@@ -1,0 +1,395 @@
+/* Diff view styles.
+ *
+ * The controlling rule: TRACED and FABRICATED must not look like two settings
+ * of one control. They differ in hue, in weight, in whether they carry a
+ * border, in type size, and in whether they sit on the paper or on the single
+ * dark surface in the app. A reviewer glancing at the screen from two feet
+ * away should be able to tell the two apart without reading. */
+
+.diff {
+  display: flex;
+  flex-direction: column;
+  /* One gap value between every major band, so the screen reads as a stack of
+     equal-weight sections rather than a hierarchy the operator must decode. */
+  gap: var(--gap-5);
+}
+
+/* --- Header ------------------------------------------------------------ */
+
+.diff__header {
+  display: flex;
+  /* Identity left, coverage right. Wraps rather than compressing the coverage
+     bar into unreadability on a narrow window. */
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: var(--gap-5);
+  padding-bottom: var(--gap-4);
+  /* A rule rather than a filled band: the header is orientation, not content,
+     and giving it a background would make it compete with the sheets. */
+  border-bottom: 1px solid var(--rule);
+}
+
+.diff__title {
+  font-size: var(--size-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.diff__meta {
+  margin-top: var(--gap-1);
+  color: var(--ink-muted);
+  font-size: var(--size-sm);
+}
+
+/* --- Coverage --------------------------------------------------------- */
+
+.coverage {
+  /* Fixed enough to keep the bar a comparable length between rows, so the
+     operator can compare coverage across applications by eye. */
+  flex: 0 1 20rem;
+}
+
+.coverage__title {
+  font-size: var(--size-sm);
+  font-weight: 500;
+}
+
+.coverage__track {
+  display: flex;
+  margin-top: var(--gap-2);
+  height: 0.5rem;
+  /* The unfilled remainder is the panel colour, so missing coverage reads as
+     absence rather than as a third semantic state. */
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  /* Square: this is a measurement, and a rounded meter reads as decoration. */
+  border-radius: 0;
+  overflow: hidden;
+}
+
+.coverage__fill {
+  /* Width comes from an inline style because it is data, not design. */
+  display: block;
+  height: 100%;
+}
+
+/* Earned coverage. Same forest as the traced marker, because it is the same
+   fact: this is supported by the master profile. */
+.coverage__fill--honest {
+  background: var(--traced);
+}
+
+/* Coverage bought with fabrication. Oxblood, and hatched so the distinction
+   survives greyscale printing and colour-blind vision - the difference between
+   these two segments is the most consequential thing in the bar. */
+.coverage__fill--purchased {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--fabricated) 0 3px,
+    var(--fabricated-deep) 3px 6px
+  );
+}
+
+.coverage__legend {
+  display: flex;
+  flex-wrap: wrap;
+  /* A real gap rather than punctuation between the two figures. */
+  gap: var(--gap-3);
+  margin-top: var(--gap-2);
+  font-size: var(--size-xs);
+}
+
+.coverage__stat {
+  color: var(--ink-muted);
+}
+
+.coverage__stat--honest {
+  color: var(--traced);
+  font-weight: 500;
+}
+
+.coverage__stat--purchased {
+  color: var(--fabricated-deep);
+  font-weight: 500;
+}
+
+/* --- The fabrication alert -------------------------------------------- */
+
+/* The ONLY dark surface in the application. Its scarcity is the signal: a dark
+   band means this row can hurt you. Do not reuse --alarm-ground elsewhere. */
+.alarm {
+  padding: var(--gap-5);
+  background: var(--alarm-ground);
+  color: var(--ink-inverse);
+  /* No radius. Paper has trimmed edges; this is not paper, it is an
+     instrument panel, and the square edge says so. */
+  border-radius: 0;
+  /* A single bright edge on the left, the way a warning lamp is bezelled. */
+  border-left: 4px solid var(--fabricated);
+}
+
+.alarm__heading {
+  /* The largest type in the app, used exactly once, on the thing that matters
+     most. Boldness spent in one place. */
+  font-size: var(--size-xl);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+}
+
+.alarm__consequence {
+  margin-top: var(--gap-3);
+  /* Serif, because this sentence describes the document and its consequences
+     rather than the interface - it reads as a finding, not a toast. */
+  font-family: var(--font-paper);
+  font-size: var(--size-md);
+  line-height: 1.45;
+  /* Under 80 characters so the sentence that stops the operator is actually
+     readable rather than scanned across a full-width band. */
+  max-width: 46ch;
+}
+
+.alarm__instruction {
+  margin-top: var(--gap-4);
+  /* Dimmer than the consequence: it is procedural, and the finding outranks
+     the procedure. */
+  color: rgba(246, 239, 233, 0.65);
+  font-size: var(--size-sm);
+}
+
+.alarm__claims {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-2);
+  margin-top: var(--gap-3);
+}
+
+.alarm__claim {
+  display: flex;
+  flex-wrap: wrap;
+  /* Claim text and its two choices on one line where there is room, so each
+     claim reads as one decision rather than a form section. */
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-4);
+  padding: var(--gap-3) var(--gap-4);
+  /* Slightly lifted off the alarm ground so each claim is a discrete object
+     the operator can work through one at a time. */
+  background: rgba(246, 239, 233, 0.07);
+  border-left: 2px solid var(--fabricated);
+}
+
+.alarm__claim-text {
+  /* The submitted words, set in the resume's own serif so the operator
+     recognises them as document content rather than a UI label. */
+  font-family: var(--font-paper);
+  font-size: var(--size-md);
+  font-weight: 600;
+}
+
+.alarm__choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-4);
+}
+
+.alarm__choice {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  font-size: var(--size-sm);
+  /* The whole label is the hit target, which matters when the operator is
+     working through several of these quickly. */
+  cursor: pointer;
+}
+
+/* The native radio in the OS accent colour would be the one element on this
+   band not under the design system, so tint it to the alarm's own palette. */
+.alarm__choice input[type='radio'] {
+  accent-color: var(--fabricated);
+}
+
+/* Focus rings on the dark band need the inverse ink, because the forest green
+   default from base.css is close to invisible against --alarm-ground. */
+.alarm__choice input[type='radio']:focus-visible {
+  outline-color: var(--ink-inverse);
+}
+
+/* --- The clean-row notice --------------------------------------------- */
+
+/* Bucket A's entire treatment: one quiet line. The contrast with the band
+   above is deliberate and load-bearing - if this were also a coloured panel,
+   the operator would have two panels to read instead of one signal. */
+.clear-notice {
+  padding: var(--gap-3) var(--gap-4);
+  background: var(--traced-wash);
+  border-left: 3px solid var(--traced);
+  color: var(--ink);
+  font-size: var(--size-sm);
+}
+
+/* --- The comparison grid --------------------------------------------- */
+
+.diff__panes {
+  display: grid;
+  /* Equal columns so neither side looks authoritative by being wider. */
+  grid-template-columns: 1fr 1fr;
+  /* Column gap wide enough to read as a division between two documents; row
+     gap tight so a line and its provenance footer stay one unit. */
+  column-gap: var(--gap-5);
+  row-gap: var(--gap-4);
+  align-items: start;
+}
+
+.diff__pane-head {
+  padding-bottom: var(--gap-2);
+  /* The strong rule, because master-versus-tailored is a real semantic
+     division and must not look like a table row separator. */
+  border-bottom: 2px solid var(--rule-strong);
+  font-size: var(--size-sm);
+  font-weight: 600;
+}
+
+/* Each cell is a sheet: this is document content, so it sits on paper. */
+.line {
+  padding: var(--gap-4);
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+}
+
+/* The master pane is the reference, not the subject of review, so it recedes
+   slightly. One notch of hierarchy, not a greyed-out panel. */
+.line--master {
+  background: color-mix(in srgb, var(--sheet) 92%, var(--ground));
+}
+
+/* Per-cell side label. Hidden on wide screens - the column headings already
+   say which side is which, and repeating it on every sheet would be the sort
+   of redundant typographic label that clutters a dense screen. It exists only
+   for the stacked layout below. */
+.line__side-label {
+  display: none;
+}
+
+/* Resume text. Serif because the artefact under review is a document. */
+.line__text {
+  font-family: var(--font-paper);
+  font-size: var(--size-base);
+  /* Serif body text wants more leading than the 1.5 the sans UI uses. */
+  line-height: 1.65;
+}
+
+/* Prose is read as a sentence, so it gets a measure. */
+.line__text--bullet,
+.line__text--summary {
+  max-width: 52ch;
+}
+
+/* A skills list is scanned token by token, so it gets no measure cap and
+   slightly looser word spacing to help the eye separate the items. */
+.line__text--skills {
+  word-spacing: 0.05em;
+}
+
+/* --- The two visual languages ---------------------------------------- */
+
+/* TRACED: reworded from a real master node. Quiet on purpose. A pale wash and
+   nothing else - no border, no weight change, no colour shift on the text.
+   Safe content must never compete with dangerous content for attention. */
+.run--traced {
+  background: var(--traced-wash);
+  /* A hair of padding so the wash reads as a marked passage rather than a
+     rendering artefact, without shifting the line's baseline. */
+  padding: 0 0.1em;
+  border-radius: 2px;
+}
+
+/* FABRICATED: traces to nothing. Every dimension pushed the opposite way from
+   traced - colour on the text itself, semibold, a heavy underline, and a wash
+   underneath. Four redundant signals, because any one of them alone can be
+   lost to a colour-blind operator, a greyscale screenshot, or a tired glance. */
+.run--fabricated {
+  /* Overrides the browser's yellow <mark> default, which would read as a
+     highlighter pen rather than a finding. */
+  background: var(--fabricated-wash);
+  color: var(--fabricated-deep);
+  font-weight: 600;
+  padding: 0 0.15em;
+  /* Thick, and in the deep tone so it survives being printed. This is the
+     signal that reads at a distance. */
+  border-bottom: 3px solid var(--fabricated);
+}
+
+/* --- Provenance footers ---------------------------------------------- */
+
+.line__provenance {
+  margin-top: var(--gap-3);
+  padding-top: var(--gap-2);
+  border-top: 1px dotted var(--rule);
+  font-size: var(--size-xs);
+}
+
+/* Quiet: confirms provenance exists. Lowercase, small, forest, unemphasised. */
+.line__provenance--traced {
+  color: var(--traced);
+}
+
+/* Loud: names the untraceable claims in words, so the finding survives a
+   screenshot, a printout, and colour-blind vision. */
+.line__provenance--fabricated {
+  color: var(--fabricated-deep);
+  font-weight: 600;
+  border-top-color: var(--fabricated);
+}
+
+/* --- Actions ---------------------------------------------------------- */
+
+.diff__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap-3);
+  padding-top: var(--gap-4);
+  border-top: 1px solid var(--rule);
+}
+
+/* Explains the disabled Approve button. Sits beside it rather than under, so
+   it is read in the same glance as the button it explains. */
+.diff__gate-note {
+  color: var(--fabricated-deep);
+  font-size: var(--size-sm);
+  font-weight: 500;
+}
+
+/* --- Narrow screens --------------------------------------------------- */
+
+/* Below this width two resume panes cannot both hold a readable measure, so
+   they stack. Master first, tailored second: the reference before the change,
+   which is the order the comparison is made in. */
+@media (max-width: 62rem) {
+  .diff__panes {
+    grid-template-columns: 1fr;
+  }
+
+  /* Both column headings go: in one column they would sit at the top of the
+     page and correctly label only the first two cells, silently mislabelling
+     every pair after. Each sheet names its own side instead. */
+  .diff__pane-head {
+    display: none;
+  }
+
+  .line__side-label {
+    display: block;
+    margin-bottom: var(--gap-2);
+    padding-bottom: var(--gap-1);
+    border-bottom: 1px solid var(--rule);
+    /* Sans, small and muted: it is chrome identifying the sheet, not part of
+       the document the sheet contains. */
+    font-family: var(--font-machine);
+    font-size: var(--size-xs);
+    font-weight: 600;
+    color: var(--ink-muted);
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "// extends": "Root scaffold is owned by peer applyyy-e5; this file deliberately owns no compiler settings of its own so its settings cannot drift from the other packages.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "// noEmit": "This package is consumed as source (see package.json exports), so emitting build output would only create a stale second copy.",
+    "noEmit": true
+  },
+  "// include": "src only — never pull the contract doc or package.json into the type program.",
+  "include": ["src"]
+}

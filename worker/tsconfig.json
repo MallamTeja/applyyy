@@ -1,0 +1,25 @@
+{
+  // Inherit the monorepo dialect so the worker cannot drift from the other four
+  // streams; every setting that must be identical across peers lives upstream.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // The worker is the only package that runs on a real Node runtime rather
+    // than Deno or a bundler, so it resolves like Node does. This deliberately
+    // differs from tsconfig.base's provisional "Bundler" setting: that one is
+    // shaped by the Deno/Node shared-template spike (PROJECT_PLAN.md §7), and
+    // the worker must not be held hostage to a decision it does not depend on.
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    // node:http, node:fs and process.env are all used directly by the applier,
+    // so the Node type surface has to be visible to the compiler.
+    "types": ["node"],
+    // Playwright's page.evaluate() runs its callback inside the browser, so DOM
+    // lib types are needed at compile time even though no DOM exists in Node.
+    "lib": ["ES2022", "DOM"],
+    "outDir": "dist",
+    "rootDir": "."
+  },
+  // Tests are type-checked alongside source: a test that no longer compiles
+  // against the code it covers is a broken test, and should fail the same run.
+  "include": ["src/**/*.ts", "test/**/*.ts", "*.config.ts"]
+}

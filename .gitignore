@@ -1,0 +1,47 @@
+# --- Secrets: the whole point of this file. .env holds 15 Gemini keys,
+# --- Supabase service-role key, and Gmail credentials. Never committed.
+.env
+.env.*
+!.env.example
+
+# --- Playwright browser session state. Contains live logged-in cookies
+# --- for ATS accounts; leaking these is equivalent to leaking passwords.
+worker/.auth/
+**/storageState*.json
+*.har
+
+# --- Generated resume PDFs and screenshots. Contain personal data
+# --- (phone, address, CTC) and are reproducible from the DB anyway.
+artifacts/
+**/*.generated.pdf
+worker/screenshots/
+
+# --- Dependencies and build output
+node_modules/
+dist/
+build/
+.vite/
+*.tsbuildinfo
+
+# --- Supabase CLI local state (includes local DB credentials)
+supabase/.temp/
+supabase/.branches/
+
+# --- Vercel local link metadata (contains project + org ids)
+.vercel/
+
+# --- Editor / OS noise
+.DS_Store
+Thumbs.db
+*.swp
+
+# --- This repo's stray artifact, already present
+bash.exe.stackdump
+
+# --- Playwright run output. Screenshots of part-filled application forms carry
+# --- personal data (CTC, notice period, contact details); reports are rebuilt
+# --- on every run, so nothing here is worth versioning.
+playwright-report/
+test-results/
+blob-report/
+.playwright/

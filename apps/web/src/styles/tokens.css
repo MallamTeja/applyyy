@@ -1,0 +1,121 @@
+/* Design tokens for the applyy console.
+
+   The organising idea: this app is a verification desk, not a dashboard. The
+   core act is checking a generated document against its source, so the visual
+   system splits into PAPER (resume content — white sheets, serif type) and
+   MACHINE (the console around it — sage ground, sans type). Colour is never
+   decorative here: each accent carries exactly one meaning, and the only dark
+   surface in the entire application is the fabrication band on the diff view. */
+
+:root {
+  /* --- Surfaces -------------------------------------------------------- */
+
+  /* The desk. Pale sage-grey reads as drafting film or ledger paper, which is
+     the right register for an instrument you check documents on. */
+  --ground: #eef1ec;
+  /* Resume content sits on genuine white so the figure/ground relationship is
+     literally "sheet of paper on a desk" rather than a card on a background. */
+  --sheet: #ffffff;
+  /* Chrome that must separate from the ground without becoming a third
+     material: the nav rail, table headers, inset panels. */
+  --panel: #e4e9e2;
+  /* The single dark surface. Reserved for the fabrication alert and nothing
+     else, so its presence alone identifies a dangerous row from across the
+     room. Using it anywhere else destroys that signal. */
+  --alarm-ground: #1a1416;
+
+  /* --- Ink ------------------------------------------------------------- */
+
+  /* Body text: a very dark green-black rather than pure black, matching the
+     sage ground so the page reads as one material lit once. */
+  --ink: #1b211f;
+  /* Secondary text — metadata, field help, timestamps. Still passes AA on
+     --ground at body size. */
+  --ink-muted: #5a635e;
+  /* Text on the alarm surface. Slightly warm so it does not look like the same
+     ink accidentally inverted. */
+  --ink-inverse: #f6efe9;
+
+  /* --- Structure ------------------------------------------------------- */
+
+  /* Hairline rules: table rows, sheet edges, field separators. */
+  --rule: #c9d1c7;
+  /* A stronger rule for the boundary between master and tailored panes, which
+     is a real semantic division and should not look like a row separator. */
+  --rule-strong: #9aa79b;
+
+  /* --- Semantic accents. One meaning each, never used for styling. ------ */
+
+  /* TRACED: this line resolves to a real node in the master profile. Forest
+     green, and deliberately LOW salience — safe content must not compete for
+     attention with dangerous content. Quietness is the design decision. */
+  --traced: #2f6f4e;
+  /* A wash of the same hue for marking safely-reworded text inline. */
+  --traced-wash: #e6efe8;
+
+  /* FABRICATED: this claim traces to nothing. Oxblood, chosen over a bright
+     alert red because it reads as an authoritative stamp rather than a
+     transient browser error — this verdict is a finding, not a glitch. */
+  --fabricated: #9e1b32;
+  /* Used for the underline and stamp border; darker than the text colour so
+     the mark survives being printed or screenshotted. */
+  --fabricated-deep: #6f1223;
+  --fabricated-wash: #f7e4e7;
+
+  /* SIGNAL: a human is required and the machine has stopped. The
+     blocked_needs_human queue, an agent that has not run, a paused project.
+     Bronze reads as a warning lamp rather than a validation error. */
+  --signal: #b4762a;
+  --signal-wash: #f7ecdb;
+
+  /* --- Type ------------------------------------------------------------ */
+
+  /* Machine chrome. Plex Sans is drawn for information-dense technical UI and
+     stays legible at 12px, which most humanist sans faces do not. */
+  --font-machine: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  /* Resume prose. A serif because the artefact under review is a document, and
+     because it makes master-vs-tailored text visually separate from the
+     controls that act on it. */
+  --font-paper: 'IBM Plex Serif', Georgia, 'Times New Roman', serif;
+  /* Literal identifiers only — bullet ids, board tokens, fingerprints, run
+     timestamps. These are strings a human might copy, so tabular figures and
+     unambiguous glyphs earn their keep. Never used for ordinary labels. */
+  --font-id: 'IBM Plex Mono', ui-monospace, monospace;
+
+  /* A 1.25 modular scale off a 15px base. Dense enough for tables, and the
+     base is above 14px so long-form resume text is comfortable. */
+  --size-xs: 0.8125rem;   /* 13px — dense table cells, provenance notes */
+  --size-sm: 0.875rem;    /* 14px — field labels, secondary metadata */
+  --size-base: 0.9375rem; /* 15px — body, form inputs, resume text */
+  --size-md: 1.1719rem;   /* 18.75px — sheet headings, kanban column titles */
+  --size-lg: 1.4648rem;   /* 23.4px — page titles */
+  --size-xl: 1.8311rem;   /* 29.3px — the fabrication headline, once */
+
+  /* --- Space ----------------------------------------------------------- */
+
+  /* A 4px base grid. Dense screens need a finer step than the usual 8px, or
+     every table row inherits eight pixels of padding it does not want. */
+  --gap-1: 0.25rem;
+  --gap-2: 0.5rem;
+  --gap-3: 0.75rem;
+  --gap-4: 1rem;
+  --gap-5: 1.5rem;
+  --gap-6: 2rem;
+  --gap-7: 3rem;
+
+  /* --- Geometry -------------------------------------------------------- */
+
+  /* Sheets get a small radius so they read as paper with a trimmed edge, not
+     as a rounded app card. Controls get a smaller one still. Rules get none.
+     Three values, applied by material rather than uniformly. */
+  --radius-sheet: 3px;
+  --radius-control: 2px;
+
+  /* One elevation, used only to lift a sheet off the desk. Deliberately not a
+     generic soft grey blur under every element. */
+  --lift: 0 1px 0 rgba(27, 33, 31, 0.06), 0 2px 8px rgba(27, 33, 31, 0.05);
+
+  /* Rail width. Nine pages plus three operational views need full labels — an
+     icon rail would make the operator guess. */
+  --rail-width: 15rem;
+}

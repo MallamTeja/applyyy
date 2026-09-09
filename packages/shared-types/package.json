@@ -1,0 +1,28 @@
+{
+  "// name": "Scoped to @applyy (two y's) per the naming standard; the folder still reads applyyy pending Teja's rename.",
+  "name": "@applyy/shared-types",
+  "// version": "0.0.0 because nothing is published to a registry — this is a workspace-internal package only.",
+  "version": "0.0.0",
+  "// private": "Belt-and-braces against an accidental `pnpm publish` of a repo that contains resume and CTC data.",
+  "private": true,
+  "// type": "ESM everywhere: Deno Edge Functions cannot consume CommonJS, and the Node worker is ESM too.",
+  "type": "module",
+  "// exports": "Source-only export map. There is no build step: Deno type-checks .ts directly and Vite/tsx transpile it, so shipping compiled output would add a build to every peer's inner loop for zero benefit.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "// types": "Redundant with exports for modern resolvers, kept for editors that still read this field.",
+  "types": "./src/index.ts",
+  "// files": "Only src ships if this ever is packed; no stray configs.",
+  "files": [
+    "src"
+  ],
+  "// scripts.typecheck": "The only script this package needs — it has no runtime code to build or test.",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "// devDependencies": "typescript is a devDependency here so the package can be type-checked standalone in CI; the root pins the actual version.",
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

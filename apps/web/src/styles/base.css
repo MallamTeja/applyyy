@@ -1,0 +1,241 @@
+/* Element defaults and the small set of shared primitives. Anything used by
+   two or more features lives here; anything used by one lives beside it. */
+
+/* Border-box everywhere so a padded input inside a fixed-width settings column
+   does not overflow it — the single most common dense-form layout bug. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* Zero the margins the browser adds to headings and paragraphs. Vertical
+   rhythm here comes from explicit gaps on flex/grid parents, and inherited
+   margins fight that and collapse unpredictably between sections. */
+body,
+h1,
+h2,
+h3,
+p,
+ul,
+ol,
+figure {
+  margin: 0;
+}
+
+/* Lists in this app are data (skills, filter rules, watchlist rows), never
+   bulleted prose, so the marker and indent are noise. */
+ul,
+ol {
+  padding: 0;
+  list-style: none;
+}
+
+body {
+  /* The desk colour covers the viewport; sheets sit on top of it. */
+  background: var(--ground);
+  color: var(--ink);
+  /* Machine chrome is the default voice; resume prose opts into the serif. */
+  font-family: var(--font-machine);
+  font-size: var(--size-base);
+  /* 1.5 for UI text — tight enough to keep dense tables scannable. */
+  line-height: 1.5;
+  /* Grayscale antialiasing keeps 13px labels from looking bolder than they are
+     on the pale ground. */
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Form controls do not inherit type by default, which is how a settings page
+   ends up rendering inputs in the browser's default sans while its labels use
+   the design font. */
+input,
+select,
+textarea,
+button {
+  font: inherit;
+  color: inherit;
+}
+
+/* --- Focus ------------------------------------------------------------- */
+
+/* One visible focus treatment for every interactive element. The operator
+   reviews ~35 rows a day and keyboard-driving the approval queue is the fast
+   path, so focus is a working affordance rather than a compliance checkbox. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--traced);
+  /* Offset keeps the ring off the control's own border so both stay readable. */
+  outline-offset: 2px;
+}
+
+/* --- Motion ------------------------------------------------------------ */
+
+/* Every transition in the app is a response to a click or a hover; none of it
+   is scroll choreography. Honour the OS setting anyway. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* --- Primitives -------------------------------------------------------- */
+
+/* A sheet: the paper material. Anything that represents document content or a
+   coherent settings group is a sheet. */
+.sheet {
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+  box-shadow: var(--lift);
+}
+
+/* Page frame. A max width because a settings form stretched across a 27-inch
+   monitor puts the label and its input a foot apart. */
+.page {
+  padding: var(--gap-6) var(--gap-6) var(--gap-7);
+  max-width: 68rem;
+}
+
+/* The diff view opts out of the width cap: two resume panes side by side need
+   every pixel, and capping them forces the operator to scroll to compare. */
+.page--wide {
+  max-width: none;
+}
+
+.page__title {
+  font-size: var(--size-lg);
+  /* 600 rather than 700 — Plex Sans bold is heavy enough to shout at this
+     size, and nothing on a settings page needs to shout. */
+  font-weight: 600;
+  /* Large type carries the extra tracking browsers add at default; pulling it
+     back keeps the word looking set rather than spaced out. */
+  letter-spacing: -0.01em;
+}
+
+/* One line of orientation under each page title, in the interface's voice.
+   Sentence case, plain verbs, no eyebrow label above it. */
+.page__lede {
+  margin-top: var(--gap-2);
+  max-width: 58ch;
+  color: var(--ink-muted);
+  font-size: var(--size-sm);
+}
+
+/* --- Forms ------------------------------------------------------------- */
+
+/* Every row of the §8 filter cascade and every §15 settings field is one of
+   these. Label above input, because side-by-side labels break the moment a
+   field needs a sentence of help text. */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-1);
+}
+
+.field__label {
+  font-size: var(--size-sm);
+  font-weight: 500;
+}
+
+/* Help text explains the consequence of the setting, not the setting. It sits
+   under the label and above the control so it is read before the change. */
+.field__help {
+  max-width: 54ch;
+  color: var(--ink-muted);
+  font-size: var(--size-xs);
+}
+
+.field__control {
+  padding: var(--gap-2) var(--gap-3);
+  background: var(--sheet);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-control);
+}
+
+/* --- Buttons ----------------------------------------------------------- */
+
+.button {
+  display: inline-flex;
+  /* Centres label text regardless of the button's width, which varies because
+     these labels are verbs rather than fixed-width words. */
+  align-items: center;
+  justify-content: center;
+  gap: var(--gap-2);
+  padding: var(--gap-2) var(--gap-4);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-control);
+  background: var(--sheet);
+  font-size: var(--size-sm);
+  font-weight: 500;
+  cursor: pointer;
+  /* Only the background moves on hover. Buttons that lift or scale read as
+     decoration in a tool whose job is sober verification. */
+  transition: background-color 120ms ease;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--panel);
+}
+
+/* Disabled is a real state in this app, not an edge case: batch-approve stays
+   disabled until every flagged claim on the row has been acknowledged. It must
+   look inert rather than merely dimmed. */
+.button:disabled {
+  border-color: var(--rule);
+  color: var(--ink-muted);
+  background: var(--panel);
+  cursor: not-allowed;
+}
+
+/* The affirmative action. Green because approval is the traced-and-safe path;
+   it shares the hue with the provenance marker on purpose. */
+.button--approve {
+  border-color: var(--traced);
+  background: var(--traced);
+  color: #fff;
+}
+
+.button--approve:hover:not(:disabled) {
+  background: #275c41;
+}
+
+/* Reject is destructive-ish but recoverable, so it is outlined rather than
+   filled — filled oxblood would compete with the fabrication band, which must
+   stay the loudest thing on the screen. */
+.button--reject {
+  border-color: var(--fabricated);
+  color: var(--fabricated-deep);
+}
+
+.button--reject:hover:not(:disabled) {
+  background: var(--fabricated-wash);
+}
+
+/* --- Identifiers ------------------------------------------------------- */
+
+/* Applied to master bullet ids, ATS board tokens, job fingerprints and run
+   timestamps: strings the operator may copy into a SQL query or a support
+   thread. Monospace here is functional, not stylistic. */
+.identifier {
+  font-family: var(--font-id);
+  font-size: var(--size-xs);
+  color: var(--ink-muted);
+}
+
+/* --- Screen-reader-only ------------------------------------------------ */
+
+/* For headings that structure the page for assistive tech where the visual
+   design already conveys the grouping. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

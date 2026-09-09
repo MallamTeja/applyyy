@@ -1,0 +1,38 @@
+# Workspace root for the applyy monorepo.
+# Every stream owned by a peer session resolves through this file, so it must
+# exist before any peer runs `pnpm install` — otherwise each peer creates its
+# own broken package root and the installs diverge.
+packages:
+  # Shared libraries. shared-types is owned by the schema stream and is the
+  # contract every other stream builds against; resume-template must import
+  # into BOTH Deno (Supabase Edge Functions) and Node (the Playwright worker),
+  # which is the known risk flagged in PROJECT_PLAN.md §7.
+  - "packages/*"
+  # The React + TypeScript dashboard deployed to Vercel as a static frontend.
+  - "apps/*"
+  # The Playwright applier that runs on GitHub Actions. Singular, not a glob,
+  # because there is exactly one worker and a glob would invite a second.
+  - "worker"
+
+# Dependencies permitted to run their install/build scripts. pnpm 11 blocks all
+# of them by default and the block is FATAL, not a warning: `pnpm --filter X run
+# test` performs an implicit dependency-status install first, so every script in
+# the workspace exits 1 with ERR_PNPM_IGNORED_BUILDS before the script itself is
+# reached. Two peers hit this independently and one was working around it by
+# calling node_modules/.bin/vitest directly -- a workaround that would have
+# survived into CI and failed there instead.
+onlyBuiltDependencies:
+  # esbuild ships prebuilt platform binaries and its postinstall selects the
+  # right one. It is not a direct dependency of anything here; it arrives via
+  # vitest and vite, which is why the failure hits worker and apps/web alike.
+  - esbuild
+  # Playwright downloads its browser binaries in a postinstall step, so the
+  # applier cannot install on a clean machine or a GitHub Actions runner without
+  # this. Listed pre-emptively: the failure would otherwise appear only in CI,
+  # which is the worst place to discover it.
+  - playwright
+  # The Chromium/Firefox/WebKit payloads are a separate package from the
+  # Playwright client library and carry their own postinstall.
+  - "@playwright/test"
+allowBuilds:
+  esbuild: set this to true or false

@@ -1,0 +1,10 @@
+{
+  "// extends": "All compiler settings live in the root base config, owned by peer applyyy-bd, so no package can drift from the spike-proven values.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "// noEmit": "Consumed as source (see package.json exports); emitting would create a stale second copy of the renderer.",
+    "noEmit": true
+  },
+  "// include": "src and test — the fixtures are typed against the same shapes the renderer accepts, which is how a fixture that no longer matches the contract becomes a compile error.",
+  "include": ["src", "test"]
+}

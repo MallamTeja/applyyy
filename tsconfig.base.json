@@ -1,0 +1,84 @@
+{
+  // Base config every package extends. Five peers build against this file, so
+  // anything that must be identical across streams lives here and nowhere else.
+  // SETTLED as of 2026-09-09 23:40 by applyyy-04's Deno<->Node spike; the values
+  // below are what that spike proved, not what looked reasonable.
+  "compilerOptions": {
+    // ES2023 across all three runtimes (Node 24, Deno 2.9, Vite 7). Raised from
+    // ES2022 because 04's spike ran on es2023 and byte-identical output was
+    // verified at that target; changing it would invalidate that evidence.
+    "target": "es2023",
+    // No DOM here. The shared packages must compile for Deno and Node too, so a
+    // DOM lib in the base config would let a browser-only global leak into a
+    // module the worker imports and fail at runtime instead of at compile time.
+    "lib": ["es2023"],
+
+    // nodenext/nodenext is the only resolution pair the spike found acceptable
+    // to Deno, Node's native type stripper, and Vite simultaneously. The earlier
+    // ESNext/Bundler pair was a provisional guess by the session that died.
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+
+    // Relative imports must carry an explicit `.ts` extension. Deno requires it,
+    // Node's type stripper requires it, Vite tolerates it -- it is the single
+    // spelling all three accept, so it is not a style preference.
+    "allowImportingTsExtensions": true,
+
+    // tsc is a TYPECHECKER in this repo and never an emitter: Deno reads source,
+    // Node strips types at load, Vite transpiles. Nothing consumes a tsc build,
+    // so emitting would produce dist/ directories that silently go stale.
+    // This also satisfies allowImportingTsExtensions, which requires no-emit.
+    "noEmit": true,
+
+    // THE load-bearing setting. Bans TS syntax that cannot be erased -- `enum`,
+    // `namespace`, constructor parameter properties. 04 ran the negative test:
+    // `export enum Section {}` in a shared module RAN under Deno and THREW at
+    // parse under Node v24. Node is the binding constraint and the failure is
+    // invisible to anyone developing against Deno, so without this flag the
+    // first enum anyone writes breaks only the worker, only at runtime, in CI.
+    // Consequence for shared-types: use `const` objects + union types, never
+    // `enum`. Requires TypeScript >= 5.8.
+    "erasableSyntaxOnly": true,
+
+    // Keeps `import type` erasable and stops TS inventing or eliding imports
+    // differently per runtime -- which is how three runtimes drift apart while
+    // every individual build still passes.
+    "verbatimModuleSyntax": true,
+
+    // Full strictness from the first file. Retrofitting strict mode across a
+    // monorepo five peers built in parallel is a rewrite, not a flag flip.
+    "strict": true,
+    // Catches the fabrication class of bug at the type level: an index into the
+    // master profile that may not exist types as possibly-undefined, which is
+    // exactly the check the Tailor validator relies on.
+    "noUncheckedIndexedAccess": true,
+    // An optional property must be genuinely absent, not explicitly undefined.
+    // Matters because tailored-profile JSON round-trips through Postgres, where
+    // those two states are not the same value.
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    // A missing `break` in the status state machine would silently advance an
+    // application two states; this makes it a compile error.
+    "noFallthroughCasesInSwitch": true,
+    // Dead code cannot accumulate silently across streams that never read each
+    // other's files, so unused symbols are errors rather than warnings.
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    // Required because both Vite and Deno transpile file-by-file with no
+    // whole-program context available.
+    "isolatedModules": true,
+    // ATS fixtures and the company watchlist seed are checked-in JSON that the
+    // scouts import directly.
+    "resolveJsonModule": true,
+    // Third-party .d.ts files are not our correctness problem and checking them
+    // costs seconds on every typecheck across six packages.
+    "skipLibCheck": true,
+    // Windows is case-insensitive and CI is not; without this, an import that
+    // works on Teja's machine fails only in GitHub Actions.
+    "forceConsistentCasingInFileNames": true
+  },
+  // The base config is never itself a compilation root; each package that
+  // extends it supplies its own `include`.
+  "exclude": ["node_modules", "dist"]
+}

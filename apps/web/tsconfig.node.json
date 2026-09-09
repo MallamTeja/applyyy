@@ -1,0 +1,14 @@
+{
+  // The build tooling is Node code, not browser code. Typechecking it in the
+  // same project as the app would force DOM globals into the Vite config and
+  // Node globals into the React app, and both would be wrong.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": false,
+    "emitDeclarationOnly": true,
+    "outDir": "./.tsbuild",
+    "moduleResolution": "Bundler"
+  },
+  "include": ["vite.config.ts"]
+}

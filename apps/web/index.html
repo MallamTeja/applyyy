@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- Dense operator tables must be readable on a laptop screen without the
+         mobile browser zooming them into unreadability. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <!-- The product is applyy with two y's. The repo, folder and Vercel project
+         still read applyyy pending a rename Teja does himself; nothing
+         user-visible is allowed to carry the typo. -->
+    <title>applyy — application console</title>
+
+    <!-- This console holds CTC, personal answers and a full resume. Search
+         engines must never index a deployed preview URL. -->
+    <meta name="robots" content="noindex, nofollow" />
+
+    <!-- Preconnect before the stylesheet request so the font files start
+         downloading a round trip earlier; type is the first paint that matters. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- IBM Plex, three cuts with distinct jobs: Sans for machine chrome, Serif
+         for resume prose (it is a document, so it is set like one), Mono only
+         for literal identifiers a human might copy. One family keeps them
+         harmonious while the role split carries information. -->
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap"
+    />
+  </head>
+  <body>
+    <!-- Single mount point; the shell and router take over from main.tsx. -->
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

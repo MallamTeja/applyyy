@@ -1,0 +1,28 @@
+{
+  // Inherits the monorepo dialect so this app cannot drift from the other
+  // streams; only the browser-specific parts are overridden below.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The base config declares ES2022 only, because Deno and Node targets share
+    // it. The browser bundle additionally needs DOM lib or every `document`
+    // reference fails to typecheck.
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    // React 18 automatic runtime: no `import React` ceremony in every TSX file,
+    // which matters when there are forty of them.
+    "jsx": "react-jsx",
+    // Vite owns emit; tsc runs purely as a typechecker in the build script, so
+    // emitting anything here would produce stray artefacts next to sources.
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    // Bundler resolution is correct for Vite and lets us import without file
+    // extensions; unlike the shared resume template, this app never runs in Deno.
+    "moduleResolution": "Bundler",
+    // Vite injects import.meta.env typings through this reference.
+    "types": ["vite/client"]
+  },
+  // Only application sources are roots. vite.config.ts runs in Node, not the
+  // browser, so it is typechecked by its own project below.
+  "include": ["src"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}
