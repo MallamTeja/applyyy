@@ -65,3 +65,25 @@ blob-report/
 # tsc emits nothing and this directory is never created today. Listed so that
 # re-adding a build step cannot quietly start committing compiled output.
 worker/dist/
+
+# THE MASTER RESUME, and anything shaped like it at the repo root.
+#
+# Teja dropped `master resume.pdf` here at 21:14 as the ingest source. It is the
+# single most sensitive file in the project — phone, address, CTC, the lot — and
+# it matched NO existing rule: `artifacts/` is a directory and
+# `**/*.generated.pdf` only covers rendered output, not a hand-authored source.
+#
+# Ignored rather than committed even though the repo is private and PROJECT_PLAN
+# says it "holds resume, CTC, personal answers". Private is not the same as safe:
+# a private repo can be made public, forked into an org, or handed to a
+# collaborator, and git history is the one artifact here that cannot be edited
+# after the fact without a force-push that five concurrent sessions are forbidden
+# from performing. The asymmetry decides it — ignoring costs nothing functionally
+# because the ingest reads the file from DISK, while committing it is permanent.
+#
+# NOT a substitute for the real rule: stage by explicit path. This removes one
+# half of the write-into-tree + sweep-whatever-you-find combination that has now
+# fired three times in this repo.
+*.pdf
+!worker/fixtures/**/*.pdf
+!packages/**/fixtures/**/*.pdf
