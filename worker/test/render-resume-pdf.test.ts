@@ -18,7 +18,6 @@
 // render, submit, then upload what was actually sent.
 import { afterAll, beforeAll, expect, test } from 'vitest';
 import { chromium, type Browser } from 'playwright';
-import { readFile } from 'node:fs/promises';
 import { renderResumePdf } from '../src/render-resume-pdf.ts';
 import { extractPdfText } from '../src/ats-parse-check.ts';
 
