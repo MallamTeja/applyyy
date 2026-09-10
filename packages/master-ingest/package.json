@@ -1,0 +1,35 @@
+{
+  "// name": "Scoped @applyy (two y's) per the naming standard; the repo folder stays applyyy and is NOT renamed.",
+  "name": "@applyy/master-ingest",
+  "// version": "Workspace-internal only; nothing here is ever published to a registry.",
+  "version": "0.0.0",
+  "// private": "This package's fixtures and callers carry real resume content — an accidental `pnpm publish` must be impossible.",
+  "private": true,
+  "// type": "ESM only. The reconciler has to be importable by a Deno Edge Function, the Node worker and the browser console alike, and Deno cannot consume CommonJS.",
+  "type": "module",
+  "// exports": "Source-only export map pointing at .ts, exactly like resume-template. There is deliberately NO build step: a build would create a second, stale copy of the function that decides whether a node id survives, and the whole point of this package is that that decision is made in exactly one place.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "// types": "Redundant with exports for modern resolvers; kept for editors that still read this field.",
+  "types": "./src/index.ts",
+  "// files": "Only src ships if this is ever packed.",
+  "files": [
+    "src"
+  ],
+  "// scripts.typecheck": "tsc is a checker only in this repo — noEmit is inherited from tsconfig.base.json.",
+  "// scripts.test": "The glob is REQUIRED. `node --test test` (a bare directory) fails on Node 24 with MODULE_NOT_FOUND, and that error reads exactly like missing fixtures, which is how a previous session lost time to it.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "// dependencies": "shared-types owns MasterProfile and NodeId. This package reconciles those shapes and must never re-declare them: a local copy of MasterProfile would let the reconciler carry ids forward under a shape the database no longer stores.",
+  "dependencies": {
+    "@applyy/shared-types": "workspace:*"
+  },
+  "// devDependencies": "@types/node is needed by the TESTS ONLY (node:test, node:assert). src/ uses no Node API at all — not even crypto, which is why mintId is injected rather than ambient. typescript for standalone type-checking; the floor is 5.8 because tsconfig.base.json sets erasableSyntaxOnly, which 5.6/5.7 reject as an unknown option. NOTE: these explanations live at the TOP level because pnpm validates dependency names and rejects a \"// x\" pseudo-key inside dependencies with ERR_PNPM_INVALID_DEPENDENCY_NAME — the same trap as TS5025 inside compilerOptions.",
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  }
+}

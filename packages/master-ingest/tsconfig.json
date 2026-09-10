@@ -1,0 +1,21 @@
+{
+  // All compiler settings live in the root base config, so this package cannot
+  // drift from the values the section 20 step 0 cross-runtime spike proved.
+  // NOTE: real `//` comments, not "// key" entries — TypeScript validates the
+  // keys inside compilerOptions and rejects an unknown one with TS5025.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Consumed as source (see package.json exports). Emitting would create a
+    // stale second copy of the id-carrying decision.
+    "noEmit": true,
+    // Node builtins are needed by the TESTS ONLY (node:test, node:assert).
+    // src/ deliberately uses none — the reconciler must stay importable by Deno
+    // and by the browser, so a Node API leaking into it would break two of the
+    // three runtimes at runtime rather than here.
+    "types": ["node"]
+  },
+  // src and test together: the fixtures are typed against the real MasterProfile,
+  // which is how a fixture that no longer matches shared-types becomes a compile
+  // error rather than a test that passes against a profile nothing could store.
+  "include": ["src", "test"]
+}

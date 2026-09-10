@@ -1,0 +1,11 @@
+# Line endings are a CORRECTNESS control here, not a style preference, for a
+# reason specific to this package: similarity is computed over TOKENS derived
+# from bullet text, and the fixtures hold that text in multi-line template
+# literals. A CRLF checkout puts \r inside those strings, which changes the
+# token stream and therefore changes a Dice score — so a threshold test would
+# pass for whoever authored the fixture and fail on a clean clone, or worse,
+# pass on both machines with a different bullet matched.
+#
+# core.autocrlf=true is set in this machine's SYSTEM gitconfig (verified
+# 2026-09-10), so without this file git converts on checkout.
+* text eol=lf
