@@ -490,6 +490,95 @@ nothing to prevent it; only the reordering did. **A comment is not a control.**
 
 ---
 
+## Instance 20 — a precondition test that passed because the POSTCONDITION caught it
+
+Found by `applyyy-48` in the master-profile reconciler.
+
+A guard checking a **precondition** was mutation-tested and killed **zero**
+mutations. Not "few" — none. Every input the precondition was supposed to reject
+was *also* rejected further downstream by a **postcondition** guard checking the
+output. The test named after the precondition passed on every mutation, because
+something else was doing the work.
+
+**This is THE RULE in its purest form: the test was measuring the composite, not
+the guard it was named after.** Removing the precondition entirely would not have
+failed it.
+
+**The fix is the instructive half**, and it is not "add more tests". It is
+constructing the one input **only the precondition can catch**: both offending
+nodes are *dropped* during reconciliation, so the output comes out clean and the
+postcondition has nothing to fire on. The precondition is then the only thing
+standing between that input and a silent pass.
+
+A second change came out of it: **both guards now assert on the message**, not
+merely that something threw. Two guards that both throw are indistinguishable
+from one guard that throws twice, so a test asserting only "it threw" cannot
+tell you *which* defence caught the input — and that is precisely the
+information a mutation test needs.
+
+**Generalised: redundant defences make each other untestable, and the more
+reliable the outer one, the more thoroughly it hides the inner.** To test a
+guard, you must find the input that *only* it rejects. If no such input exists,
+you have not got two guards — you have one guard and one decoration.
+
+---
+
+## Instance 21 — the per-section uniqueness result, reproduced independently
+
+`profile-nodes.ts` recorded a mutation of a duplicate-id checker from **global**
+to **per-section** uniqueness: 36 tests, 34 passed, 2 failed — and the survivor
+was *the within-section duplicate test*, the case anyone writes first.
+
+`applyyy-48` hit the same mutation in **different code** (the reconciler's
+`node-id-uniqueness` check) and got the same shape: global→per-section killed
+**9** tests, and **the within-section duplicate test still passed.**
+
+**Two independent measurements of the same phenomenon in unrelated code
+upgrades it from an anecdote about one file to a property of the invariant
+itself.** Global uniqueness and per-section uniqueness agree on every input
+anyone reaches for naturally; they differ *only* on a duplicate spanning two
+sections — an id shared between, say, a bullet and a skill.
+
+**Why the weaker design is the plausible one, and therefore the dangerous one:**
+per-section uniqueness is what most people would implement, it reads as more
+precise, and it passes the obvious test suite. It is wrong here because
+`TailoredBullet` and `TailoredSkill` carry a **bare `ref` with no section
+qualifier** — so under per-section uniqueness a bullet ref could resolve to a
+skill with nothing able to disambiguate.
+
+**Generalised: when two candidate invariants agree on every ordinary input, your
+test suite is not choosing between them — your implementation is, silently.**
+Write the cross-section case first.
+
+---
+
+## Instance 22 — a count field is an invitation to skip the list
+
+Not a failed check; a design rule that prevents one, and it belongs here because
+the failure it prevents is *a verification step that stops verifying*.
+
+`applyyy-48` deliberately put **no count fields anywhere** in the reconciliation
+report — no `carriedCount`, no `mintedCount`. The reasoning: **a count field is
+an invitation to render the count and skip the list.**
+
+A UI that says *"14 ids carried forward"* has told the human nothing they can
+act on, while looking exactly like a confirmation step. The human clicks
+through. The screen exists to be looked at, and it has quietly become a screen
+that is looked *past*.
+
+That matters most precisely where it is easiest to add: the reconciler's
+similarity threshold is unsafe in both directions and **fails silently both
+ways** — too low and wrong bullets match, carrying an id onto the wrong claim;
+too high and every old pin breaks. **No threshold is safe by construction**,
+which is exactly why every non-exact match must be *shown* rather than totalled.
+
+**Generalised: a confirmation step that can be satisfied without reading the
+evidence is theatre.** The same argument makes the approval queue a diff rather
+than a score. If a number can be rendered instead of the thing it summarises,
+someone eventually will — so do not provide the number.
+
+---
+
 ## Where this bites hardest in `applyy`
 
 Layered defences are the deliberate design here, so the cost applies throughout:
