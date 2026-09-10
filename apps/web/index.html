@@ -25,6 +25,35 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231b211f'/%3E%3Cpath d='M4.4 11.6 8 4.4l3.6 7.2' stroke='%23f6efe9' stroke-width='1.6' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E"
     />
 
+    <!-- Theme bootstrap. Deliberately inline, blocking, and above the
+         stylesheet, because it has to finish before the first paint.
+
+         WHY IT CANNOT LIVE IN THE REACT APP: the app is a module, so it runs
+         after the document is parsed and painted. An operator who chose Dark
+         on a light-mode machine would get one frame of white console before
+         React mounted - a flash bright enough to be unpleasant in a dark room
+         on every navigation-free reload.
+
+         WHY IT DUPLICATES TWO STRINGS from src/app/theme.ts: a blocking
+         inline script cannot import a module. The key and attribute names are
+         repeated there with a matching warning. Missing one shows up as a
+         one-frame flash, which is easy to mistake for imagination.
+
+         Only "light" and "dark" are honoured. Anything else - absent, stale
+         from an older build, or corrupt - leaves the attribute off, which is
+         what makes the console follow the operating system by default. -->
+    <script>
+      try {
+        var storedTheme = localStorage.getItem('applyy.theme');
+        if (storedTheme === 'light' || storedTheme === 'dark') {
+          document.documentElement.setAttribute('data-theme', storedTheme);
+        }
+      } catch (storageBlocked) {
+        /* Reading localStorage throws outright when the browser blocks site
+           data. The console must still start; it just opens in the OS theme. */
+      }
+    </script>
+
     <!-- Preconnect before the stylesheet request so the font files start
          downloading a round trip earlier; type is the first paint that matters. -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />

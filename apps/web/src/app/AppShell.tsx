@@ -10,6 +10,11 @@ import type { ReactElement } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 
 import { CONSOLE_SECTIONS } from './routes';
+/* The appearance control. It lives in the rail rather than on a settings page
+   because the palette is designed dark-first while the console follows the
+   operating system by default - so on a light-mode machine the dark theme is
+   unreachable, and a control the operator cannot find does not fix that. */
+import { ThemeToggle } from './ThemeToggle';
 /* Two coverage sets, not one, and the second is why this import changed.
    `MISSING_HUMAN_CONTROLS` only catches a status NO screen claims, and every
    status is claimed - so it is empty, and the rail said nothing while eight
@@ -85,6 +90,13 @@ export function AppShell(): ReactElement {
             no control in this console. See System health.
           </p>
         ) : null}
+
+        {/* Last in the rail, below the defect notice. Appearance is the one
+            control here that changes nothing about the pipeline, so it sits
+            after everything that does - and it is set once and then left
+            alone, which is the definition of something that should not be
+            competing with fifteen destinations for attention. */}
+        <ThemeToggle />
       </nav>
 
       {/* The routed page. `main` so screen readers and keyboard users can skip
