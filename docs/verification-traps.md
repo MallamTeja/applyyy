@@ -579,6 +579,41 @@ someone eventually will — so do not provide the number.
 
 ---
 
+## Instance 23 — a single-owner file written by a command nobody calls a writer
+
+`pnpm-lock.yaml` was given **one designated owner** precisely because it is the
+most collision-prone file in a five-session tree, and the task of running
+`pnpm install` was routed deliberately to that owner rather than left to whoever
+noticed first.
+
+By the time the owner ran it, the lock **already contained** the new package's
+importer entry. `pnpm install` reported `Already up to date` and changed nothing.
+
+The writer was **`pnpm -r run <script>`**. Recursive script runs perform an
+implicit dependency-status install first, and that install can write the
+lockfile. Nobody had run `pnpm install`; several sessions had run `pnpm test` and
+`pnpm run typecheck`.
+
+**So "nobody ran the writing command" is not the same as "the file was not
+written."** Write-ownership partitioning protects a file from the commands you
+have *classified* as writers. A command whose stated purpose is to *read* — run
+the tests, check the types — silently held a write.
+
+**Generalised, and it goes well past pnpm:** when you assign an owner to a
+mutable file, enumerate what can write it by *effect*, not by *name*. Formatters
+invoked by a lint check, a build that refreshes a manifest, a test runner that
+updates a snapshot, a CLI that rewrites its own config on startup — each is a
+writer that reads as a reader. The tell here was benign; the general case is a
+concurrent write nobody was watching for, in the one file everybody agreed to be
+careful with.
+
+Related and already recorded: `deno.json` warns that Deno, walking up the tree
+looking for a workspace root, will **rewrite the repo's root `package.json`** to
+add a `workspaces` key. Same mechanism — a tool writing a file that belongs to
+someone else, as a side effect of being run for another reason.
+
+---
+
 ## Where this bites hardest in `applyy`
 
 Layered defences are the deliberate design here, so the cost applies throughout:

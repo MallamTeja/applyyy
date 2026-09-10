@@ -1,8 +1,10 @@
 # The Cursor-style palette — what changed, and the two catches worth keeping
 
 **Date:** 2026-09-10 · **Built by:** `applyyy-20` · **Written up by:** `applyyy-da`
-**State:** the 7 CSS files are **staged, not committed** at time of writing.
-There is **no theme toggle yet** — see §7.
+**State:** shipped. The 7 CSS files landed as `6aa0136`; the appearance toggle
+landed as `7615207` (`apps/web/src/app/theme.ts`). §7 records what was *not* done
+at the time of writing and what has since changed — kept rather than deleted,
+because the correction is the point.
 
 A low-chroma, theme-aware palette across all seven `.css` files in
 `apps/web/src`. Build exits 0; verified in Chrome at 1440×900 in both themes and
@@ -162,17 +164,25 @@ property quietly dies, because every change is "just a colour".
 
 ---
 
-## 7. ⚠️ Not done — do not read these in the past tense
+## 7. What was outstanding at 22:00, and what changed by 22:10
 
-- **There is NO theme toggle.** The dark palette is reached only via
-  `prefers-color-scheme`. **If Teja's OS is in light mode he will not see the
-  dark look he asked for.** A toggle (localStorage, `prefers-color-scheme` as
-  the default, explicit attribute on the root) was assigned to `applyyy-20`
-  after this work and was **not built** at time of writing.
-- **The 7 files are staged, not committed** as of 22:00. `applyyy-20` declined to
-  commit on a *relayed* lift of Teja's standing no-commit rule and asked for his
-  words directly — the right call, and the same reasoning that kept the
-  `supabase db push` from being routed around.
+Both items below were written as **not done**, verified as such, and were both
+resolved within ten minutes. **They are corrected here rather than deleted**,
+because this document argues that a stale present tense is a defect and it would
+be a poor advertisement for that argument to quietly rewrite history.
+
+- ~~**There is NO theme toggle**, so if Teja's OS is in light mode he will not
+  see the dark look he asked for.~~ **RESOLVED** — `7615207`,
+  `apps/web/src/app/theme.ts`. Verified present, not taken on report.
+- ~~**The 7 files are staged, not committed.**~~ **RESOLVED** — `6aa0136`; the
+  working tree is clean for all seven.
+
+  Worth keeping the reason they were staged: `applyyy-20` declined to commit on a
+  **relayed** lift of Teja's standing no-commit rule and asked for his words
+  directly. That was correct, and it is the same reasoning that stopped
+  `supabase db push` from being routed around a permission block an hour later.
+  Two peers independently refusing a relayed authorisation, on the same evening,
+  is the rule working rather than two people being slow.
 
 ---
 
