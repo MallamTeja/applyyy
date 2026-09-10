@@ -136,12 +136,16 @@ interface Accumulator {
   readonly firstUpload: boolean;
 }
 
-/* Shortens a bullet for the `label` field. The review UI needs enough to
- * recognise the line; the full text is in the profile itself, so carrying all
- * of it into every report entry would only bloat what gets stored or logged. */
+/* The renderable form of a bullet's text.
+ *
+ * Whitespace collapsed and NOT truncated. An earlier version cut this at 80
+ * characters to keep report entries small, which was wrong for the one use the
+ * report has: a real resume bullet runs to 150-200 characters, so every review
+ * row would have been cut mid-sentence - and a fuzzy carry is reviewed by
+ * reading the previous text against the incoming text. The report is the
+ * product, not a log, so it carries what a person needs to read. */
 function labelFor(text: string): string {
-  const collapsed = text.replace(/\s+/gu, ' ').trim();
-  return collapsed.length <= 80 ? collapsed : collapsed.slice(0, 77) + '...';
+  return text.replace(/\s+/gu, ' ').trim();
 }
 
 /* --- Exact key matching, shared by every non-bullet kind ---------------- */
@@ -237,6 +241,8 @@ function matchByKey(
  * searching a DIFFERENT parent's bullets is the misattribution. */
 function mintAllBullets(
   incoming: readonly MasterBullet[],
+  parentId: NodeId,
+  parentLabel: string,
   parentPath: string,
   reason: MintReason,
   acc: Accumulator,
@@ -246,6 +252,11 @@ function mintAllBullets(
     acc.minted.push({
       kind: 'bullet',
       id,
+      /* The parent is on every bullet row: a reviewer confirming a bullet
+         without seeing which job it sits under can miss the only error that
+         matters. */
+      parentId,
+      parentLabel,
       path: parentPath + '.bullets[' + String(index) + ']',
       reason,
       label: labelFor(bullet.text),
@@ -270,6 +281,7 @@ function reconcileBullets(
   previous: readonly MasterBullet[],
   incoming: readonly MasterBullet[],
   parentId: NodeId,
+  parentLabel: string,
   parentPath: string,
   acc: Accumulator,
 ): MasterBullet[] {
@@ -324,6 +336,8 @@ function reconcileBullets(
       kind: 'bullet',
       id: previousBullet.id,
       supersededId: bullet.id,
+      parentId,
+      parentLabel,
       path: parentPath + '.bullets[' + String(incomingIndex) + ']',
       match: 'exact_text',
       /* Null, not 1.0: an exact match has no score, and reporting one would
@@ -331,6 +345,10 @@ function reconcileBullets(
          a judgement a human should review, whereas this is not. */
       similarity: null,
       label: labelFor(bullet.text),
+      /* Equal to `label` here by definition - the texts matched exactly - and
+         populated anyway so a consumer can render every carry the same way
+         instead of special-casing the exact kinds. */
+      previousLabel: labelFor(previousBullet.text),
     });
   });
 
@@ -382,11 +400,18 @@ function reconcileBullets(
       kind: 'bullet',
       id: previousBullet.id,
       supersededId: incomingBullet.id,
+      parentId,
+      parentLabel,
       path: parentPath + '.bullets[' + String(pair.incomingIndex) + ']',
       /* The only value in the package that means "a human must look at this". */
       match: 'fuzzy_text',
       similarity: pair.score,
       label: labelFor(incomingBullet.text),
+      /* THE FIELD THE REVIEW ACTUALLY TURNS ON. A score of 0.71 is a number to
+         nod at; these two strings side by side are the decision. And this is
+         the one value a caller cannot recover from the output profile, because
+         the output is what replaced it. */
+      previousLabel: labelFor(previousBullet.text),
     });
   }
 
@@ -408,6 +433,7 @@ function reconcileBullets(
            job is a much smaller thing than a tie across the profile - which
            this design makes impossible anyway. */
         parentId,
+        parentLabel,
         path: parentPath + '.bullets[' + String(incomingIndex) + ']',
         candidateIds,
         score: tie.score,
@@ -452,6 +478,8 @@ function reconcileBullets(
     acc.minted.push({
       kind: 'bullet',
       id,
+      parentId,
+      parentLabel,
       path: parentPath + '.bullets[' + String(incomingIndex) + ']',
       reason,
       label: labelFor(bullet.text),
@@ -470,6 +498,8 @@ function reconcileBullets(
     acc.dropped.push({
       kind: 'bullet',
       id: bullet.id,
+      parentId,
+      parentLabel,
       previousPath: parentPath + '.bullets[' + String(index) + ']',
       label: labelFor(bullet.text),
     });
@@ -522,15 +552,32 @@ function reconcileBulletedSection<T extends BulletedNode>(
         kind,
         id: previousNode.id,
         supersededId: node.id,
+        /* A top-level node has no parent, rather than an unknown one. */
+        parentId: null,
+        parentLabel: null,
         path,
         match: 'exact_key',
         similarity: null,
         label: labelOf(node),
+        /* Meaningful even for an exact-KEY match: the key deliberately reads
+           only part of the node, so a project whose tagline was reworded
+           carries its id while its label changes - and that difference is
+           exactly what a reviewer wants to see. */
+        previousLabel: labelOf(previousNode),
       });
       return rebuild(
         node,
         previousNode.id,
-        reconcileBullets(previousNode.bullets, node.bullets, previousNode.id, path, acc),
+        reconcileBullets(
+          previousNode.bullets,
+          node.bullets,
+          previousNode.id,
+          /* The parent label is taken from the INCOMING node, because that is
+             the wording the reviewer is looking at on screen. */
+          labelOf(node),
+          path,
+          acc,
+        ),
       );
     }
 
@@ -552,6 +599,7 @@ function reconcileBulletedSection<T extends BulletedNode>(
         kind,
         reason: 'duplicate_match_key',
         parentId: null,
+        parentLabel: null,
         path,
         candidateIds,
         /* Null: nothing was scored. A key either matched or it did not. */
@@ -567,6 +615,8 @@ function reconcileBulletedSection<T extends BulletedNode>(
     acc.minted.push({
       kind,
       id,
+      parentId: null,
+      parentLabel: null,
       path,
       reason: acc.firstUpload
         ? 'no_previous_profile'
@@ -581,6 +631,8 @@ function reconcileBulletedSection<T extends BulletedNode>(
       id,
       mintAllBullets(
         node.bullets,
+        id,
+        labelOf(node),
         path,
         acc.firstUpload ? 'no_previous_profile' : 'new_parent',
         acc,
@@ -600,6 +652,8 @@ function reconcileBulletedSection<T extends BulletedNode>(
     acc.dropped.push({
       kind,
       id: node.id,
+      parentId: null,
+      parentLabel: null,
       previousPath: sectionPath + '[' + String(index) + ']',
       label: labelOf(node),
     });
@@ -607,6 +661,10 @@ function reconcileBulletedSection<T extends BulletedNode>(
       acc.dropped.push({
         kind: 'bullet',
         id: bullet.id,
+        /* The parent that went away with it. A reader seeing four bullet drops
+           all naming one parent knows it was one deletion, not four. */
+        parentId: node.id,
+        parentLabel: labelOf(node),
         previousPath:
           sectionPath + '[' + String(index) + '].bullets[' + String(bulletIndex) + ']',
         label: labelFor(bullet.text),
@@ -644,10 +702,18 @@ function reconcileFlatSection<T extends { readonly id: NodeId }>(
         kind,
         id: previousNode.id,
         supersededId: node.id,
+        /* A top-level node has no parent, rather than an unknown one. */
+        parentId: null,
+        parentLabel: null,
         path,
         match: 'exact_key',
         similarity: null,
         label: labelOf(node),
+        /* Meaningful even for an exact-KEY match: the key deliberately reads
+           only part of the node, so a project whose tagline was reworded
+           carries its id while its label changes - and that difference is
+           exactly what a reviewer wants to see. */
+        previousLabel: labelOf(previousNode),
       });
       return rebuild(node, previousNode.id);
     }
@@ -666,6 +732,7 @@ function reconcileFlatSection<T extends { readonly id: NodeId }>(
         kind,
         reason: 'duplicate_match_key',
         parentId: null,
+        parentLabel: null,
         path,
         candidateIds,
         score: null,
@@ -680,6 +747,8 @@ function reconcileFlatSection<T extends { readonly id: NodeId }>(
     acc.minted.push({
       kind,
       id,
+      parentId: null,
+      parentLabel: null,
       path,
       reason: acc.firstUpload
         ? 'no_previous_profile'
@@ -699,6 +768,8 @@ function reconcileFlatSection<T extends { readonly id: NodeId }>(
     acc.dropped.push({
       kind,
       id: node.id,
+      parentId: null,
+      parentLabel: null,
       previousPath: sectionPath + '[' + String(index) + ']',
       label: labelOf(node),
     });

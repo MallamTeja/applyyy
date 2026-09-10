@@ -38,6 +38,11 @@ export {
 export {
   needsHumanReview,
   nonExactCarries,
+  /* The review policy, in one place. A consumer gating its accept button on
+     "every risky row acknowledged" must not reimplement which rows are risky -
+     two implementations of that would disagree about the only question that
+     matters. */
+  reviewableRows,
   type AmbiguityReason,
   type AmbiguousMatch,
   type CarriedNode,
@@ -45,8 +50,10 @@ export {
   type MatchKindLabel,
   type MintReason,
   type MintedNode,
+  type NodePlacement,
   type ReconciledKind,
   type ReconciliationReport,
+  type ReviewableRow,
 } from './report.ts';
 
 /* The global NodeId invariant, exported so a caller can check a profile this

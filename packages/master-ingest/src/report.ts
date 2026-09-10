@@ -42,8 +42,39 @@ export type ReconciledKind =
  * from the report. */
 export type MatchKindLabel = 'exact_key' | 'exact_text' | 'fuzzy_text';
 
+/* WHERE A ROW SITS, for the three lists that describe individual nodes.
+ *
+ * WHY EVERY ROW CARRIES ITS PARENT, and this is the correction that matters
+ * most in the file. The failure this package exists to prevent is a TRUE bullet
+ * appearing under the WRONG parent. So a review row reading "Cut p95 latency
+ * 40% - reworded" is not reviewable on its own: it is only reviewable beside
+ * "...under Full Stack AI Engineer at Northwind Systems". Without the parent, a
+ * reviewer can confirm the wording and still miss the one error that matters.
+ *
+ * THE FIRST VERSION OF THIS FILE PUT `parentId` ON `AmbiguousMatch` ONLY, which
+ * was exactly the wrong list to have it on. `ambiguous` is where the reconciler
+ * REFUSED to decide, so a human is already looking hard. The dangerous list is
+ * `carried` with `match: 'fuzzy_text'` - where a decision WAS made, silently,
+ * by a score. Caught by applyyy-20 reading the shipped code against a claim
+ * that it already carried this. It did not.
+ *
+ * `parentLabel` IS THE RENDERED FORM, not the components, so that every
+ * consumer shows the same string. Handing out `{ company, role }` guarantees
+ * two callers join them differently and Teja sees one wording in the review and
+ * another in the diff. */
+export interface NodePlacement {
+  /* The RECONCILED parent's id for a bullet - the id that will be in the stored
+     profile, not the throwaway one the parse produced. Null for a top-level
+     node (a skill, a link, or a parent itself), which has no parent rather than
+     an unknown one. */
+  readonly parentId: NodeId | null;
+  /* Pre-rendered, e.g. "Full Stack AI Engineer at Northwind Systems". Null
+     exactly when `parentId` is null. */
+  readonly parentLabel: string | null;
+}
+
 /* A node that kept its previous id. */
-export interface CarriedNode {
+export interface CarriedNode extends NodePlacement {
   readonly kind: ReconciledKind;
   /* The id that now sits on the output node - the PREVIOUS one. This is the
      whole purpose of the package: this id is what old pinned applications
@@ -63,10 +94,23 @@ export interface CarriedNode {
      match has no score and reporting 1.0 would make an exact match
      indistinguishable from a fuzzy match that happened to score 1.0. */
   readonly similarity: number | null;
-  /* Human-readable identification of the node - a skill name, a company, the
-     bullet text. The review UI needs this and should not have to re-walk the
-     profile to find it. */
+  /* Human-readable identification of the node as it is NOW - a skill name, a
+     company, the full bullet text. Not truncated: the review UI renders this,
+     and a real bullet runs to 150-200 characters, so an abbreviation would cut
+     every row mid-sentence. */
   readonly label: string;
+  /* The same, as it was in the STORED profile.
+   *
+   * REQUIRED FOR THE REPORT TO MEET ITS OWN STATED GOAL. A fuzzy carry is
+   * reviewed by reading previous against incoming side by side; the score alone
+   * is just a number to nod at. And this is the one field a caller cannot
+   * recover from the output profile, because the previous text is precisely
+   * what the output replaced - so without it the review needs a second lookup
+   * into a second profile, which the header of this file promises it will not.
+   *
+   * Differs from `label` only when the text actually changed, so a consumer can
+   * compare the two rather than being told which kind of match it was. */
+  readonly previousLabel: string;
 }
 
 /* WHY a node got a fresh id. Five distinct reasons, and they are not
@@ -103,7 +147,7 @@ export type MintReason =
   | 'ambiguous';
 
 /* A node that received a freshly minted id. */
-export interface MintedNode {
+export interface MintedNode extends NodePlacement {
   readonly kind: ReconciledKind;
   readonly id: NodeId;
   readonly path: string;
@@ -121,7 +165,7 @@ export interface MintedNode {
  * THIS IS THE ENTRY THAT EARNS THE LIST-NOT-COUNT RULE. A dropped id is not a
  * cleanup detail: pinned applications and frozen resolved resumes still refer
  * to it, so it is a dangling reference somebody has to decide about. */
-export interface DroppedNode {
+export interface DroppedNode extends NodePlacement {
   readonly kind: ReconciledKind;
   readonly id: NodeId;
   /* Path in the PREVIOUS profile - the output has no such node, so an
@@ -147,14 +191,9 @@ export type AmbiguityReason =
  * That redundancy is deliberate: `minted` answers "what happened to this node"
  * and `ambiguous` answers "what should a human look at", and a reader of either
  * list gets a complete answer without having to join the two. */
-export interface AmbiguousMatch {
+export interface AmbiguousMatch extends NodePlacement {
   readonly kind: ReconciledKind;
   readonly reason: AmbiguityReason;
-  /* The reconciled parent whose scope the tie occurred in, for bullets. Null
-     for top-level kinds. Present because it localises the problem: a tie inside
-     one job is a much smaller thing than a tie across the profile - which this
-     design makes impossible anyway. */
-  readonly parentId: NodeId | null;
   /* Path of the INCOMING node that could not be resolved. */
   readonly path: string;
   /* The previous ids that tied. The human decides between exactly these. */
@@ -187,11 +226,92 @@ export function nonExactCarries(report: ReconciliationReport): readonly CarriedN
   return report.carried.filter((entry) => entry.match === 'fuzzy_text');
 }
 
+/* Mint reasons that a person has to look at.
+ *
+ * The other three are not judgements: `no_previous_profile` is a first upload,
+ * `no_candidate` is content with no counterpart at all, and `new_parent` is the
+ * cascade already made visible by its parent's own row. Asking for an
+ * acknowledgement on those buries the three that matter in a wall of noise -
+ * and a reviewer who is shown too much stops reading, which is the failure mode
+ * this whole report is shaped around. */
+const REVIEWABLE_MINT_REASONS: readonly MintReason[] = [
+  /* Close enough that it may be a rewording the threshold could not see. */
+  'below_threshold',
+  /* Two bullets both scored well against one previous bullet; usually one is a
+     rewording and the other is new, and only a human knows which. */
+  'candidate_taken',
+];
+
+/* NOT IN THAT LIST, DELIBERATELY: `ambiguous`.
+ *
+ * Every ambiguity appears in BOTH `minted` (reason `ambiguous`) and
+ * `ambiguous`, which is intentional - each list answers a different question
+ * completely. But a REVIEW GATE must count each decision once. Including it
+ * here would make one refusal produce two rows: the rich one naming the tied
+ * candidates, and a bare mint saying nothing the other did not. A reviewer
+ * reads that as two problems, and a per-row acknowledgement gate would demand
+ * two acknowledgements for one decision.
+ *
+ * The `ambiguous` row is the one that survives, because it is the one carrying
+ * the candidate ids and the `detail` sentence. Found by applyyy-20 reaching the
+ * same conclusion independently while building the render adapter - which is
+ * the useful kind of agreement, since we got there from opposite ends. */
+
+/* ONE ROW A PERSON MUST ACKNOWLEDGE, tagged by why.
+ *
+ * A discriminated union rather than four separate getters, because the consumer
+ * gates the accept button on EVERY reviewable row having been acknowledged
+ * individually - so it needs one enumerable set, not four lists it has to
+ * remember to concatenate. Forgetting one of four lists is silent; forgetting
+ * to handle a variant of this union is a compile error. */
+export type ReviewableRow =
+  /* An id was carried by SCORE. The dangerous case: a decision was made
+     silently, and this is where a misattribution would be. */
+  | { readonly reviewKind: 'fuzzy_carry'; readonly carried: CarriedNode }
+  /* The reconciler refused to decide and named the candidates. */
+  | { readonly reviewKind: 'ambiguous'; readonly ambiguous: AmbiguousMatch }
+  /* A fresh id where a rewording was plausible. */
+  | { readonly reviewKind: 'uncertain_mint'; readonly minted: MintedNode }
+  /* A node that was in the stored profile and is NOT in the new one.
+   *
+   * EVERY dropped row is reviewable, including on a deliberate deletion, and
+   * that is the point rather than an oversight. If the PDF parse loses a bullet
+   * - a layout quirk, a ligature, a column boundary - Teja sees an otherwise
+   * clean list, accepts it, and a true achievement disappears from every future
+   * resume with nothing anywhere reporting a problem. Making him acknowledge
+   * the deletion he MEANT is the price of catching the one he did not. */
+  | { readonly reviewKind: 'dropped'; readonly dropped: DroppedNode };
+
+/* Every row a person must acknowledge before this reconciliation is stored.
+ *
+ * THE POLICY LIVES HERE AND NOWHERE ELSE. A consumer that reimplements "which
+ * rows are risky" will drift from this one, and the two will disagree about the
+ * only question that matters. Exported for exactly that reason. */
+export function reviewableRows(report: ReconciliationReport): readonly ReviewableRow[] {
+  return [
+    ...nonExactCarries(report).map(
+      (carried): ReviewableRow => ({ reviewKind: 'fuzzy_carry', carried }),
+    ),
+    ...report.ambiguous.map(
+      (ambiguous): ReviewableRow => ({ reviewKind: 'ambiguous', ambiguous }),
+    ),
+    ...report.minted
+      .filter((minted) => REVIEWABLE_MINT_REASONS.includes(minted.reason))
+      .map((minted): ReviewableRow => ({ reviewKind: 'uncertain_mint', minted })),
+    ...report.dropped.map((dropped): ReviewableRow => ({ reviewKind: 'dropped', dropped })),
+  ];
+}
+
 /* Whether this reconciliation needs a person before it can be stored.
  *
- * True when anything was decided by score, or when anything was refused. Both
- * halves matter: a fuzzy carry may be WRONG, and an ambiguity means an id was
- * dropped on the floor that a human might have been able to place. */
+ * Derived from `reviewableRows` rather than computed separately, so the boolean
+ * and the list can never disagree - a UI that says "nothing to review" while
+ * the list has three rows in it is worse than either answer alone.
+ *
+ * NOTE FOR CONSUMERS: this is a "should a human look" signal, NOT "refuse to
+ * store". Gating the accept button on `false` would make a reworded bullet
+ * unacceptable rather than reviewable, and Teja would be stuck with no way
+ * forward. Gate on every reviewable row having been acknowledged instead. */
 export function needsHumanReview(report: ReconciliationReport): boolean {
-  return nonExactCarries(report).length > 0 || report.ambiguous.length > 0;
+  return reviewableRows(report).length > 0;
 }

@@ -120,10 +120,48 @@ Four **lists**, not four counts:
 - `ambiguous` — where the reconciler refused to decide, naming exactly the
   candidate ids a human is choosing between.
 
+Every row in the first three lists also carries **where it sits** — `parentId`
+plus a **pre-rendered** `parentLabel` ("Full Stack AI Engineer at Northwind
+Systems"). That is not decoration. The failure this package exists to prevent is
+a *true* bullet under the *wrong* parent, so a row reading "Cut p95 latency 40% —
+reworded" is only reviewable beside the job it sits under. Pre-rendered rather
+than `{ company, role }` components, so two consumers cannot join them
+differently and show Teja two different wordings.
+
+`carried` additionally carries `previousLabel` — the text **as it was stored**.
+A fuzzy carry is reviewed by reading previous against incoming side by side; the
+score alone is just a number to nod at. It is also the one value a caller cannot
+recover from the output profile, because the output is what replaced it.
+
 There are deliberately **no count fields**. A count field is an invitation to
 render the count and skip the list, and rendering the count is how this package
 silently stops working. A clean re-upload should be a five-second glance
 (`needsHumanReview === false`); a suspicious one should be loud.
+
+### The review gate
+
+`reviewableRows(report)` returns the rows a person must acknowledge, tagged
+`fuzzy_carry` / `ambiguous` / `uncertain_mint` / `dropped`. **The policy lives
+there and nowhere else** — a consumer that reimplements "which rows are risky"
+will drift from this one, and the two will then disagree about the only question
+that matters.
+
+Two decisions inside it worth knowing:
+
+- **An ambiguity produces ONE row, not two.** Every ambiguity appears in both
+  `minted` (reason `ambiguous`) and `ambiguous`, which is deliberate — each list
+  answers a different question completely. But a *gate* must count one decision
+  once, or a reviewer reads one refusal as two problems and has to acknowledge
+  it twice. The `ambiguous` row survives, because it carries the candidate ids.
+- **Every `dropped` row is reviewable, including on a deliberate deletion.** If
+  the parse loses a bullet, this is the only place it surfaces. Making Teja
+  acknowledge the deletion he *meant* is the price of catching the one he did
+  not.
+
+`needsHumanReview` is derived from `reviewableRows`, so the boolean and the list
+cannot disagree. It means "a human should look", **not** "refuse to store" —
+gating an accept button on `false` would make a reworded bullet unacceptable
+rather than reviewable, and leave Teja stuck.
 
 ---
 
@@ -211,6 +249,11 @@ cannot distinguish a correct guard from one that rejects everything.
 | Exact-text pass before the fuzzy pass | 7 |
 | Mint for unmatched bullets → keep the parse id | 2 |
 | Soft-hyphen fold | 2 |
+| `parentId` on the fuzzy-carry row | 2 |
+| `previousLabel` on the fuzzy row echoes the incoming text | 2 |
+| Label truncation reinstated at 80 chars | 2 |
+| Ambiguous mints counted as a second review row | 2 |
+| `reviewableRows` omits dropped nodes | 3 |
 
 Two results worth reading:
 
@@ -219,6 +262,15 @@ Two results worth reading:
   per-section checker passed **34 of 36** ingest tests: the case anyone writes
   first passes under *both* designs, so on its own it is not evidence that the
   checker is global.
+- **Two review fields were claimed to exist and did not.** `parentId` and a
+  parent label were described to the consuming session as already present on
+  `carried` / `minted` / `dropped`; they existed only on `AmbiguousMatch` —
+  which was exactly the wrong list, since `ambiguous` is where the reconciler
+  *refused* and a human is already looking hard. The dangerous list is `carried`
+  with `fuzzy_text`, where a decision was made silently by a score. Caught by
+  `applyyy-20` grepping the shipped code against the claim. Labels were also
+  truncated at 80 characters, which would have cut every real 150–200 character
+  bullet mid-sentence in the review UI.
 - **The stored-profile precondition initially killed ZERO tests.** The test
   named after it was passing because the *postcondition* caught the same input —
   a composite result, and exactly `docs/verification-traps.md`'s THE RULE. It is
