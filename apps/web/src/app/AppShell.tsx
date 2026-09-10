@@ -10,7 +10,16 @@ import type { ReactElement } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 
 import { CONSOLE_SECTIONS } from './routes';
-import { MISSING_HUMAN_CONTROLS } from '../data/humanLanes';
+/* Two coverage sets, not one, and the second is why this import changed.
+   `MISSING_HUMAN_CONTROLS` only catches a status NO screen claims, and every
+   status is claimed - so it is empty, and the rail said nothing while eight
+   human-reachable edges had no screen behind the claim. `UNBUILT_HUMAN_CONTROLS`
+   is the set whose claiming screen does not exist, which is the defect the
+   operator is actually exposed to. */
+import {
+  MISSING_HUMAN_CONTROLS,
+  UNBUILT_HUMAN_CONTROLS,
+} from '../data/humanLanes';
 
 import './AppShell.css';
 
@@ -58,12 +67,22 @@ export function AppShell(): ReactElement {
             schema stream adds an edge only a human may traverse and no screen
             offers it, rows can enter a status nothing can leave. That is a
             silent stall, and section 14's whole lesson is that the silent
-            failures are the expensive ones. Normally empty and invisible. */}
-        {MISSING_HUMAN_CONTROLS.length > 0 ? (
+            failures are the expensive ones.
+
+            THE SUM OF TWO SETS, because either alone reads as an all-clear it
+            has not earned: an unclaimed status and a status claimed by a screen
+            that does not exist are both "rows can arrive here and never leave
+            by hand". Kept as one number in the rail - a rail is a glance
+            surface, and the breakdown belongs on System health where there is
+            room to say which is which. */}
+        {MISSING_HUMAN_CONTROLS.length + UNBUILT_HUMAN_CONTROLS.length > 0 ? (
           <p className="rail__defect">
-            {MISSING_HUMAN_CONTROLS.length} workflow{' '}
-            {MISSING_HUMAN_CONTROLS.length === 1 ? 'step has' : 'steps have'} no
-            control in this console. See System health.
+            {MISSING_HUMAN_CONTROLS.length + UNBUILT_HUMAN_CONTROLS.length}{' '}
+            workflow{' '}
+            {MISSING_HUMAN_CONTROLS.length + UNBUILT_HUMAN_CONTROLS.length === 1
+              ? 'step has'
+              : 'steps have'}{' '}
+            no control in this console. See System health.
           </p>
         ) : null}
       </nav>

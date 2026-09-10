@@ -171,3 +171,94 @@
   font-size: var(--size-xs);
   max-width: 72ch;
 }
+
+/* --- Ages, and the states that are not ages -------------------------- */
+
+/* A MEASURED AGE. Tabular figures and the mono face, because these numbers get
+   compared down a column - "9 days" against "1 day" against "under an hour" -
+   and proportional digits make a column of numbers a column of ragged shapes.
+   Deliberately NOT coloured by severity: the emphasis lives on the row (see
+   .table__row--attention), so a green/red age would encode the same fact twice
+   and disagree with itself the first time one of them was edited. */
+.table__age {
+  font-family: var(--font-id);
+  font-size: var(--size-xs);
+  /* Digits share one width, so ages line up vertically as if in columns. */
+  font-variant-numeric: tabular-nums;
+  /* An age is one short phrase; wrapping "under an hour" mid-column makes the
+     row taller and harder to scan than the value is worth. */
+  white-space: nowrap;
+}
+
+/* "NEVER RUN" AND FRIENDS - the absence of any run at all.
+   THE LOUDEST STATE ON THIS PAGE, and it takes the fabrication red rather than
+   the muted `.unknown` italic on purpose. `.unknown` means "the console did not
+   ask"; this means "the console asked and the answer was nothing has ever
+   happened", which is a positive finding and the single most alarming one the
+   freshness table can produce. Styling them alike is how the alarming one gets
+   read as the harmless one. */
+.table__never {
+  color: var(--fabricated-deep);
+  font-weight: 600;
+  font-size: var(--size-xs);
+  /* Wraps freely: these strings are whole sentences ("has never run, so the
+     60-day clock has never been reset") rather than values. */
+  max-width: 48ch;
+}
+
+/* A run that opened and never closed, older than one whole cycle. Sits under
+   the verdict sentence as a second line, because it is an additional fact about
+   the same agent rather than a competing one - and for the Applier it is the
+   safety-critical fact, since a row left at `applying` means nobody knows
+   whether an application was actually submitted. */
+.table__stuck {
+  display: block;
+  margin-top: var(--gap-1);
+  color: var(--fabricated-deep);
+  font-size: var(--size-xs);
+  max-width: 56ch;
+}
+
+/* A count in the coverage table. Tabular so four numbers that must sum to a
+   fifth can be added up by eye - which is the whole point of showing the
+   partition rather than a single figure. */
+.table__count {
+  font-family: var(--font-id);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  /* Right-aligned against the left-aligned default of `.table td`, because
+     numbers compare down their last digit and text compares down its first. */
+  text-align: right;
+  /* Narrow: the column holds at most three digits, and the explanation column
+     next to it is the one that needs the width. */
+  width: 4rem;
+}
+
+/* THE ROW THAT NEEDS A LOOK. Emphasis, never filtering - hiding a healthy row
+   would leave this page unable to prove it examined everything, and "I checked
+   all twelve agents" is the claim the operator is actually reading it for.
+   A left rule plus a wash rather than red text: the text in these rows is
+   already carrying the meaning, and recolouring it would compete with
+   `.table__never` inside the same cell. */
+.table__row--attention td,
+.table__row--attention th {
+  background: var(--fabricated-wash);
+}
+
+.table__row--attention th[scope='row'] {
+  /* The marker goes on the first cell only, so a scanned column of left rules
+     counts rows rather than cells. */
+  box-shadow: inset 3px 0 0 0 var(--fabricated);
+}
+
+/* A heading inside a panel, below .panel__title. Needed once the coverage panel
+   grew a second section (the named unbuilt edges) under its summary table -
+   without a level between the panel title and a list item, the list reads as
+   part of the table above it. */
+.panel__subtitle {
+  margin-top: var(--gap-4);
+  margin-bottom: var(--gap-2);
+  font-size: var(--size-sm);
+  font-weight: 600;
+  color: var(--ink);
+}

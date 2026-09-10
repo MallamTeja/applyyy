@@ -25,8 +25,12 @@
  *   - The `blocked_needs_human` queue. Captchas and login walls are NORMAL
  *     daily traffic, not errors (constraint 5 forbids circumventing them), so
  *     they get a real work queue with the screenshot the worker captured.
- *   - `MISSING_HUMAN_CONTROLS`, as a first-class panel. A human-reachable edge
- *     with no control is a stall the operator cannot see from anywhere else.
+ *   - MANUAL CONTROL COVERAGE, as a first-class panel. A human-reachable edge
+ *     with no control is a stall the operator cannot see from anywhere else -
+ *     and the panel reports a four-way PARTITION of those edges rather than one
+ *     list, because the single list it used to render was empty for a reason
+ *     unrelated to coverage and therefore read as an all-clear it had not
+ *     earned. See the panel's own header.
  *   - The Gemini key pool, because quota exhaustion is not an error either: all
  *     keys cooling means rows quietly wait, which looks identical to nothing
  *     happening.
@@ -39,10 +43,41 @@ import { PageHeader } from '../../app/PageHeader';
    agent added upstream appears here with no edit - an agent this page forgot to
    list is an agent whose death nobody would notice. */
 import { AGENT_NAMES } from '../../data/contract';
-import type { AgentName } from '../../data/contract';
 /* The coverage check, imported rather than recomputed. Its own file explains
-   why the predicate is `.includes('human')` and not `=== ['human']`. */
-import { MISSING_HUMAN_CONTROLS } from '../../data/humanLanes';
+   why the predicate is `.includes('human')` and not `=== ['human']`, and why
+   one list of gaps was not enough: a status claimed by a screen nobody wrote
+   is a gap that `MISSING_HUMAN_CONTROLS` cannot see, because the status IS
+   claimed. All four sets are imported so the panel can report a partition of
+   the human-reachable edges rather than a single number that reads as an
+   all-clear it has not earned. */
+import {
+  HUMAN_REACHABLE_LANES,
+  INOPERABLE_HUMAN_CONTROLS,
+  MISSING_HUMAN_CONTROLS,
+  OPERABLE_HUMAN_CONTROLS,
+  UNBUILT_HUMAN_CONTROLS,
+} from '../../data/humanLanes';
+/* Freshness is DERIVED, not measured here: the cadences, the age arithmetic and
+   the verdict ladder all live in one pure module with a test per branch. A
+   nine-day silence and a clock skewed into the future are both one line of test
+   setup there and untestable in a component. */
+import {
+  AGENT_CADENCE,
+  describeVerdict,
+  formatAge,
+  needsAttention,
+  newestHeartbeat,
+} from '../../data/agentFreshness';
+/* The read itself. `RUN_WINDOW` is imported rather than restated so the note
+   the panel renders about its own window cannot drift from the query's LIMIT -
+   a page that misdescribes its own bounds is worse than one that says nothing,
+   because the operator would trust it. */
+import { RUN_WINDOW, useAgentRuns } from '../../data/useAgentRuns';
+import type { AgentRunsRead } from '../../data/useAgentRuns';
+/* The shared vocabulary for every state that is not an answer. Imported so
+   "not signed in" reads identically on this page, the pipeline board and any
+   panel added later - the operator learns one phrase per state, once. */
+import { describeEmptyState } from '../../data/readState';
 /* Whether the console can reach a database at all.
    IMPORTING THIS IS LOAD-BEARING BEYOND THIS PANEL: `supabase.ts` enforces the
    anon-key rule at module scope, and until something imported it that check
@@ -54,73 +89,76 @@ import { supabaseStatus } from '../../data/supabase';
 
 import './health.css';
 
-/* --- Freshness thresholds -------------------------------------------- */
-
-/* How long a given agent may be silent before silence means something is
- * wrong. This has to be per-agent, because the roster runs on wildly different
- * cadences: the Scout runs daily and a day of silence is already suspicious,
- * whereas the keepalive workflow is weekly by design and a two-day gap is
- * perfectly healthy. One global threshold would either cry wolf about the
- * keepalive or stay silent about a dead Scout for a week.
- *
- * Stated in hours as plain data so the numbers are reviewable in one place
- * rather than buried in comparisons. */
-interface Cadence {
-  /* What the operator should expect, in words - shown next to the age so a
-     reported gap can be judged without knowing the schedule by heart. */
-  readonly expected: string;
-  /* Past this age, the agent is presumed dead rather than idle. */
-  readonly staleAfterHours: number;
-}
-
-/* Keyed by `AgentName` and PARTIAL on purpose: an agent the schema adds and
- * this map does not describe still renders (with a stated unknown cadence)
- * instead of being dropped from the page. A missing cadence is a cosmetic gap;
- * a missing agent row is a silent death. */
-const CADENCE: Readonly<Partial<Record<AgentName, Cadence>>> = {
-  /* The two discovery agents are the top of the funnel. If these stop, every
-     downstream agent has nothing to do and reports itself perfectly healthy
-     while the pipeline runs dry - the exact failure that looks like success. */
-  scout_ats: { expected: 'every morning', staleAfterHours: 30 },
-  scout_aggregator: { expected: 'every morning', staleAfterHours: 30 },
-  /* Deterministic, cheap, runs with discovery. */
-  normalizer: { expected: 'every morning', staleAfterHours: 30 },
-  /* No LLM at all. Most discovered jobs die here, which is what keeps the
-     running cost near zero - so a dead Screener shows up as a surprising
-     Gemini bill, not as an error. */
-  screener: { expected: 'every morning', staleAfterHours: 30 },
-  matcher: { expected: 'every morning', staleAfterHours: 30 },
-  tailor: { expected: 'every morning', staleAfterHours: 30 },
-  auditor: { expected: 'every morning', staleAfterHours: 30 },
-  /* GitHub Actions plus Playwright rather than an Edge Function, and the only
-     agent that performs a non-idempotent action. */
-  applier: { expected: 'after each approval', staleAfterHours: 48 },
-  /* Reads the mailbox through Apps Script. This is the one whose death is
-     hardest to notice from the outside: applications still go out, they just
-     never advance past `applied`, so the board looks merely quiet. */
-  tracker: { expected: 'every few hours', staleAfterHours: 12 },
-  /* Reclaims stale leases. If it stops, `applying` rows pile up - and that is
-     the safety-critical status, so its silence is worth flagging early. */
-  sweeper: { expected: 'every run', staleAfterHours: 24 },
-};
-
 /* --- Panels ----------------------------------------------------------- */
 
-/* Last-successful-run per agent.
+/* AGENT FRESHNESS - the panel section 14 exists for, now reading real rows.
  *
- * Rendered from the roster rather than from the rows: an agent with NO rows at
- * all is the most alarming case there is - it has never run once - and a table
- * built from query results would simply omit it. So the roster drives the
- * table and a missing row is rendered as "never", loudly. */
-function AgentFreshnessPanel(): ReactElement {
+ * WHAT IT READS AND WHY THAT TABLE FIRST. `agent_runs` carries an agent name,
+ * an outcome and two timestamps: no resume, no job description, no answer bank,
+ * nothing personal. So it is the safest real read available, and the worst case
+ * if the read is wrong is a misleading age on one panel rather than misleading
+ * resume content on the highest-consequence screen in the console. Prove the
+ * read pattern where a mistake is cheap.
+ *
+ * THE TABLE IS DRIVEN BY THE ROSTER, NOT BY THE ROWS, and that is the whole
+ * design. `GROUP BY agent` produces no row for an agent that has never run - so
+ * the agent whose failure is TOTAL would be the one missing from the page, and
+ * its absence would look like tidiness. `AGENT_NAMES` drives the rows and the
+ * query only fills them in; a missing agent reports "has never run", loudly.
+ *
+ * AND EVERY COLUMN IS AN AGE. A green tick meaning "the last run succeeded" is
+ * exactly the wrong indicator: a job that stopped a month ago has a perfectly
+ * successful last run. Freshness is the signal, outcome is the qualifier.
+ */
+function AgentFreshnessPanel({
+  read,
+}: {
+  /* The whole read, not just the rows. A panel handed only rows cannot tell
+     "nothing has ever run" from "nobody is signed in", which is the one
+     distinction this page cannot afford to lose. */
+  readonly read: AgentRunsRead;
+}): ReactElement {
+  /* Null exactly when the read produced a real answer. Any other value is the
+     shared phrase for why it did not - one vocabulary across the console, from
+     one function, so "not signed in" always reads the same. */
+  const unreadable = describeEmptyState(read.state);
+
+  /* Keyed for lookup inside the roster loop. `summarizeAgentRuns` already
+     returns one entry per agent in roster order, so this map is complete
+     whenever the read was conclusive and empty otherwise - which is why the
+     loop below can treat a missing entry as "the console does not know" rather
+     than as "this agent never ran". */
+  const byAgent = new Map(read.freshness.map((entry) => [entry.agent, entry]));
+
   return (
     <section className="panel">
-      <h2 className="panel__title">Last successful run</h2>
+      <h2 className="panel__title">Agent freshness</h2>
       <p className="panel__note">
         Read the AGE column, not the outcome. A job that stopped a month ago
         still has a perfectly successful last run, so &quot;succeeded&quot; on
         its own tells you nothing about whether anything is still happening.
       </p>
+
+      {/* WHEN the ages were measured, or WHY there are none. An age with no
+          "as of" is unfalsifiable - the operator cannot tell a nine-day silence
+          from a nine-day-old browser tab. */}
+      {read.measuredAt === null || unreadable !== null ? (
+        <p className="not-wired">
+          {/* The read state's own words. Note that none of them is the digit
+              zero, and none of them is a timestamp - an unread age must never
+              render as a number. */}
+          No ages below: {unreadable ?? 'the read has not completed'}.
+        </p>
+      ) : (
+        <p className="panel__note">
+          Measured once, at{' '}
+          <span className="identifier">
+            {new Date(read.measuredAt).toISOString()}
+          </span>
+          . The ages below do not tick - reload to re-measure, so a number on
+          screen always says when it was taken.
+        </p>
+      )}
 
       <div className="table-wrap">
         <table className="table">
@@ -132,18 +170,40 @@ function AgentFreshnessPanel(): ReactElement {
               {/* The expected cadence sits next to the age so a gap can be
                   judged without memorising the schedule. */}
               <th scope="col">Expected</th>
-              {/* The load-bearing column. */}
+              {/* THE LOAD-BEARING COLUMN, and named for what it measures.
+                  "Silent for" cannot be misread as an outcome the way a
+                  "Status" column can. */}
+              <th scope="col">Silent for</th>
+              {/* The second clock: proof that work happened, as opposed to
+                  proof that the scheduler fired. */}
               <th scope="col">Last success</th>
-              <th scope="col">Age</th>
+              {/* The two clocks in one sentence, because the pair of them is
+                  what determines the operator's next action. */}
+              <th scope="col">What that means</th>
             </tr>
           </thead>
           <tbody>
             {AGENT_NAMES.map((agent) => {
-              /* Undefined for an agent the schema added and this page has not
-                 been taught about - handled below rather than crashing. */
-              const cadence = CADENCE[agent];
+              /* Undefined whenever the read was not conclusive. Deliberately
+                 NOT defaulted to a never-run entry: "we could not ask" and
+                 "it has never run" are opposite claims. */
+              const entry = byAgent.get(agent);
+              /* The cadence comes from the pure module either way, so the
+                 expected-schedule column is honest even with no data at all -
+                 it describes configuration, not state. */
+              const cadence = AGENT_CADENCE[agent];
+
               return (
-                <tr key={agent}>
+                <tr
+                  key={agent}
+                  /* Emphasis only, never filtering. Hiding a healthy row would
+                     make this page unable to prove it looked at everything. */
+                  className={
+                    entry !== undefined && needsAttention(entry.verdict)
+                      ? 'table__row--attention'
+                      : undefined
+                  }
+                >
                   {/* The schema's own identifier, so the name here matches the
                       one in `agent_runs` and in a peer's message. */}
                   <th scope="row" className="table__id">
@@ -158,14 +218,81 @@ function AgentFreshnessPanel(): ReactElement {
                       cadence.expected
                     )}
                   </td>
-                  {/* Both cells are unknown until `agent_runs` is queried, and
-                      an unknown age must never render as "just now" - that
-                      would be the single most dangerous default on this page. */}
+
+                  {/* Silent for: the heartbeat age. */}
                   <td>
-                    <span className="unknown">not read yet</span>
+                    {entry === undefined ? (
+                      /* The read's own phrase, so an unknown age can never be
+                         mistaken for a measured one. */
+                      <span className="unknown">{unreadable}</span>
+                    ) : entry.heartbeatAgeMs === null ? (
+                      /* THE LOUDEST CASE. Not a dash, not a blank, not a zero:
+                         an agent with no runs at all has never run once, and
+                         that is the most alarming thing this table can say. */
+                      <span className="table__never">never run</span>
+                    ) : (
+                      <span className="table__age">
+                        {formatAge(entry.heartbeatAgeMs)}
+                      </span>
+                    )}
                   </td>
+
+                  {/* Last success: the outcome clock, with its own age. */}
                   <td>
-                    <span className="unknown">&mdash;</span>
+                    {entry === undefined ? (
+                      <span className="unknown">{unreadable}</span>
+                    ) : entry.successAgeMs === null ? (
+                      /* Has run, has never succeeded - a real state, and a
+                         different one from never having run. */
+                      <span className="table__never">no success on record</span>
+                    ) : (
+                      <>
+                        <span className="table__age">
+                          {formatAge(entry.successAgeMs)} ago
+                        </span>
+                        {/* The timestamp itself, monospaced, because it is a
+                            string the operator may paste into a SQL query when
+                            the age tells him to go looking. */}
+                        {entry.lastSuccess === null ? null : (
+                          <span className="identifier">
+                            {entry.lastSuccess.finished_at ??
+                              entry.lastSuccess.started_at}
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </td>
+
+                  {/* The verdict sentence, plus the crashed-run note when there
+                      is one. */}
+                  <td>
+                    {entry === undefined ? (
+                      <span className="unknown">nothing read</span>
+                    ) : (
+                      <>
+                        <span>{describeVerdict(entry)}</span>
+                        {/* A run that opened and never closed, older than a
+                            whole cycle. For the Applier this is the
+                            safety-critical case: a row left at `applying`
+                            means nobody knows whether an application was
+                            actually submitted, and submission is the one
+                            non-idempotent action in the system. */}
+                        {entry.stuckRun === null ? null : (
+                          <span className="table__stuck">
+                            A run opened{' '}
+                            {formatAge(
+                              /* Measured from `started_at`, since a run that
+                                 never closed has no `finished_at` to measure
+                                 from. */
+                              (read.measuredAt ?? 0) -
+                                Date.parse(entry.stuckRun.started_at),
+                            )}{' '}
+                            ago and never closed - that is a crash mid-run, not
+                            work in progress.
+                          </span>
+                        )}
+                      </>
+                    )}
                   </td>
                 </tr>
               );
@@ -173,6 +300,26 @@ function AgentFreshnessPanel(): ReactElement {
           </tbody>
         </table>
       </div>
+
+      {/* THE CAVEAT THAT APPLIES TO EVERY NUMBER ABOVE, restated here because
+          this is the first panel in the console that shows real read data and
+          the operator will read these ages as fact. The RLS policies are
+          confirmed to EXIST and have never been exercised as `authenticated` -
+          every verifying query ran as `postgres`, which holds BYPASSRLS - so a
+          policy with an inverted predicate would look identical when listed.
+          An age here is evidence that the database answered; it is not yet
+          evidence that it answered with this operator's rows. */}
+      <p className="contract-gap">
+        <strong>Do not treat these ages as proven.</strong> Row scoping has
+        never been exercised as{' '}
+        <span className="identifier">authenticated</span>, so what came back is
+        what the database chose to return, not what RLS was verified to permit.
+        The ages are read from the newest runs in a bounded window
+        (<span className="identifier">{RUN_WINDOW}</span> rows, newest first),
+        so an agent that has not run inside that window reports as never having
+        run - which errs toward alarm rather than toward reassurance, on
+        purpose.
+      </p>
     </section>
   );
 }
@@ -256,8 +403,40 @@ function ConnectionPanel(): ReactElement {
 /* The two scheduled things that keep the free tiers alive.
  *
  * These are not agents - they do no work - so they get their own panel. Their
- * only job is to be recent. */
-function KeepalivePanel(): ReactElement {
+ * only job is to be recent, and each of them is read from a DIFFERENT clock in
+ * the same table, which is the point worth being careful about:
+ *
+ *   Supabase's pause clock measures ANY database activity, so the evidence is
+ *   the newest run anywhere in the roster rather than one named agent's run.
+ *   Reading a single agent here would let the console report "idle for 8 days"
+ *   while another agent had written a row this morning.
+ *
+ *   GitHub's 60-day clock is reset by the `keepalive` workflow specifically, so
+ *   its evidence IS one named agent - which is why `keepalive` has its own
+ *   identity in `AGENT_NAMES` rather than borrowing one. A keepalive logging
+ *   itself as, say, the Applier would produce a health page that lies
+ *   confidently, and a confident lie is worse than a gap because a gap prompts
+ *   somebody to look. */
+function KeepalivePanel({
+  read,
+}: {
+  readonly read: AgentRunsRead;
+}): ReactElement {
+  /* Null when the read produced a real answer; otherwise the shared phrase. */
+  const unreadable = describeEmptyState(read.state);
+
+  /* The newest run anywhere - the console's best available proxy for "when did
+     something last touch this database". Its own module documents the honest
+     limit: the console's own queries are activity too and are not recorded in
+     `agent_runs`, so this over-estimates idleness. Over-estimating is the right
+     direction for a warning to err in - it can cry wolf, it cannot miss a
+     pause. */
+  const anyActivity = newestHeartbeat(read.freshness);
+
+  /* The GitHub keepalive, by name. Found by lookup rather than by position so a
+     roster reorder cannot silently point this panel at a different agent. */
+  const keepalive = read.freshness.find((entry) => entry.agent === 'keepalive');
+
   return (
     <section className="panel">
       <h2 className="panel__title">Keepalives</h2>
@@ -276,8 +455,26 @@ function KeepalivePanel(): ReactElement {
           <span className="keepalive__why">
             A free project pauses after one week idle. The daily Actions cron
             runs one database query purely so that clock never reaches a week.
+            Measured here as the newest run by ANY agent, since the pause clock
+            counts any activity at all rather than one particular job.
           </span>
-          <span className="unknown">not read yet</span>
+          {unreadable !== null ? (
+            /* The read's own phrase. Never a number, and never "just now". */
+            <span className="unknown">{unreadable}</span>
+          ) : anyActivity === null ? (
+            /* A conclusive read with no runs at all. This is the alarming case
+               and it is stated as one: nothing has ever written to this
+               database through an agent, so the pause clock is running with
+               nothing resetting it. */
+            <span className="table__never">
+              no agent has ever run, so nothing is resetting the pause clock
+            </span>
+          ) : (
+            <span className="table__age">
+              last activity {formatAge(anyActivity.ageMs)} ago, by{' '}
+              <span className="identifier">{anyActivity.agent}</span>
+            </span>
+          )}
         </li>
         <li className="keepalive__item">
           <span className="keepalive__what">GitHub scheduled workflows</span>
@@ -286,9 +483,40 @@ function KeepalivePanel(): ReactElement {
             inactivity - silently, and every scheduled agent stops with them. A
             weekly workflow touches a timestamp file to reset that counter.
           </span>
-          <span className="unknown">not read yet</span>
+          {unreadable !== null ? (
+            <span className="unknown">{unreadable}</span>
+          ) : keepalive === undefined ||
+            keepalive.heartbeatAgeMs === null ? (
+            /* THE WORST CASE ON THIS PANEL, and worth spelling out rather than
+               dashing. The keepalive never having run means the 60-day clock
+               has never been reset - and when it expires, every scheduled agent
+               stops at once, silently. */
+            <span className="table__never">
+              has never run, so the 60-day clock has never been reset
+            </span>
+          ) : (
+            <span className="table__age">
+              {formatAge(keepalive.heartbeatAgeMs)} ago
+            </span>
+          )}
         </li>
       </ul>
+
+      {/* A cross-stream dependency the operator would otherwise discover as a
+          silent insert failure. Recorded in the UI and not only in a report,
+          because the consequence lands on the operator: with the enum value
+          absent from the remote database, the keepalive's own `agent_runs`
+          insert fails, so the row above stays "never run" no matter how
+          faithfully the workflow runs. */}
+      <p className="contract-gap">
+        <strong>Schema dependency, not a UI gap.</strong> The{' '}
+        <span className="identifier">keepalive</span> agent identity was added
+        by migration <span className="identifier">20260910185900</span>, which
+        is local-only as of 2026-09-10. Until it is pushed, an{' '}
+        <span className="identifier">agent_runs</span> insert using that value
+        is rejected by the remote database - so the workflow can be running
+        perfectly and this row will still read &quot;never run&quot;.
+      </p>
     </section>
   );
 }
@@ -321,47 +549,178 @@ function GeminiPoolPanel(): ReactElement {
   );
 }
 
-/* Human-reachable edges no screen offers a control for.
+/* MANUAL CONTROL COVERAGE - a first-class panel, and now an honest one.
  *
- * A FIRST-CLASS PANEL rather than a footnote, because this is the one defect
- * class the operator has no other way to notice: rows enter a status, no
- * automation can move them, no screen offers the move, and they sit there
- * forever looking like they are merely in progress.
+ * WHY IT IS FIRST-CLASS rather than a footnote: this is the one defect class
+ * the operator has no other way to notice. Rows enter a status, no automation
+ * can move them, no screen offers the move, and they sit there forever looking
+ * like they are merely in progress. Section 14's lesson applied to the console
+ * itself - the failure does not error, it just stalls.
  *
- * Empty is the good case and is stated positively - a blank panel would be
- * ambiguous between "no gaps" and "not checked". */
-function MissingControlsPanel(): ReactElement {
+ * WHY IT WAS REWRITTEN, and this is the interesting part. The previous version
+ * rendered one list: human-reachable edges whose source status NO SCREEN
+ * CLAIMS. That list is empty, and it was empty for a reason that has nothing to
+ * do with coverage - every status is claimed, and four of the claiming screens
+ * DO NOT EXIST. So the panel said "every human-reachable transition has a
+ * screen that offers it" while eight edges on the submit boundary had no screen
+ * behind the claim and not one control in the console could perform any
+ * transition at all.
+ *
+ * A FALSE ALL-CLEAR IS WORSE THAN NO CHECK. A missing check prompts somebody to
+ * look; a green check tells them not to. So the panel now reports a PARTITION
+ * of the human-reachable edges - unclaimed, claimed-but-unbuilt, visible-but-
+ * inoperable, and actually operable - and the four numbers sum to the graph's
+ * own total, which is what makes the report auditable rather than assertable.
+ *
+ * The operable count is currently zero and is shown anyway. A report that only
+ * ever counts problems cannot be told apart from one whose predicate is
+ * inverted; a report that also counts successes can.
+ */
+function ControlCoveragePanel(): ReactElement {
+  /* The graph's own total, so the arithmetic below is checkable on screen
+     rather than trusted. If these four buckets ever stopped summing to it, the
+     partition would have a hole and the panel would be back to guessing. */
+  const total = HUMAN_REACHABLE_LANES.length;
+
   return (
     <section className="panel">
-      <h2 className="panel__title">Manual controls the console is missing</h2>
+      <h2 className="panel__title">Manual control coverage</h2>
       <p className="panel__note">
         Derived from the status graph at load time, so this check cannot go
-        stale: it lists every transition a human is permitted to make whose
-        source status no screen in this console claims. Non-empty means rows can
-        reach a status and never leave it by hand.
+        stale. Every transition a human is permitted to make is counted in
+        exactly one of the four rows below, and the four add up to{' '}
+        {/* Rendered rather than hardcoded: the number comes from the graph, so
+            a schema change moves it without an edit here. */}
+        {total} - which is how you can tell nothing quietly fell out of the
+        count.
       </p>
 
-      {MISSING_HUMAN_CONTROLS.length === 0 ? (
-        /* Said out loud, and said as a derived claim rather than a promise:
-           what is being asserted is that the check ran and found nothing. */
-        <p className="panel__clear">
-          Every human-reachable transition has a screen that offers it.
-        </p>
-      ) : (
+      <table className="table">
+        <thead>
+          <tr>
+            <th scope="col">Coverage</th>
+            <th scope="col">Edges</th>
+            <th scope="col">What it means for the operator</th>
+          </tr>
+        </thead>
+        <tbody>
+          {/* Worst first. The order is the order of exposure, not the order the
+              sets happen to be declared in. */}
+          <tr
+            className={
+              MISSING_HUMAN_CONTROLS.length > 0
+                ? 'table__row--attention'
+                : undefined
+            }
+          >
+            <th scope="row" className="table__id">
+              no screen claims it
+            </th>
+            <td className="table__count">{MISSING_HUMAN_CONTROLS.length}</td>
+            <td>
+              Rows can reach the source status and never leave it by hand. This
+              is the check that fires when the schema stream adds a
+              human-reachable edge nobody has given a home.
+            </td>
+          </tr>
+
+          <tr
+            className={
+              UNBUILT_HUMAN_CONTROLS.length > 0
+                ? 'table__row--attention'
+                : undefined
+            }
+          >
+            <th scope="row" className="table__id">
+              claimed by a screen that does not exist
+            </th>
+            <td className="table__count">{UNBUILT_HUMAN_CONTROLS.length}</td>
+            <td>
+              Strictly worse than the row above: the status is claimed, so the
+              old check passed, and yet no screen renders these rows at all.
+              They are not merely unmovable, they are invisible.
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row" className="table__id">
+              visible, control disabled
+            </th>
+            <td className="table__count">{INOPERABLE_HUMAN_CONTROLS.length}</td>
+            <td>
+              A screen shows the move, built from{' '}
+              <span className="identifier">nextStatuses(status, 'human')</span>,
+              but the button is disabled because no write path exists yet. All
+              of these wait on ONE dependency, not one each.
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row" className="table__id">
+              operable today
+            </th>
+            <td className="table__count">{OPERABLE_HUMAN_CONTROLS.length}</td>
+            <td>
+              Transitions a person can actually perform in this console. Shown
+              even at zero, because a coverage report that only counts problems
+              is indistinguishable from one whose predicate is inverted.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      {/* The unclaimed set, listed edge by edge when it is non-empty. Normally
+          empty - and when it is not, the graph's own note on each edge is the
+          most useful sentence available about why it matters. */}
+      {MISSING_HUMAN_CONTROLS.length > 0 ? (
         <ul className="gaps">
           {MISSING_HUMAN_CONTROLS.map((transition) => (
             /* `from`+`to` is the natural key of an edge, so it is a stable
                React key without inventing an id. */
-            <li key={transition.from + '->' + transition.to} className="gaps__item">
+            <li
+              key={transition.from + '->' + transition.to}
+              className="gaps__item"
+            >
               <span className="identifier">
                 {transition.from} &rarr; {transition.to}
               </span>
-              {/* The graph's own note on the edge, which is usually the most
-                  useful sentence available about why it matters. */}
               <span className="gaps__why">{transition.note}</span>
             </li>
           ))}
         </ul>
+      ) : null}
+
+      {/* The unbuilt set, always listed when non-empty, because these are the
+          eight the operator is actually exposed to right now. Named
+          individually rather than counted: "eight edges" sends nobody
+          anywhere, whereas `applying -> needs_verification` names the exact
+          row that would be stuck. */}
+      {UNBUILT_HUMAN_CONTROLS.length > 0 ? (
+        <>
+          <h3 className="panel__subtitle">
+            Claimed by a screen nobody has written yet
+          </h3>
+          <ul className="gaps">
+            {UNBUILT_HUMAN_CONTROLS.map((transition) => (
+              <li
+                key={transition.from + '->' + transition.to}
+                className="gaps__item"
+              >
+                <span className="identifier">
+                  {transition.from} &rarr; {transition.to}
+                </span>
+                <span className="gaps__why">{transition.note}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : (
+        /* Said out loud, and said as a derived claim rather than a promise:
+           what is asserted is that the check ran and found nothing. */
+        <p className="panel__clear">
+          Every claimed screen exists. Whether its control can fire is the row
+          above.
+        </p>
       )}
     </section>
   );
@@ -417,6 +776,12 @@ function BlockedQueuePanel(): ReactElement {
 /* --- The page --------------------------------------------------------- */
 
 export function HealthPage(): ReactElement {
+  /* ONE READ FOR THE WHOLE PAGE, shared by the freshness table and the
+     keepalive panel. Two hooks reading `agent_runs` would be two round trips on
+     a free tier and - worse - two chances for the panels to disagree about what
+     is going on, which on this page is the failure it exists to prevent. */
+  const agentRuns = useAgentRuns();
+
   return (
     <div className="page">
       <PageHeader path="health" />
@@ -433,14 +798,15 @@ export function HealthPage(): ReactElement {
       {/* Order is deliberate: the two silent deaths first, then the things that
           are merely waiting, then the console's own coverage gaps, then the
           work queue. Freshness before workload. */}
-      {/* Connection first: every panel below reports "not read yet", and this
-          is what says whether that is because the query is unwritten or because
-          there is nothing to query. */}
+      {/* Connection first: several panels below can only report why they have
+          no data, and this is what says whether that is because the query is
+          unwritten or because there is nothing to query. */}
       <ConnectionPanel />
-      <AgentFreshnessPanel />
-      <KeepalivePanel />
+      {/* The two panels that read real rows, both from the same read. */}
+      <AgentFreshnessPanel read={agentRuns} />
+      <KeepalivePanel read={agentRuns} />
       <GeminiPoolPanel />
-      <MissingControlsPanel />
+      <ControlCoveragePanel />
       <BlockedQueuePanel />
     </div>
   );
