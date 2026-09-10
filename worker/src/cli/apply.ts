@@ -1,0 +1,129 @@
+// Entry point for `pnpm --filter '@applyy/worker' run apply`, invoked by
+// .github/workflows/apply.yml.
+//
+// This is the COMPOSITION ROOT: the only place that reads environment
+// variables, constructs real clients and launches a real browser. Everything it
+// wires together is pure and injected, which is why the whole loop is testable
+// without a network, a database or Chromium.
+import { chromium } from 'playwright';
+import { runApplierBatch } from '../claim-loop.js';
+import { createSupabaseGateway, type SupabaseLike } from '../supabase-gateway.js';
+import { createPlaywrightPage } from '../playwright-page.js';
+import { resolveSubmissionMode } from '../submission-mode.js';
+
+/** Read a required environment variable or fail loudly at startup. */
+function required(name: string): string {
+  const value = process.env[name];
+  // Fail at the top of the run rather than half way through. An empty secret is
+  // the realistic case — `${{ secrets.MISSING }}` expands to an empty string
+  // rather than erroring — so absence and emptiness are treated identically.
+  if (!value) {
+    throw new Error(
+      `${name} is not set. The applier needs it; see .github/workflows/apply.yml. ` +
+        'Secrets are configured in the repository settings, never committed (constraint #11).',
+    );
+  }
+  return value;
+}
+
+async function main(): Promise<void> {
+  // ANNOUNCED FIRST, BEFORE ANY WORK. §14's subject is failures that do not
+  // announce themselves, and "was this run dry?" is the single most important
+  // fact about an applier run. Printing it up front means the answer is in the
+  // log even if the run dies later.
+  const mode = resolveSubmissionMode(process.env);
+  console.log(`[applyy] submission mode: ${mode.submits ? 'LIVE' : 'DRY RUN'} — ${mode.reason}`);
+
+  const supabaseUrl = required('SUPABASE_URL');
+  const anonKey = required('SUPABASE_ANON_KEY');
+  const email = required('APPLYY_WORKER_EMAIL');
+  const password = required('APPLYY_WORKER_PASSWORD');
+
+  // THE ONLY LOAD OF THE SUPABASE SDK IN THE WORKER, and it is deliberately a
+  // dynamic import through a variable specifier. Two reasons: it keeps the
+  // package's `tsc --noEmit` green while the dependency is added but not yet
+  // installed (the lockfile belongs to the root-config stream, and a workspace
+  // that cannot typecheck blocks five peers at once); and this is the
+  // composition root, which is the one place where late binding is appropriate.
+  // Convert it to a static import once `pnpm install` has run.
+  const specifier = '@supabase/supabase-js';
+  const sdk = (await import(specifier)) as {
+    createClient: (url: string, key: string, options?: unknown) => SupabaseLike;
+  };
+
+  // The ANON key, never a service-role key. The anon key carries no privilege
+  // on its own; all authority comes from the signed-in user's JWT below, so
+  // every query runs under exactly the same RLS policies as the dashboard.
+  const client = sdk.createClient(supabaseUrl, anonKey, {
+    auth: {
+      // A CI runner has no browser storage and the process is thrown away after
+      // the run, so persisting a session would write a credential to disk for
+      // no benefit — constraint #11 territory.
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  });
+
+  // Sign in as an ordinary Auth user. `signInWithPassword` yields a normal
+  // `authenticated` JWT, so `auth.uid()` resolves and the claim RPCs work
+  // unmodified.
+  const authResult = await client.auth.signInWithPassword({ email, password });
+  if (authResult.error || !authResult.data.session) {
+    // Deliberately does not echo the error verbatim into a public log beyond
+    // its message; and deliberately fatal, because continuing unauthenticated
+    // is the one outcome that must never happen.
+    throw new Error(`worker sign-in failed: ${authResult.error?.message ?? 'no session returned'}`);
+  }
+
+  // The user id scopes storage paths and the settings read. Taken from the
+  // session rather than configured, so it cannot disagree with the JWT.
+  const session = authResult.data.session as { expires_at?: number; user?: { id?: string } };
+  const userId = session.user?.id ?? '';
+
+  const gateway = createSupabaseGateway(client, { userId, email, password });
+  // Prime the cached expiry before the first run-window check, so the very
+  // first application is gated on a real number rather than on zero.
+  await gateway.refreshSession();
+
+  // One browser for the whole batch. Launching per application would add ~475ms
+  // each and, far worse, tempt someone to split the loop into parallel jobs.
+  const browser = await chromium.launch();
+
+  try {
+    const summary = await runApplierBatch({
+      gateway,
+      openPage: async () => createPlaywrightPage(await browser.newPage()),
+      env: process.env,
+      clock: () => Math.floor(Date.now() / 1000),
+    });
+
+    // One structured line, because the health page reads the database but a
+    // human reading the Actions log needs the same facts without a query.
+    console.log(
+      `[applyy] run ${summary.runId}: claimed=${summary.claimed} submitted=${summary.submitted} ` +
+        `blocked=${summary.blocked} dryRun=${summary.dryRun} unknown=${summary.outcomeUnknown} ` +
+        `errors=${summary.errors} — ${summary.stoppedReason}`,
+    );
+
+    // A row whose outcome we could not determine is the one case that needs a
+    // human, so it is called out separately rather than buried in the tally.
+    if (summary.outcomeUnknown > 0) {
+      console.warn(
+        `[applyy] ${summary.outcomeUnknown} application(s) have an UNKNOWN submit outcome. ` +
+          'They are left at `applying` for the sweeper to route to `needs_verification`. ' +
+          'Check manually whether they went out — never resubmit blind (constraint #7).',
+      );
+    }
+  } finally {
+    // Closed unconditionally: a leaked browser keeps the Actions job alive and
+    // billing until its timeout, against a budget billed in whole minutes.
+    await browser.close();
+  }
+}
+
+// Top-level failure must set a non-zero exit code, or a broken run shows as a
+// green tick in the Actions UI — a silent death of exactly the kind §14 is about.
+main().catch((error: unknown) => {
+  console.error('[applyy] applier run failed:', error);
+  process.exitCode = 1;
+});

@@ -34,7 +34,17 @@ export interface SubmissionMode {
 // The sole value that enables real submission. Exact, lowercase, no trimming.
 // Kept as a named constant so the opt-in appears once in the codebase and is
 // greppable by anyone auditing how submission can possibly be turned on.
-const SUBMISSION_OPT_IN = 'false';
+//
+// NAMED FOR ITS VALUE, NOT ITS EFFECT, AND DELIBERATELY SO. This constant was
+// once called SUBMISSION_OPT_IN, which read as `SUBMISSION_OPT_IN = 'false'` —
+// a line whose name inverts the polarity of its value, so it scans as a bug and
+// greps as one. The danger was never confusion: it is that a future reader
+// "corrects" it to 'true' to make the name agree, and that edit silently
+// enables real submissions on every run. The polarity is confusing because the
+// VARIABLE is negative (DRY_RUN) while the ACTION is positive (submit), so
+// disabling the dry run is what permits sending. Naming the constant after the
+// literal it must equal removes the invitation to fix it.
+const DRY_RUN_DISABLED_VALUE = 'false';
 
 /**
  * Decide whether this run may submit applications.
@@ -56,7 +66,7 @@ export function resolveSubmissionMode(env: SubmissionEnv): SubmissionMode {
 
   // The single deliberate opt-in. Compared with === against an exact string, so
   // no casing, padding or truthiness rule can widen this branch by accident.
-  if (raw === SUBMISSION_OPT_IN) {
+  if (raw === DRY_RUN_DISABLED_VALUE) {
     return {
       submits: true,
       reason: 'DRY_RUN="false"; submission explicitly enabled.',

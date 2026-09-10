@@ -8,12 +8,16 @@
     "node": ">=24.0.0"
   },
   "scripts": {
+    "build": "tsc",
+    "apply": "pnpm run build && node dist/src/cli/apply.js",
+    "keepalive": "pnpm run build && node dist/src/cli/keepalive.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@applyy/shared-types": "workspace:*",
+    "@supabase/supabase-js": "2.47.10",
     "playwright": "1.49.1"
   },
   "devDependencies": {
