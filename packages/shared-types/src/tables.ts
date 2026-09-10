@@ -1,21 +1,35 @@
 /**
  * applyy — row shapes for every table, plus the signatures of the SQL functions.
  *
- * Hand-written rather than produced by `supabase gen types typescript`. That reason has
- * now EXPIRED, and this comment says so rather than quietly keeping its original
- * justification: the migrations apply cleanly to a local Postgres 17.6, the project was
- * linked at 18:40 on 2026-09-10, and Teja is reported to have pushed all 7 migrations
- * at 18:45. (Link state on disk is verified; the remote's contents are second-hand here
- * and were not queried from this package.)
+ * Hand-written, and now CHECKED against generated types rather than merely trusted.
  *
- * So generating types is now POSSIBLE and remains the right next step: run it
- * and use the output as the CHECK on this file, not as a replacement for it. This file
- * carries the comments and the reasoning; the generated one carries column-level proof
- * that no hand-written shape can give. `test/enum-parity.test.ts` already covers enum
- * values, enum ORDER, table presence and the whole 44-edge status graph — what it
- * cannot cover is per-column types and nullability, because an `interface` is erased at
- * runtime and the test only reads this file as text. That gap is exactly what generated
- * types would close.
+ * DIFFED AGAINST THE LIVE REMOTE SCHEMA, 2026-09-10 ~19:00 IST, via
+ * `supabase gen types typescript --project-id <ref>` (Management API, read-only, no
+ * write and no DB password needed). The authority at that moment was the SEVEN applied
+ * migrations `20260909234500`–`20260909235100`. applyyy-8c has since written two
+ * local-only migrations (`20260910185900`, `20260910190000`) which were NOT yet pushed,
+ * so they are absent from that diff — re-run it after they land. Timestamping this
+ * matters: "the migration files" and "the live database" are two different authorities
+ * and they currently disagree.
+ *
+ * WHAT THE DIFF FOUND — the exercise paid for itself:
+ *   - ZERO missing or extra columns across all 15 tables. The hand-written shapes are
+ *     structurally complete.
+ *   - TEN columns mistyped `string` where the database returns a number. Fixed; see the
+ *     `numeric` convention below for why the original rule was half-right.
+ *   - ONE nullability disagreement, `company_watchlist.first_seen_at_is_trustworthy`,
+ *     left deliberately as-is — see that column's own comment.
+ *   - Every RPC return shape CONFIRMED, including the two that were corrected earlier
+ *     the same day: `claim_gemini_key` is `Returns: number` (a scalar, not an object)
+ *     and `sweep_stale_claims` is `Returns: {...}[]` (an array, not a bare object).
+ *
+ * This file stays hand-written because it carries the comments and the reasoning; the
+ * generated output carries column-level proof that no hand-written shape can give.
+ * `test/enum-parity.test.ts` covers enum values, enum ORDER, table presence and the
+ * whole 44-edge status graph — what it structurally CANNOT cover is per-column types
+ * and nullability, because an `interface` is erased at runtime and that half of the
+ * suite reads this file as text. Re-running the generated diff is the only mechanism
+ * that closes that gap, so re-run it after any migration.
  *
  * Conventions used throughout, so you can predict a shape you have not read yet:
  *   - `<Table>Row`    — exactly what a SELECT returns.
@@ -24,10 +38,26 @@
  *   - `<Table>Update` — Partial of the insert shape, minus anything immutable.
  *   - Every `user_id` is optional on insert: RLS `WITH CHECK` plus a column default
  *     of `auth.uid()` fills it, so no client can set it to somebody else's id.
- *   - `string` is used for `timestamptz`, `date` and `numeric`. Supabase returns all
- *     three as strings over PostgREST; typing them as `number`/`Date` would be a lie
- *     that only shows up at runtime. `numeric` in particular must not be `number` —
- *     it is arbitrary precision and JSON.parse would quietly round it.
+ *   - `string` for `timestamptz` and `date`. PostgREST returns those as JSON strings;
+ *     typing them as `Date` would be a lie that only shows up at runtime.
+ *   - `number` for `numeric`. CORRECTED 2026-09-10 — this rule previously lumped
+ *     `numeric` in with the two above and claimed all three arrive as strings. That was
+ *     wrong: PostgREST serialises `numeric` as an UNQUOTED JSON number, and
+ *     `supabase gen types typescript` run against the live database emits `number` for
+ *     every one of them. Ten columns were mistyped as `string`.
+ *
+ *     Why it was a real defect and not a cosmetic one: the value is a number at
+ *     runtime, so `row.match_score.startsWith('9')` COMPILES against the wrong type and
+ *     throws in production, while the correct `row.match_score.toFixed(2)` was rejected
+ *     by the compiler. A wrong primitive type inverts which code is allowed.
+ *
+ *     The original reasoning — `numeric` is arbitrary precision, so JSON.parse could
+ *     round it — is true of `numeric` IN GENERAL and false of every numeric column in
+ *     this schema: the widest is `numeric(14,2)` (salary, max ~1e12) and the rest are
+ *     `numeric(5,2)`, `numeric(4,1)`, `numeric(4,3)`. All are exactly representable in
+ *     a double. If a genuinely high-precision numeric column is ever added, THAT column
+ *     needs `string` plus an explicit `::text` cast — the fix belongs to the column, not
+ *     to the convention.
  */
 
 import type {
@@ -255,12 +285,12 @@ export interface JobRow {
   /** Incremented when a job reappears after disappearing. A non-zero value is a STRONGER hiring signal than a fresh posting: they are still looking and the last batch did not work out. */
   repost_count: number;
   /** Years of experience the JD demands, parsed. Feeds the experience-ceiling filter. */
-  min_experience_years: string | null;
-  max_experience_years: string | null;
+  min_experience_years: number | null;
+  max_experience_years: number | null;
   /** True when the JD requires a Master's or PhD. Feeds the degree-mismatch filter. */
   requires_advanced_degree: boolean | null;
-  salary_min: string | null;
-  salary_max: string | null;
+  salary_min: number | null;
+  salary_max: number | null;
   salary_currency: string | null;
   /** UNTRUSTED. The board's raw JSON, kept so a parser bug can be re-run over history without re-polling. */
   raw_payload: Json | null;
@@ -288,11 +318,11 @@ export type JobInsert = {
   /** Required on insert: the extractor always produces one, and `posted_at_source` carries the confidence. */
   posted_at: string;
   posted_at_source?: PostedAtSource;
-  min_experience_years?: string | null;
-  max_experience_years?: string | null;
+  min_experience_years?: number | null;
+  max_experience_years?: number | null;
   requires_advanced_degree?: boolean | null;
-  salary_min?: string | null;
-  salary_max?: string | null;
+  salary_min?: number | null;
+  salary_max?: number | null;
   salary_currency?: string | null;
   raw_payload?: Json | null;
 };
@@ -481,13 +511,13 @@ export interface ApplicationRow {
   /** The JD keywords the Tailor selected to emphasise. Half of the tailored_hash input, and the Skill-Gap Aggregator's raw material in phase 3. */
   selected_jd_keywords: string[];
   /** Matcher's fit score, 0..100. */
-  match_score: string | null;
+  match_score: number | null;
   /** Matcher's reasoning. Model-authored text — display it, never execute or interpolate it. */
   match_reasoning: string | null;
   /** Everything the Auditor could not trace. Empty array means Bucket A, one-click batch approval. */
   audit_findings: AuditFinding[];
   /** Percentage of JD keywords present in the tailored resume, shown on the diff view so you can see whether tailoring did anything. */
-  ats_keyword_coverage: string | null;
+  ats_keyword_coverage: number | null;
   /** Supabase Storage path of the generated PDF. */
   resume_storage_path: string | null;
   /** Supabase Storage path of the blocked-page or dry-run screenshot. */
@@ -725,12 +755,12 @@ export interface SearchPreferencesRow {
   /** Keywords that make it less interesting — a cheap pre-filter before the title blocklist. */
   excluded_keywords: string[];
   employment_types: EmploymentType[];
-  min_experience_years: string | null;
+  min_experience_years: number | null;
   /** The experience ceiling: reject a JD demanding more than this. */
-  max_experience_years: string | null;
+  max_experience_years: number | null;
   locations: string[];
   remote_only: boolean;
-  min_salary: string | null;
+  min_salary: number | null;
   salary_currency: string;
   created_at: string;
   updated_at: string;
@@ -913,7 +943,7 @@ export interface EmailEventRow {
   snippet: Untrusted;
   received_at: string;
   classification: EmailClassification;
-  classification_confidence: string | null;
+  classification_confidence: number | null;
   /** Which application this email is about, once matched. NULL until matched, and it may stay NULL. */
   matched_application_id: string | null;
   /** When classification finished. NULL means still queued — so a Gemini outage delays mail rather than losing it. */

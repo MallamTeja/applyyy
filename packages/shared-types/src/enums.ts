@@ -215,6 +215,24 @@ export const AGENT_NAMES = [
   'sweeper',
   /** A human acting through the dashboard. Approvals and manual edits are events too. */
   'human',
+  /**
+   * The keepalive workflow, which exists to stop GitHub disabling the scheduled
+   * workflows after 60 days of repository inactivity.
+   *
+   * IT NEEDS ITS OWN IDENTITY RATHER THAN BORROWING ONE, and the reason generalises:
+   * `agent_runs` is what the health page reads to say "this stopped running", so a
+   * keepalive logging itself as, say, the Applier produces a health page that lies
+   * CONFIDENTLY — strictly worse than one with a missing row, because a gap prompts
+   * someone to look and a wrong row does not. **Agent identities must be one-to-one
+   * with real agents, because the health page's only job is detecting absence.**
+   *
+   * APPENDED LAST, deliberately. `alter type ... add value` without BEFORE/AFTER
+   * appends, and declaration order is what Postgres sorts by — inserting mid-list would
+   * silently change `ORDER BY agent` for every existing query. Added by migration
+   * 20260910185900, which as of 2026-09-10 is LOCAL-ONLY: an `agent_runs` insert using
+   * this value will fail against the remote database until that migration is pushed.
+   */
+  'keepalive',
 ] as const;
 /** Union of every legal agent identity. */
 export type AgentName = (typeof AGENT_NAMES)[number];

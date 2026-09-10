@@ -7,11 +7,34 @@
 // text out. The proxy and the property are not the same claim, and only one of them is
 // what a recruiter's ATS does.
 //
-// The failure being guarded against is the commonest silent fresher killer: a resume
-// that looks immaculate to a human and parses into interleaved gibberish, so the
-// keyword matcher never sees the skills and therefore no human ever sees the resume.
-// Nothing in a visual review catches it — the document looks perfect, which is exactly
-// why it survives review. PARSER FIRST, EYE SECOND.
+// The failure class being guarded against: a resume that looks immaculate to a human
+// while the machine reads something else, so the keyword matcher never sees the skills
+// and therefore no human ever sees the resume. Nothing in a visual review catches it —
+// the document looks perfect, which is exactly why it survives review.
+// PARSER FIRST, EYE SECOND.
+//
+// ── WHICH HAZARD IS REAL HERE, MEASURED 2026-09-10 BY applyyy-ef ─────────────────
+// The received wisdom — "multi-column layouts parse into interleaved gibberish" — is
+// FALSE for this pipeline, and ef measured it rather than arguing it. Rendering the real
+// golden resume in two columns and extracting through `page.pdf()` -> pdf.js
+// `getTextContent()` produced correct DOM order. Chromium emits its PDF text stream in
+// PAINT order, and paint order equals DOM order for every ordinary side-by-side layout.
+// column-count, flex, grid, float, absolute positioning and even a two-cell <table> all
+// came out in DOM order. The folklore is true of Word, LaTeX and design tools — which is
+// where the advice comes from — and not of a browser print.
+//
+// So the two rules that actually bind are narrower and one of them is nearly invisible:
+//   1. NEVER place sections with `order:` or `flex-direction: row-reverse`. Those are
+//      the ONLY primitives that move the text layer, and the rendered PDF still looks
+//      correct — so no reviewer, screenshot or approval preview can catch it. That gets
+//      its own assertion here.
+//   2. KEEP EVERY CLAIMED SKILL IN THE TEXT LAYER. Missing text, not misordered text,
+//      is the load-bearing risk.
+//
+// Consequence for the sibling suite: render-resume-html.test.ts's "no columns, no
+// tables, real <ul>" assertions are kept — they are cheap and they encode intent — but
+// they are LAYOUT-INTENT assertions, not §17.2 compliance. A proxy labelled as the real
+// thing is worse than no proxy, because it stops anyone looking for the actual hazard.
 //
 // ── THE SEAM, AND WHY IT IS A SEAM RATHER THAN AN IMPLEMENTATION ─────────────────
 // These assertions take EXTRACTED TEXT (an array of lines) as their input. Today that
@@ -28,6 +51,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { renderResumeHtml } from '../src/render-resume-html.ts';
+// The stylesheet itself, for the reordering assertion — the one layout hazard ef's
+// measurement showed actually moves the PDF text layer.
+import { RESUME_STYLESHEET } from '../src/print-styles.ts';
 import { naiveTextExtract } from './naive-text-extract.ts';
 import { zomatoBackendIntern } from './fixtures/zomato-backend-intern.ts';
 
@@ -101,21 +127,84 @@ test('ATS parse — every rendered skill is readable as text', () => {
 });
 
 test('ATS parse — no line interleaves two sections', () => {
-  // THE MULTI-COLUMN SIGNATURE. In a two-column layout a dumb reader walking document
-  // order emits one line carrying content from both columns — "Skills Python
-  // Experience CampusHub" — and every downstream field assignment is then wrong.
+  // Detects one extracted line carrying content from two sections — "Skills Python
+  // Experience CampusHub" — after which every downstream field assignment is wrong.
   //
-  // Checking that no single extracted line contains two section headings detects
-  // exactly that, and it is a property the structural tests cannot express: markup can
-  // pass "no <table>, no column CSS" and still lay out side by side via flex or grid.
+  // ── SCOPE, CORRECTED 2026-09-10 AFTER applyyy-ef MEASURED THE REAL PIPELINE ─────
+  // This assertion is about EXTRACTION FROM HTML in document order. It is NOT evidence
+  // about the submitted PDF, and the difference matters because the folklore is wrong
+  // for our pipeline. ef rendered the real golden resume in two columns expecting
+  // extraction to break; it PASSED. It then measured every layout through
+  // `page.pdf()` -> pdf.js `getTextContent()`:
+  //   NOT scrambled: column-count:2, display:flex, display:grid, float, position:
+  //                  absolute, a two-cell <table>
+  //   SCRAMBLED:     flex-direction: row-reverse, and flex `order:`
+  // Chromium emits its PDF text stream in PAINT order, and paint order equals DOM
+  // order for every ordinary side-by-side layout. The interleaving advice comes from
+  // Word, LaTeX and design tools, where it is true — and is not true of a browser
+  // print. So printing through Chromium is structurally safer than §17.2 assumes.
+  //
+  // This test is therefore kept as a cheap lower bound on a dumb reader, not as
+  // §17.2 compliance. The hazard that actually binds has its own test below.
   const headings = Object.values(SECTION_HEADINGS);
   for (const line of lines) {
     const found = headings.filter((h) => line.includes(h));
     assert.ok(
       found.length <= 1,
-      `one extracted line carries two section headings (${found.join(' + ')}), the multi-column signature: "${line}"`,
+      `one extracted line carries two section headings (${found.join(' + ')}): "${line}"`,
     );
   }
+});
+
+test('ATS parse — NON-VACUITY CONTROL: the interleaving check accepts a correct document', () => {
+  // THE POSITIVE CONTROL, adopted from applyyy-ef. Every mutation test run today proves
+  // a guard CAN fail; none proves it can PASS for the right reason — and a guard that
+  // rejects ALL inputs is indistinguishable from a correct one when you only ever test
+  // the failing side. This closes that hole for the assertion above.
+  //
+  // Same fragments, same expectation, differing ONLY in emission order: sequential must
+  // pass, interleaved must fail. If either half stops holding, the check has become
+  // either vacuous or a blanket rejector.
+  const sequential = ['Skills', 'Python', 'Experience', 'CampusHub'];
+  const interleaved = ['Skills Python Experience CampusHub'];
+
+  const interleaves = (ls: string[]): boolean =>
+    ls.some((line) => Object.values(SECTION_HEADINGS).filter((h) => line.includes(h)).length > 1);
+
+  assert.equal(interleaves(sequential), false, 'the check rejects a correctly ordered document — it is a blanket rejector');
+  assert.equal(interleaves(interleaved), true, 'the check accepts an interleaved document — it is vacuous');
+});
+
+test('ATS parse — the stylesheet never reorders content away from DOM order', () => {
+  // THE ONE HAZARD THAT ACTUALLY BINDS IN THIS PIPELINE, per ef's measurement above:
+  // `order:` and `flex-direction: row-reverse` are the only primitives that move the
+  // PDF text layer away from DOM order.
+  //
+  // AND IT IS INVISIBLE. The rendered PDF looks perfect — the sections appear exactly
+  // where the designer put them — while the text layer a parser reads is in a different
+  // order entirely. No human reviewer can catch it, no screenshot shows it, and the
+  // approval preview looks right too. That combination is what makes it worth a test of
+  // its own rather than a note: it is the only layout defect in this package that a
+  // person cannot see.
+  //
+  // `display: flex` itself is FINE and is deliberately not banned — it is used on
+  // .resume__entry-head for two single-line siblings already in reading order. Banning
+  // flex would be cargo-culting the refuted hazard; banning reordering is the real rule.
+  assert.doesNotMatch(
+    RESUME_STYLESHEET,
+    /(^|[^-\w])order\s*:/m,
+    'stylesheet sets `order:` — this silently reorders the PDF text layer while looking correct',
+  );
+  assert.doesNotMatch(
+    RESUME_STYLESHEET,
+    /flex-direction\s*:\s*\w*-?reverse/,
+    'stylesheet reverses flex direction — this silently reorders the PDF text layer',
+  );
+  assert.doesNotMatch(
+    RESUME_STYLESHEET,
+    /flex-flow\s*:[^;]*reverse/,
+    'stylesheet reverses flex flow via the shorthand',
+  );
 });
 
 test('ATS parse — every bullet survives intact on a single line', () => {

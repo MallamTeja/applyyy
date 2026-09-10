@@ -99,12 +99,25 @@ export const STATUS_TRANSITIONS: readonly StatusTransition[] = [
   // ---- Into the human queue -------------------------------------------------
   { from: 'audit_clean', to: 'awaiting_approval', allowedAgents: ['auditor'], note: 'Bucket A - eligible for one-click batch approval.' },
   { from: 'audit_flagged', to: 'awaiting_approval', allowedAgents: ['auditor'], note: 'Bucket B - individual review, never batch-approved.' },
-  { from: 'audit_flagged', to: 'tailored', allowedAgents: ['human'], note: 'Human wants a re-tailor. HUMAN-ONLY: an automated retry loop here would burn quota rewriting the same flagged bullet.' },
+  { from: 'audit_flagged', to: 'tailored', allowedAgents: ['human'], note: 'Human edited the master or the selection and wants a re-tailor. HUMAN-ONLY: a re-tailor is a decision about truth, not a retry.' },
 
   // ---- THE GATE. The only door to `applying` in the entire graph ------------
   { from: 'awaiting_approval', to: 'approved', allowedAgents: ['human'], note: 'CONSTRAINT 15. A human, and only a human, opens this door.' },
-  { from: 'awaiting_approval', to: 'dropped_filter', allowedAgents: ['human'], note: 'Human declined. A human is the last filter in the cascade.' },
+  { from: 'awaiting_approval', to: 'dropped_filter', allowedAgents: ['human'], note: 'Human declined. drop_reason carries why; a human is the last filter in the cascade.' },
   { from: 'approved', to: 'applying', allowedAgents: ['applier'], note: 'THE ONLY EDGE INTO applying IN THE ENTIRE GRAPH. Everything upstream is reversible; nothing downstream is.' },
+  // A blocker found on an already-approved row goes straight to the human queue. This
+  // is a FORWARD edge (approved precedes blocked_needs_human in declaration order), so
+  // it does not affect the seven-backward-edges invariant, and constraint 15 is
+  // untouched: it adds an edge OUT of approved, while approved -> applying remains the
+  // only edge INTO applying.
+  //
+  // WHY IT EXISTS: without it, a captcha discovered after approval had to transit
+  // THROUGH `applying`. A crash between those two writes leaves the row at
+  // `applying`, the sweeper correctly routes it to `needs_verification`, and a human
+  // then hand-verifies an application that was never submitted — a spurious instance of
+  // the most expensive human task in the system, manufactured by a graph gap rather than
+  // by any real ambiguity.
+  { from: 'approved', to: 'blocked_needs_human', allowedAgents: ['applier'], note: 'Applier hit a blocker on an approved row. Set block_reason in the SAME update — applications_blocked_has_reason requires it. Exists so a blocked row need not travel through `applying`: a crash between an approved->applying write and an applying->blocked write leaves the row at `applying`, the sweeper routes it to needs_verification, and a human then hand-verifies an application that was never submitted.' },
 
   // ---- Submission: the one non-idempotent leg ------------------------------
   { from: 'applying', to: 'applied', allowedAgents: ['applier'], note: 'Submission confirmed by the worker.' },

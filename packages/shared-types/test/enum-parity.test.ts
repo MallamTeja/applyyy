@@ -67,13 +67,60 @@ const NOT_ENUM_MIRRORS = new Set<string>([
   'AUDIT_FINDING_KINDS',
 ]);
 
-/** Every migration file, concatenated. Order is irrelevant: these are declarations, not a replay. */
+/**
+ * Strip `--` line comments WITHOUT damaging string literals that contain them.
+ *
+ * Needed because migrations interleave comments between the columns of a multi-row
+ * INSERT, and a regex built from `\s*` cannot cross a comment. The naive approach —
+ * replacing every `--` run to end-of-line unconditionally — would corrupt any note text
+ * containing a double hyphen.
+ * So: per line, a `--` only starts a comment when an EVEN number of single quotes
+ * precedes it — i.e. we are not inside a literal. Doubled quotes ('') are self-
+ * cancelling under a parity count, so they need no special case.
+ */
+function stripSqlComments(sql: string): string {
+  return sql
+    .split('\n')
+    .map((line) => {
+      for (let i = 0; i < line.length - 1; i++) {
+        if (line[i] === "'") {
+          // Count parity as we scan rather than pre-counting, so the cut point is
+          // evaluated with the quote state that actually holds at that position.
+          continue;
+        }
+        if (line[i] === '-' && line[i + 1] === '-') {
+          const quotesBefore = (line.slice(0, i).match(/'/g) ?? []).length;
+          if (quotesBefore % 2 === 0) return line.slice(0, i);
+        }
+      }
+      return line;
+    })
+    .join('\n');
+}
+
+/**
+ * Every migration file, comment-stripped and concatenated, in FILENAME ORDER.
+ *
+ * Order matters now, unlike when this was written: `alter type ... add value` and
+ * `update ... set note` mutate earlier declarations, so the corpus is a replay after
+ * all. Files are sorted so a later migration's amendment is applied after the
+ * declaration it amends.
+ *
+ * ── WHICH AUTHORITY THIS TEST CHECKS AGAINST ─────────────────────────────────────
+ * THE MIGRATION FILES, not the live database. As of 2026-09-10 those two DIFFER: the
+ * seven original migrations are applied remotely, while `20260910185900` and
+ * `20260910190000` are local-only pending a push. So a green run here means "the types
+ * match the intended schema", NOT "the types match the database an agent will hit
+ * today". Both are worth knowing and they are not the same claim — see the note in
+ * tables.ts about the generated-types diff, which is the check that uses the OTHER
+ * authority.
+ */
 function readAllMigrations(): string {
   const files = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql')).sort();
   // A silently empty corpus would make every test below pass vacuously, which is worse
   // than failing: it would report "parity verified" having compared nothing at all.
   assert.ok(files.length > 0, `no .sql migrations found in ${MIGRATIONS_DIR}`);
-  return files.map((f) => readFileSync(join(MIGRATIONS_DIR, f), 'utf8')).join('\n');
+  return stripSqlComments(files.map((f) => readFileSync(join(MIGRATIONS_DIR, f), 'utf8')).join('\n'));
 }
 
 /**
@@ -88,8 +135,33 @@ function parseSqlEnums(sql: string): Map<string, string[]> {
   const found = new Map<string, string[]>();
   for (const match of sql.matchAll(/create\s+type\s+public\.(\w+)\s+as\s+enum\s*\(([\s\S]*?)\)\s*;/gi)) {
     const [, name, rawBody] = match;
-    const body = rawBody!.replace(/--[^\n]*/g, '');
-    found.set(name!, [...body.matchAll(/'([^']*)'/g)].map((m) => m[1]!));
+    found.set(name!, [...rawBody!.matchAll(/'([^']*)'/g)].map((m) => m[1]!));
+  }
+
+  // ENUM EVOLUTION. A value added by a later migration is part of the enum, and this
+  // parser used to read only `create type` — so `agent_name` gaining `keepalive` via
+  // `alter type` would have been invisible here, and the TS mirror would have failed
+  // parity for having a value the parser could not see. That is a false failure, which
+  // is the kind that trains people to distrust the suite.
+  //
+  // APPEND is the correct position: `add value` without BEFORE/AFTER appends, and the
+  // resulting declaration order is what Postgres sorts by. `before`/`after` variants are
+  // deliberately NOT handled — they are rejected loudly below rather than guessed at,
+  // because silently mis-positioning a value would corrupt the order assertion that is
+  // this suite's most subtle check.
+  for (const match of sql.matchAll(
+    /alter\s+type\s+public\.(\w+)\s+add\s+value\s+(?:if\s+not\s+exists\s+)?'([^']*)'\s*(before|after)?\s*('[^']*')?\s*;/gi,
+  )) {
+    const [, name, value, position] = match;
+    assert.ok(
+      position === undefined,
+      `alter type ${name} add value '${value}' uses ${position?.toUpperCase()} positioning, which this parser does not model. ` +
+        `Teach it the positioning rule before relying on the enum-order assertion.`,
+    );
+    const existing = found.get(name!);
+    assert.ok(existing !== undefined, `alter type public.${name} adds a value to an enum that is never created`);
+    // Idempotent, matching `if not exists`: re-adding an existing value is a no-op.
+    if (!existing.includes(value!)) existing.push(value!);
   }
   return found;
 }
@@ -144,6 +216,36 @@ test('enum parity — every Postgres enum has a TypeScript mirror, same values i
       );
     });
   }
+});
+
+test('enum parity — NON-VACUITY CONTROL: the comparison accepts a correct enum and rejects a reordered one', () => {
+  // THE POSITIVE CONTROL, adopted from applyyy-ef's finding on its own tests.
+  //
+  // This suite was mutation-checked three ways when written — an order-only swap, a
+  // TS-only value, a second edge into `applying` — and all three were caught. But every
+  // one of those proves only that the comparison CAN FAIL. None proves it can PASS for
+  // the right reason, and **a guard that rejects all inputs is indistinguishable from a
+  // correct one when you only ever test the failing side.** If `deepEqual` were
+  // accidentally comparing the wrong two things, or comparing a value against itself,
+  // the mutations above would still have "caught" everything.
+  //
+  // So: same values, same comparison, differing ONLY in order. Identical must pass,
+  // reordered must fail. Both halves are the assertion.
+  const reference = ['alpha', 'beta', 'gamma'];
+  const identical = ['alpha', 'beta', 'gamma'];
+  const reordered = ['beta', 'alpha', 'gamma'];
+
+  const matches = (a: readonly string[], b: readonly string[]): boolean =>
+    a.length === b.length && a.every((v, i) => v === b[i]);
+
+  assert.equal(matches(reference, identical), true, 'the order-sensitive comparison rejects an identical enum — it is a blanket rejector');
+  assert.equal(matches(reference, reordered), false, 'the comparison accepts a reordered enum — order sensitivity has been lost');
+
+  // And the same control applied to the REAL data rather than to a toy: at least one
+  // genuine enum must actually be comparing non-trivially. A suite where every tuple
+  // was empty would pass every assertion above and mean nothing.
+  const biggest = Math.max(...[...SQL_ENUMS.values()].map((v) => v.length));
+  assert.ok(biggest >= 3, `the largest parsed SQL enum has ${biggest} values — the comparisons are near-trivial`);
 });
 
 test('enum parity — no TypeScript enum mirror lacks a Postgres declaration', () => {
@@ -232,6 +334,20 @@ test('status graph parity — the TS mirror matches the transitions seeded into 
   }));
 
   assert.ok(seeded.length > 0, 'parsed zero seeded transitions — has the guard migration changed shape?');
+
+  // NOTE OVERRIDES. A later migration may correct a note with an UPDATE rather than by
+  // editing the original seed — which is the only option once a migration is applied
+  // remotely, since applied files are immutable. Without this the test would compare
+  // against the SUPERSEDED text and demand that TypeScript match a string the database
+  // no longer holds.
+  for (const match of MIGRATION_SQL.matchAll(
+    /update\s+public\.application_status_transitions\s+set\s+note\s*=\s*'((?:[^']|'')*)'\s+where\s+from_status\s*=\s*'(\w+)'\s+and\s+to_status\s*=\s*'(\w+)'\s*;/gi,
+  )) {
+    const [, note, from, to] = match;
+    const target = seeded.find((s) => s.from === from && s.to === to);
+    assert.ok(target !== undefined, `an UPDATE rewrites the note for ${from} -> ${to}, but no such edge is seeded`);
+    target.note = note!.replace(/''/g, "'");
+  }
 
   const mirror = contract.STATUS_TRANSITIONS;
   const key = (t2: { from: string; to: string }) => `${t2.from} -> ${t2.to}`;
