@@ -350,6 +350,146 @@ Runtime is after the artifact has shipped.
 
 ---
 
+## Instance 15 — a stability check cannot tell "finished" from "not started"
+
+Four subagents were reported as writing into `apps/web/**` and
+`supabase/functions/**`, with the instruction: *"`git status --short` twice, a
+little apart; if those paths stop changing, the agents are done."*
+
+Followed exactly, at 21:06: **0 lines, twice.** Conclusion drawn and written
+into an audit document: the agents produced nothing. At 21:11 the same command
+returned six changed paths. **The agents had been alive the whole time and had
+simply not reached their first write.**
+
+**Both states present as an unchanging tree.** Two identical readings feel like
+corroboration and are not — they are one measurement taken twice, and neither
+can see a process that has produced nothing *so far*.
+
+**It was doubly vacuous.** `find -newermt` was then used as independent
+corroboration, but it interrogates the same underlying fact — no writes yet —
+through a second interface. **Two views of one absence is still one
+observation.** Corroboration requires an independent *signal*, not a second
+window onto the same one.
+
+**What actually discriminates: ask whether the PRODUCER is alive, not whether
+the PRODUCT exists.** `ListAgents`, or a process check. An idle tree plus a live
+agent means *wait*; an idle tree plus no agent means *nothing came*. Only the
+second licenses the conclusion.
+
+**Generalised:** **never conclude a background worker has finished from the
+absence of its output.** Confirm the worker itself is gone. Absence of evidence
+is the specific thing this whole document is about, and it arrived here through
+a door nobody recognised — dressed up as a *stability* check, which sounds
+active and is not.
+
+---
+
+## Instance 16 — the same command exits 0 while failing *completely*
+
+Instance 4 records `supabase db reset` exiting **1 while succeeding** — the
+storage container failed a healthcheck after the migrations had fully applied.
+
+Tonight it did the opposite. The Postgres image pull died with `unexpected EOF`,
+every retry failed with `open //./pipe/dockerDesktopLinuxEngine: The system
+cannot find the file specified` because Docker Desktop had stopped, and the
+final payload was:
+
+```json
+{"_tag":"Error","error":{"code":"LegacyImagePrepullError", ... }}
+```
+
+**The wrapper returned 0.** Nothing was reset, no container ever started, no SQL
+was ever parsed — and a script chaining `supabase db reset && next-step` would
+have proceeded straight into the next step.
+
+**Both directions from one command, which is the point.** A tool whose exit code
+is unreliable is not *sometimes* wrong; it carries no information at all, and
+you must read the state either way.
+
+**And the two directions are not equally dangerous.** Exit 1 while succeeding is
+the *honest* failure — it makes someone look. **Exit 0 while failing is a green
+that means nothing**, and greens are precisely what nobody investigates. When a
+tool is known to lie in one direction, check whether it lies in the other before
+trusting the direction you like.
+
+---
+
+## Instance 17 — a plpgsql function body is not parsed when the function is created
+
+A migration adding `applyy_internal.assign_master_profile_content_hash()` was
+validated against the live schema inside `begin; … rollback;`. The function
+object was confirmed **created**. It would have been natural to call the body
+verified.
+
+**It was not.** PostgreSQL does not parse a plpgsql function's body at `CREATE`
+time — only at first execution. So `create function` succeeding proves the
+*signature* is well-formed and says **nothing** about whether the identifiers
+inside it resolve. The specific worry — whether `pg_catalog.sha256(bytea)`
+resolves under `set search_path = ''` — was exactly the kind of thing a
+successful create does not answer.
+
+It was closed by evaluating the expression standalone under an empty
+`search_path`, which also turned two *documented* claims into *measured* ones:
+`jsonb` normalises key order (`{"b":2,"a":1}` and `{"a":1,"b":2}` hash
+identically), and numeric scale genuinely collides (`1.0` and `1.00` do not).
+
+**Generalised:** **"the thing was created" and "the thing works" are different
+claims, and deferred compilation is where they come apart.** Same family as
+Instance 2 — a check that exists but never executes. Anywhere a language defers
+parsing (plpgsql bodies, dynamic SQL, a lazily-imported module, a template
+rendered only on one branch), creation-time success is not execution-time
+evidence.
+
+---
+
+## Instance 18 — validate the validator before you trust what it tells you
+
+With Docker unavailable, a migration was validated against the **live** database
+using `begin; <migration>; rollback;`. That is only evidence if the harness
+behaves — and **a rollback that silently never ran and a rollback that worked
+produce identical observations afterwards: the object is absent either way.**
+
+So the harness was tested first, with a throwaway probe requiring **both**
+readings:
+
+| Reading | Required | Proves |
+|---|---|---|
+| object visible **INSIDE** the transaction | 1 | the DDL genuinely executed, not silently ignored |
+| object absent **AFTER** rollback | 0 | the rollback genuinely discarded it |
+
+Either reading alone is worthless. "Absent afterwards" alone is satisfied by a
+harness that never ran anything at all.
+
+**Generalised: the non-vacuity twin applies to test HARNESSES, not just to
+guards.** Before trusting a mechanism that reports absence, make it report
+presence once. The same discipline says *don't accept a green from a runner you
+haven't seen go red* — which is how the 249 previously-unreachable tests were
+confirmed to be genuinely wired: a guard was mutated and 15 tests failed.
+
+---
+
+## Instance 19 — `&&` hides the report you added the step for
+
+A root script was written as `test:workspace && test:functions`, specifically to
+surface 31 kill-switch tests that no runner had been reaching. The `&&` risk was
+noticed at the time and documented as acceptable.
+
+**It fired on the very first real invocation.** An unrelated pre-existing failure
+in the worker suite stopped the chain, and the kill-switch results never
+printed — hiding exactly what the change existed to reveal.
+
+**`&&` masks whatever follows it precisely when something is already wrong**,
+which is the moment you least want a safety-critical guard to go quiet. Fixed by
+running the fast, safety-critical half **first**, so it always reports; the chain
+still returns one non-zero exit for CI.
+
+**Generalised:** ordering inside a `&&` chain is not cosmetic — it decides *what
+you still learn on a bad day.* Put the check whose silence would mislead you
+earliest, not last. Note also that documenting a known risk as "accepted" did
+nothing to prevent it; only the reordering did. **A comment is not a control.**
+
+---
+
 ## Where this bites hardest in `applyy`
 
 Layered defences are the deliberate design here, so the cost applies throughout:
