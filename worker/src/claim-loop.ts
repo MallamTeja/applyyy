@@ -14,7 +14,13 @@
 // fitting the budget and not having a product. The reasoning lives here, beside
 // the loop, because THE CHANGE THAT BREAKS IT WILL LOOK LIKE AN IMPROVEMENT.
 import type { AgentName } from '@applyy/shared-types';
-import { applyToOne, type ApplicationPage, type ApplierGateway, type ClaimedApplication } from './apply-one.ts';
+import {
+  applyToOne,
+  type ApplicationPage,
+  type ApplierGateway,
+  type ClaimedApplication,
+  type ResumeRenderer,
+} from './apply-one.ts';
 import { canStartAnotherApplication, type RunWindowLimits } from './run-window.ts';
 import type { AnswerBankRow } from '@applyy/shared-types';
 import type { SubmissionEnv } from './submission-mode.ts';
@@ -48,6 +54,14 @@ export interface RunGateway extends ApplierGateway {
 export interface ClaimLoopInput {
   readonly gateway: RunGateway;
   readonly openPage: () => Promise<ClosableApplicationPage>;
+  // Renders the tailored resume for one application. Passed straight through to
+  // applyToOne and never called here: the loop's job is claiming and pacing, and
+  // a render at this level would happen for rows that turn out to be blocked.
+  //
+  // It gets its own PAGE, not one of `openPage`'s — the renderer replaces the
+  // document it renders on, so sharing the form's page would erase the form.
+  // That is enforced where the renderer is built, not by convention here.
+  readonly renderResume: ResumeRenderer;
   readonly env: SubmissionEnv;
   // Epoch seconds. Injected rather than read from Date.now() so budget
   // behaviour can be tested at a boundary without fake timers.
@@ -74,7 +88,7 @@ export interface RunSummary {
 }
 
 export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary> {
-  const { gateway, openPage, env, clock } = input;
+  const { gateway, openPage, env, clock, renderResume } = input;
   // Default the run start to now, so a caller that does not care gets the whole
   // budget rather than accidentally starting mid-window.
   const runStartedAtEpochSeconds = input.runStartedAtEpochSeconds ?? clock();
@@ -157,7 +171,7 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
         // Opened per application so one poisoned page cannot corrupt the next.
         const page = await openPage();
         try {
-          const outcome = await applyToOne({ row, page, gateway, answers, env });
+          const outcome = await applyToOne({ row, page, gateway, answers, env, renderResume });
 
           // Counted separately rather than collapsed into a success/failure
           // pair, because these four mean genuinely different things to the

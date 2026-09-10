@@ -7,6 +7,8 @@ import type { Page } from 'playwright';
 import type { BlockReason } from '@applyy/shared-types';
 import { extractFields } from './extract-fields.ts';
 import type { ClosableApplicationPage } from './claim-loop.ts';
+// The one document shape that crosses into a real employer's form.
+import type { AttachedFile } from './apply-one.ts';
 
 /**
  * Thrown if anything ever reaches the submit path before Teja has approved it.
@@ -47,6 +49,36 @@ const BLOCKER_SELECTORS: ReadonlyArray<readonly [string, BlockReason]> = [
   ['input[type="password"]', 'login_required'],
 ];
 
+/**
+ * A selector for one element by id, built without `CSS.escape`.
+ *
+ * THIS FIXED A LIVE BUG, and the bug is worth recording because the shape
+ * recurs. Both call sites below used `CSS.escape(id)`, which is a BROWSER global
+ * — and this module runs in NODE. Every call threw
+ * `ReferenceError: CSS is not defined`, so the applier's `fill` path had never
+ * executed even once. `CSS.escape` in extract-fields.ts is correct, because that
+ * code is inside `page.evaluate` and really does run in the browser; the two
+ * lines here look identical and run somewhere else entirely.
+ *
+ * It survived because nothing reached it. The unit tests drive a fake page, and
+ * the one end-to-end test uses the real GitLab form, whose seven required
+ * comboboxes have no answers — so `wouldSubmit` was false, the fill loop was
+ * skipped, and the suite stayed green while the only code that types into a real
+ * employer's form was dead on arrival. Unmeasured is not the same as passing.
+ *
+ * An ATTRIBUTE selector rather than an id selector, which also removes the need
+ * to escape at all in the common case: `[id="..."]` accepts numeric-leading and
+ * punctuation-bearing ids verbatim, which matters because real Greenhouse custom
+ * questions are named things like `question_36622854002`.
+ */
+function byId(id: string): string {
+  // Only these two characters can terminate the quoted attribute value early.
+  // Backslash first — escaping it after the quote would double-escape the
+  // backslash this very substitution introduces.
+  const escaped = id.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return `[id="${escaped}"]`;
+}
+
 export function createPlaywrightPage(page: Page): ClosableApplicationPage {
   return {
     async goto(url: string) {
@@ -65,9 +97,32 @@ export function createPlaywrightPage(page: Page): ClosableApplicationPage {
     async fill(id: string, value: string) {
       // Addressed by id because modern Greenhouse boards carry NO `name`
       // attributes at all — the classic `job_application[first_name]`
-      // convention is gone. Escaped because custom-question ids are opaque and
-      // numeric-leading, which a bare `#id` selector cannot express.
-      await page.locator(`#${CSS.escape(id)}`).fill(value);
+      // convention is gone. Via `byId` because custom-question ids are opaque
+      // and numeric-leading, which a bare `#id` selector cannot express.
+      await page.locator(byId(id)).fill(value);
+    },
+
+    async attachFile(id: string, file: AttachedFile) {
+      // `setInputFiles` with an in-memory payload rather than a temp file on
+      // disk. Two reasons, and the second is the important one: the bytes never
+      // touch the runner's filesystem, so a crashed job cannot leave a rendered
+      // resume behind in an Actions workspace; and the buffer handed here is the
+      // SAME one that was hashed and uploaded, so no re-read can substitute
+      // different bytes for the ones the digest describes.
+      //
+      // NO ACTIONABILITY WAIT IS NEEDED OR WANTED. The captured Greenhouse form
+      // renders its real <input type="file"> as `class="visually-hidden"` behind
+      // a styled "Attach" button, so a click-and-wait-for-visible approach would
+      // time out on the one real form we have. setInputFiles sets the file list
+      // directly and does not require the element to be visible.
+      await page.locator(byId(id)).setInputFiles({
+        name: file.name,
+        mimeType: file.mimeType,
+        // Playwright wants a Node Buffer; the port speaks Uint8Array so nothing
+        // upstream of here needs a Node type. `Buffer.from` on a Uint8Array
+        // VIEWS the same memory rather than copying it.
+        buffer: Buffer.from(file.bytes),
+      });
     },
 
     async screenshot() {

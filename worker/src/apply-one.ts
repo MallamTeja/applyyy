@@ -20,11 +20,22 @@
 // claim and leaves the row exactly where the human approved it — which is also
 // what makes §18.6's trust period work: after three days of screenshots, the
 // same rows are still sitting there when the flag is flipped.
-import type { AgentName, AnswerBankRow, BlockReason } from '@applyy/shared-types';
+import type { AgentName, AnswerBankRow, BlockReason, ResolvedResume } from '@applyy/shared-types';
 import { guardedAdvance, type StatusWriter } from './guarded-advance.ts';
 import { planFill, type FillBlocker } from './plan-fill.ts';
 import { resolveSubmissionMode, type SubmissionEnv } from './submission-mode.ts';
 import type { FormField } from './extract-fields.ts';
+// Which file input receives the resume, or why none can. Pure and browser-free,
+// so the decision is unit-testable away from a live DOM.
+import {
+  planResumeAttachment,
+  resumeFileName,
+  type ResumeAttachmentBlocker,
+} from './plan-resume-attachment.ts';
+// Type-only: the render's result shape has ONE declaration, in the module that
+// produces it, so the digest this file records cannot drift from the digest that
+// was computed over the bytes.
+import type { RenderedResume } from './render-resume-pdf.ts';
 
 // This worker's identity in the status graph. Named once so no call site can
 // quietly claim to be a different agent and slip through an edge it may not use.
@@ -43,6 +54,12 @@ export interface ApplicationPage {
   goto(url: string): Promise<void>;
   extractFields(): Promise<FormField[]>;
   fill(id: string, value: string): Promise<void>;
+  // Put the rendered resume into a file input. Separate from `fill` because the
+  // two cannot be driven the same way — a file input's value is unwritable from
+  // script by browser security design — and because keeping the ONE operation
+  // that puts a document on an employer's form under its own name makes it
+  // greppable, exactly as `submit` is.
+  attachFile(id: string, file: AttachedFile): Promise<void>;
   // Taken AFTER filling, because §18.6's whole purpose is showing Teja exactly
   // what would have been sent — a screenshot of an empty form proves nothing.
   screenshot(): Promise<Uint8Array>;
@@ -55,13 +72,40 @@ export interface ApplicationPage {
   submit(): Promise<void>;
 }
 
-/** The database operations this module needs, narrowed to four. */
+/** One document handed to a file input, as the employer's page will receive it. */
+export interface AttachedFile {
+  // What the recruiter sees in the ATS. Deterministic — see resumeFileName.
+  readonly name: string;
+  // Declared explicitly because upload widgets validate it, and a file input
+  // fed bytes with no type is treated as application/octet-stream by some
+  // boards and silently rejected.
+  readonly mimeType: string;
+  readonly bytes: Uint8Array;
+}
+
+/**
+ * Produce the resume PDF for one application.
+ *
+ * A PORT, NOT AN IMPORT, and that is what keeps the whole promise honest. The
+ * only argument is the pinned `ResolvedResume` snapshot, so there is no
+ * parameter through which a storage path, a job id or a template choice could
+ * reach the render — the artifact is a function of exactly the data the human
+ * approved. It is also why this module needs no Playwright type: the
+ * implementation owns a browser page, and apply-one.ts never learns that.
+ */
+export type ResumeRenderer = (resume: ResolvedResume) => Promise<RenderedResume>;
+
+/** The database operations this module needs, narrowed to five. */
 export interface ApplierGateway extends StatusWriter {
   // Give the row back untouched, still `approved`. The dry-run path and only
   // the dry-run path uses this.
   releaseClaim(applicationId: string, reason: string): Promise<void>;
   // Returns the storage path, which the dashboard renders beside the row.
   uploadScreenshot(applicationId: string, bytes: Uint8Array): Promise<string>;
+  // Stores the exact bytes that were attached, and returns their path. Uploaded
+  // AFTER the render and from the same buffer, so what is kept is the artifact
+  // that went out rather than a second render that might not match it.
+  uploadResume(applicationId: string, bytes: Uint8Array): Promise<string>;
 }
 
 /** The claimed row, narrowed to what applying to it actually requires. */
@@ -74,6 +118,15 @@ export interface ClaimedApplication {
   // Taking it from there is what makes "a LinkedIn sighting never becomes a
   // submit path" structurally true rather than a convention to be remembered.
   readonly applyUrl: string;
+  // `applications.tailored_profile`: the frozen ResolvedResume as the human
+  // approved it. THE SOURCE THE RESUME IS RENDERED FROM, and deliberately not
+  // `resume_storage_path` — that column records what was sent, and a stored
+  // artifact can drift from what was approved while a derivation cannot.
+  //
+  // Nullable because the column is, and a null is not assumed away here: the
+  // attachment planner decides whether the absence actually stops this
+  // application, which depends on whether the form asks for a document at all.
+  readonly tailoredProfile: ResolvedResume | null;
 }
 
 /** Everything one application needs, injected. */
@@ -85,7 +138,25 @@ export interface ApplyToOneInput {
   // The environment slice the DRY_RUN gate reads. Passed rather than read from
   // process.env so the gate is testable without mutating global state.
   readonly env: SubmissionEnv;
+  // REQUIRED, never optional, and that is the lesson this file already learned
+  // the hard way: `resolveSubmissionMode` was a correct, ten-test, fail-closed
+  // guard with NO CALLERS, and the suite stayed green throughout. An optional
+  // renderer would let the same thing happen again — a resume pipeline that is
+  // right in every detail and never runs. Required means the compiler refuses
+  // any call site that forgets it.
+  readonly renderResume: ResumeRenderer;
 }
+
+/**
+ * Anything that stops an application, whatever layer noticed.
+ *
+ * A union rather than one widened type: an unanswerable question and an
+ * unplaceable document need different fixes from Teja (answer it once, versus
+ * teach the attachment planner a form shape), so their reason vocabularies stay
+ * separate. What they share is the shape the dashboard reads — id and label —
+ * which is all any consumer below actually touches.
+ */
+export type ApplicationBlocker = FillBlocker | ResumeAttachmentBlocker;
 
 /** What happened. A discriminated union so no caller can ignore a case. */
 export type ApplyOutcome =
@@ -97,18 +168,25 @@ export type ApplyOutcome =
       // Surfaced so the run summary can name the questions that would have
       // blocked, letting the answer bank grow during the trust period without
       // moving any rows.
-      readonly blockers: readonly FillBlocker[];
+      readonly blockers: readonly ApplicationBlocker[];
       readonly screenshotPath: string;
+      // The resume that WOULD have gone out, and its identity. Surfaced on the
+      // outcome because a dry run writes nothing to the row — so without this,
+      // the one artifact the §18.6 review exists to check would be produced,
+      // attached, screenshotted and then unreferenced anywhere. Null when the
+      // form asked for no document, which is a real and blameless case.
+      readonly resumePath: string | null;
+      readonly resumeSha256: string | null;
       readonly reason: string;
     }
   | { readonly kind: 'submitted' }
-  | { readonly kind: 'blocked'; readonly reason: BlockReason; readonly blockers: readonly FillBlocker[] }
+  | { readonly kind: 'blocked'; readonly reason: BlockReason; readonly blockers: readonly ApplicationBlocker[] }
   // The submit threw. We do NOT know whether it landed, so no status is
   // written and the sweeper is left to route the row to a human.
   | { readonly kind: 'submit_outcome_unknown'; readonly error: string };
 
 export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> {
-  const { row, page, gateway, answers, env } = input;
+  const { row, page, gateway, answers, env, renderResume } = input;
 
   // THE GATE, consulted before anything else so its verdict is available at
   // every branch below. A pre-deploy audit found this function had no callers
@@ -130,8 +208,32 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
   // blocker, and has no third branch that invents a value.
   const plan = planFill(fields, answers);
 
-  // Whether a real run would go through with this one.
-  const wouldSubmit = detected === null && plan.canProceed;
+  // WHERE THE RESUME GOES, decided before anything is typed and while the row is
+  // still `approved`. Pure and browser-free: the form has already been read, so
+  // this needs no second look at the page and cannot fail in a way that leaves
+  // the DOM half-touched.
+  const attachment = planResumeAttachment(fields, {
+    // The snapshot's PRESENCE is the question, not its contents. Handing the
+    // planner the resume itself would let a form-shape decision start depending
+    // on resume data, which is how "which box" quietly becomes "what to send".
+    hasResumeSnapshot: row.tailoredProfile !== null,
+  });
+
+  // Whether a real run would go through with this one. The attachment gate joins
+  // the other two here rather than later, because an application that cannot
+  // carry its resume must not be typed into, screenshotted as viable, or
+  // submitted — and all three of those decisions read this one boolean.
+  const wouldSubmit = detected === null && plan.canProceed && attachment.canProceed;
+
+  // Every blocker from every layer, in one list. Merged at the point of decision
+  // so no downstream consumer has to remember that there are two sources; a
+  // second array would eventually be reported by one caller and not the other.
+  const blockers: readonly ApplicationBlocker[] = [...plan.blockers, ...attachment.blockers];
+
+  // The rendered artifact, kept out here so both the dry-run exit and the real
+  // status write can name it. Null until a viable application actually needs one.
+  let resume: RenderedResume | null = null;
+  let resumePath: string | null = null;
 
   // Type the values ONLY when the application is actually viable. Filling a
   // form we are about to park would leave Teja a screenshot of a
@@ -140,9 +242,59 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
     for (const fill of plan.fills) {
       await page.fill(fill.id, fill.value);
     }
+
+    // ---- THE RESUME, RENDERED HERE AND FOR THREE DELIBERATE REASONS --------
+    //
+    // 1. BEFORE the `approved -> applying` transition. Rendering is fallible —
+    //    a stale `schema_version` throws ResumeRenderError by design — and every
+    //    fallible operation moved inside that window is a new way to strand a
+    //    row at `applying`, which is human-only recovery: Teja must open the
+    //    employer's site and check by hand whether an application went out. A
+    //    render that throws HERE costs nothing: no status has been written, the
+    //    lease simply expires and the row is still exactly where it was.
+    // 2. AFTER the viability decision, so a form we are about to park never
+    //    pays for a PDF it cannot use.
+    // 3. BEFORE the screenshot below, so §18.6's evidence SHOWS the attachment.
+    //    A screenshot taken before attaching would picture an application whose
+    //    resume box is empty — the one thing the trust period exists to verify,
+    //    absent from the artifact that is supposed to verify it.
+    if (attachment.target !== null) {
+      // Restates at the type level what the planner already guarantees: a target
+      // is only ever returned when a snapshot exists. Thrown rather than skipped
+      // because the safe failure is "no application", and skipping would send a
+      // resume-less application to an employer who explicitly asked for one.
+      if (row.tailoredProfile === null) {
+        throw new Error(
+          `unreachable: attachment target ${attachment.target.id} on ${row.id} without a ` +
+            'tailored_profile. planResumeAttachment must not return a target without one.',
+        );
+      }
+
+      // From the PINNED SNAPSHOT, never from a stored file. This is the whole
+      // guarantee: the worker and the React approval preview call the same
+      // renderResumeHtml, so the bytes below are provably downstream of exactly
+      // the data the human reviewed.
+      resume = await renderResume(row.tailoredProfile);
+
+      // Stored before it is attached, so the record exists even if the page
+      // rejects the upload — an artifact that cannot be produced again from a
+      // row whose snapshot later changes is worth keeping either way.
+      resumePath = await gateway.uploadResume(row.id, resume.bytes);
+
+      // THE SAME BUFFER that was hashed and uploaded. Not a re-render: a second
+      // render would be a second artifact, and "byte-for-byte what was approved"
+      // would then be a claim about a file nobody kept.
+      await page.attachFile(attachment.target.id, {
+        name: resumeFileName(row.tailoredProfile),
+        // Fixed, because renderResumePdf only ever produces a PDF.
+        mimeType: 'application/pdf',
+        bytes: resume.bytes,
+      });
+    }
   }
 
-  // After filling, so the image shows what would actually have been sent.
+  // After filling AND attaching, so the image shows what would actually have
+  // been sent — including the attached filename the ATS echoes back.
   const screenshotPath = await gateway.uploadScreenshot(row.id, await page.screenshot());
 
   // ---- The dry-run exit. No status write of any kind beyond this point -----
@@ -154,8 +306,14 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
     return {
       kind: 'dry_run_complete',
       wouldSubmit,
-      blockers: plan.blockers,
+      // Both layers' blockers, so the trust-period log names every reason this
+      // application would not have gone out — not just the answer-bank ones.
+      blockers,
       screenshotPath,
+      resumePath,
+      // Null when nothing was rendered. Reported rather than recomputed so the
+      // digest describes the bytes that were actually attached.
+      resumeSha256: resume?.sha256 ?? null,
       reason: mode.reason,
     };
   }
@@ -188,11 +346,11 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
         screenshot_storage_path: screenshotPath,
         // Names the exact questions a human must answer, so the dashboard can
         // show the work rather than just the fact of being stuck.
-        unanswered: plan.blockers.map((blocker) => blocker.label),
+        unanswered: blockers.map((blocker) => blocker.label),
       },
     });
 
-    return { kind: 'blocked', reason, blockers: plan.blockers };
+    return { kind: 'blocked', reason, blockers };
   }
 
   // ---- THE NON-IDEMPOTENT WINDOW. Opens here, closes four lines down -------
@@ -225,7 +383,16 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
     from: 'applying',
     to: 'applied',
     agent: ACTING_AGENT,
-    detail: { screenshot_storage_path: screenshotPath },
+    detail: {
+      screenshot_storage_path: screenshotPath,
+      // WHAT WAS SENT, recorded in the same write that asserts it was sent, so
+      // the two can never disagree. The path alone answers "where is the file";
+      // the digest answers "is this the artifact that was approved?", which is
+      // the question actually asked six months later when a recruiter mentions
+      // something on the resume.
+      resume_storage_path: resumePath,
+      resume_sha256: resume?.sha256 ?? null,
+    },
   });
 
   return { kind: 'submitted' };

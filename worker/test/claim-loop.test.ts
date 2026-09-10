@@ -20,6 +20,9 @@ function stubPage(): ApplicationPage & { close(): Promise<void> } {
       { id: 'first_name', label: 'First Name', kind: 'text', required: true },
     ],
     fill: async () => {},
+    // Present because the port requires it; these tests never reach it, since
+    // the stub form below carries no file input.
+    attachFile: async () => {},
     screenshot: async () => new Uint8Array([1]),
     detectBlocker: async () => null,
     submit: async () => {},
@@ -40,8 +43,19 @@ function fakeGateway(overrides: Partial<RunGateway> = {}) {
   const calls: string[] = [];
   // Rows handed out on successive claim calls; the loop claims repeatedly until
   // it gets an empty page, so a single-element queue needs a terminating [].
-  const batches: Array<Array<{ id: string; status: 'approved'; applyUrl: string }>> = [
-    [{ id: 'app-1', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html' }],
+  const batches: Array<
+    Array<{
+      id: string;
+      status: 'approved';
+      applyUrl: string;
+      // Carried on the claim because `claim_applications` returns `a.*`. Null
+      // here is honest and harmless: the stub form asks for no document, so the
+      // attachment planner proceeds without one — which is also the case these
+      // tests want, since they are about pacing and not about resumes.
+      tailoredProfile: null;
+    }>
+  > = [
+    [{ id: 'app-1', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null }],
     [],
   ];
   const closed: Array<Record<string, unknown>> = [];
@@ -77,10 +91,23 @@ function fakeGateway(overrides: Partial<RunGateway> = {}) {
       calls.push('release');
     },
     uploadScreenshot: async () => 'screens/a.png',
+    uploadResume: async () => 'resumes/a.pdf',
     ...overrides,
   };
   return { gateway, calls, closed };
 }
+
+/**
+ * A renderer that throws if anything calls it.
+ *
+ * Deliberately hostile rather than a no-op. None of these tests presents a form
+ * with an upload, so a render here would mean the applier had started producing
+ * PDFs for forms that never asked for one — and a stub returning fake bytes
+ * would absorb that regression silently.
+ */
+const renderResume = async (): Promise<never> => {
+  throw new Error('claim-loop tests must not reach the resume renderer');
+};
 
 /** A clock that never moves, so wall-clock budget never triggers by accident. */
 const frozenClock = () => 1_000_000;
@@ -92,7 +119,7 @@ describe('runApplierBatch', () => {
     // invisible for a whole extra day.
     const { gateway, calls } = fakeGateway();
 
-    await runApplierBatch({ gateway, openPage: async () => stubPage(), env: {}, clock: frozenClock });
+    await runApplierBatch({ gateway, openPage: async () => stubPage(), env: {}, clock: frozenClock, renderResume });
 
     expect(calls.indexOf('sweep')).toBeLessThan(calls.indexOf('claim'));
   });
@@ -108,6 +135,7 @@ describe('runApplierBatch', () => {
     const summary = await runApplierBatch({
       gateway,
       openPage: async () => stubPage(),
+      renderResume,
       env: {},
       clock: frozenClock,
     });
@@ -131,6 +159,7 @@ describe('runApplierBatch', () => {
     await runApplierBatch({
       gateway,
       openPage: async () => stubPage(),
+      renderResume,
       env: { DRY_RUN: 'false' },
       clock: frozenClock,
     });
@@ -148,6 +177,7 @@ describe('runApplierBatch', () => {
     const summary = await runApplierBatch({
       gateway,
       openPage: async () => stubPage(),
+      renderResume,
       env: {},
       // Started far enough in the past that the budget is already gone.
       clock: () => 1_000_000,
@@ -172,6 +202,7 @@ describe('runApplierBatch', () => {
           throw new Error('net::ERR_CONNECTION_REFUSED');
         },
       }),
+      renderResume,
       env: {},
       clock: frozenClock,
     });
@@ -196,6 +227,7 @@ describe('runApplierBatch', () => {
         },
         close,
       }),
+      renderResume,
       env: {},
       clock: frozenClock,
     });
@@ -211,6 +243,7 @@ describe('runApplierBatch', () => {
     const summary = await runApplierBatch({
       gateway,
       openPage: async () => stubPage(),
+      renderResume,
       env: {},
       clock: frozenClock,
     });

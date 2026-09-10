@@ -71,9 +71,114 @@ export async function renderResumePdf(input: RenderResumePdfInput): Promise<Rend
     displayHeaderFooter: false,
   });
 
+  // ---- Two corrections applied to Chromium's raw output --------------------
+  //
+  // MEASURED, NOT SUSPECTED. Two renders of an identical snapshot 1.5s apart
+  // produced files of identical length (77032 bytes) differing in exactly TWO
+  // bytes — the seconds digits of `/CreationDate` and `/ModDate`:
+  //
+  //   /Producer (Skia/PDF m131)
+  //   /CreationDate (D:20260910161513+00'00')   <- and ...15 in the second run
+  //   /ModDate     (D:20260910161513+00'00')
+  //
+  // So `page.pdf()` is deterministic in its CONTENT and non-deterministic in its
+  // METADATA, which made this file's own determinism test intermittent: two
+  // renders inside one wall-clock second matched, and two that straddled a
+  // second boundary did not. An intermittent guarantee is not a guarantee, and
+  // the failure mode is the worst kind — the test passes on a fast machine and
+  // fails in CI, which reads as flake rather than as the real defect it is.
+  //
+  // Normalising the stamp is not a workaround bolted on; it FINISHES the
+  // decision `displayHeaderFooter: false` above already states, whose comment
+  // says the date must not reach the document because it would "make the bytes
+  // differ every day, destroying the determinism the approval guarantee depends
+  // on". That reasoning applies identically to the info dictionary; only the
+  // footer had been dealt with.
+  const normalised = withFixedPdfTimestamps(bytes);
+
   // Hashed here, over the exact buffer that will be uploaded and attached, so
   // the digest cannot describe a different serialisation than the one sent.
-  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const sha256 = createHash('sha256').update(normalised).digest('hex');
 
-  return { bytes, sha256 };
+  return { bytes: normalised, sha256 };
+}
+
+// The fixed stamp, and it MUST be exactly as long as what it replaces
+// (`D:YYYYMMDDHHMMSS+HH'MM'`, 23 characters). Same length means every byte
+// offset in the file — including the xref table, which stores absolute offsets
+// and would send readers to the wrong objects if anything shifted — stays valid,
+// so this is a substitution rather than a rewrite of the PDF.
+//
+// The Unix epoch rather than a plausible-looking date, deliberately: a fixed
+// timestamp that reads like a real render time invites someone to trust it.
+// This one is obviously a sentinel, and it is the conventional zero point for
+// reproducible builds.
+const FIXED_PDF_TIMESTAMP = "D:19700101000000+00'00'";
+
+// The two keys Skia writes. Only these: no `/ID` appears in the output at all,
+// which was checked rather than assumed — an unpatched document ID would have
+// left the file non-deterministic while every date matched.
+const TIMESTAMP_KEYS = ['/CreationDate (', '/ModDate ('] as const;
+
+/**
+ * Replace the PDF's creation and modification stamps with a fixed value.
+ *
+ * Byte-level and same-length by construction. Operating on the bytes rather than
+ * re-serialising the document is what keeps this safe: nothing is parsed, so
+ * there is no PDF writer here that could disagree with Chromium's about anything
+ * else in the file.
+ */
+function withFixedPdfTimestamps(source: Uint8Array): Uint8Array {
+  // A COPY, for two reasons. Chromium hands back a Node Buffer, and a Buffer is
+  // frequently a view into a shared pool — mutating it in place could reach
+  // memory another caller owns. And pdfjs (used by the ATS parse check) rejects
+  // a Buffer outright with "Please provide binary data as `Uint8Array`, rather
+  // than `Buffer`", because it tests the constructor rather than the prototype
+  // chain. Copying into a plain Uint8Array fixes both at one stroke.
+  const bytes = new Uint8Array(source);
+
+  // Encoded once. The stamp is pure ASCII, so one byte per character, which is
+  // what makes the fixed-width assumption above hold.
+  const replacement = new TextEncoder().encode(FIXED_PDF_TIMESTAMP);
+
+  for (const key of TIMESTAMP_KEYS) {
+    // FIRST occurrence only. Both keys live in the document info dictionary
+    // within the first ~250 bytes, ahead of every content stream, so stopping at
+    // the first match means resume text that happened to contain this literal
+    // could not be touched. (It could not corrupt the file either — the
+    // substitution is same-length — but it could silently alter a bullet, which
+    // is worse.)
+    const at = indexOfAscii(bytes, key);
+    // Absent is not an error: a future Chromium that stops writing a stamp needs
+    // no patch, and throwing here would fail every application over metadata.
+    if (at < 0) continue;
+
+    // Overwrite in place, immediately after the key, for exactly the stamp's
+    // length. Anything longer would run into the closing paren and produce a
+    // malformed date that some readers reject.
+    bytes.set(replacement, at + key.length);
+  }
+
+  return bytes;
+}
+
+/** Byte offset of an ASCII needle, or -1. */
+function indexOfAscii(haystack: Uint8Array, needle: string): number {
+  // Hand-rolled because `Uint8Array` has no indexOf-for-sequences, and decoding
+  // 77KB to a string to use String.indexOf would allocate the whole document
+  // again for every key on every application.
+  const target = new TextEncoder().encode(needle);
+
+  // Stop where a full match can still fit, so the inner loop never reads past
+  // the end of the buffer.
+  outer: for (let i = 0; i <= haystack.length - target.length; i += 1) {
+    for (let j = 0; j < target.length; j += 1) {
+      // Labelled continue rather than a found-flag: this runs once per key per
+      // application and the intent reads directly.
+      if (haystack[i + j] !== target[j]) continue outer;
+    }
+    return i;
+  }
+
+  return -1;
 }

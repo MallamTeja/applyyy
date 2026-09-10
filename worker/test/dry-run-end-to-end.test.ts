@@ -17,6 +17,10 @@ import type { AnswerBankRow } from '@applyy/shared-types';
 import { startFixtureServer, type FixtureServer } from '../src/fixture-server.ts';
 import { createPlaywrightPage } from '../src/playwright-page.ts';
 import { runApplierBatch, type RunGateway } from '../src/claim-loop.ts';
+// The renderer and the snapshot it renders from. Wired here so the end-to-end
+// run exercises the REAL composition, including the resume path.
+import { createResumeRenderer } from '../src/resume-renderer.ts';
+import { syntheticResume } from './resolved-resume-fixture.ts';
 
 let browser: Browser;
 let server: FixtureServer;
@@ -54,6 +58,9 @@ test('a full dry-run batch fills, screenshots and submits NOTHING', async () => 
   const statusWrites: string[] = [];
   const released: string[] = [];
   const screenshots: number[] = [];
+  // Resume uploads, counted separately from screenshots: this run must produce
+  // NONE, and the reason is asserted below.
+  const resumeUploads: number[] = [];
   const closed: Array<Record<string, unknown>> = [];
 
   // One row, pointing at the real captured Greenhouse form.
@@ -63,6 +70,11 @@ test('a full dry-run batch fills, screenshots and submits NOTHING', async () => 
         id: 'app-e2e-1',
         status: 'approved' as const,
         applyUrl: `${server.url}/greenhouse/gitlab-remix-form.html`,
+        // A REAL approved snapshot, so the resume path is genuinely available
+        // rather than being skipped because the row had nothing to render.
+        // That distinction matters for the assertion below: no resume is
+        // produced here because the FORM blocks, not because the row was empty.
+        tailoredProfile: syntheticResume,
       },
     ],
     [],
@@ -89,14 +101,24 @@ test('a full dry-run batch fills, screenshots and submits NOTHING', async () => 
       screenshots.push(bytes.length);
       return 'screens/app-e2e-1.png';
     },
+    uploadResume: async (_id, bytes) => {
+      resumeUploads.push(bytes.length);
+      return 'resumes/app-e2e-1.pdf';
+    },
   };
 
   const startedAt = Date.now();
+
+  // The real renderer, on its own page. Handed the browser rather than a page,
+  // so it cannot land on the form page and erase the form mid-run.
+  const renderer = createResumeRenderer(browser);
 
   const summary = await runApplierBatch({
     gateway,
     // A real Chromium page driving the real captured DOM.
     openPage: async () => createPlaywrightPage(await browser.newPage()),
+    // The real render path, not a stub: this is the wiring under test.
+    renderResume: renderer.render,
     // DRY_RUN deliberately unset — the same state a runner has when a workflow
     // references a secret that does not exist.
     env: {},
@@ -136,6 +158,18 @@ test('a full dry-run batch fills, screenshots and submits NOTHING', async () => 
   // real batch would have blocked rather than submitted. This is the §18.6
   // signal that tells Teja which answers to add before flipping the flag.
   expect(summary.blocked).toBe(0);
+
+  // NO RESUME WAS RENDERED OR UPLOADED, and the reason is the interesting part.
+  // The row carries a real approved snapshot, so the resume path was fully
+  // available — it was not taken because the form's seven unanswered required
+  // comboboxes make this application non-viable, and an application we are
+  // about to park must not pay for a PDF or leave an artifact in storage that
+  // looks exactly like one that was really attached.
+  expect(resumeUploads).toHaveLength(0);
+
+  // Released so the renderer's page does not outlive the run. Before the shared
+  // browser is torn down in afterAll, so the page is closed by its owner.
+  await renderer.close();
 
   // Reported rather than asserted: a wall-clock threshold here would flake on a
   // loaded machine and teach us nothing, but the number sets the daily volume

@@ -24,7 +24,7 @@
 //
 // The property this buys, on the one component that touches real employers:
 // THE WORKER CANNOT DO ANYTHING TEJA COULD NOT DO FROM THE DASHBOARD.
-import type { AgentName, ApplicationStatus } from '@applyy/shared-types';
+import type { AgentName, ApplicationStatus, ResolvedResume } from '@applyy/shared-types';
 import type { RunGateway } from './claim-loop.ts';
 import type { ClaimedApplication } from './apply-one.ts';
 
@@ -59,6 +59,12 @@ export interface GatewayConfig {
   readonly password?: string;
   // Storage bucket for blocked-page and dry-run screenshots.
   readonly screenshotBucket?: string;
+  // Storage bucket for the rendered resumes that were actually attached. A
+  // SEPARATE bucket from screenshots rather than a folder inside it, because the
+  // two have different sensitivities: a screenshot is evidence of a form, while
+  // a resume is Teja's personal data and the artifact an employer received, so
+  // they want their own access policy.
+  readonly resumeBucket?: string;
 }
 
 /**
@@ -83,6 +89,7 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
   // from the client on every check so the hot path is synchronous.
   let expiresAtEpochSeconds = 0;
   const bucket = config.screenshotBucket ?? 'screenshots';
+  const resumeBucket = config.resumeBucket ?? 'resumes';
 
   return {
     async openRun(agent: AgentName) {
@@ -141,7 +148,17 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
         'claimApplications',
       );
       // Zero rows is the kill switch or an empty queue, and neither is an error.
-      const rows = (Array.isArray(data) ? data : []) as Array<{ id: string; apply_url?: string }>;
+      const rows = (Array.isArray(data) ? data : []) as Array<{
+        id: string;
+        apply_url?: string;
+        // `claim_applications` is declared `returns setof public.applications`
+        // and returns `a.*`, so the pinned snapshot arrives with the claim and
+        // needs no second query. That matters beyond round trips: a separate
+        // read could see a DIFFERENT snapshot than the one that was claimed if
+        // the row were re-approved in between, and the resume would then be
+        // rendered from data this run never validated.
+        tailored_profile?: ResolvedResume | null;
+      }>;
       return rows.map(
         (row): ClaimedApplication => ({
           id: row.id,
@@ -150,6 +167,13 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
           // normalize time, which is what keeps a LinkedIn sighting from ever
           // becoming a submit path.
           applyUrl: row.apply_url ?? '',
+          // Passed through UNVALIDATED and un-defaulted on purpose. Coercing a
+          // missing snapshot to an empty resume here would produce a blank PDF
+          // that renders, uploads and attaches without complaint; leaving the
+          // null intact means the attachment planner refuses the application
+          // and a human sees why. `??` rather than a bare read so `undefined`
+          // (column absent from the payload) and SQL NULL mean the same thing.
+          tailoredProfile: row.tailored_profile ?? null,
         }),
       );
     },
@@ -205,6 +229,29 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
       unwrap(
         await client.storage.from(bucket).upload(path, bytes, { contentType: 'image/png' }),
         'uploadScreenshot',
+      );
+      return path;
+    },
+
+    async uploadResume(applicationId, bytes) {
+      // Same path shape as the screenshot — user, application, timestamp — so
+      // one storage-policy rule covers both and the two artifacts of a single
+      // application sit under the same prefix.
+      //
+      // TIMESTAMPED RATHER THAN CONTENT-ADDRESSED. Naming the object after its
+      // sha256 would deduplicate identical renders, which sounds like a win and
+      // is the wrong trade here: two applications sending the identical resume
+      // to different employers would share one object, and deleting one row's
+      // artifact would silently remove the other's evidence of what it sent.
+      const path = `${config.userId}/${applicationId}/${Date.now()}.pdf`;
+      unwrap(
+        await client.storage
+          .from(resumeBucket)
+          // Declared explicitly: Supabase Storage infers from the extension but
+          // an object served as octet-stream downloads instead of previewing,
+          // and Teja opens these from the dashboard to check what went out.
+          .upload(path, bytes, { contentType: 'application/pdf' }),
+        'uploadResume',
       );
       return path;
     },

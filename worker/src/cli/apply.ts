@@ -9,6 +9,9 @@ import { chromium } from 'playwright';
 import { runApplierBatch } from '../claim-loop.ts';
 import { createSupabaseGateway, type SupabaseLike } from '../supabase-gateway.ts';
 import { createPlaywrightPage } from '../playwright-page.ts';
+// The resume renderer, which owns a page of its own — see resume-renderer.ts for
+// why it must never be handed one of the form pages.
+import { createResumeRenderer } from '../resume-renderer.ts';
 import { resolveSubmissionMode } from '../submission-mode.ts';
 
 /** Read a required environment variable or fail loudly at startup. */
@@ -89,10 +92,19 @@ async function main(): Promise<void> {
   // each and, far worse, tempt someone to split the loop into parallel jobs.
   const browser = await chromium.launch();
 
+  // Built from the browser rather than from a page, so the resume render can
+  // never land on the page holding an employer's half-filled form. Lazy inside:
+  // a run that renders nothing opens no page at all.
+  const resumeRenderer = createResumeRenderer(browser);
+
   try {
     const summary = await runApplierBatch({
       gateway,
       openPage: async () => createPlaywrightPage(await browser.newPage()),
+      // The wiring this whole change exists to add. Passing the bound method
+      // rather than the object keeps the loop's dependency a single function,
+      // so it cannot reach the renderer's page lifecycle.
+      renderResume: resumeRenderer.render,
       env: process.env,
       clock: () => Math.floor(Date.now() / 1000),
     });
@@ -115,8 +127,11 @@ async function main(): Promise<void> {
       );
     }
   } finally {
-    // Closed unconditionally: a leaked browser keeps the Actions job alive and
-    // billing until its timeout, against a budget billed in whole minutes.
+    // Closed before the browser, so the page is released by its owner rather
+    // than being torn down underneath it. Both are unconditional: a leaked
+    // browser keeps the Actions job alive and billing until its timeout,
+    // against a budget billed in whole minutes.
+    await resumeRenderer.close();
     await browser.close();
   }
 }

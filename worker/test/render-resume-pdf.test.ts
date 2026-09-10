@@ -20,6 +20,11 @@ import { afterAll, beforeAll, expect, test } from 'vitest';
 import { chromium, type Browser } from 'playwright';
 import { renderResumePdf } from '../src/render-resume-pdf.ts';
 import { extractPdfText } from '../src/ats-parse-check.ts';
+// The typed fixture. It replaces an inline literal that was cast past the
+// compiler with `as unknown as` and had drifted into a shape the renderer has
+// never accepted — which failed all three tests below at runtime while
+// `tsc --noEmit` and the workspace build both exited 0. See the fixture's header.
+import { syntheticResume } from './resolved-resume-fixture.ts';
 
 let browser: Browser;
 
@@ -31,41 +36,17 @@ afterAll(async () => {
   await browser?.close();
 });
 
-/**
- * The template package's own fixture, loaded through its public entry point
- * rather than deep-imported — the schema contract forbids reaching past a
- * package's single export, and a fixture is not part of that export. So the
- * resume is rebuilt here from the minimum the renderer requires.
- */
-const resume = {
-  fullName: 'Teja Mallam',
-  headline: 'Backend Engineer',
-  contact: {
-    email: 'tejamallam00@gmail.com',
-    phone: '+91 90000 00000',
-    location: 'Hyderabad, India',
-    links: [],
-  },
-  summary: null,
-  skillGroups: [
-    { label: 'Languages & Runtimes', skills: [{ ref: 's1', text: 'Node.js' }] },
-  ],
-  experience: [
-    {
-      ref: 'e1',
-      role: 'Backend Developer, College Event Portal',
-      organisation: 'MLR Institute of Technology',
-      location: 'Hyderabad, India',
-      startDate: 'Jan 2025',
-      endDate: 'Apr 2025',
-      bullets: [{ ref: 'b1', text: 'Designed and shipped a production REST API in Node.js/Express' }],
-    },
-  ],
-  projects: [],
-  education: [],
-} as unknown as Parameters<typeof renderResumePdf>[0]['resume'];
+// Named `resume` so the assertions below read unchanged, while the definition is
+// now checked against ResolvedResume instead of asserted past it.
+const resume = syntheticResume;
 
 test('renders a PDF whose text layer carries the resume content', async () => {
+  // THE NON-VACUITY TWIN for the schema guard asserted at the bottom of this
+  // file. Until now the only evidence about `schema_version` was that the
+  // renderer REJECTED an undefined one — and a guard that rejects everything is
+  // indistinguishable from a correct guard if rejection is all you ever measure.
+  // This test is the acceptance half: a snapshot declaring the supported version
+  // must render, all the way to real PDF bytes.
   const page = await browser.newPage();
   try {
     const result = await renderResumePdf({ resume, page });
@@ -79,7 +60,7 @@ test('renders a PDF whose text layer carries the resume content', async () => {
     // The content actually reaches the text layer — the §17.2 property, checked
     // on the artifact that would really be sent rather than on a fixture.
     const extracted = await extractPdfText(result.bytes);
-    expect(extracted.text).toContain('Teja Mallam');
+    expect(extracted.text).toContain('Ada Placeholder');
     expect(extracted.text).toContain('Node.js');
   } finally {
     await page.close();
@@ -123,6 +104,64 @@ test('produces identical bytes for identical input', async () => {
     const second = await renderResumePdf({ resume, page });
 
     expect(second.sha256).toBe(first.sha256);
+  } finally {
+    await page.close();
+  }
+}, 120_000);
+
+test('produces identical bytes across a wall-clock second boundary', async () => {
+  // THE DISCRIMINATING TEST, and the one nobody writes first. The test above
+  // renders twice back to back and PASSED against the unfixed renderer, because
+  // both renders landed inside the same wall-clock second and the only varying
+  // bytes were the SECONDS digits of `/CreationDate` and `/ModDate`. It could
+  // not tell a deterministic renderer from one whose output changes every
+  // second — and "every second" is indistinguishable from "always" once a run
+  // is spread over 35 applications.
+  //
+  // Measured, not theorised: two renders 1.5s apart differed in exactly 2 bytes
+  // at offsets 211 and 251, both inside those stamps, with total length
+  // identical at 77032. So the sleep is not padding — it is the entire
+  // experiment, and removing it silently removes the coverage.
+  const page = await browser.newPage();
+  try {
+    const first = await renderResumePdf({ resume, page });
+
+    // Long enough to guarantee a different second on any machine. A shorter
+    // wait would make this test itself intermittent, which is the failure it
+    // exists to detect.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+
+    const second = await renderResumePdf({ resume, page });
+
+    // Length first: if this ever fails while the digests differ, the cause is
+    // NOT the timestamp patch (which is same-length by construction) and the
+    // investigation should start somewhere else entirely.
+    expect(second.bytes.length).toBe(first.bytes.length);
+    expect(second.sha256).toBe(first.sha256);
+  } finally {
+    await page.close();
+  }
+}, 120_000);
+
+test('hands back a plain Uint8Array, not a Node Buffer', async () => {
+  // NOT PEDANTRY — this was a real failure. `page.pdf()` returns a Buffer, and
+  // `Buffer` is a Uint8Array subclass, so TypeScript accepted it everywhere and
+  // the port's `Uint8Array` type looked satisfied. pdfjs then rejected it at
+  // runtime with "Please provide binary data as `Uint8Array`, rather than
+  // `Buffer`" because it checks the CONSTRUCTOR rather than the prototype
+  // chain, which broke the ATS parse check on the artifact that would really be
+  // sent.
+  //
+  // The general shape is worth naming: a subclass satisfies the type system and
+  // fails a runtime brand check, so no amount of typechecking could have caught
+  // this. Only running it could.
+  const page = await browser.newPage();
+  try {
+    const result = await renderResumePdf({ resume, page });
+
+    // The exact assertion pdfjs makes, made here where the failure is
+    // attributable to the renderer instead of surfacing three layers away.
+    expect(result.bytes.constructor.name).toBe('Uint8Array');
   } finally {
     await page.close();
   }
