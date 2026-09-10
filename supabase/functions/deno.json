@@ -14,11 +14,11 @@
     "exactOptionalPropertyTypes": true
   },
 
-  "// exclude": "Test files are excluded from `deno check` because they import node:test, which pulls Node type-reference directives Deno cannot resolve. They are run by `node --test` instead — the pure functions are runtime-agnostic by design, so the runtime that executes the tests need not be the runtime that ships them.",
-  "exclude": ["**/*_test.ts"],
+  "// exclude": "Test files are excluded from `deno check` because they import node:test, which pulls Node type-reference directives Deno cannot resolve. They are run by `node --test` instead — the pure functions are runtime-agnostic by design, so the runtime that executes the tests need not be the runtime that ships them. RENAMED 2026-09-10 from *_test.ts to *.test.ts: the Deno convention advertised a Deno runner that this very exclude rules out, and `deno test` reported 'No test modules found'. The name now matches the runner that actually runs them. These globs are COUPLED to that name — change one and the other must follow, or deno check silently resumes checking files it cannot resolve.",
+  "exclude": ["**/*.test.ts"],
 
   "// lint": "Default rules are fine; the recommended set already covers the mistakes that matter here.",
   "lint": {
-    "exclude": ["**/*_test.ts"]
+    "exclude": ["**/*.test.ts"]
   }
 }
