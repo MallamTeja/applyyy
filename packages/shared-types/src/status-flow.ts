@@ -97,19 +97,19 @@ export const STATUS_TRANSITIONS: readonly StatusTransition[] = [
   { from: 'tailored', to: 'failed', allowedAgents: ['auditor', 'human'], note: 'Auditor could not run.' },
 
   // ---- Into the human queue -------------------------------------------------
-  { from: 'audit_clean', to: 'awaiting_approval', allowedAgents: ['auditor'], note: 'Bucket A — eligible for one-click batch approval.' },
-  { from: 'audit_flagged', to: 'awaiting_approval', allowedAgents: ['auditor'], note: 'Bucket B — individual review, never batch-approved.' },
-  { from: 'audit_flagged', to: 'tailored', allowedAgents: ['human'], note: 'Human edited the master or the selection and wants a re-tailor. Human-gated on purpose: an automated retry loop here would burn quota rewriting the same flagged bullet.' },
+  { from: 'audit_clean', to: 'awaiting_approval', allowedAgents: ['auditor'], note: 'Bucket A - eligible for one-click batch approval.' },
+  { from: 'audit_flagged', to: 'awaiting_approval', allowedAgents: ['auditor'], note: 'Bucket B - individual review, never batch-approved.' },
+  { from: 'audit_flagged', to: 'tailored', allowedAgents: ['human'], note: 'Human wants a re-tailor. HUMAN-ONLY: an automated retry loop here would burn quota rewriting the same flagged bullet.' },
 
   // ---- THE GATE. The only door to `applying` in the entire graph ------------
   { from: 'awaiting_approval', to: 'approved', allowedAgents: ['human'], note: 'CONSTRAINT 15. A human, and only a human, opens this door.' },
-  { from: 'awaiting_approval', to: 'dropped_filter', allowedAgents: ['human'], note: 'Human declined. drop_reason carries why; a human is the last filter in the cascade.' },
-  { from: 'approved', to: 'applying', allowedAgents: ['applier'], note: 'THE ONLY EDGE INTO `applying`. Everything upstream of this is reversible; nothing downstream is.' },
+  { from: 'awaiting_approval', to: 'dropped_filter', allowedAgents: ['human'], note: 'Human declined. A human is the last filter in the cascade.' },
+  { from: 'approved', to: 'applying', allowedAgents: ['applier'], note: 'THE ONLY EDGE INTO applying IN THE ENTIRE GRAPH. Everything upstream is reversible; nothing downstream is.' },
 
   // ---- Submission: the one non-idempotent leg ------------------------------
   { from: 'applying', to: 'applied', allowedAgents: ['applier'], note: 'Submission confirmed by the worker.' },
-  { from: 'applying', to: 'blocked_needs_human', allowedAgents: ['applier'], note: 'Captcha / MFA / anti-bot wall. Screenshot saved; a normal daily queue item, not a failure.' },
-  { from: 'applying', to: 'needs_verification', allowedAgents: ['sweeper', 'human'], note: 'SAFETY-CRITICAL. A stale `applying` lease means the worker died mid-submit and we do not know whether it landed. The sweeper routes here and NEVER back to the queue — a blind retry is how you submit twice and violate constraint 7.' },
+  { from: 'applying', to: 'blocked_needs_human', allowedAgents: ['applier'], note: 'Captcha, MFA, or an unanswerable question. block_reason says which. A normal daily queue item, not a failure.' },
+  { from: 'applying', to: 'needs_verification', allowedAgents: ['sweeper', 'human'], note: 'SAFETY-CRITICAL. A stale applying lease means the worker died mid-submit and nobody knows if it landed. Routes here, NEVER back to the queue - a blind retry is how you submit twice and violate constraint 7. `human` is included so a person can still resolve the row when the sweeper itself is not running, which section 14 says is a thing that happens silently.' },
   { from: 'applying', to: 'failed', allowedAgents: ['applier'], note: 'Worker positively established the submit did not happen.' },
 
   // ---- Post-apply, driven by the email Tracker -----------------------------
@@ -128,12 +128,12 @@ export const STATUS_TRANSITIONS: readonly StatusTransition[] = [
 
   // ---- Human-only recovery lanes -------------------------------------------
   { from: 'needs_verification', to: 'applied', allowedAgents: ['human'], note: 'Human checked the employer portal: it did go through.' },
-  { from: 'needs_verification', to: 'approved', allowedAgents: ['human'], note: 'Human checked: it did NOT go through, so a resubmit is safe. HUMAN-ONLY BY DESIGN — this is the only way a row re-enters the submit path, and a machine must never decide that a possibly-submitted application was not submitted.' },
+  { from: 'needs_verification', to: 'approved', allowedAgents: ['human'], note: 'Human checked: it did NOT go through, so a resubmit is safe. HUMAN-ONLY BY DESIGN - the only way a row re-enters the submit path, and a machine must never decide that a possibly-submitted application was not submitted.' },
   { from: 'needs_verification', to: 'failed', allowedAgents: ['human'], note: 'Human gave up on this one.' },
   { from: 'blocked_needs_human', to: 'applied', allowedAgents: ['human'], note: 'Human finished the submission by hand.' },
   { from: 'blocked_needs_human', to: 'dropped_filter', allowedAgents: ['human'], note: 'Human decided it was not worth finishing.' },
   { from: 'blocked_needs_human', to: 'failed', allowedAgents: ['human'], note: 'Human could not complete it either.' },
-  { from: 'failed', to: 'needs_verification', allowedAgents: ['human'], note: 'The ONLY edge out of `failed`, and it leads to verification rather than to the queue. A row that failed somewhere near the submit boundary must be checked by a person before it can move again.' },
+  { from: 'failed', to: 'needs_verification', allowedAgents: ['human'], note: 'The ONLY edge out of failed, and it leads to verification rather than to the queue. A row that failed near the submit boundary must be checked by a person before it can move again.' },
 ] as const;
 
 /**

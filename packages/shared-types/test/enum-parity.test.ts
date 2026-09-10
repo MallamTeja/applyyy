@@ -61,6 +61,10 @@ const NOT_ENUM_MIRRORS = new Set<string>([
   // `create type` to match. See the long note in enums.ts for why merging them into
   // BLOCK_REASONS would mean one enum typing two different granularities.
   'ANSWER_BLOCK_REASONS',
+  // Auditor finding kinds, incl. `misattributed_bullet`. TS-only for the same reason:
+  // they discriminate one element of the applications.audit_findings jsonb ARRAY, and
+  // a row-level enum column cannot type a per-element field.
+  'AUDIT_FINDING_KINDS',
 ]);
 
 /** Every migration file, concatenated. Order is irrelevant: these are declarations, not a replay. */
@@ -215,12 +219,16 @@ test('status graph parity — the TS mirror matches the transitions seeded into 
   // reaches the user). Both are silent without this test.
   const seeded = [
     ...MIGRATION_SQL.matchAll(
-      /\(\s*'(\w+)'\s*,\s*'(\w+)'\s*,\s*array\[([^\]]*)\]::public\.agent_name\[\]/gi,
+      // The trailing group captures the `note`, with '' unescaped to a literal quote —
+      // note text is user-visible (see the note-parity subtest below), so it is part of
+      // the contract rather than a comment.
+      /\(\s*'(\w+)'\s*,\s*'(\w+)'\s*,\s*array\[([^\]]*)\]::public\.agent_name\[\]\s*,\s*'((?:[^']|'')*)'\s*\)/gi,
     ),
   ].map((m) => ({
     from: m[1]!,
     to: m[2]!,
     agents: [...m[3]!.matchAll(/'([^']*)'/g)].map((a) => a[1]!),
+    note: m[4]!.replace(/''/g, "'"),
   }));
 
   assert.ok(seeded.length > 0, 'parsed zero seeded transitions — has the guard migration changed shape?');
@@ -251,6 +259,75 @@ test('status graph parity — the TS mirror matches the transitions seeded into 
         `allowed agents differ for ${key(edge)}`,
       );
     }
+  });
+
+  await t.test('every edge `note` is identical on both sides', () => {
+    // `note` is `text not null` and the frontend renders it, so these are strings a
+    // USER can read: two versions means the UI and the database disagree about what a
+    // transition means. SQL is the authority here precisely because the UI reads the
+    // column, so TS converges on it — 9 of 44 differed on 2026-09-10 (4 punctuation,
+    // 5 substantive) and were synced onto the SQL text.
+    const seededNotes = new Map(seeded.map((s) => [key(s), s.note]));
+    for (const edge of mirror) {
+      assert.equal(
+        edge.note,
+        seededNotes.get(key(edge)),
+        `note text differs for ${key(edge)}. SQL is the source of truth for notes because ` +
+          `the frontend renders application_status_transitions.note; change the migration first, then sync here.`,
+      );
+    }
+  });
+
+  await t.test('every edge into `approved` is human-only', () => {
+    // THE CORRECTED INVARIANT, 2026-09-10. Three places used to assert that
+    // `awaiting_approval -> approved` was the ONLY edge into `approved`. It is not:
+    // `needs_verification -> approved` is a second one. The safety property survives
+    // because BOTH are ['human'] — so this is the true statement, and it is strictly
+    // stronger than the false one, since it keeps holding if a third in-edge is added.
+    //
+    // Asserted rather than commented because the false version was asserted in prose
+    // in three places and stayed wrong: prose does not fail.
+    const intoApproved = seeded.filter((s) => s.to === 'approved');
+    assert.ok(intoApproved.length > 0, 'no edges into `approved` found — the graph cannot be right');
+    for (const edge of intoApproved) {
+      assert.deepEqual(
+        edge.agents,
+        ['human'],
+        `${key(edge)} is an edge into \`approved\` that a machine can walk. Constraint 15 requires ` +
+          `every route into the submit path to be opened by a person.`,
+      );
+    }
+  });
+
+  await t.test('exactly one backward edge is machine-walkable, and it is `interview -> oa_pending`', () => {
+    // "Backward" is defined by APPLICATION_STATUSES declaration order, which is
+    // pipeline order (and Postgres's sort order for the enum). Six comments across the
+    // repo claimed there are NO backward edges; there are seven, and they are the
+    // recovery lanes. The property actually worth protecting is that all but one are
+    // human-only — a reader who believes "no backward edges" concludes the actor check
+    // on reverse moves is redundant, and it is the whole safety property.
+    const rank = new Map(contract.APPLICATION_STATUSES.map((s, i) => [s as string, i]));
+    const backward = seeded.filter((s) => rank.get(s.to)! < rank.get(s.from)!);
+
+    assert.equal(backward.length, 7, `expected 7 backward edges, found ${backward.length}: ${backward.map(key).join(', ')}`);
+
+    const machineWalkable = backward.filter((s) => s.agents.some((a) => a !== 'human'));
+    assert.deepEqual(
+      machineWalkable.map((s) => `${key(s)} by ${s.agents.join('/')}`),
+      ['interview -> oa_pending by tracker/human'],
+      'the set of backward edges an automated agent may walk has changed. Every reverse move except ' +
+        'the multi-round interview loop must be human-only.',
+    );
+  });
+
+  await t.test('TERMINAL_STATUSES is exactly the set of statuses with no outgoing edge in SQL', () => {
+    // TERMINAL_STATUSES is now derived from STATUS_TRANSITIONS in status-flow.ts, so
+    // this checks it against the OTHER side — the seeded SQL — which is the half that
+    // derivation alone cannot guarantee. `failed` must NOT appear: it looks terminal
+    // but `failed -> needs_verification` exists.
+    const hasOutgoing = new Set(seeded.map((s) => s.from));
+    const expected = contract.APPLICATION_STATUSES.filter((s) => !hasOutgoing.has(s));
+    assert.deepEqual([...contract.TERMINAL_STATUSES], [...expected]);
   });
 
   await t.test('`applying` has exactly one edge into it, and it comes from `approved`', () => {

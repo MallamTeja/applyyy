@@ -1,26 +1,30 @@
 /**
  * applyy — Postgres enum mirrors.
  *
- * Every export here is intended as the TypeScript twin of a `CREATE TYPE ... AS ENUM`
- * in supabase/migrations. STATE OF THAT CLAIM, 2026-09-10 — read it before relying on
- * it, because "twin" is two separate assertions and only one of them is settled:
+ * Every export here is the TypeScript twin of a `CREATE TYPE ... AS ENUM` in
+ * supabase/migrations. Both halves of that claim are now verified — and they are two
+ * separate claims, which is why they are stated separately:
  *
- *   1. MIRRORS THE MIGRATION SOURCE — VERIFIED, and verified continuously. Every tuple
- *      below matches its `create type` in 20260909234500_enums.sql by value AND by
- *      declaration order. Order matters as much as membership: Postgres sorts an enum
- *      by declaration order, so `ORDER BY status` is only pipeline order if these two
+ *   1. MIRRORS THE MIGRATION SOURCE — verified continuously. Every tuple below matches
+ *      its `create type` in 20260909234500_enums.sql by value AND by declaration
+ *      order. Order matters as much as membership: Postgres sorts an enum by
+ *      declaration order, so `ORDER BY status` is only pipeline order if these two
  *      agree. Proven by `test/enum-parity.test.ts`, which parses the migration and
  *      diffs it against this file — so this paragraph cannot quietly go stale.
- *   2. THE MIGRATION LOADS INTO POSTGRES — NOT YET TRUE. As of 2026-09-10 the SQL has
- *      never been executed anywhere: no local `supabase start`, no remote push (gated
- *      on Teja, constraint: no remote infrastructure). So nothing has confirmed that
- *      Postgres ACCEPTS these declarations. A typo in the SQL would be invisible to
- *      the parity test, which reads the file rather than the database.
+ *   2. THE MIGRATION LOADS INTO POSTGRES — verified 2026-09-10 by applyyy-8c: all 7
+ *      migrations apply cleanly to a LOCAL Postgres 17.6, 15/15 tables present, all 7
+ *      RPCs present, 44 transition edges seeded. It took a fix to get there (a partial
+ *      index whose predicate called `now()` was rejected as not IMMUTABLE, which had
+ *      been aborting the run at file 4 of 7 and leaving the guard, the RLS policies and
+ *      the RPCs unexecuted).
  *
- * Consequence for a consumer: import these freely — they are the agreed vocabulary
- * and four streams already build on them. Just do not read a comment here as evidence
- * that a database exists. When applyyy-8c reports the migrations executing, assertion
- * 2 becomes true and this block should shrink to one sentence.
+ * TWO LIMITS ON "VERIFIED", because a general claim here would mislead later:
+ *   - LOCAL ONLY. There is no remote database and no `supabase link` state on disk.
+ *     Never describe the hosted project as migrated.
+ *   - The verifying role had `rolbypassrls=TRUE`. The `SECURITY DEFINER` audit trigger
+ *     did write its witness row through FORCE RLS, but it did so BECAUSE of BYPASSRLS —
+ *     FORCE RLS does not exempt table owners. So "the audit trigger works" holds for
+ *     that deployment and is unproven for a plain-owner one.
  *
  * The pattern throughout is: a `const` tuple (runtime value, iterable, usable to build
  * a dropdown or to validate an untrusted string) plus a union type derived from it with
@@ -67,16 +71,22 @@ export const APPLICATION_STATUSES = [
   /**
    * A human said yes. The ONLY status from which `applying` is reachable.
    *
-   * WHERE THAT IS ENFORCED, 2026-09-10 — the distinction is safety-relevant, so it is
-   * spelled out rather than implied. The single-door property is DECLARED twice: in
-   * `application_status_transitions` + its BEFORE UPDATE trigger
-   * (20260909234900_status_transition_guard.sql) and in status-flow.ts. Only the
-   * second is currently RUNNING, because the migration has not been executed. A
-   * client-side mirror is advisory: today a buggy agent that writes `applying`
-   * directly would succeed, and constraint 15 rests on code review plus this comment
-   * rather than on Postgres refusing the write. Executing the migration is what turns
-   * "by convention" into "by the transition table" — until then, do not describe the
-   * gate as unbypassable.
+   * ENFORCED BY THE TRANSITION TABLE, not by convention — and that is now verified
+   * against a running Postgres rather than asserted. applyyy-8c confirmed on
+   * 2026-09-10 that `approved → applying` is the ONLY row in
+   * `application_status_transitions` whose `to_status` is `applying`, with
+   * `allowed_agents = {applier}`, and that the BEFORE UPDATE guard rejects the illegal
+   * jump with `illegal status transition tailored -> applying`.
+   *
+   * The control is what makes that evidence worth anything: the legal
+   * `approved → applying` move with the same agent SUCCEEDED and set
+   * `previous_status = approved`. So the guard is discriminating between edges, not
+   * blanket-refusing writes — which a test that only checked the rejection could not
+   * have distinguished.
+   *
+   * Constraint 15 is therefore unreachable-by-construction: no second door into
+   * `applying` exists to be reached by a buggy agent. Local database only — there is no
+   * remote deployment yet.
    */
   'approved',
   /** The worker has begun submitting. THE ONE NON-IDEMPOTENT STATE — see NON_RETRYABLE_STATUSES below. */
@@ -291,14 +301,20 @@ export const APPLICATION_EVENT_TYPES = [
   /**
    * Logged on every status change.
    *
-   * INTENDED to be written by a trigger, so that no agent can forget to log one —
-   * that trigger is written (20260909234900_status_transition_guard.sql) but has
-   * never run, so as of 2026-09-10 an agent CAN forget. Write the event explicitly
-   * (or go through the `advance_application_status` RPC, which does both in one
-   * transaction) until applyyy-8c reports the migration loading; then the automatic
-   * write becomes real and a hand-written event becomes a duplicate. Both halves of
-   * that sentence matter: the trigger's absence is a gap now, and its arrival is a
-   * behaviour change to code written against the gap.
+   * Written automatically by a trigger on every status change, so no agent can forget
+   * to log one. The trigger is live as of 2026-09-10 (verified locally: it wrote its
+   * witness row into `application_events` during 8c's guard test).
+   *
+   * SO DO NOT ALSO WRITE ONE BY HAND — a manual insert alongside the trigger is a
+   * duplicate event, not a belt-and-braces safeguard. Use
+   * `advance_application_status`, which moves the row, writes the event and releases
+   * the claim in one transaction.
+   *
+   * One caveat on the verification, because stating it generally would overclaim: the
+   * trigger is `SECURITY DEFINER` and the role that proved it had `rolbypassrls=TRUE`.
+   * FORCE RLS does not exempt table owners, so the write succeeded because of BYPASSRLS
+   * rather than because FORCE RLS permits it. On a plain-owner deployment this is
+   * unproven and should be re-tested before anyone relies on it.
    */
   'status_change',
   'claim',
@@ -406,6 +422,67 @@ export const ANSWER_BLOCK_REASONS = [
 ] as const;
 /** Union of every legal per-field answer-block reason. Carried inside `block_detail`, never in a column. */
 export type AnswerBlockReason = (typeof ANSWER_BLOCK_REASONS)[number];
+
+/**
+ * WHAT KIND of untraceable claim the Auditor found. Carried inside
+ * `applications.audit_findings` (jsonb), so TS-only by design — same granularity
+ * argument as ANSWER_BLOCK_REASONS: this describes one finding, not the whole row.
+ *
+ * WHY A KIND IS NEEDED AT ALL. `AuditFinding` used to be `{path, claim, reason,
+ * confidence}` with no discriminant, which collapsed two questions a human reviewer
+ * must answer differently:
+ *
+ *   "Did I do this at all?"        -> the model invented something. Reject it.
+ *   "Did I do this at THAT job?"   -> every fact is true; the ATTRIBUTION is false.
+ *
+ * The second is the dangerous one and the reason this enum exists. See
+ * `misattributed_bullet` below.
+ */
+export const AUDIT_FINDING_KINDS = [
+  /**
+   * A ref that resolves to nothing in the pinned master version. The model invented an
+   * id. Caught by the validator BEFORE the Auditor runs, so a finding of this kind in
+   * production means the validator was bypassed — treat it as a bug, not a review item.
+   */
+  'unresolved_ref',
+  /**
+   * THE QUIET ONE. A ref that genuinely exists, nested under the WRONG PARENT: a bullet
+   * that really belongs to a personal project, emitted under a named employer.
+   *
+   * Every individual claim survives a fact-check. The work happened, the numbers are
+   * real, the wording is faithful — and the resume now credits a personal project to an
+   * employer. This is FABRICATED EXPERIENCE ASSEMBLED ENTIRELY OUT OF TRUE PARTS, which
+   * is why line-by-line tracing passes it and why existence-only ref checking cannot
+   * see it: the fabrication is in the STRUCTURE, not in any string.
+   *
+   * It needs its own kind because the fix differs. `unresolved_ref` means the model is
+   * INVENTING and the answer is to reject the output. This means the model is
+   * REASSEMBLING TRUTH, and the answer is to re-parent the bullet. Same severity in the
+   * interview room, opposite remedies.
+   *
+   * Findings of this kind MUST name both parents — see the discriminated union in
+   * tables.ts, which makes a nameless misattribution unrepresentable rather than merely
+   * discouraged.
+   */
+  'misattributed_bullet',
+  /**
+   * The ref resolves, the parent is right, but the rewording asserts something the
+   * master text does not support — scope inflation ("led" for "contributed to"), a
+   * number that grew, a technology swapped for the one the JD asked for.
+   */
+  'unfaithful_rewording',
+  /**
+   * The summary's prose is not supported by the master nodes it declared in `refs`.
+   * Prose cannot be constrained by refs the way a bullet can, which profile-nodes.ts
+   * names as the weakest point in the whole design — so this kind is expected to fire
+   * more often than the others and must never be auto-cleared.
+   */
+  'summary_unsupported',
+  /** Anything the Auditor could not classify. `reason` carries the detail. */
+  'other',
+] as const;
+/** Union of every legal `AuditFinding.kind`. Lives inside `audit_findings` jsonb, never in a column. */
+export type AuditFindingKind = (typeof AUDIT_FINDING_KINDS)[number];
 
 /**
  * The golden eval set's verdict — `matcher_eval_cases.label`.

@@ -1,11 +1,19 @@
 /**
  * applyy — row shapes for every table, plus the signatures of the SQL functions.
  *
- * Hand-written rather than produced by `supabase gen types typescript`, because the
- * remote project has not been migrated yet (pushing to it is gated on Teja's explicit
- * approval) and four peers are blocked on the contract right now. Once the migrations
- * land, generated types become the CHECK on this file rather than a replacement for
- * it: this file carries the comments, the generated one carries the proof.
+ * Hand-written rather than produced by `supabase gen types typescript`. The reason has
+ * NARROWED as of 2026-09-10 and is worth keeping accurate: the migrations now apply
+ * cleanly to a LOCAL Postgres 17.6, but no remote project has been migrated (that is
+ * gated on Teja's explicit approval, and there is no `supabase link` state on disk).
+ *
+ * So generating types is now POSSIBLE locally and remains the right next step: run it
+ * and use the output as the CHECK on this file, not as a replacement for it. This file
+ * carries the comments and the reasoning; the generated one carries column-level proof
+ * that no hand-written shape can give. `test/enum-parity.test.ts` already covers enum
+ * values, enum ORDER, table presence and the whole 44-edge status graph — what it
+ * cannot cover is per-column types and nullability, because an `interface` is erased at
+ * runtime and the test only reads this file as text. That gap is exactly what generated
+ * types would close.
  *
  * Conventions used throughout, so you can predict a shape you have not read yet:
  *   - `<Table>Row`    — exactly what a SELECT returns.
@@ -26,7 +34,9 @@ import type {
   AnswerType,
   ApplicationEventType,
   ApplicationStatus,
+  AnswerBlockReason,
   AtsProvider,
+  AuditFindingKind,
   BlocklistReason,
   BlockReason,
   DiscoverySource,
@@ -291,9 +301,53 @@ export type JobUpdate = Partial<Omit<JobInsert, 'user_id' | 'fingerprint'>>;
 // applications — the queue. `status` IS the workflow.
 // ---------------------------------------------------------------------------
 
-/** One flagged claim from the Auditor: a tailored line that traced back to nothing. */
-export interface AuditFinding {
-  /** Where in the tailored profile the claim appears. */
+/** One form field the Applier refused to fill, and which kind of refusal it was. */
+export interface BlockedField {
+  /** The normalised question key, so the dashboard can join to `answer_bank`. */
+  question_key: string;
+  /** UNTRUSTED — the question text as scraped from the ATS page DOM. Display escaped. */
+  question_text: Untrusted;
+  /**
+   * WHICH KIND of unanswerable. This is the sub-kind that `block_reason` alone cannot
+   * express: the row-level reason is always `unanswerable_question`, while the three
+   * values here drive three different operator actions AND three different answer-bank
+   * effects (insert / update / never write). See ANSWER_BLOCK_REASONS in enums.ts.
+   */
+  reason: AnswerBlockReason;
+}
+
+/**
+ * The structured payload of `applications.block_detail` (jsonb).
+ *
+ * ADDED 2026-09-10. The column was typed `Json`, which is the same as untyped: a
+ * consumer learned nothing about what is legal inside it, and applyyy-20 reported that
+ * the UI could not distinguish "no answer stored" from "uncertain match" from "refused
+ * on principle" — three states that need three different operator actions, with only
+ * `question_key` available to go on.
+ *
+ * WHY THE SUB-KIND LIVES HERE AND NOT IN `BLOCK_REASONS`: granularity. One page-level
+ * wall (captcha, MFA) blocks a row with no field attached; one row can be blocked by
+ * SEVERAL unanswerable fields at once. A row-level enum column cannot carry a per-field
+ * list, so inflating `BLOCK_REASONS` with answer sub-kinds would put values in a column
+ * that can only ever describe one of them. `fields` is an ARRAY for exactly that
+ * reason — the Applier surfaces every blocking question at once, so the human answers
+ * them in one pass instead of unblocking, re-running, and blocking again on the next.
+ *
+ * Every property is optional because the column defaults to `'{}'` and a page-level
+ * block legitimately carries no fields at all.
+ */
+export interface BlockDetail {
+  /** Every required question that stopped this application. Empty or absent for a page-level wall. */
+  fields?: BlockedField[];
+  /** Storage path of the screenshot taken at the wall. Constraint 5: we record, never circumvent. */
+  screenshot_storage_path?: string;
+  /** UNTRUSTED — free-text context from the page, e.g. the challenge's own message. */
+  detail?: Untrusted;
+}
+
+/** Fields every Auditor finding carries, whatever kind it is. */
+interface AuditFindingBase {
+  /** Where in the tailored profile the claim appears, e.g. `experience[1].bullets[0]`. */
   path: string;
   /** The claim itself, quoted so the human reviewer sees exactly what was written. */
   claim: string;
@@ -302,6 +356,61 @@ export interface AuditFinding {
   /** Auditor's confidence, 0..1. Advisory only — a flag is a flag regardless. */
   confidence: number | null;
 }
+
+/**
+ * A misattribution: the referenced node is REAL but sits under a different parent in
+ * the master than the one it was rendered under.
+ *
+ * Split out as its own member because it is the only kind that needs to name two
+ * parents, and because a discriminated union makes a NAMELESS misattribution
+ * unrepresentable. An optional `claimed_parent?` would have let the Auditor emit
+ * `kind: 'misattributed_bullet'` with both parents missing — which is the one finding
+ * where the reviewer cannot act without them, since the whole question is "under which
+ * employer did this appear, and where does it actually belong". Making the fields
+ * required is the same move as `TailoredBullet.ref` being non-optional: the wrong
+ * output has no shape to occupy.
+ */
+export interface MisattributedBulletFinding extends AuditFindingBase {
+  kind: 'misattributed_bullet';
+  /** The master bullet id that was referenced. Mirrors `TailorViolation.ref`. */
+  ref: NodeId;
+  /**
+   * The parent it was rendered UNDER — the false attribution, e.g. `exp-eventportal`.
+   * This is the validator's `TailorViolation.parentRef`, renamed at the storage
+   * boundary because a bare `parentRef` does not say WHICH parent it means, and this
+   * shape has to carry both.
+   */
+  claimed_parent_ref: NodeId;
+  /**
+   * The parent it ACTUALLY belongs to in the master, e.g. `proj-portfolio`. The
+   * validator has this at the point of detection (`found.parentRef`) but its violation
+   * type does not carry it — so it must be captured here or the reviewer is told a
+   * bullet is mis-filed without being told where it belongs.
+   */
+  actual_parent_ref: NodeId;
+}
+
+/** Every other kind of finding: one path, one claim, one reason. */
+export interface GenericAuditFinding extends AuditFindingBase {
+  kind: Exclude<AuditFindingKind, 'misattributed_bullet'>;
+}
+
+/**
+ * One flagged claim from the Auditor. DISCRIMINATED ON `kind` (added 2026-09-10).
+ *
+ * This was previously a single flat shape with no `kind`, which meant the approval diff
+ * could not distinguish the two questions a reviewer has to answer differently:
+ * "did I do this at all?" versus "did I do this at THAT job?". The second is
+ * `misattributed_bullet` — every individual fact true, the attribution false — so it is
+ * the finding that line-by-line tracing PASSES. It is quiet in the data and therefore
+ * has to be loud in the UI, and it could not be loud while it was indistinguishable
+ * from an ordinary flag.
+ *
+ * Switch on `kind` exhaustively: `noFallthroughCasesInSwitch` and the union together
+ * turn a newly added kind into a compile error at every consumer, which is what stops
+ * a new finding type from being silently rendered as "other".
+ */
+export type AuditFinding = MisattributedBulletFinding | GenericAuditFinding;
 
 /**
  * Your application to a job. Separate from `jobs` so one posting has one application
@@ -376,7 +485,8 @@ export interface ApplicationRow {
    */
   block_reason: BlockReason | null;
   /** Structured context. For `unanswerable_question` it carries `{question_key}`. */
-  block_detail: Json;
+  /** Structured context for the block: which fields, which sub-kind, the screenshot. See BlockDetail. */
+  block_detail: BlockDetail;
   /** How many times an agent has retried this row. Retries never cross the `applying` boundary. */
   retry_count: number;
   /** Lease-based claiming: when the current claim was taken. NULL means unclaimed. */

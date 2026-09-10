@@ -152,12 +152,35 @@ Two values differ from PROJECT_PLAN §9, renamed before any code existed:
 
 ### The structural payoff — the reason the guard table earns its keep
 
-> `awaiting_approval → approved` is the only edge into `approved`, and
-> `approved → applying` is the only edge into `applying` in the entire graph.
+> **Every edge into `approved` is `['human']`-only**, and `approved → applying` is the
+> only edge into `applying` in the entire graph.
 > **Constraint #15 is therefore unreachable-by-construction rather than
 > enforced-by-review.**
 
-No bug in any agent can skip the human approval gate, because there is no other door.
+No bug in any agent can skip the human approval gate, because there is no other door
+into `applying`, and no automated actor can open the door into `approved`.
+
+**Corrected 2026-09-10.** This block previously read "`awaiting_approval → approved` is
+the only edge into `approved`". That was false: there are **two** in-edges,
+`awaiting_approval → approved` and `needs_verification → approved` (the latter is listed
+in the human-only table 15 lines below, so the document contradicted itself). The
+safety property was never in danger — both are `['human']` — but the *stated* reason for
+it was wrong, and a reader who checked the graph would have found the document unreliable
+exactly where it is most load-bearing.
+
+The replacement wording is **strictly stronger**: "the only edge" breaks the moment a
+second recovery lane is added, whereas "every edge into `approved` is human-only" keeps
+holding. Both facts are now asserted in `test/enum-parity.test.ts` against the seeded
+SQL, so the next person to add an in-edge gets a failing test rather than a stale
+sentence.
+
+Verified against a running Postgres on 2026-09-10, not merely read off the seed:
+`approved → applying` is the only row with `to_status = 'applying'`
+(`allowed_agents = {applier}`), the guard rejects `tailored → applying` with
+`illegal status transition`, and — the control that makes that meaningful — the legal
+`approved → applying` move with the same agent **succeeded** and set
+`previous_status = approved`. The guard discriminates between edges rather than
+blanket-refusing writes.
 
 ### The human-only lanes
 
@@ -186,7 +209,7 @@ for a safety-critical shared edge is missing.
 without a matching UI control should surface as a visible defect, not as rows silently
 stalling.
 
-### There are no backward edges
+### There is no backward edge on the automated forward path
 
 PROJECT_PLAN §6 says an agent that finds every Gemini key cooling "returns the row to
 its prior status". **That rollback does not exist, and must not be built.** Claiming
@@ -194,8 +217,31 @@ sets `claimed_by` / `claim_expires_at` and does *not* advance `status`, so a row
 worked on never left the status it was in. An agent that cannot get a key calls
 `release_application_claim()`; the row is picked up next run.
 
-Deleting the rollback rather than authorising it means the graph has no backward path
-for a bug to wander down.
+**Corrected 2026-09-10 — this section used to be titled "There are no backward edges",
+and that is false.** Seven backward edges exist, deliberately; they are the recovery
+lanes. Ordered by `application_status` declaration order:
+
+| Backward edge | Allowed agents |
+|---|---|
+| `audit_flagged → tailored` | `['human']` |
+| `interview → oa_pending` | **`['tracker', 'human']`** |
+| `blocked_needs_human → applied` | `['human']` |
+| `blocked_needs_human → dropped_filter` | `['human']` |
+| `needs_verification → applied` | `['human']` |
+| `needs_verification → approved` | `['human']` |
+| `failed → needs_verification` | `['human']` |
+
+The true statement, and the one the old wording was reaching for: **no backward edge
+exists on the automated forward path, and every backward edge except one is
+human-only.** The exception is `interview → oa_pending` — **the one reverse edge a
+machine can walk** — because a multi-round loop legitimately sends a further assessment
+after an interview.
+
+Why the precision earns its space: a reader who believes "zero backward edges"
+concludes the actor check on reverse moves is redundant and skips it. It is not
+redundant. It is the entire safety property, and it is doing real work on exactly one
+edge. Both facts — the count of seven and the single machine-walkable exception — are
+now asserted in `test/enum-parity.test.ts`.
 
 ---
 
@@ -219,7 +265,68 @@ Read §11 as the design brief that *motivated* this schema, not as a live scenar
    design.** Mitigations: `refs` must be non-empty, and the Auditor gates summaries
    even though §18.8 exempts cover letters from human approval.
 
-Both surface as `AuditFinding { path, claim, reason, confidence }`.
+3. **`TailoredExperience.bullets[].ref` pointing at a real bullet from the WRONG
+   PARENT.** See the next subsection — this one is invisible to a fact-check and was
+   not previously written down anywhere.
+
+All three surface as `AuditFinding`, which is a **discriminated union on `kind`** as of
+2026-09-10 (it was a single flat shape, which is why vector 3 had nowhere to live):
+
+```ts
+type AuditFinding = MisattributedBulletFinding | GenericAuditFinding;
+// kind: 'unresolved_ref' | 'misattributed_bullet' | 'unfaithful_rewording'
+//     | 'summary_unsupported' | 'other'
+```
+
+`AUDIT_FINDING_KINDS` is TypeScript-only: it discriminates one element of the
+`applications.audit_findings` jsonb **array**, and a row-level enum column cannot type a
+per-element field. Switch on `kind` exhaustively — with `noFallthroughCasesInSwitch`, a
+newly added kind becomes a compile error at every consumer instead of being silently
+rendered as "other".
+
+### A ref is only valid inside its correct PARENT — not merely existent
+
+**THE RULE: validating a ref means checking it resolves *under the node it was emitted
+under*, not that it exists somewhere in the master.** Existence-only checking passes an
+attack that a fact-check also passes.
+
+The attack, concretely. A bullet that genuinely belongs to `proj-portfolio` is emitted
+by the model inside `TailoredExperience { ref: 'exp-eventportal', bullets: [...] }`:
+
+- the bullet id **exists** in the master → every existence check passes
+- the wording is **faithful** to the master text → the rewording check passes
+- the numbers are **real**, the work **happened** → a line-by-line human fact-check
+  passes, and the candidate can talk about it for ten minutes
+
+…and the resume now credits personal-project work to a named employer. This is
+**fabricated experience assembled entirely out of true parts**: every individual claim
+survives verification, and the fabrication lives in the *structure* rather than in any
+string. Nothing that inspects claims one at a time can see it.
+
+It is `misattributed_bullet` and **not** `unresolved_ref`, because the two have
+different fixes:
+
+| Finding | What the model did | The fix |
+|---|---|---|
+| `unresolved_ref` | **invented** an id | reject the output |
+| `misattributed_bullet` | **reassembled truth** | re-parent the bullet |
+
+Same severity in an interview room; opposite remedies. Collapsing them would tell a
+reviewer to throw away output that is entirely true and merely mis-filed.
+
+**Why this is written down here:** the nested shape of `TailoredExperience` /
+`TailoredProject` is what made the attack *visible* — a flat list of bullets could not
+express a parent, so it could not express a wrong one either. The next person to write a
+validator will otherwise implement `masterBulletIds.has(ref)`, which is the obvious
+implementation, is what the type system alone appears to ask for, and silently reopens
+this hole. The type guarantees a real bullet is being referenced; **only the validator
+can guarantee it is being referenced from the right place.**
+
+`MisattributedBulletFinding` requires both `claimed_parent` and `actual_parent` — not
+optional fields. A misattribution with no parents named is unactionable, since the whole
+question is "under which employer did this appear, and where does it belong", so the
+union makes a nameless one unrepresentable rather than merely discouraged. Same move as
+`ref` being non-optional.
 
 ### Three types, three stages, one direction
 
@@ -262,7 +369,10 @@ quietly reopen the hole while every test still passed.
 const { data: run } = await sb.from('agent_runs').insert({ agent: 'matcher' }).select().single();
 
 // 2. Sweep first. Cheap, and it makes a crashed peer self-heal.
-await sb.rpc('sweep_stale_claims');
+//    `returns table (...)` so this resolves to an ARRAY, even though it can only ever
+//    yield one row. `data.released_count` is undefined; `data[0]` is the row.
+const { data: sweptRows } = await sb.rpc('sweep_stale_claims');
+const swept = sweptRows?.[0];
 
 // 3. Claim. Returns [] when the kill switch is off — that is not an error.
 const { data: rows } = await sb.rpc('claim_applications', {
@@ -272,7 +382,13 @@ const { data: rows } = await sb.rpc('claim_applications', {
 });
 
 for (const row of rows) {
-  const keyIndex = await sb.rpc('claim_gemini_key');
+  // DESTRUCTURE `data`. `sb.rpc()` resolves to { data, error }, never to the value —
+  // and because `claim_gemini_key` returns `smallint`, `data` IS the index (a bare
+  // number), not `{ key_index }`. Getting either half wrong fails silently: the
+  // `=== null` guard below can never match an object, so the agent would sail past
+  // quota exhaustion and pass garbage to report_gemini_result.
+  const { data: keyIndex, error: keyError } = await sb.rpc('claim_gemini_key');
+  if (keyError) throw keyError;
 
   // 4. NULL means no key: all cooling, or the daily budget is spent.
   //    QUOTA EXHAUSTION IS NOT AN ERROR. Give the row back untouched.
@@ -415,6 +531,67 @@ free text, because the UI branches on it and free text is how you get three spel
 of one reason. It is **kept** after the block is resolved — that history is what the
 health page wants.
 
+#### Two reason vocabularies, at two granularities. Do not merge them.
+
+Added 2026-09-10 because the overlap looks like duplication and is not. Someone will
+see two enums both containing "reasons" and consolidate them; this is why that is wrong.
+
+| Enum | Types | Granularity | Question it answers |
+|---|---|---|---|
+| `BLOCK_REASONS` | `applications.block_reason` — a real Postgres enum **column** | ROW | why is this whole application parked? |
+| `ANSWER_BLOCK_REASONS` | a field inside `applications.block_detail` (**jsonb**) | FIELD | which question stopped it, and what kind of stop? |
+
+The relationship is fixed and total: **if any field carries an `ANSWER_BLOCK_REASONS`
+value, the row's `block_reason` is `'unanswerable_question'`.** Never `captcha` or
+`mfa` — those are page-level walls with no field attached, which is exactly why they
+live only in the row-level enum and are **deliberately not repeated** in the field-level
+one.
+
+Two structural reasons one enum cannot serve both, so this is not a style preference:
+
+1. One row can be blocked by **several** unanswerable fields at once. An enum *column*
+   holds one value, so it cannot carry a per-field list. `block_detail.fields` is an
+   array for that reason — the Applier surfaces every blocking question in one go, so a
+   human answers them in one pass instead of unblocking, re-running, and blocking again
+   on the next field.
+2. Merging would put values in a column that can only ever describe one of them.
+
+**The three field-level cases, and why three and not two.** The operator action *and*
+the answer-bank effect differ in each, and the bank growing itself is the entire value
+of §15:
+
+| `ANSWER_BLOCK_REASONS` | Operator action | Answer-bank effect |
+|---|---|---|
+| `answer_missing` | answer it once | **INSERT** — never asked again. This is the bank growing itself. |
+| `answer_low_confidence` | confirm or correct | **UPDATE** in place, clear `needs_human` |
+| `answer_refused` | the human answers on the real form, every time | **NONE — never write back** |
+
+Collapsing `answer_missing` into `answer_low_confidence` would lose the INSERT trigger,
+so the system would stop learning new questions — which is the feature, not a detail.
+
+`answer_refused` is the one worth explaining: the system has an answer, or could compose
+one, and refuses to submit it automatically. Two grounds — the honest answer is not
+among the options the widget offers, or the question is one no automation should answer
+on someone's behalf (EEO and self-identification, disability, veteran status,
+sponsorship, expected CTC). **Never write these back to the bank.** Caching a legal or
+demographic declaration for silent reuse is a decision that belongs to the human on
+every application. It is constraint #3 at its sharpest: the failure is not a gap in the
+bank, so filling the gap is the wrong fix.
+
+**One vocabulary, one spelling.** `worker/src/plan-fill.ts` declares a local
+`'no_answer' | 'awaiting_human_answer'`. Import `AnswerBlockReason` instead:
+
+- `no_answer` → **`answer_missing`** (one concept, two names — this was the drift)
+- `awaiting_human_answer` → **`answer_low_confidence`** (bank row exists, `needs_human`)
+
+As of 2026-09-10 that rename is **not yet applied in the worker** — this table is the
+agreed target, not a description of shipped code.
+
+Open question for whoever owns the answer bank: `answer_bank.needs_human` is one
+boolean trying to express three states. Either it becomes the storage for the sub-kind,
+or it stays a coarse "a human must look" and the sub-kind is derived at plan time.
+Not decided here; flagged so it is decided once rather than twice.
+
 ### 8.7 `posted_at_source = 'unknown'` has exactly one cause
 
 **It means "this board is not yet trusted". It NEVER means a parse failure.** Every
@@ -446,6 +623,26 @@ caller's RLS in force. A definer function reachable over the REST API would make
 caller act as the owner and RLS would stop meaning anything. The only definer functions
 are the two triggers, which are not API-reachable.
 
+**Verified live 2026-09-10, as two separate assertions** (one alone would be a false
+comfort — RLS enabled with no policy is a locked table, and a policy on a table without
+RLS is dead code): **15/15** public tables have `relrowsecurity = t`, and **15/15** have
+at least one policy. Zero holes, zero locked tables.
+
+**One documented exception to the FORCE RLS pattern.** `application_status_transitions`
+has `relrowsecurity = t` but `relforcerowsecurity = f`; the other 14 tables have force
+RLS on. It is the read-only reference seed rather than user data, so this is defensible
+— but it is the single place the pattern differs, so it is recorded here rather than
+left for someone to find and assume was an oversight. Open question, owned jointly with
+the migrations stream: make it uniform, or state the exemption in the migration itself.
+
+**A limit on the word "verified" above, because the general claim would mislead.** The
+verifying role had `rolbypassrls = TRUE`. The `SECURITY DEFINER` audit trigger did write
+its witness row into `application_events` through FORCE RLS — but it did so *because of*
+BYPASSRLS, not because FORCE RLS exempts table owners (**it does not**). So "the audit
+trigger writes through FORCE RLS" is true for this deployment and **unproven for a
+plain-owner one.** Re-test before relying on it in a deployment whose owner lacks
+BYPASSRLS.
+
 ---
 
 ## 9. Changing the schema
@@ -458,7 +655,51 @@ An enum lives in **two** places. Change one and you must change the other:
 Same for the status graph: `…_status_transition_guard.sql` (the rule) and
 `src/status-flow.ts` (the mirror the UI reads).
 
-There is no codegen enforcing this. This checklist is the enforcement.
+**A TEST is the enforcement, not this checklist.** As of 2026-09-10, run:
+
+```bash
+pnpm --filter @applyy/shared-types test    # test/enum-parity.test.ts
+```
+
+It parses `supabase/migrations/**` and diffs it against the imported TypeScript, and it
+fails in **both** directions. What it covers:
+
+- every Postgres enum has a TS mirror with the same values **in the same order**
+- no TS enum mirror lacks a Postgres declaration (a value added here and forgotten in
+  the migration would otherwise typecheck everywhere and fail as a runtime
+  `22P02 invalid_text_representation` on the first insert — in production, from an
+  agent, at 3am)
+- every table in the migrations has a `Row` type
+- all **44** transition edges match, including `allowed_agents` **and** the user-visible
+  `note` text
+- the invariants: every edge into `approved` is human-only; exactly one backward edge is
+  machine-walkable; `TERMINAL_STATUSES` is exactly the no-outgoing-edge set; `applying`
+  has one in-edge
+
+**Why the change matters more than it looks.** This section previously said "This
+checklist is the enforcement", and a checklist is a guard nobody runs. It had already
+failed: `eval_label` and `matcher_eval_cases` shipped in SQL with no TS mirror while
+§1 of this document claimed 15 tables, and nothing noticed. The test was
+mutation-checked when written — reordering two values of one enum (same members,
+swapped order), adding a TS-only value, and adding a second edge into `applying` each
+produce a failure.
+
+**Declaration order is part of the contract, not cosmetics.** Postgres sorts an enum by
+declaration order, so `ORDER BY status` yields pipeline order only while both sides
+agree. Reorder one side and nothing breaks loudly — every value still exists, every
+insert still succeeds, every other test still passes — and the kanban board silently
+sorts wrong, surfacing months later as "the board looks odd" with no change to blame.
+
+**Notes have a single source of truth: the SQL.** `application_status_transitions.note`
+is `text not null` and the frontend renders it, so a mismatch means the UI and the
+database disagree about what a transition *means* to a user. Change the migration first,
+then sync `status-flow.ts`. (9 of 44 differed on 2026-09-10 — 4 punctuation-only, 5
+substantive — and were converged onto the SQL text.)
+
+**What the test cannot cover, so you still must:** per-column types and nullability. A
+TypeScript `interface` is erased at runtime, so that half of the suite reads
+`tables.ts` as *text* and only checks that a `Row` type **exists**. Closing that gap is
+what `supabase gen types typescript` is for — see §10.
 
 Adding a status transition also means adding a UI control for it if any human is in
 `allowed_agents` — see §4.
@@ -467,10 +708,23 @@ Adding a status transition also means adding a UI control for it if any human is
 
 ## 10. Not done
 
-- **Nothing is applied to the hosted project.** Migrations are files on disk. Gated on
-  Teja.
-- **Not yet validated against a live Postgres.** `supabase db reset` needs Docker.
-- `matcher_eval_cases` is empty — ~20 labels are Teja's to write.
+- **Nothing is applied to the hosted project.** Gated on Teja. There is no
+  `supabase link` state on disk, and no remote database exists — never describe the
+  hosted project as migrated.
+- ~~Not yet validated against a live Postgres.~~ **DONE 2026-09-10:** all 7 migrations
+  apply cleanly to a local Postgres 17.6. It took one fix to get there — a partial index
+  on `company_blocklist` whose predicate called `now()` was rejected as not `IMMUTABLE`
+  (`42P17`), which had been aborting the run at file **4 of 7** and therefore leaving the
+  guard, the RLS policies and the RPCs unexecuted. Worth remembering as a shape: an
+  early failure in a numbered sequence does not report the files it never reached.
+- `matcher_eval_cases` is empty — ~20 labels are Teja's to write. The table and its
+  `eval_label` enum are now mirrored in `src/tables.ts` as
+  `MatcherEvalCaseRow` / `Insert` / `Update` (added 2026-09-10; they were the one
+  table and the one enum with no TypeScript twin).
+- **There is no real master resume in the repo.** The only `ResolvedResume` instance is
+  the synthetic `zomato-backend-intern` fixture in `packages/resume-template/test/`.
+  `MasterProfile` and `ResolvedResume` are built to *ingest* a real one; do not invent
+  résumé content to fill the gap, and do not read the fixture as Teja's actual history.
 - The JSON fixture export + CI gate for the eval set belong to the Edge Functions
   stream, not to this schema.
 - Generated types (`supabase gen types typescript`) should eventually be produced as a
