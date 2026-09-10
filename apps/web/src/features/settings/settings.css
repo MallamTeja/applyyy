@@ -156,3 +156,158 @@
   border-left: 3px solid var(--signal);
   font-size: var(--size-sm);
 }
+
+/* --- The master-profile ingest surface -------------------------------- */
+
+/* The paste box. Mono, because JSON is code and proportional type makes a
+   misplaced brace genuinely hard to find. */
+.ingest__input {
+  width: 100%;
+  margin-top: var(--gap-3);
+  padding: var(--gap-3);
+  font-family: var(--font-id);
+  font-size: var(--size-xs);
+  /* Tighter than prose line-height: JSON is scanned vertically for structure,
+     and generous leading breaks the visual connection between a key and the
+     block it opens. */
+  line-height: 1.5;
+  background: var(--sheet);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-control);
+  /* Vertical only. Horizontal resize would let the box escape the page's
+     measure and push the nav rail off. */
+  resize: vertical;
+  /* No wrapping games - long lines scroll, so a deeply nested object is not
+     reflowed into something that reads as a different shape. */
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.ingest__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-3);
+  margin-top: var(--gap-3);
+  /* Wraps on a narrow window so the reassurance text never gets squeezed to
+     one word per line beside the button. */
+  flex-wrap: wrap;
+}
+
+.ingest__button {
+  padding: var(--gap-2) var(--gap-4);
+  background: var(--ink);
+  color: var(--ink-inverse);
+  border: 1px solid var(--ink);
+  border-radius: var(--radius-control);
+  font-family: var(--font-machine);
+  font-size: var(--size-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Nothing pasted yet. Visibly inert rather than removed, so the button still
+   explains what the textarea above it is for. */
+.ingest__button:disabled {
+  background: var(--panel);
+  color: var(--ink-muted);
+  border-color: var(--rule);
+  cursor: not-allowed;
+}
+
+/* The line that makes someone willing to paste a real resume into a text box.
+   Deliberately adjacent to the button rather than in a paragraph above it -
+   reassurance read after clicking is reassurance that arrived too late. */
+.ingest__reassurance {
+  color: var(--ink-muted);
+  font-size: var(--size-xs);
+}
+
+/* --- The verdict ------------------------------------------------------ */
+
+.ingest__verdict {
+  margin-top: var(--gap-4);
+  padding: var(--gap-3) var(--gap-4);
+  border-radius: var(--radius-control);
+  font-size: var(--size-sm);
+  font-weight: 600;
+}
+
+/* Green, the traced/verified colour: this is a positive derived claim - the
+   check ran over every node and found nothing blocking. */
+.ingest__verdict--ok {
+  background: var(--traced-wash);
+  border-left: 3px solid var(--traced);
+}
+
+/* Red, the fabrication colour, and it is the right family rather than the
+   bronze needs-a-human one: a blocking finding means storing this profile
+   would break a downstream honesty guarantee. That is the same class of
+   problem as an untraceable claim, not a "waiting for you" state. */
+.ingest__verdict--blocked {
+  background: var(--fabricated-wash);
+  border-left: 3px solid var(--fabricated);
+  color: var(--fabricated-deep);
+}
+
+.ingest__group-title {
+  margin-top: var(--gap-4);
+  font-family: var(--font-machine);
+  font-size: var(--size-sm);
+  font-weight: 600;
+  /* Uppercase is earned here: these two headings are labels separating two
+     lists, not content, and the case difference does the separating without
+     another colour. */
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-muted);
+}
+
+.ingest__list {
+  list-style: none;
+  margin-top: var(--gap-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-2);
+}
+
+/* One finding. Grid rather than flex so the path column is the same width down
+   the whole list and the explanations line up - a ragged left edge on the
+   explanations makes ten findings read as noise. */
+.ingest__item {
+  display: grid;
+  grid-template-columns: minmax(8rem, max-content) 1fr;
+  gap: var(--gap-1) var(--gap-3);
+  padding: var(--gap-2) var(--gap-3);
+  border-radius: var(--radius-control);
+  font-size: var(--size-xs);
+}
+
+/* Two visual LANGUAGES rather than two shades, the same principle the diff
+   view is built on: a list where every row is highlighted equally is a list
+   nobody triages. Blocking rows carry a red rule and a tinted ground. */
+.ingest__item--blocking {
+  background: var(--fabricated-wash);
+  border-left: 3px solid var(--fabricated);
+}
+
+/* Advisory rows are deliberately quiet - bronze, and no tinted ground. They
+   are worth reading once, not worth stopping for. */
+.ingest__item--advisory {
+  background: transparent;
+  border-left: 3px solid var(--signal);
+}
+
+/* The explanation. Capped at a readable measure even inside a grid cell,
+   because the "why" sentence is the half that gets acted on. */
+.ingest__problem {
+  max-width: 72ch;
+  color: var(--ink);
+}
+
+/* On a narrow window the two-column grid collapses: the path stacks above its
+   explanation rather than being crushed to three characters wide. */
+@media (max-width: 40rem) {
+  .ingest__item {
+    grid-template-columns: 1fr;
+  }
+}
