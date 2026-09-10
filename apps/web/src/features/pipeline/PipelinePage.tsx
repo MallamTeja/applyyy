@@ -37,6 +37,11 @@ import type { ApplicationStatus } from '../../data/contract';
 /* Whether any screen claims the human transitions out of a status, so a column
    whose manual moves have no home can say so. */
 import { humanControlLocation, isHumanOnlyLane } from '../../data/humanLanes';
+/* The first real read in this console: counts per status. Read-only, and it
+   deliberately cannot express a fabricated zero - see readState.ts. */
+import { useApplicationCounts } from '../../data/useApplicationCounts.ts';
+import { describeEmptyState } from '../../data/readState.ts';
+import type { ReadState } from '../../data/readState.ts';
 
 import './pipeline.css';
 
@@ -125,7 +130,22 @@ function columnsFor(group: BoardGroup): readonly ApplicationStatus[] {
 
 /* --- One column ------------------------------------------------------- */
 
-function StatusColumn({ status }: { readonly status: ApplicationStatus }): ReactElement {
+function StatusColumn({
+  status,
+  count,
+  readState,
+}: {
+  readonly status: ApplicationStatus;
+  /* Undefined means this status had no rows in a read that DID succeed, or that
+     no successful read happened at all. Which of those it is comes from
+     `readState`, never from the absence itself - that ambiguity is the bug the
+     read layer exists to prevent. */
+  readonly count: number | undefined;
+  /* Passed down rather than read per column: one query feeds the whole board,
+     and eighteen columns each classifying their own read would be eighteen
+     chances to disagree about what is going on. */
+  readonly readState: ReadState<unknown>;
+}): ReactElement {
   /* The manual moves out of this status, asked of the graph at render time.
      This is the line that makes the board follow a schema change rather than
      need updating after one. */
@@ -150,12 +170,35 @@ function StatusColumn({ status }: { readonly status: ApplicationStatus }): React
             message; a prettier per-status label would mean two vocabularies for
             one workflow. */}
         <h3 className="column__title">{status}</h3>
-        {/* An em dash rather than 0, because the count is unknown and not zero.
-            Claiming an empty column would be a lie on the one page whose entire
-            job is to not mislead. */}
-        <span className="column__count" aria-label="row count not yet available">
-          &mdash;
-        </span>
+        {/* THE HONEST COUNT. A number appears only when a read actually
+            completed; otherwise the column shows WHY it has no number, in words.
+            Never a bare 0 - "nobody is signed in" and "no applications in this
+            status" are opposite claims that a zero renders identically, and the
+            operator would act on the wrong one. */}
+        {readState.kind === 'rows' || readState.kind === 'empty' ? (
+          <span className="column__count">
+            {/* An absent key in a successful read genuinely means none in this
+                status, so a zero here is earned rather than assumed. */}
+            {count ?? 0}
+          </span>
+        ) : (
+          <span
+            className="column__count column__count--unknown"
+            /* The phrase is short enough to sit in the column head, and the
+               title carries it in full for a narrow column. */
+            title={describeEmptyState(readState) ?? undefined}
+          >
+            {/* One shared vocabulary across the console: the same state always
+                produces the same words, from one function. */}
+            {readState.kind === 'loading'
+              ? '…'
+              : readState.kind === 'no_session'
+                ? 'not signed in'
+                : readState.kind === 'failed'
+                  ? 'read failed'
+                  : 'not connected'}
+          </span>
+        )}
       </header>
 
       {/* The moves out of here, listed rather than mocked up as drag targets:
@@ -201,6 +244,9 @@ function StatusColumn({ status }: { readonly status: ApplicationStatus }): React
 /* --- The page --------------------------------------------------------- */
 
 export function PipelinePage(): ReactElement {
+  /* One read for the whole board. */
+  const { state, counts } = useApplicationCounts();
+
   return (
     <div className="page">
       <PageHeader path="pipeline" />
@@ -209,13 +255,29 @@ export function PipelinePage(): ReactElement {
           live. It is not, and the operator must not plan a day around it. */}
       <p className="not-wired">
         The columns, and the moves out of each, are read from the status graph -
-        so this layout already matches the real workflow. It is not yet reading{' '}
-        <span className="identifier">applications</span>, so every column shows
-        an unknown count and every control is disabled. No control on this page
-        will ever fire{' '}
-        <span className="identifier">awaiting_approval &rarr; approved</span>:
+        so this layout matches the real workflow. Counts are now read from{' '}
+        <span className="identifier">applications</span>, but every control is
+        still disabled: this board reports and does not write. No control on this
+        page will ever fire{' '}
+        <span className="identifier">awaiting_approval &rarr; approved</span> -
         that edge belongs to the approval queue, and to a person.
       </p>
+
+      {/* Shown whenever a number is on screen, because a number invites a
+          conclusion. The policies are confirmed to exist and have never been
+          exercised as `authenticated` - every verifying query ran as
+          `postgres`, which holds BYPASSRLS - so a count is evidence that the
+          database answered, not that it answered with the right rows. */}
+      {(state.kind === 'rows' || state.kind === 'empty') && (
+        <p className="contract-gap">
+          <strong>These counts are not yet trustworthy.</strong> Row-level
+          security is confirmed to exist but has never been exercised as{' '}
+          <span className="identifier">authenticated</span>, so a policy with an
+          inverted predicate would produce numbers that look perfectly
+          reasonable. Treat what follows as proof the query ran, not as proof it
+          returned your rows.
+        </p>
+      )}
 
       {(['needs_you', 'in_flight', 'closed'] as const).map((group) => (
         <section key={group} className="lane">
@@ -223,7 +285,12 @@ export function PipelinePage(): ReactElement {
           <p className="lane__note">{GROUP_COPY[group].note}</p>
           <div className="lane__columns">
             {columnsFor(group).map((status) => (
-              <StatusColumn key={status} status={status} />
+              <StatusColumn
+                key={status}
+                status={status}
+                count={counts[status]}
+                readState={state}
+              />
             ))}
           </div>
         </section>

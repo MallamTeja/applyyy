@@ -173,3 +173,20 @@
   font-size: var(--size-xs);
   color: var(--fabricated-deep);
 }
+
+/* A column head with no number, showing WHY instead.
+   Smaller and muted, so a phrase never reads as a value - the eye should be
+   able to sweep the board and see instantly which columns have real counts and
+   which are reporting a condition. Same reasoning as `.unknown` in base.css:
+   the absence of a number must not look like a number. */
+.column__count--unknown {
+  color: var(--ink-muted);
+  font-style: italic;
+  /* Not mono: the numeric counts are mono, so breaking the family here is a
+     second, redundant signal that this is not a value. */
+  font-family: var(--font-machine);
+  font-size: 0.6875rem;
+  /* Keeps a longer phrase from pushing the status title out of the head. */
+  text-align: right;
+  max-width: 6.5rem;
+}

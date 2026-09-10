@@ -20,9 +20,10 @@ pnpm --filter @applyy/web build       # typecheck then vite build
 pnpm --filter @applyy/web dev         # vite, port 5173, strict
 ```
 
-**Verified 2026-09-10:** `typecheck` exit 0, `build` exit 0 (dist: 1.86 kB
-html, 17.75 kB css, 233.89 kB js / 73.62 kB gzip), `test` 36/36 passing. This
-was the package's first successful build.
+**Verified 2026-09-10:** `typecheck` exit 0, `build` exit 0, `test` **60/60**
+passing, and three pages confirmed rendering in a real browser with zero console
+errors. This was the package's first successful build. Re-measure rather than
+trusting this line — a verified claim has a date on it for a reason.
 
 ### Why `node --test` and not vitest
 
@@ -31,6 +32,15 @@ types — which works **only** because `erasableSyntaxOnly` in
 `tsconfig.base.json` guarantees every file in the repo is type-strippable. That
 flag was added to stop `export enum` breaking the worker at runtime; the test
 runner is a side benefit.
+
+> **Rule for anything you want tested: value imports need the `.ts` extension.**
+> `node --test` runs the sources directly, and Node's ESM resolver requires the
+> extension where Vite's `Bundler` resolution does not — so `import { x } from
+> './y'` typechecks, bundles, and then fails only under the test runner.
+> `import type` is exempt, because it is erased before Node ever resolves it
+> (which is why the ingest tests passed while the config tests did not).
+> `allowImportingTsExtensions` is enabled for this, and
+> `packages/resume-template` already writes imports this way.
 
 > **Trap, and it cost time.** `node --test test/` **fails** on Node 24.14.0 —
 > it resolves the bare directory as a module and dies with `MODULE_NOT_FOUND`.
@@ -150,8 +160,10 @@ a blank reads as zero, and zero is the opposite claim.
 
 ## Tested code
 
-Two pure modules, both extracted specifically so they could be tested, both
-mutation-checked by hand.
+Four pure modules, each extracted specifically so it could be tested, three of
+them mutation-checked by hand. The pattern in all three: **separate the pure
+decision from the side effect** — the decision is the part that can be subtly
+wrong, the side effect is what makes it hard to reach.
 
 ### `src/data/keyRole.ts` — the anon-key guard
 
@@ -189,11 +201,49 @@ closed** — that is the case that gets missed, because the tempting shortcut is
 shrug at a token you cannot parse and carry on, admitting a key precisely when
 you understand it least.
 
-> **Known gap: nothing imports `supabase.ts` yet, so this guard is currently
-> unreachable** — module-level code does not run until something imports the
-> module. It is correct, tested, and protecting nothing until the read path
-> lands. Corollary: the app does *not* white-screen on missing env vars today,
-> because the client is never constructed.
+**Now reachable, and proven to fire.** `HealthPage` imports `supabase.ts`, so
+the module-level check executes. That import is load-bearing beyond the panel it
+feeds: until something imported this module the guard could not fail, could not
+pass, and protected nothing.
+
+Proven by experiment rather than asserted — a fabricated `service_role` token
+(fake signature, no real key material) placed in a git-ignored `.env.local`:
+
+| Step | Result |
+|---|---|
+| `vite build` | **exit 0** — and the token embedded verbatim in `dist/assets/index-*.js` |
+| Loading the page | Console refuses: *"has role service_role, not anon"*; page renders **nothing** |
+| Key removed, rebuilt | Bundle clean, page renders, zero console errors |
+
+### Two layers, because the runtime guard prevents the wrong thing
+
+That experiment exposed a real limitation. The runtime guard stops the console
+from **operating** with a bad key; it does not stop the key from being
+**shipped**. On a dev machine that hardly matters — you paste, you look, nothing
+was published. On a deploy it matters completely: `vercel deploy` would succeed,
+the URL would go live carrying an RLS-bypassing key, and the guard would
+announce it in the console of the first visitor. **A key that has been served
+must be rotated.**
+
+So `vite.config.ts` now refuses to build. Verified across four scenarios:
+
+| Configuration | Build |
+|---|---|
+| No env at all | **0** — an inert preview is legitimate |
+| `VITE_SUPABASE_ANON_KEY` holding a `service_role` token | **1** — refused |
+| Valid anon key **plus** `VITE_SUPABASE_KEY_2` holding a service-role token | **1** — refused |
+| Valid anon key alone | **0** |
+
+Two deliberate design points. It is **not symmetrical** with the runtime guard —
+a *missing* key must not fail the build, because the console is designed to open
+unconfigured. And the second check reads the **role claim of every `VITE_`
+variable** rather than pattern-matching names: a token parked in
+`VITE_SUPABASE_KEY_2` would pass any name-based check, and anything `VITE_`-prefixed
+reaches the browser.
+
+*Generalisable: when a guard is a runtime check, ask what it actually prevents.
+"Refuses to run" and "refuses to ship" are different guarantees, and only one of
+them survives a deploy.*
 
 ### `src/features/settings/masterIngest.ts` — master profile ingest
 
@@ -240,13 +290,63 @@ rather than invalid). A stricter check is not a better check. Every finding
 carries a dotted path (`experience[2].bullets[0].id`) that can be pasted into an
 editor's search box, and states the *consequence* rather than the rule.
 
+### `src/data/readState.ts` — why an empty table is empty
+
+**The central honesty problem of the console.** An empty table on screen has
+four distinct causes:
+
+1. Not configured — no client exists.
+2. Configured but nobody signed in, so RLS correctly returns nothing. **This is
+   the state the project is in right now** — the schema is live and there is no
+   Auth user yet, so zero rows is *correct*.
+3. The query failed.
+4. It genuinely succeeded and there are no rows.
+
+**Only the fourth means "you have no applications."** The other three mean "this
+console cannot tell you", which is a different sentence demanding a different
+response. Rendering `0` for all four is the most misleading thing this app could
+do — and it is the *default* behaviour of almost every data-fetching hook,
+because `rows ?? []` collapses every case into an empty array.
+
+So `classifyRead` returns a discriminated union and a caller cannot reach rows
+without handling every other case. `describeEmptyState` gives one shared
+vocabulary, and **no phrase it can return is the digit zero** — there is a test
+asserting exactly that. Ordering is load-bearing: configuration before session,
+session before error, error before rows. Getting it wrong is how someone whose
+query errored gets told to sign in, fixes the wrong thing, and sees the same
+screen.
+
+**Three mutations, measured:**
+
+| Mutation | Result |
+|---|---|
+| `no_session` → `empty` (the `rows ?? []` bug) | 60 tests, **4 failed** |
+| null rows → `empty` | 60 tests, **1 failed** |
+| error checked *after* session | 60 tests, **1 failed** |
+
+Two of the three were caught by **exactly one test each** — 59 of 60 tests were
+indifferent to a real, shippable, plausible-looking bug. *Test count says almost
+nothing about protection; which specific inputs you chose says everything.*
+
+Verified in a browser across both live states: unconfigured columns read
+*"not connected — VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY not set"*; connected
+-without-session columns read *"not signed in — no rows are visible until you
+are"*. No zeros anywhere.
+
+`useApplicationCounts` does the side effects (one query, session lookup, React
+state) and hands raw facts to the pure classifier. It checks the session
+**before** querying, so the honest state is reported without a pointless round
+trip. Read-only; it selects `status` alone, so no personal field is fetched into
+the browser to be counted and discarded.
+
 ---
 
 ## Known gaps — stated, not worked around
 
 | Gap | Owner |
 |---|---|
-| Nothing imports `supabase.ts`; no page reads real data yet | this package |
+| No page reads real data yet — the client is wired and its guards proven, but no query is written | this package |
+| **RLS policies are proven to EXIST, never proven to SCOPE** — every verifying query ran as `postgres`, which holds `BYPASSRLS`, so an inverted predicate would look identical. No page may trust returned rows until row scoping is proven as `authenticated` | schema stream (in progress) |
 | The nine pages are laid out but not wired — every one carries a `.not-wired` banner | this package |
 | No master profile editor; ingest reports but does not store | this package |
 | **No real master resume exists anywhere in the repo** — only a synthetic `ResolvedResume` fixture. Do not fabricate résumé content to fill it | content, needs Teja |
