@@ -67,6 +67,16 @@ export async function extractFields(page: Page): Promise<FormField[]> {
         }
       }
       // Finally the classic <label for="id"> association.
+      //
+      // `CSS.escape` IS CORRECT HERE AND ONLY HERE — DO NOT "make it
+      // consistent" with playwright-page.ts. This line executes INSIDE
+      // page.evaluate, i.e. in the browser, where `CSS` is a real global. The
+      // two textually identical calls that used to sit in playwright-page.ts
+      // ran in NODE, where `CSS` is undefined, and threw ReferenceError on
+      // every invocation — the applier's `fill` path had therefore never
+      // executed once. Those were replaced with an attribute selector; this one
+      // must stay, and the type system cannot tell the two situations apart
+      // because nothing marks a callback as running in another runtime.
       if (!label && element.id) {
         label = document.querySelector(`label[for="${CSS.escape(element.id)}"]`)?.textContent?.trim() ?? '';
       }
