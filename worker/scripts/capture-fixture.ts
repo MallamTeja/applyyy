@@ -30,10 +30,30 @@ const ALLOWED_HOSTS = new Set([
   'boards.greenhouse.io',
   // robots.txt has every rule commented out, so nothing is disallowed. Checked 2026-09-09.
   'job-boards.greenhouse.io',
-  // robots.txt disallows /meeting/, /b/ and /api/; /{company}/{id} job pages are
-  // permitted. Checked 2026-09-09.
-  'jobs.ashbyhq.com',
 ]);
+// DELIBERATELY ABSENT: jobs.ashbyhq.com. Its robots.txt permits /{company}/{id}
+// job pages and disallows /meeting/, /b/ and /api/ (re-checked 2026-09-10;
+// unchanged, no ClaudeBot-specific rule). A RAW GET of a job page would
+// therefore be allowed — but a raw GET is useless here, because Ashby is a
+// client-rendered SPA and returns no form fields. The plan calls for a
+// Playwright-RENDERED snapshot, and rendering is what makes this impossible:
+//
+// Measured 2026-09-10 by navigating with every disallowed path ABORTED, so none
+// was ever fetched. The SPA attempts `/api/non-user-graphql` and
+// `/api/images/...`, both under the disallowed `/api/` prefix. With those
+// aborted, the board listing still rendered (146 job links are server-rendered)
+// but BOTH a job page and its /application page rendered ZERO inputs. There is
+// no way to capture an Ashby application form without fetching a disallowed path.
+//
+// AND NO SYNTHETIC ASHBY FIXTURE WAS WRITTEN INSTEAD, deliberately. We have
+// never seen Ashby's real form DOM, so a hand-authored one would be invented
+// markup — precisely the failure PROJECT_PLAN.md section 19 records for
+// Greenhouse, where a hand-authored fixture "would have encoded a convention no
+// employer actually serves, and it would have looked correct in review". A
+// fixture that creates false confidence about a vendor whose DOM we have never
+// observed is worse than no fixture. Teja can settle this by saving a page from
+// his own browser as a human visitor, or by ruling on the robots question.
+//
 // DELIBERATELY ABSENT: jobs.lever.co. Its robots.txt carries an explicit
 // "User-agent: ClaudeBot / Disallow: /". A Claude-driven agent fetching Lever
 // content to store in a repo is exactly what that line asks us not to do, so
