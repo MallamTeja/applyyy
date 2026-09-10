@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "exported_at": "2026-09-10T19:00:00.000Z",
+  "master_version": null,
+  "placeholder": true,
+  "_README": "PLACEHOLDER CASES, NOT REAL LABELS. These exist so the labelling -> export -> gate pipeline can be built and proven end to end BEFORE any hand-labelling happens, which is what makes Teja's ~20 real labels pure data entry rather than a build task. The `placeholder` flag above is read by the gate, which then refuses to report a green run as meaningful: a gate that proves nothing while looking exactly like a gate that proves everything is the most dangerous state available here. Running `_shared/eval/export.ts` against a populated `matcher_eval_cases` overwrites this file with real cases and sets `placeholder` to false. Do not hand-edit labels here - the database is the labelling surface and this file is its export, so an edit made here is lost on the next export.",
+  "cases": [
+    {
+      "id": "PLACEHOLDER-001-obvious-good-fit",
+      "job_snapshot": {
+        "title": "Backend Engineering Intern",
+        "company_name": "Placeholder Foods Ltd",
+        "location_raw": "Bengaluru, India",
+        "description_raw": "Build REST APIs in Node.js and Express. Work with a relational database. 0-1 years of experience. Final-year students welcome.",
+        "min_experience_years": "0",
+        "employment_type": "internship"
+      },
+      "label": "good_fit",
+      "rationale": "PLACEHOLDER. Shaped as a clear positive: named stack overlaps the master, experience band matches, location on the allowlist.",
+      "master_version": null
+    },
+    {
+      "id": "PLACEHOLDER-002-obvious-bad-fit",
+      "job_snapshot": {
+        "title": "Staff Site Reliability Engineer",
+        "company_name": "Placeholder Infra Corp",
+        "location_raw": "Remote (US only)",
+        "description_raw": "Own multi-region Kubernetes fleets. Deep Terraform and eBPF experience required. 8+ years operating production distributed systems.",
+        "min_experience_years": "8",
+        "employment_type": "full_time"
+      },
+      "label": "bad_fit",
+      "rationale": "PLACEHOLDER. Shaped as a clear negative: seniority, unrelated stack, experience far above the ceiling, location off the allowlist.",
+      "master_version": null
+    },
+    {
+      "id": "PLACEHOLDER-003-genuinely-borderline",
+      "job_snapshot": {
+        "title": "Software Engineer, New Grad",
+        "company_name": "Placeholder Analytics",
+        "location_raw": "Hyderabad, India",
+        "description_raw": "Generalist role across a Python data pipeline and a small React front end. Some backend work. 0-2 years. Strong CS fundamentals valued over specific tooling.",
+        "min_experience_years": "0",
+        "employment_type": "full_time"
+      },
+      "label": "borderline",
+      "rationale": "PLACEHOLDER. Shaped as genuinely arguable: right seniority and location, partial stack overlap, Python-leaning rather than Node. Exists to exercise the rule that a human `borderline` accepts any machine answer.",
+      "master_version": null
+    }
+  ]
+}
