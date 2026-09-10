@@ -16,7 +16,7 @@
 // needs_verification for a human to check by hand. Deciding early is what keeps
 // the dangerous window free of decisions.
 import { describe, expect, it } from 'vitest';
-import { canStartAnotherApplication } from '../src/run-window.js';
+import { canStartAnotherApplication } from '../src/run-window.ts';
 
 // A baseline that every case below perturbs one axis of, so each assertion
 // attributes its outcome to exactly one variable.

@@ -43,6 +43,14 @@ import type { AgentName } from '../../data/contract';
 /* The coverage check, imported rather than recomputed. Its own file explains
    why the predicate is `.includes('human')` and not `=== ['human']`. */
 import { MISSING_HUMAN_CONTROLS } from '../../data/humanLanes';
+/* Whether the console can reach a database at all.
+   IMPORTING THIS IS LOAD-BEARING BEYOND THIS PANEL: `supabase.ts` enforces the
+   anon-key rule at module scope, and until something imported it that check
+   never executed. A guard in an unimported module cannot fail, cannot pass, and
+   protects nothing - so this import is what turns it from documentation into
+   enforcement. Health is the right home for it: "can we even connect" is the
+   first question this page exists to answer. */
+import { supabaseStatus } from '../../data/supabase';
 
 import './health.css';
 
@@ -165,6 +173,82 @@ function AgentFreshnessPanel(): ReactElement {
           </tbody>
         </table>
       </div>
+    </section>
+  );
+}
+
+/* Can this console reach a database at all?
+ *
+ * FIRST PANEL ON THE PAGE, because every other panel below it reports "not read
+ * yet", and there are two completely different reasons that could be true: the
+ * query is not written, or there is no connection to run it against. Leaving
+ * the operator to guess between those is exactly the ambiguity this page exists
+ * to remove.
+ *
+ * Note what is NOT possible here: a "connected" state with a service-role key.
+ * That case throws at import time in `supabase.ts`, so this panel can only ever
+ * report connected-with-an-anon-key or not-configured. */
+function ConnectionPanel(): ReactElement {
+  return (
+    <section className="panel">
+      <h2 className="panel__title">Database connection</h2>
+
+      {supabaseStatus.connected ? (
+        <>
+          {/* Green: a positive derived claim - a client was constructed, and it
+              could only have been constructed with a key whose role claim reads
+              "anon". */}
+          <p className="panel__clear">
+            Connected with an anon key. Row access is decided by RLS.
+          </p>
+          {/* THE CAVEAT THAT MATTERS RIGHT NOW, and it is not a UI gap. The RLS
+              policies have been verified to EXIST but never verified to SCOPE -
+              every check ran as `postgres`, which holds BYPASSRLS. A policy with
+              an inverted predicate would look identical in `pg_policies`. Until
+              row scoping is proven as `authenticated`, an empty table here is
+              not evidence of anything and a populated one is not either. */}
+          <p className="contract-gap">
+            <strong>Do not trust row counts yet.</strong> The RLS policies are
+            confirmed to exist but have never been exercised as{' '}
+            <span className="identifier">authenticated</span> - every verifying
+            query ran as <span className="identifier">postgres</span>, which
+            holds <span className="identifier">BYPASSRLS</span>. A policy with an
+            inverted predicate would look identical when listed. There is also
+            no Auth user yet, so a real session correctly returns zero rows;
+            that is not a bug and is not a reason to reach for a service-role
+            key.
+          </p>
+        </>
+      ) : (
+        <>
+          {/* Not a failure, and deliberately not styled as one - this is the
+              normal state of a fresh clone. The six settings pages work
+              regardless, which is why the console still opens. */}
+          <p className="panel__note">
+            Not configured, so nothing on this page can report real state. The
+            settings pages still work - they describe configuration rather than
+            read it.
+          </p>
+          <ul className="gaps">
+            {supabaseStatus.missing.map((variable) => (
+              /* Named individually. "Check your environment" sends someone to a
+                 file to guess which line is wrong. */
+              <li key={variable} className="gaps__item">
+                <span className="identifier">{variable}</span>
+                <span className="gaps__why">
+                  Not set, or set to an empty value, in apps/web/.env.local.
+                </span>
+              </li>
+            ))}
+          </ul>
+          {/* Says which key, because this is exactly the moment someone reaches
+              for whichever key is on their clipboard. */}
+          <p className="panel__note">
+            The anon key only. A service-role key pasted here stops the console
+            from starting at all, on purpose.
+          </p>
+        </>
+      )}
     </section>
   );
 }
@@ -349,6 +433,10 @@ export function HealthPage(): ReactElement {
       {/* Order is deliberate: the two silent deaths first, then the things that
           are merely waiting, then the console's own coverage gaps, then the
           work queue. Freshness before workload. */}
+      {/* Connection first: every panel below reports "not read yet", and this
+          is what says whether that is because the query is unwritten or because
+          there is nothing to query. */}
+      <ConnectionPanel />
       <AgentFreshnessPanel />
       <KeepalivePanel />
       <GeminiPoolPanel />

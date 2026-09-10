@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // Subject under test; does not exist yet, which is what makes this test RED.
-import { startFixtureServer } from '../src/fixture-server.js';
+import { startFixtureServer } from '../src/fixture-server.ts';
 
 describe('startFixtureServer', () => {
   test('serves a saved form over http', async () => {

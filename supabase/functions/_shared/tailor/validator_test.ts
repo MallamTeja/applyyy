@@ -471,3 +471,139 @@ test("reports every violation in a single pass rather than stopping at the first
   // All three surfaced together rather than one at a time.
   assert.equal(result.ok === false ? result.violations.length : 0, 3);
 });
+
+// ---------------------------------------------------------------------------------
+// AMBIGUOUS MASTER IDS — the guard that keeps the misattribution check meaningful.
+//
+// `indexBullets` builds ONE FLAT MAP keyed by bullet id across experience, projects
+// and education, and a `Map` overwrites. Without the guard, two bullets sharing an id
+// mean the later silently replaces the earlier, and the parent-scope check then
+// compares against THE WRONG PARENT — so a genuinely misattributed bullet can pass, or
+// an honest one be flagged, decided by indexing order. Nothing errors. The tailoring
+// looks clean and the Auditor reports clean.
+//
+// THE DESIGN THESE TESTS MUST DISCRIMINATE. The plausible wrong answer is PER-SECTION
+// uniqueness, and it reads as more sensible than global uniqueness. It catches the
+// mistake people actually make — a duplicate within one employer — and still leaves
+// the audit corruptible, because the collision it misses is the SAME id under two
+// DIFFERENT parents, which is precisely the one a flat index cannot survive.
+//
+// So the within-section case below is the NON-discriminating one: both designs catch
+// it, and a suite containing only that case would pass under the broken design. The
+// cross-parent cases are the ones that tell the two apart, and they are marked.
+
+// Deep-clone the master so a mutation in one test cannot leak into another. The
+// fixture is a module-level constant, so mutating it in place would make these tests
+// order-dependent — which is its own class of untrustworthy green.
+function masterClone(): MasterProfile {
+  return structuredClone(MASTER);
+}
+
+// NON-DISCRIMINATING (per-section uniqueness also catches this). Included anyway
+// because it is the most common real defect: the way anyone adds a bullet is to copy
+// the one above it.
+test("two bullets with the same id under the SAME parent refuse the tailoring", () => {
+  // Clone and duplicate a bullet id within one experience node.
+  const master = masterClone();
+  master.experience[0]!.bullets.push({ id: "bullet-rest-api", text: "A second bullet reusing the id", tags: [] });
+  // Validate an otherwise-perfectly-honest tailoring.
+  const result = validateTailoredProfile(baseline(), master, PINNED_VERSION);
+  // Refused.
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  // And refused for the right reason.
+  assert.equal(result.violations[0]?.kind, "ambiguous_master_ids");
+});
+
+// DISCRIMINATING. Per-section uniqueness passes this and leaves the audit corruptible.
+// This is the exact collision that makes the flat index return the wrong parent, so it
+// is the case the whole guard exists for.
+test("the same bullet id under two DIFFERENT parents refuses the tailoring", () => {
+  // Clone and place the experience bullet's id under the project node too.
+  const master = masterClone();
+  master.projects[0]!.bullets.push({ id: "bullet-rest-api", text: "A project bullet stealing the id", tags: [] });
+  // Validate.
+  const result = validateTailoredProfile(baseline(), master, PINNED_VERSION);
+  // Refused — under a per-section design this would pass and the parent lookup would
+  // silently resolve to whichever node was indexed last.
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.violations[0]?.kind, "ambiguous_master_ids");
+  // The colliding id is named, so the fix is one edit rather than a hunt.
+  const violation = result.violations[0];
+  assert.equal(violation?.kind === "ambiguous_master_ids" && violation.ids.includes("bullet-rest-api"), true);
+});
+
+// DISCRIMINATING. `resolveBullet` compares `found.parentRef` against the parent the
+// model nested the bullet under, so two PARENTS sharing an id defeats that comparison
+// just as thoroughly as two bullets do — and a per-section checker never looks here.
+test("an experience node and a project node sharing an id refuse the tailoring", () => {
+  // Clone and collide the two parent ids.
+  const master = masterClone();
+  master.projects[0]!.id = "exp-eventportal";
+  // Validate.
+  const result = validateTailoredProfile(baseline(), master, PINNED_VERSION);
+  // Refused.
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.violations[0]?.kind, "ambiguous_master_ids");
+});
+
+// DISCRIMINATING. A bullet id colliding with its own parent's id is not caught by any
+// per-section rule that treats parents and bullets as separate namespaces.
+test("a bullet id colliding with a parent id refuses the tailoring", () => {
+  // Clone and give a bullet the same id as an education node.
+  const master = masterClone();
+  master.education[0]!.bullets[0]!.id = "edu-mlrit";
+  // Validate.
+  const result = validateTailoredProfile(baseline(), master, PINNED_VERSION);
+  // Refused.
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.violations[0]?.kind, "ambiguous_master_ids");
+});
+
+// A skill colliding with a bullet is NOT exploitable today — skills resolve through
+// their own map and a bullet ref never reaches it. Refused anyway, because an id space
+// that is ambiguous to a human reading a provenance footer is a latent hazard, and
+// "every id in the master is unique" is a rule worth stating without a footnote.
+test("a skill id colliding with a bullet id refuses the tailoring", () => {
+  // Clone and collide a skill with the §11 bullet.
+  const master = masterClone();
+  master.skills[0]!.id = "bullet-rest-api";
+  // Validate.
+  const result = validateTailoredProfile(baseline(), master, PINNED_VERSION);
+  // Refused.
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.violations[0]?.kind, "ambiguous_master_ids");
+});
+
+// THE REFUSAL MUST BE TOTAL, NOT ADVISORY. A validator that reports the ambiguity and
+// then carries on has produced a verdict it cannot support — worse than no check,
+// because "clean" now carries the authority of a check that did not actually hold.
+test("an ambiguous master refuses outright rather than reporting alongside other findings", () => {
+  // A master that is ambiguous AND a tailoring that is separately dishonest, so a
+  // validator that carried on would certainly emit more than one violation.
+  const master = masterClone();
+  master.projects[0]!.bullets.push({ id: "bullet-rest-api", text: "collision", tags: [] });
+  // A tailoring that also references a skill that does not exist.
+  const dishonest = baseline();
+  const result = validateTailoredProfile({ ...dishonest, skills: [{ ref: "skill-docker-invented" }] }, master, PINNED_VERSION);
+  // Refused.
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  // EXACTLY ONE violation, and it is the ambiguity. Nothing else ran, because nothing
+  // else could have been trusted.
+  assert.equal(result.violations.length, 1);
+  assert.equal(result.violations[0]?.kind, "ambiguous_master_ids");
+});
+
+// The guard must not fire on a healthy profile, or it would refuse every tailoring
+// and present as "the Tailor is broken". A check that always fails proves nothing.
+test("a master with all-unique ids still validates normally", () => {
+  // The untouched fixture.
+  const result = validateTailoredProfile(baseline(), MASTER, PINNED_VERSION);
+  // Accepted, as before the guard existed.
+  assert.equal(result.ok, true);
+});

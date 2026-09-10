@@ -71,8 +71,8 @@ jobs:
       # himself. A leaked service-role key would mean RLS bypassed on every
       # table and a rotation touching every consumer; a leaked app-user password
       # means one account, revocable from the dashboard in seconds.
-      APPLYY_WORKER_EMAIL: ${{ secrets.APPLYY_WORKER_EMAIL }}
-      APPLYY_WORKER_PASSWORD: ${{ secrets.APPLYY_WORKER_PASSWORD }}
+      APPLYY_APP_USER_EMAIL: ${{ secrets.APPLYY_APP_USER_EMAIL }}
+      APPLYY_APP_USER_PASSWORD: ${{ secrets.APPLYY_APP_USER_PASSWORD }}
       # AES-GCM key for the browser storageState held in Supabase Storage. The
       # state itself never lands in the repo (§10 defense 4).
       STORAGE_STATE_ENC_KEY: ${{ secrets.STORAGE_STATE_ENC_KEY }}

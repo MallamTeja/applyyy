@@ -1,0 +1,51 @@
+-- ============================================================================
+-- Add `keepalive` to the `agent_name` enum.
+--
+-- WHY THIS IS ITS OWN FILE, and it is not tidiness.
+-- `alter type ... add value` is special: even where Postgres permits it inside a
+-- transaction block (12+), THE NEW VALUE CANNOT BE USED UNTIL THAT TRANSACTION
+-- COMMITS. The Supabase CLI wraps each migration, so a single file that both
+-- adds the value and then inserts a row using it would fail on the insert — and
+-- fail *after* the type change, leaving a partially-applied migration, which is
+-- the worst outcome available. Splitting it guarantees the value is committed
+-- before any file that references it runs.
+--
+-- This file is timestamped BEFORE 20260910190000_… deliberately, so migration
+-- ordering does that sequencing rather than a reader's good luck.
+--
+-- !! UNVERIFIED AGAINST A RUNNING POSTGRES — Docker was unavailable when this
+-- was written. It must survive a local `supabase db reset` before it is pushed.
+-- ============================================================================
+
+-- WHY A NEW AGENT IDENTITY RATHER THAN REUSING AN EXISTING ONE.
+--
+-- The keepalive workflow currently writes NO `agent_runs` row at all, because
+-- there is no valid `agent_name` for it. The alternative — logging itself as
+-- `applier` or `sweeper` — was rejected, and the reasoning is the important part:
+-- **that would produce a health page which lies confidently, which is worse than
+-- one with a missing row.**
+--
+-- §14's whole premise is that GitHub silently disables scheduled workflows after
+-- 60 days of repository inactivity, and that the health page must be able to say
+-- "this stopped running". A keepalive that logs itself as the Applier corrupts
+-- exactly the signal it exists to feed: the Applier would appear to have run on
+-- a day it did not, so the one absence the page is built to detect becomes
+-- invisible.
+--
+-- THE RULE, worth stating because it generalises past this enum: **agent
+-- identities must be one-to-one with real agents, because the health page's only
+-- job is detecting absence.** Any shared or borrowed identity converts a
+-- detectable silence into a false positive, and a monitoring system that reports
+-- healthy while a component is dead is not a degraded monitoring system — it is
+-- an actively harmful one.
+--
+-- Appended at the END of the enum on purpose. `add value` without `before`/
+-- `after` appends, which leaves the declaration order of all 11 existing values
+-- untouched — and that order is asserted against the TypeScript mirror in
+-- `packages/shared-types` by `test/enum-parity.test.ts`, because Postgres sorts
+-- enums by declaration order rather than alphabetically. Inserting in the middle
+-- would silently change sort behaviour for every existing query.
+--
+-- `if not exists` makes this idempotent, so re-running it against a database that
+-- already has the value is a no-op rather than a duplicate-value error.
+alter type public.agent_name add value if not exists 'keepalive';

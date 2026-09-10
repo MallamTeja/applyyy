@@ -6,10 +6,10 @@
 // wires together is pure and injected, which is why the whole loop is testable
 // without a network, a database or Chromium.
 import { chromium } from 'playwright';
-import { runApplierBatch } from '../claim-loop.js';
-import { createSupabaseGateway, type SupabaseLike } from '../supabase-gateway.js';
-import { createPlaywrightPage } from '../playwright-page.js';
-import { resolveSubmissionMode } from '../submission-mode.js';
+import { runApplierBatch } from '../claim-loop.ts';
+import { createSupabaseGateway, type SupabaseLike } from '../supabase-gateway.ts';
+import { createPlaywrightPage } from '../playwright-page.ts';
+import { resolveSubmissionMode } from '../submission-mode.ts';
 
 /** Read a required environment variable or fail loudly at startup. */
 function required(name: string): string {
@@ -36,8 +36,8 @@ async function main(): Promise<void> {
 
   const supabaseUrl = required('SUPABASE_URL');
   const anonKey = required('SUPABASE_ANON_KEY');
-  const email = required('APPLYY_WORKER_EMAIL');
-  const password = required('APPLYY_WORKER_PASSWORD');
+  const email = required('APPLYY_APP_USER_EMAIL');
+  const password = required('APPLYY_APP_USER_PASSWORD');
 
   // THE ONLY LOAD OF THE SUPABASE SDK IN THE WORKER, and it is deliberately a
   // dynamic import through a variable specifier. Two reasons: it keeps the

@@ -14,9 +14,9 @@
 import { afterAll, beforeAll, expect, test } from 'vitest';
 import { chromium, type Browser } from 'playwright';
 import type { AnswerBankRow } from '@applyy/shared-types';
-import { startFixtureServer, type FixtureServer } from '../src/fixture-server.js';
-import { createPlaywrightPage } from '../src/playwright-page.js';
-import { runApplierBatch, type RunGateway } from '../src/claim-loop.js';
+import { startFixtureServer, type FixtureServer } from '../src/fixture-server.ts';
+import { createPlaywrightPage } from '../src/playwright-page.ts';
+import { runApplierBatch, type RunGateway } from '../src/claim-loop.ts';
 
 let browser: Browser;
 let server: FixtureServer;

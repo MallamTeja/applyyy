@@ -71,7 +71,53 @@ export type DocumentOrdered<T> = readonly T[];
 // MasterProfile — the human-maintained truth
 // ---------------------------------------------------------------------------
 
-/** A stable node id. Stable ACROSS VERSIONS — that is what makes a ref meaningful six months later. */
+/**
+ * A stable node id. Stable ACROSS VERSIONS — that is what makes a ref meaningful six
+ * months later.
+ *
+ * ── DECIDED 2026-09-10: ONE GLOBAL ID SPACE FOR THE WHOLE MasterProfile ──────────
+ *
+ * **Every NodeId must be unique across the ENTIRE master profile — across experience,
+ * projects, education, skills, links and every bullet nested inside them. Not unique
+ * per section. Not unique per kind.**
+ *
+ * This was previously undecided, and the ambiguity was load-bearing: the validator
+ * indexes master bullets into one flat `Map` keyed by id, which assumes a global space,
+ * while a reader of this file could just as reasonably assume per-section. A reader who
+ * assumed per-section would be right to call the flat index a bug, and a reader who
+ * assumed global would be right to call a per-section ingest check a bug. Both cannot
+ * be right, so the contract has to say which.
+ *
+ * WHY GLOBAL IS THE ONLY COHERENT ANSWER — it follows from the tailored types, it is
+ * not a preference. `TailoredBullet` is `{ ref, text }` and `TailoredSkill` is
+ * `{ ref }`: a bare id with NO section qualifier and no kind tag. Resolution therefore
+ * has nothing to go on but the id itself. Under per-section uniqueness a bullet ref
+ * could resolve to a skill, or to a bullet under a different parent, and the type
+ * system offers a consumer no way to disambiguate. Adding a qualifier to every ref
+ * would be the alternative design; it is strictly more machinery for no gain, since a
+ * human authoring the master can simply not reuse an id.
+ *
+ * WHAT GOES WRONG IF INGEST ONLY CHECKS PER-SECTION — and it fails SILENTLY, which is
+ * why this is in the type rather than in a style guide. A `Map` overwrites on duplicate
+ * key, so a duplicate id anywhere in the master silently replaces the earlier entry.
+ * The misattribution check (see `TailoredBullet`) then compares the tailored parent
+ * against the WRONG stored parent, and a genuine misattribution passes as clean. The
+ * tailoring looks clean, the Auditor reports clean, and the honesty guarantee has
+ * stopped holding with nothing anywhere reporting a problem.
+ *
+ * That is measurable rather than hypothetical: a per-section uniqueness checker — the
+ * plausible wrong design, and arguably the more natural-reading one — passed **34 of 36**
+ * tests written against the ingest path. The two that failed were the cross-section
+ * collision and a bullet id colliding with a SKILL id. The within-section duplicate
+ * test, which is the case anyone writes first, passed under both designs. So the wrong
+ * design catches the mistake people actually make, and still leaves the audit
+ * corruptible.
+ *
+ * REQUIRED OF THE INGEST VALIDATOR: reject a master profile with any duplicate NodeId
+ * across all kinds, and FAIL CLOSED. It is the only place this can be enforced —
+ * `type NodeId = string` buys no enforcement, and by the time a ref is being resolved
+ * the collision has already been silently absorbed.
+ */
 export type NodeId = string;
 
 /** An external link: GitHub, portfolio, LinkedIn. */

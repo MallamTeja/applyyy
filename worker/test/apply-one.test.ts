@@ -13,8 +13,8 @@
 // indistinguishable, and a test that cannot tell them apart is exactly the
 // composite test that the aria-hidden regression turned out to be.
 import { describe, expect, it, vi } from 'vitest';
-import { applyToOne, type ApplicationPage, type ApplierGateway } from '../src/apply-one.js';
-import type { FormField } from '../src/extract-fields.js';
+import { applyToOne, type ApplicationPage, type ApplierGateway } from '../src/apply-one.ts';
+import type { FormField } from '../src/extract-fields.ts';
 import type { AnswerBankRow } from '@applyy/shared-types';
 
 /** A form the answer bank can fully satisfy, so nothing blocks by accident. */

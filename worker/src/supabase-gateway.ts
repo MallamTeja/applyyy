@@ -25,8 +25,8 @@
 // The property this buys, on the one component that touches real employers:
 // THE WORKER CANNOT DO ANYTHING TEJA COULD NOT DO FROM THE DASHBOARD.
 import type { AgentName, ApplicationStatus } from '@applyy/shared-types';
-import type { RunGateway } from './claim-loop.js';
-import type { ClaimedApplication } from './apply-one.js';
+import type { RunGateway } from './claim-loop.ts';
+import type { ClaimedApplication } from './apply-one.ts';
 
 /** What a Supabase-shaped client must offer. Deliberately minimal. */
 export interface SupabaseLike {

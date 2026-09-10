@@ -21,10 +21,10 @@
 // what makes §18.6's trust period work: after three days of screenshots, the
 // same rows are still sitting there when the flag is flipped.
 import type { AgentName, AnswerBankRow, BlockReason } from '@applyy/shared-types';
-import { guardedAdvance, type StatusWriter } from './guarded-advance.js';
-import { planFill, type FillBlocker } from './plan-fill.js';
-import { resolveSubmissionMode, type SubmissionEnv } from './submission-mode.js';
-import type { FormField } from './extract-fields.js';
+import { guardedAdvance, type StatusWriter } from './guarded-advance.ts';
+import { planFill, type FillBlocker } from './plan-fill.ts';
+import { resolveSubmissionMode, type SubmissionEnv } from './submission-mode.ts';
+import type { FormField } from './extract-fields.ts';
 
 // This worker's identity in the status graph. Named once so no call site can
 // quietly claim to be a different agent and slip through an edge it may not use.

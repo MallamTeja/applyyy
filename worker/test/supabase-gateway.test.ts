@@ -6,7 +6,7 @@
 // `undefined` rather than an error. Every test here pins a wire shape that the
 // TypeScript types do not currently describe.
 import { describe, expect, it } from 'vitest';
-import { createSupabaseGateway, type SupabaseLike } from '../src/supabase-gateway.js';
+import { createSupabaseGateway, type SupabaseLike } from '../src/supabase-gateway.ts';
 
 /** Builds a fake client that records the calls the gateway makes. */
 function fakeClient(overrides: Partial<SupabaseLike> = {}) {

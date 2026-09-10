@@ -15,6 +15,16 @@
          engines must never index a deployed preview URL. -->
     <meta name="robots" content="noindex, nofollow" />
 
+    <!-- An inline SVG data URI rather than a favicon.ico file. Browsers request
+         /favicon.ico unprompted, and without this the console logs a 404 on
+         every single page load - which is exactly the kind of harmless noise
+         that trains you to ignore the console, and this app relies on the
+         console being worth reading. A data URI also needs no extra request. -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231b211f'/%3E%3Cpath d='M4.4 11.6 8 4.4l3.6 7.2' stroke='%23f6efe9' stroke-width='1.6' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
+
     <!-- Preconnect before the stylesheet request so the font files start
          downloading a round trip earlier; type is the first paint that matters. -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />

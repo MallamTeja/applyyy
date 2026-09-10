@@ -8,8 +8,8 @@
 // and fits. Splitting this loop into a matrix of parallel jobs is the obvious
 // speed-up and it multiplies the billed minutes by 35.
 import { describe, expect, it, vi } from 'vitest';
-import { runApplierBatch, type RunGateway } from '../src/claim-loop.js';
-import type { ApplicationPage } from '../src/apply-one.js';
+import { runApplierBatch, type RunGateway } from '../src/claim-loop.ts';
+import type { ApplicationPage } from '../src/apply-one.ts';
 import type { AnswerBankRow } from '@applyy/shared-types';
 
 /** A page that always presents one answerable field and never blocks. */

@@ -13,10 +13,10 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 // Serves the saved fixture over localhost so the page loads exactly as a real
 // one would, without any request reaching an employer (constraint #16).
-import { startFixtureServer, type FixtureServer } from '../src/fixture-server.js';
+import { startFixtureServer, type FixtureServer } from '../src/fixture-server.ts';
 
 // Subject under test; absent, which is what makes this file RED.
-import { extractFields } from '../src/extract-fields.js';
+import { extractFields } from '../src/extract-fields.ts';
 
 // Shared across tests in this file: launching Chromium per test would triple
 // the runtime, and runtime here is charged against the Actions budget (§2).

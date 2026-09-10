@@ -14,10 +14,10 @@
 // fitting the budget and not having a product. The reasoning lives here, beside
 // the loop, because THE CHANGE THAT BREAKS IT WILL LOOK LIKE AN IMPROVEMENT.
 import type { AgentName } from '@applyy/shared-types';
-import { applyToOne, type ApplicationPage, type ApplierGateway, type ClaimedApplication } from './apply-one.js';
-import { canStartAnotherApplication, type RunWindowLimits } from './run-window.js';
+import { applyToOne, type ApplicationPage, type ApplierGateway, type ClaimedApplication } from './apply-one.ts';
+import { canStartAnotherApplication, type RunWindowLimits } from './run-window.ts';
 import type { AnswerBankRow } from '@applyy/shared-types';
-import type { SubmissionEnv } from './submission-mode.js';
+import type { SubmissionEnv } from './submission-mode.ts';
 
 // This worker's identity, used for both the run row and the claim marker.
 const ACTING_AGENT: AgentName = 'applier';

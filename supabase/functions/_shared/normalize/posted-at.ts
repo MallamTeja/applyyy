@@ -121,10 +121,34 @@ function parseRelativeDays(text: string | null): number | null {
 
 // Reduce the union to "the best genuine timestamp this source offers, and whether
 // that timestamp actually means 'posted'".
+// WHAT THIS RETURNS AND WHY THE SHAPE MATTERS MORE THAN THE LOGIC.
+//
+// `null` means "this source gave us nothing usable" — full stop, no confidence
+// attached. A successful read returns a date paired with `exact` or `derived`, and
+// `unknown` IS NOT IN THAT UNION AT ALL.
+//
+// THE BUG THIS SHAPE PREVENTS, which was live here until it was made structural.
+// These branches used to return `{ date: null, confidence: "unknown" }` on a parse
+// failure. Those `unknown`s never reached the output — but only because the CALLER
+// reads `confidence` exclusively inside its `if (date !== null)` branch. So the
+// system-wide guarantee that *`unknown` means "board not yet trusted" and NEVER means
+// a parse failure* held by the caller's control flow, not by anything here.
+//
+// That is a loaded gun. A refactor that trusted this function's `confidence`
+// unconditionally reads like a harmless simplification and would pass review — and it
+// would silently start emitting `unknown` for malformed dates. The consequence is not
+// cosmetic: `unknown` FAILS the staleness filter, so parse failures would begin
+// quietly dropping fresh jobs, and the only visible symptom would be a lower discovery
+// count that looks like thin supply. That is §13's own bug class arriving by a
+// different door.
+//
+// Narrowing the return type makes the invariant unexpressible rather than merely
+// untriggered: there is now nowhere in this function to write `unknown`. A test would
+// have proven the current behaviour; the type prevents the refactor.
 function readSourceDate(
   input: PostedAtInput,
   context: PostedAtContext,
-): { readonly date: Date | null; readonly confidence: PostedAtConfidence } {
+): { readonly date: Date; readonly confidence: "exact" | "derived" } | null {
   // Switch on the discriminant so adding a fifth source is a compile error until
   // its date semantics are decided here rather than defaulted.
   switch (input.source) {
@@ -132,36 +156,44 @@ function readSourceDate(
     case "greenhouse": {
       // Still parsed, because as an upper bound it beats nothing.
       const date = parseTimestamp(input.updatedAt);
+      // Unparseable: no verdict at all, so the caller falls back to its own sighting.
+      if (date === null) return null;
       // Never `exact`, no matter how well-formed — that downgrade is the point.
-      return { date, confidence: date === null ? "unknown" : "derived" };
+      return { date, confidence: "derived" };
     }
     // Lever publishes a true creation instant.
     case "lever": {
       // Epoch milliseconds, with the zero sentinel rejected.
       const date = parseEpochMillis(input.createdAt);
-      // Genuine posting date when present.
-      return { date, confidence: date === null ? "unknown" : "exact" };
+      // Unparseable or the zero sentinel: no verdict.
+      if (date === null) return null;
+      // Genuine posting date.
+      return { date, confidence: "exact" };
     }
     // Ashby publishes a true publication date.
     case "ashby": {
       // ISO string.
       const date = parseTimestamp(input.publishedDate);
-      // Genuine when parseable.
-      return { date, confidence: date === null ? "unknown" : "exact" };
+      // Unparseable: no verdict.
+      if (date === null) return null;
+      // Genuine publication date.
+      return { date, confidence: "exact" };
     }
     // Adzuna publishes a true creation date.
     case "adzuna": {
       // ISO string.
       const date = parseTimestamp(input.created);
-      // Genuine when parseable.
-      return { date, confidence: date === null ? "unknown" : "exact" };
+      // Unparseable: no verdict.
+      if (date === null) return null;
+      // Genuine creation date.
+      return { date, confidence: "exact" };
     }
     // Aggregators publish prose, or nothing.
     case "aggregator": {
       // Try to recover a day offset from the prose.
       const daysAgo = parseRelativeDays(input.relativeText);
       // Nothing recoverable: let the caller fall back to our own observation.
-      if (daysAgo === null) return { date: null, confidence: "unknown" };
+      if (daysAgo === null) return null;
       // Anchor the offset to the injected clock, never to the wall clock.
       return { date: new Date(context.now.getTime() - daysAgo * MS_PER_DAY), confidence: "derived" };
     }
@@ -171,7 +203,8 @@ function readSourceDate(
 // The extractor. Every discovered job goes through this before it is written, so
 // that `posted_at` and `posted_at_source` are always decided in one place.
 export function extractPostedAt(input: PostedAtInput, context: PostedAtContext): PostedAtResult {
-  // What the source itself claims.
+  // What the source itself claims, or `null` when it gave nothing usable. The union
+  // deliberately cannot carry `unknown` — see the note above `readSourceDate`.
   const fromSource = readSourceDate(input, context);
   // The source gave us something usable, so no inference of ours is involved.
   // THE COLD-START GUARD DOES NOT APPLY HERE, and that scoping is the whole
@@ -180,7 +213,7 @@ export function extractPostedAt(input: PostedAtInput, context: PostedAtContext):
   // so downgrading it would discard a fact in order to defend against a guess we
   // never made — and supply is already the scarce thing (§13: a 3-day window over
   // a 50-company watchlist yields single digits per day, not 35).
-  if (fromSource.date !== null) {
+  if (fromSource !== null) {
     return {
       // ISO-8601 UTC so the value is unambiguous crossing into Postgres.
       postedAt: fromSource.date.toISOString(),

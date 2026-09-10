@@ -20,7 +20,7 @@
 // Postgres, so the keepalive must actually reach Postgres — which is exactly
 // the kind of distinction that produces a keepalive that runs happily every day
 // while the project pauses anyway.
-import type { SupabaseLike } from '../supabase-gateway.js';
+import type { SupabaseLike } from '../supabase-gateway.ts';
 
 /** Read a required environment variable or fail loudly at startup. */
 function required(name: string): string {
@@ -36,8 +36,8 @@ function required(name: string): string {
 async function main(): Promise<void> {
   const supabaseUrl = required('SUPABASE_URL');
   const anonKey = required('SUPABASE_ANON_KEY');
-  const email = required('APPLYY_WORKER_EMAIL');
-  const password = required('APPLYY_WORKER_PASSWORD');
+  const email = required('APPLYY_APP_USER_EMAIL');
+  const password = required('APPLYY_APP_USER_PASSWORD');
 
   // Same late-binding composition-root import as the applier; see the comment
   // in cli/apply.ts for why the specifier is indirected.

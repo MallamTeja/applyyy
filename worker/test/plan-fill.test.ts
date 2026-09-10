@@ -13,10 +13,10 @@ import { describe, expect, test } from 'vitest';
 // a local copy is how the worker and the database silently drift apart.
 import type { AnswerBankRow } from '@applyy/shared-types';
 // The worker's own DOM concern; not a database shape, so it lives here.
-import type { FormField } from '../src/extract-fields.js';
+import type { FormField } from '../src/extract-fields.ts';
 
 // Subject under test; absent, which is what makes this file RED.
-import { planFill } from '../src/plan-fill.js';
+import { planFill } from '../src/plan-fill.ts';
 
 /** Builds an answer-bank row with only the fields the planner actually reads. */
 function answer(question_key: string, answer_value: unknown, needs_human = false): AnswerBankRow {

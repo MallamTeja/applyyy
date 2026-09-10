@@ -23,6 +23,13 @@
     // Bundler resolution is correct for Vite and lets us import without file
     // extensions; unlike the shared resume template, this app never runs in Deno.
     "moduleResolution": "Bundler",
+    // Lets a source file write `./keyRole.ts` instead of `./keyRole`. Needed
+    // because `node --test` runs these .ts sources directly and Node's ESM
+    // resolver requires the extension on value imports, where Vite does not
+    // care. Safe with noEmit: nothing is rewritten, so the specifier that
+    // typechecks is the one that runs. Matches how packages/resume-template
+    // already writes its imports.
+    "allowImportingTsExtensions": true,
     // Vite injects import.meta.env typings through this reference.
     "types": ["vite/client"]
   },

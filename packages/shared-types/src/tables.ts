@@ -1,12 +1,14 @@
 /**
  * applyy — row shapes for every table, plus the signatures of the SQL functions.
  *
- * Hand-written rather than produced by `supabase gen types typescript`. The reason has
- * NARROWED as of 2026-09-10 and is worth keeping accurate: the migrations now apply
- * cleanly to a LOCAL Postgres 17.6, but no remote project has been migrated (that is
- * gated on Teja's explicit approval, and there is no `supabase link` state on disk).
+ * Hand-written rather than produced by `supabase gen types typescript`. That reason has
+ * now EXPIRED, and this comment says so rather than quietly keeping its original
+ * justification: the migrations apply cleanly to a local Postgres 17.6, the project was
+ * linked at 18:40 on 2026-09-10, and Teja is reported to have pushed all 7 migrations
+ * at 18:45. (Link state on disk is verified; the remote's contents are second-hand here
+ * and were not queried from this package.)
  *
- * So generating types is now POSSIBLE locally and remains the right next step: run it
+ * So generating types is now POSSIBLE and remains the right next step: run it
  * and use the output as the CHECK on this file, not as a replacement for it. This file
  * carries the comments and the reasoning; the generated one carries column-level proof
  * that no hand-written shape can give. `test/enum-parity.test.ts` already covers enum
@@ -52,7 +54,7 @@ import type {
 // The inner document shapes. Imported so the row types name a real structure instead
 // of `Json` — a jsonb column typed as `Json` teaches the reader nothing about what is
 // legal inside it, and these three shapes carry the anti-fabrication defence.
-import type { MasterProfile, ResolvedResume, TailoredProfile } from './profile-nodes.ts';
+import type { MasterProfile, NodeId, ResolvedResume, TailoredProfile } from './profile-nodes.ts';
 
 /** Anything Postgres will accept into a `jsonb` column. */
 export type Json = string | number | boolean | null | { [key: string]: Json } | Json[];
@@ -409,6 +411,25 @@ export interface GenericAuditFinding extends AuditFindingBase {
  * Switch on `kind` exhaustively: `noFallthroughCasesInSwitch` and the union together
  * turn a newly added kind into a compile error at every consumer, which is what stops
  * a new finding type from being silently rendered as "other".
+ *
+ * ── THE FAILURE THIS FIXES IS A LOSSY BOUNDARY, NOT A MISSING CONCEPT ─────────────
+ * `TailorViolation` in supabase/functions/_shared/tailor/validator.ts ALREADY models
+ * misattribution fully, and the validator already performs the check
+ * (`found.parentRef !== parentRef`). The discrimination was computed correctly and then
+ * DISCARDED on the way into the database, because the stored shape had no `kind` and no
+ * parent fields. No amount of UI work could recover it.
+ *
+ * Worth recognising as a shape, because this is unlikely to be the only instance: a
+ * type that is RICH at the point of computation and LOSSY at the point of storage
+ * leaves every consumer downstream of the database working with less information than
+ * the system actually derived. It is harder to spot than a missing concept, because
+ * both types look entirely reasonable read on their own — the defect exists only in the
+ * mapping between them, which is nobody's file.
+ *
+ * Field names are deliberately snake_case here (the jsonb convention in this schema,
+ * matching the columns around it) while the validator's are camelCase. That is one
+ * documented translation rather than an undocumented divergence — `kind` values are
+ * identical on both sides, and MUST stay identical.
  */
 export type AuditFinding = MisattributedBulletFinding | GenericAuditFinding;
 

@@ -1,6 +1,6 @@
 # Verification traps
 
-**One family of bug, six instances.** Every entry here is a check that
+**One family of bug, seven instances.** Every entry here is a check that
 **reported success for a reason other than the one you believed**. None of them
 were caught by a failing test, because in every case the test passed.
 
@@ -132,6 +132,31 @@ the green a green.
 
 **Generalised:** for any tool whose success output is empty, **an empty result is
 not evidence.** Prove the harness can fail before trusting it to pass.
+
+## Instance 7 — a tool that writes into the tree, plus staging that sweeps it
+
+Playwright MCP wrote seven console logs and **page snapshots** into
+`.playwright-mcp/` at the repo root when a peer drove a real browser. That path
+was not in `.gitignore`, so the files sat untracked-but-visible — and a
+`git add -A` would have committed **browser snapshots of Teja's console**.
+
+This is the second instance in one family. The first: a `git add -A` swept a
+security guard that had been **deliberately sabotaged mid-mutation-test** into a
+commit, capturing the broken state as though it were intended.
+
+**The hazard is the COMBINATION, not either half.** A tool that writes into the
+working tree is fine. Staging that sweeps whatever it finds is fine. Together
+they commit things nobody chose. Both mitigations are therefore worth having, and
+they are independent:
+
+- **Stage by explicit path.** Never `git add -A` — which is already the standing
+  rule here, and this is *why* rather than merely *that*.
+- **Ignore the path**, removing one half so the combination cannot fire even if
+  someone forgets the first rule.
+
+**Generalised:** when auditing for this, do not ask "is this tool safe?" or "is
+my staging safe?" Ask **"what writes into this tree that I did not write, and
+what would sweep it up?"** The answer is usually a tool somebody ran once.
 
 ---
 

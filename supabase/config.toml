@@ -79,17 +79,32 @@ additional_redirect_urls = ["http://localhost:5173"]
 # whole minute, which is why the worker batches all of a day's applications
 # into ONE run instead of taking one run each.
 #
-# That batching is what erodes the headroom here. Under the old per-application
-# reading, a run was ~90s against a 3600s token — roughly 40x of slack. Under
-# batching, one run carries the whole daily queue: ~35 applications is
-# estimated at ~54 min/day of runner time, i.e. ~3240s against a 3600s token.
-# That is ~10% headroom, not 4000%, and the 3.75s measurement EXCLUDES real-site
-# latency and file upload, so the true figure is higher than the estimate.
+# CORRECTION, recorded rather than quietly replaced. An earlier version of this
+# comment claimed batching left only ~10% headroom (~3240s against 3600s). That
+# was wrong by a factor of about 25, and the way it was wrong is the instructive
+# part: it was derived from PROJECT_PLAN §2's "~54 min/day" table cell, which was
+# itself 35 x 90s — the per-application estimate that the same section had
+# already refuted three lines earlier. A stale DERIVED figure survived a
+# correction to the figure it was derived from, and then looked reviewed.
 #
-# Consequence to design for, not to assume away: a long batch can outlive its
-# access token mid-run. The worker must be able to re-authenticate partway
-# through a run rather than signing in once at the start, which is what the
-# refresh-token rotation below exists to support.
+# Measured reality, ten applications through the real loop (real Chromium, real
+# captured Greenhouse DOM, full-page screenshot, dry-run): 1407 ms per
+# application amortised. So ~35/day is ~49 SECONDS of work, one batched run is
+# ~2 min of billed time, and the headroom against a 3600s token is ~97%.
+#
+# So mid-run expiry is NOT the near-certain failure it briefly appeared to be.
+# The worker still refreshes proactively before each application rather than
+# reactively on a 401, and that remains correct — but as INSURANCE against an
+# unmeasured risk, not as a fix for an imminent one: the measurement above runs
+# against a localhost fixture and excludes real-site latency, TLS and resume PDF
+# upload, so the true per-application cost is higher and unmeasured. Proactive is
+# preferred over reactive because a 401 caught at the wrong moment is
+# indistinguishable from the dangerous case.
+#
+# Raising this value would be the wrong fix regardless of magnitude: it trades a
+# bounded, testable refresh path for a longer-lived credential sitting in a
+# GitHub Actions runner. The refresh-token rotation below is what supports the
+# refresh path.
 jwt_expiry = 3600
 # The worker signs in once per run and relies on the access token; rotation protects
 # the long-lived refresh token it holds in Actions secrets.

@@ -18,13 +18,20 @@
  *      been aborting the run at file 4 of 7 and leaving the guard, the RLS policies and
  *      the RPCs unexecuted).
  *
- * TWO LIMITS ON "VERIFIED", because a general claim here would mislead later:
- *   - LOCAL ONLY. There is no remote database and no `supabase link` state on disk.
- *     Never describe the hosted project as migrated.
- *   - The verifying role had `rolbypassrls=TRUE`. The `SECURITY DEFINER` audit trigger
- *     did write its witness row through FORCE RLS, but it did so BECAUSE of BYPASSRLS —
- *     FORCE RLS does not exempt table owners. So "the audit trigger works" holds for
- *     that deployment and is unproven for a plain-owner one.
+ * REMOTE STATE, and the provenance matters as much as the fact: the project IS now
+ * linked — `supabase/.temp/linked-project.json` and `project-ref` exist, written
+ * 2026-09-10 18:40 — and Teja is reported to have pushed all 7 migrations at 18:45.
+ * WHAT I VERIFIED MYSELF is the link state on disk; I did NOT query the remote, so
+ * "the hosted project has these enums" is a second-hand claim, not one this comment
+ * proves. Treat it accordingly, and re-verify against the remote before depending on
+ * it. (The link files are gitignored, so no project identifier is committed —
+ * constraint 11.)
+ *
+ * ONE FURTHER LIMIT ON "VERIFIED", because the general claim would mislead: the role
+ * that ran the local verification had `rolbypassrls=TRUE`. The `SECURITY DEFINER` audit
+ * trigger did write its witness row through FORCE RLS, but it did so BECAUSE of
+ * BYPASSRLS — FORCE RLS does not exempt table owners. So "the audit trigger works"
+ * holds for that deployment and is unproven for a plain-owner one.
  *
  * The pattern throughout is: a `const` tuple (runtime value, iterable, usable to build
  * a dropdown or to validate an untrusted string) plus a union type derived from it with
@@ -85,8 +92,7 @@ export const APPLICATION_STATUSES = [
    * have distinguished.
    *
    * Constraint 15 is therefore unreachable-by-construction: no second door into
-   * `applying` exists to be reached by a buggy agent. Local database only — there is no
-   * remote deployment yet.
+   * `applying` exists to be reached by a buggy agent.
    */
   'approved',
   /** The worker has begun submitting. THE ONE NON-IDEMPOTENT STATE — see NON_RETRYABLE_STATUSES below. */

@@ -5,8 +5,8 @@
 // the accessibility-tree extraction and the anti-bot detection meet a live DOM.
 import type { Page } from 'playwright';
 import type { BlockReason } from '@applyy/shared-types';
-import { extractFields } from './extract-fields.js';
-import type { ClosableApplicationPage } from './claim-loop.js';
+import { extractFields } from './extract-fields.ts';
+import type { ClosableApplicationPage } from './claim-loop.ts';
 
 /**
  * Thrown if anything ever reaches the submit path before Teja has approved it.

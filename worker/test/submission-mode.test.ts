@@ -9,7 +9,7 @@
 import { describe, expect, test } from 'vitest';
 
 // Subject under test; absent, which is what makes this file RED.
-import { resolveSubmissionMode } from '../src/submission-mode.js';
+import { resolveSubmissionMode } from '../src/submission-mode.ts';
 
 describe('resolveSubmissionMode', () => {
   test('defaults to dry-run when DRY_RUN is unset', () => {

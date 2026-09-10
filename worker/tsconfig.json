@@ -15,9 +15,7 @@
     "types": ["node"],
     // Playwright's page.evaluate() runs its callback inside the browser, so DOM
     // lib types are needed at compile time even though no DOM exists in Node.
-    "lib": ["ES2022", "DOM"],
-    "outDir": "dist",
-    "rootDir": "."
+    "lib": ["ES2022", "DOM"]
   },
   // Tests are type-checked alongside source: a test that no longer compiles
   // against the code it covers is a broken test, and should fail the same run.

@@ -17,9 +17,9 @@ import { afterAll, beforeAll, expect, test } from 'vitest';
 // hazard itself rather than pinned by a human who might miscount — as happened.
 import { readFile } from 'node:fs/promises';
 import { chromium, type Browser, type Page } from 'playwright';
-import { startFixtureServer, type FixtureServer } from '../src/fixture-server.js';
-import { extractFields } from '../src/extract-fields.js';
-import { planFill } from '../src/plan-fill.js';
+import { startFixtureServer, type FixtureServer } from '../src/fixture-server.ts';
+import { extractFields } from '../src/extract-fields.ts';
+import { planFill } from '../src/plan-fill.ts';
 
 // Shared browser/server; launching per test would cost billable seconds (§2).
 let browser: Browser;

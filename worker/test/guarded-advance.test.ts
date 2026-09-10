@@ -8,7 +8,7 @@
 // Failing fast in TypeScript means a bad edge is caught before Playwright
 // launches, not mid-submit with an unknown real-world outcome.
 import { describe, expect, it, vi } from 'vitest';
-import { guardedAdvance } from '../src/guarded-advance.js';
+import { guardedAdvance } from '../src/guarded-advance.ts';
 
 describe('guardedAdvance', () => {
   it('performs a legal transition for the acting agent', async () => {

@@ -8,9 +8,8 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "build": "tsc",
-    "apply": "pnpm run build && node dist/src/cli/apply.js",
-    "keepalive": "pnpm run build && node dist/src/cli/keepalive.js",
+    "apply": "node src/cli/apply.ts",
+    "keepalive": "node src/cli/keepalive.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
@@ -22,6 +21,7 @@
   },
   "devDependencies": {
     "@types/node": "24.0.1",
+    "pdfjs-dist": "4.9.155",
     "typescript": "^5.8.0",
     "vitest": "2.1.8"
   }

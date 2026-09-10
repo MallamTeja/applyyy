@@ -27,8 +27,27 @@ Seven migrations in `supabase/migrations/`, applied in filename order:
 **15 physical tables: 14 domain + 1 config.** The config table is
 `application_status_transitions`, which holds rules rather than user data.
 
-**Nothing has been applied to the hosted project.** These are files on disk.
-`supabase link` and `supabase db push` are gated on Teja's explicit approval.
+**Applied and verified against a LOCAL Postgres 17.6 on 2026-09-10:** all 7 migrations
+load cleanly, 15/15 tables present, all 7 RPCs present, 44 transition edges seeded,
+RLS enabled with at least one policy on 15/15 tables.
+
+**The hosted project is now linked, and reportedly pushed.** `supabase/.temp/`
+carries `linked-project.json` and `project-ref` as of 18:40 on 2026-09-10, and Teja is
+reported to have pushed all 7 migrations at 18:45.
+
+**Read that with its provenance.** What is verified here is the *link state on disk*.
+Nobody has queried the remote to confirm it holds these 15 tables, 7 RPCs and 44 edges —
+so "the hosted project has this schema" is currently a second-hand claim. Re-verify
+against the remote before depending on it, and note the consequence: **type-level
+defects in this package are now live-system defects, not future ones.** The link files
+are gitignored, so no project identifier is committed (constraint #11).
+
+Getting to that clean load took one fix worth remembering as a *shape*: a partial index
+on `company_blocklist` whose predicate called `now()` was rejected as not `IMMUTABLE`
+(`42P17`), which aborted the run at **file 4 of 7** — so the guard, the RLS policies and
+the RPCs (files 5, 6, 7) had never executed at all. An early failure in a numbered
+sequence says nothing about the files it never reached, and a partial run reports as one
+error rather than as three unverified files.
 
 ---
 
@@ -47,6 +66,46 @@ step** — Node, Deno and Vite all consume the source); erasable-syntax-only Typ
 **Never turn a `const` tuple into a TS `enum` here.** A TS `enum` is not erasable
 syntax: it runs fine under Deno and throws at parse under Node v24. The failure would
 appear only in the worker, only at runtime, only in CI — the worst possible shape.
+
+**The unexpected dividend, and the best argument for the const-tuple style.**
+`erasableSyntaxOnly` was added to stop `export enum` breaking the worker at runtime.
+Because it guarantees every file in this repo is type-strippable, `node --test` runs the
+`.ts` sources **directly** — no vitest, no ts-node, no build step, zero test
+dependencies. A compiler flag added for one reason bought a test runner for free. That
+is a more persuasive case for the style than "the linter says so", and it is why
+`test/enum-parity.test.ts` can import the real contract at runtime rather than
+re-parsing it as text.
+
+### Two toolchain traps that have each cost a session
+
+**1. `node --test` needs a GLOB, not a directory.** On Node 24.14.0 a bare `test/`
+argument is resolved as a *module* and dies with `MODULE_NOT_FOUND: …\test`; `./test/`
+fails identically. The working form, used by both packages here:
+
+```jsonc
+"test": "node --test \"test/**/*.test.ts\""
+```
+
+The error is easy to misread: "MODULE_NOT_FOUND on a test dir that has no fixtures" is a
+coherent story, and it was the wrong one.
+
+**2. The `"// key": "explanation"` pseudo-key trick is only safe where nothing validates
+the object.** It is used widely in `package.json` and is fine there — npm does no schema
+validation. It is **fatal** in two places we have now hit:
+
+| Location | Result |
+|---|---|
+| inside `compilerOptions` | `TS5025: Unknown compiler option '// noEmit'` |
+| inside `dependencies` / `devDependencies` | `ERR_PNPM_INVALID_DEPENDENCY_NAME` |
+
+Tolerated at the tsconfig **root** (`"// extends"` passes) because TypeScript ignores
+unrecognised top-level keys — which is exactly why the pattern half-works and survived
+review. `tsconfig.json` is JSONC, so use **real `//` comments** there instead. For a
+validated block like `devDependencies`, put the explanation on a sibling top-level key.
+
+The general rule, which is the transferable part: **a self-documenting convention that
+relies on a parser ignoring what it does not recognise fails wherever that parser is
+strict — and it fails at the place you add it, not where you learned it.**
 
 ---
 
@@ -322,11 +381,55 @@ implementation, is what the type system alone appears to ask for, and silently r
 this hole. The type guarantees a real bullet is being referenced; **only the validator
 can guarantee it is being referenced from the right place.**
 
-`MisattributedBulletFinding` requires both `claimed_parent` and `actual_parent` — not
-optional fields. A misattribution with no parents named is unactionable, since the whole
-question is "under which employer did this appear, and where does it belong", so the
-union makes a nameless one unrepresentable rather than merely discouraged. Same move as
-`ref` being non-optional.
+`MisattributedBulletFinding` requires `ref`, `claimed_parent_ref` **and**
+`actual_parent_ref` — not optional fields. A misattribution with no parents named is
+unactionable, since the whole question is "under which employer did this appear, and
+where does it belong", so the union makes a nameless one unrepresentable rather than
+merely discouraged. Same move as `ref` being non-optional.
+
+**The defect this fixed was a lossy boundary, not a missing concept.** `TailorViolation`
+in `validator.ts` already models `{kind: 'misattributed_bullet', ref, parentRef}` and
+the validator already performs the check (`found.parentRef !== parentRef`). The
+discrimination was computed correctly and then **discarded on the way into the
+database**, because the stored shape had no `kind` and no parent fields. No amount of UI
+work could recover it. Worth recognising as a shape, since it is unlikely to be the only
+instance: a type that is **rich at the point of computation and lossy at the point of
+storage** leaves every consumer downstream of the database working with less information
+than the system actually derived — and it is harder to spot than a missing concept,
+because both types look reasonable read on their own. The defect lives only in the
+mapping, which is nobody's file.
+
+Naming: `kind` values are **identical** on both sides and must stay so. The field names
+differ by convention — camelCase in the validator (function-internal TS), snake_case in
+the stored jsonb (matching the columns around it) — and `parentRef` becomes
+`claimed_parent_ref` because a bare `parentRef` does not say *which* parent it means,
+and the stored shape carries both. One documented translation, not an undocumented
+divergence.
+
+### `NodeId` is unique across the WHOLE master profile — one global id space
+
+**Decided 2026-09-10.** Every `NodeId` must be unique across the entire
+`MasterProfile`: across experience, projects, education, skills, links, and every bullet
+nested inside any of them. **Not per section. Not per node kind.**
+
+This follows from the tailored types rather than being a preference. `TailoredBullet` is
+`{ref, text}` and `TailoredSkill` is `{ref}` — a bare id with **no section qualifier and
+no kind tag** — so resolution has nothing to go on but the id. Under per-section
+uniqueness a bullet ref could resolve to a skill, or to a bullet under a different
+parent, and no consumer could disambiguate. The alternative design is qualifying every
+ref, which is strictly more machinery for no gain.
+
+**The ingest validator must reject any duplicate `NodeId` across all kinds, and fail
+closed.** That is the only place it can be enforced: `type NodeId = string` buys no
+enforcement, and by the time a ref is being resolved the collision has already been
+absorbed. The failure mode is silent — a `Map` overwrites on duplicate key, so the
+misattribution check compares against the *wrong* stored parent and a genuine
+misattribution passes as clean, with nothing reporting a problem.
+
+Why this was worth deciding explicitly: the ambiguity was itself load-bearing. The
+validator's flat index assumes global; a reader of `profile-nodes.ts` could reasonably
+assume per-section. Both readings could call the other's code a bug, so the contract has
+to say which — and a confirmed collision bug already existed in that gap.
 
 ### Three types, three stages, one direction
 
@@ -603,9 +706,57 @@ will write the wrong filter.
 
 `unknown` **fails** the staleness check rather than bypassing it. That policy is a
 setting, not a buried constant: `filter_rules.config.treat_unknown_posted_at_as_fresh`,
-default `false`. On a board's first poll only `derived` degrades to `unknown` — a
-genuine `exact` date from Lever or Ashby stays `exact`, because the cold-start bug lives
-entirely in the `first_seen_at` fallback path.
+default `false`.
+
+#### The degradation axis is WHERE THE DATE CAME FROM, not how confident we are
+
+**Corrected 2026-09-10 — the implementation was right and this document's wording was
+wrong.** It previously read "on a board's first poll only `derived` degrades to
+`unknown`", which read literally degrades a real Greenhouse `updated_at`. What
+`posted-at.ts` actually does: **both `exact` and `derived` survive a board's first poll.
+Only a date that would have come from `first_seen_at` becomes `unknown`.**
+
+**There are two distinct defects here and they need two distinct mechanisms.** Keeping
+them apart is the whole point, and conflating them is the mistake this subsection exists
+to prevent:
+
+1. **The cold-start bug (§13) lives entirely in the inference from our own poll
+   history.** "Anything we have never seen must be new" is sound in steady state and
+   false on a board's first poll, when the entire back catalogue arrives stamped today.
+   A real board timestamp's value **does not depend on when we started polling**, so the
+   cold-start error cannot reach it. Downgrading a Lever `createdAt` would discard a
+   fact to defend against a guess we never made — and supply is already the scarce
+   thing (§13: a 3-day window over a 50-company watchlist yields single digits a day,
+   not 35).
+2. **Separately, Greenhouse's `updated_at` is a poor proxy for a posted date** — a
+   description edit resets it, so a job open since March but edited yesterday looks
+   fresh. **But that is true on EVERY poll, not just the first.** Folding it into the
+   cold-start guard would "fix" it on poll 1, leave it broken from poll 2 onward, and —
+   worst of the three — make it look handled. It belongs to the `derived` confidence
+   level's own filter policy, which is why Greenhouse is `derived` and never `exact`
+   regardless of how well-formed its timestamp is.
+
+#### `unknown` has exactly one cause: the cold-start guard. Never a parse failure.
+
+Every degraded input — malformed string, epoch-0 sentinel, absent field, unparseable
+prose — carries the same information (nothing), so all of them fall through to the
+`first_seen_at` path and resolve to **`derived`** on any poll after the first. No column
+type can express this, and a reader who assumes `unknown` signals a bad parse will write
+the wrong filter.
+
+**A caveat on how that guarantee is currently enforced, because it is more fragile than
+it looks.** `readSourceDate` *does* return `confidence: 'unknown'` on an unparseable
+date — but only ever paired with `date === null`, and `extractPostedAt` reads
+`fromSource.confidence` **only inside its `if (fromSource.date !== null)` branch**. So
+those `unknown` values are unreachable in the output, and the guarantee holds because of
+the *caller's* control flow rather than because of the confidence values themselves.
+
+Consequence worth stating plainly: a future refactor that trusted
+`fromSource.confidence` unconditionally — which reads like a harmless simplification —
+would silently start emitting `unknown` for parse failures and break this guarantee with
+no other symptom. If you touch `extractPostedAt`, the invariant to preserve is
+**"`unknown` is written by exactly one line, the cold-start ternary"**, not "the
+confidences are correct".
 
 ### 8.8 RLS conventions
 

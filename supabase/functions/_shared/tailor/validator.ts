@@ -50,7 +50,13 @@ export type TailorViolation =
   // A number that does not appear in the referenced master bullet.
   | { readonly kind: "invented_metric"; readonly ref: NodeId; readonly value: string }
   // A word in a rewording that traces back to nothing in the master profile.
-  | { readonly kind: "unverifiable_token"; readonly ref: NodeId; readonly token: string };
+  | { readonly kind: "unverifiable_token"; readonly ref: NodeId; readonly token: string }
+  // THE MASTER ITSELF IS AMBIGUOUS: two nodes share an id, so no ref naming that id
+  // can be resolved to a single source. This is not a fabrication by the model — it
+  // is a defect in the profile that makes the honesty check unable to reach a verdict
+  // at all. Reported distinctly for exactly that reason: the remedy is to fix the
+  // master, not to re-run the Tailor.
+  | { readonly kind: "ambiguous_master_ids"; readonly ids: readonly NodeId[] };
 
 // Success carries the render input; failure carries every reason. A union rather than
 // a throw, because the caller must persist the violations for the dashboard rather
@@ -130,9 +136,74 @@ function masterSkillTokens(master: MasterProfile): ReadonlySet<string> {
   return tokens;
 }
 
+// Find every id that appears more than once anywhere in the master profile.
+//
+// WHY THIS EXISTS, AND WHY IT REFUSES RATHER THAN REPAIRS. `indexBullets` below builds
+// ONE FLAT MAP keyed by bullet id across experience, projects and education — and a
+// `Map` overwrites. So if two bullets share an id, the later one silently replaces the
+// earlier, and the misattribution check then compares a tailored bullet against THE
+// WRONG PARENT. A genuinely misattributed bullet can pass, or an honest one be
+// flagged, decided purely by which duplicate happened to be indexed last. No error
+// anywhere: the tailoring looks clean and the Auditor reports clean, while the honesty
+// guarantee has quietly stopped holding.
+//
+// The same hazard applies to PARENT ids. `resolveBullet` compares `found.parentRef`
+// against the parent the model nested the bullet under, so if an experience node and
+// a project node share an id, a bullet moved between them passes that comparison.
+//
+// AND IT IS THE MOST LIKELY DEFECT IN A HAND-MAINTAINED PROFILE, which is what makes
+// it worth a hard failure rather than a warning: the way anyone adds a bullet is to
+// copy the one above it. `TailoredBullet.ref` is a bare `NodeId` with no section
+// qualifier, so nothing downstream can disambiguate after the fact.
+//
+// WHY GLOBAL UNIQUENESS AND NOT PER-SECTION UNIQUENESS — this distinction is the whole
+// point, and per-section is the plausible wrong answer that reads as more sensible.
+// Per-section uniqueness catches the mistake people make most often (a duplicate
+// within one employer) and still leaves the audit corruptible, because the collision
+// it misses — the SAME id under two different parents — is precisely the one a flat
+// index cannot survive. A checker that catches the common mistake and misses the
+// dangerous one is worse than none, because it produces confidence it has not earned.
+//
+// Skills are included even though `skillsById` is a separate map that a bullet ref
+// never reaches, so a skill/bullet collision is not exploitable today. It is refused
+// anyway: an id space that is ambiguous to a human reading a provenance footer is a
+// latent hazard, and "every id in the master is unique" is a rule worth being able to
+// state without a footnote.
+function findDuplicateMasterIds(master: MasterProfile): readonly NodeId[] {
+  // Ids seen at least once.
+  const seen = new Set<NodeId>();
+  // Ids seen more than once. A Set so one id repeated three times is reported once.
+  const duplicates = new Set<NodeId>();
+  // Record one id, promoting it to `duplicates` on a second sighting.
+  const note = (id: NodeId): void => {
+    // Already seen means this is a collision.
+    if (seen.has(id)) duplicates.add(id);
+    // Otherwise remember it.
+    else seen.add(id);
+  };
+  // Skills occupy the same declared id space even though they resolve through their
+  // own map — see the note above about hygiene versus exploitability.
+  for (const skill of master.skills) note(skill.id);
+  // The three bullet-owning node kinds, walked exactly as `indexBullets` walks them so
+  // this check cannot drift out of alignment with the index it is protecting.
+  for (const parent of [...master.experience, ...master.projects, ...master.education]) {
+    // The parent's own id, which `resolveBullet` compares against.
+    note(parent.id);
+    // Every bullet beneath it, which is the flat-index collision proper.
+    for (const bullet of parent.bullets) note(bullet.id);
+  }
+  // Sorted so the violation is deterministic — an unstable order would make the same
+  // defect produce different output run to run and break byte-comparison tests.
+  return [...duplicates].sort();
+}
+
 // Index every bullet in the master by id, remembering WHICH node it belongs to. The
 // parent is the load-bearing part: without it, moving a real bullet under a different
 // employer passes a flat existence check while fabricating employment history.
+//
+// SAFE ONLY BECAUSE `findDuplicateMasterIds` HAS ALREADY REFUSED an ambiguous master.
+// The overwrite hazard described above is real and is handled by that guard failing
+// closed before this function is ever called — not by anything in here.
 function indexBullets(master: MasterProfile): ReadonlyMap<NodeId, { bullet: MasterBullet; parentRef: NodeId }> {
   // Accumulator keyed by bullet id.
   const index = new Map<NodeId, { bullet: MasterBullet; parentRef: NodeId }>();
@@ -239,6 +310,24 @@ export function validateTailoredProfile(
   master: MasterProfile,
   masterVersion: number,
 ): TailorValidation {
+  // FAIL CLOSED BEFORE ANY OTHER CHECK. If the master's id space is ambiguous, every
+  // ref lookup below is resolving against an index that may name the wrong node, so
+  // no verdict this function could reach would be supportable.
+  //
+  // THIS RETURNS RATHER THAN ACCUMULATING, AND THAT IS THE POINT. A validator that
+  // proceeds on an index it knows is ambiguous is worse than one with no check at
+  // all: it reports "clean" with the full authority of a check that did not actually
+  // hold. Refusing outright means the failure is loud, the remedy is obvious (fix the
+  // master, do not re-run the Tailor), and nothing downstream ever sees a
+  // `ResolvedResume` built on a corrupted lookup.
+  const duplicateMasterIds = findDuplicateMasterIds(master);
+  // Any collision at all is disqualifying — there is no safe subset to proceed with.
+  if (duplicateMasterIds.length > 0) {
+    // The whole tailoring is refused, carrying every colliding id so the fix is
+    // one edit rather than a hunt.
+    return { ok: false, violations: [{ kind: "ambiguous_master_ids", ids: duplicateMasterIds }] };
+  }
+
   // Collected rather than thrown: someone fixing a bad prompt needs every problem at
   // once, not the first one repeatedly.
   const violations: TailorViolation[] = [];

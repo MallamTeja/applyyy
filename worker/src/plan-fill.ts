@@ -12,7 +12,7 @@
 // invents a value. It can only copy an answer that a human already supplied, or
 // report a blocker. There is no third branch to get wrong.
 import type { AnswerBankRow } from '@applyy/shared-types';
-import type { FormField } from './extract-fields.js';
+import type { FormField } from './extract-fields.ts';
 
 /** One field the planner is confident it may fill, and the value to type. */
 export interface PlannedFill {

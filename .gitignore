@@ -45,3 +45,23 @@ playwright-report/
 test-results/
 blob-report/
 .playwright/
+
+# Playwright MCP writes console logs and page SNAPSHOTS here, at the repo root,
+# whenever anyone drives a real browser. Seven such files appeared during the
+# human-lane verification and were untracked-but-visible, so a `git add -A`
+# would have committed browser snapshots of Teja's console — constraint #11
+# territory, arriving through a tool nobody chose to run.
+#
+# The hazard worth naming is the COMBINATION, not either half: a tool that writes
+# into the working tree, plus staging that sweeps whatever it finds. Each is fine
+# alone. This is the second instance in that family; the first swept a
+# deliberately-sabotaged security guard mid-mutation into a commit. Ignoring the
+# path removes one half so the combination cannot fire.
+.playwright-mcp/
+
+# Belt and braces only: the worker has NO build step — it uses .ts import
+# specifiers and runs under Node 24's native type stripping, because
+# tsconfig.base.json sets noEmit (required by allowImportingTsExtensions), so
+# tsc emits nothing and this directory is never created today. Listed so that
+# re-adding a build step cannot quietly start committing compiled output.
+worker/dist/

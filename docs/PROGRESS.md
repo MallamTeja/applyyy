@@ -39,6 +39,105 @@ confirmed to *exist*, not to *behave*.
 
 ---
 
+## THE SCHEMA IS NOW LIVE ON THE REMOTE — 18:45 IST
+
+Teja ran `supabase db push` himself against `xynqxekcqizwhtskzqrq`; all 7
+migrations applied in order, `Finished supabase db push.` The local from-scratch
+`db reset` above is what made that safe to attempt, which is the whole reason
+the local-first sequencing was insisted on.
+
+**Reported, NOT independently verified — and that distinction matters here more
+than usual.** `applyyy-2b` attempted `supabase migration list` to confirm the
+remote state and it failed with `password authentication failed for user
+"postgres"` against the pooler host. So **the only evidence for the remote
+schema is Teja's own terminal output** — explicit and sequential, but not a
+query. The remote is currently the part of the system we have the *least* ability
+to inspect.
+
+It also raises a live question worth recording before someone assumes otherwise:
+**`supabase link` validates the access token, not the database password.** So
+`link` succeeding proves nothing about the password, and the credential that
+worked for `db push` may have come from a stored one rather than from the string
+Teja supplied. Nobody should treat that string as the verified DB password.
+
+### Two of my runtime findings are no longer hypothetical — they are production state
+
+1. **`gemini_key_state` is empty on the remote** and `bootstrap_user_defaults`
+   has not been called. So the silent-stop bug *is* the current state of
+   production: `claim_gemini_key()` returns `NULL` forever, every LLM agent
+   releases its claim, and the pipeline reads as **merely idle**. No error, no
+   failed run, nothing on the health page.
+2. **There is no Supabase Auth user yet**, so any real session gets **zero rows
+   from every table** — correct RLS behaviour, indistinguishable from an empty
+   database. **Blocking prerequisite**, alongside the Actions secrets.
+
+Named plainly because the combination is the trap: with no auth user and an empty
+key pool, a deployed system looks **working but idle** rather than broken. That
+is the §14 silent death arriving through *configuration* rather than through code
+— and configuration has no test suite.
+
+### Migrations are now immutable
+
+`supabase_migrations.schema_migrations` on the remote records all 7 versions as
+applied, so Supabase will never re-run those files. **Editing an applied
+migration in place would leave the file saying one thing while the live database
+does another, silently**, because nothing re-reads an applied migration. Same
+class of divergence as the CRLF bug: two artifacts disagreeing with no error
+anywhere.
+
+Consequence for the two logic fixes below: they must ship as a **new migration**
+using `create or replace function`, not as edits to the applied files. Comment-only
+corrections are a separate case — they never reached Postgres, so fixing them in
+place changes no behaviour, and leaving a *false invariant written down* is worse
+than the file/ledger divergence.
+
+### Verified live by `applyyy-20`, which docs could only assert
+
+- **`MISSING_HUMAN_CONTROLS` reports zero gaps at runtime.** It built, ran `vite
+  preview`, and drove three pages with a real browser: every one of the **31
+  human-reachable transitions** has a screen offering it, derived **from the
+  graph** rather than from a reading of the file. Strongest evidence yet that the
+  human-lane work is complete.
+- A `/favicon.ico` **404 on every page load**, now fixed. Small, and the
+  justification is the good part: **a console that always has one error in it
+  trains you to ignore the console**, and this app depends on the console being
+  worth reading. Compilation could never have caught it.
+
+### CRLF sweep of the current working tree — 18:50 IST
+
+The root `.gitattributes` protects **future checkouts**, not files already sitting
+in the tree, so 14 tracked files still carry CRLF. Read-only measurement, nothing
+renormalised (the repo-wide `--renormalize` stays deferred — see above):
+
+| CR bytes | File |
+|---|---|
+| 742 | `PROJECT_PLAN.md` |
+| 470 | `apps/web/src/features/approval/DiffView.tsx` |
+| 406 | `apps/web/src/features/approval/DiffView.css` |
+| 361 | `apps/web/src/features/approval/diffAdapter.ts` |
+| 183 | `apps/web/src/features/approval/diffModel.ts` |
+| 175 | `apps/web/src/features/approval/ApprovalQueuePage.tsx` |
+| 167 | `apps/web/src/features/approval/fixtures.ts` |
+| 166 | `apps/web/test/keyRole.test.ts` |
+| 86 | `apps/web/src/data/supabase.ts` |
+| 47 | `.gitignore` |
+| 46 | `apps/web/index.html` |
+| 33 | `apps/web/tsconfig.json` |
+| 28 | `apps/web/package.json` |
+| 18 | `apps/web/tsconfig.node.json` |
+
+`applyyy-98` normalised its own two packages (`tables.ts` was 1141 CR bytes) and
+both now measure 0. **The remaining CRLF is concentrated almost entirely in
+`apps/web`.** Git normalises these to LF on staging — the warning `CRLF will be
+replaced by LF the next time Git touches it` is that mechanism working, not a
+problem — so the committed bytes are already correct and the exposure is limited
+to anything that hashes a *working-tree* file before staging. Nothing in
+`apps/web` currently does; the renderer, which does, measures 0 CRs and its
+output hash `525c5304…ad70ebf3` / 11111 bytes is unchanged across all of today's
+edits, which is the signal that none of them reached the output.
+
+---
+
 ## Per-stream status
 
 | Stream | Owns | Verified | In progress | Blocked on |
@@ -85,15 +184,27 @@ topologically and dependents of a failed package are **SKIPPED rather than run**
 (`--no-bail` does not change this), the other three packages were never
 type-checked at all.
 
-When `applyyy-98` fixed it, **two genuinely broken packages surfaced**:
+When `applyyy-98` fixed it, **two genuinely broken packages surfaced**. Both had
+been red all along: **"green" had never been measured**, it had been *inferred
+from the absence of a report*, which is not the same thing.
 
-- `worker/test/guarded-advance.test.ts:11` imports `../src/guarded-advance.js`,
-  which does not exist. → `applyyy-ef`
-- `apps/web/src/App.tsx:19,21,22` import three settings pages that do not exist.
-  → `applyyy-20`
+**Re-measured 18:50 IST, and my earlier record of this was stale in both halves:**
 
-Both had been red all along. **"Green" had never been measured** — it had been
-*inferred from the absence of a report*, which is not the same thing.
+| Package | State |
+|---|---|
+| `packages/shared-types` | **Done** |
+| `packages/resume-template` | **Done** |
+| `apps/web` | **Done** — exit 0. All six settings pages exist and are committed (`AnswerBankPage`, `BlocklistPage`, `FiltersPage`, `MasterProfilePage`, `SearchPreferencesPage`, `WatchlistPage`). My earlier note that three were missing was **wrong when I wrote it down** |
+| `worker` | **FAILS** — but on a *different* error than before. `guarded-advance` is fixed; the current failure is `test/ats-parse-check.test.ts(17,60): error TS2307: Cannot find module '../src/ats-parse-check.ts'` plus four `TS7006` implicit-`any` parameters |
+
+`pnpm -r run typecheck` therefore still exits 1, for `worker` alone.
+
+**Worth flagging about this row specifically:** `worker`'s failure is a *moving
+target* — it is mid-TDD, so a red run there is expected-and-temporary rather than
+a defect, and the specific error changes between measurements. That makes it
+exactly the wrong thing to record as a static fact. Any future note about it
+should carry a timestamp and the error text, or it will be stale within the hour,
+as mine was.
 
 ### A claim of mine that was wrong
 
@@ -103,11 +214,22 @@ extracting each `compilerOptions` block: **zero hits outside the one it fixed.**
 I had generalised from seeing `"// extends"` and `"// include"` at the *root* of
 the same file, and did not check. Left visible rather than edited away.
 
-The refined rule is more useful than my wrong one: the
-`"// key": "explanation"` pseudo-key trick is **legal and harmless in
-`package.json`** (npm ignores unknown keys and does no schema validation) and
-**fatal inside `compilerOptions`** (TypeScript validates every key strictly).
-That is why the trick appeared to work right up until it didn't.
+The refined rule is more useful than my wrong one — and `applyyy-98` then found a
+second instance that generalises it further. The `"// key": "explanation"`
+pseudo-key trick also fails inside **`dependencies` / `devDependencies`**, where
+pnpm validates dependency names and raises `ERR_PNPM_INVALID_DEPENDENCY_NAME`
+(hit live while adding `@types/node`).
+
+So the rule is **not** "fatal in `compilerOptions`". It is:
+
+> **The pseudo-key trick is fatal inside any object whose parser validates its
+> keys, and safe only where the parser ignores what it does not recognise.**
+
+`package.json`'s *top level* ignores unknown keys, which is why the trick looks
+harmless there; `compilerOptions` and `dependencies` both validate, which is why
+it detonates there. **And it fails at the place you add it, not at the place you
+learned the pattern** — which is exactly why it spread. Both instances are
+tabulated in §2 of `SCHEMA_CONTRACT.md`.
 
 ---
 
@@ -182,26 +304,41 @@ against its absence** — those consumers will double-write once it exists.
 Nobody infers this from either the SQL or the TypeScript in isolation. Also
 recorded in `SCHEMA_CONTRACT.md` by `applyyy-98`.
 
-### The batched run may outlive its own access token
+### ~~The batched run may outlive its own access token~~ — MY MAGNITUDE WAS WRONG BY ~25×
 
-`jwt_expiry = 3600`. The batching decision that fixes GitHub's minute-rounding
-billing problem means **one run carries the whole daily queue**: ~35 applications
-≈ ~54 min/day ≈ **~3240 s against a 3600 s token — ~10% headroom**, not the ~40×
-that the old "~90 s per application" figure implied. The 3.75 s per-application
-measurement was taken against a **localhost fixture** and excludes real-site
-latency and file upload, so the true figure is higher.
+**Retracted as stated, kept as a worked example of how I got it wrong**, because
+the mechanism is more instructive than the number.
 
-The failure mode is the nasty one: it lands **late in a run, after real
-applications have already been submitted**, not at startup where it would be
-obvious. And a token expiring between `applying` and `applied` means the terminal
-status cannot be written, the row goes stale, and the sweeper correctly routes it
-to `needs_verification` — converting clean submissions into a pile of "did this
-actually send?" questions. That is exactly what §14 exists to prevent.
+I claimed one batched run was ~3240 s against a 3600 s token — **~10% headroom**.
+`applyyy-ef` measured the real loop (real Chromium, real captured Greenhouse DOM,
+full-page screenshot, dry-run): **1407 ms per application amortised**, 2839 ms
+cold. So ~35/day is **~49 SECONDS** of in-process work, one batched run is **~2
+min** of billed time, and the headroom is **~97%**, not ~10%.
 
-Routed to `applyyy-ef`: refresh **proactively on remaining lifetime**, not
-reactively on a 401 (a 401 caught at the wrong moment is indistinguishable from
-the dangerous case). Raising `jwt_expiry` is the wrong fix — it trades a bounded,
-testable refresh path for a longer-lived credential sitting in an Actions runner.
+**How the error happened, which is the part worth keeping:** I derived 3240 s
+from PROJECT_PLAN §2's "~54 min/day" table cell — and *that cell was itself
+35 × 90 s*, the per-application estimate the same section had explicitly refuted
+three lines earlier. **A stale derived figure survived a correction to the figure
+it was derived from, and then looked reviewed because it sat next to corrected
+prose.** I trusted a number inside a document I was in the middle of correcting.
+The lesson: when you supersede a figure, sweep everything *derived* from it, not
+just its headline.
+
+**What survives, and it is not nothing.** The recommendation was right and ef
+implemented it: refresh **proactively before each application**, never reactively
+on a 401, because a 401 caught at the wrong moment is indistinguishable from the
+dangerous case. But it is now **insurance against an unmeasured risk** rather
+than a fix for a near-certain failure — the measurement excludes real-site
+latency, TLS and resume PDF upload, so per-application cost will rise and is
+unmeasured. Raising `jwt_expiry` remains the wrong fix at any magnitude: it
+trades a bounded, testable refresh path for a longer-lived credential in a runner.
+
+**Also resolved structurally**, by ef: the guard's `applyy.acting_agent` is
+per-connection state, which I flagged as droppable by a pool, retry or re-auth.
+Every status write goes through `advance_application_status()`, which calls
+`set_config('applyy.acting_agent', p_agent, true)` — transaction-scoped, so it is
+re-established on **every call** rather than assumed from setup. The re-auth case
+is structurally safe, not merely unlikely.
 
 Related, and easy to miss: the guard requires **session-local** state.
 `set applyy.acting_agent = 'applier'` is **per-connection**, not one-time setup —
