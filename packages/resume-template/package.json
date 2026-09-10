@@ -21,14 +21,15 @@
   "// scripts.test": "node --test runs .ts directly via native type stripping, so the test suite needs no runner dependency and no build.",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/"
+    "test": "node --test \"test/**/*.test.ts\""
   },
   "// dependencies": "shared-types carries the bullet-ID and skill-ID shapes that are the anti-fabrication defense; it is imported, never re-declared.",
   "dependencies": {
     "@applyy/shared-types": "workspace:*"
   },
-  "// devDependencies": "typescript only, so the package can be type-checked standalone in CI.",
+  "// devDependencies": "typescript for standalone type-checking; @types/node ONLY because the tests use node:test and node:crypto. src/ uses no Node API, because the renderer must stay importable by Deno and the browser too.",
   "devDependencies": {
+    "@types/node": "^24.0.0",
     "typescript": "^5.8.0"
   }
 }

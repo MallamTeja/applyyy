@@ -22,7 +22,7 @@ import type { ResumeDiff } from './diffModel';
 export const zomatoBackendIntern: ResumeDiff = {
   applicationId: 'fixture-zomato-backend-intern',
   jobTitle: 'Backend Intern',
-  company: 'Zomato',
+  companyName: 'Zomato',
   /* Version 4 of the immutable master. Displayed so the operator knows which
    * snapshot the Auditor's verdict actually applies to. */
   masterVersion: 4,
@@ -37,6 +37,10 @@ export const zomatoBackendIntern: ResumeDiff = {
      * that end the first technical interview. */
     matchedByFabrication: ['PostgreSQL', 'Docker'],
   },
+  /* Both findings are locatable inside the skills line, so nothing falls
+   * through. A non-empty list here would mean the adapter could not place a
+   * finding, which the renderer surfaces loudly rather than dropping. */
+  unlocatedClaims: [],
   lines: [
     {
       id: 'line-bullet-3',
@@ -107,7 +111,7 @@ export const zomatoBackendIntern: ResumeDiff = {
 export const swiggyFrontendIntern: ResumeDiff = {
   applicationId: 'fixture-swiggy-frontend-intern',
   jobTitle: 'Frontend Intern',
-  company: 'Swiggy',
+  companyName: 'Swiggy',
   masterVersion: 4,
   coverage: {
     jdKeywords: ['React', 'JavaScript', 'REST APIs', 'Git'],
@@ -116,6 +120,8 @@ export const swiggyFrontendIntern: ResumeDiff = {
     honestlyMatched: ['React', 'JavaScript', 'REST APIs', 'Git'],
     matchedByFabrication: [],
   },
+  /* Nothing flagged at all, which is what makes this row Bucket A. */
+  unlocatedClaims: [],
   lines: [
     {
       id: 'line-bullet-1',

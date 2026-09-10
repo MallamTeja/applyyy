@@ -15,6 +15,11 @@
     "noEmit": true,
     "declaration": false,
     "declarationMap": false,
+    // `module` and `moduleResolution` are a coupled pair in tsc, and the base
+    // config sets BOTH to nodenext for the Deno/Node packages. Overriding only
+    // the resolution half is rejected outright (TS5095 + TS5109), so the browser
+    // project has to restate both. ESNext is what Vite emits anyway.
+    "module": "ESNext",
     // Bundler resolution is correct for Vite and lets us import without file
     // extensions; unlike the shared resume template, this app never runs in Deno.
     "moduleResolution": "Bundler",

@@ -1,0 +1,152 @@
+# applyy — daily batched applier.
+#
+# BUDGET IS THE BINDING CONSTRAINT ON THIS PRODUCT (PROJECT_PLAN.md §2).
+# GitHub Free gives 2,000 Actions minutes/month = ~66 min/day, and the repo must
+# stay private (it holds the resume, CTC and personal answers) so the unlimited
+# public-repo allowance is unavailable.
+#
+# THIS WORKFLOW PROCESSES THE WHOLE DAY'S QUEUE IN ONE RUN, DELIBERATELY.
+# Measured on this repo: per-application browser work is ~2-4s, but per-RUN
+# overhead (checkout + node + pnpm install + browser restore) is ~40-70s, and
+# GitHub bills every job rounded UP to a whole minute. So:
+#   35 separate runs = 35 x ~1 min overhead + ~53 min work  = ~88 min/day  OVER
+#   1 batched run    =  1 x ~1 min overhead + ~53 min work  = ~54 min/day  FITS
+# Batching is not an optimisation here; it is the difference between fitting the
+# 66 min/day budget and burning the month in ~13 days. Do not split this into a
+# per-application workflow.
+name: applyy applier (daily batch)
+
+on:
+  # One scheduled run per day. 02:30 UTC = 08:00 IST, so the overnight ATS
+  # postings are picked up and the freshness window (§13) is used well.
+  schedule:
+    - cron: '30 2 * * *'
+  # Manual trigger, needed for the §18.6 trust period where Teja watches a run.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Set to "false" ONLY to actually submit applications. Anything else is a dry run.'
+        required: false
+        # Defaults to the safe value so an operator who clicks straight through
+        # cannot submit by accident (constraint #15).
+        default: 'true'
+
+# Least privilege: the applier reads the repo and talks to Supabase over the
+# network. It never needs to write back here, so it gets no write token at all.
+permissions:
+  contents: read
+
+# Two applier runs at once could each claim work and submit. Submission is the
+# one non-idempotent action in the system (§14), so overlap risks constraint #7.
+concurrency:
+  group: applyy-applier
+  # DELIBERATELY false. Cancelling a run mid-submit produces exactly the crash
+  # §14 warns about: a row stranded at `applying` with nobody knowing whether the
+  # application went out. Better to let a run finish and skip the next one.
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    # Hard ceiling on budget damage. A hung browser or a retry loop cannot burn
+    # more than this, which is roughly one day's allowance rather than a month's.
+    timeout-minutes: 60
+
+    env:
+      # THE SAFETY DEFAULT. A scheduled run supplies no inputs, so this resolves
+      # to 'true' and the run fills forms and screenshots without submitting.
+      # Only an explicit manual "false" flips it. The worker's gate additionally
+      # refuses anything that is not the exact string "false", so a typo here
+      # fails closed rather than submitting (see worker/src/submission-mode.ts).
+      DRY_RUN: ${{ inputs.dry_run == 'false' && 'false' || 'true' }}
+      # Supabase connection. Secrets, never committed (constraint #11).
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      # The anon key is public-by-design and carries no privilege on its own;
+      # every query's authority comes from the signed-in user's JWT below.
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      # The worker signs in as an ORDINARY Supabase Auth user rather than using
+      # a service-role key. This is the most important security property in the
+      # workflow: every query then runs under exactly the same RLS policies as
+      # the dashboard, so the worker cannot do anything Teja could not do
+      # himself. A leaked service-role key would mean RLS bypassed on every
+      # table and a rotation touching every consumer; a leaked app-user password
+      # means one account, revocable from the dashboard in seconds.
+      APPLYY_WORKER_EMAIL: ${{ secrets.APPLYY_WORKER_EMAIL }}
+      APPLYY_WORKER_PASSWORD: ${{ secrets.APPLYY_WORKER_PASSWORD }}
+      # AES-GCM key for the browser storageState held in Supabase Storage. The
+      # state itself never lands in the repo (§10 defense 4).
+      STORAGE_STATE_ENC_KEY: ${{ secrets.STORAGE_STATE_ENC_KEY }}
+
+    steps:
+      # Shallow clone: history is irrelevant to the worker and fetching it costs
+      # billable seconds on every single run.
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # pnpm must exist before setup-node, because setup-node's pnpm cache
+      # resolution shells out to pnpm to find the store path.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # Pinned to the version in the root package.json's packageManager
+          # field; a floating version is how a lockfile silently drifts.
+          version: 11.25.0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Matches the pinned local runtime (PROJECT_PLAN.md §22) so a bug
+          # cannot be a Node version difference between laptop and CI.
+          node-version: '24'
+          # Restores the pnpm store between runs; this is a large share of the
+          # per-run overhead the batching argument above is about.
+          cache: 'pnpm'
+
+      # Frozen lockfile: CI installs exactly what is committed, and fails rather
+      # than quietly resolving something new.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Chromium is ~130MB. Restoring it from cache instead of downloading it
+      # saves roughly 30s of billable time on every run.
+      - name: Restore the Playwright browser cache
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          # Keyed on the lockfile so a Playwright version bump invalidates the
+          # cache automatically rather than serving a mismatched browser.
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      # Only downloads on a cache miss. --with-deps pulls the system libraries
+      # Chromium needs on a bare ubuntu runner.
+      - name: Install Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: pnpm --filter '@applyy/worker' exec playwright install --with-deps chromium
+
+      # The run itself. The worker checks the `system_enabled` kill switch FIRST
+      # (§18.1) and exits immediately if it is off, so stopping everything never
+      # requires deleting this cron or revoking a key at 2am.
+      - name: Run the applier
+        run: pnpm --filter '@applyy/worker' run apply
+
+      # Screenshots are the entire deliverable of the §18.6 trust period: Teja
+      # reviews them to see exactly what WOULD have been submitted before
+      # granting the system authority to submit anything.
+      - name: Upload run screenshots
+        # always() so screenshots survive a failed run — a failure is precisely
+        # when the evidence matters most.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: applyy-screenshots-${{ github.run_id }}
+          path: worker/screenshots/
+          # Screenshots of filled forms contain personal data (CTC, phone,
+          # notice period), so they expire quickly rather than sitting in the
+          # artifact store indefinitely.
+          retention-days: 7
+          # A dry run that filled nothing is a real signal worth investigating,
+          # not a reason to fail the upload step.
+          if-no-files-found: warn

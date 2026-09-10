@@ -295,7 +295,24 @@ function Line({ line }: { readonly line: DiffLine }): ReactElement {
             column - at which point a single pair of headings at the top would
             label only the first two cells and mislabel every cell after. */}
         <p className="line__side-label">Master</p>
-        <p className={kindClass}>{line.masterText}</p>
+
+        {/* A null master text is meaningful rather than missing. A bullet
+            rewords exactly one master bullet, so it has a counterpart to sit
+            beside; a summary is prose drawn from several nodes, so there is
+            none. Saying that is important: an empty pane beside generated
+            prose reads as "wholly invented", when the truth is "assembled from
+            several real things, and therefore harder to check" - which is why
+            prose is the weakest point in the honesty design. */}
+        {line.masterText === null ? (
+          <p className="line__no-master">
+            No single master line to compare. This paragraph draws on several
+            parts of your profile at once, which is why prose gets a closer
+            look than a reworded bullet.
+          </p>
+        ) : (
+          <p className={kindClass}>{line.masterText}</p>
+        )}
+
         {/* The master node id, in mono because it is a literal string the
             operator can look up on the Master Profile page. */}
         <p className="identifier">{line.masterNodeId}</p>
@@ -380,7 +397,7 @@ export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactEle
         <div className="diff__identity">
           {/* Plain language, no separator characters standing in for a verb. */}
           <h2 className="diff__title">
-            {diff.jobTitle} at {diff.company}
+            {diff.jobTitle} at {diff.companyName}
           </h2>
           <p className="diff__meta">
             Tailored from master version {diff.masterVersion}

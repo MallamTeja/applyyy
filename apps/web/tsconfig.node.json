@@ -7,8 +7,12 @@
     "composite": true,
     "noEmit": false,
     "emitDeclarationOnly": true,
-    "outDir": "./.tsbuild",
-    "moduleResolution": "Bundler"
+    "outDir": "./.tsbuild"
+    // No `moduleResolution` override here on purpose: vite.config.ts really does
+    // run under Node and imports only bare package specifiers, so the base
+    // config's nodenext pair is correct for it. Overriding just the resolution
+    // half is what broke the app project (TS5095/TS5109) - a Node file should be
+    // typechecked with Node resolution rather than told it is bundled.
   },
   "include": ["vite.config.ts"]
 }

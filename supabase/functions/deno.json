@@ -1,0 +1,24 @@
+{
+  "// purpose": "Deno's configuration root for supabase/functions/**. It exists for a second reason beyond settings: WITHOUT a deno.json here, Deno walks up the tree looking for a workspace root, finds pnpm-workspace.yaml, and REWRITES the repo's root package.json to add a `workspaces` key. That file belongs to another stream. Anchoring Deno here stops the walk.",
+
+  "// imports": "Import map. Reserved for the bare specifier @applyy/shared-types once Node's test runner can resolve it too. Today _shared/contracts/shared-types.ts uses a relative path instead, because Deno reads this map and `node --test` does not — a CURRENT toolchain limitation to revisit when pnpm install is healthy and node_modules links exist, NOT a permanent design choice.",
+  "imports": {},
+
+  "// compilerOptions": "Kept aligned with the repo's tsconfig.base.json. Deno does not read that file, so the strictness settings that matter for the anti-fabrication work are restated rather than assumed.",
+  "compilerOptions": {
+    "strict": true,
+    "// noUncheckedIndexedAccess": "Load-bearing for PROJECT_PLAN.md §10: an index into the master profile that may not exist is typed as possibly-undefined, which is the check the validator relies on.",
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": true
+  },
+
+  "// exclude": "Test files are excluded from `deno check` because they import node:test, which pulls Node type-reference directives Deno cannot resolve. They are run by `node --test` instead — the pure functions are runtime-agnostic by design, so the runtime that executes the tests need not be the runtime that ships them.",
+  "exclude": ["**/*_test.ts"],
+
+  "// lint": "Default rules are fine; the recommended set already covers the mistakes that matter here.",
+  "lint": {
+    "exclude": ["**/*_test.ts"]
+  }
+}

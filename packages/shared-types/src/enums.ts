@@ -263,3 +263,32 @@ export const APPLICATION_EVENT_TYPES = [
 ] as const;
 /** Union of every legal `application_events.event_type` value. */
 export type ApplicationEventType = (typeof APPLICATION_EVENT_TYPES)[number];
+
+/**
+ * WHY an application is parked at `blocked_needs_human`.
+ *
+ * Exists so constraint 4 ("don't guess when an application question cannot be
+ * answered from the profile") has storage WITHOUT adding a status. An unanswerable
+ * question and a captcha need the identical operator action — a human takes it from
+ * here — so a separate state would add a node to the graph without adding meaning.
+ *
+ * The rule of thumb: add a STATE when the handler differs; add a REASON when only the
+ * explanation differs.
+ */
+export const BLOCK_REASONS = [
+  /** Anti-bot challenge. We do not solve these — constraint 5 forbids circumvention. */
+  'captcha',
+  /** Multi-factor or identity challenge on the employer's portal. */
+  'mfa',
+  /** CONSTRAINT 4: a required field has no answer in the bank and the system refuses to guess. `block_detail.question_key` says which. */
+  'unanswerable_question',
+  /** No adapter handles this form shape. A coverage gap, not a run failure. */
+  'unsupported_form',
+  /** The board demands an account before showing the form. */
+  'login_required',
+  /** Submit was reached but the outcome could not be confirmed from the page. */
+  'submission_unconfirmed',
+  'other',
+] as const;
+/** Union of every legal `applications.block_reason` value. */
+export type BlockReason = (typeof BLOCK_REASONS)[number];

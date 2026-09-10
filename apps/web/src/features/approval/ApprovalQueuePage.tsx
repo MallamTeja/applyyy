@@ -1,0 +1,175 @@
+/* THE TWO-BUCKET APPROVAL QUEUE - PROJECT_PLAN.md section 11.
+ *
+ * The split is NOT about speed. At ~35 applications a day, reviewing every one
+ * individually costs about twelve minutes, which is perfectly sustainable. The
+ * split exists to put attention where the risk is: one undifferentiated queue
+ * gives the dangerous rows the same three seconds as the safe ones, and the
+ * dangerous rows are the entire reason the gate exists.
+ *
+ * So the page is built around one asymmetry:
+ *
+ *   BUCKET A - every line traced. Presented as a COUNT with one button. The
+ *   operator is not asked to read thirty safe rows one at a time, because
+ *   asking them to is how they learn to click without reading, and that habit
+ *   is what then carries them through Bucket B.
+ *
+ *   BUCKET B - any untraceable claim. Presented as full diff views, expanded,
+ *   one after another, each with its own gate. Never collapsed into a list,
+ *   never batched, never given a count.
+ *
+ * Bucket B comes FIRST on the page. A list of clean rows above the dangerous
+ * ones would mean the operator scrolls past thirty green rows to reach the one
+ * that matters, which is exactly the skim the design is trying to prevent.
+ */
+
+import { useMemo, useState } from 'react';
+import type { ReactElement } from 'react';
+
+import { PageHeader } from '../../app/PageHeader';
+import { DiffView } from './DiffView';
+import { deriveBucket } from './diffModel';
+import type { ResumeDiff } from './diffModel';
+import { approvalQueueFixture } from './fixtures';
+
+import './ApprovalQueuePage.css';
+
+export function ApprovalQueuePage(): ReactElement {
+  /* FIXTURE DATA, not a live query. The renderer is finished and correct
+     against section 11's worked example; wiring it to `select * from
+     applications where status = 'awaiting_approval'` needs the Auditor to exist
+     to produce rows, and no agent has been built yet. The adapter that maps a
+     real row into this shape is written and lives in diffAdapter.ts. */
+  const [queue] = useState<readonly ResumeDiff[]>(approvalQueueFixture);
+
+  /* Rows the operator has acted on this session, so they leave the queue
+     without a refetch. A set of ids rather than a filtered copy of the queue,
+     because the queue itself will become live data. */
+  const [settled, setSettled] = useState<ReadonlySet<string>>(() => new Set());
+
+  /* Partition by bucket. Derived from the findings on each row, never stored -
+     a row carrying a stored bucket alongside its findings will eventually
+     disagree with them, and the badge is what the operator would trust. */
+  const { bucketA, bucketB } = useMemo(() => {
+    const pending = queue.filter((diff) => !settled.has(diff.applicationId));
+    return {
+      bucketA: pending.filter((diff) => deriveBucket(diff) === 'A'),
+      bucketB: pending.filter((diff) => deriveBucket(diff) === 'B'),
+    };
+  }, [queue, settled]);
+
+  /* Mark rows as handled. In the live version this is where
+     `advance_application_status` is called - `awaiting_approval -> approved` is
+     the only edge into `approved`, and `approved -> applying` the only edge
+     into `applying`, so this function is the single door to submission in the
+     whole system. Constraint #15 is unreachable-by-construction rather than
+     enforced by review. */
+  function settle(ids: readonly string[]): void {
+    setSettled((previous) => {
+      const next = new Set(previous);
+      for (const id of ids) next.add(id);
+      return next;
+    });
+  }
+
+  /* Nothing left. An empty queue is the normal end state of a review session,
+     so it is written as a finished-for-now statement rather than a void. */
+  if (bucketA.length === 0 && bucketB.length === 0) {
+    return (
+      <div className="page">
+        <PageHeader path="approvals" />
+        <p className="queue__empty">
+          Nothing waiting. The Scouts run on a schedule, so new applications
+          will appear here without you doing anything.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    /* The wide variant: two resume panes need every pixel, and the standard
+       page measure would force the operator to scroll to compare them. */
+    <div className="page page--wide">
+      <PageHeader path="approvals" />
+
+      {/* BUCKET B FIRST. Deliberate ordering - see the note at the top. */}
+      {bucketB.length > 0 ? (
+        <section className="queue__bucket" aria-labelledby="bucket-b-heading">
+          <h2 id="bucket-b-heading" className="queue__bucket-heading">
+            {/* Says what these are and why they are here, in one line. */}
+            {bucketB.length}{' '}
+            {bucketB.length === 1 ? 'application needs' : 'applications need'} a
+            claim-by-claim look
+          </h2>
+          <p className="queue__bucket-note">
+            The Auditor could not trace something in{' '}
+            {bucketB.length === 1 ? 'this one' : 'these'} back to your master
+            profile. Each is reviewed on its own - there is no batch option
+            here, on purpose.
+          </p>
+
+          {/* Expanded, one after another. Never a collapsed list: a row that
+              must be read cannot be behind a disclosure triangle. */}
+          <ul className="queue__list">
+            {bucketB.map((diff) => (
+              <li key={diff.applicationId} className="queue__item">
+                <DiffView
+                  diff={diff}
+                  /* The decisions map arrives here; the live version writes it
+                     to the row so the audit log records what the operator
+                     chose per claim, not just that they approved. */
+                  onApprove={() => settle([diff.applicationId])}
+                  onReject={() => settle([diff.applicationId])}
+                />
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {/* BUCKET A: a count and a button, not thirty rows to scroll. */}
+      {bucketA.length > 0 ? (
+        <section className="queue__bucket" aria-labelledby="bucket-a-heading">
+          <h2 id="bucket-a-heading" className="queue__bucket-heading">
+            {bucketA.length}{' '}
+            {bucketA.length === 1 ? 'application is' : 'applications are'} fully
+            traced
+          </h2>
+          <p className="queue__bucket-note">
+            Every line in {bucketA.length === 1 ? 'this one' : 'these'} rewords
+            something already in your master profile. Nothing was invented.
+          </p>
+
+          {/* One row per application, but as a compact line rather than a diff.
+              The operator can still open any of them; the default is that they
+              do not need to. */}
+          <ul className="queue__clean-list">
+            {bucketA.map((diff) => (
+              <li key={diff.applicationId} className="queue__clean-row">
+                <span className="queue__clean-job">
+                  {/* Both strings came from an ATS board and are UNTRUSTED
+                      (constraint #17). Rendered as React text children, which
+                      React escapes - no raw-HTML path exists in this file. */}
+                  {diff.jobTitle} at {diff.companyName}
+                </span>
+                <span className="identifier">
+                  master v{diff.masterVersion}
+                </span>
+              </li>
+            ))}
+          </ul>
+
+          <button
+            type="button"
+            className="button button--approve"
+            onClick={() => settle(bucketA.map((diff) => diff.applicationId))}
+          >
+            {/* The verb keeps the same name through the flow: approve produces
+                approved. And it states the count, so the button says exactly
+                what it is about to do. */}
+            Approve all {bucketA.length} and queue for submission
+          </button>
+        </section>
+      ) : null}
+    </div>
+  );
+}

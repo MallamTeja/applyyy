@@ -119,18 +119,48 @@ test("the first poll of a new board marks a dateless job unknown", () => {
   assert.equal(result.postedAtSource, "unknown");
 });
 
-// Literal compliance with the §13 wording "marks everything unknown": the cost is a
-// one-poll delay for genuinely fresh jobs, strictly cheaper than a false-fresh batch.
-test("the first poll of a new board downgrades even a genuine lever date", () => {
-  // The Lever createdAt is genuine, but the board itself is not yet trusted.
+// THE SCOPE OF THE GUARD. §13's defect lives entirely in the first_seen_at
+// INFERENCE ("anything we have never seen must be new"), which is false on day one
+// of a board. A genuine Lever createdAt is not an inference — it is true whether or
+// not we have polled this board before — so there is nothing to guard against, and
+// downgrading it would discard a fact to defend against a guess we never made.
+// Supply is already the tight constraint (§13: single digits/day), so discarding
+// real fresh jobs on every new board worsens exactly what the plan is short of.
+test("the first poll of a new board leaves a genuine lever date exact", () => {
+  // The Lever createdAt is genuine even on an as-yet-untrusted board.
   const result = extractPostedAt(
     { source: "lever", createdAt: LEVER_EPOCH_MS },
     { now: NOW, firstSeenAt: FIRST_SEEN, isFirstPollOfBoard: true },
   );
-  // Confidence is suppressed board-wide on poll one.
-  assert.equal(result.postedAtSource, "unknown");
-  // The timestamp itself is retained so the dashboard can still display it.
+  // Confidence is preserved, because no inference of ours was involved.
+  assert.equal(result.postedAtSource, "exact");
+  // And the timestamp kept is the board's, not our sighting.
   assert.equal(result.postedAt, new Date(LEVER_EPOCH_MS).toISOString());
+});
+
+// The same scoping rule applied to a date the SOURCE derived rather than one WE
+// inferred. Greenhouse's updated_at is untrustworthy for a reason unrelated to cold
+// start, and that reason applies identically on every poll.
+test("the first poll of a new board leaves a greenhouse updated_at derived", () => {
+  // A board-supplied timestamp on an untrusted board.
+  const result = extractPostedAt(
+    { source: "greenhouse", updatedAt: "2026-09-09T08:00:00.000Z" },
+    { now: NOW, firstSeenAt: FIRST_SEEN, isFirstPollOfBoard: true },
+  );
+  // Still derived — downgraded for being an edit timestamp, not for the poll count.
+  assert.equal(result.postedAtSource, "derived");
+});
+
+// Aggregator prose is source-supplied information rather than our own inference,
+// so it survives the first poll too.
+test("the first poll of a new board leaves parsed relative prose derived", () => {
+  // "3 days ago" is a claim the board made, not one we deduced from a sighting.
+  const result = extractPostedAt(
+    { source: "aggregator", relativeText: "3 days ago" },
+    { now: NOW, firstSeenAt: FIRST_SEEN, isFirstPollOfBoard: true },
+  );
+  // Unaffected by the guard.
+  assert.equal(result.postedAtSource, "derived");
 });
 
 // A malformed timestamp must degrade, never throw: one bad row cannot kill a scout

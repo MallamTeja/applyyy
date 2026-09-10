@@ -1,0 +1,21 @@
+# Line endings are a DETERMINISM concern in this package, not a style preference.
+#
+# core.autocrlf=true is set on this machine and there is no root .gitattributes,
+# so without this file git would check these sources out with CRLF. Two things
+# would then break, both silently:
+#
+#  1. print-styles.ts holds the stylesheet as a multi-line template literal, so
+#     CRLF in the SOURCE puts \r\n inside the rendered HTML string itself --
+#     changing the output and its sha256 between a fresh Windows clone and the
+#     Ubuntu Actions runner. That is precisely the byte-for-byte approval
+#     guarantee and the tailored_hash cache key (constraint #8).
+#  2. The golden fixture is compared byte for byte against a freshly rendered
+#     string, so a CRLF checkout fails the test on a clean clone while passing
+#     for whoever generated it.
+#
+# eol=lf pins both to LF everywhere regardless of anyone's git config.
+* text eol=lf
+
+# The golden render is a test artifact compared byte for byte. -text disables
+# ALL conversion, so it is never touched even if the rule above is relaxed.
+*.golden.html -text

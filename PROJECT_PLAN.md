@@ -23,7 +23,7 @@ A multi-agent system that discovers jobs from ATS boards, scores them against a 
 | LLM | Gemini, key pool across 15 GCP projects | Likely only needs 2–3 keys; see §6 |
 | Approval | Two-bucket: batch-approve fully-traced, individually review flagged | Nothing fabricated ever goes out unseen |
 | Package manager | pnpm only | |
-| Repo | `github.com/MallamTeja/applyyy` — **private, confirmed** | Holds resume, CTC, personal answers |
+| Repo | `github.com/MallamTeja/applyy` (remote as configured) — private | Holds resume, CTC, personal answers |
 
 ### Decisions made by explicit choice (verbatim from the session)
 
@@ -41,7 +41,7 @@ These were answered as structured choices, not prose, so they are the least ambi
 | How should the approval gate work? | **Two buckets, batch-approve the clean ones** |
 | Gemini keys — same project or different? | **Different projects, 1 key per project, 15 total, same env-var naming pattern** |
 | 3-day window yields single digits/day — how to handle supply? | **Seed a large ATS watchlist** |
-| Is `github.com/MallamTeja/applyyy` private? | **Yes, it's private** |
+| Is the GitHub repo private? | **Yes** — confirmed by Teja |
 
 **Discovery sources named explicitly:** LinkedIn posts, LinkedIn jobs, company career pages, Naukri — reached through ATS APIs and aggregators rather than scraping, per the layered choice above.
 
@@ -53,8 +53,43 @@ This is what makes §10's structural honesty defense possible: because the Tailo
 
 ### The 100/day → 35/day resolution
 
-GitHub Free = 2,000 Actions minutes/month = 66 min/day. One Playwright application ≈ 90s.
-100/day = 150 min/day = 4,500 min/month = **225% over budget**; the month burns in ~13 days. Public-repo unlimited minutes is unavailable because the repo must stay private. Hard ceiling on Actions is ~44/day, realistically **~35/day** after discovery runs.
+GitHub Free = 2,000 Actions minutes/month = **66 min/day**. Public-repo unlimited
+minutes is unavailable because the repo must stay private (it holds resume data,
+CTC and personal answers).
+
+> **This derivation was rebuilt on 2026-09-09 against measured numbers. The
+> earlier version — "one application ≈ 90s, so 100/day = 150 min/day" — was my
+> estimate during design and is superseded. It is not presented as still
+> standing.**
+
+`applyyy-21` instrumented a real captured Greenhouse form: browser launch 475 ms,
+navigate 413 ms, extract 47 ms, screenshot 784 ms, `page.pdf()` 303 ms —
+**≈3.75 s of in-process work per application.**
+
+*Honest caveat, 21's own:* that is against a **localhost fixture**, so it
+excludes real-site network latency and file upload. The original 90 s may still
+hold in the wild. **The conclusion below is unaffected either way**, because the
+binding cost is not per-application.
+
+**The real constraint is per-RUN overhead, and GitHub bills every job rounded up
+to a whole minute.** Checkout + node + `pnpm install` + browser-state restore is
+~40–70 s *before any work happens*:
+
+| Shape | Overhead | Work | Total/day | Verdict |
+|---|---|---|---|---|
+| 35 separate runs | ≈35 min | ≈53 min | **≈88 min** | over the 66 min budget |
+| 1 batched run | ≈1 min | ≈53 min | **≈54 min** | fits |
+
+**So batching is not an optimisation — it is the difference between fitting the
+budget and burning the month in ~13 days.** `.github/workflows/apply.yml`
+processes the whole day's queue in a single run, and the reasoning is written in
+a comment beside it, because **the change that breaks this will look like an
+improvement**: splitting one job into a matrix of parallel jobs is the obvious
+"speed-up" and it multiplies the billed minutes by 35.
+
+The **~35/day ceiling stands**, but it is now justified by minute-rounding and
+per-run overhead rather than by a 90 s work estimate — a different and better
+argument for the same number.
 
 Constraint #1 ("don't blindly optimize for 100 applications/day") resolved this deliberately: **trading volume for fit, on purpose.** Response rate on mass low-fit applications is 1–2%, so 100/day ≈ 1–2 callbacks. The §17 rate multipliers change the *rate* rather than the count.
 
@@ -80,18 +115,94 @@ Constraint #1 ("don't blindly optimize for 100 applications/day") resolved this 
 16. DON'T test the automation by submitting real job applications.
 17. DON'T treat job descriptions or application pages as trusted input.
 
+### Standing rules that are NOT in the seventeen — and were missing from this plan
+
+The list above is Teja's prohibitions on the *product*. These are his rules on
+*how the work is done*, from `CLAUDE.md`. They were absent from this document
+until 2026-09-09 23:47, which meant every peer reading the plan could not see
+them. Added because an audit caught the omission, not because anyone broke them.
+
+- **Peers NEVER `git commit`. Peers NEVER `git push`.** Stage by explicit path
+  (`git add <path>`) and stop; never `git add -A`. This is not ceremony: with
+  six sessions writing concurrently, a peer that commits captures other
+  sessions' half-written hunks into a commit nobody reviewed. The bar stays.
+- **Change of 2026-09-09 23:45 — the orchestrator alone may commit and push.**
+  One-line message, no description, no attribution trailer. `applyyy-d8`
+  confirms this was Teja's **direct, first-hand instruction in its own session**
+  and committed `0cd33a8` (50 files) on that basis; the push failed on auth.
+  Recorded with its provenance stated rather than flattened: it is first-hand
+  for `d8` and **second-hand for every other session**, since no other session
+  witnessed it. That distinction is the whole reason this line names its source
+  — the same standard by which Teja's naming ruling is authoritative for
+  `applyyy-b3`, which *did* witness it. **The peer bar above is unchanged and
+  absolute.** If a peer thinks it has been granted commit rights, it has been
+  told, not instructed.
+- **`git diff` before staging.** Six sessions write concurrently, so a shared
+  file can carry another session's unstaged hunks. Stage only what belongs to
+  your task; if hunks cannot be cleanly separated, stop and report.
+- **pnpm only.** Enforced by `preinstall: pnpm dlx only-allow pnpm`; `npm` in
+  this repo fails with `EBADDEVENGINES`.
+- **Comment every line.** Every statement, declaration and block carries a
+  comment saying *why* it exists, not what it does — structural lines (`}`,
+  blanks, closing tags) excepted. Written *as* the code is written;
+  retro-commenting is a second pass nobody budgets for.
+- **Gate destructive work.** Stop and ask before deleting or overwriting an
+  existing file.
+- **No remote infrastructure without approval** — no `supabase db push`, no
+  `vercel deploy`, no `gh` writes.
+
 ---
 
 ## 4. Blockers found in the original plan
 
 1. **Supabase cannot run Python.** Edge Functions are Deno/TS only. Resolved by switching to Node/TS.
 2. **Browser automation cannot run serverless.** Vercel Hobby caps at 60s and ships no browser binary. Needs a persistent worker → GitHub Actions.
-3. **LinkedIn auto-apply gets accounts restricted** (User Agreement §8.2). Resolved by **ATS-first discovery** — Greenhouse, Lever, Ashby, Workable and SmartRecruiters expose free, public, unauthenticated JSON APIs:
+
+   **The limits that actually bound the agents are Supabase's, not Vercel's** —
+   an earlier draft cited only Vercel's 60s, which is misleading, because the
+   agents run on Supabase Edge Functions and nothing of ours runs on Vercel
+   except static assets. Verified 2026-09-09 against
+   [Supabase's own docs](https://supabase.com/docs/guides/functions/limits) and
+   [pricing page](https://supabase.com/pricing):
+
+   | Free-tier limit | Value | What it constrains |
+   |---|---|---|
+   | Edge Function wall clock | **150 s** | total time one invocation may take |
+   | Edge Function **CPU time** | **2 s** | *active computing* per request |
+   | Database size | 500 MB | total Postgres storage |
+   | Single file upload | 50 MB | resume PDFs — ample |
+   | Project idle pause | 1 week | see §14 |
+
+   *Do not mislabel these:* 500 MB is **database size**, not memory, and 50 MB
+   is a **file-upload** ceiling, not a bundle size. Both were misquoted during
+   coordination tonight.
+
+   **The 2 s CPU limit is the binding one, and it dictates agent shape.** It
+   measures active computing, so a 40-second wait on a Gemini response costs
+   almost none of it — which is why Edge Functions make fine LLM orchestrators.
+   But a loop over hundreds of job rows burns real CPU. **So every agent must
+   claim a bounded batch per invocation and let `pg_cron` re-fire, never drain
+   the queue in one run.** An agent written to "process all pending" will pass
+   in testing on ten rows and fail in production on four hundred.
+3. **LinkedIn auto-apply gets accounts restricted** — their User Agreement
+   prohibits automated access. *No clause number is cited here on purpose: an
+   earlier draft said "§8.2", which was asserted from memory during design and
+   never checked against the live document. Do not reintroduce a section number
+   without verifying it — a precise-looking citation that is wrong is worse than
+   a general statement that is right.* Resolved by **ATS-first discovery** — Greenhouse, Lever, Ashby, Workable and SmartRecruiters expose free, public, unauthenticated JSON APIs:
    - `https://boards-api.greenhouse.io/v1/boards/{company}/jobs?content=true`
    - `https://api.lever.co/v0/postings/{company}?mode=json`
    - `https://api.ashbyhq.com/posting-api/job-board/{company}`
 
    Those same ATSs are where most real applications get submitted, so discovery *and* submission stay legitimate. LinkedIn becomes a human-in-loop lane, never automated.
+
+   **Phasing, so the two deferred boards are not mistaken for dropped ones:**
+   Phase 1 ships **Greenhouse, Lever and Ashby**; **Workable and SmartRecruiters
+   are Phase 2.** All five expose free public APIs — the deferral is scheduling,
+   not capability. They matter later because of §13's supply arithmetic: a 3-day
+   window over ~50 companies yields single digits per day, and sustaining ~35/day
+   needs 200–400 boards. `applyyy-d0`'s adapter interface is built so a fourth
+   and fifth provider drop in without touching the Scout.
 4. **Gemini limits are per GCP project, not per key** — confirmed in Google's docs. 15 keys in 15 projects = 15 real buckets. Same project would have been 1 bucket with 15 names.
 
 ---
@@ -148,13 +259,30 @@ If free Flash gives even 100 requests/day per project, **two keys covers it.** B
 |---|---|---|
 | **Scout-ATS** | Edge Fn, cron | watchlist → `discovered` |
 | **Scout-Aggregator** | Edge Fn, cron | Adzuna/Jooble → `discovered` |
-| **Normalizer** | Edge Fn | `discovered` → `deduped` / `dropped` |
-| **Screener** | Edge Fn, **no LLM** | `deduped` → `screened` / `dropped` |
-| **Matcher** | Edge Fn, Gemini | `screened` → `scored` |
+| **Normalizer** | Edge Fn | `discovered` → `deduped` / `dropped_duplicate` |
+| **Screener** | Edge Fn, **no LLM** | `deduped` → `passed_filters` / `dropped_filter` |
+| **Matcher** | Edge Fn, Gemini | `passed_filters` → `scored` |
 | **Tailor** | Edge Fn, Gemini | `scored` → `tailored` |
-| **Auditor** | Edge Fn, Gemini | `tailored` → `awaiting_approval` / `audit_failed` |
-| **Applier** | GH Actions + Playwright | `approved` → `applied` / `blocked_needs_human` |
-| **Tracker** | Edge Fn, cron | Gmail → advances post-apply statuses |
+| **Auditor** | Edge Fn, Gemini | `tailored` → `audit_clean` / `audit_flagged` |
+| **Approval gate** | human, in dashboard | `audit_clean` \| `audit_flagged` → `awaiting_approval` → `approved` |
+| **Applier** | GH Actions + Playwright | `approved` → `applying` → `applied` / `blocked_needs_human` |
+| **Tracker** | Edge Fn, **push** | Apps Script POST → advances post-apply statuses |
+| **Sweeper** | Edge Fn, cron | reclaims expired claim leases; `applying` → `needs_verification` |
+
+Three corrections applied 2026-09-09 23:47 after this table drifted from the
+shipped schema — recorded rather than silently fixed, because the drift itself
+is the lesson:
+
+- `screened` → **`passed_filters`** and `screening` → **`employer_screening`**.
+  The old pair was one word apart with opposite meanings in the same enum:
+  `screened` meant *we* passed it through our pre-apply filter, `screening`
+  meant *the employer* is reviewing you post-apply. One name meaning two things.
+- `audit_failed` did not exist; the real pair is `audit_clean | audit_flagged`.
+  And `audit_clean` is a genuine intermediate state, not a synonym for
+  `awaiting_approval` — this table previously collapsed them.
+- **The Tracker is push-driven, not cron.** §12 rejected the Gmail API, so no
+  component may poll Gmail. Apps Script POSTs in. This table said "cron" and
+  contradicted §12.
 
 Two deliberate design choices:
 
@@ -200,19 +328,53 @@ The pattern is a **cascade** (short-circuit / cheap-test-first): order tests by 
 
 ## 9. Data model
 
-Twelve tables:
+**Fourteen domain tables plus one config table — fifteen physical.** Authoritative
+per `applyyy-aa`, who owns the migrations.
 
 ```
-jobs               -- a posting exists ONCE, globally
-applications       -- your application to a job; separate row
-master_profiles    -- versioned, immutable snapshots
-answer_bank        -- standing answers, grows itself
-gemini_key_state   -- the pool
-application_events -- append-only audit log
-agent_runs         -- powers the health page
-+ search_preferences, filter_rules, company_watchlist,
-  company_blocklist, email_events
+jobs                          -- a posting exists ONCE, globally
+applications                  -- your application to a job; separate row
+master_profiles               -- versioned, immutable snapshots
+answer_bank                   -- standing answers, grows itself
+gemini_key_state              -- the key pool
+application_events            -- append-only audit log
+agent_runs                    -- powers the health page
+system_settings               -- kill switch, DRY_RUN, budgets, caps (singleton)
+matcher_eval_cases            -- the §18.3 golden eval set
+search_preferences
+filter_rules
+company_watchlist
+company_blocklist
+email_events
+--- config ---
+application_status_transitions -- the legal-edge table a trigger enforces
 ```
+
+> **Columns are NOT specified here, on purpose.** The authoritative
+> column-level contract is
+> [`packages/shared-types/SCHEMA_CONTRACT.md`](packages/shared-types/SCHEMA_CONTRACT.md),
+> owned by `applyyy-aa` and living in the same tree as the migration that
+> creates it. An audit on 2026-09-09 found this section had listed twelve table
+> *names* and zero columns, which left seven §18 items — including the
+> safety-critical kill switch — with nowhere to live. The fix was to give the
+> columns one home rather than two: **duplicated facts drift and then
+> contradict each other.** Do not restate columns in this document.
+
+Notes that belong here rather than in the contract:
+
+- **`application_status_transitions` is global config**, not user data: RLS
+  read-only for authenticated, no write policy. It backs a trigger that makes
+  constraint #7 (never submit twice) structurally unviolatable rather than
+  merely checked.
+- **`jobs.discovered_via`** is a `discovery_source[]` recording which boards a
+  deduped posting arrived from, and **`jobs.source_refs`** holds per-source
+  presence windows. Together these replace the separately-planned
+  `job_sightings` table — same provenance requirement, one fewer join.
+- **`applications.previous_status` is informational only — never branch on it.**
+  Trigger-maintained. It is *not* a rollback mechanism: the status graph has
+  zero backward edges. A quota-exhausted agent releases its claim *lease*, so
+  the row never left its status in the first place and has nothing to roll back
+  to.
 
 Three decisions carrying real weight:
 
@@ -221,6 +383,23 @@ Three decisions carrying real weight:
 - **`master_profiles` is versioned and immutable.** Editing creates version N+1; old versions never change. `applications` stores both the master version it derived from *and* a snapshot of the tailored JSON. That is what makes resume pinning true six months later, and what keeps the Auditor's verdict meaningful — it audited a specific version, and that version still exists.
 
 Plus `tailored_hash = hash(master_version + selected_jd_keywords)` → identical inputs reuse the existing PDF. Constraint #8, implemented as a cache key.
+
+**The dedupe fingerprint — documenting what `applyyy-d0` shipped, not inventing
+one.** Authoritative implementation:
+`supabase/functions/_shared/normalize/fingerprint.ts` (18 tests green). The plan
+previously said only "matched by fingerprint", which under-specified a rule the
+code had already committed to.
+
+It is `normalized(company, title, location)`, where normalisation collapses
+case, company legal suffixes, `Bengaluru`↔`Bangalore`, a trailing `", India"`,
+hyphenation variants, `"(Remote)"` noise, and per-board requisition IDs.
+
+**It deliberately keeps `"Senior"` distinct**, and that asymmetry is the
+interesting part: §8's filter cascade *rejects* on seniority words, so
+collapsing "Senior Backend Engineer" into "Backend Engineer" would let a
+filtered-out job re-enter through its own duplicate. A normaliser has to know
+which distinctions downstream code depends on — aggressive normalisation is not
+automatically better.
 
 ### Status flow
 
@@ -327,7 +506,13 @@ No GCP project, no consent screen, no restricted-scope verification, no 7-day ex
 
 > **When a platform's official integration path is heavy, check whether the platform has a first-party scripting surface that sidesteps the auth problem entirely by already running as you.** The same trick applies to Sheets, Calendar and Drive.
 
-**Use a personal Gmail (`tejamallam00@gmail.com`), not the college address.** It survives graduation, no admin can block it, and recruiters replying to an address you lose access to in a year is a real failure mode.
+**DECIDED — the tracker mailbox is `tejamallam00@gmail.com`**, confirmed by
+Teja directly on 2026-09-09. It survives graduation, no admin can block it, and
+recruiters replying to an address he loses access to in a year is a real failure
+mode. `campushub@mlrit.ac.in` is **not** a candidate and should not be revisited
+as one: it is a Google Workspace account, which is one of the four reasons the
+Gmail API path is dead. It appears in this project only as Teja's Claude Code
+account identity.
 
 **Ban risk: none.** Apps Script reading your own inbox is a first-party feature doing exactly what it was built for — no ToS surface. Applying to 35 jobs/day does not involve Google at all. What *would* risk the account is automated outbound sending at volume — which is precisely why the referral agent **drafts** and you send.
 
@@ -407,15 +592,58 @@ One settings table, one `WHERE` clause. High value for the cost.
 
 **4. Skill-Gap Aggregator.** Across every scored JD, count what you were missing: *"of 400 jobs, 172 wanted Docker, 130 wanted AWS, 88 wanted system design."* Nothing else in a job search tells you this, and it converts a month of rejections into a ranked list of what to learn next. The feedback loop that makes the system compound instead of churn.
 
-**Second tier, cheap and worth having:** A/B resume testing (two master variants, analytics says which gets callbacks), assessment detector (flag jobs likely to send a HackerRank), company research brief at interview stage, Google Calendar sync for interview invites, portfolio project selector (feature the 2 most relevant projects per JD), duplicate-company guard.
+### ⚠️ UNAPPROVED — needs Teja before any peer builds these
+
+An audit on 2026-09-09 traced every feature in this plan back to the design
+conversation. The items below were **offered to Teja and never accepted by
+him.** They are kept, not deleted, because he may still want them — but no peer
+should treat a line in this plan as an assignment until he says yes.
+
+*Why this section exists:* six sessions build from this document, and none of
+them can distinguish a decision Teja made from a suggestion that merely sounded
+plausible. An unapproved feature that reaches the plan silently becomes
+somebody's task. Provenance has to be visible, not remembered.
+
+| Item | Status |
+|---|---|
+| A/B resume testing | **Unapproved.** Also conflicts with §9's single versioned-immutable `master_profiles` — two competing masters is a schema change, not a feature |
+| Assessment detector (flag likely HackerRank) | **Unapproved** |
+| Company research brief at interview stage | **Unapproved** |
+| Google Calendar sync for interview invites | **Unapproved**, and it adds a whole new Google OAuth surface — the thing §12 spent four reasons avoiding |
+| Portfolio project selector | **Unapproved** |
+| Duplicate-company guard | **Approved in substance** — this is §18.5's per-company cap (2/week), already locked. Not a separate feature |
+| **Freshness priority queue** (§17 item 3 above) | **Superseded.** Teja chose a hard 3-day *filter* (§13), which is stronger than a priority sort. Keep the arrival-order reasoning; drop the separate queue |
+
+**Explicitly approved by Teja**, for contrast: interview prep packs, follow-up
+nudges at day 7, cover letters without human approval but still Auditor-gated,
+and all seven §18 items.
 
 ---
 
 ## 18. Additional locked logic
 
 1. **Kill switch.** One row: `system_enabled = false` halts every agent on its next tick, checked first before any other work. Anything that submits real applications on your behalf needs a single place to stop it that does not require deleting a cron or revoking a key at 2am. **Safety-critical.**
-2. **Daily Gemini budget with a circuit breaker.** Without a cap, one bug — a retry loop, a bad status transition — burns all keys before noon and the system is dead until Pacific midnight.
+2. **Daily Gemini budget with a circuit breaker.** Without a cap, one bug — a retry loop, a bad status transition — burns all keys before noon and the system is dead until Pacific midnight. Stored as `system_settings.gemini_daily_call_budget` (nullable; NULL means uncapped) with `.gemini_calls_today` and `.gemini_budget_date`.
+
+   > **DOCUMENTED GOTCHA — do not "fix" this to `current_date`.** Both
+   > `system_settings.gemini_budget_date` and `gemini_key_state.quota_date`
+   > default to `(now() AT TIME ZONE 'America/Los_Angeles')::date`, and the key
+   > claim function compares against the same expression. Gemini's RPD resets at
+   > **Pacific** midnight. An IST-dated counter would reset 5½ hours *after* the
+   > quota it tracks, so the breaker would open during exactly the window it
+   > exists to protect — once a day, at night, presenting as flaky quota. That
+   > is the hardest possible failure to notice, which is why it is written down
+   > here rather than left to the schema.
 3. **Golden eval set for the Matcher.** Hand-label ~20 jobs good-fit/bad-fit *before* tuning prompts. Every prompt change must still classify all 20 correctly. **Build the eval set before iterating on the prompt** — otherwise you tweak a prompt to fix one bad match and silently break scoring on everything else, with no way to notice.
+
+   **A table alone does NOT satisfy this item.** The requirement is a CI gate,
+   and CI has no database. So there are three parts, and it is only done when
+   all three exist: `matcher_eval_cases` is the *labelling surface* (Teja labels
+   in the dashboard) — owned by `applyyy-aa`; a harness *exports* those rows to
+   a JSON fixture **committed to the repo** — owned by `applyyy-d0`; and CI runs
+   against that fixture. Fixtures in git are diffable and reviewable in a pull
+   request, fixtures in a database are neither. Flagged because "the table
+   exists" would otherwise read as complete when the item is half built.
 4. **Reposted-job signal.** A job that vanishes and reappears means they are still hiring and the last batch did not work out — a *stronger* signal than a fresh posting, and free to detect since boards are diffed daily.
 5. **Per-company cap.** Max 2 applications per company per week. Five in a week from one candidate is a visible negative in most ATSs.
 6. **Trust-building dry-run period.** The first three days run `DRY_RUN=true` — full pipeline, forms filled, screenshots saved, nothing submitted. Review the screenshots to see exactly what would have been sent, then flip the flag. Earning trust before granting authority, rather than after.
@@ -429,6 +657,45 @@ One settings table, one `WHERE` clause. High value for the cost.
 **Never submit a real application to test** (constraint #16).
 
 - **Static fixtures.** Real Greenhouse/Lever/Ashby application forms saved as HTML in the repo, served from localhost, the Applier run against them, filled values asserted. Real DOM, zero submissions.
+
+### What the real DOM captures proved — and why hand-authored fixtures would have failed
+
+`applyyy-21`'s captures found four things nobody would have guessed. This is the
+concrete vindication of insisting on real fixtures, so it is recorded as fact
+rather than anecdote:
+
+- **Modern Greenhouse boards have NO `name` attributes.** The classic
+  `job_application[first_name]` convention is gone; fields are keyed by `id`, and
+  custom questions carry opaque ids like `question_36622854002` whose human
+  meaning exists *only* in `aria-label`. **A hand-authored fixture would have
+  encoded a convention no employer actually serves — and it would have looked
+  correct in review.**
+- **`aria-hidden`, `tabindex="-1"` inputs carry native `required`.** Sites use
+  them to block browser-native submit behind custom dropdowns. Counting them as
+  real fields would route **every** application to `blocked_needs_human`,
+  turning the human queue from an occasional captcha into the entire day's work
+  — and it would present as *"the automation doesn't work"* rather than as a
+  parsing bug. Field extraction is accessibility-tree-driven because of this.
+- **React-select `role="combobox"` widgets are not native `<select>`** and
+  cannot be driven with `selectOption()`.
+- **Ashby is a client-rendered SPA** — a plain GET returns zero form fields, so
+  its fixture must be a Playwright-**rendered** snapshot. Worth stating
+  explicitly: *a rendered snapshot proves something different from a raw
+  response*, and a test built on the wrong one passes while proving nothing.
+
+### `jobs.lever.co` robots.txt — a respected restriction, not an obstacle
+
+`jobs.lever.co/robots.txt` contains `User-agent: ClaudeBot` → `Disallow: /`.
+`applyyy-21` declined to reason its way around the user-directed-GET versus
+crawler distinction with Teja away, and instead hand-authored the Lever fixture
+as **synthetic and explicitly labelled**, with the exclusion enforced in
+`capture-fixture.ts` and the reason written beside it.
+
+This is recorded under **constraint #5** (don't bypass robots restrictions) as a
+**live restriction being respected** — not a limitation to engineer around.
+Revisiting it is Teja's call and nobody else's. Note the cost is honest and
+small: a synthetic Lever fixture proves less than a real one, and it is labelled
+so no one mistakes it for evidence about Lever's actual DOM.
 - **`DRY_RUN=true` is the default.** The worker fills every field, screenshots the completed form, and stops. Submitting requires an explicit opt-in flag, so an accidental run costs nothing.
 - **The most important test in the repo** is the Tailor validator rejecting invented skills. That test is the load-bearing wall under constraint #2.
 - **An injection regression suite.** JDs carrying injection payloads must produce byte-identical Tailor output to the same JD without them.
@@ -442,7 +709,7 @@ One settings table, one `WHERE` clause. High value for the cost.
 |---|---|---|
 | 0 | **Spike:** Deno↔Node code sharing for the resume template | The fiddliest unknown in the stack. Verify in 20 min, not week 2 |
 | 1 | Supabase schema + RLS + migrations | Everything else reads it |
-| 2 | Gemini pool + `probe-quota.ts` | Real capacity before planning around guesses |
+| 2 | Gemini pool + `probe-quota.ts` | **The probe reports numbers to Teja; the pool code never reads one.** Measurement tells him whether he needs 3 keys or 15. The runtime stays purely reactive to 429s per §6 — the probe must not write a threshold into config, code or the database. These are reconcilable, not contradictory, and the distinction is *who* the number is for |
 | 3 | Master profile parse + settings pages | Nothing can be tailored without a master |
 | 4 | Scout adapters (Greenhouse, Lever, Ashby) + dedupe | Supply |
 | 5 | Filter cascade | Cheap rejection before expensive anything |
@@ -458,7 +725,7 @@ One settings table, one `WHERE` clause. High value for the cost.
 |---|---|
 | **1 — The loop** | Master profile, 9 settings pages, ATS + aggregator discovery, dedupe, filter cascade, Matcher, Tailor, Auditor, diff view + batch approval, Playwright applier, pipeline kanban, resume version pinning, answer bank, blocklist, Gemini pool, health page |
 | **2 — Rate multipliers** | Freshness priority, ATS parse simulator, referral outreach queue, cover letters, email tracker, follow-up nudges |
-| **3 — Compounding** | Skill-gap aggregator, interview prep packs, company briefs, A/B resume testing, calendar sync, assessment detector, portfolio selector |
+| **3 — Compounding** | Skill-gap aggregator, interview prep packs. *(Company briefs, A/B resume testing, calendar sync, assessment detector and portfolio selector removed from this phase — see the UNAPPROVED table in §17. Do not schedule them.)* |
 
 Deferral reasoning: each v2 item adds either a Gemini call per job or a whole new agent, and none helps until the core loop — *discover → score → tailor → approve → apply → track* — actually runs. Shipping a half-working loop with cover letters attached is worse for a job search than a working loop without them. **YAGNI** — build it when you feel its absence, not when you can imagine wanting it.
 
@@ -470,11 +737,22 @@ No two workers ever write the same file. Shared reads are fine.
 
 | Peer | Owns (exclusive write) | Depends on |
 |---|---|---|
-| **applyy-11** | `supabase/migrations/**`, RLS policies, `packages/shared-types/**` | nothing — **goes first** |
-| **applyy-58** | `supabase/functions/**` — Gemini pool, scouts, matcher, tailor + validator, auditor | schema contract from spec |
-| **applyy-af** | `apps/web/**` — 9 settings pages, diff view, kanban, health page | schema contract from spec |
-| **unassigned** | `worker/**`, `.github/workflows/**`, `packages/resume-template/**` | needs a 4th peer |
-| **orchestrator** | `docs/**`, root config (`package.json`, `pnpm-workspace.yaml`, `tsconfig`, `.gitignore`) | — |
+| **applyyy-aa** | `supabase/migrations/**`, `supabase/config.toml`, `packages/shared-types/**` | nothing — **goes first**; owns `SCHEMA_CONTRACT.md` |
+| **applyyy-d0** | `supabase/functions/**` — Gemini pool, scouts, filter cascade, Matcher/Tailor/Auditor, eval-fixture export | schema contract |
+| **applyyy-76** | `apps/web/**` — 9 settings pages, diff view, kanban, health page | schema contract |
+| **applyyy-21** | `worker/**`, `.github/workflows/**` — Playwright applier, Actions | schema contract |
+| **applyyy-04** | `packages/resume-template/**` + the Deno↔Node spike | — |
+| **applyyy-b3** | `PROJECT_PLAN.md`, `docs/**`, root config (`package.json`, `pnpm-workspace.yaml`, `tsconfig.base.json`, `.npmrc`, `.gitignore`, `README.md`) | — |
+| **applyyy-d8** | orchestration; no file ownership | — |
+
+Session-name history, because the plan previously listed peers that never
+existed: the names `applyy-11`, `applyy-58` and `applyy-af` in earlier drafts
+were **design-time placeholders invented before any peer was spawned**, not real
+sessions. Orchestration moved from `applyyy-e5` to `applyyy-d8` on Teja's
+instruction at 23:29; `applyyy-e5` died at ~23:34 having written the root
+scaffold, and `applyyy-b3` inherited its stream. Session names keep the
+three-`y` `applyyy-` prefix — that is the Claude session namespace, not the
+product name, and it is correct as written.
 
 Types live with the schema owner because types *derive* from schema — splitting them guarantees drift. Every peer gets the schema contract plus the "comment every line" rule up front, since retro-commenting is a second pass nobody budgets for.
 
@@ -490,11 +768,16 @@ Types live with the schema owner because types *derive* from schema — splittin
 | Vercel CLI | 59.5.0, logged in as `mallamteja` |
 | Vercel auth | `VERCEL_TOKEN` set, verified via `vercel whoami --token` |
 | Vercel project | `applyyy` → `applyyy.vercel.app`, created 2026-09-09 |
-| GitHub repo | `github.com/MallamTeja/applyyy` — **private, confirmed** |
+| GitHub remote | `github.com/MallamTeja/applyy` as configured in `.git/config`. Private. **Whether the repo was actually renamed is UNCONFIRMED** — `git push` returns `Repository not found`, which GitHub also returns for a private repo you are not authenticated to, so it does not distinguish "renamed and unauthenticated" from "does not exist". Settle with `gh repo view MallamTeja/applyy` after `gh auth login` |
 | `gh` CLI | 2.69.0 installed, **NOT authenticated** |
 | Node / pnpm | v24.14.0 / 11.25.0 |
-| Repo contents | `.gitignore`, `docs/`, `README.md`, `PROJECT_PLAN.md`, `.env` (untracked, ignored) |
-| Code written | **none** |
+| Repo contents | `apps/`, `packages/`, `worker/`, `supabase/`, `.github/`, `docs/`, plus root config (`package.json`, `pnpm-workspace.yaml`, `tsconfig.base.json`, `.npmrc`, `.gitignore`), `pnpm-lock.yaml`, `node_modules/`, `PROJECT_PLAN.md`, `README.md`, `.env` (untracked, ignored) |
+| Code written | **Substantial, across five streams** — see [`docs/PROGRESS.md`](docs/PROGRESS.md) for the live per-stream state with evidence. This row previously read "none", which was already false when written; it is the reason `PROGRESS.md` exists as a separate live document rather than a section in here |
+| `pnpm install` | **Passes** (exit 0) as of 23:50 IST |
+| `pnpm -r run test` | **RED** (exit 1) — `packages/resume-template` has no test files yet. Do NOT wire this into a workflow as a green gate until it passes |
+| Git | Commit `0cd33a8` exists **locally only**. Push **FAILED**, blocked on `gh auth login` |
+| Gemini keys | **Six**, renamed `GEMINI_API_KEY_01…_06`. §6's "15 keys" is aspirational |
+| Deno | Installed tonight via winget (`DenoLand.Deno` 2.9.6, user scope) — the machine changed |
 
 ---
 

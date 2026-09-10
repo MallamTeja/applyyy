@@ -1,97 +1,167 @@
-/* THE SCHEMA SEAM - read this before adding a type anywhere else in apps/web.
+/* THE SCHEMA SEAM - read this before importing a domain type anywhere in apps/web.
  *
- * `packages/shared-types` is owned by the schema stream (applyyy-aa) and is the
- * contract this app must build against. At the time this file was written that
- * package was still empty, and PROJECT_PLAN.md section 21 is explicit that
- * types live with the schema owner because types *derive* from schema and
- * splitting them guarantees drift.
+ * `@applyy/shared-types` is owned by the schema stream and is the single source
+ * of truth for every domain name in this system: 12 enums, the status graph,
+ * and Row/Insert/Update shapes for all 14 tables. Types live with the schema
+ * owner because types DERIVE from schema, and splitting them guarantees drift.
  *
- * So this file is a deliberately-quarantined placeholder, not a second source
- * of truth. The pattern is an ANTI-CORRUPTION LAYER: every domain name the UI
- * needs is declared in exactly one file, so when the real package lands the
- * migration is to replace these declarations with re-exports from
- * `@applyy/shared-types` and delete nothing else. One merge point, not forty.
+ * This file used to hold placeholder unions written while that package was
+ * still empty. Those are now deleted - it is a pure re-export surface, which is
+ * the whole point of having routed every domain name through one file: the
+ * migration off the placeholders touched this file and nothing else.
+ *
+ * WHY RE-EXPORT AT ALL rather than importing the package directly everywhere:
+ * it keeps one place to look for what the UI actually depends on, and one place
+ * to add an adapter if the contract ever needs reshaping for display. That is
+ * an ANTI-CORRUPTION LAYER, and it costs one file.
  *
  * RULES:
- *   - No other file under apps/web may declare a domain type or enum.
- *   - Nothing here is authoritative. If it disagrees with the migrations, the
- *     migrations win and this file is wrong.
- *   - Anything the UI needs that the real contract lacks is a message to the
- *     orchestrator, not a local addition.
- *
- * Values are transcribed from PROJECT_PLAN.md section 9 (status flow) and
- * section 7 (agent roster), the closest thing to the contract that exists yet,
- * PLUS the schema stream's later renames. Where the two disagree the schema
- * stream wins: PROJECT_PLAN.md section 9 is mid-reconciliation and still lists
- * the pre-rename `screened` / `screening` pair.
+ *   - No file under apps/web may declare a domain type or enum. If you need
+ *     one, add a re-export here; if it does not exist upstream, message the
+ *     orchestrator rather than inventing it locally.
+ *   - PRESENTATION types are different and do NOT belong here. The shape a
+ *     component needs in order to draw is owned by that component.
+ *   - Never write into `packages/shared-types`. It is another stream's file.
+ *   - Never deep-import (`@applyy/shared-types/src/enums.ts`); the package's
+ *     export map is the supported surface.
  */
 
-/* The status column IS the workflow (section 5): each agent claims rows in one
- * status and writes the next. The dashboard renders this; it never drives it. */
-export const APPLICATION_STATUSES = [
-  'discovered',
-  'deduped',
-  /* Renamed from `screened` by the schema stream: `screened` and `screening`
-   * sat one word apart in the same enum with opposite meanings - one means
-   * "survived our filters", the other "the employer is screening us". A name
-   * that means two things is the collision this account keeps hitting. */
-  'passed_filters',
-  'scored',
-  'tailored',
-  'audit_clean',
-  'audit_flagged',
-  'awaiting_approval',
-  'approved',
-  'applying',
-  'applied',
-  /* The employer's own screening stage, advanced by the email Tracker rather
-   * than by anything the operator does. Renamed from `screening` alongside
-   * `passed_filters` above. */
-  'employer_screening',
-  'oa_pending',
-  'interview',
-  'offer',
-  'rejected',
-  /* Off-ramps. Terminal or human-owned; never auto-advanced. */
-  'dropped_filter',
-  'dropped_duplicate',
-  'blocked_needs_human',
-  'needs_verification',
-  'failed',
-] as const;
+/* --- Enums ------------------------------------------------------------- */
 
-/* Derived from the array rather than declared twice, so the runtime list the
- * kanban iterates and the compile-time union can never disagree. */
-export type ApplicationStatus = (typeof APPLICATION_STATUSES)[number];
+/* The status column IS the workflow: each agent claims rows in one status and
+ * writes the next. The dashboard renders this; it never drives it.
+ *
+ * Exported as both a const tuple and a union, so the same declaration order
+ * drives the kanban's column order at runtime and exhaustiveness checking at
+ * compile time. Note `passed_filters` (WE filtered it, pre-apply) and
+ * `employer_screening` (THEY are reviewing us, post-apply) - renamed from the
+ * plan's `screened` / `screening`, which were one letter apart with opposite
+ * meanings in the same enum. */
+export { APPLICATION_STATUSES } from '@applyy/shared-types';
+export type { ApplicationStatus } from '@applyy/shared-types';
 
-/* The Auditor's per-line finding. `traced` means the line resolves to a real
- * node in the master profile; `fabricated` means it resolves to nothing, which
- * is the section 11 case the whole approval gate exists for. */
-export type TraceVerdict = 'traced' | 'fabricated';
+/* Agent identities. Includes `human`, which is not in the plan's roster but
+ * must exist: an approval is an event with an author, and several status edges
+ * are human-only. Also includes `sweeper`, the lease reclaimer. */
+export { AGENT_NAMES } from '@applyy/shared-types';
+export type { AgentName } from '@applyy/shared-types';
 
-/* Which review bucket a row falls into (section 11). This is DERIVED, not
- * stored: a row is Bucket B if any single line is fabricated. Deriving it in
- * one place stops a UI that shows "Bucket A" next to a visible oxblood stamp. */
-export type ReviewBucket = 'A' | 'B';
+/* Confidence in `jobs.posted_at`. The 3-day freshness filter behaves
+ * differently per level and `unknown` rows are excluded from it entirely by the
+ * cold-start guard, so the UI must show which is which or the operator cannot
+ * tell why a stale-looking job survived filtering. */
+export { POSTED_AT_SOURCES } from '@applyy/shared-types';
+export type { PostedAtSource } from '@applyy/shared-types';
 
-/* The nine agents of section 7, in pipeline order. The health page needs the
- * ordered list to show last-successful-run per agent, so this is an array too. */
-export const AGENT_NAMES = [
-  'scout-ats',
-  'scout-aggregator',
-  'normalizer',
-  'screener',
-  'matcher',
-  'tailor',
-  'auditor',
-  'applier',
-  'tracker',
-] as const;
+/* Every row of the filter cascade is one of these, and the Filters page renders
+ * one control per rule type. Nothing about the cascade is hardcoded in this
+ * system - the settings pages ARE the configuration surface. */
+export { FILTER_RULE_TYPES } from '@applyy/shared-types';
+export type { FilterRuleType } from '@applyy/shared-types';
 
-export type AgentName = (typeof AGENT_NAMES)[number];
+/* Why a company is blocked. Drives the Blocklist page's reason selector. */
+export { BLOCKLIST_REASONS } from '@applyy/shared-types';
+export type { BlocklistReason } from '@applyy/shared-types';
 
-/* Confidence in `posted_at` (section 13). The 3-day freshness filter behaves
- * differently per level, and `unknown` rows are excluded from it entirely by
- * the cold-start guard - so the UI must be able to show which is which, or the
- * operator cannot tell why a stale-looking job survived filtering. */
-export type PostedAtSource = 'exact' | 'derived' | 'unknown';
+/* Answer bank value shapes. The bank grows itself as new ATS questions appear,
+ * so the page must render a control per type rather than a fixed form. */
+export { ANSWER_TYPES } from '@applyy/shared-types';
+export type { AnswerType } from '@applyy/shared-types';
+
+/* Agent run outcomes, for the health page. */
+export { AGENT_RUN_STATUSES } from '@applyy/shared-types';
+export type { AgentRunStatus } from '@applyy/shared-types';
+
+/* Job metadata enums used by the pipeline cards and the watchlist page. */
+export { ATS_PROVIDERS, EMPLOYMENT_TYPES, WORK_ARRANGEMENTS } from '@applyy/shared-types';
+export type { AtsProvider, EmploymentType, WorkArrangement } from '@applyy/shared-types';
+
+/* --- The status graph -------------------------------------------------- */
+
+/* THE SINGLE DEFINITION OF THE WORKFLOW. The database trigger, the agents and
+ * this UI are all readers of it.
+ *
+ * Every "what can this row do next" affordance in the console must come from
+ * `nextStatuses` / `isTerminal` rather than a hardcoded list, so that when the
+ * schema stream adds or removes an edge the UI follows instead of drifting into
+ * offering a button the database will refuse.
+ *
+ * Two facts worth knowing while building the approval gate:
+ *   - `awaiting_approval -> approved` is the ONLY edge into `approved`, and
+ *     `approved -> applying` is the ONLY edge into `applying`. Constraint #15
+ *     is therefore unreachable-by-construction: this UI is the gate, and there
+ *     is no path around it to route through.
+ *   - Eleven edges are human-only, so the UI must expose them or they cannot
+ *     happen at all - a row would enter a status nothing can leave. See
+ *     `humanLanes.ts`, which derives that list from the graph rather than
+ *     restating it. */
+export {
+  STATUS_TRANSITIONS,
+  TERMINAL_STATUSES,
+  NON_RETRYABLE_STATUSES,
+  canTransition,
+  nextStatuses,
+  isTerminal,
+} from '@applyy/shared-types';
+export type { StatusTransition } from '@applyy/shared-types';
+
+/* --- Table shapes ------------------------------------------------------ */
+
+/* `Untrusted` marks a string that came from a job description, an ATS page or
+ * an incoming email (constraint #17). Rendering one is always plain React text
+ * children; it is never handed to a raw-HTML escape hatch, interpolated into an
+ * href or selector, or evaluated. Importing the alias keeps that obligation
+ * visible at every use site instead of relying on memory. */
+export type { Json, Untrusted } from '@applyy/shared-types';
+
+/* The queue row the whole console reads. `audit_findings` being empty is what
+ * makes a row Bucket A. */
+export type {
+  ApplicationRow,
+  ApplicationUpdate,
+  AuditFinding,
+} from '@applyy/shared-types';
+
+/* Jobs, and the per-source provenance the pipeline cards show. */
+export type { JobRow, JobSourceRef } from '@applyy/shared-types';
+
+/* The resume as structured JSON. The Tailor manipulates identified nodes rather
+ * than free text, which is what makes the honesty guarantee structural rather
+ * than bolted on - see the note in diffAdapter.ts about what that means for
+ * which fabrications the diff view can actually encounter. */
+export type {
+  MasterProfileRow,
+  MasterProfile,
+  MasterBullet,
+  MasterSkill,
+  NodeId,
+  TailoredProfile,
+  TailoredBullet,
+  TailoredSkill,
+  TailoredSummary,
+  ResolvedResume,
+} from '@applyy/shared-types';
+
+/* Settings-page rows. One page per row type; every field on these pages is a
+ * live control, because nothing in this system is hardcoded. */
+export type {
+  SearchPreferencesRow,
+  SearchPreferencesUpdate,
+  FilterRuleRow,
+  FilterRuleUpdate,
+  CompanyWatchlistRow,
+  CompanyWatchlistUpdate,
+  CompanyBlocklistRow,
+  CompanyBlocklistUpdate,
+  AnswerBankRow,
+  AnswerBankUpdate,
+  SystemSettingsRow,
+  SystemSettingsUpdate,
+} from '@applyy/shared-types';
+
+/* Health-page rows: run history per agent, the Gemini pool, and the audit log. */
+export type {
+  AgentRunRow,
+  GeminiKeyStateRow,
+  ApplicationEventRow,
+} from '@applyy/shared-types';

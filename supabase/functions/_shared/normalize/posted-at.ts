@@ -173,37 +173,34 @@ function readSourceDate(
 export function extractPostedAt(input: PostedAtInput, context: PostedAtContext): PostedAtResult {
   // What the source itself claims.
   const fromSource = readSourceDate(input, context);
-  // Fall back to our own sighting when the source gave nothing usable — whether
-  // the field was absent, empty, malformed or a zero sentinel, since all four
-  // carry the same information. This is sound in steady state: if we poll daily,
-  // a posting we have never seen before is genuinely new.
-  const resolved: { readonly date: Date; readonly confidence: PostedAtConfidence } =
-    fromSource.date === null
-      // The observation timestamp is real evidence, but it is inference, so `derived`.
-      ? { date: context.firstSeenAt, confidence: "derived" }
-      // Otherwise keep what the source gave us, at the confidence it earned.
-      : { date: fromSource.date, confidence: fromSource.confidence };
-
-  // THE COLD-START GUARD. On a board's first poll, first_seen_at is meaningless —
-  // an entire back catalogue arrives stamped "today". §13 says mark EVERYTHING on
-  // that poll `unknown`, including sources with genuine dates. Suppressing a
-  // genuine date costs one poll cycle of delay; trusting a false one costs a day
-  // of Gemini quota spent on postings that have been open for months.
-  if (context.isFirstPollOfBoard) {
+  // The source gave us something usable, so no inference of ours is involved.
+  // THE COLD-START GUARD DOES NOT APPLY HERE, and that scoping is the whole
+  // subtlety: §13's defect lives entirely in the first_seen_at inference below.
+  // A Lever `createdAt` is true whether or not we have polled this board before,
+  // so downgrading it would discard a fact in order to defend against a guess we
+  // never made — and supply is already the scarce thing (§13: a 3-day window over
+  // a 50-company watchlist yields single digits per day, not 35).
+  if (fromSource.date !== null) {
     return {
-      // The timestamp is still returned so the dashboard can display something,
-      // but the confidence beside it forbids any freshness claim.
-      postedAt: resolved.date.toISOString(),
-      // The staleness filter reads this and declines to treat the row as fresh.
-      postedAtSource: "unknown",
+      // ISO-8601 UTC so the value is unambiguous crossing into Postgres.
+      postedAt: fromSource.date.toISOString(),
+      // `exact` for the three sources publishing a real posting timestamp,
+      // `derived` for a Greenhouse edit timestamp or parsed aggregator prose.
+      postedAtSource: fromSource.confidence,
     };
   }
 
-  // Steady state: report the date and the confidence it genuinely earned.
+  // Nothing usable from the source — the field was absent, empty, malformed or a
+  // zero sentinel, all of which carry the same information. The only evidence left
+  // is our own sighting, and THIS is the inference §13 warns about: "anything we
+  // have never seen must be new" is sound in steady state and false on day one.
   return {
-    // ISO-8601 UTC so the value is unambiguous crossing into Postgres.
-    postedAt: resolved.date.toISOString(),
-    // `exact` only for the three sources that publish a real posting timestamp.
-    postedAtSource: resolved.confidence,
+    // The sighting is still the best timestamp available, so it is what we store.
+    postedAt: context.firstSeenAt.toISOString(),
+    // On a board's first poll the entire back catalogue arrives stamped "today", so
+    // the inference is refused outright rather than dressed up as `derived`. The
+    // staleness filter reads `unknown` and declines to treat the row as fresh —
+    // which is what stops a day of Gemini quota going to postings open since March.
+    postedAtSource: context.isFirstPollOfBoard ? "unknown" : "derived",
   };
 }

@@ -2,10 +2,11 @@
  * derive every verdict shown on screen.
  *
  * These are PRESENTATION types - the shape this component needs in order to
- * draw - not domain types. Domain names (TraceVerdict, ReviewBucket) are
- * imported from the schema seam and never redeclared here. When
- * `@applyy/shared-types` lands, the Auditor's real output gets mapped into
- * these shapes in one adapter; the renderer does not change.
+ * draw - not domain types. The Auditor's real output (`AuditFinding[]` on the
+ * application row) and the resolved resume are mapped into these shapes by
+ * `diffAdapter.ts`, and the renderer never sees either. That separation is what
+ * lets the flagship screen be a pure component: it renders a fixture and a live
+ * row through exactly the same code path.
  *
  * Everything on this screen that could disagree with itself is DERIVED here
  * rather than passed in. A row that carried both a stored `bucket: 'A'` and a
@@ -13,7 +14,24 @@
  * badge above an oxblood stamp, and the operator would trust the badge.
  */
 
-import type { ReviewBucket, TraceVerdict } from '../../data/contract';
+/* PRESENTATION-ONLY types, owned here rather than in the schema seam.
+ *
+ * The schema stream models the Auditor's output as `AuditFinding[]` on the
+ * application row - a list of claims that traced to nothing. It does not model
+ * "this run of text is traced" or "this row is Bucket A", because neither is
+ * stored: both are things the renderer works out in order to draw. Declaring
+ * them upstream would put display concerns in the schema contract, and
+ * declaring them as domain types here would violate the seam's one rule. */
+
+/* Per-run provenance, as the renderer needs it. `traced` resolves to a real
+ * master node, `fabricated` resolves to nothing. */
+export type TraceVerdict = 'traced' | 'fabricated';
+
+/* Which review path this row takes (section 11). DERIVED from whether any
+ * finding exists - the schema stream's own comment on `audit_findings` says
+ * "empty array means Bucket A", so storing it would be storing a duplicate that
+ * can disagree with the findings sitting next to it. */
+export type ReviewBucket = 'A' | 'B';
 
 /* One run of text inside a tailored line.
  *
@@ -47,8 +65,16 @@ export interface DiffLine {
   readonly kind: 'bullet' | 'skills' | 'summary';
   /* The master text, verbatim. This pane is never edited from this screen:
    * master_profiles is versioned and immutable (section 9), and editing it
-   * here would silently create version N+1 mid-review. */
-  readonly masterText: string;
+   * here would silently create version N+1 mid-review.
+   *
+   * NULL for a tailored summary, and that null is meaningful rather than
+   * missing data. A bullet rewords exactly one master bullet, so it has a
+   * counterpart to sit beside. A summary is prose drawn from SEVERAL master
+   * nodes, so there is no single line to compare it against - which is
+   * precisely why prose is the weakest point in the honesty design and why the
+   * Auditor gates summaries even where it lets other prose through. The
+   * renderer says so rather than showing an empty pane. */
+  readonly masterText: string | null;
   readonly masterNodeId: string;
   readonly tailoredRuns: readonly TailoredRun[];
 }
@@ -77,12 +103,22 @@ export interface KeywordCoverage {
 export interface ResumeDiff {
   readonly applicationId: string;
   readonly jobTitle: string;
-  readonly company: string;
+  readonly companyName: string;
   /* Which immutable master version this was derived from. Shown because it is
    * what makes resume pinning meaningful six months later (section 9). */
   readonly masterVersion: number;
   readonly coverage: KeywordCoverage;
   readonly lines: readonly DiffLine[];
+  /* Auditor findings the adapter could not locate inside any rendered line.
+   *
+   * This exists because the alternative is unacceptable. If a finding cannot be
+   * matched to a line, the choice is to drop it or to surface it, and dropping
+   * it would mean the screen showed a clean row while the Auditor had flagged a
+   * claim - the exact failure the approval gate exists to prevent, delivered by
+   * the gate itself. So an unmatched finding is listed separately, counted in
+   * the bucket calculation, and still blocks approval until decided. Fail loud,
+   * never fail clean. */
+  readonly unlocatedClaims: readonly FlaggedClaim[];
 }
 
 /* A single flagged claim, flattened out of the line structure so the alert band
@@ -96,11 +132,13 @@ export interface FlaggedClaim {
   readonly lineKind: DiffLine['kind'];
 }
 
-/* Every run that traces to nothing, in document order. */
+/* Every claim that traces to nothing: the runs found inside lines, plus any
+ * finding the adapter could not place. Both must be here - a gate that only
+ * counts the located ones can be opened while an unlocated finding stands. */
 export function collectFlaggedClaims(diff: ResumeDiff): FlaggedClaim[] {
   /* flatMap rather than a nested loop with a push, because the result is a
    * projection of the input and reads as one. */
-  return diff.lines.flatMap((line) =>
+  const inLines = diff.lines.flatMap((line) =>
     line.tailoredRuns
       .filter((run) => run.verdict === 'fabricated')
       .map((run) => ({
@@ -112,6 +150,10 @@ export function collectFlaggedClaims(diff: ResumeDiff): FlaggedClaim[] {
         lineKind: line.kind,
       })),
   );
+
+  /* Unlocated findings last, so document order still holds for everything that
+   * has a position, and the positionless ones are not interleaved arbitrarily. */
+  return [...inLines, ...diff.unlocatedClaims];
 }
 
 /* Bucket B if ANY line carries an untraceable claim, Bucket A otherwise

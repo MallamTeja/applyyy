@@ -1,0 +1,92 @@
+/* Approval queue layout.
+ *
+ * The two buckets get deliberately unequal visual weight. Bucket B is a stack
+ * of full-height diff views; Bucket A is a compact list and one button. That
+ * inequality is the design - matching their presentation would undo the whole
+ * point of splitting them. */
+
+.queue__bucket {
+  margin-top: var(--gap-6);
+}
+
+.queue__bucket-heading {
+  font-size: var(--size-md);
+  font-weight: 600;
+}
+
+.queue__bucket-note {
+  margin-top: var(--gap-1);
+  /* Under 80 characters: this sentence explains why the bucket exists and is
+     meant to be read, not scanned. */
+  max-width: 60ch;
+  color: var(--ink-muted);
+  font-size: var(--size-sm);
+}
+
+.queue__list {
+  display: flex;
+  flex-direction: column;
+  /* A wide gap between diff views so two consecutive applications never read
+     as one long document - the operator must be able to see where one decision
+     ends and the next begins. */
+  gap: var(--gap-7);
+  margin-top: var(--gap-5);
+}
+
+.queue__item {
+  padding: var(--gap-5);
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+  box-shadow: var(--lift);
+}
+
+/* --- Bucket A ---------------------------------------------------------- */
+
+.queue__clean-list {
+  display: flex;
+  flex-direction: column;
+  margin: var(--gap-4) 0;
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+}
+
+.queue__clean-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--gap-3);
+  padding: var(--gap-3) var(--gap-4);
+  /* Hairline between rows, and none after the last, so the list has no
+     dangling rule at its foot. */
+  border-bottom: 1px solid var(--rule);
+}
+
+.queue__clean-row:last-child {
+  border-bottom: none;
+}
+
+.queue__clean-job {
+  /* Serif: this is the job the resume was written for, so it belongs to the
+     document side of the paper/machine split rather than to the chrome. */
+  font-family: var(--font-paper);
+  font-size: var(--size-base);
+}
+
+/* --- Empty state ------------------------------------------------------- */
+
+/* An empty queue is the normal end of a review session, not a void. Sage
+   rather than a grey placeholder, and no illustration: it is a statement that
+   the work is done. */
+.queue__empty {
+  margin-top: var(--gap-6);
+  padding: var(--gap-5);
+  max-width: 52ch;
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--traced);
+  border-radius: var(--radius-sheet);
+  font-size: var(--size-base);
+}

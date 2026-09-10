@@ -1,0 +1,153 @@
+/* Shell layout: a fixed rail beside a scrolling page. */
+
+.shell {
+  display: grid;
+  /* Fixed rail, elastic content. `minmax(0, 1fr)` rather than `1fr` because a
+     wide table inside the page would otherwise force the grid track wider than
+     the viewport and push the rail off screen. */
+  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  /* Full height so the rail's own background reaches the bottom of the window
+     rather than stopping at the end of its links. */
+  min-height: 100vh;
+}
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-5);
+  padding: var(--gap-5) var(--gap-4);
+  /* The panel tone: the rail is machine chrome, distinctly not paper. */
+  background: var(--panel);
+  /* A rule rather than a shadow. Paper casts shadows; a fixed chrome edge is a
+     seam between two materials. */
+  border-right: 1px solid var(--rule);
+  /* Sticks while the page scrolls, so navigation is always one click away
+     during a long approval session. */
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  /* Fifteen links plus a defect notice can exceed a short window. */
+  overflow-y: auto;
+}
+
+.rail__brand {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: var(--gap-4);
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.rail__name {
+  /* Set in the serif, and the only place the serif appears outside document
+     content. The product name is the one piece of chrome allowed a voice. */
+  font-family: var(--font-paper);
+  font-size: var(--size-md);
+  font-weight: 600;
+  /* Slightly tightened, which the serif at this size can carry. */
+  letter-spacing: -0.01em;
+}
+
+.rail__role {
+  color: var(--ink-muted);
+  font-size: var(--size-xs);
+}
+
+.rail__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-2);
+}
+
+.rail__heading {
+  color: var(--ink-muted);
+  font-size: var(--size-xs);
+  font-weight: 600;
+}
+
+.rail__link {
+  display: block;
+  padding: var(--gap-2) var(--gap-3);
+  border-radius: var(--radius-control);
+  color: var(--ink);
+  /* The rail is a list of destinations; underlines on all fifteen would be
+     noise, and the active state carries the affordance instead. */
+  text-decoration: none;
+  font-size: var(--size-sm);
+  transition: background-color 120ms ease;
+}
+
+.rail__link:hover {
+  background: rgba(27, 33, 31, 0.06);
+}
+
+/* The active page. A filled sheet-white pill: the current destination looks
+   like the paper it leads to, which ties the rail to the page beside it. */
+.rail__link--active {
+  background: var(--sheet);
+  border-left: 3px solid var(--traced);
+  font-weight: 600;
+}
+
+/* A gap in this console's own coverage of the workflow. Bronze, because it
+   means a human is required and nothing has stopped working yet - it is not a
+   fabrication and must not borrow the oxblood that means one. */
+.rail__defect {
+  margin-top: auto;
+  padding: var(--gap-3);
+  background: var(--signal-wash);
+  border-left: 3px solid var(--signal);
+  color: var(--ink);
+  font-size: var(--size-xs);
+}
+
+.shell__main {
+  /* Lets the grid track shrink below its content's intrinsic width so wide
+     tables scroll inside their own container instead of stretching the page. */
+  min-width: 0;
+}
+
+/* --- Narrow screens --------------------------------------------------- */
+
+/* Below this the rail and a resume pane cannot share the width. The rail
+   becomes a horizontal strip above the page rather than a hamburger: fifteen
+   destinations behind a menu button costs a tap on every navigation, and this
+   console is worked, not browsed. */
+@media (max-width: 52rem) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .rail {
+    position: static;
+    height: auto;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: baseline;
+    border-right: none;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  /* The section headings go: horizontally they would separate the links from
+     the group they label, which is worse than no label. */
+  .rail__heading {
+    display: none;
+  }
+
+  .rail__section ul {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gap-1);
+  }
+
+  .rail__brand {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+
+  /* `margin-top: auto` pushed it to the bottom of a column; in a row it would
+     push it right and orphan it from the links. */
+  .rail__defect {
+    margin-top: 0;
+    flex-basis: 100%;
+  }
+}

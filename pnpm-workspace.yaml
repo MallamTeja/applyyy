@@ -14,6 +14,23 @@ packages:
   # because there is exactly one worker and a glob would invite a second.
   - "worker"
 
+# ONE TypeScript version for the whole workspace, forced regardless of what each
+# package declares. Enforced here rather than asked of four peers because the
+# floor is a consequence of MY choice: tsconfig.base.json sets
+# `erasableSyntaxOnly`, which TypeScript only understands from 5.8 — below that
+# tsc fails with "TS5023: Unknown compiler option", which is what apps/web hit
+# on 5.7.2.
+#
+# The audit that prompted this found three different ranges across four
+# packages, and the dangerous one was NOT the broken one. packages/shared-types
+# declared ^5.6.0 and passed only because the caret floated up to 5.9.x -- fine
+# by luck, not by intent. A dependency that works because a range happens to
+# float breaks on a LOCKFILE REFRESH rather than on a code change, so it breaks
+# for someone who edited nothing, which is the hardest kind of break to diagnose.
+# An override converts that into one number in one place.
+overrides:
+  typescript: "5.9.3"
+
 # Dependencies permitted to run their install/build scripts. pnpm 11 blocks all
 # of them by default and the block is FATAL, not a warning: `pnpm --filter X run
 # test` performs an implicit dependency-status install first, so every script in
@@ -34,5 +51,20 @@ onlyBuiltDependencies:
   # The Chromium/Firefox/WebKit payloads are a separate package from the
   # Playwright client library and carry their own postinstall.
   - "@playwright/test"
+# THE KEY THAT ACTUALLY DECIDES. pnpm 11 replaced pnpm 10's
+# `onlyBuiltDependencies` list with this name->boolean map, and pnpm WROTE this
+# block itself with the placeholder string "set this to true or false" while the
+# list above already named esbuild -- which is the proof the list is inert in 11.
+# An unanswered placeholder counts as "not yet decided", NOT as allowed, so the
+# install kept failing. Values must be real booleans.
 allowBuilds:
-  esbuild: set this to true or false
+  # Selects the correct prebuilt platform binary. Arrives via vitest and vite,
+  # not as anyone's direct dependency, which is why it breaks worker and
+  # apps/web identically.
+  esbuild: true
+  # Downloads browser binaries. Pre-approved so a clean GitHub Actions runner
+  # can install the applier; without it the failure appears first in CI.
+  playwright: true
+  # The browser payloads are a separate package from the client library and
+  # carry their own postinstall.
+  "@playwright/test": true

@@ -1,0 +1,5 @@
+{
+  "imports": {
+    "@applyy/shared-types": "../shared-types/src/index.ts"
+  }
+}

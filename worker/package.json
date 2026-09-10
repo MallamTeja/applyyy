@@ -13,11 +13,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@applyy/shared-types": "workspace:*",
     "playwright": "1.49.1"
   },
   "devDependencies": {
     "@types/node": "24.0.1",
-    "typescript": "5.7.2",
+    "typescript": "^5.8.0",
     "vitest": "2.1.8"
   }
 }

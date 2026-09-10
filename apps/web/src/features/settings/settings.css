@@ -1,0 +1,158 @@
+/* Shared layout for the six configuration pages.
+ *
+ * Every one of them is the same shape - groups of labelled controls on paper -
+ * so the layout lives here once rather than six times. What differs between
+ * them is which rows they render, and that comes from the schema contract. */
+
+/* A group of related settings. Grouped rather than one long form, because a
+   flat list of thirty fields gives the experience ceiling the same weight as
+   the salary floor and the operator has to read all thirty to find one. */
+.settings-group {
+  margin-top: var(--gap-5);
+  padding: var(--gap-5);
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+  box-shadow: var(--lift);
+}
+
+.settings-group__title {
+  font-size: var(--size-md);
+  font-weight: 600;
+}
+
+.settings-group__note {
+  margin-top: var(--gap-1);
+  /* Explains the consequence of the group, not its contents. */
+  max-width: 60ch;
+  color: var(--ink-muted);
+  font-size: var(--size-sm);
+}
+
+/* Fields in a group. A two-column grid on wide screens so short numeric
+   thresholds do not each occupy a full row of empty space. */
+.settings-group__fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: var(--gap-4);
+  margin-top: var(--gap-4);
+  padding-top: var(--gap-4);
+  border-top: 1px solid var(--rule);
+}
+
+/* A field that needs the full width: a keyword list, a location list, anything
+   the operator types several comma-separated values into. */
+.settings-group__fields .field--wide {
+  grid-column: 1 / -1;
+}
+
+/* --- Cascade rows ----------------------------------------------------- */
+
+/* One row of the filter cascade. Ordered, because the cascade runs cheapest
+   test first and the order is part of what makes it cheap - so the UI shows
+   the order rather than hiding it behind an alphabetical list. */
+.cascade {
+  display: flex;
+  flex-direction: column;
+  margin-top: var(--gap-4);
+}
+
+.cascade__row {
+  display: grid;
+  /* Toggle, then the rule and its explanation, then its threshold control.
+     The toggle leads because "is this rule on" is the first thing asked. */
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--gap-4);
+  padding: var(--gap-4) 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.cascade__row:last-child {
+  border-bottom: none;
+}
+
+/* A rule the operator has switched off. Dimmed rather than hidden, so the
+   cascade still reads as a complete pipeline with a gap in it - hiding a
+   disabled rule would make "why did this job get through" unanswerable. */
+.cascade__row--off .cascade__name,
+.cascade__row--off .cascade__drops {
+  color: var(--ink-muted);
+}
+
+.cascade__toggle {
+  /* Forest when on: an enabled filter is a rule doing its job, the same
+     "this is fine" meaning the provenance marker carries. */
+  accent-color: var(--traced);
+  /* Larger than the browser default. This is the primary control on the row
+     and a 13px checkbox beside 15px text reads as an afterthought. */
+  width: 1.1rem;
+  height: 1.1rem;
+  /* Nudged down onto the text baseline rather than the line box top. */
+  margin-top: 0.15rem;
+}
+
+.cascade__name {
+  font-weight: 500;
+}
+
+/* What this rule throws away, in the operator's words. The most useful text on
+   the page: a rule name alone does not say what turning it off would let in. */
+.cascade__drops {
+  margin-top: var(--gap-1);
+  max-width: 56ch;
+  color: var(--ink-muted);
+  font-size: var(--size-xs);
+}
+
+/* --- Tables ----------------------------------------------------------- */
+
+/* The watchlist, blocklist and answer bank are lists of rows rather than forms.
+   Scrolls inside its own container so a long board token never widens the page. */
+.settings-table-wrap {
+  margin-top: var(--gap-4);
+  overflow-x: auto;
+}
+
+.settings-table {
+  width: 100%;
+  /* Collapsed so the hairlines between rows are single lines, not doubled. */
+  border-collapse: collapse;
+  font-size: var(--size-sm);
+}
+
+.settings-table th {
+  padding: var(--gap-2) var(--gap-3);
+  /* Left, because every column here is text or an identifier, not a figure. */
+  text-align: left;
+  border-bottom: 2px solid var(--rule-strong);
+  font-weight: 600;
+  /* Sticky so column meaning survives scrolling a 200-board watchlist. */
+  position: sticky;
+  top: 0;
+  background: var(--sheet);
+}
+
+.settings-table td {
+  padding: var(--gap-2) var(--gap-3);
+  border-bottom: 1px solid var(--rule);
+  /* Top-aligned: a wrapped note in one cell should not centre the short cells
+     beside it. */
+  vertical-align: top;
+}
+
+/* --- Not-yet-wired notice --------------------------------------------- */
+
+/* Marks a page whose controls are laid out but not yet reading or writing the
+   database. Bronze, the "a human is needed and nothing is broken" colour -
+   this is an incomplete build, not a fabrication and not a failure.
+   Stated plainly on the page rather than left for the operator to discover by
+   editing a field and watching nothing happen. */
+.not-wired {
+  margin-top: var(--gap-4);
+  padding: var(--gap-3) var(--gap-4);
+  max-width: 64ch;
+  background: var(--signal-wash);
+  border-left: 3px solid var(--signal);
+  font-size: var(--size-sm);
+}

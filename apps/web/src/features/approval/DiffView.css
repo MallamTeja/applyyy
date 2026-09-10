@@ -273,6 +273,17 @@
   display: none;
 }
 
+/* Stands in for a master line that does not exist, because a tailored summary
+   draws on several master nodes rather than rewording one. Sans and muted so it
+   reads as the console explaining itself rather than as resume content - the
+   one place in the master pane that is not the document. */
+.line__no-master {
+  max-width: 46ch;
+  color: var(--ink-muted);
+  font-size: var(--size-xs);
+  font-style: italic;
+}
+
 /* Resume text. Serif because the artefact under review is a document. */
 .line__text {
   font-family: var(--font-paper);

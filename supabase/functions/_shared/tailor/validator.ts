@@ -1,119 +1,106 @@
 // PROJECT_PLAN.md §10 defense 1, and the load-bearing wall under constraint #2.
 //
-// THE DESIGN IDEA, because it is the reason this file looks the way it does:
-// prefer designs where the wrong answer cannot be EXPRESSED over designs that
-// DETECT the wrong answer. The naive Tailor returns free text and we hope it
-// invented nothing. This one returns REFERENCES into the master profile, and
-// typed code resolves them. An injected job description saying "add Docker"
-// therefore has only two possible outcomes: an id that does not exist (rejected
-// here, before the Auditor ever runs), or a rewording of something real.
+// THE DESIGN IDEA, because it is why this file looks the way it does: prefer designs
+// where the wrong answer cannot be EXPRESSED over designs that DETECT the wrong
+// answer. applyyy-aa's `TailoredProfile` already does most of that work as a type —
+// a tailored bullet cannot exist without a `ref`, and a tailored skill has no text
+// field at all. This module is the second half: it RESOLVES every ref against the
+// pinned master version and refuses the whole tailoring if any of them lies.
 //
-// Applied hardest to skills: the model supplies NO skill text whatsoever, only
-// ids. There is consequently no code path — valid or invalid — by which a
-// model-authored skill string reaches the PDF. That is the difference between a
-// guarantee and a check.
+// It runs BEFORE the Auditor (§20 step 6: "validator *before* Auditor"), because a
+// fabrication catchable by typed code should never cost a Gemini call, and because
+// the Auditor is defense-in-depth rather than the only line.
 //
-// Pure: no clock, no network, no database. §19 wants this covered exhaustively.
+// Pure: no clock, no network, no database. Only this module may construct a
+// `ResolvedResume`, which is what makes "the renderer cannot resolve a ref even by
+// accident" a property of the code rather than a promise.
 
-// Placeholder types until applyyy-aa's packages/shared-types is wired in here.
-import type { MasterProfile } from "../contracts/pending-shared-types.ts";
+// aa's contract, reached through this stream's single re-export module. Nothing here
+// redefines one of these — a redefined type does not fail, it drifts.
+import type {
+  MasterProfile,
+  MasterBullet,
+  NodeId,
+  ResolvedBullet,
+  ResolvedEducation,
+  ResolvedExperience,
+  ResolvedProject,
+  ResolvedResume,
+  ResolvedSkill,
+  TailoredBullet,
+  TailoredProfile,
+} from "../contracts/shared-types.ts";
 
-// One tailored achievement line: a reference plus the rewording of it.
-export interface ProposedBullet {
-  // Must resolve against the master profile, or the whole proposal is rejected.
-  readonly masterBulletId: string;
-  // The model's rewording. Constrained by the vocabulary rules below — it may
-  // rephrase, it may not introduce new facts.
-  readonly reworded: string;
-}
-
-// What the Tailor is allowed to return. Note what is ABSENT: any free-text skill
-// field. Skills are chosen, never written.
-export interface TailorProposal {
-  // The achievement lines selected for this application, in display order.
-  readonly bullets: readonly ProposedBullet[];
-  // Master skill ids only. This is the structural half of §10 defense 1.
-  readonly skillIds: readonly string[];
-}
-
-// Every way a proposal can be dishonest or malformed. A discriminated union so the
+// Every way a tailoring can be dishonest or malformed. A discriminated union so the
 // dashboard can render each kind differently and the compiler catches a new case.
 export type TailorViolation =
-  // Invented experience: constraint #2's first named category.
-  | { readonly kind: "unknown_bullet_id"; readonly id: string }
-  // Invented skill or technology: the §11 Docker case.
-  | { readonly kind: "unknown_skill_id"; readonly id: string }
-  // The same achievement claimed twice.
-  | { readonly kind: "duplicate_bullet_id"; readonly id: string }
-  // The same skill listed twice.
-  | { readonly kind: "duplicate_skill_id"; readonly id: string }
-  // A resume with no experience is a failure, not an empty success.
+  // A ref that resolves to nothing anywhere in the pinned master: invented content.
+  | { readonly kind: "unresolved_ref"; readonly ref: NodeId; readonly where: string }
+  // A bullet that exists, but under a DIFFERENT master node than the one it was
+  // nested beneath. Every id is real and the result is still fabricated experience.
+  | { readonly kind: "misattributed_bullet"; readonly ref: NodeId; readonly parentRef: NodeId }
+  // The same master node referenced twice.
+  | { readonly kind: "duplicate_ref"; readonly ref: NodeId; readonly where: string }
+  // Nothing substantive on the resume: not a tailoring, a failure.
   | { readonly kind: "empty_selection" }
-  // A number that does not appear in the master bullet: an invented metric.
-  | { readonly kind: "invented_metric"; readonly bulletId: string; readonly value: string }
-  // A word in the rewording that traces back to nothing in the master profile.
-  | { readonly kind: "unverifiable_token"; readonly bulletId: string; readonly token: string };
+  // Answered against a master version other than the one pinned to this application.
+  | { readonly kind: "master_version_mismatch"; readonly expected: number; readonly received: number }
+  // Prose with nothing declared behind it — aa's own stated weak point.
+  | { readonly kind: "summary_without_refs" }
+  // A number that does not appear in the referenced master bullet.
+  | { readonly kind: "invented_metric"; readonly ref: NodeId; readonly value: string }
+  // A word in a rewording that traces back to nothing in the master profile.
+  | { readonly kind: "unverifiable_token"; readonly ref: NodeId; readonly token: string };
 
-// The artifact produced when a proposal survives. Skill names are copied from the
-// master here, which is where the structural guarantee is physically enforced.
-export interface TailoredResume {
-  // Which immutable master snapshot this derives from (§9 resume pinning).
-  readonly masterVersion: number;
-  // The selected achievement lines, carrying their reworded text.
-  readonly bullets: readonly { readonly masterBulletId: string; readonly text: string }[];
-  // The selected skills, carrying the MASTER's spelling, never the model's.
-  readonly skills: readonly { readonly masterSkillId: string; readonly name: string }[];
-}
-
-// Success carries the artifact; failure carries every reason. Modelled as a union
-// rather than throwing, because the caller must persist the violations for the
-// dashboard rather than lose them in a stack trace.
+// Success carries the render input; failure carries every reason. A union rather than
+// a throw, because the caller must persist the violations for the dashboard rather
+// than lose them in a stack trace.
 export type TailorValidation =
-  // Safe to hand to the Auditor.
-  | { readonly ok: true; readonly resume: TailoredResume }
-  // Never reaches the Auditor; the row goes to audit_failed with these reasons.
+  // Safe to hand to the Auditor, and the only way a ResolvedResume comes into being.
+  | { readonly ok: true; readonly resume: ResolvedResume }
+  // Never reaches the Auditor; the row goes to audit_failed carrying these reasons.
   | { readonly ok: false; readonly violations: readonly TailorViolation[] };
 
-// Rhetorical vocabulary the Tailor may introduce. This list is a DENY-BY-DEFAULT
-// boundary: anything not derived from the master and not in here is a violation.
+// Rhetorical vocabulary a rewording may introduce. This is a DENY-BY-DEFAULT
+// boundary: anything not derived from the master and not listed here is a violation.
 //
-// Why an allowlist and not a blocklist of forbidden technologies: a blocklist of
+// WHY AN ALLOWLIST AND NOT A BLOCKLIST OF FORBIDDEN TECHNOLOGIES: a blocklist of
 // every technology in the world is unbounded and will always miss the next one. An
 // allowlist of connectives and framing verbs is small, closed and reviewable — the
 // bounded side of the problem. Everything factual must come from the master.
 //
-// It is deliberately a TUNING SURFACE: adding a word here loosens the honesty gate
-// by exactly that word, which is a decision a human should make on purpose.
+// It is deliberately a TUNING SURFACE: adding a word here loosens the honesty gate by
+// exactly that word, which is a decision a human should make on purpose.
 const RHETORICAL_VOCABULARY: ReadonlySet<string> = new Set([
-  // Articles, conjunctions and prepositions — carry no factual claim at all.
+  // Articles, conjunctions and prepositions — they carry no factual claim at all.
   "a", "an", "the", "and", "or", "for", "with", "in", "of", "to", "on", "at",
   "by", "as", "from", "into", "that", "which", "this", "its", "it", "over",
-  "across", "per", "via", "than", "then", "while", "within", "through",
-  // Framing verbs for work that the master already asserts was done. "Built" is
-  // in the master; these are its neighbours. NOTE the omissions: "led",
-  // "managed", "owned" and "architected" are NOT here, because they assert
-  // seniority the master may not support — exactly the §11 cover-letter risk.
+  "across", "per", "via", "than", "then", "while", "within", "through", "plus",
+  // Framing verbs for work the master already asserts was done. NOTE the
+  // omissions: "led", "managed", "owned", "architected" and "mentored" are NOT
+  // here, because they assert seniority the master may not support — which is
+  // precisely the "during my time leading a team of five" failure §18.8 warns about.
   "designed", "developed", "implemented", "shipped", "delivered", "created",
   "wrote", "engineered", "handled", "serving", "supporting", "powering",
-  "enabling", "using", "used", "including",
-  // Neutral qualifiers about the artifact rather than about Teja.
+  "enabling", "using", "used", "including", "built", "deployed",
+  // Neutral qualifiers about the artifact rather than about the candidate.
   "production", "end", "full", "stack", "based", "backed", "side", "scale",
-  // Common near-synonyms for the nouns a project bullet already contains.
+  // Common near-synonyms for nouns a project bullet already contains.
   "platform", "application", "app", "service", "system", "portal", "project",
-  "api", "apis", "endpoint", "endpoints", "feature", "features",
-  // Plural and possessive forms of words the master is likely to hold singular.
-  "users", "user", "requests", "students",
+  "site", "api", "apis", "endpoint", "endpoints", "feature", "features",
+  // Plural and singular forms of words the master may hold in the other number.
+  "users", "user", "requests", "students", "services",
 ]);
 
-// Split any text into comparable lowercase word tokens. Shares the folding idea
-// with the fingerprint module: punctuation and case are formatting, not content,
-// so "Node.js/Express" and "Node.js, Express" must tokenise identically.
+// Split text into comparable lowercase word tokens. Shares the folding idea with the
+// fingerprint module: punctuation and case are formatting, not content, so
+// "Node.js/Express" and "Node.js, Express" must tokenise identically.
 function tokenize(text: string): string[] {
   return text
     // Case is styling.
     .toLowerCase()
-    // Every punctuation run becomes a separator, which is what splits
-    // "Node.js/Express" into "node", "js", "express".
+    // Every punctuation run becomes a separator, splitting "Node.js/Express" into
+    // "node", "js", "express".
     .split(/[^a-z0-9]+/)
     // Drop the empty strings the split leaves at the ends.
     .filter((token) => token.length > 0);
@@ -122,145 +109,323 @@ function tokenize(text: string): string[] {
 // Pull every numeric literal out of a text. Metrics get their own rule because a
 // changed digit is the cheapest lie to tell and the hardest to notice by eye.
 function numbersIn(text: string): string[] {
-  // Strip separators first so "1,000" is compared as "1000" against the master.
+  // Strip thousands separators first, so "1,000" compares against the master's "1000".
   const withoutSeparators = text.replace(/(\d),(?=\d)/g, "$1");
-  // Every run of digits. Suffixes like "+" and "%" fall outside the match, which
-  // is what makes "500+" compare equal to the master's "500".
+  // Every run of digits. Suffixes like "+" and "%" fall outside the match, which is
+  // what makes "500+" compare equal to the master's "500".
   return withoutSeparators.match(/\d+/g) ?? [];
 }
 
-// Build the set of words a rewording is allowed to contain, for one bullet.
-function allowedVocabularyFor(masterBulletText: string, master: MasterProfile): ReadonlySet<string> {
-  // Start from the bullet's own words: the facts this line is actually about.
-  const allowed = new Set(tokenize(masterBulletText));
-  // Add every skill Teja genuinely has. Naming a real skill inside a bullet is
-  // legitimate re-emphasis — and note the deliberate looseness: this permits
-  // moving a real skill into a bullet that did not mention it. That is a mild
-  // overstatement rather than a fabrication, and it is what the Auditor is for.
+// Collect every skill token in the profile once, so a rewording may legitimately name
+// a real skill. Computed a single time per validation rather than per bullet.
+function masterSkillTokens(master: MasterProfile): ReadonlySet<string> {
+  // Accumulator.
+  const tokens = new Set<string>();
+  // Every skill the candidate genuinely has.
   for (const skill of master.skills) {
     // Tokenised, so "Node.js" contributes both "node" and "js".
-    for (const token of tokenize(skill.name)) allowed.add(token);
+    for (const token of tokenize(skill.name)) tokens.add(token);
   }
-  // Finally the closed rhetorical set, which carries no factual weight.
-  for (const word of RHETORICAL_VOCABULARY) allowed.add(word);
-  // Numbers are governed by their own stricter rule below, so they are excluded
-  // from this set entirely rather than being quietly permitted here.
-  return allowed;
+  // Returned as a read-only view.
+  return tokens;
 }
 
-// The validator. Runs BEFORE the Auditor (§20 step 6: "validator *before* Auditor"),
-// because a fabrication that can be caught by typed code should never cost a
-// Gemini call, and because the Auditor is defense-in-depth, not the only line.
-export function validateTailorProposal(proposal: TailorProposal, master: MasterProfile): TailorValidation {
-  // Collected rather than thrown: a caller fixing a bad prompt needs every
-  // problem at once, not the first one repeatedly.
-  const violations: TailorViolation[] = [];
+// Index every bullet in the master by id, remembering WHICH node it belongs to. The
+// parent is the load-bearing part: without it, moving a real bullet under a different
+// employer passes a flat existence check while fabricating employment history.
+function indexBullets(master: MasterProfile): ReadonlyMap<NodeId, { bullet: MasterBullet; parentRef: NodeId }> {
+  // Accumulator keyed by bullet id.
+  const index = new Map<NodeId, { bullet: MasterBullet; parentRef: NodeId }>();
+  // The three node kinds that own bullets, walked uniformly.
+  for (const parent of [...master.experience, ...master.projects, ...master.education]) {
+    // Each bullet records the node it hangs from.
+    for (const bullet of parent.bullets) index.set(bullet.id, { bullet, parentRef: parent.id });
+  }
+  // Returned as a read-only view.
+  return index;
+}
 
-  // Index the master once. A Map lookup is what turns "does this id exist" from a
-  // hopeful assumption into a decided fact.
-  const bulletsById = new Map(master.bullets.map((bullet) => [bullet.id, bullet]));
-  // Same for skills, so the rendered name can be pulled from the master.
-  const skillsById = new Map(master.skills.map((skill) => [skill.id, skill]));
-
-  // A resume with no achievements on it is a failed tailoring, and without this
-  // check an empty proposal would pass with zero violations.
-  if (proposal.bullets.length === 0) violations.push({ kind: "empty_selection" });
-
-  // Track ids already seen so a repeat is reported rather than silently rendered.
-  const seenBulletIds = new Set<string>();
-  // The resolved output lines, built only from references that checked out.
-  const resolvedBullets: { masterBulletId: string; text: string }[] = [];
-
-  // Validate each proposed bullet independently so one bad line does not mask others.
-  for (const proposed of proposal.bullets) {
-    // Duplicate detection first: it is about the proposal's shape, not its honesty.
-    if (seenBulletIds.has(proposed.masterBulletId)) {
-      // Reported rather than de-duplicated, because silent repair hides a bad prompt.
-      violations.push({ kind: "duplicate_bullet_id", id: proposed.masterBulletId });
-      // Skip the rest of the checks for this line; the first copy already ran them.
-      continue;
-    }
-    // Remember it for the next iteration.
-    seenBulletIds.add(proposed.masterBulletId);
-
-    // The reference check. This is the half of §10 defense 1 that catches an
-    // entirely invented achievement.
-    const masterBullet = bulletsById.get(proposed.masterBulletId);
-    // An id with no master behind it is invented experience — constraint #2.
-    if (masterBullet === undefined) {
-      // Named so the dashboard can show exactly what the model made up.
-      violations.push({ kind: "unknown_bullet_id", id: proposed.masterBulletId });
-      // Nothing further can be checked without a master text to compare against.
-      continue;
-    }
-
-    // THE CONTENT CHECK. A valid id is necessary but not sufficient: the rewording
-    // itself can smuggle in a technology the master never contained.
-    const allowed = allowedVocabularyFor(masterBullet.text, master);
-    // Every word the model wrote must trace back to something real.
-    for (const token of tokenize(proposed.reworded)) {
-      // Numbers are handled by the metric rule below, not by the vocabulary rule.
-      if (/^\d+$/.test(token)) continue;
-      // Anything outside the allowed set is a claim with no source.
-      if (!allowed.has(token)) {
-        // The word is reported so a human can judge it in one glance.
-        violations.push({ kind: "unverifiable_token", bulletId: proposed.masterBulletId, token });
-      }
-    }
-
-    // THE METRIC RULE, stricter than the vocabulary rule: a number in the
-    // rewording must appear in the MASTER BULLET specifically. Skills and
-    // rhetoric cannot vouch for a quantity.
-    const masterNumbers = new Set(numbersIn(masterBullet.text));
-    // Check each number the model produced.
-    for (const value of numbersIn(proposed.reworded)) {
-      // A number the master does not contain is an invented metric, even when
-      // every word around it is true.
-      if (!masterNumbers.has(value)) {
-        // Reported with the value, because "which number" is the first question.
-        violations.push({ kind: "invented_metric", bulletId: proposed.masterBulletId, value });
-      }
-    }
-
-    // Kept for the output artifact; only emitted if the whole proposal passes.
-    resolvedBullets.push({ masterBulletId: proposed.masterBulletId, text: proposed.reworded });
+// Validate one reworded bullet against the master bullet it claims to rework, and
+// return the resolved node. Violations are appended rather than thrown so a single
+// bad line does not hide the rest.
+function resolveBullet(
+  tailored: TailoredBullet,
+  parentRef: NodeId,
+  bulletIndex: ReadonlyMap<NodeId, { bullet: MasterBullet; parentRef: NodeId }>,
+  skillTokens: ReadonlySet<string>,
+  violations: TailorViolation[],
+): ResolvedBullet | null {
+  // Look the reference up.
+  const found = bulletIndex.get(tailored.ref);
+  // A bullet id that exists nowhere is wholly invented experience — constraint #2.
+  if (found === undefined) {
+    // Named so the dashboard can show exactly what the model made up.
+    violations.push({ kind: "unresolved_ref", ref: tailored.ref, where: `bullet under ${parentRef}` });
+    // Nothing further can be checked without a master text to compare against.
+    return null;
+  }
+  // THE MISATTRIBUTION CHECK. Both ids are real, so a flat existence lookup would
+  // wave this through — yet crediting a personal project's work to a named employer
+  // is fabricated experience assembled entirely out of true parts.
+  if (found.parentRef !== parentRef) {
+    // Distinguished from an unresolved ref because the remedy differs: this means the
+    // model is reassembling the truth rather than inventing it.
+    violations.push({ kind: "misattributed_bullet", ref: tailored.ref, parentRef });
+    // Refused rather than silently reparented.
+    return null;
   }
 
-  // Track skill ids for the same duplicate reason.
-  const seenSkillIds = new Set<string>();
-  // Resolved skills, whose names come from the master and nowhere else.
-  const resolvedSkills: { masterSkillId: string; name: string }[] = [];
-
-  // Validate each selected skill.
-  for (const skillId of proposal.skillIds) {
-    // A repeat is malformed output.
-    if (seenSkillIds.has(skillId)) {
-      // Reported, not collapsed.
-      violations.push({ kind: "duplicate_skill_id", id: skillId });
-      // Already validated on the first occurrence.
-      continue;
+  // THE CONTENT CHECK. A valid ref is necessary but not sufficient: the rewording can
+  // still smuggle in a technology the master never contained.
+  const allowed = new Set(tokenize(found.bullet.text));
+  // A rewording may legitimately name a skill the candidate genuinely has. NOTE the
+  // deliberate looseness: this permits moving a real skill into a bullet that did not
+  // mention it — an overstatement rather than a fabrication, and what the Auditor is for.
+  for (const token of skillTokens) allowed.add(token);
+  // Plus the closed rhetorical set, which carries no factual weight.
+  for (const word of RHETORICAL_VOCABULARY) allowed.add(word);
+  // Every word the model wrote must trace back to something real.
+  for (const token of tokenize(tailored.text)) {
+    // Numbers are governed by the stricter metric rule below, not by vocabulary.
+    if (/^\d+$/.test(token)) continue;
+    // Anything outside the allowed set is a claim with no source.
+    if (!allowed.has(token)) {
+      // The word is reported so a human can judge it in one glance.
+      violations.push({ kind: "unverifiable_token", ref: tailored.ref, token });
     }
-    // Remember it.
-    seenSkillIds.add(skillId);
+  }
 
+  // THE METRIC RULE, stricter than the vocabulary rule: a number in the rewording
+  // must appear in THE REFERENCED MASTER BULLET. Skills and rhetoric cannot vouch
+  // for a quantity, and a quantity is the easiest thing to inflate unnoticed.
+  const masterNumbers = new Set(numbersIn(found.bullet.text));
+  // Check each number the model produced.
+  for (const value of numbersIn(tailored.text)) {
+    // A number the master does not contain is an invented metric even when every
+    // word around it is true.
+    if (!masterNumbers.has(value)) {
+      // Reported with the value, because "which number" is a reviewer's first question.
+      violations.push({ kind: "invented_metric", ref: tailored.ref, value });
+    }
+  }
+
+  // Resolved. `master_text` travels with it so the §15 diff view can render
+  // master-vs-tailored side by side without a second lookup into the profile.
+  return { ref: tailored.ref, text: tailored.text, master_text: found.bullet.text };
+}
+
+// Small helper: record a duplicate reference and report whether this ref is a repeat.
+// Extracted because the same three lines are needed for five different node kinds.
+function isDuplicate(ref: NodeId, seen: Set<NodeId>, where: string, violations: TailorViolation[]): boolean {
+  // First sighting is fine.
+  if (!seen.has(ref)) {
+    // Remember it for next time.
+    seen.add(ref);
+    // Not a duplicate.
+    return false;
+  }
+  // Reported rather than collapsed: silent repair hides a misbehaving prompt.
+  violations.push({ kind: "duplicate_ref", ref, where });
+  // Caller skips this entry.
+  return true;
+}
+
+// THE VALIDATOR. `masterVersion` is passed separately because that is where aa put
+// it: `master_profiles.version` is a database column, while `MasterProfile` itself
+// carries only `schema_version`. Passing the pin explicitly is also what lets this
+// function refuse a tailoring computed against a different snapshot.
+export function validateTailoredProfile(
+  tailored: TailoredProfile,
+  master: MasterProfile,
+  masterVersion: number,
+): TailorValidation {
+  // Collected rather than thrown: someone fixing a bad prompt needs every problem at
+  // once, not the first one repeatedly.
+  const violations: TailorViolation[] = [];
+
+  // THE PIN. Resolving a tailoring against a master version it never saw would
+  // produce a resume nobody approved — §9's resume pinning depends on this check.
+  if (tailored.master_version !== masterVersion) {
+    // Named distinctly so retry logic can tell it apart from a fabrication.
+    violations.push({ kind: "master_version_mismatch", expected: masterVersion, received: tailored.master_version });
+  }
+
+  // Index the master once. A Map lookup is what turns "does this ref exist" from a
+  // hopeful assumption into a decided fact.
+  const bulletIndex = indexBullets(master);
+  // Skill tokens, computed once and shared by every bullet check.
+  const skillTokens = masterSkillTokens(master);
+  // Node lookups for the four referenceable top-level kinds.
+  const experienceById = new Map(master.experience.map((node) => [node.id, node]));
+  // Projects.
+  const projectsById = new Map(master.projects.map((node) => [node.id, node]));
+  // Education.
+  const educationById = new Map(master.education.map((node) => [node.id, node]));
+  // Skills.
+  const skillsById = new Map(master.skills.map((node) => [node.id, node]));
+
+  // A resume with no experience, projects or education is a failed tailoring; without
+  // this check an empty selection would pass with zero violations.
+  if (tailored.experience.length === 0 && tailored.projects.length === 0 && tailored.education.length === 0) {
+    // Named distinctly from the fabrication cases, since the remedy differs.
+    violations.push({ kind: "empty_selection" });
+  }
+
+  // Duplicate tracking, one set per namespace so a skill and a project may share an id.
+  const seenRefs = new Set<NodeId>();
+
+  // --- Skills -------------------------------------------------------------
+  // Resolved skills, whose names and categories come from the master and nowhere else.
+  const resolvedSkills: ResolvedSkill[] = [];
+  // Walk the selection in order; aa's ORDER CONTRACT says array order is document order.
+  for (const selected of tailored.skills) {
+    // A repeat is malformed output.
+    if (isDuplicate(selected.ref, seenRefs, "skills", violations)) continue;
     // The reference check — this is the §11 "add Docker" case terminating.
-    const masterSkill = skillsById.get(skillId);
-    // No master skill behind the id means the model invented a technology.
+    const masterSkill = skillsById.get(selected.ref);
+    // No master skill behind the ref means the model invented a technology.
     if (masterSkill === undefined) {
       // Named so the dashboard can show which technology was fabricated.
-      violations.push({ kind: "unknown_skill_id", id: skillId });
+      violations.push({ kind: "unresolved_ref", ref: selected.ref, where: "skills" });
       // Nothing to render.
       continue;
     }
-
-    // THE STRUCTURAL GUARANTEE, in one line: the name comes from the master
-    // profile, so no model-authored skill string can ever reach the PDF.
-    resolvedSkills.push({ masterSkillId: skillId, name: masterSkill.name });
+    // THE STRUCTURAL GUARANTEE, physically enforced in one line: name and category
+    // are copied from the master, so no model-authored skill string reaches the PDF.
+    resolvedSkills.push({ ref: selected.ref, name: masterSkill.name, category: masterSkill.category });
   }
 
-  // Any violation at all fails the whole proposal. There is no partial accept:
-  // shipping the honest half of a proposal that also contained a fabrication
-  // would mean the fabrication merely got dropped rather than investigated.
+  // --- Experience ---------------------------------------------------------
+  // Resolved employment history.
+  const resolvedExperience: ResolvedExperience[] = [];
+  // Same pattern for each of the three bullet-bearing kinds.
+  for (const selected of tailored.experience) {
+    // Repeated employer entry.
+    if (isDuplicate(selected.ref, seenRefs, "experience", violations)) continue;
+    // Resolve the employer itself.
+    const node = experienceById.get(selected.ref);
+    // An employer that does not exist is invented employment — constraint #2.
+    if (node === undefined) {
+      // Reported with its location, so the dashboard can point at the section.
+      violations.push({ kind: "unresolved_ref", ref: selected.ref, where: "experience" });
+      // Its bullets cannot be scope-checked without a parent to check against.
+      continue;
+    }
+    // Resolve each bullet, scoped to THIS employer.
+    const bullets = selected.bullets
+      // Null entries are the ones that failed; they are already reported.
+      .map((bullet) => resolveBullet(bullet, selected.ref, bulletIndex, skillTokens, violations))
+      // Narrowed so the resolved node contains only bullets that checked out.
+      .filter((bullet): bullet is ResolvedBullet => bullet !== null);
+    // Every display field is materialised from the master, never from the model —
+    // which is why aa's TailoredExperience carries no company or role text.
+    resolvedExperience.push({
+      ref: node.id,
+      company: node.company,
+      role: node.role,
+      location: node.location,
+      start_display: node.start_display,
+      end_display: node.end_display,
+      bullets,
+    });
+  }
+
+  // --- Projects -----------------------------------------------------------
+  // Resolved projects.
+  const resolvedProjects: ResolvedProject[] = [];
+  // Identical shape to experience, kept explicit rather than abstracted: the three
+  // node types have genuinely different display fields, and a clever generic here
+  // would obscure exactly the field-copying that makes the guarantee true.
+  for (const selected of tailored.projects) {
+    // Repeated project entry.
+    if (isDuplicate(selected.ref, seenRefs, "projects", violations)) continue;
+    // Resolve the project.
+    const node = projectsById.get(selected.ref);
+    // An invented project.
+    if (node === undefined) {
+      // Reported.
+      violations.push({ kind: "unresolved_ref", ref: selected.ref, where: "projects" });
+      // Skip its bullets.
+      continue;
+    }
+    // Bullets scoped to this project.
+    const bullets = selected.bullets
+      // Resolve each.
+      .map((bullet) => resolveBullet(bullet, selected.ref, bulletIndex, skillTokens, violations))
+      // Keep only those that resolved.
+      .filter((bullet): bullet is ResolvedBullet => bullet !== null);
+    // Display fields from the master.
+    resolvedProjects.push({
+      ref: node.id,
+      name: node.name,
+      url: node.url,
+      start_display: node.start_display,
+      end_display: node.end_display,
+      bullets,
+    });
+  }
+
+  // --- Education ----------------------------------------------------------
+  // Resolved qualifications.
+  const resolvedEducation: ResolvedEducation[] = [];
+  // Same pattern again.
+  for (const selected of tailored.education) {
+    // Repeated education entry.
+    if (isDuplicate(selected.ref, seenRefs, "education", violations)) continue;
+    // Resolve the qualification.
+    const node = educationById.get(selected.ref);
+    // An invented degree is constraint #2's "education" and "qualifications" clauses.
+    if (node === undefined) {
+      // Reported.
+      violations.push({ kind: "unresolved_ref", ref: selected.ref, where: "education" });
+      // Skip its bullets.
+      continue;
+    }
+    // Bullets scoped to this qualification.
+    const bullets = selected.bullets
+      // Resolve each.
+      .map((bullet) => resolveBullet(bullet, selected.ref, bulletIndex, skillTokens, violations))
+      // Keep only those that resolved.
+      .filter((bullet): bullet is ResolvedBullet => bullet !== null);
+    // Display fields from the master, grade included — the template must not decide
+    // how to render a grade (aa's DATE CONTRACT reasoning applied to grades).
+    resolvedEducation.push({
+      ref: node.id,
+      institution: node.institution,
+      degree: node.degree,
+      field: node.field,
+      start_display: node.start_display,
+      end_display: node.end_display,
+      grade_display: node.grade_display,
+      bullets,
+    });
+  }
+
+  // --- Summary ------------------------------------------------------------
+  // aa names this the weakest point in the contract, and states why: prose cannot be
+  // constrained by refs the way a bullet can. The non-empty `refs` requirement is the
+  // stated mitigation, so it is enforced here rather than merely documented.
+  if (tailored.summary !== null) {
+    // Prose with nothing declared behind it is exactly where a model writes "leading
+    // a team of five" about something that never happened.
+    if (tailored.summary.refs.length === 0) {
+      // Named for the dashboard.
+      violations.push({ kind: "summary_without_refs" });
+    }
+    // Every declared ref must resolve against some real master node.
+    for (const ref of tailored.summary.refs) {
+      // The summary may cite any node kind, so all four indexes are consulted.
+      const exists = experienceById.has(ref) || projectsById.has(ref) || educationById.has(ref) ||
+        skillsById.has(ref) || bulletIndex.has(ref);
+      // A citation to something that does not exist is the same fabrication as an
+      // invented bullet, just harder to spot because it sits in the metadata.
+      if (!exists) violations.push({ kind: "unresolved_ref", ref, where: "summary refs" });
+    }
+  }
+
+  // Any violation at all fails the whole tailoring. There is no partial accept:
+  // shipping the honest half of a tailoring that also contained a fabrication would
+  // mean the fabrication was merely dropped rather than investigated.
   if (violations.length > 0) return { ok: false, violations };
 
   // Clean. This artifact is what the Auditor then independently re-checks —
@@ -268,12 +433,23 @@ export function validateTailorProposal(proposal: TailorProposal, master: MasterP
   return {
     ok: true,
     resume: {
-      // Pins the artifact to the immutable snapshot it derived from.
-      masterVersion: master.version,
-      // Reworded text, every word of it traced.
-      bullets: resolvedBullets,
-      // Master-authored names.
+      // aa's shape marker.
+      schema_version: 1,
+      // The pin, so a stale snapshot is detected rather than silently rendered.
+      master_version: masterVersion,
+      // Verbatim from the master. There is no honest reason to tailor a name or a
+      // phone number, and aa's type gives the Tailor no way to try.
+      identity: master.identity,
+      // Order is a tailoring decision, carried through untouched.
+      section_order: tailored.section_order,
+      // Prose if there was any, already checked for declared support above.
+      summary: tailored.summary === null ? null : tailored.summary.text,
+      // Every field below was copied out of the pinned master by typed code, which
+      // is what makes a ResolvedResume unconstructible by an LLM.
       skills: resolvedSkills,
+      experience: resolvedExperience,
+      projects: resolvedProjects,
+      education: resolvedEducation,
     },
   };
 }

@@ -18,5 +18,10 @@ export * from './enums.ts';
 // database rule, not the rule itself — Postgres refuses illegal moves regardless.
 export * from './status-flow.ts';
 
-// Row / Insert / Update shapes for all fourteen tables, and the RPC signatures.
+// The inner document shapes: MasterProfile (the human-maintained truth), TailoredProfile
+// (refs + rewordings — all Gemini may return) and ResolvedResume (the render input).
+// The anti-fabrication defence lives here: it is a type, not a checker.
+export * from './profile-nodes.ts';
+
+// Row / Insert / Update shapes for all fifteen tables, and the RPC signatures.
 export * from './tables.ts';

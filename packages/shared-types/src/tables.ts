@@ -28,6 +28,7 @@ import type {
   ApplicationStatus,
   AtsProvider,
   BlocklistReason,
+  BlockReason,
   DiscoverySource,
   EmailClassification,
   EmploymentType,
@@ -136,7 +137,7 @@ export interface MasterProfileRow {
 /** Insert shape. `version` is absent because supplying it is always a mistake — the trigger owns it. */
 export type MasterProfileInsert = {
   user_id?: string;
-  profile: Json;
+  profile: MasterProfile;
   content_hash: string;
   label?: string | null;
 };
@@ -202,9 +203,31 @@ export interface JobRow {
   discovered_via: DiscoverySource[];
   /** Per-source detail behind that array: url, ats_job_id and presence window per source. Powers the reposted-job signal. */
   source_refs: JobSourceRef[];
-  /** When the posting went up — the least reliable field in the system. Always read it together with posted_at_source. */
-  posted_at: string | null;
-  /** How much to believe `posted_at`. `unknown` is EXCLUDED from the freshness filter rather than assumed fresh. */
+  /**
+   * When the posting went up. NOT NULL — absence is carried by `posted_at_source`,
+   * never by a null date. The extractor always produces a timestamp; what varies is
+   * how much you may believe it. A nullable date would force every caller to handle
+   * two different "we don't know" representations.
+   */
+  posted_at: string;
+  /**
+   * How much to believe `posted_at`.
+   *
+   * SEMANTIC GUARANTEE NO TYPE CAN EXPRESS, so read this before writing a filter:
+   * `unknown` has exactly ONE cause — the cold-start guard, meaning "this board is not
+   * yet trusted". It NEVER means a parse failure. Every degraded input (malformed
+   * string, epoch 0, missing field, unparseable prose) resolves to `derived` via
+   * first_seen_at. Assuming `unknown` signals a bad parse will get you the wrong filter.
+   *
+   * `unknown` FAILS the staleness check rather than bypassing it, so a cold-start
+   * board's back catalogue is excluded rather than waved through. That policy is a
+   * setting: `filter_rules.config.treat_unknown_posted_at_as_fresh`, default false.
+   *
+   * On a board's first poll only `derived` degrades to `unknown` — a genuine `exact`
+   * date from Lever or Ashby stays `exact`, because the cold-start bug lives entirely
+   * in the first_seen_at fallback path and discarding a real date would defend against
+   * an inference we are not making.
+   */
   posted_at_source: PostedAtSource;
   /** First time we saw this posting on any source. */
   first_seen_at: string;
@@ -247,7 +270,8 @@ export type JobInsert = {
   description_hash?: string | null;
   discovered_via?: DiscoverySource[];
   source_refs?: JobSourceRef[];
-  posted_at?: string | null;
+  /** Required on insert: the extractor always produces one, and `posted_at_source` carries the confidence. */
+  posted_at: string;
   posted_at_source?: PostedAtSource;
   min_experience_years?: string | null;
   max_experience_years?: string | null;
@@ -305,8 +329,20 @@ export interface ApplicationRow {
   status_changed_at: string;
   /** Which master version this application derived from. Composite FK to master_profiles(user_id, version) — the database itself guarantees the pinned version still exists. */
   master_version: number | null;
-  /** Frozen copy of the tailored profile as approved. What the worker renders; not a pointer to something that can change underneath it. */
-  tailored_profile: Json | null;
+  /**
+   * Frozen copy of the resolved resume as approved. What the React preview shows and
+   * what the worker prints to PDF — the same immutable snapshot, so what was approved
+   * is byte-for-byte what gets sent. Not a pointer to something that can change
+   * underneath it.
+   */
+  tailored_profile: ResolvedResume | null;
+  /**
+   * The Tailor's RAW output: refs plus rewordings, before the validator resolved it.
+   * Kept for the Auditor's trace and for the injection regression suite, which asserts
+   * that a JD carrying an injection payload produces byte-identical Tailor output to
+   * the same JD without it. You cannot make that assertion against the resolved copy.
+   */
+  tailor_refs: TailoredProfile | null;
   /** hash(master_version + selected_jd_keywords). Constraint 8 as a cache key: identical inputs reuse the existing PDF instead of regenerating it. */
   tailored_hash: string | null;
   /** The JD keywords the Tailor selected to emphasise. Half of the tailored_hash input, and the Skill-Gap Aggregator's raw material in phase 3. */
@@ -327,6 +363,17 @@ export interface ApplicationRow {
   drop_reason: string | null;
   /** Why it failed. Paired with `failed`. */
   failure_reason: string | null;
+  /**
+   * WHY the row is parked at `blocked_needs_human`. Typed because the dashboard
+   * branches on it: a captcha needs the screenshot, an unanswerable question needs a
+   * deep link to the answer bank. A blocked row always has one (database CHECK).
+   *
+   * KEPT after the block is resolved, deliberately — "this one needed a human, and it
+   * was a captcha" is history the health page wants.
+   */
+  block_reason: BlockReason | null;
+  /** Structured context. For `unanswerable_question` it carries `{question_key}`. */
+  block_detail: Json;
   /** How many times an agent has retried this row. Retries never cross the `applying` boundary. */
   retry_count: number;
   /** Lease-based claiming: when the current claim was taken. NULL means unclaimed. */
@@ -369,6 +416,8 @@ export type ApplicationUpdate = Partial<
     | 'screenshot_storage_path'
     | 'drop_reason'
     | 'failure_reason'
+    | 'block_reason'
+    | 'block_detail'
   >
 >;
 
