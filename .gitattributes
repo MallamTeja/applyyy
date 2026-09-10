@@ -1,0 +1,106 @@
+# Line endings are a CORRECTNESS control in this repo, not a formatting
+# preference. Two product guarantees are byte-comparisons, so any per-platform
+# byte difference breaks them silently rather than loudly:
+#
+#   * PROJECT_PLAN.md §7/§10 — "what you approved is byte-for-byte what gets
+#     submitted". The resume renderer builds HTML from multi-line template
+#     literals, so the SOURCE file's line endings are copied verbatim into the
+#     rendered output. A CRLF checkout therefore changes the artifact itself,
+#     not merely the file it was written in.
+#   * Constraint #8 — tailored_hash is a sha256 over that rendered text and is
+#     used as a cache key. A per-platform hash means the cache NEVER hits, and
+#     the same resume is billed to Gemini twice.
+#
+# Why this was invisible until now: every machine is internally self-consistent,
+# so every test passes everywhere in isolation. The divergence only exists
+# BETWEEN a Windows contributor and the Ubuntu Actions runner, which is the one
+# pair no single test run ever compares.
+#
+# Verified 2026-09-10, not assumed: core.autocrlf=true is set in this machine's
+# SYSTEM gitconfig (C:/Program Files/Git/etc/gitconfig), and cloning this repo
+# into a temp directory produced CRLF working-tree files (PROJECT_PLAN.md 525 CR
+# bytes, posted-at.ts 209, contract.ts 97) while the git blobs themselves are
+# pure LF. The current working tree is LF only by accident — these files were
+# authored here rather than checked out, and autocrlf only converts on checkout.
+
+# ---------------------------------------------------------------------------
+# Baseline for every path in the repo.
+# ---------------------------------------------------------------------------
+
+# text=auto lets git detect which files are text and normalise those to LF in
+# the repository; eol=lf then forces LF into the WORKING TREE too, on every
+# platform, overriding whatever core.autocrlf each contributor happens to have.
+# Deliberately `text=auto` and not the blunter `text`: bare `text` asserts that
+# EVERY file is text, which makes git rewrite bytes inside PNGs, PDFs and fonts
+# and corrupt them. This repo renders resume PDFs, so that risk is real here.
+* text=auto eol=lf
+
+# ---------------------------------------------------------------------------
+# Files whose LF-ness is load-bearing, pinned explicitly.
+# text=auto above uses a content heuristic; a file with an unlucky byte can be
+# misdetected as binary and skip normalisation. These types are named so the
+# heuristic cannot demote them.
+# ---------------------------------------------------------------------------
+
+# The renderer and its tests. Template literals here become product bytes.
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+
+# Migrations are applied by Postgres and diffed against a live schema; CRLF
+# inside a dollar-quoted function body is stored as part of the function source.
+*.sql text eol=lf
+
+# Workflow files run on the Ubuntu runner. YAML is whitespace-significant and a
+# stray CR can land inside a `run:` block and reach the shell as a literal \r.
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Shell scripts break outright with CRLF: the interpreter reads `#!/bin/sh\r`
+# and reports "not found" for a shell that plainly exists.
+*.sh text eol=lf
+
+# Config, docs and the lockfile — hashed, parsed or reviewed as diffs, and
+# nothing here benefits from per-platform bytes.
+*.json text eol=lf
+*.jsonc text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.env.example text eol=lf
+.gitignore text eol=lf
+.npmrc text eol=lf
+
+# ---------------------------------------------------------------------------
+# Files that must NOT be normalised.
+# ---------------------------------------------------------------------------
+
+# Golden fixtures are compared byte for byte against a freshly rendered string,
+# so they are the one place where conversion must be disabled outright rather
+# than merely pinned. -text switches off ALL eol handling, so these survive even
+# if the baseline rule above is ever loosened.
+*.golden.html -text
+
+# Batch files are the genuine exception: the Windows command interpreter needs
+# CRLF, and an LF-only .cmd can execute only its first line.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary payloads. text=auto should already detect these, but naming them is
+# cheap and a misdetected binary is corrupted silently and permanently.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.zip binary
+*.gz binary
