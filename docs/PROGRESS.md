@@ -1,14 +1,320 @@
 # `applyy` — live progress
 
-**Last updated: 2026-09-09 23:57 IST** · maintained by session `applyyy-b3`
-(root config + `PROJECT_PLAN.md` + `docs/**`)
+**Last updated: 2026-09-10 18:40 IST** · maintained by session `applyyy-8c`
+(Stream 0 — `supabase/migrations/**`, `supabase/config.toml`, root config,
+`docs/**`, `PROJECT_PLAN.md`)
 
-Evidence rule for this document: a row says **SHIPPED** only when something was
-verified — a test count, a captured exit code, a file on disk. Where the
-evidence is a peer's own report rather than my measurement, the row says so.
-Nothing here is written in the past tense until it is actually true.
+Evidence rule for this document: a row says **VERIFIED** only where there is a
+measurement behind it — a captured error string, an exit code, a row count, a
+catalogue query. Where the evidence is a peer's own report rather than my
+measurement, the row says so. **Nothing is written in the past tense until it is
+actually true**, and a claim retracted later is left visible rather than edited
+away.
 
 ---
+
+## THE HEADLINE: the SQL has been executed
+
+All 7 migrations — ~116 KB, 15 tables, the transition guard, RLS on every
+table, 7 RPCs — **apply cleanly from scratch**. Before today they had never been
+parsed by Postgres once, so every claim about the schema was a claim about SQL
+*text*.
+
+Full record with reproduction steps:
+[`audit/2026-09-10-schema-invariants-verified.md`](audit/2026-09-10-schema-invariants-verified.md).
+
+| Invariant | Result | Isolated how |
+|---|---|---|
+| `UNIQUE(user_id, job_id)` refuses a duplicate (constraint #7) | **VERIFIED** — `duplicate key value violates unique constraint "applications_user_job_key"` | Duplicate row otherwise perfectly legal; control insert against a different `job_id` succeeded |
+| Transition guard rejects `tailored → applying` (constraint #15) | **VERIFIED** — `illegal status transition tailored -> applying … No such edge` | `applyy.acting_agent` set to the agent permitted on the legal edge, making both `42501` paths unreachable; control on `approved → applying` succeeded |
+| RLS enabled on every table | **VERIFIED** — 15/15 via `pg_class.relrowsecurity` | Separate assertion from the one below, on purpose |
+| Every table has ≥1 policy | **VERIFIED** — 15/15 via `pg_policies`; 0 holes, 0 locked | RLS-on-no-policy and RLS-off fail identically from outside |
+
+**What that does NOT prove**, stated because a verification note is most
+dangerous when read as broader than it is: nothing is deployed; the policies were
+never exercised **as `authenticated`** (every query ran as `postgres`, which
+holds `BYPASSRLS`), so "15/15 have a policy" is a statement about the catalogue
+and **not** a demonstration that rows are scoped correctly; and the 7 RPCs are
+confirmed to *exist*, not to *behave*.
+
+---
+
+## Per-stream status
+
+| Stream | Owns | Verified | In progress | Blocked on |
+|---|---|---|---|---|
+| **applyyy-8c** (me) | `supabase/migrations/**`, `supabase/config.toml`, root config, `docs/**`, `PROJECT_PLAN.md` | All 7 migrations apply; 3 invariants proven; root `.gitattributes` proven by CR-byte measurement; one TS version workspace-wide; both workflows lint clean | `PROJECT_PLAN.md` §2/§11 reconciliation; 4 runtime findings in migrations | — |
+| **applyyy-2b** | orchestration, git | Independently re-verified my 15/15 RLS result against the running container; committed `10b0336`, `088f938`, and the index fix | Coordination | **`git push` — `gh` unauthenticated** |
+| **applyyy-98** | `packages/**` | `TS5025` pseudo-key bug fixed; `erasableSyntaxOnly` proven accepted; 14/14 enum mirrors match SQL by value **and declaration order** *(98's report)* | `matcher_eval_cases` + `eval_label` mirrors; parity test | — |
+| **applyyy-f8** | `supabase/functions/**` | Tailor validator work *(f8's report)* | Intake endpoint | Needs `email_events` columns — see open questions |
+| **applyyy-ef** | `worker/**`, `.github/workflows/**` | Both workflows **lint clean** under actionlint 1.7.12 *(my measurement)* | Run loop | — |
+| **applyyy-20** | `apps/web/**` | `tsc --noEmit` 0 **and** `vite build` 0 — 60 modules, 224.22 kB JS / 70.73 kB gzip, **first time ever** *(20's report)* | Settings pages | — |
+| **applyyy-5e** | *(joined 15:27)* | — | — | — |
+
+### `apps/web` — the cause was **not** the TypeScript pin
+
+Worth recording because the obvious suspect was the wrong one. It was
+`moduleResolution: Bundler` overridden while inheriting `module: nodenext` — **a
+coupled pair that `tsc` rejects if you override half of it.** The TS version pin
+was a real problem and a separate one.
+
+**Credit correction:** `applyyy-20`'s predecessor had already fixed both the TS
+bump and the `humanLanes` predicate split before it died. Earlier versions of
+this document credited it with less than it shipped.
+
+---
+
+## Verified by me today, with the measurement
+
+| Check | Result |
+|---|---|
+| 7 migrations apply from scratch | **VERIFIED** — `supabase_migrations.schema_migrations` holds all 7 versions; 15 public tables; 44 transition edges; 0 leftover rows, so the reset genuinely started from empty |
+| Root `.gitattributes` fixes checkout | **VERIFIED** — fresh clone of `088f938` has **0 CR bytes across the entire repo**; before, `PROJECT_PLAN.md` 525, `validator.ts` 279, `posted-at.ts` 209, `contract.ts` 97, `escape-html.ts` 60 |
+| One TypeScript version workspace-wide | **VERIFIED** — all four packages' `node_modules/typescript` symlinks resolve to `typescript@5.9.3`; lockfile references only 5.9.3. The `5.7.2` in `node_modules/.pnpm` is an orphaned store leftover, unreferenced |
+| `erasableSyntaxOnly` accepted (≥5.8 floor met) | **VERIFIED** *(by applyyy-98)* — two packages compile clean past it |
+| `.github/workflows/*.yml` lint | **VERIFIED CLEAN** — actionlint 1.7.12 official image, 0 findings, exit 0; harness self-tested against a deliberately broken workflow first |
+| No link state on disk | **VERIFIED** — `supabase/.temp` holds only `cli-latest`; no project-ref, so a local `db reset` provably cannot reach `xynqxekcqizwhtskzqrq` |
+| `postgres` role privileges | **VERIFIED** — `rolsuper=false`, `rolbypassrls=true` |
+| `pnpm -r run typecheck` | **STILL RED**, for `worker` and `apps/web` reasons — see below |
+
+### `typecheck` was **unmeasured, not passing** — the whole lesson
+
+`pnpm -r run typecheck` failed at `packages/shared-types` with
+`TS5025: Unknown compiler option '// noEmit'`. Because pnpm orders packages
+topologically and dependents of a failed package are **SKIPPED rather than run**
+(`--no-bail` does not change this), the other three packages were never
+type-checked at all.
+
+When `applyyy-98` fixed it, **two genuinely broken packages surfaced**:
+
+- `worker/test/guarded-advance.test.ts:11` imports `../src/guarded-advance.js`,
+  which does not exist. → `applyyy-ef`
+- `apps/web/src/App.tsx:19,21,22` import three settings pages that do not exist.
+  → `applyyy-20`
+
+Both had been red all along. **"Green" had never been measured** — it had been
+*inferred from the absence of a report*, which is not the same thing.
+
+### A claim of mine that was wrong
+
+I reported that "two other packages carry the same pseudo-key pattern." They do
+not. `applyyy-98` swept all six `tsconfig.json` files programmatically,
+extracting each `compilerOptions` block: **zero hits outside the one it fixed.**
+I had generalised from seeing `"// extends"` and `"// include"` at the *root* of
+the same file, and did not check. Left visible rather than edited away.
+
+The refined rule is more useful than my wrong one: the
+`"// key": "explanation"` pseudo-key trick is **legal and harmless in
+`package.json`** (npm ignores unknown keys and does no schema validation) and
+**fatal inside `compilerOptions`** (TypeScript validates every key strictly).
+That is why the trick appeared to work right up until it didn't.
+
+---
+
+## Rulings made today
+
+### Naming: one credential, one name → **`APPLYY_APP_USER_*`**
+
+There is exactly **one** Supabase Auth user in this system, because RLS scopes
+every row by `auth.uid()` — a second auth user would be a second disjoint
+`user_id`, at which point the worker and the dashboard silently stop seeing each
+other's rows. That single credential pair was being called **two** different
+things: `APPLYY_WORKER_*` in `SCHEMA_CONTRACT.md` §8.3 and `APPLYY_APP_USER_*`
+in the Edge Function.
+
+**Ruling: `APPLYY_APP_USER_EMAIL` / `APPLYY_APP_USER_PASSWORD`.**
+
+Reasoning, which is the CLAUDE.md naming rule applied directly: `APPLYY_WORKER_*`
+names the credential after **one of its several consumers**. The worker is one
+consumer, the Edge Function is another, and the dashboard could be a third — so
+under that name every non-worker consumer *looks wrong when it uses it*, which
+is precisely what invites somebody to introduce a second name. That already
+happened here. `APPLYY_APP_USER_*` says what the thing **is**. Two names for one
+credential is how somebody rotates only one of them.
+
+Must be fixed in **every** occurrence — contract, Edge Function, workflows,
+Actions secrets — not just the one in front of you. A half-renamed thing is worse
+than an unrenamed one.
+
+### actionlint: official image locally, official Action pinned by SHA in CI
+
+The npm package named `actionlint` was **rejected**, not merely skipped. It is
+versioned **2.0.6** while upstream actionlint is at **1.7.12**, so you cannot
+tell which upstream ruleset is inside it. It declares **no repository URL, no
+homepage and no author**, describes itself as "Actionlint as wasm", and its sole
+maintainer is a release bot at an unrelated company
+(`solar-web-npm-hops@xing.com`), not `rhysd`.
+
+Constraint #11 is written about credentials, but the same instinct governs supply
+chain: **an unauditable repackaging that executes in CI is exactly the dependency
+you cannot justify after an incident.**
+
+---
+
+## Known-deferred — deliberately not done, do not do ad hoc
+
+### `git add --renormalize .`
+
+**Decision: deferred by `applyyy-2b`. Not a maybe.** The root `.gitattributes`
+protects fresh clones and CI, which is where the real damage was (the Ubuntu
+runner receiving different bytes than a Windows clone). The existing working tree
+stays un-renormalised.
+
+Reasoning: it rewrites files across **all four peers' write-ownership
+territory**, and every one of them has unstaged work in flight — it would collide
+with concurrent writers and produce exactly the tangled diff that write-ownership
+partitioning exists to prevent. Scheduled for when peers are idle and Teja is at
+the keyboard. Recorded here so it is neither quietly forgotten nor quietly done.
+
+---
+
+## Will break later — not broken now
+
+These are the items a progress document is uniquely good at not losing.
+
+### The `status_change` trigger will cause double-writes
+
+The `log_status_change` trigger **has never run** in any consumer's environment,
+so consumers written *now* are emitting those audit events **explicitly**. The
+trigger's eventual arrival is therefore a **behaviour change for code written
+against its absence** — those consumers will double-write once it exists.
+
+Nobody infers this from either the SQL or the TypeScript in isolation. Also
+recorded in `SCHEMA_CONTRACT.md` by `applyyy-98`.
+
+### The batched run may outlive its own access token
+
+`jwt_expiry = 3600`. The batching decision that fixes GitHub's minute-rounding
+billing problem means **one run carries the whole daily queue**: ~35 applications
+≈ ~54 min/day ≈ **~3240 s against a 3600 s token — ~10% headroom**, not the ~40×
+that the old "~90 s per application" figure implied. The 3.75 s per-application
+measurement was taken against a **localhost fixture** and excludes real-site
+latency and file upload, so the true figure is higher.
+
+The failure mode is the nasty one: it lands **late in a run, after real
+applications have already been submitted**, not at startup where it would be
+obvious. And a token expiring between `applying` and `applied` means the terminal
+status cannot be written, the row goes stale, and the sweeper correctly routes it
+to `needs_verification` — converting clean submissions into a pile of "did this
+actually send?" questions. That is exactly what §14 exists to prevent.
+
+Routed to `applyyy-ef`: refresh **proactively on remaining lifetime**, not
+reactively on a 401 (a 401 caught at the wrong moment is indistinguishable from
+the dangerous case). Raising `jwt_expiry` is the wrong fix — it trades a bounded,
+testable refresh path for a longer-lived credential sitting in an Actions runner.
+
+Related, and easy to miss: the guard requires **session-local** state.
+`set applyy.acting_agent = 'applier'` is **per-connection**, not one-time setup —
+anything that silently reconnects (a pool, a retry, a re-auth) drops it, and
+every subsequent status write then fails with
+`42501 status change X -> Y refused: no acting agent`.
+
+---
+
+## Open questions — recorded rather than silently resolved
+
+1. **`application_status_transitions` has `relforcerowsecurity = f`** while the
+   other 14 tables have force RLS **on**. It is the read-only reference seed, so
+   this is *defensible* — but defensible is not *decided*, and it is the single
+   place the pattern differs. If `SCHEMA_CONTRACT.md` says "force RLS on every
+   table", that sentence is currently false.
+2. **`email_events` cannot store `thread_id`, `to`, or `label_ids`**, which the
+   published wire contract sends — so the Edge Function validates and drops
+   them. `thread_id` is the one that hurts: it is what "has this recruiter
+   already replied?" needs, and the natural join key for threading a conversation
+   onto an application. **Recommendation: add the columns.** A dropped field is
+   invisible until someone needs it. Not yet done.
+3. **Should `supabase/tests/invariants.sql` exist?** The invariant script is
+   currently a transcript in a docs file. It should be checked in and
+   re-runnable, but `supabase/tests/` has **no assigned owner**, so it is
+   proposed rather than created.
+
+---
+
+## Runtime defects found in my tree — not yet fixed
+
+Load-time is clean; these are behavioural.
+
+1. **`sweep_stale_claims` double-counts, and its own comment asserts the
+   opposite.** The first statement moves stale `applying` rows to
+   `needs_verification` **without clearing the lease**; the second statement's
+   predicate (`claimed_by is not null and claim_expires_at < now() and a.status
+   <> 'applying'`) then matches those very rows, so they are released **and
+   counted again** in `released_count`. The comment claims the first statement
+   "already moved every stale `applying` row out of this predicate" — it moved
+   them out of `status = 'applying'`, **not** out of the predicate. Net behaviour
+   is safe (the lease does get cleared, which is desirable) but the two return
+   values cannot both be trusted, **and the health page reads them**.
+2. **`bootstrap_user_defaults` never seeds `gemini_key_state`** — the silent stop
+   §14 exists to prevent. It inserts `system_settings`, `search_preferences` and
+   the 9 `filter_rules` only. **Nothing anywhere else writes to
+   `gemini_key_state`**; the only other touches are the two `UPDATE`s inside
+   `claim_gemini_key` and `report_gemini_result`. So on a freshly bootstrapped
+   account **`claim_gemini_key()` returns `NULL` forever, every LLM agent
+   releases its claim, and the pipeline looks merely idle** — no error, no failed
+   run, nothing on the health page. Whatever the fix, **the absence must be
+   visible if it has not been done.**
+3. **The `FORCE RLS` comment gives the wrong reason.** It says the
+   `SECURITY DEFINER` insert "is not subject to this policy". It succeeds, but
+   **only because `postgres` carries `BYPASSRLS`** — `rolsuper` is `false`, and
+   `FORCE RLS` genuinely *does* apply to the table owner. As written it will
+   mislead the next reader into thinking superuser status is what saves it, and
+   it would be **false** for a plain owner role, where every status change would
+   fail.
+4. **Two false invariants stated in migration comments.**
+   `awaiting_approval → approved` is **not** the only edge into `approved` —
+   `needs_verification → approved` also exists, both human-only, so the true
+   statement is "**every edge into `approved` is human-only**". And "no backward
+   edges" is false: there are **seven**, of which `interview → oa_pending` is
+   `['tracker','human']` and therefore **the one reverse edge a machine can
+   walk**.
+
+---
+
+## Waiting on Teja — nothing below can proceed without him
+
+| Item | Detail |
+|---|---|
+| **`gh auth login`** | `git push` fails with `remote: Repository not found` on `github.com/MallamTeja/applyy`; `gh auth status` says not logged in. GitHub returns 404-instead-of-403 for private repos to avoid leaking their existence, so this is an **auth** failure, not a missing repo. Commits are stacked locally. |
+| **Remote database authorisation** | `supabase link` / `db push` against `xynqxekcqizwhtskzqrq` is **gated**. An attempt to delegate this authorisation between sessions was correctly refused — a peer session cannot grant it. Teja's to lift, in his own session. |
+| **Docker Desktop** | Stopped again as of ~18:34 IST. It was **not running** at session start (service `com.docker.service` STOPPED, exit 1077 = never started since boot). Needed for any further local SQL work; images are cached, so a restart is fast. |
+
+---
+
+## Not done — stated as not done
+
+- **Nothing is deployed.** No `supabase link`, no `db push`, no `vercel deploy`,
+  no Actions run has ever executed. This has not changed today.
+- The RLS policies have **never been exercised as `authenticated`**. This is the
+  single highest-value verification still outstanding.
+- The 7 RPCs have **never been called**. Existence ≠ behaviour, and two of them
+  have known defects above.
+- `pnpm -r run typecheck` is **red** (`worker`, `apps/web`).
+- The working tree is **not renormalised** (deliberate — see above).
+- `supabase/tests/invariants.sql` does not exist.
+- The `APPLYY_WORKER_*` → `APPLYY_APP_USER_*` rename is **ruled but not
+  executed** across contract, function, workflows and Actions secrets.
+
+## Unknowns, stated rather than smoothed over
+
+- **Why the local `supabase_storage` container reports `unhealthy`.** It made
+  `supabase db reset` **exit 1 while the SQL itself fully succeeded**. Unrelated
+  to migrations, but unexplained, and it will mislead the next person who reads
+  the exit code. See [`verification-traps.md`](verification-traps.md).
+- Whether `application_status_transitions`'s missing force-RLS was a decision.
+- Whether the hosted project's `postgres` role matches the local one's
+  privileges. It should — same image — but "should" is not "verified", and the
+  `FORCE RLS` path depends on it.
+
+---
+
+# Archive — 2026-09-09 night (session `applyyy-b3`)
+
+Preserved verbatim rather than deleted, because the retraction narrative and the
+coordination-error section are the most instructive parts of it. The stream ids
+below (`aa`, `d0`, `04`, `21`, `76`, `b3`, `d8`, `e5`) belong to the peers of
+2026-09-09, all of which are now dead. The streams for 2026-09-10 are listed at
+the top of this document.
 
 ## Per-stream status
 
