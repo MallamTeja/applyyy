@@ -12,6 +12,7 @@
     "test": "node --test \"test/**/*.test.ts\""
   },
   "dependencies": {
+    "@applyy/master-ingest": "workspace:*",
     "@applyy/shared-types": "workspace:*",
     "@supabase/supabase-js": "2.47.10",
     "react": "18.3.1",

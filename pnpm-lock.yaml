@@ -13,6 +13,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@applyy/master-ingest':
+        specifier: workspace:*
+        version: link:../../packages/master-ingest
       '@applyy/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
