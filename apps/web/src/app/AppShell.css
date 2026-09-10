@@ -77,14 +77,21 @@
 }
 
 .rail__link:hover {
-  background: rgba(27, 33, 31, 0.06);
+  /* The shared hover wash rather than a rail-specific tint. It is translucent
+     ink, so the one value works over the panel here and over paper elsewhere,
+     and it inverts to a light wash in dark mode without a second rule. */
+  background: var(--surface-hover);
 }
 
-/* The active page. A filled sheet-white pill: the current destination looks
-   like the paper it leads to, which ties the rail to the page beside it. */
+/* The active page. A filled pill in the paper tone: the current destination
+   looks like the paper it leads to, which ties the rail to the page beside
+   it. */
 .rail__link--active {
   background: var(--sheet);
-  border-left: 3px solid var(--traced);
+  /* The accent, not the traced green. Navigation is interaction, not a
+     verdict - marking the current page in the colour that elsewhere means
+     "this claim checks out" spends a status colour on furniture. */
+  border-left: 3px solid var(--accent);
   font-weight: 600;
 }
 
@@ -98,6 +105,115 @@
   border-left: 3px solid var(--signal);
   color: var(--ink);
   font-size: var(--size-xs);
+}
+
+/* --- Appearance control ------------------------------------------------ */
+
+/* The fieldset. Browsers give fieldsets a border, padding and margin of their
+   own that match nothing in this design, so all three are zeroed - the
+   element is here for the grouping semantics it gives assistive tech, not for
+   anything it draws. */
+.theme {
+  /* Pushes the control to the foot of the rail. The defect notice above it
+     also claims `margin-top: auto`; when both are present the first one
+     absorbs the free space and they sit together at the bottom, and when the
+     notice is absent this one does the job alone. */
+  margin-top: auto;
+  padding: 0;
+  border: none;
+  /* Flex so the legend sits above the segments with a real gap rather than
+     the fieldset's default legend-notched-into-the-border arrangement. */
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-2);
+  /* The rail is 15rem wide; without this the group can push it wider. */
+  min-width: 0;
+}
+
+/* Names what is being chosen. Muted and small: this is the least consequential
+   control in the rail and its label should not read louder than a
+   destination. */
+.theme__legend {
+  padding: 0;
+  color: var(--ink-muted);
+  font-size: var(--size-xs);
+  font-weight: 600;
+}
+
+/* The three segments as one object. A single border around the group with
+   hairlines between the segments, rather than three separate bordered
+   buttons - a segmented control reads as "pick one of these" and three
+   buttons read as "three things you can do". */
+.theme__options {
+  display: flex;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-control);
+  /* Clips the segment backgrounds to the group's rounded corners, so the
+     selected end segment does not square off the corner it sits in. */
+  overflow: hidden;
+}
+
+.theme__option {
+  /* Equal thirds regardless of label length, so the control does not shift
+     its geometry when the selection moves. */
+  flex: 1 1 0;
+  padding: var(--gap-1) var(--gap-2);
+  text-align: center;
+  font-size: var(--size-xs);
+  /* The whole segment is the hit target, which is the point of wrapping the
+     input in its label. */
+  cursor: pointer;
+  color: var(--ink-muted);
+  /* Divider between segments. Applied to every segment then removed from the
+     first, so the group has two internal rules and no leading edge. */
+  border-left: 1px solid var(--rule);
+  /* Only the background and text move. Consistent with every other control
+     in this console, which is deliberately sober. */
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.theme__option:first-child {
+  border-left: none;
+}
+
+/* Hover on an unselected segment. The shared wash, so it behaves the same way
+   over the rail's panel tone as it does over paper elsewhere. */
+.theme__option:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+
+/* The current choice. Filled in the paper tone with full-strength ink and the
+   accent - the same visual language the active rail link uses, because it is
+   the same kind of fact: this is the one that is currently in effect. */
+.theme__option--selected {
+  background: var(--sheet);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* The radio itself. Taken out of the layout but left in the accessibility
+   tree and left focusable - `display: none` and `visibility: hidden` would
+   remove it from both and turn the group into three unreachable labels. */
+.theme__input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  /* Stops the hidden 1px control from adding a scrollable pixel to the rail. */
+  margin: 0;
+  pointer-events: none;
+}
+
+/* The focus ring has to be drawn by the segment, because the input it belongs
+   to is one invisible pixel. `:has()` lets the label style itself from its
+   own child's state, which is what keeps the whole thing native radios
+   instead of buttons pretending to be them. */
+.theme__option:has(.theme__input:focus-visible) {
+  outline: 2px solid var(--accent);
+  /* Inset rather than offset: an outward ring on a segment inside a clipped
+     group would be cropped by the group's own overflow. */
+  outline-offset: -2px;
 }
 
 .shell__main {
@@ -149,5 +265,18 @@
   .rail__defect {
     margin-top: 0;
     flex-basis: 100%;
+  }
+
+  /* Same reasoning as the defect notice: `margin-top: auto` pushed it to the
+     bottom of a column, but in a wrapped row it would push it right and
+     strand it away from the rail it belongs to. Given its own line so the
+     three segments keep a tappable width on a phone. */
+  .theme {
+    margin-top: 0;
+    flex-basis: 100%;
+    /* Caps the control at a sensible width once it has a full row to itself -
+       three segments stretched across 400px would be a very wide way to say
+       "Light". */
+    max-width: 18rem;
   }
 }

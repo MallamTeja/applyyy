@@ -81,9 +81,12 @@
 }
 
 .cascade__toggle {
-  /* Forest when on: an enabled filter is a rule doing its job, the same
-     "this is fine" meaning the provenance marker carries. */
-  accent-color: var(--traced);
+  /* The interactive accent, not the traced green it used to carry. A checkbox
+     is a control the operator sets, not a verdict the console reached - and
+     an enabled filter is not "this is fine", it is "this rule is switched
+     on". Reusing the provenance colour here made a setting look like a
+     finding. */
+  accent-color: var(--accent);
   /* Larger than the browser default. This is the primary control on the row
      and a 13px checkbox beside 15px text reads as an afterthought. */
   width: 1.1rem;
@@ -195,9 +198,17 @@
 
 .ingest__button {
   padding: var(--gap-2) var(--gap-4);
-  background: var(--ink);
-  color: var(--ink-inverse);
-  border: 1px solid var(--ink);
+  /* The accent fill, and this is the one place in the console that gets it -
+     the single restrained accent is spent on the primary action of the whole
+     ingest flow and nowhere else.
+     It replaces a background of --ink with --ink-inverse text, which was a
+     latent bug rather than a style choice: --ink-inverse means "text on the
+     dark alarm band", so on the dark theme both tokens resolve to warm
+     off-white and the button rendered light text on a light fill. */
+  background: var(--accent);
+  /* Pairs with any filled semantic colour and flips with the theme. */
+  color: var(--ink-on-fill);
+  border: 1px solid var(--accent);
   border-radius: var(--radius-control);
   font-family: var(--font-machine);
   font-size: var(--size-sm);
@@ -246,7 +257,7 @@
 .ingest__verdict--blocked {
   background: var(--fabricated-wash);
   border-left: 3px solid var(--fabricated);
-  color: var(--fabricated-deep);
+  color: var(--fabricated-strong);
 }
 
 .ingest__group-title {

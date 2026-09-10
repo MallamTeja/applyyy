@@ -62,7 +62,11 @@ button {
    reviews ~35 rows a day and keyboard-driving the approval queue is the fast
    path, so focus is a working affordance rather than a compliance checkbox. */
 :where(a, button, input, select, textarea, [tabindex]):focus-visible {
-  outline: 2px solid var(--traced);
+  /* The accent, not the traced green it used to be. A focus ring lands on
+     every control on the page including ones showing a fabrication, and a
+     ring drawn in a verdict colour tells the operator something about the
+     row that is not true. The accent carries no verdict, so it can. */
+  outline: 2px solid var(--accent);
   /* Offset keeps the ring off the control's own border so both stay readable. */
   outline-offset: 2px;
 }
@@ -195,11 +199,16 @@ button {
 .button--approve {
   border-color: var(--traced);
   background: var(--traced);
-  color: #fff;
+  /* Not a literal white: on the dark theme the filled green lifts far enough
+     that white text on it fails contrast, so the legible choice flips to
+     near-black. Naming the token for its job rather than its colour is what
+     lets that flip happen in one place. */
+  color: var(--ink-on-fill);
 }
 
 .button--approve:hover:not(:disabled) {
-  background: #275c41;
+  /* The emphatic tone of the same hue - darker in light, lighter in dark. */
+  background: var(--traced-strong);
 }
 
 /* Reject is destructive-ish but recoverable, so it is outlined rather than
@@ -207,7 +216,7 @@ button {
    stay the loudest thing on the screen. */
 .button--reject {
   border-color: var(--fabricated);
-  color: var(--fabricated-deep);
+  color: var(--fabricated-strong);
 }
 
 .button--reject:hover:not(:disabled) {

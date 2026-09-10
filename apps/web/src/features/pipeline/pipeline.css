@@ -171,7 +171,7 @@
   background: var(--fabricated-wash);
   border-left: 3px solid var(--fabricated);
   font-size: var(--size-xs);
-  color: var(--fabricated-deep);
+  color: var(--fabricated-strong);
 }
 
 /* A column head with no number, showing WHY instead.

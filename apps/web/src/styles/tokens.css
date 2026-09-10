@@ -1,72 +1,186 @@
-/* Design tokens for the applyy console.
+/* Design tokens for the applyy operator console.
 
-   The organising idea: this app is a verification desk, not a dashboard. The
+   THE ORGANISING IDEA. This app is a verification desk, not a dashboard. The
    core act is checking a generated document against its source, so the visual
-   system splits into PAPER (resume content — white sheets, serif type) and
-   MACHINE (the console around it — sage ground, sans type). Colour is never
-   decorative here: each accent carries exactly one meaning, and the only dark
-   surface in the entire application is the fabrication band on the diff view. */
+   system splits into PAPER (resume content) and MACHINE (the console around
+   it). That split is the one distinctive thing here and it survives both
+   themes: paper surfaces carry a faint WARM cast, machine chrome a COOL one,
+   at near-identical luminance. A generic dark theme paints every surface the
+   same neutral grey; this one keeps the two materials tellable apart.
+
+   THE PALETTE REGISTER. Low-chroma layered near-blacks in dark, low-chroma
+   layered off-whites in light. Elevation is expressed as a LIGHTER surface in
+   both directions, never as a heavier shadow. Borders are separators, not
+   lines. Text never runs pure #fff on pure #000, which vibrates.
+
+   THE ONE RULE THAT MATTERS MOST. Colour is never decorative in this console:
+   every hue below carries exactly one meaning, and the interactive accent
+   deliberately carries NONE of them. Statuses must stay readable at a glance
+   even for a colour-blind operator, so no status anywhere in this app relies
+   on hue alone - each pairs its colour with a second channel (weight, an
+   underline, a border, hatching, italics, or a word).
+
+   ----------------------------------------------------------------------
+   HOW THEMING WORKS HERE, AND WHY IT IS NOT A MEDIA QUERY.
+
+   Every colour below is written once, as light-dark(<light>, <dark>). Which
+   half applies is decided by the `color-scheme` property, so the two values
+   for a token sit on the same line and cannot drift apart.
+
+   The obvious alternative - a full :root plus a @media (prefers-color-scheme)
+   override - cannot express a THEME TOGGLE without stating every dark value a
+   second time, because "the OS is dark and the user has not overridden it"
+   and "the user picked dark" are different selectors and one of them lives
+   inside a media block. That second copy is precisely the duplicate-that-
+   drifts problem: the day someone tunes a hex in one copy, the toggle and the
+   OS setting quietly disagree. light-dark() has one definition site, so that
+   failure is not available.
+
+   Three states, and the default is genuinely "follow the OS":
+     - no data-theme attribute  -> color-scheme: light dark -> the OS decides
+     - data-theme="light"       -> color-scheme: light      -> forced light
+     - data-theme="dark"        -> color-scheme: dark       -> forced dark
+   Setting `color-scheme` rather than swapping variables by hand has a second
+   payoff: form controls, scrollbars and the canvas the browser paints behind
+   the page follow it too. Before this, dark mode rendered a bright scrollbar
+   down the side of a near-black console.
+
+   The one exception is --lift, which is a box-shadow rather than a colour.
+   light-dark() resolves <color> only, so that token - and only that token -
+   is themed the long way at the foot of this file. ------------------------ */
 
 :root {
-  /* --- Surfaces -------------------------------------------------------- */
+  /* Follow the operating system unless a data-theme attribute below overrides
+     it. This declaration is what makes every light-dark() call resolve, and
+     what makes the browser's own chrome match the page. */
+  color-scheme: light dark;
 
-  /* The desk. Pale sage-grey reads as drafting film or ledger paper, which is
-     the right register for an instrument you check documents on. */
-  --ground: #eef1ec;
-  /* Resume content sits on genuine white so the figure/ground relationship is
-     literally "sheet of paper on a desk" rather than a card on a background. */
-  --sheet: #ffffff;
-  /* Chrome that must separate from the ground without becoming a third
-     material: the nav rail, table headers, inset panels. */
-  --panel: #e4e9e2;
-  /* The single dark surface. Reserved for the fabrication alert and nothing
-     else, so its presence alone identifies a dangerous row from across the
-     room. Using it anywhere else destroys that signal. */
-  --alarm-ground: #1a1416;
+  /* --- Surfaces: the three-step elevation ladder ----------------------- */
+
+  /* The desk, and the lowest step. Off-white rather than #fff in light so the
+     paper sheets have somewhere lighter to go; near-black rather than #000 in
+     dark for the same reason in the other direction. */
+  --ground: light-dark(#f4f4f2, #0d0f11);
+  /* Machine chrome one step up: the nav rail, table headers, inset panels.
+     Cool-neutral, because it is the console rather than the document. */
+  --panel: light-dark(#eaeae7, #15181c);
+  /* Paper: resume content and any coherent settings group. The top step, and
+     the only surface with a warm cast - this is the figure, the desk is the
+     ground, and the material difference is what says so. In dark it sits at
+     the same luminance step as the chrome but on the other side of neutral,
+     which is what keeps a resume sheet reading as a different material rather
+     than just a lighter box. */
+  --sheet: light-dark(#ffffff, #1c1b19);
+  /* Any surface a pointer is over. A translucent wash rather than a fixed
+     colour, so one value works over all three steps of the ladder instead of
+     needing a hover twin for each - and it shades in light, lifts in dark. */
+  --surface-hover: light-dark(rgba(23, 24, 26, 0.055), rgba(230, 228, 224, 0.06));
+
+  /* THE ALARM SURFACE. Reserved for the fabrication band on the diff view and
+     nothing else - its scarcity is the whole signal, and spending it on
+     navigation furniture would cost the console its loudest voice.
+     In light mode it is scarce because it is the only DARK surface. In dark
+     mode darkness is universal, so the channel changes: it becomes the only
+     surface carrying CHROMA in an otherwise strictly neutral UI. What the
+     signal rests on changes between themes; the scarcity does not. */
+  --alarm-ground: light-dark(#1a1215, #2b1216);
+  /* A claim lifted off the alarm ground so the operator can work through them
+     one at a time. Translucent, so it tracks whichever alarm ground applies. */
+  --alarm-raised: rgba(246, 236, 233, 0.07);
 
   /* --- Ink ------------------------------------------------------------- */
 
-  /* Body text: a very dark green-black rather than pure black, matching the
-     sage ground so the page reads as one material lit once. */
-  --ink: #1b211f;
-  /* Secondary text — metadata, field help, timestamps. Still passes AA on
-     --ground at body size. */
-  --ink-muted: #5a635e;
-  /* Text on the alarm surface. Slightly warm so it does not look like the same
-     ink accidentally inverted. */
-  --ink-inverse: #f6efe9;
+  /* Body text. Near-black on off-white, warm off-white on near-black - never
+     the maximum-contrast pairing at either end, because that is the
+     combination that shimmers during a long reading session, and this
+     operator reads roughly thirty-five resumes a day. */
+  --ink: light-dark(#17181a, #e6e4e0);
+  /* Secondary text - metadata, field help, timestamps, table headers. Recedes
+     so the status column wins the eye, while still clearing AA at body size
+     against all three surface steps in both themes. */
+  --ink-muted: light-dark(#5f6367, #9a9894);
+  /* Text on the alarm surface. Faintly warm so it does not read as the body
+     ink accidentally inverted, and light in both themes because the alarm
+     ground is dark in both. */
+  --ink-inverse: #f6ece9;
+  /* The procedural second line on the alarm band. Dimmer than the finding
+     above it, because the finding outranks the procedure. */
+  --alarm-ink-muted: light-dark(rgba(246, 236, 233, 0.65), rgba(246, 236, 233, 0.62));
+  /* Text sitting on top of a filled semantic colour (the approve button, the
+     ingest button). Named for its job rather than for being white, because
+     the filled greens lift in dark mode until white text on them fails and
+     the legible choice flips to near-black.
+     This token exists because of a real bug: the ingest button used to be
+     --ink on a background of --ink-inverse, and --ink-inverse means "text on
+     the dark alarm band", not "the opposite of ink". In dark mode both
+     resolved to warm off-white and the button rendered invisible. A name
+     broad enough to be borrowed gets borrowed. */
+  --ink-on-fill: light-dark(#ffffff, #0d0f11);
 
   /* --- Structure ------------------------------------------------------- */
 
-  /* Hairline rules: table rows, sheet edges, field separators. */
-  --rule: #c9d1c7;
-  /* A stronger rule for the boundary between master and tailored panes, which
-     is a real semantic division and should not look like a row separator. */
-  --rule-strong: #9aa79b;
+  /* Hairlines: table rows, sheet edges, field separators. Barely-there on
+     purpose - a dense table with assertive rules reads as a grid of boxes
+     rather than a list of rows. */
+  --rule: light-dark(#e0e0dc, #2a2d31);
+  /* The stronger rule, for boundaries that are real semantic divisions - the
+     master/tailored split, a table's header edge. Distinguishable from --rule
+     at a glance, so a reader can tell a division from a row separator. */
+  --rule-strong: light-dark(#b9b9b3, #3d4147);
 
-  /* --- Semantic accents. One meaning each, never used for styling. ------ */
+  /* --- The interactive accent ------------------------------------------ */
 
-  /* TRACED: this line resolves to a real node in the master profile. Forest
-     green, and deliberately LOW salience — safe content must not compete for
-     attention with dangerous content. Quietness is the design decision. */
-  --traced: #2f6f4e;
-  /* A wash of the same hue for marking safely-reworded text inline. */
-  --traced-wash: #e6efe8;
+  /* THE SINGLE RESTRAINED ACCENT: focus rings, the active rail item, primary
+     interaction. A muted slate-blue, and the choice is structural rather than
+     aesthetic - green, oxblood and bronze below are all spoken for as
+     verdicts, so blue is the one hue left that can never be misread AS a
+     verdict. An accent that doubles as a status is an accent that lies. */
+  --accent: light-dark(#2f6bbf, #6a9fe0);
+  /* Hover and pressed. Darker in light, lighter in dark - which is exactly
+     why the name is "strong" and not "dark". */
+  --accent-strong: light-dark(#24558f, #85b3ee);
 
-  /* FABRICATED: this claim traces to nothing. Oxblood, chosen over a bright
-     alert red because it reads as an authoritative stamp rather than a
-     transient browser error — this verdict is a finding, not a glitch. */
-  --fabricated: #9e1b32;
-  /* Used for the underline and stamp border; darker than the text colour so
-     the mark survives being printed or screenshotted. */
-  --fabricated-deep: #6f1223;
-  --fabricated-wash: #f7e4e7;
+  /* --- Semantic status colours. One meaning each, never used for styling.
+         Each is paired in the CSS with a non-colour channel, because hue
+         alone is not a signal a colour-blind operator can read. ---------- */
 
-  /* SIGNAL: a human is required and the machine has stopped. The
-     blocked_needs_human queue, an agent that has not run, a paused project.
-     Bronze reads as a warning lamp rather than a validation error. */
-  --signal: #b4762a;
-  --signal-wash: #f7ecdb;
+  /* TRACED: this line resolves to a real node in the master profile. Green,
+     and deliberately LOW salience - safe content must not compete for
+     attention with dangerous content. Its quietness is the design decision. */
+  --traced: light-dark(#2f6f4e, #4e9e6e);
+  /* The emphatic tone: the approve button's hover, provenance that must hold
+     its own against body text. */
+  --traced-strong: light-dark(#275c41, #63b583);
+  /* A wash for marking safely-reworded text inline and for all-clear notices.
+     A pale tint in light, a DARK tint in dark - a pale wash on a near-black
+     ground would make the safest line on screen the brightest thing on it. */
+  --traced-wash: light-dark(#e7f0ea, #16241c);
+
+  /* FABRICATED: this claim traces to nothing. Oxblood rather than a bright
+     alert red, because it reads as an authoritative stamp rather than a
+     transient browser error - this verdict is a finding, not a glitch. It
+     lifts to a rose-red in dark, where oxblood goes muddy against near-black
+     and stops being visible from two feet away, which is the requirement the
+     colour exists to meet. */
+  --fabricated: light-dark(#a3182f, #e0576b);
+  /* The emphatic tone, for text and for marks that must survive being printed
+     or screenshotted. Renamed from the old --fabricated-deep: "deep" names a
+     direction, and the direction inverts between themes - darker here,
+     lighter there. A name that is actively wrong in one theme is worse than a
+     vague one. */
+  --fabricated-strong: light-dark(#74111f, #f4879a);
+  /* Tinted ground behind a blocking finding. */
+  --fabricated-wash: light-dark(#f9e6e9, #2a1519);
+
+  /* SIGNAL: a human is required and the machine has stopped - the
+     blocked_needs_human queue, a human-only pipeline edge, an unwired page.
+     Bronze reads as a warning lamp rather than a validation error, which is
+     the distinction between "waiting for you" and "broken". It lifts to amber
+     in dark for the same reason a lamp has to look lit. */
+  --signal: light-dark(#a8701f, #d29a44);
+  /* The emphatic tone, for signal text that must clear AA on its own wash. */
+  --signal-strong: light-dark(#7d520f, #e8b66a);
+  --signal-wash: light-dark(#f8eeda, #261d0f);
 
   /* --- Type ------------------------------------------------------------ */
 
@@ -77,19 +191,19 @@
      because it makes master-vs-tailored text visually separate from the
      controls that act on it. */
   --font-paper: 'IBM Plex Serif', Georgia, 'Times New Roman', serif;
-  /* Literal identifiers only — bullet ids, board tokens, fingerprints, run
+  /* Literal identifiers only - bullet ids, board tokens, fingerprints, run
      timestamps. These are strings a human might copy, so tabular figures and
      unambiguous glyphs earn their keep. Never used for ordinary labels. */
   --font-id: 'IBM Plex Mono', ui-monospace, monospace;
 
   /* A 1.25 modular scale off a 15px base. Dense enough for tables, and the
      base is above 14px so long-form resume text is comfortable. */
-  --size-xs: 0.8125rem;   /* 13px — dense table cells, provenance notes */
-  --size-sm: 0.875rem;    /* 14px — field labels, secondary metadata */
-  --size-base: 0.9375rem; /* 15px — body, form inputs, resume text */
-  --size-md: 1.1719rem;   /* 18.75px — sheet headings, kanban column titles */
-  --size-lg: 1.4648rem;   /* 23.4px — page titles */
-  --size-xl: 1.8311rem;   /* 29.3px — the fabrication headline, once */
+  --size-xs: 0.8125rem;   /* 13px - dense table cells, provenance notes */
+  --size-sm: 0.875rem;    /* 14px - field labels, secondary metadata */
+  --size-base: 0.9375rem; /* 15px - body, form inputs, resume text */
+  --size-md: 1.1719rem;   /* 18.75px - sheet headings, kanban column titles */
+  --size-lg: 1.4648rem;   /* 23.4px - page titles */
+  --size-xl: 1.8311rem;   /* 29.3px - the fabrication headline, once */
 
   /* --- Space ----------------------------------------------------------- */
 
@@ -111,11 +225,56 @@
   --radius-sheet: 3px;
   --radius-control: 2px;
 
-  /* One elevation, used only to lift a sheet off the desk. Deliberately not a
-     generic soft grey blur under every element. */
-  --lift: 0 1px 0 rgba(27, 33, 31, 0.06), 0 2px 8px rgba(27, 33, 31, 0.05);
-
-  /* Rail width. Nine pages plus three operational views need full labels — an
+  /* Rail width. Nine pages plus three operational views need full labels - an
      icon rail would make the operator guess. */
   --rail-width: 15rem;
+
+  /* One elevation, used only to lift a sheet off the desk. A hairline plus a
+     short soft shadow rather than a wide blur, because a dense screen with a
+     generic soft grey under every element loses its own hierarchy.
+     THIS IS THE ONE TOKEN THAT CANNOT USE light-dark(): it is a box-shadow,
+     and light-dark() resolves <color> values only. It is themed the long way
+     in the three rules at the foot of this file, which is also why those
+     rules exist at all. */
+  --lift: 0 1px 0 rgba(23, 24, 26, 0.05), 0 2px 8px rgba(23, 24, 26, 0.05);
+}
+
+/* --- The theme override -------------------------------------------------
+   Two rules, and they are the entire toggle. Flipping `color-scheme` re-points
+   every light-dark() above at the other half of its own declaration, so a
+   forced theme and the OS default can never disagree about a colour: there is
+   only one place the colour is written. ---------------------------------- */
+
+/* Forced light, which must win even when the OS is dark. */
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+/* Forced dark, which must win even when the OS is light. This is the one that
+   matters in practice: the palette was designed dark-first and an operator on
+   a light-mode machine would otherwise never see it. */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+/* --- The one token light-dark() cannot carry ---------------------------
+   --lift is a box-shadow, so it needs the long-form treatment: the OS default
+   in a media query, guarded so a forced-light choice beats a dark OS, plus a
+   rule for a forced-dark choice on a light OS. Three rules for one token is
+   the cost light-dark() saves us on the other twenty-two. --------------- */
+
+/* Shadows are close to invisible on near-black, so elevation is carried by a
+   faint top highlight - the way a raised surface catches light - with only a
+   little shadow left underneath to seat it. */
+@media (prefers-color-scheme: dark) {
+  /* The :not() is load-bearing: without it, choosing light on a dark-mode
+     machine would keep the dark shadow and every sheet would sit on a bright
+     ground with a highlight along its top edge. */
+  :root:not([data-theme='light']) {
+    --lift: 0 1px 0 rgba(255, 255, 255, 0.035), 0 2px 8px rgba(0, 0, 0, 0.45);
+  }
+}
+
+:root[data-theme='dark'] {
+  --lift: 0 1px 0 rgba(255, 255, 255, 0.035), 0 2px 8px rgba(0, 0, 0, 0.45);
 }

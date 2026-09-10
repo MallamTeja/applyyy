@@ -167,7 +167,7 @@
 /* The graph's own note on the edge, which is usually the most useful sentence
    available about why that transition matters. */
 .gaps__why {
-  color: var(--fabricated-deep);
+  color: var(--fabricated-strong);
   font-size: var(--size-xs);
   max-width: 72ch;
 }
@@ -198,7 +198,7 @@
    freshness table can produce. Styling them alike is how the alarming one gets
    read as the harmless one. */
 .table__never {
-  color: var(--fabricated-deep);
+  color: var(--fabricated-strong);
   font-weight: 600;
   font-size: var(--size-xs);
   /* Wraps freely: these strings are whole sentences ("has never run, so the
@@ -214,7 +214,7 @@
 .table__stuck {
   display: block;
   margin-top: var(--gap-1);
-  color: var(--fabricated-deep);
+  color: var(--fabricated-strong);
   font-size: var(--size-xs);
   max-width: 56ch;
 }
