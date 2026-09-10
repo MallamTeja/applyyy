@@ -316,10 +316,22 @@ create table public.applications (
   -- trigger that writes the event row.
   --
   -- INFORMATIONAL ONLY. NEVER BRANCH ON THIS. It exists so the UI can say "came from
-  -- X" without joining the event log. It is NOT a rollback mechanism: the status
-  -- graph has zero backward edges, because claiming uses a lease rather than a status
-  -- change, so an agent that cannot get a Gemini key releases its claim and the row
-  -- never left the status it was in.
+  -- X" without joining the event log.
+  --
+  -- It is NOT a rollback mechanism, and the precise reason matters. NO AGENT EVER
+  -- WALKS AN EDGE BACKWARD: claiming uses a lease rather than a status change, so an
+  -- agent that cannot get a Gemini key releases its claim and the row never left the
+  -- status it was in. There is nothing to roll back.
+  --
+  -- CORRECTED 2026-09-10: an earlier version of this comment said "the status graph
+  -- has zero backward edges", which is FALSE — the graph has exactly SEVEN, verified
+  -- by comparing each edge against `application_status` declaration order. All seven
+  -- are HUMAN CORRECTION paths (audit_flagged->tailored, needs_verification->applied,
+  -- needs_verification->approved, blocked_needs_human->applied,
+  -- blocked_needs_human->dropped_filter, failed->needs_verification), and exactly one
+  -- is walkable by a machine: interview->oa_pending, allowed to ['tracker','human'],
+  -- because an employer really can move a candidate back a stage. Human correction and
+  -- agent rollback are different purposes; only the second one is absent.
   previous_status public.application_status,
 
   -- When status last changed. Drives the "stuck for N days" health indicator.
@@ -391,7 +403,9 @@ create table public.applications (
   retry_count integer not null default 0 check (retry_count >= 0),
 
   -- LEASE-BASED CLAIMING. Claiming sets these three and does NOT touch status, which
-  -- is precisely why no backward edge is needed anywhere in the graph.
+  -- is precisely why no backward edge is needed FOR CLAIM ROLLBACK. (Narrowed
+  -- 2026-09-10: the graph does contain seven backward edges, but every one of them is
+  -- a human correction path, not an agent undoing its own work.)
   claimed_at timestamptz,
   -- Conventionally '<agent>:<run id>', so a stranded row names the run that stranded it.
   claimed_by text,
@@ -452,6 +466,6 @@ create index applications_user_status_changed_idx
 create index applications_job_id_idx on public.applications (job_id);
 
 comment on column public.applications.previous_status is
-  'INFORMATIONAL ONLY — never branch on it. Not a rollback mechanism: the status graph has zero backward edges.';
+  'INFORMATIONAL ONLY - never branch on it. Not a rollback mechanism: no agent ever walks an edge backward, because claiming takes a lease rather than changing status. The graph does contain 7 backward edges, all human correction paths; only interview->oa_pending is machine-walkable.';
 comment on column public.applications.status is
   'The queue. Change it only via advance_application_status(); a bare UPDATE passes the guard but skips the claim release and strands the row.';

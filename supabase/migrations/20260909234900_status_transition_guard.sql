@@ -6,10 +6,28 @@
 --
 -- A lookup table of legal (from_status, to_status, allowed_agents) edges, plus a
 -- BEFORE UPDATE trigger that refuses anything absent from it. The payoff, in one
--- sentence: `awaiting_approval → approved` is the only edge into `approved`, and
--- `approved → applying` is the only edge into `applying` in the entire graph, so
--- CONSTRAINT 15 — never submit without human approval — is UNREACHABLE BY
--- CONSTRUCTION rather than enforced by code review.
+-- sentence: EVERY edge into `approved` is human-only, and `approved → applying` is
+-- the only edge into `applying` in the entire graph, so CONSTRAINT 15 — never submit
+-- without human approval — is UNREACHABLE BY CONSTRUCTION rather than enforced by
+-- code review.
+--
+-- CORRECTED 2026-09-10. This previously read "`awaiting_approval → approved` is the
+-- only edge into `approved`", which is FALSE: there are TWO, verified by query.
+-- `needs_verification → approved` also exists, and it has to — it is the only way a
+-- row re-enters the submit path after a human has checked that a possibly-submitted
+-- application did not actually go through.
+--
+-- The correction STRENGTHENS the argument rather than weakening it, which is why the
+-- false version was so easy to leave standing. Constraint 15 never needed `approved`
+-- to have a single entrance; it needed every entrance to require a human. Both edges
+-- are `array['human']`, so it holds:
+--
+--   awaiting_approval  -> approved  ['human']
+--   needs_verification -> approved  ['human']
+--
+-- Stated as "every edge into approved is human-only" because that is the property the
+-- constraint actually rests on, and unlike an edge count it stays true when a third
+-- human-only entrance is added.
 --
 -- The alternative was an `if` statement inside the worker's Playwright job, reviewed
 -- once by one person. This is one table and one trigger, and it holds against every
@@ -50,11 +68,33 @@ create table public.application_status_transitions (
 -- -----------------------------------------------------------------------------
 -- Seed the graph. Read top to bottom, this is the entire workflow.
 --
--- NOTE ON WHAT IS ABSENT: there are NO backward edges. PROJECT_PLAN section 6 says an
--- agent that finds every Gemini key cooling "returns the row to its prior status" —
+-- NOTE ON WHAT IS ABSENT: there is no AGENT ROLLBACK edge. PROJECT_PLAN section 6 says
+-- an agent that finds every Gemini key cooling "returns the row to its prior status" —
 -- but claiming sets claimed_by/claim_expires_at and does NOT advance status, so such a
 -- row never left the status it was in. The rollback is a no-op, so no reverse edge is
--- needed, so the graph has no backward path for a bug to wander down.
+-- needed for it.
+--
+-- CORRECTED 2026-09-10. This comment previously read "there are NO backward edges",
+-- which is FALSE and was worth catching, because a false invariant written down is
+-- read as a guarantee. Measured against `application_status` declaration order, the
+-- seed below contains EXACTLY SEVEN backward edges:
+--
+--   audit_flagged        -> tailored            ['human']
+--   interview            -> oa_pending          ['tracker','human']   <-- see below
+--   needs_verification   -> applied             ['human']
+--   needs_verification   -> approved            ['human']
+--   blocked_needs_human  -> applied             ['human']
+--   blocked_needs_human  -> dropped_filter      ['human']
+--   failed               -> needs_verification  ['human']
+--
+-- Six of the seven are HUMAN-ONLY, so no bug can wander down them — reaching them
+-- requires a person deciding to. The claim that was true all along is the narrower
+-- one: **no machine can walk backward, with exactly one deliberate exception.**
+--
+-- That exception is interview -> oa_pending, allowed to ['tracker','human'], and it is
+-- correct: an employer genuinely can move a candidate back a stage, and the email
+-- Tracker has to be able to record that it happened. It is the one reverse edge to
+-- check first if a row is ever seen moving backward unexpectedly.
 -- -----------------------------------------------------------------------------
 insert into public.application_status_transitions (from_status, to_status, allowed_agents, note) values
   -- Discovery and dedupe.

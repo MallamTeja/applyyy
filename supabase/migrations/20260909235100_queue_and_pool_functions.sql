@@ -30,8 +30,10 @@
 -- would otherwise be dragged in to provide.
 --
 -- CLAIMING DOES NOT CHANGE `status`. It sets a lease. That single decision is why the
--- status graph needs no backward edges: a row being worked on has not moved, so an
--- agent that gives up has nothing to undo.
+-- status graph needs no backward edge FOR AGENT ROLLBACK: a row being worked on has not
+-- moved, so an agent that gives up has nothing to undo. (Narrowed 2026-09-10 — the
+-- graph does have seven backward edges, but they are human correction paths and six of
+-- the seven are human-only.)
 --
 -- RETURNS ZERO ROWS WHEN THE KILL SWITCH IS OFF. The check lives here, not in the
 -- agents, so an agent that forgets to check it still cannot get work. Safety that
