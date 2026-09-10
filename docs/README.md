@@ -6,6 +6,7 @@ facts drift and then contradict each other.
 
 | Doc | Topic |
 |-----|-------|
+| [architecture/agents.md](architecture/agents.md) | **The agent roster, in detail.** All twelve agent identities, what each does and why, which status transitions each may make, which cost Gemini calls, and — marked per agent — which actually exist versus which are only designed. Includes the kill switch and what it stops |
 | [PROGRESS.md](PROGRESS.md) | **Live status.** Per-stream state with evidence, decisions and their reasoning, what is waiting on Teja, and what is explicitly not done |
 | [verification-traps.md](verification-traps.md) | **Read before testing a guard or believing a green.** Fourteen instances of a check that reported success for a reason other than the one you believed, and the rule that a test passing without its guard is testing the composite |
 | [audit/2026-09-10-handoff-verification.md](audit/2026-09-10-handoff-verification.md) | **Read before trusting the handoff.** Three claims from `applyyy-9f`'s transfer checked against the artifact and found false — including its stated top priority — plus one defect it never saw: the Vercel project has zero env vars |
