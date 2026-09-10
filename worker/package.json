@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@applyy/resume-template": "workspace:*",
     "@applyy/shared-types": "workspace:*",
     "@supabase/supabase-js": "2.47.10",
     "playwright": "1.49.1"

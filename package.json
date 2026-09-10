@@ -6,14 +6,18 @@
   "description": "Job application automation: ATS discovery, resume tailoring with an honesty auditor, human-gated submission, and email-driven tracking.",
   "packageManager": "pnpm@11.25.0",
   "engines": {
-    "node": ">=24.0.0",
+    "node": ">=24.0.0 <25.0.0",
     "pnpm": "11.25.0"
   },
   "scripts": {
     "preinstall": "pnpm dlx only-allow pnpm",
-    "build": "pnpm -r --filter \"./packages/**\" run build && pnpm -r --filter \"./apps/**\" run build",
-    "typecheck": "pnpm -r run typecheck",
-    "test": "pnpm -r run test",
-    "lint": "pnpm -r run lint"
-  }
+    "build": "pnpm -r --if-present run build",
+    "typecheck": "pnpm -r --if-present run typecheck",
+    "test": "pnpm -r --if-present run test",
+    "lint": "pnpm -r --if-present run lint"
+  },
+  "// scripts": "Every recursive script uses --if-present. Two of them were fatal without it: `build` broke every Vercel deploy, and `lint` would have broken the moment anything invoked it.",
+  "// scripts.build": "WAS: `pnpm -r --filter \"./packages/**\" run build && pnpm -r --filter \"./apps/**\" run build`, which failed EVERY Vercel deploy with ERR_PNPM_RECURSIVE_RUN_NO_SCRIPT: neither packages/shared-types nor packages/resume-template has a build script. That absence is CORRECT and deliberate - both export raw .ts source with zero build step, which is what makes the Deno/Node/Vite cross-runtime guarantee work. So the script encoded an assumption the architecture deliberately rejects, the first half of the && chain failed, and apps/web was never reached. --if-present rather than deleting the packages half: a package that LATER gains a build step is then picked up automatically, whereas a hardcoded apps-only filter would silently stop building it. Derived over hardcoded - this project has been bitten three times by the hardcoded form.",
+  "// scripts.lint": "Latent instance of the same bug, found while fixing build: NO package in the workspace defines a lint script, so this was guaranteed to fail the moment anything ran it. It had simply never been invoked.",
+  "// engines.node": "Upper bound added 2026-09-10. Vercel warns that \">=24.0.0\" auto-upgrades when a new Node major ships; an unbounded runtime range breaks a deploy months from now with no local change."
 }
