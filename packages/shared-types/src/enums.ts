@@ -1,15 +1,37 @@
 /**
  * applyy — Postgres enum mirrors.
  *
- * Every export here is the TypeScript twin of a `CREATE TYPE ... AS ENUM` in
- * supabase/migrations. The pattern throughout is: a `const` tuple (runtime value,
- * iterable, usable to build a dropdown or to validate an untrusted string) plus a
- * union type derived from it with `[number]` (compile-time value, exhaustively
- * checkable in a switch). Declaring the type by hand alongside the tuple would let
- * the two drift apart silently — deriving one from the other makes that impossible.
+ * Every export here is intended as the TypeScript twin of a `CREATE TYPE ... AS ENUM`
+ * in supabase/migrations. STATE OF THAT CLAIM, 2026-09-10 — read it before relying on
+ * it, because "twin" is two separate assertions and only one of them is settled:
  *
- * If you add a value here you MUST add it to the migration, and vice versa. There
- * is no codegen guarding this; the checklist in SCHEMA_CONTRACT.md is.
+ *   1. MIRRORS THE MIGRATION SOURCE — VERIFIED, and verified continuously. Every tuple
+ *      below matches its `create type` in 20260909234500_enums.sql by value AND by
+ *      declaration order. Order matters as much as membership: Postgres sorts an enum
+ *      by declaration order, so `ORDER BY status` is only pipeline order if these two
+ *      agree. Proven by `test/enum-parity.test.ts`, which parses the migration and
+ *      diffs it against this file — so this paragraph cannot quietly go stale.
+ *   2. THE MIGRATION LOADS INTO POSTGRES — NOT YET TRUE. As of 2026-09-10 the SQL has
+ *      never been executed anywhere: no local `supabase start`, no remote push (gated
+ *      on Teja, constraint: no remote infrastructure). So nothing has confirmed that
+ *      Postgres ACCEPTS these declarations. A typo in the SQL would be invisible to
+ *      the parity test, which reads the file rather than the database.
+ *
+ * Consequence for a consumer: import these freely — they are the agreed vocabulary
+ * and four streams already build on them. Just do not read a comment here as evidence
+ * that a database exists. When applyyy-8c reports the migrations executing, assertion
+ * 2 becomes true and this block should shrink to one sentence.
+ *
+ * The pattern throughout is: a `const` tuple (runtime value, iterable, usable to build
+ * a dropdown or to validate an untrusted string) plus a union type derived from it with
+ * `[number]` (compile-time value, exhaustively checkable in a switch). Declaring the
+ * type by hand alongside the tuple would let the two drift apart silently — deriving
+ * one from the other makes that impossible.
+ *
+ * If you add a value here you MUST add it to the migration, and vice versa. That rule
+ * used to be guarded only by a checklist in SCHEMA_CONTRACT.md; it is now guarded by
+ * `pnpm --filter @applyy/shared-types test`, which fails on any drift in either
+ * direction. Prefer the executable guard — a checklist is a guard nobody runs.
  */
 
 /**
@@ -42,7 +64,20 @@ export const APPLICATION_STATUSES = [
   'audit_flagged',
   /** Sitting in the human approval queue. A durable row state, not a paused process — it survives a Supabase pause and a laptop reboot. */
   'awaiting_approval',
-  /** A human said yes. The ONLY status from which `applying` is reachable — enforced by the transition table, not by convention. */
+  /**
+   * A human said yes. The ONLY status from which `applying` is reachable.
+   *
+   * WHERE THAT IS ENFORCED, 2026-09-10 — the distinction is safety-relevant, so it is
+   * spelled out rather than implied. The single-door property is DECLARED twice: in
+   * `application_status_transitions` + its BEFORE UPDATE trigger
+   * (20260909234900_status_transition_guard.sql) and in status-flow.ts. Only the
+   * second is currently RUNNING, because the migration has not been executed. A
+   * client-side mirror is advisory: today a buggy agent that writes `applying`
+   * directly would succeed, and constraint 15 rests on code review plus this comment
+   * rather than on Postgres refusing the write. Executing the migration is what turns
+   * "by convention" into "by the transition table" — until then, do not describe the
+   * gate as unbypassable.
+   */
   'approved',
   /** The worker has begun submitting. THE ONE NON-IDEMPOTENT STATE — see NON_RETRYABLE_STATUSES below. */
   'applying',
@@ -253,7 +288,18 @@ export type AnswerType = (typeof ANSWER_TYPES)[number];
 
 /** What is being recorded in the append-only audit log. */
 export const APPLICATION_EVENT_TYPES = [
-  /** Written automatically by a trigger on every status change — no agent can forget to log one. */
+  /**
+   * Logged on every status change.
+   *
+   * INTENDED to be written by a trigger, so that no agent can forget to log one —
+   * that trigger is written (20260909234900_status_transition_guard.sql) but has
+   * never run, so as of 2026-09-10 an agent CAN forget. Write the event explicitly
+   * (or go through the `advance_application_status` RPC, which does both in one
+   * transaction) until applyyy-8c reports the migration loading; then the automatic
+   * write becomes real and a hand-written event becomes a duplicate. Both halves of
+   * that sentence matter: the trigger's absence is a gap now, and its arrival is a
+   * behaviour change to code written against the gap.
+   */
   'status_change',
   'claim',
   'release',
@@ -292,3 +338,99 @@ export const BLOCK_REASONS = [
 ] as const;
 /** Union of every legal `applications.block_reason` value. */
 export type BlockReason = (typeof BLOCK_REASONS)[number];
+
+/**
+ * WHICH KIND of unanswerable a single form FIELD is. The one reason vocabulary for
+ * per-field refusals, replacing worker/src/plan-fill.ts's local union.
+ *
+ * ── WHY THIS IS A SECOND ENUM AND NOT MORE VALUES IN BLOCK_REASONS ──────────────
+ * The two are at different GRANULARITIES and type different columns, so merging them
+ * would mean one enum whose values are legal in one column and illegal in the other:
+ *
+ *   BLOCK_REASONS         types `applications.block_reason` — a real Postgres enum
+ *                         column. ROW-level: why is this whole application parked?
+ *   ANSWER_BLOCK_REASONS  lives inside `applications.block_detail` (jsonb). FIELD-
+ *                         level: which of possibly several questions stopped it, and
+ *                         which kind of stop each one is.
+ *
+ * The relationship is fixed and total: if any field carries one of these, the row's
+ * `block_reason` is `'unanswerable_question'`. Never `'captcha'` or `'mfa'` — those
+ * are page-level walls with no field attached, which is exactly why they belong only
+ * in the row-level enum and are deliberately NOT repeated here. Repeating them is the
+ * duplication this enum exists to prevent: two spellings of one concept is how the
+ * `no_answer` / `answer_missing` drift started.
+ *
+ * ── ONE VOCABULARY: the rename that closes the drift ────────────────────────────
+ * worker/src/plan-fill.ts:33 declares `'no_answer' | 'awaiting_human_answer'` locally.
+ * Import this instead and apply the mapping (applyyy-ef, applyyy-20, applyyy-f8):
+ *   no_answer            -> answer_missing         (same concept, two names — the drift)
+ *   awaiting_human_answer -> answer_low_confidence  (bank row exists, needs_human = true)
+ * As of 2026-09-10 that rename has NOT been applied in the worker; this enum is the
+ * agreed target, not a description of shipped code.
+ *
+ * ── WHY THREE CASES AND NOT TWO ────────────────────────────────────────────────
+ * Because the operator action and the ANSWER-BANK EFFECT differ per case, and the bank
+ * growing itself is the whole value of the answer bank (PROJECT_PLAN section 15).
+ * Collapsing `answer_missing` into `answer_low_confidence` would lose the INSERT
+ * trigger — the system would stop learning new questions, which is the feature.
+ */
+export const ANSWER_BLOCK_REASONS = [
+  /**
+   * No row in the answer bank matches this question at all — never seen it before.
+   * Operator action: answer it once. Bank effect: INSERT a new row, so this question
+   * is answered automatically forever after. THIS is the bank growing itself.
+   */
+  'answer_missing',
+  /**
+   * A bank row exists but is not trustworthy enough to submit — `needs_human` is
+   * true, i.e. a placeholder or a guess awaiting confirmation. Operator action:
+   * confirm or correct the existing value. Bank effect: UPDATE in place and clear
+   * `needs_human`. Distinct from `answer_missing` because there is already a value to
+   * react to, and because the write is an update rather than an insert.
+   */
+  'answer_low_confidence',
+  /**
+   * The system has an answer, or could compose one, and REFUSES to submit it
+   * automatically. Two grounds: the honest answer is not among the options the widget
+   * offers (a yes/no control where the truthful answer is neither), or the question is
+   * one no automation should answer on someone's behalf — EEO and self-identification,
+   * disability, veteran status, sponsorship, expected CTC.
+   *
+   * Operator action: the human answers this one on the real form, every time. Bank
+   * effect: NONE, deliberately — never write back. Caching a legal or demographic
+   * declaration for silent reuse is a decision that belongs to the human on each
+   * application, and it is constraint 3 (never falsely answer) at its sharpest: the
+   * failure here is not a gap in the bank, so filling the gap is the wrong fix.
+   */
+  'answer_refused',
+] as const;
+/** Union of every legal per-field answer-block reason. Carried inside `block_detail`, never in a column. */
+export type AnswerBlockReason = (typeof ANSWER_BLOCK_REASONS)[number];
+
+/**
+ * The golden eval set's verdict — `matcher_eval_cases.label`.
+ *
+ * ~20 hand-labelled jobs that every Matcher prompt change must still classify
+ * correctly. Build the eval set BEFORE iterating on the prompt: otherwise you tweak a
+ * prompt to fix one bad match and silently break scoring on everything else, with no
+ * way to notice.
+ *
+ * ADDED 2026-09-10, and worth knowing why it was missing: `eval_label` was the only
+ * one of the 15 enums in the migration with no TypeScript twin, and
+ * `matcher_eval_cases` the only one of 15 tables with no Row type. The eval-set work
+ * landed in SQL and was never mirrored here, so anyone building the Matcher would have
+ * hand-declared both — the exact drift this package exists to prevent. Found by
+ * diffing the migration against this file, which is now `test/enum-parity.test.ts`.
+ */
+export const EVAL_LABELS = [
+  'good_fit',
+  'bad_fit',
+  /**
+   * Deliberately present. A two-way forced choice would push genuinely ambiguous jobs
+   * into one bucket and make the eval set lie about the model's accuracy — a regression
+   * suite that overstates its own precision is worse than none, because it is trusted.
+   */
+  'borderline',
+] as const;
+/** Union of every legal `matcher_eval_cases.label` value. */
+export type EvalLabel = (typeof EVAL_LABELS)[number];

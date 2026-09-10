@@ -1,0 +1,173 @@
+/* System health.
+ *
+ * THE DESIGN CONSTRAINT THAT SHAPES THIS PAGE. Every other screen can use
+ * colour to mean severity. This one mostly cannot, because the thing it reports
+ * is ABSENCE - a job that stopped has no error to colour. There is no red row
+ * to find; there is a date that is older than it should be. So the page is
+ * built as tables with an age column, and the visual work goes into making an
+ * unknown or stale value impossible to mistake for a healthy one.
+ *
+ * Concretely: `.unknown` (in base.css) is italic muted text rather than a blank
+ * cell, because a blank cell reads as zero and zero is the opposite claim -
+ * "ran and processed nothing" versus "nobody asked". That distinction is the
+ * entire page.
+ *
+ * NO DARK SURFACE HERE EITHER. It belongs to the Bucket B alert band on the
+ * approval queue and nowhere else. A health page with an alarm-coloured header
+ * would burn the console's loudest signal on a screen the operator visits when
+ * nothing is wrong.
+ */
+
+/* --- Panels ----------------------------------------------------------- */
+
+.panel {
+  margin-top: var(--gap-6);
+  padding: var(--gap-4);
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+}
+
+.panel__title {
+  font-size: var(--size-md);
+  font-weight: 600;
+  /* Machine face throughout - everything on this page is system state. */
+  font-family: var(--font-machine);
+  margin-bottom: var(--gap-2);
+}
+
+.panel__note {
+  color: var(--ink-muted);
+  font-size: var(--size-sm);
+  /* Readable measure. These paragraphs carry the reasoning that makes the
+     numbers interpretable, so they need to actually get read. */
+  max-width: 72ch;
+  margin-bottom: var(--gap-3);
+}
+
+/* The page's opening thesis. Sits outside any panel and is allowed slightly
+   more presence than a panel note, because everything below is an instance of
+   it and a reader who skips it will misread the tables as status indicators. */
+.panel__note--lead {
+  color: var(--ink);
+  font-size: var(--size-base);
+  border-left: 3px solid var(--rule-strong);
+  padding-left: var(--gap-3);
+  margin-top: var(--gap-4);
+}
+
+/* An all-clear. Green - the traced/verified colour - because this is a
+   POSITIVE derived claim: the check ran and found no gaps. A blank panel would
+   be ambiguous between "no gaps" and "not checked", and on this page that
+   ambiguity is the failure mode. */
+.panel__clear {
+  padding: var(--gap-2) var(--gap-3);
+  background: var(--traced-wash);
+  border-left: 3px solid var(--traced);
+  font-size: var(--size-sm);
+  color: var(--ink);
+}
+
+/* --- Tables ----------------------------------------------------------- */
+
+/* Scroll the table, never the page. The agent table has four columns and will
+   fit most screens, but a narrow window must not push the nav rail off. */
+.table-wrap {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--size-sm);
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: var(--gap-2) var(--gap-3);
+  border-bottom: 1px solid var(--rule);
+  /* Top-aligned: the "why" cells wrap to several lines and centring them
+     against a one-line agent name makes the row hard to follow. */
+  vertical-align: top;
+}
+
+.table thead th {
+  /* Lighter than the body text. A header row that competes with the data is a
+     header row that gets read every time instead of once. */
+  color: var(--ink-muted);
+  font-weight: 600;
+  font-size: var(--size-xs);
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+/* The agent name cell. Mono, because these are the literal identifiers written
+   into `agent_runs` - the operator matches them against rows and log lines. */
+.table__id {
+  font-family: var(--font-id);
+  font-size: var(--size-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* --- Keepalives ------------------------------------------------------- */
+
+.keepalive {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-3);
+}
+
+.keepalive__item {
+  display: grid;
+  /* Single column: the explanation is the longest part of each item and
+     squeezing it into a side column would make it unreadable. */
+  gap: var(--gap-1);
+  padding: var(--gap-3);
+  background: var(--panel);
+  border-radius: var(--radius-control);
+}
+
+.keepalive__what {
+  font-weight: 600;
+  font-size: var(--size-sm);
+}
+
+/* WHY each keepalive matters, not what it is. This is the text that stops
+   someone deleting a workflow that appears to do nothing - which is exactly
+   what a keepalive looks like from the outside. */
+.keepalive__why {
+  color: var(--ink-muted);
+  font-size: var(--size-xs);
+  max-width: 72ch;
+}
+
+/* --- Missing-control gaps -------------------------------------------- */
+
+.gaps {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-2);
+}
+
+/* Each missing control is a defect in the console, so it takes the fabrication
+   red rather than the bronze needs-a-human wash. Bronze means "waiting for
+   you"; these rows are not waiting, they are unreachable. */
+.gaps__item {
+  display: grid;
+  gap: var(--gap-1);
+  padding: var(--gap-2) var(--gap-3);
+  background: var(--fabricated-wash);
+  border-left: 3px solid var(--fabricated);
+  border-radius: var(--radius-control);
+}
+
+/* The graph's own note on the edge, which is usually the most useful sentence
+   available about why that transition matters. */
+.gaps__why {
+  color: var(--fabricated-deep);
+  font-size: var(--size-xs);
+  max-width: 72ch;
+}

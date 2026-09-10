@@ -239,3 +239,39 @@ button {
   clip-path: inset(50%);
   white-space: nowrap;
 }
+
+/* --- Shared "we do not know" and "the schema cannot say" markers ------ */
+
+/* A value the console has not read yet, or cannot read.
+   WHY THIS EXISTS AS A STYLE RATHER THAN A BLANK: an empty cell reads as zero,
+   and on the health page zero and unknown are opposite claims - "this agent ran
+   and processed nothing" versus "nobody has asked". Italic muted text says
+   unknown without shouting, and every page that shows machine state uses the
+   same one so the operator learns a single signal. */
+.unknown {
+  color: var(--ink-muted);
+  font-style: italic;
+  /* Machine-state text, so it takes the machine face rather than the paper one
+     used for resume content. */
+  font-family: var(--font-machine);
+  font-size: var(--size-sm);
+}
+
+/* A gap in the shared schema that this console cannot paper over.
+   Distinct from .not-wired on purpose: .not-wired means "this UI is unfinished
+   and will be finished", whereas a contract gap means "the data cannot express
+   what this screen needs, and no amount of frontend work fixes it". Conflating
+   the two would hide a cross-stream dependency behind a to-do note.
+   Bronze like .not-wired because it is also a needs-a-human state, but boxed on
+   all four sides rather than side-barred so the two do not read as one thing. */
+.contract-gap {
+  margin-top: var(--gap-4);
+  padding: var(--gap-3) var(--gap-4);
+  max-width: 64ch;
+  background: var(--signal-wash);
+  /* Full border, not a left rule - the visual difference from .not-wired is the
+     whole point of a separate class. */
+  border: 1px solid var(--signal);
+  border-radius: var(--radius-control);
+  font-size: var(--size-sm);
+}

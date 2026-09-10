@@ -1,10 +1,31 @@
 {
-  "// extends": "Root scaffold is owned by peer applyyy-e5; this file deliberately owns no compiler settings of its own so its settings cannot drift from the other packages.",
+  // Real `//` comments, NOT "// key": string entries. tsconfig.json is JSONC and tsc
+  // parses these; it also VALIDATES every key inside compilerOptions and rejects an
+  // unknown one with TS5025. A "// noEmit" entry there therefore broke this package's
+  // typecheck outright (fixed 2026-09-10) while the identical convention kept working
+  // at the top level, where unknown keys are ignored — which is why it survived review.
+  // The pseudo-key trick is fine in package.json (npm validates nothing); it is only
+  // ever wrong inside compilerOptions. Do not reintroduce it here.
+  //
+  // Root scaffold is owned by peer applyyy-8c; this file deliberately owns no compiler
+  // settings of its own, so its settings cannot drift from the other packages'.
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "// noEmit": "This package is consumed as source (see package.json exports), so emitting build output would only create a stale second copy.",
-    "noEmit": true
+    // This package is consumed as source (see package.json exports), so emitting build
+    // output would only create a stale second copy of the contract. Inherited from the
+    // base config too; restated because it is load-bearing and a reader of this file
+    // should not have to open another to learn it.
+    "noEmit": true,
+    // Node builtins for the PARITY TEST ONLY — it reads supabase/migrations off disk.
+    // src/ uses no Node API by design: the contract is imported by Deno Edge Functions
+    // and by the browser, so a Node builtin leaking into it would break two of three
+    // runtimes at runtime instead of failing here.
+    "types": ["node"]
   },
-  "// include": "src only — never pull the contract doc or package.json into the type program.",
-  "include": ["src"]
+  // src AND test. Including test is what makes the parity suite typecheck against the
+  // real contract, so a test that no longer matches the types it guards becomes a
+  // compile error rather than a suite that passes against a shape nothing produces.
+  // Never widen this to the package root: SCHEMA_CONTRACT.md and package.json must stay
+  // out of the type program.
+  "include": ["src", "test"]
 }

@@ -32,6 +32,9 @@ import type {
   DiscoverySource,
   EmailClassification,
   EmploymentType,
+  // The golden eval set's verdict. Added 2026-09-10 with MatcherEvalCaseRow below —
+  // it was the one enum in the migration with no twin here.
+  EvalLabel,
   FilterRuleType,
   PostedAtSource,
   WorkArrangement,
@@ -407,6 +410,20 @@ export type ApplicationUpdate = Partial<
     | 'master_version'
     | 'tailored_profile'
     | 'tailored_hash'
+    // ADDED 2026-09-10. Both columns exist in SQL (core_tables.sql:339 and :391) and
+    // SCHEMA_CONTRACT.md tells the Tailor to populate them, but this Pick omitted
+    // them — so the type forbade a write the contract required.
+    //
+    // `tailor_refs` is the Auditor's evidence trail: the raw refs the Tailor emitted,
+    // kept for the trace and for the injection regression suite. That makes the
+    // omission worse than an inconvenience — faced with a type that will not accept
+    // it, a stream either casts around the type or quietly drops the column, and
+    // dropping it removes the proof that every rendered line came from the master.
+    // The anti-fabrication defence is only auditable if its inputs were retained.
+    | 'tailor_refs'
+    // Written by whichever agent is retrying, so retry accounting is not lost on the
+    // one path that most needs it.
+    | 'retry_count'
     | 'selected_jd_keywords'
     | 'match_score'
     | 'match_reasoning'
@@ -443,7 +460,25 @@ export interface ApplicationStatusTransitionRow {
  * be rewritten to hide what happened — including by a service-role key.
  */
 export interface ApplicationEventRow {
-  id: string;
+  /**
+   * `bigint generated always as identity` (supporting_tables.sql:30) — a NUMBER here,
+   * not a string, and the one deliberate exception to this file's "Postgres numerics
+   * are strings" rule.
+   *
+   * CORRECTED 2026-09-10 (was `string`). The rule at the top of this file exists
+   * because PostgREST returns `numeric` as a string to preserve arbitrary precision.
+   * `bigint` is different: PostgREST serialises it as a JSON number, and
+   * `supabase gen types typescript` emits `number` — so the eventual generated-types
+   * check would have flagged this, and meanwhile any `===` against a string id is
+   * simply false. Distinguishing the two cases is the point: `numeric` must not be a
+   * number because JSON.parse would round it; `bigint` must not be a string because
+   * nothing makes it one.
+   *
+   * Why this table uses bigint at all while every other id is uuid: it is append-only
+   * and high-volume, and a monotonic key gives cheap chronological ordering that uuid
+   * does not.
+   */
+  id: number;
   user_id: string;
   application_id: string;
   event_type: ApplicationEventType;
@@ -769,6 +804,81 @@ export type EmailEventUpdate = Partial<
 >;
 
 // ---------------------------------------------------------------------------
+// matcher_eval_cases — the golden eval set
+// ---------------------------------------------------------------------------
+
+/**
+ * One hand-labelled job, ~20 of them, forming the Matcher's regression suite. Every
+ * prompt change must still classify all of them correctly.
+ *
+ * BUILD THE SET BEFORE ITERATING ON THE PROMPT. Otherwise you tweak a prompt to fix
+ * one bad match and silently break scoring on everything else, with no way to notice —
+ * prompt changes have no compiler and no stack trace, so a labelled set is the only
+ * regression signal that exists.
+ *
+ * THIS TABLE IS THE LABELLING SURFACE, NOT THE TEST FIXTURE. The CI gate has no
+ * database, so the harness must export these rows to a JSON fixture committed to the
+ * repo and CI runs against that file. Fixtures in git are diffable and reviewable in a
+ * pull request; fixtures in a database are neither — and a regression suite nobody can
+ * review in a diff stops being trusted the first time it disagrees with someone.
+ *
+ * ADDED 2026-09-10. This was the 15th table in the migration and the only one with no
+ * Row type here, while index.ts already advertised fifteen. Flagged for applyyy-f8,
+ * who builds the Matcher: use these shapes rather than declaring your own.
+ */
+export interface MatcherEvalCaseRow {
+  id: string;
+  user_id: string;
+  /**
+   * The job being labelled. NULLABLE, and `on delete set null` rather than cascade:
+   * the label is the valuable artefact and it must survive the posting being pruned,
+   * because `job_snapshot` already holds everything the eval needs. Cascading would
+   * delete hand-done work when a scout tidied up.
+   */
+  job_id: string | null;
+  /**
+   * UNTRUSTED — a frozen copy of the job at labelling time (title, company,
+   * description, parsed requirements), carrying all the risk of its source. It reaches
+   * Gemini on every eval run, so it goes in a fenced untrusted block like any JD.
+   *
+   * Frozen on purpose: an eval case whose input can change is not a regression test.
+   */
+  job_snapshot: Json;
+  /** The human verdict. */
+  label: EvalLabel;
+  /**
+   * Why. Read by whoever is debugging a prompt regression six weeks from now, and
+   * worth more than the label itself when the two disagree — the label says what the
+   * answer is, this says whether the reasoning still applies.
+   */
+  rationale: string | null;
+  /**
+   * Which master version the label was judged against. Fit is relative to a resume,
+   * so a label taken against an old master may not hold against a new one — a case
+   * that "regressed" may just be stale.
+   */
+  master_version: number | null;
+  created_at: string;
+  updated_at: string;
+}
+/** Insert shape — what the labelling UI posts. `label` and `job_snapshot` are the only genuinely required fields. */
+export type MatcherEvalCaseInsert = {
+  user_id?: string;
+  job_id?: string | null;
+  job_snapshot: Json;
+  label: EvalLabel;
+  rationale?: string | null;
+  master_version?: number | null;
+};
+/**
+ * Update shape. `job_snapshot` is deliberately ABSENT: the snapshot is the frozen
+ * input, and a mutable input turns a regression test into a moving target that can be
+ * made to pass by editing the question. Relabelling and re-reasoning are legitimate;
+ * rewriting the job is not.
+ */
+export type MatcherEvalCaseUpdate = Partial<Pick<MatcherEvalCaseRow, 'label' | 'rationale' | 'master_version'>>;
+
+// ---------------------------------------------------------------------------
 // RPC signatures — the SQL functions every agent calls
 // ---------------------------------------------------------------------------
 
@@ -791,6 +901,19 @@ export interface ClaimApplicationsArgs {
 }
 
 /**
+ * What `claim_applications` resolves to: `returns setof public.applications`, so full
+ * rows, already leased. An EMPTY ARRAY is the normal no-work-available answer and also
+ * what the kill switch produces — neither is an error.
+ *
+ * ADDED 2026-09-10. Without a declared return type `sb.rpc('claim_applications', …)`
+ * hands the caller `any`, and every agent in the system starts its work loop by
+ * claiming rows — so an untyped value at that boundary silently disables the type layer
+ * for the whole pipeline downstream of it. The Args interface being right is not enough
+ * when the return is what the agent actually reads.
+ */
+export type ClaimApplicationsResult = ApplicationRow[];
+
+/**
  * Arguments to `advance_application_status`. Validates the edge against the transition
  * table, writes the event, updates previous_status, and releases the claim — in ONE
  * transaction. Raises if the move is illegal or the actor is not permitted.
@@ -803,6 +926,22 @@ export interface AdvanceApplicationStatusArgs {
   /** Optional structured context recorded on the event row. */
   p_detail?: Json;
 }
+
+/**
+ * What `advance_application_status` resolves to: `returns public.applications`, i.e.
+ * ONE row — the application as it now stands after the move.
+ *
+ * ADDED 2026-09-10, same reasoning as `ClaimApplicationsResult`. Note the contrast
+ * with `sweep_stale_claims`: this is `returns <table>` (a single composite value, one
+ * object) whereas that is `returns table (…)` (a set, an array). The two SQL spellings
+ * differ by one word and produce different JSON shapes, which is precisely how the
+ * `SweepStaleClaimsResult` bug happened — so both are now stated explicitly here
+ * rather than left for a peer to infer from the function name.
+ *
+ * On an illegal edge or a forbidden actor this RAISES, arriving as `error`, not as a
+ * null row. Do not treat a null as "move refused".
+ */
+export type AdvanceApplicationStatusResult = ApplicationRow;
 
 /** Arguments to `release_application_claim` — used when quota is exhausted. Status is untouched; only the lease is dropped. */
 export interface ReleaseApplicationClaimArgs {
@@ -817,10 +956,35 @@ export interface ReleaseApplicationClaimArgs {
  * every key is cooling or the user's daily budget is spent. That is NOT an error:
  * release the claim and let the row be picked up next run.
  */
-export interface ClaimGeminiKeyResult {
-  /** The key to use. Read the actual secret from `GEMINI_API_KEY_<zero-padded index>`. */
-  key_index: number;
-}
+/**
+ * CORRECTED 2026-09-10 — this used to be `interface { key_index: number }` and that
+ * was WRONG in a way that fails silently. `claim_gemini_key()` is
+ * `returns smallint` (20260909235100_queue_and_pool_functions.sql:282-283), and
+ * PostgREST serialises a scalar-returning function as a BARE VALUE, not as an object.
+ *
+ * So the correct call is:
+ *
+ *     const { data, error } = await sb.rpc('claim_gemini_key');
+ *     if (error) throw error;
+ *     if (data === null) return;            // no key available — NOT an error
+ *     await callGemini(keySecretFor(data)); // `data` IS the index
+ *
+ * and `data.key_index` is `undefined`. Why that mattered enough to document: the old
+ * shape produced `p_key_index: undefined` on the follow-up `report_gemini_result`
+ * call, so a key's success or failure was never recorded — cooldowns and
+ * consecutive_failures would stay frozen and the pool would keep handing out a key
+ * that was already rate-limited. A wrong type at an RPC boundary is not a compile
+ * error, because the client returns `any`; it is a runtime shape mismatch, and this
+ * one degraded the quota system rather than crashing it.
+ *
+ * `null` is IN THE TYPE, not an error case: it means every key is cooling or the daily
+ * budget is spent. Release the claim and let the row be picked up next run.
+ *
+ * The number is the key INDEX — read the actual secret from
+ * `GEMINI_API_KEY_<zero-padded index>`. The secret itself never enters the database
+ * (constraint 11: nothing secret in the repo, and nothing secret in a row either).
+ */
+export type ClaimGeminiKeyResult = number | null;
 
 /** Arguments to `report_gemini_result` — closes the loop after every call. */
 export interface ReportGeminiResultArgs {
@@ -833,12 +997,58 @@ export interface ReportGeminiResultArgs {
 }
 
 /**
+ * `bootstrap_user_defaults()` — takes no arguments, `returns void`. Call it once per
+ * new account, before anything else runs.
+ *
+ * ADDED 2026-09-10: SCHEMA_CONTRACT.md counted seven RPCs and instructed every peer to
+ * call this one, while tables.ts declared only six. An RPC that the contract tells you
+ * to call and the types do not mention is the kind of gap where each stream invents its
+ * own bootstrap.
+ *
+ * KNOWN GAP, reported to applyyy-8c and NOT fixable from this package: as written the
+ * function does not seed `gemini_key_state`. `claim_gemini_key()` therefore returns
+ * NULL forever on a fresh account, and because NULL legitimately means "every key is
+ * cooling" (see ClaimGeminiKeyResult), the pipeline looks merely IDLE rather than
+ * broken — no error, no failed run, nothing on the health page. That is the silent
+ * death of PROJECT_PLAN section 14, and it is a SQL fix, not a type fix. Do not paper
+ * over it here by having an agent seed the pool itself.
+ */
+export type BootstrapUserDefaultsResult = void;
+
+/**
  * Result of `sweep_stale_claims`. Run it at the top of every agent tick — it is cheap
  * and it makes a crashed agent self-heal instead of stranding work forever.
  */
-export interface SweepStaleClaimsResult {
+export interface SweepStaleClaimsRow {
   /** Rows whose lease lapsed and whose claim was simply dropped; they stay in their status and get picked up again. */
   released_count: number;
   /** Rows that were stale in `applying` and were routed to `needs_verification`. NEVER returned to the queue. */
   needs_verification_count: number;
 }
+
+/**
+ * What `sweep_stale_claims()` actually resolves to — AN ARRAY OF ONE ROW.
+ *
+ * CORRECTED 2026-09-10. This was declared as a bare object, which was wrong in the
+ * most expensive possible way: silently. The SQL is
+ * `returns table (released_count integer, needs_verification_count integer)`
+ * (20260909235100_queue_and_pool_functions.sql:218-219), and PostgREST serialises
+ * ANY `returns table` function as a JSON array — even when it can only ever yield one
+ * row. So:
+ *
+ *     const { data, error } = await sb.rpc('sweep_stale_claims');
+ *     if (error) throw error;
+ *     const swept = data?.[0];                       // CORRECT
+ *     const released = swept?.released_count ?? 0;
+ *
+ * `data.released_count` is `undefined`, and `undefined ?? 0` is `0`. That is why this
+ * mattered: every health-page counter fed by this RPC would read ZERO, forever, with
+ * no error anywhere. PROJECT_PLAN section 14 calls the silent death the expensive
+ * failure mode — a monitoring page that confidently reports "0 stale claims swept"
+ * because its type was wrong is exactly that, and it is worse than a blank page,
+ * because a blank page prompts someone to look.
+ *
+ * `SweepStaleClaimsRow` is exported separately so a caller can name the unwrapped row
+ * after indexing; use this alias for the RPC's return value itself.
+ */
+export type SweepStaleClaimsResult = SweepStaleClaimsRow[];

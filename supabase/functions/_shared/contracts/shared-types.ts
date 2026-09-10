@@ -57,4 +57,62 @@ export type {
   DiscoverySource,
   EmploymentType,
   WorkArrangement,
+  // The untrusted-string marker. It is `string` to the compiler and buys no
+  // enforcement — it exists so the danger is visible at every use site instead of
+  // living in a document nobody rereads.
+  Untrusted,
+  // The JSON column type, used by `filter_rules.config` and `jobs.raw_payload`.
+  Json,
+  // Row and insert shapes this stream reads or writes. Imported, NEVER redefined: a
+  // redefined row type does not fail, it DRIFTS, and drift between the row shape and
+  // the code writing that row is invisible until production.
+  SystemSettingsRow,
+  JobRow,
+  JobInsert,
+  JobUpdate,
+  JobSourceRef,
+  ApplicationRow,
+  AuditFinding,
+  FilterRuleRow,
+  CompanyWatchlistRow,
+  EmailEventRow,
+  EmailEventInsert,
+  GeminiKeyStateRow,
+  AgentRunRow,
+  AgentRunInsert,
+  // Enum unions for the agent runtime and the email Tracker.
+  AgentName,
+  AgentRunStatus,
+  EmailClassification,
+  BlockReason,
+} from "../../../../packages/shared-types/src/index.ts";
+
+// VALUES, not types — and the reason this block exists is worth stating, because the
+// header above originally said this module would be `export type` only.
+//
+// That was correct while this stream had only pure text functions. It stopped being
+// correct the moment an agent needed to WRITE a status: SCHEMA_CONTRACT.md §6 requires
+// `canTransition` to be called before every status write, so that an illegal edge
+// fails fast in TypeScript rather than surfacing as an opaque trigger error from
+// Postgres. That check cannot be performed by a type — it needs the runtime graph.
+//
+// So the runtime dependency is now deliberate and paid for, rather than accidental.
+// It stays confined to this one module for the same reason the type re-exports do:
+// switching to the bare `@applyy/shared-types` specifier later remains a one-line
+// edit here instead of a sweep through every agent.
+export {
+  // The ~45-edge status graph's guard. Called before every status write.
+  canTransition,
+  // What an agent may legally move a row to from here, for building the next step.
+  nextStatuses,
+  // Whether a row has reached a state nothing further will move it out of.
+  isTerminal,
+  // The status vocabulary, for validating a value that arrived as a plain string.
+  APPLICATION_STATUSES,
+  // The agent identities the transition guard accepts as actors.
+  AGENT_NAMES,
+  // The filter cascade's rule vocabulary — the Screener iterates this.
+  FILTER_RULE_TYPES,
+  // The classifier's output vocabulary, used to build Gemini's response schema.
+  EMAIL_CLASSIFICATIONS,
 } from "../../../../packages/shared-types/src/index.ts";

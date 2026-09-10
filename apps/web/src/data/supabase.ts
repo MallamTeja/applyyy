@@ -17,44 +17,22 @@
 import { createClient } from '@supabase/supabase-js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
+/* The pure role reader. Imported rather than redeclared - two copies of a
+   security decision is how one of them ends up subtly wrong and nobody
+   notices which one is live. */
+import { readRoleClaim } from './keyRole';
+
 /* Read through Vite's env rather than process.env: only VITE_-prefixed values
  * are exposed to the bundle, which is itself a guard against a stray
  * SUPABASE_SERVICE_ROLE_KEY in the shell leaking into the build. */
 const url: string | undefined = import.meta.env['VITE_SUPABASE_URL'];
 const anonKey: string | undefined = import.meta.env['VITE_SUPABASE_ANON_KEY'];
 
-/* Decode a JWT payload without verifying it. Verification is not the point and
- * is not possible in the browser anyway - we only need to read the role claim
- * the issuer put there, to catch the wrong key being supplied. */
-function readRoleClaim(token: string): string | null {
-  /* A JWT is three base64url segments; the middle one is the payload. Anything
-   * with a different shape is not a Supabase key at all. */
-  const segments = token.split('.');
-  if (segments.length !== 3) return null;
-
-  /* `noUncheckedIndexedAccess` types this as possibly-undefined, which is
-   * correct: the compiler cannot connect the length check above to this index,
-   * so the guard is real rather than ceremonial. */
-  const payloadSegment = segments[1];
-  if (payloadSegment === undefined) return null;
-
-  try {
-    /* base64url differs from base64 in two characters, and atob only
-     * understands the latter, so translate before decoding. */
-    const base64 = payloadSegment.replace(/-/g, '+').replace(/_/g, '/');
-    const decoded: unknown = JSON.parse(atob(base64));
-
-    /* The decoded payload is untrusted JSON, so narrow it rather than casting
-     * to a shape we have merely assumed. */
-    if (typeof decoded !== 'object' || decoded === null) return null;
-    const role = (decoded as Record<string, unknown>)['role'];
-    return typeof role === 'string' ? role : null;
-  } catch {
-    /* A malformed token is a configuration error, and returning null routes it
-     * into the same explicit failure below as a missing one. */
-    return null;
-  }
-}
+/* The role decision lives in its own side-effect-free module so it can be
+ * tested directly. It could not be while it was private to this file: this
+ * module throws at import time, so any test importing it had to satisfy the
+ * guard before it could test the guard. See keyRole.ts for the full reasoning -
+ * the short version is "separate the pure decision from the side effect". */
 
 /* Thrown at import time. Failing to start is the correct response to a
  * misconfigured key: a console that silently renders empty tables because auth

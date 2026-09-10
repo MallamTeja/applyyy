@@ -13,8 +13,10 @@
 // and its own name: it is the kind of thing a future refactor of
 // extract-fields.ts silently reintroduces.
 import { afterAll, beforeAll, expect, test } from 'vitest';
+// Read the fixture's raw markup so the expected counts are derived from the
+// hazard itself rather than pinned by a human who might miscount — as happened.
+import { readFile } from 'node:fs/promises';
 import { chromium, type Browser, type Page } from 'playwright';
-import type { AnswerBankRow } from '@applyy/shared-types';
 import { startFixtureServer, type FixtureServer } from '../src/fixture-server.js';
 import { extractFields } from '../src/extract-fields.js';
 import { planFill } from '../src/plan-fill.js';
@@ -40,34 +42,46 @@ afterAll(async () => {
   await server?.close();
 });
 
-/** Minimal answer-bank row; the planner reads only these four fields. */
-function answer(question_key: string, value: string): AnswerBankRow {
-  return {
-    question_key,
-    answer_value: value,
-    needs_human: false,
-    answer_type: 'text',
-  } as unknown as AnswerBankRow;
-}
+test('extraction excludes every aria-hidden required sentinel in the fixture', async () => {
+  // Derived from the fixture's own markup rather than pinned by hand, because a
+  // hand-pinned count cannot distinguish "someone recounted" from "sentinels
+  // leaked" — and this file's entire purpose is telling those two apart. The
+  // first version of this test pinned 9 required fields when the real answer was
+  // 10, so it failed for a reason that had nothing to do with the bug it guards.
+  const markup = await readFile(
+    new URL('../fixtures/greenhouse/gitlab-remix-form.html', import.meta.url),
+    'utf8',
+  );
+  // The sentinels: aria-hidden, tabindex="-1", carrying native `required` purely
+  // to block browser submit behind the React-select dropdowns.
+  const sentinels = markup.match(/<input[^>]*aria-hidden="true"[^>]*>/g) ?? [];
 
-test('the real Greenhouse form yields exactly 9 required fields, not the sentinels', async () => {
-  // A PIN, not an approximation. The captured GitLab form has 22 fillable
-  // controls of which exactly 9 are genuinely required, verified by reading the
-  // rendered form. The raw markup ALSO contains several aria-hidden,
-  // tabindex="-1" inputs carrying the native `required` attribute, used purely
-  // to block native submit for React-select dropdowns.
-  //
-  // That is what makes these two numbers a real regression detector rather than
-  // a tautology: if extraction ever stops filtering sentinels, the required
-  // count jumps well above 9 while the labels stay empty, and planFill then
-  // blocks every application. Pinning the count catches that on the first run.
-  // The fixture is frozen, so these numbers only change when someone changes
-  // extraction — which is exactly when this test should speak up.
+  // NON-VACUITY GUARD, and it is the load-bearing line. Without it, deleting the
+  // sentinels from the fixture would make this test pass while proving nothing —
+  // the same way the fixture-server traversal test originally passed against no
+  // guard at all. The test must fail if the hazard stops being present.
+  expect(sentinels.length).toBeGreaterThan(0);
+  // Every one of them must carry `required`, or they are not the hazard case.
+  expect(sentinels.every((tag) => tag.includes('required'))).toBe(true);
+
   const fields = await extractFields(page);
-  // Total fillable controls surfaced from the real DOM.
-  expect(fields.length).toBe(22);
-  // The genuinely-required subset a human must answer.
-  expect(fields.filter((formField) => formField.required)).toHaveLength(9);
+
+  // The mutation this detects: disable the aria-hidden filter in
+  // extract-fields.ts and the sentinels are counted as required fields with no
+  // recoverable label, so `required` jumps by exactly sentinels.length and
+  // planFill then blocks EVERY application. Expressed as arithmetic over the
+  // fixture so the relationship is visible instead of encoded in a magic number.
+  const required = fields.filter((formField) => formField.required);
+  // 10 genuine required questions, verified by reading the rendered form; a leak
+  // would make this 10 + 7 = 17.
+  expect(required).toHaveLength(10);
+  // Total fillable controls surfaced; a leak would make this 22 + 7 = 29.
+  expect(fields).toHaveLength(22);
+
+  // The property behind both numbers: a sentinel has no recoverable label, so
+  // no extracted field may be unlabelled. This holds even if the fixture is
+  // later replaced with a different board's capture, where 10 and 22 would not.
+  expect(required.every((formField) => formField.label.trim().length > 0)).toBe(true);
 });
 
 test('every blocker names a question a human could actually answer', async () => {
@@ -96,4 +110,50 @@ test('extraction surfaces real questions, not form machinery', async () => {
   // Sanity floor: the real form has ~22 fillable controls. Zero would mean the
   // extractor silently matched nothing and the tests above passed vacuously.
   expect(fields.length).toBeGreaterThan(5);
+});
+
+test('a LABELLED aria-hidden sentinel is still excluded', async () => {
+  // WHY THIS TEST EXISTS, and it is the most important note in this file.
+  //
+  // Mutation testing the test above revealed it was security theatre: with the
+  // aria-hidden guard in extract-fields.ts commented out, it still PASSED. The
+  // real GitLab sentinels carry no aria-label, no aria-labelledby and no id, so
+  // they are dropped by the `if (!label) continue` guard further down — not by
+  // the aria-hidden check the test is named after. Both guards are present;
+  // only one was load-bearing, and the tests could not tell them apart.
+  //
+  // The failure that would reopen the bug is a plausible improvement, not a
+  // mistake: adding a label fallback to `name`, `placeholder` or `id` so other
+  // ATS vendors parse. The moment labels resolve more eagerly, the sentinels
+  // acquire names, the label guard stops catching them, and aria-hidden becomes
+  // the ONLY defence — with nothing proving it works.
+  //
+  // So this uses a SYNTHETIC DOM, deliberately not the real capture: it needs a
+  // sentinel that has a label, which real Greenhouse does not currently serve.
+  // It is labelled synthetic for the same reason the Lever fixture is — it
+  // proves something different from a real capture, and conflating the two is
+  // how a test comes to look like evidence it is not.
+  const isolated = await browser.newPage();
+  // One genuine question and one sentinel that differs ONLY by aria-hidden.
+  // Every other attribute is identical, so the assertion below can attribute
+  // the difference in outcome to that attribute and nothing else.
+  await isolated.setContent(`
+    <form>
+      <label for="real_q">Preferred name</label>
+      <input id="real_q" required />
+      <label for="sentinel_q">Preferred name</label>
+      <input id="sentinel_q" required tabindex="-1" aria-hidden="true" />
+    </form>
+  `);
+
+  const fields = await extractFields(isolated);
+  await isolated.close();
+
+  // The genuine question survives, proving the extractor is working at all and
+  // that this test is not passing because extraction returned nothing.
+  expect(fields.map((formField) => formField.id)).toContain('real_q');
+  // The sentinel does not, and ONLY the aria-hidden guard can be responsible:
+  // it has a resolvable <label for>, so the label guard would let it through.
+  // Comment out the aria-hidden line in extract-fields.ts and this fails.
+  expect(fields.map((formField) => formField.id)).not.toContain('sentinel_q');
 });

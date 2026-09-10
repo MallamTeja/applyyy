@@ -17,12 +17,15 @@
   "files": [
     "src"
   ],
-  "// scripts.typecheck": "The only script this package needs — it has no runtime code to build or test.",
+  "// scripts.typecheck": "Type-checks src AND test. The package has no runtime code to build.",
+  "// scripts.test": "Enum/table/graph parity against supabase/migrations. node --test runs .ts directly via native type stripping, so this needs no runner dependency and no build. It reads the migration FILES, never a database, so it works with no Supabase running.",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
   },
-  "// devDependencies": "typescript is a devDependency here so the package can be type-checked standalone in CI; the root pins the actual version.",
+  "// devDependencies": "@types/node is needed by the PARITY TEST ONLY (node:fs, node:test, node:path, node:url); src/ deliberately uses no Node API, because the contract is imported by Deno Edge Functions and by the browser, so a Node builtin leaking into it would break two of three runtimes at runtime rather than at compile time. NOTE: this explanation lives at the top level because pnpm VALIDATES dependency names — a \"// x\" pseudo-key inside devDependencies is rejected with ERR_PNPM_INVALID_DEPENDENCY_NAME, the same trap as TS5025 inside compilerOptions. The trick is only safe in objects nothing validates. typescript is a devDependency here so the package can be type-checked standalone in CI; the root pins the actual version. The floor is 5.8, NOT 5.6: tsconfig.base.json sets erasableSyntaxOnly, which TypeScript only understands from 5.8 — under 5.6 it is an unknown-option error, so a lockfile refresh that resolved the caret down would break this package with no code change to blame. Raised 2026-09-10 to state the real requirement instead of relying on the caret floating to 5.9.",
   "devDependencies": {
-    "typescript": "^5.6.0"
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
   }
 }

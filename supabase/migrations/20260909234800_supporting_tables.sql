@@ -341,11 +341,34 @@ create table public.company_blocklist (
 alter table public.company_blocklist enable row level security;
 alter table public.company_blocklist force row level security;
 
--- The filter's lookup: is this slug blocked right now? Partial on live blocks so
--- expired ones do not bloat the index the Screener hits on every job.
-create index company_blocklist_active_idx
-  on public.company_blocklist (user_id, company_slug)
-  where blocked_until is null or blocked_until > now();
+-- The Screener's lookup is "is this slug blocked RIGHT NOW?", and the honest
+-- answer is that no index can encode "right now".
+--
+-- This was written as a partial index with `where blocked_until is null or
+-- blocked_until > now()` and Postgres refused it outright, which is how this
+-- migration first failed to load:
+--   ERROR: functions in index predicate must be marked IMMUTABLE (SQLSTATE 42P17)
+--
+-- The refusal is correct and worth understanding rather than working around. An
+-- index predicate is evaluated at WRITE time and decides whether a row is in
+-- the index at all. now() is STABLE, not IMMUTABLE — it returns a different
+-- value in a later transaction — so a row admitted while "still blocked" would
+-- stay in the index forever after its block expired, and nothing would ever
+-- re-evaluate it, because there is no write to trigger re-evaluation when the
+-- only thing that changed is the clock. The index would encode a fact that was
+-- true only at the instant it was written, and would then quietly lie.
+--
+-- Therefore the time comparison belongs in the QUERY, which is re-evaluated on
+-- every execution, and never in the index.
+--
+-- No replacement index is created here, and that is a deliberate choice rather
+-- than an omission. The unique constraint declared above,
+-- `company_blocklist_user_slug_key unique (user_id, company_slug)`, already
+-- creates a btree on exactly those two columns — which IS the Screener's lookup
+-- key. A second index on the same leading columns would cost a write on every
+-- insert and buy no reads. The Screener reads `blocked_until` off the row it
+-- just found and applies the time test itself; this table holds one person's
+-- blocked companies, so that heap fetch is not a cost worth indexing away.
 
 -- =============================================================================
 -- answer_bank — standing answers, growing themselves.

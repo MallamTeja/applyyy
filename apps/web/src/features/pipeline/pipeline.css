@@ -1,0 +1,175 @@
+/* The pipeline board.
+ *
+ * THE DESIGN PROBLEM THIS SOLVES. The status graph has eighteen statuses, and
+ * eighteen equal columns is not a board, it is a spreadsheet - the operator
+ * scans left to right and gives the approval gate the same attention as
+ * `dropped_filter`. So the board is three stacked lanes with different visual
+ * weight, and only one of them is allowed to draw the eye.
+ *
+ * WHAT IS DELIBERATELY ABSENT: the dark surface. It appears in exactly one
+ * place in this whole console - the Bucket B alert band on the approval queue -
+ * and its scarcity is what makes it mean anything. A kanban board with a dark
+ * header would spend that signal on navigation furniture.
+ */
+
+/* --- Lanes ------------------------------------------------------------ */
+
+.lane {
+  /* Generous separation between lanes, because the lane boundary is the most
+     important line on the page: it separates "you must act" from "this is just
+     information". A tight stack would read as one long list of columns. */
+  margin-top: var(--gap-6);
+}
+
+.lane__title {
+  font-size: var(--size-md);
+  /* 600 rather than bold: the lane heading orients, it does not announce. */
+  font-weight: 600;
+  /* Machine face - this is system state, not resume content. */
+  font-family: var(--font-machine);
+  margin-bottom: var(--gap-1);
+}
+
+.lane__note {
+  color: var(--ink-muted);
+  font-size: var(--size-sm);
+  /* Capped at a readable measure. These notes carry the reasoning for the lane
+     and get read once; a full-width line of 14px text does not get read at
+     all. */
+  max-width: 68ch;
+  margin-bottom: var(--gap-4);
+}
+
+/* Horizontal scroll lives on the column strip, never on the page body. A page
+   that scrolls sideways loses the nav rail, and eighteen columns will not fit
+   any screen. */
+.lane__columns {
+  display: flex;
+  gap: var(--gap-3);
+  overflow-x: auto;
+  /* Room for the scrollbar so it never overlaps the last column's controls. */
+  padding-bottom: var(--gap-3);
+  /* Snap so a flick lands on a column edge rather than mid-column, which
+     matters when there are enough columns to need several flicks. */
+  scroll-snap-type: x proximity;
+}
+
+/* --- One column ------------------------------------------------------- */
+
+.column {
+  /* Fixed width rather than flexible: columns of unequal width imply unequal
+     importance, and the importance here is carried by the lane, not the
+     column. */
+  flex: 0 0 13rem;
+  scroll-snap-align: start;
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+  padding: var(--gap-3);
+  /* Columns are containers of work, so they sit on the page rather than
+     floating over it - no shadow. */
+}
+
+/* Terminal statuses. Dimmed, NOT hidden: hiding them would make "where did
+   that application go" unanswerable, which is the question a closed lane
+   exists to answer. */
+.column--terminal {
+  background: var(--panel);
+  /* Muted, not invisible. Still readable if you look straight at it. */
+  opacity: 0.72;
+}
+
+.column__head {
+  display: flex;
+  /* Title left, count hard right - a consistent place for the eye to find the
+     number across every column. */
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--gap-2);
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: var(--gap-2);
+  margin-bottom: var(--gap-2);
+}
+
+.column__title {
+  /* Mono, because this is the literal status value from the database and the
+     operator will match it against a row, an event log and a peer's message.
+     Setting it in the body face would imply it is prose we chose. */
+  font-family: var(--font-id);
+  font-size: var(--size-xs);
+  font-weight: 600;
+  /* No text-transform: changing the case of an identifier the operator has to
+     match by eye is exactly the wrong kind of polish. */
+  word-break: break-word;
+}
+
+.column__count {
+  font-family: var(--font-id);
+  font-size: var(--size-xs);
+  color: var(--ink-muted);
+}
+
+/* --- The manual moves out of a column -------------------------------- */
+
+.column__moves {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-1);
+}
+
+/* Human-ONLY edges. A person is the only actor that will ever move these, so
+   they carry the bronze needs-a-human signal at full strength. */
+.move--human-only .move__button {
+  border-color: var(--signal);
+  background: var(--signal-wash);
+  color: var(--ink);
+}
+
+/* Edges shared with an agent. Normally the automation handles these and this
+   control is the fallback for when it has stopped - so it is present, but
+   quiet. Giving it the same weight as a human-only lane would train the
+   operator to reach for a manual move that an agent was about to make. */
+.move--fallback .move__button {
+  border-color: var(--rule);
+  background: transparent;
+  color: var(--ink-muted);
+}
+
+.move__button {
+  width: 100%;
+  /* Left-aligned so the target status names line up down the column and can be
+     read as a list rather than as separate buttons. */
+  text-align: left;
+  padding: var(--gap-1) var(--gap-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+  font-family: var(--font-id);
+  font-size: var(--size-xs);
+  cursor: pointer;
+}
+
+/* Every one of these is disabled right now, and the styling says so plainly.
+   A control that looks live but does nothing is worse than a visibly dead one,
+   especially on a board about applications that may or may not have been
+   sent. */
+.move__button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* --- The coverage warning -------------------------------------------- */
+
+/* A status with human-reachable edges that no screen claims. Rows can enter it
+   and never leave by hand - a silent stall. Rendered in the fabrication red
+   because this is a defect in the console itself, not a needs-a-human state:
+   the bronze family means "waiting for you", and this is not waiting, it is
+   broken. */
+.column__gap {
+  margin-top: var(--gap-2);
+  padding: var(--gap-2);
+  background: var(--fabricated-wash);
+  border-left: 3px solid var(--fabricated);
+  font-size: var(--size-xs);
+  color: var(--fabricated-deep);
+}

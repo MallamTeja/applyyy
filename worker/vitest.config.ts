@@ -14,6 +14,14 @@ export default defineConfig({
     // timeout would flake. Kept tight enough that a genuine hang still fails
     // fast rather than burning GitHub Actions minutes (§2 budget).
     testTimeout: 30_000,
+    // hookTimeout is a SEPARATE knob from testTimeout and defaults to 10s, which
+    // is less than a cold Chromium launch plus fixture-server bind plus page
+    // navigation on this machine. Left at the default, extract-fields.test.ts
+    // failed in beforeAll with "Hook timed out" — a failure that reads like a
+    // broken extractor rather than a misconfigured runner, which is the
+    // expensive kind. Set here once instead of re-passing 60_000 at every
+    // beforeAll, since every browser-driving file in this package needs it.
+    hookTimeout: 60_000,
     // Browser tests bind real localhost ports. Running files sequentially
     // avoids port races and keeps peak memory low on a 2-core Actions runner.
     fileParallelism: false,

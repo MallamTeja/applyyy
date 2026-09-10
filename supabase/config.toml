@@ -68,8 +68,28 @@ enabled = true
 # The URL the local frontend runs on; auth redirects come back here.
 site_url = "http://localhost:5173"
 additional_redirect_urls = ["http://localhost:5173"]
-# One hour. Short enough that a leaked token expires quickly, long enough that a
-# GitHub Actions worker run (~90s per application) never expires mid-run.
+# One hour. Short enough that a leaked token expires quickly, long enough to
+# outlast a worker run — but the margin is now much thinner than it looks, and
+# the reason is worth recording where the number lives.
+#
+# This comment used to read "~90s per application". That figure is wrong: a
+# single in-process application measured ~3.75s against a localhost fixture.
+# The real cost is per-RUN, not per-application (~40-70s of runner startup,
+# checkout and browser install), and GitHub bills every job rounded UP to a
+# whole minute, which is why the worker batches all of a day's applications
+# into ONE run instead of taking one run each.
+#
+# That batching is what erodes the headroom here. Under the old per-application
+# reading, a run was ~90s against a 3600s token — roughly 40x of slack. Under
+# batching, one run carries the whole daily queue: ~35 applications is
+# estimated at ~54 min/day of runner time, i.e. ~3240s against a 3600s token.
+# That is ~10% headroom, not 4000%, and the 3.75s measurement EXCLUDES real-site
+# latency and file upload, so the true figure is higher than the estimate.
+#
+# Consequence to design for, not to assume away: a long batch can outlive its
+# access token mid-run. The worker must be able to re-authenticate partway
+# through a run rather than signing in once at the start, which is what the
+# refresh-token rotation below exists to support.
 jwt_expiry = 3600
 # The worker signs in once per run and relies on the access token; rotation protects
 # the long-lived refresh token it holds in Actions secrets.
@@ -89,3 +109,26 @@ enable_confirmations = false
 [analytics]
 # Off. It is a heavy container and this project has no use for it.
 enabled = false
+
+# ---------------------------------------------------------------------------
+# Edge Function overrides.
+# ---------------------------------------------------------------------------
+
+# The Apps Script email tracker posts here, and Apps Script CANNOT mint a
+# Supabase JWT — it has no access to the project's signing secret and no
+# Supabase client. With the default verify_jwt = true the platform rejects every
+# request at the gateway BEFORE the function body runs, so no amount of
+# in-function logic can rescue it; the function would be unreachable by its only
+# caller.
+[functions.email-tracker-intake]
+# Disables gateway JWT verification for this ONE function. Scoped per-function
+# on purpose: it is the narrowest place the exemption can live, so no other
+# function silently inherits an open door.
+#
+# This does NOT make the endpoint unauthenticated — it moves authentication from
+# the gateway into the function, which must therefore verify a shared secret it
+# checks itself. An unauthenticated public writer into the tracking tables would
+# let anyone forge application-status emails, which is constraint #11 territory.
+# applyyy-f8 owns supabase/functions/** and owns that in-function check; this
+# file only opens the gate it has to check behind.
+verify_jwt = false

@@ -15,6 +15,11 @@
  */
 
 import type { AgentName, ApplicationStatus } from './enums.ts';
+// A VALUE import, not a type import: TERMINAL_STATUSES is derived by filtering this
+// tuple, so the list of statuses has to exist at runtime. Kept as a separate statement
+// because `verbatimModuleSyntax` requires type-only and value imports to be spelled
+// distinctly rather than merged.
+import { APPLICATION_STATUSES } from './enums.ts';
 
 /** One legal move: a from-status, a to-status, and who is permitted to make it. */
 export interface StatusTransition {
@@ -39,12 +44,31 @@ export interface StatusTransition {
  * if you change one you must change both, and SCHEMA_CONTRACT.md carries the checklist.
  *
  * NOTE ON QUOTA-EXHAUSTION ROLLBACK: PROJECT_PLAN section 6 says an agent that finds
- * every Gemini key cooling "returns the row to its prior status". There are deliberately
- * NO backward edges for that, because none are needed — claiming is done with
- * `claimed_by` / `claim_expires_at`, not by advancing the status. An agent that cannot
- * get a key simply releases its claim; the row never left the status it was in. The
- * rollback that the plan describes is a no-op in this design, which is strictly better
- * than seeding reverse edges: there is no backward path for a bug to wander down.
+ * every Gemini key cooling "returns the row to its prior status". No backward edge was
+ * added for that, because none is needed — claiming is done with `claimed_by` /
+ * `claim_expires_at`, not by advancing the status. An agent that cannot get a key
+ * simply releases its claim; the row never left the status it was in. The rollback the
+ * plan describes is a no-op in this design, which is better than seeding reverse edges
+ * onto the forward path.
+ *
+ * BUT DO NOT READ THAT AS "THE GRAPH HAS NO BACKWARD EDGES" — corrected 2026-09-10,
+ * because the previous wording ended "there is no backward path for a bug to wander
+ * down" and that is false. SEVEN backward edges exist, deliberately, and they are the
+ * recovery lanes: `audit_flagged→tailored`, `interview→oa_pending`,
+ * `blocked_needs_human→applied`, `blocked_needs_human→dropped_filter`,
+ * `needs_verification→applied`, `needs_verification→approved`,
+ * `failed→needs_verification`.
+ *
+ * The true statement is narrower and is what the prose above was reaching for: no
+ * backward edge exists on the AUTOMATED FORWARD PATH, and every backward edge except
+ * one is `['human']`-only. The exception is `interview → oa_pending`
+ * (`['tracker','human']`) — THE ONE REVERSE EDGE A MACHINE CAN WALK, because a
+ * multi-round loop legitimately sends a further assessment after an interview.
+ *
+ * Why the distinction is worth this many lines: a reader who trusts "zero backward
+ * edges" concludes the actor check on reverse moves is redundant and skips it. It is
+ * not redundant — it is the entire safety property, and it is doing real work on
+ * exactly one edge.
  */
 export const STATUS_TRANSITIONS: readonly StatusTransition[] = [
   // ---- Discovery and dedupe -------------------------------------------------
@@ -114,9 +138,28 @@ export const STATUS_TRANSITIONS: readonly StatusTransition[] = [
 
 /**
  * Statuses with no outgoing edge. Nothing in the system may move a row out of these.
- * Derived rather than hand-listed so it cannot fall out of sync with the graph above.
+ *
+ * NOW GENUINELY DERIVED (2026-09-10). This comment previously claimed "derived rather
+ * than hand-listed so it cannot fall out of sync with the graph above" while the value
+ * was a hand-written literal — the values happened to be correct, but the guarantee was
+ * fictional, and a comment asserting a property nothing enforces is a guard nobody
+ * runs. Adding an outgoing edge to `offer` would have left this list silently wrong,
+ * which is the exact drift the comment promised to prevent. It is computed now, so the
+ * promise and the code are the same thing.
+ *
+ * Note what this correctly EXCLUDES: `failed` looks terminal and is not, because
+ * `failed → needs_verification` exists — a row that failed near the submit boundary
+ * must be checked by a person before it can move again. Deriving gets that right
+ * without anyone having to remember it.
+ *
+ * Order follows APPLICATION_STATUSES rather than the edge list, so it stays stable
+ * against a harmless reshuffle of the transitions below and matches the order Postgres
+ * sorts the enum in.
  */
-export const TERMINAL_STATUSES: readonly ApplicationStatus[] = ['offer', 'rejected', 'dropped_filter', 'dropped_duplicate'];
+export const TERMINAL_STATUSES: readonly ApplicationStatus[] = APPLICATION_STATUSES.filter(
+  // No edge leaves this status, so nothing in the graph can move a row out of it.
+  (status) => !STATUS_TRANSITIONS.some((transition) => transition.from === status),
+);
 
 /**
  * Statuses that an automated sweeper must NEVER return to the work queue.
