@@ -595,79 +595,86 @@ function ControlCoveragePanel(): ReactElement {
         count.
       </p>
 
-      <table className="table">
-        <thead>
-          <tr>
-            <th scope="col">Coverage</th>
-            <th scope="col">Edges</th>
-            <th scope="col">What it means for the operator</th>
-          </tr>
-        </thead>
-        <tbody>
-          {/* Worst first. The order is the order of exposure, not the order the
-              sets happen to be declared in. */}
-          <tr
-            className={
-              MISSING_HUMAN_CONTROLS.length > 0
-                ? 'table__row--attention'
-                : undefined
-            }
-          >
-            <th scope="row" className="table__id">
-              no screen claims it
-            </th>
-            <td className="table__count">{MISSING_HUMAN_CONTROLS.length}</td>
-            <td>
-              Rows can reach the source status and never leave it by hand. This
-              is the check that fires when the schema stream adds a
-              human-reachable edge nobody has given a home.
-            </td>
-          </tr>
+      {/* The same scroll container the freshness table above uses, and it was
+          missing here. Without it this table sets its own intrinsic width and
+          pushes the whole PAGE sideways on a narrow window - which loses the
+          nav rail rather than scrolling one table. The rule this restores:
+          a table scrolls inside its own container, never the page body. */}
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th scope="col">Coverage</th>
+              <th scope="col">Edges</th>
+              <th scope="col">What it means for the operator</th>
+            </tr>
+          </thead>
+          <tbody>
+            {/* Worst first. The order is the order of exposure, not the order the
+                sets happen to be declared in. */}
+            <tr
+              className={
+                MISSING_HUMAN_CONTROLS.length > 0
+                  ? 'table__row--attention'
+                  : undefined
+              }
+            >
+              <th scope="row" className="table__id">
+                no screen claims it
+              </th>
+              <td className="table__count">{MISSING_HUMAN_CONTROLS.length}</td>
+              <td>
+                Rows can reach the source status and never leave it by hand. This
+                is the check that fires when the schema stream adds a
+                human-reachable edge nobody has given a home.
+              </td>
+            </tr>
 
-          <tr
-            className={
-              UNBUILT_HUMAN_CONTROLS.length > 0
-                ? 'table__row--attention'
-                : undefined
-            }
-          >
-            <th scope="row" className="table__id">
-              claimed by a screen that does not exist
-            </th>
-            <td className="table__count">{UNBUILT_HUMAN_CONTROLS.length}</td>
-            <td>
-              Strictly worse than the row above: the status is claimed, so the
-              old check passed, and yet no screen renders these rows at all.
-              They are not merely unmovable, they are invisible.
-            </td>
-          </tr>
+            <tr
+              className={
+                UNBUILT_HUMAN_CONTROLS.length > 0
+                  ? 'table__row--attention'
+                  : undefined
+              }
+            >
+              <th scope="row" className="table__id">
+                claimed by a screen that does not exist
+              </th>
+              <td className="table__count">{UNBUILT_HUMAN_CONTROLS.length}</td>
+              <td>
+                Strictly worse than the row above: the status is claimed, so the
+                old check passed, and yet no screen renders these rows at all.
+                They are not merely unmovable, they are invisible.
+              </td>
+            </tr>
 
-          <tr>
-            <th scope="row" className="table__id">
-              visible, control disabled
-            </th>
-            <td className="table__count">{INOPERABLE_HUMAN_CONTROLS.length}</td>
-            <td>
-              A screen shows the move, built from{' '}
-              <span className="identifier">nextStatuses(status, 'human')</span>,
-              but the button is disabled because no write path exists yet. All
-              of these wait on ONE dependency, not one each.
-            </td>
-          </tr>
+            <tr>
+              <th scope="row" className="table__id">
+                visible, control disabled
+              </th>
+              <td className="table__count">{INOPERABLE_HUMAN_CONTROLS.length}</td>
+              <td>
+                A screen shows the move, built from{' '}
+                <span className="identifier">nextStatuses(status, 'human')</span>,
+                but the button is disabled because no write path exists yet. All
+                of these wait on ONE dependency, not one each.
+              </td>
+            </tr>
 
-          <tr>
-            <th scope="row" className="table__id">
-              operable today
-            </th>
-            <td className="table__count">{OPERABLE_HUMAN_CONTROLS.length}</td>
-            <td>
-              Transitions a person can actually perform in this console. Shown
-              even at zero, because a coverage report that only counts problems
-              is indistinguishable from one whose predicate is inverted.
-            </td>
-          </tr>
-        </tbody>
-      </table>
+            <tr>
+              <th scope="row" className="table__id">
+                operable today
+              </th>
+              <td className="table__count">{OPERABLE_HUMAN_CONTROLS.length}</td>
+              <td>
+                Transitions a person can actually perform in this console. Shown
+                even at zero, because a coverage report that only counts problems
+                is indistinguishable from one whose predicate is inverted.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
 
       {/* The unclaimed set, listed edge by edge when it is non-empty. Normally
           empty - and when it is not, the graph's own note on each edge is the
