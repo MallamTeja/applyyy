@@ -1,6 +1,6 @@
 # Verification traps
 
-**One family of bug, seven instances.** Every entry here is a check that
+**One family of bug, fourteen instances.** Every entry here is a check that
 **reported success for a reason other than the one you believed**. None of them
 were caught by a failing test, because in every case the test passed.
 
@@ -35,6 +35,12 @@ observability of every other layer.
    refuses everything is not a guard, and only the control distinguishes them.
 5. **Ask the mutation question:** *would this test still pass if I deleted the
    guard?* If yes, it is not a test of that guard.
+6. **Prove it can PASS for the right reason** — feed it a *correct* input and
+   assert success. Steps 1-5 only ever prove a guard can *fail*, and **a guard
+   that rejects every input satisfies all of them.** The cheapest form is the
+   *twin*: two inputs identical in every respect except the one property under
+   test, one asserted to fail and one asserted to pass. See instance 13, where an
+   expectation was satisfied by the very input it existed to reject.
 
 ---
 
@@ -158,6 +164,190 @@ they are independent:
 my staging safe?" Ask **"what writes into this tree that I did not write, and
 what would sweep it up?"** The answer is usually a tool somebody ran once.
 
+## Instance 8 — an accurate error message pointing at the wrong cause
+
+After Teja reset the database password, `supabase migration list` failed with:
+
+```
+password authentication failed for user "postgres"
+```
+
+The password was **correct**. The reset had simply not propagated yet. Sixty
+seconds later the same command connected and confirmed all seven migrations on
+both sides.
+
+The message is not wrong — authentication *did* fail. It describes the symptom
+precisely and says nothing about the cause, and the cause a reader infers from it
+("we have the wrong password") sends them hunting through credential stores for a
+string that was already right.
+
+**Generalised:** distinguish *"this error is inaccurate"* from **"this error is
+accurate and its most natural reading is wrong."** The second is far more
+dangerous, because the message survives scrutiny. For anything just
+reconfigured, **retry before diagnosing** — propagation delay and
+misconfiguration produce identical errors.
+
+Same family as instance 4: there, an exit code described a different program;
+here, an error describes a different cause.
+
+## Instance 9 — a guard verified in production, which no test could do
+
+`email-tracker-intake` was deployed with `EMAIL_INTAKE_SHARED_SECRET` **unset**.
+It returned **500 "server misconfigured"** — not 401, and critically **not 202**.
+
+This is the inverse of every other entry here, and it is worth having as a
+category: a guard **confirmed working in a live deployment** rather than in a
+test. It matters because the failure mode it rules out is one a unit test can
+only ever *predict*: the function needed to **fail closed**, so that an unset
+secret does not silently become an **open public writer** into the tracking
+tables. A forged application-status email is worse than a missing one, because it
+looks authoritative.
+
+The distinction between the three possible responses is the whole result:
+
+- **202** would have meant the endpoint was open — the disaster case.
+- **401** would have meant it was treating "no secret configured" as "caller
+  unauthorised" — safe by accident, and it would break the moment someone decided
+  401 meant "retry with credentials".
+- **500** is correct: *the server is broken, not the caller.*
+
+**Generalised:** for anything whose safety depends on a configuration value being
+present, **test the absent case in the deployed environment**, not only in unit
+tests. Deployment is where configuration actually lives, and "fails closed" is a
+claim about the deployment, not about the code.
+
+## Instance 10 — an invariant that holds because of the caller, not the callee
+
+`posted-at.ts`'s `readSourceDate` returns `confidence: 'unknown'` at **five**
+separate sites. All five are unreachable in the output — but **only because**
+`extractPostedAt` reads `fromSource.confidence` exclusively inside its
+`if (fromSource.date !== null)` branch.
+
+So the documented guarantee — *"unknown has exactly one cause"* — holds because
+of the **caller's control flow**, not because the callee's confidence values are
+correct. Nobody had recorded that.
+
+**The refactor that breaks it reads like a harmless simplification:** trusting
+`fromSource.confidence` unconditionally. Do that and parse failures silently
+start emitting `unknown` with no other symptom, because the five dead branches
+come alive.
+
+The invariant to write down is therefore **"unknown is written by exactly one
+line, the cold-start ternary"** — a statement about *where the value comes from*
+— and **not** "the confidence values are correct", which is a statement about the
+values and happens to be false.
+
+**Generalised:** when a property holds, ask **which** part of the system makes it
+hold. If the answer is "the caller", the callee is free to be wrong, and it
+usually is. Same shape as instances 1 and 2: a property true for a reason nobody
+has recorded is a property that disappears silently.
+
+## Instance 11 — the migration files and the live database disagree
+
+Two corrective migrations (`20260910185900_add_keepalive_agent_name.sql`,
+`20260910190000_fix_sweep_count_bootstrap_seed_and_blocked_edge.sql`) exist as
+files with **empty `remote` entries** in `supabase migration list`. The live
+database therefore does not have the `keepalive` agent value, does not have the
+`approved -> blocked_needs_human` edge, and still runs the un-fixed
+`bootstrap_user_defaults` and `sweep_stale_claims`.
+
+**Nothing errors.** A peer reading the files gets one answer; the same peer
+querying the database gets another.
+
+This will recur with **every** corrective migration, so it is a standing rule
+rather than an incident:
+
+> **Read the files for intent. Query the database for behaviour. Never assume they
+> agree while any migration has an empty `remote` entry.**
+
+Third member of a family this project keeps producing — **two artifacts
+disagreeing with no error anywhere.** The others: CRLF (source bytes vs. rendered
+bytes across platforms), and editing an already-applied migration (file text vs.
+what actually ran).
+
+## Instance 12 — the server you believed you had killed
+
+`TaskStop` killed a `vite preview` **wrapper** and left vite itself still
+listening. The next preview exited 1 on `--strictPort` — and **the page then
+loaded was served by the server that was supposed to be dead.** `netstat`
+confirmed the old PID.
+
+It was caught only by a contradiction that should have been impossible: the
+background task reported **failure** while the page loaded **fine**.
+
+**It fails in the safe-looking direction, which is what makes it dangerous.** You
+see a working page, so you conclude your change works. The stale server serves
+the *old* bundle, so a broken change looks correct and a correct change looks
+confirmed — both for the same wrong reason.
+
+Same family as instance 3 (`pnpm rebuild`): **a step that can produce the desired
+outcome by itself destroys the test.** A running old server produces "a page that
+loads" whether or not your new build works.
+
+**Rule: after stopping a dev server, confirm the port is actually free before
+trusting anything loaded from it — and prefer a fresh port when you cannot.**
+
+## Instance 13 — the vacuous expectation, and the twin that fixes it
+
+This is the entry that closes a hole every other measurement in this document
+leaves open.
+
+Two tests asserted that interleaved extraction is detected, using the expected
+sequence `['EXPERIENCE', 'Built a REST API']`. But that sequence **survives
+interleaving intact** — a heading still precedes its own bullet even when columns
+scramble. **The expectation was satisfied by the very input it existed to
+reject.**
+
+Two fixes, and the second is the important one:
+
+1. Require the sequence to **alternate**, so section N's *body* precedes section
+   N+1's *heading*. That is the property interleaving actually destroys.
+2. Add the **twin**: identical fragments, identical expectations, **differing only
+   in emission order**, asserted to **PASS**.
+
+The twin is what makes "detects interleaving" unsatisfiable by a checker that
+simply rejects everything.
+
+**THE HOLE THIS CLOSES.** Every mutation measurement here — 12/14, 2/36, 4/8 —
+proves a guard **can fail**. **None of them proves a guard can PASS for the right
+reason.** A guard that fires on *all* inputs is indistinguishable from a correct
+one if you only ever test the failing side, and it would score perfectly on every
+mutation test in this document.
+
+That is why the checklist below has a sixth step.
+
+## Instance 14 — a guard that reports the incident instead of preventing it
+
+`vite build` exited **0** with a `service_role` token embedded **verbatim** in
+`dist/assets/index-*.js` — decoded out of the bundle to confirm it was really
+there.
+
+The runtime anon-key guard works exactly as designed: it stops the console
+operating with a wrong-role key, and it **announces the problem in the first
+visitor's console**. What it does not do — and never could — is stop the key from
+being **shipped**.
+
+**The asymmetry is the whole point.** On a dev machine, a wrong-role key is
+nearly free: you see the console error and fix it. **On a deploy it is the entire
+ballgame** — the URL goes live carrying an RLS-bypassing credential, the guard
+reports it to whoever visits first, and by the time anyone reads that message the
+key has already been served and must be rotated. A CI gate on the build would not
+have caught it, **because the build passes.**
+
+The fix is a **build-time refusal**, and two of its design choices are worth
+copying:
+
+- It reads the **role claim of every `VITE_`-prefixed variable** rather than
+  pattern-matching variable names. Names are a convention; the claim is the fact.
+- It is **deliberately asymmetric with the runtime guard**: a *missing* key must
+  **not** fail the build, because an unconfigured preview is legitimate. Only a
+  *present and wrong-role* key fails.
+
+**Generalised:** **a guard that reports an incident is not a guard that prevents
+one, and the difference only appears at the boundary where the artifact escapes.**
+When auditing a guard, ask *where* it runs relative to the point of no return.
+Runtime is after the artifact has shipped.
+
 ---
 
 ## Where this bites hardest in `applyy`
@@ -180,6 +370,48 @@ Layered defences are the deliberate design here, so the cost applies throughout:
   are refusable by either. Test the constraint with a straight duplicate that is
   otherwise perfectly legal; test the guard with an `UPDATE` on a row whose pair
   is already unique.
+
+---
+
+## Mutation testing: three measurements, so it is a law rather than an anecdote
+
+Each number is *assertions that failed when the code they cover was deliberately
+broken* — i.e. assertions actually doing work:
+
+| Suite | Survived mutation | Meaning |
+|---|---|---|
+| §19 injection suite | **12 / 14** | 2 assertions passed against broken code |
+| Status-flow / graph assertions | **2 / 36** | **34 assertions proved nothing** |
+| §17.2 extractor harness | **4 / 8** | half the suite rode on incidental formatting |
+
+**The §17.2 case is the most instructive.** Deleting the extractor's
+block-boundary awareness left **all 8 assertions passing** — because the
+extractor was riding on the renderer's incidental **pretty-printed source
+newlines** rather than on its own layout logic. The fix (collapse whitespace
+before inserting any) is also the *more faithful model*, since a real ATS parser
+reads a DOM and never sees source indentation.
+
+**The survivor pattern is consistent across all three, and it is the actionable
+finding: the assertions that survive mutation are the ORDER-INSENSITIVE ones.** In
+the §17.2 suite the survivors included **"every skill is readable"** — the obvious
+test, and *the one the whole feature exists for*.
+
+That is the uncomfortable lesson. The test you would write first, the one stating
+the feature's purpose most directly, is the one most likely to pass against broken
+code — because a broad "nothing is missing" assertion is satisfied by many wrong
+implementations. **Specificity is what makes a test load-bearing**, and the obvious
+test is rarely specific.
+
+**But mutation testing alone is not enough**, which instance 13 demonstrates: all
+three numbers above prove a guard **can fail** and none proves it can **pass for
+the right reason**. A guard that rejects every input scores perfectly here. Pair
+every mutation measurement with a positive twin.
+
+**The practice this justifies:** for any guard or extractor whose correctness
+matters, **break it on purpose and confirm the suite goes red**, then **feed it a
+correct input and confirm it goes green.** One measurement is an anecdote; three
+in one project is a property of how tests get written here.
+
 
 ## The one-line test
 

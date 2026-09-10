@@ -1,6 +1,6 @@
 # `applyy` — live progress
 
-**Last updated: 2026-09-10 18:40 IST** · maintained by session `applyyy-8c`
+**Last updated: 2026-09-10 19:06 IST** · maintained by session `applyyy-8c`
 (Stream 0 — `supabase/migrations/**`, `supabase/config.toml`, root config,
 `docs/**`, `PROJECT_PLAN.md`)
 
@@ -162,6 +162,225 @@ bump and the `humanLanes` predicate split before it died. Earlier versions of
 this document credited it with less than it shipped.
 
 ---
+
+---
+
+## Update — 19:06 IST
+
+### THE REPO IS `applyyy`, THREE Ys. The push was never only an auth problem.
+
+Vercel's build log shows it **cloning `github.com/MallamTeja/applyyy` successfully.**
+That is decisive third-party evidence: the remote we spent the afternoon pushing
+to — `applyy`, two ys — **genuinely does not exist.** `origin` has been corrected.
+
+**The lesson is about the investigation, not the URL.** GitHub returns
+404-instead-of-403 for private repos to avoid leaking their existence. That is
+true, useful, and exactly the kind of knowledge that makes you feel informed —
+and it gave us a **satisfying explanation that stopped us checking the simpler
+one.** Every `Repository not found` today was a real 404 *as well as* an auth gap.
+
+> **A plausible cause is worse than no cause when it ends the investigation.**
+
+Also worth noting about our tooling rather than our reasoning: **we had no way to
+observe the remote's existence independently.** The fact that settled it arrived
+from a third-party build log, not from anything we ran.
+
+**Naming consequence:** the `applyy` rename is **entirely outstanding**. Supabase
+is the only resource carrying the correct name. New names use `applyy`; nothing
+existing gets renamed; and nothing in these docs should describe the repo as
+renamed. Vercel is **git-connected and auto-deploying `main`**.
+
+### The root `build` script was breaking every Vercel deploy — FIXED and verified
+
+```
+[ERR_PNPM_RECURSIVE_RUN_NO_SCRIPT] None of the selected packages has a "build" script
+Error: Command "pnpm run build" exited with 1
+```
+
+`package.json` had
+`build: pnpm -r --filter "./packages/**" run build && pnpm -r --filter "./apps/**" run build`.
+Neither `packages/shared-types` nor `packages/resume-template` has a `build`
+script — **and that is correct and deliberate**: both export raw `.ts` source with
+zero build step, which is precisely what makes the Deno/Node/Vite cross-runtime
+guarantee work. **The script encoded an assumption the architecture deliberately
+rejects**, so the first half of the `&&` failed and `apps/web` was never reached.
+
+Fixed as `pnpm -r --if-present run build`, **not** by deleting the packages half:
+a package that later *gains* a build step is then picked up automatically, whereas
+an apps-only filter would silently stop building it. Derived over hardcoded —
+this project has now been bitten three times by the hardcoded form.
+
+Verified: `pnpm run build` → **exit 0**, 136 modules, 345.62 kB JS / 104.44 kB
+gzip, built in 4.05 s.
+
+**The sibling sweep found a second live bug: `lint` could never have worked.** Not
+"would fail if a package lacked it" — **no package in the workspace defines
+`lint` at all**, so it was guaranteed to fail identically. It had simply never
+been invoked by anyone. Now `--if-present` and exits 0 as a no-op.
+
+> **A script that has never been run is not a working script; it is an unmeasured
+> one.** Same distinction as typecheck being unmeasured rather than passing.
+
+`engines.node` also pinned to `>=24.0.0 <25.0.0`. Vercel warned that the
+open-ended range auto-upgrades on the next Node major — an unbounded runtime
+range breaks a deploy **with no local change**, months later, which is the worst
+diagnostic shape available.
+
+### `pnpm run typecheck` is GREEN across all four packages — first time ever
+
+Measured 19:06 IST: `shared-types` Done, `resume-template` Done, `worker` Done,
+`apps/web` Done, **exit 0.**
+
+Stated with a timestamp deliberately. At 18:50 `worker` was failing on
+`TS2307: Cannot find module '../src/ats-parse-check.ts'` plus four `TS7006`
+implicit-anys; ef has since landed it. This value has been red all day for
+*shifting* reasons, so it is the kind of fact that needs a measurement time
+rather than a checkbox.
+
+### The remote schema is now INDEPENDENTLY VERIFIED
+
+Upgraded from "reported, not independently verified". Teja reset the DB password,
+it propagated, and `supabase migration list` connected. All seven original
+migrations confirmed present on **both** sides: `20260909234500`, `234600`,
+`234700`, `234800`, `234900`, `235000`, `235100`.
+
+**The earlier failure was propagation timing on a freshly reset password, not a
+wrong credential** — the same value succeeded minutes later. Recorded because
+`password authentication failed for user "postgres"`, read alone, sends someone
+hunting through credential stores for a string that was already correct. See
+[`verification-traps.md`](verification-traps.md) instance 8.
+
+`SUPABASE_DB_PASSWORD` is now a persistent user environment variable, so the CLI
+picks it up **without the value ever entering a transcript.**
+
+### NEW DIVERGENCE CLASS: the migration files and the live database disagree
+
+`supabase migration list` shows my two corrective migrations —
+`20260910185900_add_keepalive_agent_name.sql` and
+`20260910190000_fix_sweep_count_bootstrap_seed_and_blocked_edge.sql` — with
+**empty `remote` entries**.
+
+So right now the live database does **not** have the `keepalive` agent value,
+does **not** have the `approved → blocked_needs_human` edge, and still runs the
+**un-fixed** `bootstrap_user_defaults` and `sweep_stale_claims`. **Nothing
+errors.** A peer reading the files gets one answer; the same peer querying the
+database gets another.
+
+> **Read the files for intent. Query the database for behaviour. Never assume they
+> agree while any migration has an empty `remote` entry.**
+
+This recurs with **every** corrective migration, so it is a standing rule rather
+than an incident. Third member of a family this project keeps producing — two
+artifacts disagreeing with no error anywhere — alongside CRLF and the
+applied-migration edit.
+
+**AND THE SHARPEST REMAINING RISK: neither new migration has ever been parsed by
+Postgres.** Docker is gone, so the first execution will be **against the live
+database** — exactly the condition this whole day was spent escaping. Stated at
+the top of both files. If Docker is restarted for one thing, it should be a
+single `supabase db reset` before that push; that is a stronger reason than the
+RLS proof was.
+
+The push is escalated to Teja framed as **"align the database with the files
+before the first sign-in"** — deliberately *not* as a production hotfix, because
+`bootstrap_user_defaults()` still has to be **called** by an authenticated
+session and there is no Auth user yet. Every insert in it is
+`on conflict do nothing`, so re-running the fixed version after the old one has
+run still works — which lowers this from "drop everything" to "cheap now, a
+diagnosis later."
+
+### Two false invariants corrected in the migration comments
+
+Both verified by query before being changed, not taken on report.
+
+1. **"`awaiting_approval → approved` is the only edge into `approved`"** — FALSE.
+   There are **two**: `needs_verification → approved` also exists, and it must —
+   it is the only way a row re-enters the submit path after a human confirms a
+   possibly-submitted application did not go through.
+   **The correction strengthens the argument, which is exactly why the false
+   version survived.** Constraint 15 never needed `approved` to have one
+   entrance; it needed **every entrance to require a human**. Both are
+   `array['human']`, so it holds. Reworded to **"every edge into `approved` is
+   human-only"** — the property the constraint actually rests on, and one that
+   stays true when a third human-only entrance is added, unlike an edge count.
+2. **"the status graph has zero backward edges"** — FALSE, and it appeared in
+   **five** places across three migrations plus a `comment on column` that ships
+   into the database itself. There are exactly **seven**, measured against
+   `application_status` declaration order: `audit_flagged→tailored`,
+   `interview→oa_pending`, `needs_verification→applied`,
+   `needs_verification→approved`, `blocked_needs_human→applied`,
+   `blocked_needs_human→dropped_filter`, `failed→needs_verification`.
+   **Narrowed rather than deleted, because the reasoning was right and only the
+   scope was wrong.** "No backward edge is needed for *claim rollback*" is true —
+   claiming takes a lease and never moves status, so an agent giving up has
+   nothing to undo. Human correction and agent rollback are different purposes,
+   and only the second is absent. The claim that was true all along is sharper:
+   **no machine can walk backward, with exactly one deliberate exception** —
+   `interview → oa_pending` `['tracker','human']`, which is *correct*, because an
+   employer genuinely can move a candidate back a stage and the Tracker must
+   record it. All seven are now listed with their agents so the next reader counts
+   rather than infers.
+
+### §17.2's premise was wrong — measurement overturned it
+
+The plan warned that a two-column resume "parses into interleaved gibberish".
+That is **true of Word, LaTeX and design tools** — where the advice comes from —
+and **not true of a browser print.** ef rendered the real golden resume in two
+columns *expecting failure*, and **it passed**, then measured every layout through
+`page.pdf()` → `pdf.js getTextContent()`.
+
+**Chromium emits its PDF text stream in PAINT order, and paint order equals DOM
+order** for `column-count`, `flex`, `grid`, `float`, `position: absolute` and
+two-cell tables. Only **`flex-direction: row-reverse`** and flex **`order:`**
+scramble it.
+
+So the two rules that actually bind are: never use `order:` or `row-reverse` to
+place sections — **the only thing that reorders the text layer, and invisible in
+the rendered PDF**, which is what makes it dangerous — and keep every claimed
+skill in the text layer. The structural assertions ("no columns, no tables") are
+being **relabelled, not deleted**: they are cheap and encode intent, but calling
+them §17.2 compliance is *worse than no proxy*, because it stops anyone looking
+for the real hazard.
+
+> **Advice inherited from a different toolchain can be exactly correct there and
+> exactly wrong here.**
+
+Second premise measurement to overturn a plan claim today, after the Actions
+budget arithmetic. Both had been carried for months because they were plausible
+and unmeasured.
+
+### Closed, verified, and corrected elsewhere
+
+- **The Deno/Node bundling unknown is CLOSED.** f8 deployed a probe importing a
+  **runtime const tuple** — deliberately not a type, since `import type` is
+  erased and a type-only probe would have passed identically even if the bundler
+  ignored `packages/` entirely, **closing the question with the wrong answer.**
+  Live call returned the package's real contents (`status_count: 21`,
+  `first_status: "discovered"`). No `deno bundle` pre-step, no layout change.
+- **`email-tracker-intake` FAILS CLOSED IN PRODUCTION.** With
+  `EMAIL_INTAKE_SHARED_SECRET` unset it returned **500 "server misconfigured"** —
+  not 401, and critically not 202. A guard verified in a live deployment rather
+  than in a test.
+- **A `service_role` token was embedded verbatim in `dist/assets/index-*.js`
+  while `vite build` exited 0.** Decoded out of the bundle to confirm. `dist/` is
+  gitignored (`.gitignore:21`) and no `dist/` file is tracked, so **nothing
+  leaked into git** — but on a deploy the URL goes live carrying an RLS-bypassing
+  key. 20 added a **build-time** refusal reading the role claim of every
+  `VITE_`-prefixed variable, deliberately asymmetric with the runtime guard (a
+  *missing* key must not fail the build; an unconfigured preview is legitimate).
+  **A guard that reports an incident is not a guard that prevents one.**
+- **Mutation testing, three independent measurements: 12/14, 2/36, 4/8.** The
+  survivors are consistently the **order-insensitive** assertions — including
+  "every skill is readable", the obvious test and the one the whole feature
+  exists for. One is an anecdote; three is a law. All three, plus the vacuity
+  problem none of them catch, are in
+  [`verification-traps.md`](verification-traps.md).
+- **Correction: `packages/resume-template`'s test was NEVER red.** 98 ran it at
+  session start: 20/20 with the glob-form script already in place. This document
+  previously recorded an invocation bug and missing fixtures for it — the
+  invocation trap is real but applies to `apps/web`, not here.
+- **`.playwright-mcp/` and `worker/dist/` are now gitignored**, both with the
+  reasoning in the file. Verified with `git check-ignore`.
 
 ## Verified by me today, with the measurement
 

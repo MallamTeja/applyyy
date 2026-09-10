@@ -262,7 +262,29 @@ One settings table, one `WHERE` clause. High value for the cost.
 
 **1. Referral Outreach Agent — the biggest single lever.** Referred candidates convert several times better than cold applications; at big Indian product companies a referral often *is* the shortlist. For each job applied to, draft a short, specific note to a recruiter or employee (including MLRIT alumni) into a send queue. **You send it manually** — which sidesteps the LinkedIn automation ban entirely while capturing almost all the value. *Twenty applications with referral notes will outperform a hundred without.*
 
-**2. ATS Parse Simulator.** After the PDF is generated, run it back through a real text extractor and show what an ATS actually reads. This catches the single most common silent fresher killer: a nicely designed two-column resume that parses into interleaved gibberish, so the machine never sees your skills and a human never sees your resume. The extractor runs in the worker, so it validates every resume you send instead of hoping.
+**2. ATS Parse Simulator.** After the PDF is generated, run it back through a real text extractor and show what an ATS actually reads. The extractor runs in the worker, so it validates **every** resume you send instead of hoping.
+
+**PREMISE CORRECTED 2026-09-10 — this section used to warn about the wrong hazard.** It claimed a two-column resume "parses into interleaved gibberish, so the machine never sees your skills". That is **true of Word, LaTeX and design tools**, which is where the advice originally comes from, and **not true of a browser print**, which is how this system renders.
+
+Measured rather than assumed: the real golden resume was rendered in two columns *expecting the extraction test to fail*, and **it passed**. Every layout was then measured through `page.pdf()` → `pdf.js getTextContent()`, comparing extraction order against DOM order:
+
+| Layout | Text-layer order |
+|---|---|
+| `column-count: 2`, `display: flex`, `display: grid`, `float: left/right`, `position: absolute`, two-cell `<table>` | **DOM order — NOT scrambled** |
+| `flex-direction: row-reverse`, flex `order:` | **VISUAL order — SCRAMBLED** |
+
+**Chromium emits its PDF text content stream in PAINT order, and paint order equals DOM order for every ordinary side-by-side layout.** So printing through Chromium is *structurally safer* than this plan assumed.
+
+**The two rules that actually bind:**
+
+1. **Never use `order:` or `flex-direction: row-reverse` to place sections.** That is the only thing that reorders the text layer — and **it is invisible in the rendered PDF**, which is exactly what makes it the dangerous one. The page looks right and reads wrong.
+2. **Keep every claimed skill in the text layer** (no text baked into images).
+
+**The simulator's justification is unchanged and now stronger:** it validates every resume rather than hoping, and it catches a hazard **a human reviewer physically cannot see** — which is a better reason to own it than the one originally given.
+
+**Note on the structural assertions** ("no columns, no tables, real `<ul>`"): they are being **relabelled, not deleted**. They are cheap and they encode intent. But describing them as §17.2 compliance is **worse than having no proxy at all**, because it stops anyone looking for the real hazard — they assert the thing that turned out to be safe while saying nothing about `order:`.
+
+**The general lesson, and this is the second premise measurement to overturn a plan claim today** (the other being the Actions budget arithmetic): **advice inherited from a different toolchain can be exactly correct there and exactly wrong here.** Both claims had been carried for months because they were plausible and unmeasured.
 
 **3. Freshness priority queue.** Recruiters review in arrival order and frequently stop reading around the 50th. Applying within 24 hours of posting is worth more than resume tweaks. Same applications, materially better position in every pile — the highest return per line of code on the list.
 

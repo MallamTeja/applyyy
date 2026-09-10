@@ -259,3 +259,48 @@ read as broader than it is:
   behaviour is not. Two known runtime defects are already recorded in
   [`../PROGRESS.md`](../PROGRESS.md) (`sweep_stale_claims` double-counting, and
   `bootstrap_user_defaults` never seeding `gemini_key_state`).
+
+## Addendum — the remote, and two migrations that have never run
+
+**19:00 IST. The remote schema is INDEPENDENTLY VERIFIED.** `supabase migration
+list` connected and confirmed all seven original migrations present on both
+sides: `20260909234500`, `234600`, `234700`, `234800`, `234900`, `235000`,
+`235100`. Teja applied them himself with `supabase db push` at 18:45; the local
+from-scratch `db reset` recorded above is what made that safe to attempt.
+
+An earlier verification attempt failed with `password authentication failed for
+user "postgres"`, and that was **propagation timing on a freshly reset password,
+not a wrong credential** — the same value connected minutes later. Recorded
+because the message is *accurate* and its most natural reading is *wrong*: it
+sends a reader hunting through credential stores for a string that was already
+correct. For anything just reconfigured, **retry before diagnosing.**
+
+**Accepted risk, recorded with its expiry condition.** The RLS-as-`authenticated`
+proof cannot run locally — Docker is unavailable — so it runs through a deployed
+Edge Function that signs in as two app users. That writes test rows **into the
+live database**. This is acceptable **only** because that database is empty and
+nothing depends on it yet, and it **stops being acceptable the moment real
+applications exist**. The test must clean up its own rows, must fail loudly if
+cleanup does not complete, and **must never be re-run against a populated
+database.**
+
+### Two migrations here have NEVER been parsed by Postgres
+
+`20260910185900_add_keepalive_agent_name.sql` and
+`20260910190000_fix_sweep_count_bootstrap_seed_and_blocked_edge.sql` are
+local-only, with empty `remote` entries. Docker was stopped before they were
+written, so **unlike the seven migrations this document verifies, neither has
+ever been executed.** Their first execution will be against the live database —
+precisely the condition the rest of this document exists to record escaping.
+
+Both files state it at the top. If Docker is restarted for one thing, it should
+be a single `supabase db reset` before that push.
+
+### Comments corrected in place in already-applied migrations
+
+Two false invariants were fixed **in place** in files the remote records as
+applied. That is a deliberate, narrow exception to migration immutability:
+comments never reached Postgres, so nothing diverges behaviourally, and **leaving
+a false invariant written down is worse than the file text differing from what
+ran** — a reader treats a written invariant as a guarantee. The corrections are
+listed in [`../PROGRESS.md`](../PROGRESS.md); both were verified by query first.
