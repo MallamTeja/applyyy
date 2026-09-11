@@ -31,12 +31,17 @@
  * that derivation was deleted and the component did not move a line.
  */
 
+/* The review POLICY - which rows are risky - is imported, never restated. See
+   the note above `toReviewRow` for why this import is load-bearing rather than
+   a convenience. */
+import { reviewableRows } from '@applyy/master-ingest';
 import type {
   AmbiguousMatch,
   CarriedNode,
   DroppedNode,
   MintedNode,
   ReconciliationReport,
+  ReviewableRow,
 } from '@applyy/master-ingest';
 
 /* --- Line reflow ------------------------------------------------------- */
@@ -133,38 +138,115 @@ const CAUSE_ORDER: readonly ReviewCause[] = [
   'uncertain_mint',
 ];
 
-/* Mint reasons that deserve a human.
+/* Render one policy row as one screen row.
  *
- * `ambiguous` is deliberately ABSENT even though it is a mint reason. Every
- * ambiguity appears twice in the report by design - once in `ambiguous` with
- * the candidate ids and a written explanation, and once in `minted` with
- * reason `ambiguous`. Including both here would put the same node on screen
- * twice, once richly and once bare, which reads as two problems. The richer
- * entry wins. */
-const MINT_REASONS_NEEDING_REVIEW: readonly string[] = ['below_threshold', 'candidate_taken'];
+ * WHY THIS FUNCTION IS THE WHOLE POINT OF THE REFACTOR THAT INTRODUCED IT.
+ * `report.ts:288` states the rule it is obeying: "THE POLICY LIVES HERE AND
+ * NOWHERE ELSE. A consumer that reimplements 'which rows are risky' will drift
+ * from this one, and the two will disagree about the only question that
+ * matters." This module used to do exactly that - it kept its own
+ * `MINT_REASONS_NEEDING_REVIEW = ['below_threshold', 'candidate_taken']`, a
+ * literal copy of `REVIEWABLE_MINT_REASONS`, and rebuilt the row set from the
+ * four report arrays by hand. The two agreed, but only by coincidence: nothing
+ * connected them, so the first change to the package's policy would have
+ * silently stopped reaching this screen. A row that quietly leaves this list is
+ * a `misattributed_bullet` nobody is asked about.
+ *
+ * WHAT THIS MODULE STILL LEGITIMATELY OWNS, because the distinction matters:
+ * the package decides WHICH rows a human must see; this file decides HOW one
+ * reads. `ReviewRow` stays an anti-corruption layer over a young contract - the
+ * argument in this file's header is unchanged and still correct. What is gone
+ * is the second opinion about risk.
+ *
+ * A SWITCH OVER THE DISCRIMINATED UNION rather than four filters, and that is
+ * the payoff `report.ts:266` promises: "forgetting one of four lists is silent;
+ * forgetting to handle a variant of this union is a compile error." With
+ * `noFallthroughCasesInSwitch` and no default branch, a fifth `reviewKind` added
+ * upstream fails the typecheck here instead of vanishing from the screen. */
+function toReviewRow(row: ReviewableRow): ReviewRow {
+  switch (row.reviewKind) {
+    /* The dangerous case: an id carried by SCORE, where a wrong decision was
+       made silently and looks like a right one. */
+    case 'fuzzy_carry':
+      return fuzzyCarryRow(row.carried);
+    /* The reconciler refused and named the candidates, so the richer row wins -
+       which is also why the package deliberately keeps `ambiguous` out of its
+       reviewable MINT reasons rather than this file filtering it out again. */
+    case 'ambiguous':
+      return ambiguousRow(row.ambiguous);
+    case 'uncertain_mint':
+      return uncertainMintRow(row.minted);
+    case 'dropped':
+      return droppedRow(row.dropped);
+  }
+}
 
 export function buildMasterReview(report: ReconciliationReport): MasterReview {
-  const rows: ReviewRow[] = [
-    ...report.ambiguous.map(ambiguousRow),
-    ...report.carried.filter((entry) => entry.match === 'fuzzy_text').map(fuzzyCarryRow),
-    ...report.dropped.map(droppedRow),
-    ...report.minted
-      .filter((entry) => MINT_REASONS_NEEDING_REVIEW.includes(entry.reason))
-      .map(uncertainMintRow),
-  ];
+  /* ONE call, and it is the single source of what counts as risky. Everything
+     below is derived from this array rather than re-filtered off the report. */
+  const reviewable = reviewableRows(report);
+
+  const rows: ReviewRow[] = reviewable.map(toReviewRow);
 
   /* Sort by risk. `CAUSE_ORDER.indexOf` rather than a comparator chain because
-     the order IS that named constant - stated once, changed in one place. */
+     the order IS that named constant - stated once, changed in one place.
+     Sorting HERE rather than trusting `reviewableRows`' own order is
+     deliberate: that function's order is an implementation detail of the
+     package, and reading order is a decision this screen owns. */
   rows.sort((a, b) => CAUSE_ORDER.indexOf(a.cause) - CAUSE_ORDER.indexOf(b.cause));
 
+  /* The ids the policy actually flagged, so the two collapsible lists below are
+     the exact COMPLEMENT of what is on screen rather than a second guess at it.
+     Keyed by id alone, which is sound precisely because the global NodeId
+     uniqueness invariant holds - the same invariant `findDuplicateNodeIds`
+     enforces. Under per-section uniqueness this would silently collapse a skill
+     and a bullet that happened to share an id. */
+  const flaggedCarries = new Set(
+    reviewable.filter((row) => row.reviewKind === 'fuzzy_carry').map((row) => row.carried.id),
+  );
+  const flaggedMints = new Set(
+    reviewable.filter((row) => row.reviewKind === 'uncertain_mint').map((row) => row.minted.id),
+  );
+
   return {
+    /* Everything the policy did NOT flag. Derived by exclusion so a carry can
+       never be both shown and collapsed, nor fall between the two. */
+    settled: report.carried.filter((entry) => !flaggedCarries.has(entry.id)),
     rows,
-    settled: report.carried.filter((entry) => entry.match !== 'fuzzy_text'),
+    /* `ambiguous` mints are excluded separately, and this is the one piece of
+       report-shape knowledge this file legitimately keeps: every ambiguity is
+       ALSO listed in `minted` with that reason, and it is already on screen as
+       its richer `ambiguous` row. Collapsing it into "plainly new" would tell
+       Teja a node he is being asked to adjudicate is nothing to worry about. */
     plainlyNew: report.minted.filter(
-      (entry) =>
-        !MINT_REASONS_NEEDING_REVIEW.includes(entry.reason) && entry.reason !== 'ambiguous',
+      (entry) => !flaggedMints.has(entry.id) && entry.reason !== 'ambiguous',
     ),
   };
+}
+
+/* Whether this re-upload changes any node's IDENTITY.
+ *
+ * THE DISTINCTION THIS NAME IS CAREFUL ABOUT, because conflating it is how an
+ * edit gets silently discarded. "No identity changes" means every node kept the
+ * id it had: nothing minted, nothing dropped, nothing refused, nothing carried
+ * by a score. It does NOT mean the profile is unchanged. The reconciler matches
+ * on normalised text and match keys, so a bullet whose `tags` were edited, or a
+ * date that was corrected, carries EXACTLY and is reported nowhere - the
+ * content changed and this predicate is still true.
+ *
+ * That is why this decides the SCREEN and never the store. It answers "is there
+ * anything for Teja to check", which is what `masterReview.ts` exists for and
+ * what makes a clean re-upload the five-second glance its header demands. The
+ * question "is this byte-identical to what is already stored" is a different
+ * one with a different answer, and only the database can answer it - via the
+ * `UNIQUE (user_id, content_hash)` constraint, on the normalised jsonb, where a
+ * tags edit really does produce a different digest.
+ *
+ * Derived from the rows rather than from the report, for the same reason
+ * `isCleanReview` is: a predicate that disagrees with what the screen lists is
+ * worse than no predicate. */
+export function noNodeIdentityChanges(review: MasterReview): boolean {
+  return review.rows.length === 0 && review.plainlyNew.length === 0;
 }
 
 /* Whether this upload can be stored without anyone looking at it.

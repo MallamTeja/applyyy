@@ -322,3 +322,210 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* --- The upload confirmation screen ----------------------------------- */
+
+/* The rows that need a decision. A list, never a count: `report.ts` refuses to
+   carry count fields at all, because a count is an invitation to render the
+   count and skip the list - and the list IS the safety property here, since the
+   similarity threshold provably cannot separate true pairs from false ones. */
+.review-list {
+  margin-top: var(--gap-4);
+  /* No bullets: each row already carries a cause word, and a disc in front of a
+     multi-line block reads as decoration rather than structure. */
+  list-style: none;
+}
+
+/* One row. Generous padding because the operator is reading a bullet against
+   its previous wording, not scanning a table - and a dense row is a row that
+   gets skimmed, which is the failure this whole screen is shaped against. */
+.review-row {
+  margin-top: var(--gap-3);
+  padding: var(--gap-4);
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  /* The left edge carries the severity. A border rather than a background tint
+     so the row still reads as paper - and it is the SECOND channel that makes
+     the cause word not the only signal. */
+  border-left: 3px solid var(--rule-strong);
+  border-radius: var(--radius-control);
+}
+
+/* Ambiguity: the reconciler refused outright, so a human is genuinely required.
+   Bronze is the "waiting for you" lamp, not a validation error. */
+.review-row--ambiguous {
+  border-left-color: var(--signal);
+}
+
+/* A fuzzy carry. THE DANGEROUS ONE - a decision was made silently by a score,
+   and this is where a misattributed bullet would be. It gets the alarm colour
+   even though nothing has failed, because "decided quietly" is exactly the
+   state that deserves the loudest channel on this screen. */
+.review-row--fuzzy_carry {
+  border-left-color: var(--fabricated);
+}
+
+/* A drop. Applications already sent still reference it, so this is a real
+   consequence rather than tidying - bronze, the same "you must look" register
+   as an ambiguity. */
+.review-row--dropped {
+  border-left-color: var(--signal);
+}
+
+/* A near-miss mint. Usually right, occasionally the wrong way round, so it sits
+   at the quiet end of the ladder rather than off it. */
+.review-row--uncertain_mint {
+  border-left-color: var(--rule-strong);
+}
+
+/* The checkbox and its cause word, on one line. `label` wraps both so the whole
+   heading is a click target - which matters when there are eleven rows. */
+.review-row__ack {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  cursor: pointer;
+}
+
+.review-row__checkbox {
+  /* The interactive accent, never a verdict colour: ticking a row is an action
+     the operator takes, not a finding the console reached. */
+  accent-color: var(--accent);
+  /* Larger than the browser default, matching the cascade toggles - this is the
+     primary control on the row. */
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+/* THE WORD that carries the cause, paired with the border colour so no status
+   here rests on hue alone. */
+.review-row__cause {
+  font-size: var(--size-xs);
+  font-weight: 600;
+  /* Uppercased and tracked out so it reads as a label rather than as the first
+     sentence of the row's content. */
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-muted);
+}
+
+/* THE PARENT, and it is the most load-bearing line in this file. The failure
+   being defended against is a true bullet under the wrong employer, so a row
+   without its parent cannot show the only error that really matters. Rendered
+   above the text and in the machine font, so it reads as context rather than as
+   part of the claim. */
+.review-row__parent {
+  margin-top: var(--gap-3);
+  font-size: var(--size-xs);
+  font-weight: 500;
+  color: var(--ink-muted);
+}
+
+/* What the node says now. Serif, because this is document content rather than
+   console chrome - the same split the whole palette rests on. */
+.review-row__label {
+  margin-top: var(--gap-1);
+  max-width: 70ch;
+  font-family: var(--font-paper);
+  font-size: var(--size-base);
+}
+
+/* What it said before. Indented and ruled so the pair reads as a comparison,
+   and quieter than the incoming text because the incoming text is the claim
+   being judged. */
+.review-row__previous {
+  margin-top: var(--gap-2);
+  padding-left: var(--gap-3);
+  max-width: 70ch;
+  border-left: 2px solid var(--rule);
+  font-family: var(--font-paper);
+  font-size: var(--size-base);
+  color: var(--ink-muted);
+}
+
+/* Labelled, because two unlabelled paragraphs do not say which is which - and
+   reading them backwards inverts the review. */
+.review-row__previous-tag {
+  display: block;
+  font-family: var(--font-machine);
+  font-size: var(--size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* One sentence saying what happened and what it means. */
+.review-row__detail {
+  margin-top: var(--gap-3);
+  max-width: 66ch;
+  font-size: var(--size-sm);
+  color: var(--ink-muted);
+}
+
+.review-row__score {
+  margin-top: var(--gap-2);
+  font-size: var(--size-xs);
+  color: var(--ink-muted);
+}
+
+/* The two halves that may be collapsed, and the only two that ever may: an
+   exact match and an unsurprising mint both have nothing for a human to decide.
+   Visually quiet so they cannot compete with the rows above. */
+.review-collapsed-group {
+  margin-top: var(--gap-4);
+}
+
+.review-collapsed {
+  margin-top: var(--gap-1);
+  font-size: var(--size-sm);
+  color: var(--ink-muted);
+}
+
+.review-collapsed__count {
+  font-family: var(--font-id);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* The reason they are safe to skip, said once per list. Without it a reader has
+   to take on trust that the collapsed half is not where the problem is. */
+.review-collapsed__why {
+  /* A leading space, since this follows the noun inline. */
+  margin-left: 0.35em;
+}
+
+/* --- What the database said ------------------------------------------- */
+
+.store-notice {
+  margin-top: var(--gap-4);
+  padding: var(--gap-3) var(--gap-4);
+  max-width: 70ch;
+  border-radius: var(--radius-control);
+  font-size: var(--size-sm);
+}
+
+/* Stored, or already stored. BOTH ARE THIS COLOUR ON PURPOSE: re-uploading an
+   unedited export raises 23505 in Postgres, and rendering that as an error
+   would teach the operator that this screen cries wolf - which costs the review
+   list the credibility it entirely depends on. */
+.store-notice--ok {
+  background: var(--traced-wash);
+  /* The second channel, so the state is not carried by hue alone. */
+  border-left: 3px solid var(--traced);
+  color: var(--ink);
+}
+
+/* Nothing was saved and something needs doing - a version race, or no session.
+   Bronze: waiting for you, not broken. */
+.store-notice--warn {
+  background: var(--signal-wash);
+  border-left: 3px solid var(--signal);
+  color: var(--ink);
+}
+
+/* An actual failure, with the database's own words. */
+.store-notice--bad {
+  background: var(--fabricated-wash);
+  border-left: 3px solid var(--fabricated);
+  color: var(--ink);
+}

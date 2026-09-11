@@ -25,12 +25,20 @@
  * the UI.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
 import { ingestMasterProfileText } from './masterIngest';
 import type { IngestResult } from './masterIngest';
+/* The confirmation screen and the read half of the store seam. Imported here
+   rather than inside `Findings` because this is the component that owns the
+   pasted result and therefore the only one that can say a profile is
+   acceptable. */
+import { MasterUploadReview } from './MasterUploadReview';
+import { loadCurrentMasterProfile } from './masterStore';
+import { supabase } from '../../data/supabase';
+import type { MasterProfile } from '../../data/contract';
 
 import './settings.css';
 
@@ -154,6 +162,40 @@ function IngestSection(): ReactElement {
      nothing wrong". Conflating the two would show an all-clear before the
      operator had pressed anything. */
   const [result, setResult] = useState<IngestResult | null>(null);
+  /* The currently stored profile, which is what a re-upload is reconciled
+     against. Null means either "nothing stored yet" or "not loaded yet", and
+     both are correct inputs for `ReconcileInput.previous` - a first upload and
+     an unread database produce the same, honest, "mint everything" report
+     rather than a wrong carry. */
+  const [stored, setStored] = useState<MasterProfile | null>(null);
+
+  /* Read the stored profile once, on mount.
+   *
+   * FETCHED BEFORE IT IS NEEDED rather than when Accept is pressed, so the
+   * review the operator reads is the review of a real comparison. Fetching at
+   * accept time would show him a report built against `null` - every node
+   * minted - and then store something reconciled against a profile he never saw
+   * a report for. */
+  useEffect(() => {
+    /* Nothing to read on an unconfigured machine, and `supabase` is null there
+       by design rather than a stub returning empty results. */
+    if (supabase === null) return;
+
+    /* The cancellation flag, matching the pattern the two existing data hooks
+       use: a resolved promise must not set state on an unmounted component. */
+    let live = true;
+    void loadCurrentMasterProfile(supabase).then((outcome) => {
+      if (!live) return;
+      /* Only `loaded` changes anything. `none` is the first-upload case and
+         `failed` is reported by the store attempt rather than here - surfacing
+         a read error on a page whose six settings sections work fine without a
+         database would be noise. */
+      if (outcome.kind === 'loaded') setStored(outcome.profile);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
 
   return (
     <section className="settings-group">
@@ -206,13 +248,37 @@ function IngestSection(): ReactElement {
         </button>
         {/* Said next to the button rather than in a paragraph above it, because
             this is the reassurance that makes someone willing to paste their
-            actual resume into a text box. */}
+            actual resume into a text box.
+
+            REWRITTEN 2026-09-11, AND THE OLD WORDING IS WORTH RECORDING. It
+            read: "Runs entirely in this page. Nothing is uploaded and nothing
+            is saved." Both halves were true while this page could only check.
+            The second half became FALSE the moment the accept path below was
+            wired, because accepting now inserts a row - and a reassurance that
+            has quietly stopped being true is worse than no reassurance, since
+            it is precisely the sentence someone relies on when deciding to
+            paste a real resume.
+
+            The replacement keeps the promise that is still true and scopes it
+            to the button it sits beside, rather than to the page. Checking
+            really does run locally; storing is a separate, explicit step that
+            cannot happen without pressing a different button. */}
         <span className="ingest__reassurance">
-          Runs entirely in this page. Nothing is uploaded and nothing is saved.
+          Checking runs entirely in this page - nothing leaves your machine. Storing is a
+          separate step below, and only happens after you accept.
         </span>
       </div>
 
       {result !== null && <Findings result={result} />}
+
+      {/* The confirmation screen, and it appears ONLY on an accepted profile.
+          `result.ok` is the discriminant of the union, so the compiler is what
+          stops a profile with blocking findings ever reaching the reconciler -
+          which is the reason `IngestResult` is a union rather than
+          `{ profile, findings }`. */}
+      {result !== null && result.ok && (
+        <MasterUploadReview previous={stored} incoming={result.profile} />
+      )}
     </section>
   );
 }
@@ -222,12 +288,22 @@ export function MasterProfilePage(): ReactElement {
     <div className="page">
       <PageHeader path="master-profile" />
 
+      {/* REWRITTEN 2026-09-11 alongside the reassurance line below, and for the
+          same reason: this paragraph said "storing a checked profile is not
+          wired up either - the checker below reports, it does not save." That
+          stopped being true in the same change that wired the accept path, and
+          a page that denies it can save while saving is the most misleading
+          thing this screen could do.
+
+          What remains true is the EDITOR half, and the reason it is still
+          deliberate rather than pending. */}
       <p className="not-wired">
-        The editor is not built yet, and storing a checked profile is not wired
-        up either - the checker below reports, it does not save. Versioning has
-        to be wired first: a half-working editor here would create master
-        versions nobody meant to create, and an old version can never be
-        changed once an application has pinned it.
+        There is no field-by-field editor here yet, and that is deliberate: a
+        half-working one would create master versions nobody meant to create,
+        and a version can never be changed once an application has pinned it.
+        Re-uploading a whole profile is the supported way to change it, which is
+        why the paste box below now ends in a stored version rather than a
+        report.
       </p>
 
       <IngestSection />

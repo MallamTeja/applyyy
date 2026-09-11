@@ -68,7 +68,15 @@ function validProfile(): Record<string, unknown> {
       {
         id: 'proj-1',
         name: 'ExampleProject',
-        url: null,
+        /* WAS `url: null`. Replaced on 2026-09-11 when `MasterProject.url`
+           became `links: DocumentOrdered<MasterLink>` - the scalar is GONE, not
+           supplemented. The distinction matters to this fixture specifically:
+           the old scalar carried no id, so there was nothing here for the
+           uniqueness walk to see, whereas this link draws a `NodeId` from the
+           same global pool as every other node. A fixture that kept `url: null`
+           would still have passed every test while silently covering none of
+           the new nested-link behaviour. */
+        links: [{ id: 'proj-1-link-1', label: 'Repo', url: 'https://example.invalid/r' }],
         start_display: '2025',
         end_display: '2025',
         start_date: null,
@@ -77,6 +85,36 @@ function validProfile(): Record<string, unknown> {
       },
     ],
     skills: [{ id: 'skill-1', name: 'TypeScript', category: 'Languages' }],
+    /* The summary. A REQUIRED FIELD WITH A NULLABLE VALUE, and this fixture
+       supplies a real node rather than null on purpose: null is the easy case
+       and would leave the id-bearing branch - the one that can collide with
+       every other node in the profile - untested by the happy path. */
+    summary: { id: 'summary-1', text: 'A short paragraph about the person.' },
+    /* Achievements and certifications, added to the contract on 2026-09-11
+       because the real resume had both and ingest was silently truncating them.
+       Both carry bullets, which is the second id-bearing place under a new node
+       kind and the part a fixture usually forgets. */
+    achievements: [
+      {
+        id: 'ach-1',
+        label: 'Winner, Example Hackathon',
+        description: null,
+        bullets: [{ id: 'ach-1-b1', text: 'Beat 300 teams', tags: ['award'] }],
+      },
+    ],
+    certifications: [
+      {
+        id: 'cert-1',
+        label: 'Example Certified Practitioner',
+        description: 'Example Issuer',
+        /* A bullet rather than an empty array, so the happy path stays free of
+           advisory findings - an empty bullets array is legal but draws a "this
+           would render as a heading with nothing under it" advisory, which
+           would make the zero-findings assertion below about the fixture rather
+           than about the checker. */
+        bullets: [{ id: 'cert-1-b1', text: 'Passed the exam', tags: ['cloud'] }],
+      },
+    ],
     links: [{ id: 'toplink-1', label: 'Portfolio', url: 'https://example.invalid/p' }],
   };
 }
@@ -106,10 +144,21 @@ test('a complete profile is accepted and counted', () => {
     experience: 1,
     projects: 1,
     education: 1,
-    /* Three bullets across three different sections - the number that proves
-       all three parent kinds were walked. */
-    bullets: 3,
-    links: 1,
+    achievements: 1,
+    certifications: 1,
+    /* Five bullets across FIVE different parent kinds - experience, projects,
+       education, achievements and certifications. The number is what proves
+       every bulleted kind was walked, and it is the assertion that would have
+       caught achievements and certifications being silently skipped when they
+       joined the contract on 2026-09-11. */
+    bullets: 5,
+    /* One link in each of the three arrays that carry them: `identity.links`,
+       `projects[0].links` and the top-level `links`. Three rather than one is
+       the assertion that proves the nested project links are walked at all -
+       they were invisible to this checker until `MasterProject.url` was
+       replaced by `links`. */
+    links: 3,
+    hasSummary: true,
   });
   /* No advisory findings either: this profile has tags on every bullet, at
      least one skill, and experience present. */
