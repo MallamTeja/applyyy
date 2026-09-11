@@ -1,0 +1,34 @@
+{
+  "// name": "Scoped @applyy (TWO y's) per the naming standard; only the repo folder is applyyy. Sibling of @applyy/master-ingest, which is the BACK half of this same pipeline — this package is the front half.",
+  "name": "@applyy/master-pdf",
+  "// version": "Workspace-internal only; nothing here is ever published to a registry.",
+  "version": "0.0.0",
+  "// private": "Fixtures here are derived from a real resume's SHAPE and the package sits next to Teja's actual personal data — an accidental `pnpm publish` must be impossible.",
+  "private": true,
+  "// type": "ESM only. The parse runs BROWSER-SIDE by product requirement (the resume must never leave the user's machine before they accept), and the tests run under Node, so both must import the same source.",
+  "type": "module",
+  "// exports": "Source-only export map pointing at .ts, exactly like master-ingest and resume-template. No build step: a compiled copy would be a second place the extraction rules live.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "// types": "Redundant with exports for modern resolvers; kept for editors that still read this field.",
+  "types": "./src/index.ts",
+  "// files": "Only src ships if this is ever packed.",
+  "files": ["src"],
+  "// scripts.typecheck": "tsc is a checker only in this repo — noEmit is inherited from tsconfig.base.json.",
+  "// scripts.test": "The glob is REQUIRED. `node --test test` (a bare directory) fails on Node 24 with MODULE_NOT_FOUND, and that error reads exactly like missing fixtures, which has already cost a previous session time in master-ingest.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "// dependencies": "shared-types owns MasterProfile and NodeId; master-ingest owns normaliseKey. THE SECOND ONE IS NOT OPTIONAL: master-ingest/src/index.ts:79-83 states that the PDF parser must use the SAME text folds the matcher uses, because two implementations of 'the same text' let an item fail to match itself for reasons invisible in the document. Its hyphen fold was measured on THIS resume.",
+  "dependencies": {
+    "@applyy/master-ingest": "workspace:*",
+    "@applyy/shared-types": "workspace:*"
+  },
+  "// devDependencies": "@types/node is needed by the TESTS ONLY (node:test, node:assert). src/ uses no Node API at all — see the header of src/index.ts. NOTE: pdfjs-dist is deliberately ABSENT; see src/load-pdf.ts for why this package depends on no PDF library.",
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  }
+}

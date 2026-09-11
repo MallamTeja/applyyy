@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "@applyy/shared-types": "../shared-types/src/index.ts",
+    "@applyy/master-ingest": "../master-ingest/src/index.ts"
+  }
+}
