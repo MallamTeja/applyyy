@@ -71,28 +71,31 @@ All core frontend, backend database schemas, worker automation pipelines, and en
 
 ## 3. Current Pending Works & Next Steps
 
-### Critical Action Items (Immediate)
+### Completed Infrastructure & Setup Items (2026-09-11 23:22 IST) ✅
 
 1. **GitHub Actions Secrets Configuration:**
-   * **State:** Workflows are committed to `.github/workflows/apply.yml` (daily at 02:30 UTC / 08:00 AM IST) and `.github/workflows/keepalive.yml` (every 3 days).
-   * **Action Needed:** Add the following repository secrets under GitHub Repository `Settings > Secrets and variables > Actions`:
-     * `SUPABASE_URL`: `https://xynqxekcqizwhtskzqrq.supabase.co`
-     * `SUPABASE_ANON_KEY`: Your project's anon key
-     * `APPLYY_APP_USER_EMAIL`: `tejamallam00@gmail.com`
-     * `APPLYY_APP_USER_PASSWORD`: Password created for the Supabase Auth user
-     * `STORAGE_STATE_ENC_KEY`: 32-byte hex key for encrypted browser cookies
+   * **State:** Configured under GitHub Repository `Settings > Secrets and variables > Actions`.
+   * **Secrets Live:** `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `APPLYY_APP_USER_EMAIL`, `APPLYY_APP_USER_PASSWORD`, `STORAGE_STATE_ENC_KEY`.
 
-2. **Supabase Database Seeding (Gemini API Keys):**
-   * **State:** The remote Supabase instance has all 7 migrations applied.
-   * **Action Needed:** Populate `public.gemini_key_state` with the 6 Gemini API keys from `.env` so `claim_gemini_key()` can distribute quotas to the Tailor, Auditor, and Classifier agents.
+2. **Supabase Database Seeding (Gemini API Keys & User Defaults):**
+   * **State:** Successfully seeded on live remote Supabase instance for operator `0f4b24da-e85b-40bb-8606-c81824493b45` (`tejamallam00@gmail.com`).
+   * **Tables Seeded:**
+     * `public.system_settings`: 1 row (`system_enabled: false`, `dry_run: true`).
+     * `public.search_preferences`: 1 row.
+     * `public.gemini_key_state`: 6 keys initialized (`key_index` 1–6, `requests_today: 0`).
+     * `public.filter_rules`: 9 cascade rules initialized with default configurations.
 
-3. **Human Recovery Lane Controls:**
+3. **Production Deployment on Vercel:**
+   * **State:** Verified active via Vercel CLI across `Production`, `Preview`, and `Development` environments.
+   * **Variables Configured:** `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
+
+---
+
+### Critical Action Items (Immediate Pending) 🟡
+
+1. **Human Recovery Lane Controls:**
    * **State:** Console surfaces system notice for 8 unbuilt recovery transitions originating from `applying`, `needs_verification`, `blocked_needs_human`, and `failed`.
    * **Action Needed:** Implement dedicated operator recovery actions (e.g., "Retry Application", "Mark Abandoned", "Manual Override") in `HealthPage.tsx`.
-
-4. **Production Deployment on Vercel:**
-   * **State:** Frontend compiles locally and works with `.env.local`.
-   * **Action Needed:** Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` in Vercel project environment variables and trigger redeploy.
 
 ---
 
