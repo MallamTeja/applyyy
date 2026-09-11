@@ -636,3 +636,63 @@ test('a blank label on a TOP-LEVEL link is blocking, same as on an identity link
   if (result.ok) return;
   assert.ok(blockingPaths(result.findings).includes('links[0].label'));
 });
+
+/* THE TEST THAT ISOLATES THIS FILE'S PROJECT-LINK WALK, added after mutation
+ * testing showed the collision test above could not.
+ *
+ * WHAT MUTATION TESTING REVEALED. Deleting the `projects[i].links` walk from
+ * this module left "a project link id colliding with a skill id is blocking"
+ * STILL PASSING - because `findDuplicateNodeIds` walks project links itself and
+ * caught the collision on the way past. The test was named for a guard it could
+ * not actually isolate; it was testing the composite of two defences, and the
+ * package half was carrying it. That is `docs/verification-traps.md` instance 1
+ * exactly, and it is the reason the mutation step exists rather than a green
+ * suite being taken as proof.
+ *
+ * A BLANK LABEL is the input only this file can reject. The package's checker
+ * compares ids to each other and has no opinion about a link's text, so there
+ * is no second defence to hide behind - if this walk is gone, a project link
+ * with no label is accepted and renders as an empty anchor on the resume. */
+test('a blank label on a PROJECT link is blocking, which only this walk can catch', () => {
+  const profile = validProfile();
+  (profile['projects'] as Record<string, unknown>[])[0]!['links'] = [
+    { id: 'proj-1-link-1', label: '   ', url: 'https://example.invalid/r' },
+  ];
+
+  const result = checkMasterProfile(profile);
+
+  assert.equal(result.ok, false, JSON.stringify(result, null, 2));
+  if (result.ok) return;
+  assert.ok(blockingPaths(result.findings).includes('projects[0].links[0].label'));
+});
+
+/* NON-VACUITY TWIN: a well-formed project link must be ACCEPTED and counted.
+ * Without this, a walk that rejected every project link would pass the test
+ * above - and rejection-only tests cannot tell a correct guard from one that
+ * refuses everything. */
+test('a well-formed project link is accepted and counted among the links', () => {
+  const result = checkMasterProfile(validProfile());
+
+  assert.equal(result.ok, true, JSON.stringify(result, null, 2));
+  if (!result.ok) return;
+  /* Three: one in identity.links, one in projects[0].links, one top-level. The
+     project link is the middle term, and it is the one that was invisible to
+     this checker until `MasterProject.url` became an array. */
+  assert.equal(result.summary.links, 3);
+});
+
+/* A project whose `links` field is MISSING entirely is blocking, and this is
+ * the other half of the crash-safety seam: `findDuplicateNodeIds` dereferences
+ * `project.links` with no guard, so an unreported absence here becomes a
+ * TypeError inside the package rather than a finding on screen. */
+test('a project with no links array is reported, never thrown', () => {
+  const profile = validProfile();
+  delete (profile['projects'] as Record<string, unknown>[])[0]!['links'];
+
+  assert.doesNotThrow(() => checkMasterProfile(profile));
+
+  const result = checkMasterProfile(profile);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.ok(blockingPaths(result.findings).includes('projects[0].links'));
+});
