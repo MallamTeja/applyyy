@@ -58,23 +58,21 @@
   /* --- Surfaces: the three-step elevation ladder ----------------------- */
 
   /* The desk, and the lowest step. Off-white rather than #fff in light so the
-     paper sheets have somewhere lighter to go; near-black rather than #000 in
-     dark for the same reason in the other direction. */
-  --ground: light-dark(#f4f4f2, #0d0f11);
+     paper sheets have somewhere lighter to go; deep obsidian #090a0f in dark
+     to eliminate muddy brown tones and establish a clean midnight floor. */
+  --ground: light-dark(#f4f4f2, #090a0f);
   /* Machine chrome one step up: the nav rail, table headers, inset panels.
-     Cool-neutral, because it is the console rather than the document. */
-  --panel: light-dark(#eaeae7, #15181c);
-  /* Paper: resume content and any coherent settings group. The top step, and
-     the only surface with a warm cast - this is the figure, the desk is the
-     ground, and the material difference is what says so. In dark it sits at
-     the same luminance step as the chrome but on the other side of neutral,
-     which is what keeps a resume sheet reading as a different material rather
-     than just a lighter box. */
-  --sheet: light-dark(#ffffff, #1c1b19);
+     Layered midnight blue-black #11141c in dark, cool off-white in light,
+     maintaining separation from the ground without muddy undertones. */
+  --panel: light-dark(#eaeae7, #11141c);
+  /* Paper: resume content and any coherent settings group. The top step,
+     elevated to pure white in light and a distinct obsidian surface #181c26
+     in dark so resume cards remain distinctly readable as active material. */
+  --sheet: light-dark(#ffffff, #181c26);
   /* Any surface a pointer is over. A translucent wash rather than a fixed
-     colour, so one value works over all three steps of the ladder instead of
-     needing a hover twin for each - and it shades in light, lifts in dark. */
-  --surface-hover: light-dark(rgba(23, 24, 26, 0.055), rgba(230, 228, 224, 0.06));
+     colour, so one value works across all three elevation steps while
+     lifting dark surfaces with subtle white translucency. */
+  --surface-hover: light-dark(rgba(23, 24, 26, 0.055), rgba(255, 255, 255, 0.055));
 
   /* THE ALARM SURFACE. Reserved for the fabrication band on the diff view and
      nothing else - its scarcity is the whole signal, and spending it on
@@ -90,15 +88,14 @@
 
   /* --- Ink ------------------------------------------------------------- */
 
-  /* Body text. Near-black on off-white, warm off-white on near-black - never
-     the maximum-contrast pairing at either end, because that is the
-     combination that shimmers during a long reading session, and this
-     operator reads roughly thirty-five resumes a day. */
-  --ink: light-dark(#17181a, #e6e4e0);
-  /* Secondary text - metadata, field help, timestamps, table headers. Recedes
-     so the status column wins the eye, while still clearing AA at body size
-     against all three surface steps in both themes. */
-  --ink-muted: light-dark(#5f6367, #9a9894);
+  /* Body text. Crisp high-contrast near-black in light and clean cool-white
+     #f1f3f7 in dark to ensure sharp readability across midnight surfaces
+     without harsh vibration. */
+  --ink: light-dark(#17181a, #f1f3f7);
+  /* Secondary text - metadata, field help, timestamps, table headers.
+     Tuned slate #9da4b0 in dark to recede while clearing AA contrast on all
+     three midnight surface steps. */
+  --ink-muted: light-dark(#5f6367, #9da4b0);
   /* Text on the alarm surface. Faintly warm so it does not read as the body
      ink accidentally inverted, and light in both themes because the alarm
      ground is dark in both. */
@@ -119,26 +116,26 @@
 
   /* --- Structure ------------------------------------------------------- */
 
-  /* Hairlines: table rows, sheet edges, field separators. Barely-there on
-     purpose - a dense table with assertive rules reads as a grid of boxes
-     rather than a list of rows. */
-  --rule: light-dark(#e0e0dc, #2a2d31);
+  /* Hairlines: table rows, sheet edges, field separators. Subdued dark slate
+     #232734 in dark mode to softly delimit boundaries without cluttering dense
+     tabular data. */
+  --rule: light-dark(#e0e0dc, #232734);
   /* The stronger rule, for boundaries that are real semantic divisions - the
-     master/tailored split, a table's header edge. Distinguishable from --rule
-     at a glance, so a reader can tell a division from a row separator. */
-  --rule-strong: light-dark(#b9b9b3, #3d4147);
+     master/tailored split, a table's header edge. Defined slate #32384a in dark
+     to clearly demarcate major structural breaks from ordinary hairlines. */
+  --rule-strong: light-dark(#b9b9b3, #32384a);
 
   /* --- The interactive accent ------------------------------------------ */
 
-  /* THE SINGLE RESTRAINED ACCENT: focus rings, the active rail item, primary
-     interaction. A muted slate-blue, and the choice is structural rather than
-     aesthetic - green, oxblood and bronze below are all spoken for as
-     verdicts, so blue is the one hue left that can never be misread AS a
-     verdict. An accent that doubles as a status is an accent that lies. */
-  --accent: light-dark(#2f6bbf, #6a9fe0);
-  /* Hover and pressed. Darker in light, lighter in dark - which is exactly
-     why the name is "strong" and not "dark". */
-  --accent-strong: light-dark(#24558f, #85b3ee);
+  /* THE SINGLE VIBRANT ACCENT: focus rings, the active rail item, primary
+     interaction. Electric indigo (#4f46e5 / #6366f1) provides vibrant modern
+     contrast against midnight surfaces while remaining distinct from semantic
+     verdicts (green, oxblood, bronze). */
+  --accent: light-dark(#4f46e5, #6366f1);
+  /* Hover and pressed states for primary interactions. Deep indigo #4338ca
+     in light, luminous periwinkle-indigo #818cf8 in dark to deliver clear
+     interactive feedback. */
+  --accent-strong: light-dark(#4338ca, #818cf8);
 
   /* --- Semantic status colours. One meaning each, never used for styling.
          Each is paired in the CSS with a non-colour channel, because hue
