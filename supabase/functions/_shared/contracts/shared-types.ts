@@ -28,6 +28,27 @@ export type {
   MasterExperience,
   MasterEducation,
   MasterProject,
+  // The human's own summary paragraph AS A NODE WITH A `NodeId`, not a bare string.
+  // Re-exported because `TailoredSummary.refs` can now cite it, so the validator has
+  // to be able to name the type it is resolving that citation against.
+  MasterSummary,
+  // Undated award and credential nodes. Added 2026-09-11 because ingest was silently
+  // dropping both sections off the real resume — a fact present in the document and
+  // absent from the contract. They are bullet-bearing parents like experience, which
+  // is what makes them tailorable through `TailoredBullet` rather than free text.
+  MasterAchievement,
+  MasterCertification,
+  // A labelled external address carrying its OWN `NodeId`, so a link reconciles
+  // across re-uploads instead of looking like a new link every time.
+  //
+  // THIS NAME WAS MISSING BEFORE THE 2026-09-11 CONTRACT CHANGE — a PRE-EXISTING GAP,
+  // not fallout from it. `MasterIdentity.links` and `MasterProfile.links` have both
+  // been `DocumentOrdered<MasterLink>` since the contract was written, so any module
+  // in this tree that wanted to annotate a link variable could not, and the omission
+  // showed up as "that type does not exist" rather than as anything pointing here.
+  // That is the exact failure mode this hand-maintained allowlist has: a missing name
+  // HIDES a type, it does not break a build.
+  MasterLink,
   // What Gemini is allowed to return: refs plus rewordings, incapable of expressing
   // a new fact. This is §10 defense 1 encoded as a type rather than as a checker.
   TailoredProfile,
@@ -36,6 +57,12 @@ export type {
   TailoredExperience,
   TailoredEducation,
   TailoredProject,
+  // Selected award and credential. Carry a `ref` and bullets and NOTHING ELSE — no
+  // `label`, no `description` — so "Winner" cannot be tailored into "International
+  // Winner". Re-exported so the validator can type its two new resolution loops
+  // against the contract rather than against an inferred shape.
+  TailoredAchievement,
+  TailoredCertification,
   TailoredSummary,
   TailoredSectionKind,
   // The render input, constructible only by the validator.
@@ -45,6 +72,11 @@ export type {
   ResolvedExperience,
   ResolvedEducation,
   ResolvedProject,
+  // Award and credential AFTER resolution: `label` and `description` materialised
+  // out of the pinned master by typed code, which is the whole reason the tailored
+  // forms above are allowed to omit them. Only the validator may construct these.
+  ResolvedAchievement,
+  ResolvedCertification,
   // Shared node vocabulary.
   NodeId,
   DisplayDate,

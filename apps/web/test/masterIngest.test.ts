@@ -473,3 +473,166 @@ test('every finding carries a path an operator can search for', () => {
  * discriminate between a correct design and a plausible wrong one are almost
  * never the obvious ones. Here it is two tests out of thirty-six.
  */
+
+/* --- The node kinds that landed on 2026-09-11 -------------------------
+ *
+ * `summary`, `achievements`, `certifications` and `projects[i].links` joined
+ * `MasterProfile` on 2026-09-11. Every test below is about the same hazard, and
+ * it is a SILENT one: this checker validates `unknown` and casts at the end, so
+ * a walk that never learned the new kinds STILL COMPILES and still reports a
+ * clean profile. Nothing fails; global uniqueness has just quietly become
+ * uniqueness-over-the-kinds-someone-remembered.
+ *
+ * The cross-kind cases are the ones that matter. `node-id-uniqueness.ts:21`
+ * records that a PER-SECTION checker passed 34 of 36 tests written against this
+ * very path, and the only two it failed were cross-section collisions - so a
+ * within-section duplicate cannot tell a correct implementation from the
+ * plausible wrong one. These add the new kinds to that same shape. */
+
+test('a summary id colliding with a bullet id is blocking', () => {
+  const profile = validProfile();
+
+  /* The summary is a single node rather than a section, so it is the kind most
+     easily left out of a walk - there is no array to loop over and notice. */
+  profile['summary'] = { id: 'exp-1-b1', text: 'A summary that stole a bullet id.' };
+
+  const result = checkMasterProfile(profile);
+
+  assert.equal(result.ok, false, JSON.stringify(result, null, 2));
+  if (result.ok) return;
+
+  /* Asserted on the MESSAGE naming both ends rather than on which end carries
+     the finding's path, and that is deliberate. The walk visits `summary`
+     before `experience`, so the finding lands on the experience bullet - the
+     older node. Document order cannot say which end was added, so the contract
+     worth testing is that both halves are visible, not that the checker guessed
+     the culprit. */
+  const finding = result.findings.find((f) => f.problem.includes('exp-1-b1'));
+  assert.ok(finding !== undefined, 'expected the collision to name the shared id');
+  assert.match(finding.problem, /summary/);
+});
+
+test('a project link id colliding with a skill id is blocking', () => {
+  const profile = validProfile();
+
+  /* Nested TWO levels deep, and it only exists at all because
+     `MasterProject.url` - a scalar with no id - was replaced by a link array
+     whose entries draw ids from the same global pool as every other node. A
+     walk written before that change cannot see this collision. */
+  (profile['projects'] as Record<string, unknown>[])[0]!['links'] = [
+    { id: 'skill-1', label: 'Repo', url: 'https://example.invalid/r' },
+  ];
+
+  const result = checkMasterProfile(profile);
+
+  assert.equal(result.ok, false, JSON.stringify(result, null, 2));
+  if (result.ok) return;
+  const finding = result.findings.find((f) => f.problem.includes('skill-1'));
+  assert.ok(finding !== undefined, 'expected the collision to name the id');
+  /* And it must name the other end, or the operator can only see half of a
+     collision they have to fix in two places. */
+  assert.match(finding.problem, /skills\[0\]/);
+});
+
+test('an achievement bullet id colliding with an experience bullet id is blocking', () => {
+  const profile = validProfile();
+
+  /* The second id-bearing place under a new node kind: the parent id is obvious
+     because it is the thing being added, and the bullets underneath are what a
+     walk forgets to descend into. */
+  (profile['achievements'] as Record<string, unknown>[])[0]!['bullets'] = [
+    { id: 'exp-1-b1', text: 'An achievement bullet with a stolen id', tags: ['award'] },
+  ];
+
+  const result = checkMasterProfile(profile);
+
+  assert.equal(result.ok, false, JSON.stringify(result, null, 2));
+  if (result.ok) return;
+  const finding = result.findings.find((f) => f.path.startsWith('achievements[0].bullets[0]'));
+  assert.ok(finding !== undefined, 'expected the finding on the copy, not the original');
+  /* Bullet collisions get the longer explanation, because theirs is the one
+     with the silent misattribution consequence. */
+  assert.match(finding.problem, /misattributed|overwrites|wrong parent/i);
+});
+
+/* THE CRASH-SAFETY TESTS, and they guard the seam rather than a rule.
+ *
+ * Uniqueness is delegated to `findDuplicateNodeIds`, which takes a TYPED
+ * profile and dereferences `profile.achievements` with no guard. It is only
+ * reached when the structural walk has found nothing blocking. So a profile
+ * that is valid in every other respect but missing one of the new fields is
+ * exactly the input that would sail through the gate and throw inside the
+ * package - turning "this paste has a problem" into a lost paste.
+ *
+ * These are the tests that fail the day someone adds a node kind to
+ * `collectNodeIds` without adding it to this file's walk. */
+for (const missing of ['achievements', 'certifications', 'summary'] as const) {
+  test('an otherwise-valid profile missing ' + missing + ' is reported, never thrown', () => {
+    const profile = validProfile();
+    delete profile[missing];
+
+    /* The no-throw assertion is the load-bearing one. */
+    assert.doesNotThrow(() => checkMasterProfile(profile));
+
+    const result = checkMasterProfile(profile);
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.ok(blockingPaths(result.findings).includes(missing));
+  });
+}
+
+/* NON-VACUITY TWIN for the three above: the same fields PRESENT must be
+ * accepted. Without this, a checker that rejected every profile would pass all
+ * three. The happy path asserts it too, and it is restated here because these
+ * are the tests that would be edited together. */
+test('the new node kinds are accepted when present and well-formed', () => {
+  const result = checkMasterProfile(validProfile());
+
+  assert.equal(result.ok, true, JSON.stringify(result, null, 2));
+  if (!result.ok) return;
+  assert.equal(result.summary.achievements, 1);
+  assert.equal(result.summary.certifications, 1);
+  assert.equal(result.summary.hasSummary, true);
+});
+
+/* A summary of `null` is the ORDINARY case - most resumes have no summary
+ * paragraph - and must not be a finding. The field being ABSENT is a finding,
+ * which is the distinction the contract draws by making it a required field
+ * with a nullable value. */
+test('a null summary is accepted, because most resumes have none', () => {
+  const profile = validProfile();
+  profile['summary'] = null;
+
+  const result = checkMasterProfile(profile);
+
+  assert.equal(result.ok, true, JSON.stringify(result, null, 2));
+  if (!result.ok) return;
+  assert.equal(result.summary.hasSummary, false);
+});
+
+test('a blank achievement label is blocking, because it is printed verbatim', () => {
+  const profile = validProfile();
+  (profile['achievements'] as Record<string, unknown>[])[0]!['label'] = '   ';
+
+  const result = checkMasterProfile(profile);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.ok(blockingPaths(result.findings).includes('achievements[0].label'));
+});
+
+/* Top-level links used to be walked by a different inline block from
+ * `identity.links`, and the two had already drifted: identity required `label`
+ * and `url`, the top-level one checked neither. So a blank-labelled top-level
+ * link was accepted and would render as an empty anchor. Both now go through
+ * one function, and this is the case that was previously missed. */
+test('a blank label on a TOP-LEVEL link is blocking, same as on an identity link', () => {
+  const profile = validProfile();
+  (profile['links'] as Record<string, unknown>[])[0]!['label'] = '';
+
+  const result = checkMasterProfile(profile);
+
+  assert.equal(result.ok, false, JSON.stringify(result, null, 2));
+  if (result.ok) return;
+  assert.ok(blockingPaths(result.findings).includes('links[0].label'));
+});

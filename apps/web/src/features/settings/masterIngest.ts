@@ -231,17 +231,23 @@ function duplicateFindings(profile: MasterProfile): readonly IngestFinding[] {
   const findings: IngestFinding[] = [];
 
   for (const duplicate of findDuplicateNodeIds(profile)) {
-    /* THE FIRST OCCURRENCE IS THE INNOCENT ONE. `collectNodeIds` returns
-       document order, so `paths[0]` is the node that was already there and
-       everything after it is what someone added - almost always by copying the
-       node above and forgetting to change the id. Anchoring the finding on the
-       COPY is what makes it actionable: it is the line the operator has to
-       edit. Anchoring on the original would send them to correct a node that is
-       fine, and renumbering that one breaks every reference to it.
+    /* ONE FINDING PER OCCURRENCE AFTER THE FIRST, in document order.
+       `collectNodeIds` returns document order, and the convention is to report
+       on the later occurrences and name the first in the sentence.
 
-       One finding per later occurrence rather than one per duplicated id, so a
-       three-way collision produces two edits to make and names both of them.
-       `slice(1)` is the whole of that decision. */
+       WHY A CONVENTION AND NOT A DEDUCTION, because the obvious reading of this
+       code overstates what it knows. Within one section, the later occurrence
+       really is the copy - the way anyone adds a bullet is to duplicate the one
+       above it - so putting the finding there points at the line to edit. ACROSS
+       kinds it decides nothing: the walk visits `summary` before `experience`,
+       so a summary colliding with an experience bullet reports on the BULLET,
+       which may well be the older node. Neither end is knowably the culprit and
+       document order cannot tell you.
+
+       That is why every finding names the other end in its message and why
+       there is one finding per later occurrence rather than one per id: the
+       operator has to see both halves and decide which to renumber, and a
+       three-way collision is two separate edits. */
     const [first, ...copies] = duplicate.paths;
     /* Cannot happen - `findDuplicateNodeIds` only returns ids with more than
        one path - but `noUncheckedIndexedAccess` types it as possibly undefined,

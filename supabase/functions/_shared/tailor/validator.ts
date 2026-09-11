@@ -21,7 +21,12 @@ import type {
   MasterProfile,
   MasterBullet,
   NodeId,
+  // The two new resolved node kinds. Named explicitly rather than inferred, so the
+  // arrays below are checked against aa's contract instead of against whatever shape
+  // this file happens to build — an inferred literal agrees with itself by definition.
+  ResolvedAchievement,
   ResolvedBullet,
+  ResolvedCertification,
   ResolvedEducation,
   ResolvedExperience,
   ResolvedProject,
@@ -169,6 +174,19 @@ function masterSkillTokens(master: MasterProfile): ReadonlySet<string> {
 // anyway: an id space that is ambiguous to a human reading a provenance footer is a
 // latent hazard, and "every id in the master is unique" is a rule worth being able to
 // state without a footnote.
+//
+// KNOWN AND DELIBERATE GAP: LINK IDS ARE NOT CHECKED HERE. `MasterLink` carries a
+// `NodeId`, and `MasterProject.links` added a third population of them on 2026-09-11
+// alongside `MasterIdentity.links` and `MasterProfile.links`. None of the three is
+// reachable from any ref this file resolves — links are copied wholesale into the
+// resolved resume and never looked up — so a colliding link id cannot corrupt a
+// verdict HERE, and widening this function to cover them would change what a
+// tailoring is refused for without making any tailoring safer. The contract's global
+// uniqueness rule still applies to them; it is enforced at ingest, by
+// `packages/master-ingest`'s `collectNodeIds`/`findDuplicateNodeIds`, which is the
+// place the contract names. The rule for this function is narrower and stated so it
+// can be checked: EVERY ID THIS FUNCTION CAN RESOLVE IS AN ID IT CHECKS. Add a link
+// id to a resolution path and it must be added here in the same edit.
 function findDuplicateMasterIds(master: MasterProfile): readonly NodeId[] {
   // Ids seen at least once.
   const seen = new Set<NodeId>();
@@ -184,9 +202,32 @@ function findDuplicateMasterIds(master: MasterProfile): readonly NodeId[] {
   // Skills occupy the same declared id space even though they resolve through their
   // own map — see the note above about hygiene versus exploitability.
   for (const skill of master.skills) note(skill.id);
-  // The three bullet-owning node kinds, walked exactly as `indexBullets` walks them so
+  // The human's own summary paragraph, which became a node with an id on 2026-09-11.
+  // Included the moment it became RESOLVABLE: the summary-refs check below now treats
+  // this id as a legitimate citation target, and every id that can be resolved must
+  // also be an id that is guaranteed to name one thing. Skipping it would leave the
+  // newest ref target as the only one with no uniqueness guarantee behind it.
+  if (master.summary !== null) note(master.summary.id);
+  // The FIVE bullet-owning node kinds, walked exactly as `indexBullets` walks them so
   // this check cannot drift out of alignment with the index it is protecting.
-  for (const parent of [...master.experience, ...master.projects, ...master.education]) {
+  //
+  // ACHIEVEMENTS AND CERTIFICATIONS JOINED THIS LIST ON 2026-09-11 AS A MATTER OF
+  // SAFETY, NOT TIDINESS. They are bullet-bearing parents, so their bullets now land
+  // in the same flat `indexBullets` map as everybody else's — which means the overwrite
+  // hazard described above reaches them too. An achievement bullet colliding with an
+  // experience bullet would silently reparent one of the two, and the misattribution
+  // check would then compare against the wrong parent and report clean. Adding the
+  // resolution loops without adding these two lines would have reopened exactly the
+  // hole this function exists to close, in the newest and least-examined section.
+  for (
+    const parent of [
+      ...master.experience,
+      ...master.projects,
+      ...master.education,
+      ...master.achievements,
+      ...master.certifications,
+    ]
+  ) {
     // The parent's own id, which `resolveBullet` compares against.
     note(parent.id);
     // Every bullet beneath it, which is the flat-index collision proper.
@@ -207,8 +248,22 @@ function findDuplicateMasterIds(master: MasterProfile): readonly NodeId[] {
 function indexBullets(master: MasterProfile): ReadonlyMap<NodeId, { bullet: MasterBullet; parentRef: NodeId }> {
   // Accumulator keyed by bullet id.
   const index = new Map<NodeId, { bullet: MasterBullet; parentRef: NodeId }>();
-  // The three node kinds that own bullets, walked uniformly.
-  for (const parent of [...master.experience, ...master.projects, ...master.education]) {
+  // The five node kinds that own bullets, walked uniformly. Achievements and
+  // certifications are here because their bullets are ordinary `MasterBullet`s that
+  // the Tailor reworks through `TailoredBullet` — omitting them would make every
+  // achievement bullet an `unresolved_ref`, so the two new sections would resolve to
+  // nothing and the resume would render with empty award lines. Kept in the same
+  // order and the same shape as `findDuplicateMasterIds` above, deliberately: that
+  // function is only a valid guard for this index while the two walk the same nodes.
+  for (
+    const parent of [
+      ...master.experience,
+      ...master.projects,
+      ...master.education,
+      ...master.achievements,
+      ...master.certifications,
+    ]
+  ) {
     // Each bullet records the node it hangs from.
     for (const bullet of parent.bullets) index.set(bullet.id, { bullet, parentRef: parent.id });
   }
@@ -352,9 +407,23 @@ export function validateTailoredProfile(
   const educationById = new Map(master.education.map((node) => [node.id, node]));
   // Skills.
   const skillsById = new Map(master.skills.map((node) => [node.id, node]));
+  // Achievements. Built exactly like the four above rather than folded in with
+  // certifications: they are separate resume sections with separate refs, and one
+  // shared map would let an achievement ref resolve to a certification.
+  const achievementsById = new Map(master.achievements.map((node) => [node.id, node]));
+  // Certifications, for the same reason in the other direction.
+  const certificationsById = new Map(master.certifications.map((node) => [node.id, node]));
 
   // A resume with no experience, projects or education is a failed tailoring; without
   // this check an empty selection would pass with zero violations.
+  //
+  // ACHIEVEMENTS AND CERTIFICATIONS ARE DELIBERATELY NOT COUNTED AS SUBSTANCE, and
+  // leaving them out is the change here rather than an oversight. Adding them to this
+  // disjunction would WEAKEN the guard: a tailoring that selected one certification
+  // and nothing else would then pass as substantive, and a resume that is a single
+  // credential line with no employment, projects or education behind it is exactly
+  // the failed tailoring this check exists to catch. Awards qualify a resume; they do
+  // not constitute one.
   if (tailored.experience.length === 0 && tailored.projects.length === 0 && tailored.education.length === 0) {
     // Named distinctly from the fabrication cases, since the remedy differs.
     violations.push({ kind: "empty_selection" });
@@ -447,7 +516,13 @@ export function validateTailoredProfile(
     resolvedProjects.push({
       ref: node.id,
       name: node.name,
-      url: node.url,
+      // EVERY address the project has, carried across whole. This replaced
+      // `url: node.url` on 2026-09-11, when the scalar was deleted from the contract
+      // because a project with both a live URL and a GitHub URL had one of the two
+      // silently discarded on every upload. Copied by reference rather than rebuilt:
+      // a link has no tailorable part, so there is nothing here for the validator to
+      // resolve and nothing a model could have touched.
+      links: node.links,
       start_display: node.start_display,
       end_display: node.end_display,
       bullets,
@@ -490,6 +565,78 @@ export function validateTailoredProfile(
     });
   }
 
+  // --- Achievements -------------------------------------------------------
+  // Resolved awards and placings.
+  const resolvedAchievements: ResolvedAchievement[] = [];
+  // The same pattern a fourth time, and kept literally the same on purpose. A reader
+  // who has checked the experience loop above should be able to skim this one and
+  // trust it without re-deriving anything; a cleverer generic over the five kinds
+  // would hide the field-by-field copying, which is the part that makes the honesty
+  // guarantee true rather than merely claimed.
+  for (const selected of tailored.achievements) {
+    // Repeated award entry — the same placing listed twice reads as two placings.
+    if (isDuplicate(selected.ref, seenRefs, "achievements", violations)) continue;
+    // Resolve the achievement itself.
+    const node = achievementsById.get(selected.ref);
+    // An award that does not exist is constraint #2's cheapest lie: a bare
+    // superlative with no surrounding context to contradict it.
+    if (node === undefined) {
+      // Reported with its location so the dashboard can point at the section.
+      violations.push({ kind: "unresolved_ref", ref: selected.ref, where: "achievements" });
+      // Its bullets cannot be scope-checked without a parent to check against.
+      continue;
+    }
+    // Bullets scoped to THIS achievement.
+    const bullets = selected.bullets
+      // Resolve each.
+      .map((bullet) => resolveBullet(bullet, selected.ref, bulletIndex, skillTokens, violations))
+      // Keep only those that resolved.
+      .filter((bullet): bullet is ResolvedBullet => bullet !== null);
+    // `label` and `description` are materialised from the master and nowhere else —
+    // which is exactly why `TailoredAchievement` carries neither. This one line is
+    // what stops "Winner" being tailored into "International Winner".
+    resolvedAchievements.push({
+      ref: node.id,
+      label: node.label,
+      description: node.description,
+      bullets,
+    });
+  }
+
+  // --- Certifications -----------------------------------------------------
+  // Resolved credentials.
+  const resolvedCertifications: ResolvedCertification[] = [];
+  // Fifth and last repetition of the pattern. Certifications resolve through their
+  // own map rather than sharing the achievements one, so a certification ref can
+  // never quietly land on an achievement of the same id — the two sections are
+  // separate in the contract and separate here.
+  for (const selected of tailored.certifications) {
+    // Repeated credential entry.
+    if (isDuplicate(selected.ref, seenRefs, "certifications", violations)) continue;
+    // Resolve the certification itself.
+    const node = certificationsById.get(selected.ref);
+    // An invented credential is constraint #2's "certifications" clause verbatim.
+    if (node === undefined) {
+      // Reported.
+      violations.push({ kind: "unresolved_ref", ref: selected.ref, where: "certifications" });
+      // Skip its bullets.
+      continue;
+    }
+    // Bullets scoped to this certification.
+    const bullets = selected.bullets
+      // Resolve each.
+      .map((bullet) => resolveBullet(bullet, selected.ref, bulletIndex, skillTokens, violations))
+      // Keep only those that resolved.
+      .filter((bullet): bullet is ResolvedBullet => bullet !== null);
+    // Name and issuer detail from the master, so neither can be upgraded in wording.
+    resolvedCertifications.push({
+      ref: node.id,
+      label: node.label,
+      description: node.description,
+      bullets,
+    });
+  }
+
   // --- Summary ------------------------------------------------------------
   // aa names this the weakest point in the contract, and states why: prose cannot be
   // constrained by refs the way a bullet can. The non-empty `refs` requirement is the
@@ -503,9 +650,19 @@ export function validateTailoredProfile(
     }
     // Every declared ref must resolve against some real master node.
     for (const ref of tailored.summary.refs) {
-      // The summary may cite any node kind, so all four indexes are consulted.
-      const exists = experienceById.has(ref) || projectsById.has(ref) || educationById.has(ref) ||
-        skillsById.has(ref) || bulletIndex.has(ref);
+      // THE HUMAN'S OWN SUMMARY IS NOW A CITABLE SOURCE, and it has to be, or the
+      // 2026-09-11 contract change buys nothing. `MasterSummary` exists so that
+      // "reword the paragraph I wrote" stops being indistinguishable from "invent a
+      // paragraph" — but that only works if the id is ACCEPTED here. Leave this line
+      // out and a tailoring that honestly cites the master summary is rejected as a
+      // fabrication, which is the loudest possible way to punish the honest case.
+      const citesMasterSummary = master.summary !== null && master.summary.id === ref;
+      // The summary may cite any node kind, so every index is consulted — including
+      // the two added on 2026-09-11. A summary drawing on an award it cannot name is
+      // a summary forced to leave its strongest evidence undeclared.
+      const exists = citesMasterSummary || experienceById.has(ref) || projectsById.has(ref) ||
+        educationById.has(ref) || skillsById.has(ref) || achievementsById.has(ref) ||
+        certificationsById.has(ref) || bulletIndex.has(ref);
       // A citation to something that does not exist is the same fabrication as an
       // invented bullet, just harder to spot because it sits in the metadata.
       if (!exists) violations.push({ kind: "unresolved_ref", ref, where: "summary refs" });
@@ -539,6 +696,13 @@ export function validateTailoredProfile(
       experience: resolvedExperience,
       projects: resolvedProjects,
       education: resolvedEducation,
+      // REQUIRED ARRAYS ON `ResolvedResume`, POSSIBLY EMPTY. Present here as plain
+      // assignments rather than conditional spreads because the contract made them
+      // required precisely so that an omission is a compile error at this, the only
+      // production construction site, instead of a resume that silently renders
+      // without two of its sections.
+      achievements: resolvedAchievements,
+      certifications: resolvedCertifications,
     },
   };
 }

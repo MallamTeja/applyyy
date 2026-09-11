@@ -78,7 +78,11 @@ const MASTER: MasterProfile = {
     {
       id: "proj-portfolio",
       name: "Portfolio Site",
-      url: null,
+      // Replaced a single `url: string | null` on 2026-09-11 — see the contract note
+      // on `MasterProject.links`. Left EMPTY here rather than populated: this suite
+      // measures the instruction region byte-for-byte, and a link this fixture does
+      // not need would become bytes every determinism assertion has to carry.
+      links: [],
       start_display: "2025",
       end_display: "2025",
       start_date: null,
@@ -93,6 +97,18 @@ const MASTER: MasterProfile = {
     { id: "skill-express", name: "Express", category: "Frameworks" },
     { id: "skill-mongodb", name: "MongoDB", category: "Databases" },
   ],
+  // Required on `MasterProfile` as of 2026-09-11, and null here on purpose: this is
+  // the INJECTION suite, and every payload below asks for Docker. A master summary
+  // would add prose to the instruction region without adding a single new way for an
+  // injected instruction to land, so it would enlarge the fixture and test nothing.
+  summary: null,
+  // Required arrays, empty for the same reason. The award sections are exercised
+  // against the validator in `validator.test.ts`, which owns that coverage; what this
+  // file must prove is that a compromised model's output is refused, and the two
+  // doors it can use — an invented ref and smuggled bullet text — are unchanged by
+  // the presence or absence of an achievement.
+  achievements: [],
+  certifications: [],
   links: [],
 };
 
@@ -245,6 +261,11 @@ function tailoringWith(overrides: Partial<TailoredProfile>): TailoredProfile {
     // Unused by these cases.
     projects: [],
     education: [],
+    // Required on `TailoredProfile` as of 2026-09-11. Empty, so the only thing that
+    // ever differs between the honest control and an attack stays the one field the
+    // caller overrides — which is the property that lets a failure here name a cause.
+    achievements: [],
+    certifications: [],
     // The single deviation under test.
     ...overrides,
   };

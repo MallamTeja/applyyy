@@ -14,7 +14,8 @@ import assert from "node:assert/strict";
 // Explicit .ts extension — required by Deno, accepted by Node.
 import { validateTailoredProfile } from "./validator.ts";
 // aa's contract, reached through this stream's single re-export module.
-import type { MasterProfile, TailoredProfile } from "../contracts/shared-types.ts";
+// `MasterBullet` is imported for one narrow purpose — see `mutableBullets` below.
+import type { MasterBullet, MasterProfile, TailoredProfile } from "../contracts/shared-types.ts";
 
 // The version pinned on the application row. Kept separate from the profile JSON
 // because that is where aa put it: `master_profiles.version` is a column, and
@@ -77,7 +78,15 @@ const MASTER: MasterProfile = {
       // A second parent node, which is what makes the misattribution test possible.
       id: "proj-portfolio",
       name: "Portfolio Site",
-      url: null,
+      // TWO links, and two is the whole point. This field replaced a single
+      // `url: string | null` on 2026-09-11 because a project with both a live
+      // deployment and a source repository had one of the two silently discarded on
+      // every upload. A fixture carrying only one link would type-check against the
+      // new shape while proving nothing the old shape could not also have proved.
+      links: [
+        { id: "link-portfolio-live", label: "Live", url: "https://tejamallam.dev" },
+        { id: "link-portfolio-repo", label: "Source", url: "https://github.com/teja/portfolio" },
+      ],
       start_display: "2025",
       end_display: "2025",
       start_date: null,
@@ -94,6 +103,46 @@ const MASTER: MasterProfile = {
     { id: "skill-mongodb", name: "MongoDB", category: "Databases" },
     { id: "skill-git", name: "Git", category: "Tools" },
     { id: "skill-python", name: "Python", category: "Languages" },
+  ],
+  // The human's own paragraph AS A NODE. Given a real id rather than left null so the
+  // "a summary may cite the master summary" test below has something honest to cite;
+  // with null here that test could only ever assert a rejection, which is the vacuous
+  // half of the pair.
+  summary: {
+    id: "summary-master",
+    text: "Backend-leaning engineer who builds REST APIs in Node.js and ships them.",
+  },
+  // Two undated award nodes' worth of coverage in one: a bulleted achievement, so the
+  // flat bullet index has to reach into this section for the tests below to pass.
+  achievements: [
+    {
+      id: "ach-sih",
+      label: "Winner — Smart India Hackathon 2025",
+      description: "national finals",
+      bullets: [
+        {
+          id: "ach-bullet-sih",
+          text: "Built a REST API prototype in Node.js for the national finals",
+          tags: ["node", "rest"],
+        },
+      ],
+    },
+  ],
+  // A bulleted certification, for the same reason: an empty `bullets` array here
+  // would leave the certification half of the bullet index untested.
+  certifications: [
+    {
+      id: "cert-aws-ccp",
+      label: "AWS Certified Cloud Practitioner",
+      description: "Amazon Web Services",
+      bullets: [
+        {
+          id: "cert-bullet-aws",
+          text: "Covered core services and the shared responsibility model",
+          tags: ["aws"],
+        },
+      ],
+    },
   ],
   links: [],
 };
@@ -124,7 +173,34 @@ function baseline(): TailoredProfile {
     projects: [{ ref: "proj-portfolio", bullets: [{ ref: "bullet-portfolio-react", text: "Built a React portfolio site deployed on Vercel" }] }],
     // A real education node.
     education: [{ ref: "edu-mlrit", bullets: [{ ref: "edu-bullet-coursework", text: "Coursework in data structures, databases and operating systems" }] }],
+    // EMPTY BY DEFAULT, AND THAT IS THE DELIBERATE CHOICE. These two arrays became
+    // required on `TailoredProfile` on 2026-09-11, so the baseline must state them —
+    // but selecting an award here would change what all twenty-six pre-existing tests
+    // are validating, and a fixture change that quietly alters unrelated tests is how
+    // a suite stops meaning what its names say. The new sections are exercised by the
+    // tests that opt into them below.
+    achievements: [],
+    certifications: [],
   };
+}
+
+// Hand back a master node's bullets as a MUTABLE array so a test can deliberately
+// construct a profile the contract forbids.
+//
+// WHY A CAST AND NOT A REWRITE OF THE FIXTURE. `DocumentOrdered<T>` is
+// `readonly T[]` — aa's ORDER CONTRACT, which exists so nothing downstream can sort
+// a tailoring's document order out from under it. That readonly-ness is exactly
+// right for production and exactly wrong for these five tests, whose entire job is
+// to build a DEFECTIVE master that a correctly-typed construction site could never
+// produce. The cast is the honest way to say "this test is violating the contract on
+// purpose"; a mutable parallel fixture would hide that, and would drift from MASTER.
+//
+// It also matters that this was INVISIBLE until today. `deno check` never saw this
+// file — see `supabase/functions/deno.json`'s `exclude` — and `node --test` strips
+// types without checking them, so `.push` on a readonly array ran green for as long
+// as it has existed. It is a type error, not a runtime one: readonly is erased.
+function mutableBullets(node: { readonly bullets: readonly MasterBullet[] }): MasterBullet[] {
+  return node.bullets as MasterBullet[];
 }
 
 // §11's SAFE edit: same project, same 500 users, same tech, reworded into the JD's
@@ -505,7 +581,7 @@ function masterClone(): MasterProfile {
 test("two bullets with the same id under the SAME parent refuse the tailoring", () => {
   // Clone and duplicate a bullet id within one experience node.
   const master = masterClone();
-  master.experience[0]!.bullets.push({ id: "bullet-rest-api", text: "A second bullet reusing the id", tags: [] });
+  mutableBullets(master.experience[0]!).push({ id: "bullet-rest-api", text: "A second bullet reusing the id", tags: [] });
   // Validate an otherwise-perfectly-honest tailoring.
   const result = validateTailoredProfile(baseline(), master, PINNED_VERSION);
   // Refused.
@@ -521,7 +597,7 @@ test("two bullets with the same id under the SAME parent refuse the tailoring", 
 test("the same bullet id under two DIFFERENT parents refuses the tailoring", () => {
   // Clone and place the experience bullet's id under the project node too.
   const master = masterClone();
-  master.projects[0]!.bullets.push({ id: "bullet-rest-api", text: "A project bullet stealing the id", tags: [] });
+  mutableBullets(master.projects[0]!).push({ id: "bullet-rest-api", text: "A project bullet stealing the id", tags: [] });
   // Validate.
   const result = validateTailoredProfile(baseline(), master, PINNED_VERSION);
   // Refused — under a per-section design this would pass and the parent lookup would
@@ -586,7 +662,7 @@ test("an ambiguous master refuses outright rather than reporting alongside other
   // A master that is ambiguous AND a tailoring that is separately dishonest, so a
   // validator that carried on would certainly emit more than one violation.
   const master = masterClone();
-  master.projects[0]!.bullets.push({ id: "bullet-rest-api", text: "collision", tags: [] });
+  mutableBullets(master.projects[0]!).push({ id: "bullet-rest-api", text: "collision", tags: [] });
   // A tailoring that also references a skill that does not exist.
   const dishonest = baseline();
   const result = validateTailoredProfile({ ...dishonest, skills: [{ ref: "skill-docker-invented" }] }, master, PINNED_VERSION);
