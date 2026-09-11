@@ -74,6 +74,13 @@ const SECTION_HEADINGS: Record<string, string> = {
   experience: 'Experience',
   projects: 'Projects',
   education: 'Education',
+  // Added in lockstep with the renderer's own SECTION_HEADINGS table. THIS LINE
+  // IS LOAD-BEARING AND ITS ABSENCE WOULD BE SILENT: the section-order assertion
+  // below filters the expected list down to kinds present in THIS map, so a
+  // missing entry does not fail — it quietly stops checking that section. Two
+  // new sections would have rendered in an unasserted order with a green suite.
+  achievements: 'Achievements',
+  certifications: 'Certifications',
 };
 
 test('ATS parse — the extractor gets real text out at all', () => {
@@ -217,6 +224,12 @@ test('ATS parse — every bullet survives intact on a single line', () => {
     ...resume.experience.flatMap((entry) => entry.bullets),
     ...resume.projects.flatMap((entry) => entry.bullets),
     ...resume.education.flatMap((entry) => entry.bullets),
+    // Achievements and certifications carry ordinary ResolvedBullets too — that
+    // is what makes them tailorable at all. Omitting them here would leave the
+    // two newest renderers as the only bullet-bearing sections nothing checks,
+    // and a new renderer is exactly where the <ul> gets forgotten.
+    ...resume.achievements.flatMap((entry) => entry.bullets),
+    ...resume.certifications.flatMap((entry) => entry.bullets),
   ];
   assert.ok(bullets.length > 0, 'the fixture has no bullets — this assertion would pass vacuously');
 
@@ -244,4 +257,63 @@ test('ATS parse — every experience employer and role is readable', () => {
     assert.ok(text.includes(entry.company), `employer "${entry.company}" does not survive extraction`);
     assert.ok(text.includes(entry.role), `role "${entry.role}" does not survive extraction`);
   }
+});
+
+test('ATS parse — a project with two links reads as two separate labels', () => {
+  // THE MULTI-LINK CASE, READ AS A MACHINE READS IT. The anchors are INLINE
+  // elements, so the extractor puts them on ONE line by design — which is the
+  // whole reason the separator has to be a real character in the markup. With
+  // CSS generated content instead, this line would extract as 'LiveSource': one
+  // nonsense token where the document shows two labels, and nothing visual would
+  // reveal it.
+  const project = resume.projects[0];
+  assert.ok(project !== undefined, 'the fixture has no project — this assertion would be vacuous');
+  assert.ok(project.links.length >= 2, 'the fixture project has fewer than two links — the case under test is not present');
+
+  // The labels must land on the same extracted line (they are inline siblings)...
+  const linkLine = lines.find((line) => project.links.every((link) => line.includes(link.label)));
+  assert.ok(linkLine !== undefined, 'the project link labels do not survive extraction on one line');
+  // ...and must NOT be fused into a single token. Checked by concatenation
+  // rather than by asserting the separator character, because the failure being
+  // guarded against is 'nothing between them', whichever way it was produced.
+  const fused = project.links.map((link) => link.label).join('');
+  assert.ok(!linkLine.includes(fused), `link labels extract as the single token "${fused}" — the separator is invisible to a parser`);
+});
+
+test('ATS parse — every achievement and certification is readable as text', () => {
+  // label and description come from the master by ref and can never be reworded,
+  // so if they do not survive extraction the failure is purely in the rendering.
+  // An achievement a parser cannot read is an achievement that never happened as
+  // far as the keyword matcher is concerned.
+  const entries = [...resume.achievements, ...resume.certifications];
+  assert.ok(entries.length > 0, 'the fixture has no achievements or certifications — this assertion would be vacuous');
+
+  for (const entry of entries) {
+    assert.ok(text.includes(entry.label), `"${entry.label}" does not survive text extraction`);
+    // A null description is the normal case and there is nothing to look for;
+    // a present one must survive as its own readable line, not be swallowed.
+    if (entry.description !== null) {
+      assert.ok(
+        lines.some((line) => line === entry.description),
+        `the description "${String(entry.description)}" does not survive extraction as its own line`,
+      );
+    }
+  }
+});
+
+test('ATS parse — the two new sections are read where the tailoring put them', () => {
+  // The order assertion above compares only the headings it finds. This one is
+  // narrower and names the two newest sections explicitly, so a regression that
+  // dropped them entirely would fail HERE with a readable message rather than
+  // silently shrinking the list the order assertion compares.
+  const achievementsIndex = lines.indexOf('Achievements');
+  const certificationsIndex = lines.indexOf('Certifications');
+  const educationIndex = lines.indexOf('Education');
+
+  assert.notEqual(achievementsIndex, -1, 'the Achievements heading does not survive extraction');
+  assert.notEqual(certificationsIndex, -1, 'the Certifications heading does not survive extraction');
+  // section_order puts both after education; extraction must agree, because that
+  // order is a tailoring decision and not the renderer's to reinterpret.
+  assert.ok(educationIndex < achievementsIndex, 'Achievements was read before Education, against section_order');
+  assert.ok(achievementsIndex < certificationsIndex, 'Certifications was read before Achievements, against section_order');
 });

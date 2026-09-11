@@ -48,11 +48,18 @@ name in this repo: `misattributed_bullet`.
 2. **Different match keys per kind**, because the kinds have different
    stability. Skills match on normalised `name`; experience on
    `(company, role)`; education on `(institution, degree)`; projects on the
-   *head* of `name`. **Bullets are the only fuzzy match**, because bullets are
-   the only thing that gets reworded between uploads. Every key has a **tiebreak**
-   consulted only when the primary key is ambiguous — never part of the primary
-   key, or editing the tiebreak field alone would churn ids the primary key
-   could have carried.
+   *head* of `name`; links on `url`; achievements and certifications on `label`.
+   **Bullets are the only fuzzy match**, because bullets are the only thing that
+   gets reworded between uploads. Every key has a **tiebreak** consulted only when
+   the primary key is ambiguous — never part of the primary key, or editing the
+   tiebreak field alone would churn ids the primary key could have carried.
+
+   The **summary** has no key at all and does not need one: `MasterProfile.summary`
+   is a single nullable node, so if a previous and an incoming summary both exist
+   there is exactly one candidate and exactly one claimant. Ambiguity there is not
+   unlikely, it is *unrepresentable* — the type cannot hold a second summary. So a
+   rewritten summary keeps its id, which is the right answer: `TailoredSummary.refs`
+   points at that id and Teja rewrites the paragraph constantly.
 
 3. **Ambiguity fails loud; it never guesses.** A tie is precisely the case where
    a similarity threshold has no information to resolve anything, so it is
@@ -109,7 +116,10 @@ package actually has.
 Four **lists**, not four counts:
 
 - `carried` — kept its previous id, with `match: 'exact_key' | 'exact_text' | 'fuzzy_text'`.
-  Only `fuzzy_text` needs a human.
+  Only `fuzzy_text` needs a human. `kind` is one of `link`, `skill`, `experience`,
+  `education`, `project`, `achievement`, `certification`, `summary`, `bullet` —
+  the last three added 2026-09-11, each a separate member because `kind` is what a
+  review UI groups and filters by.
 - `minted` — got a fresh id, with one of six reasons (`no_previous_profile`,
   `new_parent`, `no_candidate`, `below_threshold`, `candidate_taken`,
   `ambiguous`) and the near-miss score where one exists.
@@ -198,21 +208,53 @@ checked against Teja's actual Overleaf PDF, and **one was wrong**:
   0.2pt off its own text baseline. Bucket `y` with a tolerance, or trust
   emission order.
 
-### Node kinds with no home in the contract
+### The four node kinds that had no home in the contract — CLOSED 2026-09-11
 
-The real resume contains three things `MasterProfile` has no field for. These
-are **not** reconciler bugs — the reconciler cannot carry an id for a node the
-type cannot hold — but they are silent data loss on ingest:
+Until 2026-09-11 the real resume contained four things `MasterProfile` had no
+field for, and this section reported them upstream as silent data loss on ingest.
+**They landed in `packages/shared-types/src/profile-nodes.ts` on 2026-09-11 and
+are reconciled here.** The table below is what the reconciler now does with each,
+not what it cannot do.
 
-| In the PDF | Status |
-|---|---|
-| **ACHIEVEMENTS** (3 entries, label + description) | No field in `MasterProfile` |
-| **CERTIFICATIONS** (4 entries) | No field in `MasterProfile` |
-| The summary paragraph (unlabelled, 4 lines) | No field; `TailoredSummary` is generated per-job |
-| A project's *second* link (live URL **and** GitHub) | `MasterProject.url` holds one |
+| In the PDF | Contract | Match key | Reconciled as |
+|---|---|---|---|
+| **ACHIEVEMENTS** (3 entries, label + description) | `MasterAchievement` | `label`, tiebroken by `(label, description)` | A **bulleted parent**, through the same generic as experience and projects |
+| **CERTIFICATIONS** (4 entries, `Name – Issuer`) | `MasterCertification` | `label`, tiebroken by `(label, description)` | A **bulleted parent**, separate pool from achievements |
+| The summary paragraph (unlabelled, 4 lines) | `MasterSummary`, at `MasterProfile.summary` | *none — see below* | A single node: carried, minted or dropped with `kind: 'summary'` at path `summary` |
+| A project's *second* link (live URL **and** GitHub) | `MasterProject.links` replaced `url: string \| null` | `url`, tiebroken by `(url, label)` | A **nested flat section**, reconciled inside its own already-reconciled project |
 
-`packages/shared-types/**` is another session's file, so these are reported
-upstream rather than fixed here.
+Three things about that are worth stating, because each is a place the obvious
+implementation is wrong:
+
+- **`label` is the primary key, not `(label, description)`.** The description is
+  the reworded half — the same relationship `linkKey` has, where the URL is stable
+  and the human-facing label is not. And an achievement is a *bulleted parent*, so
+  a failed parent key mints the achievement id **and every bullet id under it**
+  with no similarity search attempted. Reordering four words of a detail line would
+  break every pinned reference beneath it. That is the `projectKey` cascade again,
+  in a new section. Keying on the *description* instead is worse still: it is null
+  on most real lines, so every description-less achievement would normalise to the
+  same empty key and none of them would carry.
+
+- **The summary is carried even when the paragraph is completely rewritten,** and
+  it is reported as `exact_key` rather than `fuzzy_text`. There is one summary, so
+  a rewritten paragraph is still *the* summary. Scoring it would put the summary in
+  the human-review list on every single upload, which is how a review list stops
+  being read.
+
+- **Project links are matched only inside their own reconciled project.** A global
+  link pool would let the `Source` link of project A inherit the id of the `Source`
+  link of project B whenever the URLs matched — and forks, org renames and template
+  repositories make that ordinary rather than contrived. It is the same
+  misattribution as a bullet under the wrong employer, one level down, and it is
+  prevented by the same mechanism: the pool handed to the matcher is
+  `previousProject.links` and there is no code path that can widen it.
+
+**And one bug this closed that the contract change did not cause.** A *deleted*
+project reported its bullets individually and said nothing about its links, so
+those ids went dangling with nothing anywhere reporting them — the silent half of
+`dropped`, in a field that was one day old. Found by an exhaustive `deepEqual` on
+the whole dropped list; a `dropped.some(...)` per id would have passed.
 
 ---
 
@@ -229,10 +271,11 @@ so. Not done unilaterally because `apps/web/**` belongs to another session.
 
 ## Testing bar
 
-68 tests. Every guard is **mutation-tested**: broken on purpose, with a check
-that exactly the tests naming it go red. Every guard is also paired with a
-**non-vacuity twin** — an input it must *accept* — because rejection-only tests
-cannot distinguish a correct guard from one that rejects everything.
+116 tests (93 before the 2026-09-11 contract change). Every guard is
+**mutation-tested**: broken on purpose, with a check that exactly the tests naming
+it go red. Every guard is also paired with a **non-vacuity twin** — an input it
+must *accept* — because rejection-only tests cannot distinguish a correct guard
+from one that rejects everything.
 
 | Mutation | Tests killed |
 |---|---|
@@ -254,6 +297,19 @@ cannot distinguish a correct guard from one that rejects everything.
 | Label truncation reinstated at 80 chars | 2 |
 | Ambiguous mints counted as a second review row | 2 |
 | `reviewableRows` omits dropped nodes | 3 |
+| **Added 2026-09-11 with the four new node kinds** | |
+| `achievementKey` primary `label` → `(label, description)` | 1 |
+| `certificationKey` primary `label` → `description` | 2 |
+| Summary carry → always mint | 19 |
+| Summary drop row removed | 1 |
+| Summary mint reason: `no_previous_profile` branch removed | 2 |
+| **Project-link pool: parent-scoped → global** (the misattribution, one level down) | **19** |
+| Nested mint reason `new_parent` → `no_candidate` | 2 |
+| Dropped parent stops reporting its links | 3 |
+| Achievements reconciled against an empty pool (silent re-identification) | 25 |
+| Certifications reconciled against an empty pool | 20 |
+| Project-link rows stop naming their project | 3 |
+| Project links never reconciled at all | 7 |
 
 Two results worth reading:
 
@@ -271,6 +327,11 @@ Two results worth reading:
   `applyyy-20` grepping the shipped code against the claim. Labels were also
   truncated at 80 characters, which would have cut every real 150–200 character
   bullet mid-sentence in the review UI.
+- **The achievement key mutation kills exactly ONE test, and that is the right
+  number.** Folding the description into the primary key only changes the answer
+  for an achievement whose description was reworded and whose label was not — every
+  other input still carries. A mutation that killed twenty tests here would have
+  meant the suite was asserting the same thing twenty times.
 - **The stored-profile precondition initially killed ZERO tests.** The test
   named after it was passing because the *postcondition* caught the same input —
   a composite result, and exactly `docs/verification-traps.md`'s THE RULE. It is
@@ -282,10 +343,23 @@ Two results worth reading:
 
 ## Running it
 
+From the **repo root**, through the package's own scripts:
+
 ```sh
-node --test "test/**/*.test.ts"   # the glob is required; a bare directory fails on Node 24
-tsc --noEmit                       # checker only, never an emitter
+pnpm --filter @applyy/master-ingest run test        # node --test "test/**/*.test.ts"
+pnpm --filter @applyy/master-ingest run typecheck   # tsc --noEmit, checker only, never an emitter
 ```
+
+Two things that have each cost a session:
+
+- **The test glob is required.** `node --test test` — a bare directory — fails on
+  Node 24 with `MODULE_NOT_FOUND`, and the error reads exactly like a missing
+  fixture. The `test` script above already has the glob; run the script.
+- **Do not use `pnpm -r`.** It can rewrite the shared `pnpm-lock.yaml` as a side
+  effect, and it *topologically skips* the dependents of a failed package rather
+  than failing them — so a red `shared-types` leaves `master-ingest` silently
+  unchecked while the run still looks like it covered everything. `--filter` runs
+  exactly the package named.
 
 There is **no build step, and one must not be added.** Raw `.ts` source with a
 source-only `exports` map, exactly like `resume-template`. That absence is what

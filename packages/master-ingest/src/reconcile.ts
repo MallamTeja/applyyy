@@ -52,17 +52,22 @@
  */
 
 import type {
+  MasterAchievement,
   MasterBullet,
+  MasterCertification,
   MasterEducation,
   MasterExperience,
   MasterLink,
   MasterProfile,
   MasterProject,
   MasterSkill,
+  MasterSummary,
   NodeId,
 } from '@applyy/shared-types';
 import { assignDeterministically, type ScoredPair } from './assign.ts';
 import {
+  achievementKey,
+  certificationKey,
   educationKey,
   experienceKey,
   linkKey,
@@ -146,6 +151,30 @@ interface Accumulator {
  * product, not a log, so it carries what a person needs to read. */
 function labelFor(text: string): string {
   return text.replace(/\s+/gu, ' ').trim();
+}
+
+/* The renderable form of a link. Written once and shared by all THREE link
+ * pools - identity links, project links and top-level links - because
+ * `parentLabel` and `label` are promised to be PRE-RENDERED so that two
+ * consumers cannot join the parts differently; three inline copies of the join
+ * would reintroduce exactly the divergence the pre-rendering rule forbids,
+ * inside one file. */
+function linkLabel(link: MasterLink): string {
+  return link.label + ' <' + link.url + '>';
+}
+
+/* The renderable form of an achievement or a certification.
+ *
+ * INCLUDES THE DESCRIPTION, which the MATCH KEY deliberately does not. The two
+ * are answering different questions: the key asks "is this the same node" and
+ * must ignore the reworded half, while the label asks "what is a reviewer
+ * looking at" and must show it - a certification that carried its id while its
+ * issuer changed from "Amazon Web Services" to "AWS" is a row where `label` and
+ * `previousLabel` differ, and that difference is the entire content of the
+ * review. Structural typing rather than a union of the two interfaces, so it
+ * cannot drift if one of them gains a field. */
+function labelledEntryLabel(node: { readonly label: string; readonly description: string | null }): string {
+  return node.description === null ? node.label : node.label + ' - ' + node.description;
 }
 
 /* --- Exact key matching, shared by every non-bullet kind ---------------- */
@@ -532,7 +561,46 @@ function reconcileBulletedSection<T extends BulletedNode>(
   sectionPath: string,
   keyOf: (node: T) => MatchKey,
   labelOf: (node: T) => string,
-  rebuild: (node: T, id: NodeId, bullets: readonly MasterBullet[]) => T,
+  /* Rebuilds one output node from its reconciled id and bullets.
+   *
+   * `previousNode` AND `path` WERE ADDED 2026-09-11, for project links, and the
+   * shape is the point rather than an accident of what was convenient. A nested
+   * pool needs two things this generic already knows and nobody outside it can
+   * re-derive safely: WHICH previous node matched (so the pool is
+   * `previousNode.links` and not every project's links), and WHERE the output
+   * node sits (so the nested report paths read `projects[1].links[0]`).
+   * Recomputing the first outside would mean a second matcher deciding which
+   * stored project this one is, and two matchers that disagree is cross-parent
+   * migration arriving by the back door - the thing decision 1 keeps
+   * unrepresentable by having exactly one answer to that question.
+   *
+   * `previousNode` is `T | null`, not an optional parameter: null is the REAL
+   * answer for an unmatched parent, and an optional would let a caller read
+   * "absent" as "not passed" and fall back to searching something it must not.
+   * Every other caller simply declares fewer parameters and ignores both. */
+  rebuild: (
+    node: T,
+    id: NodeId,
+    bullets: readonly MasterBullet[],
+    previousNode: T | null,
+    path: string,
+  ) => T,
+  /* Reports the ids under a DROPPED parent that this generic does not know
+     about - today, a project's links.
+   *
+   * WHY THIS EXISTS AT ALL, AND IT WAS FOUND BY A TEST RATHER THAN BY READING.
+   * The dropped walk below already lists a deleted parent's BULLETS individually,
+   * because a pinned application references a bullet id and not the project id.
+   * The moment a project gained `links: DocumentOrdered<MasterLink>`, it gained a
+   * SECOND nested id-bearing array with exactly the same property - and deleting
+   * the project made those link ids dangle with nothing anywhere reporting it.
+   * That is the silent half of `dropped`, in a brand-new field, and the first
+   * version of this change shipped it.
+   *
+   * `null` rather than optional, for the same reason as `previousNode`: the four
+   * sections that have no nested arrays must SAY so, so that the next kind with
+   * one cannot inherit silence by omission. */
+  dropNested: ((node: T, previousPath: string) => void) | null,
   acc: Accumulator,
 ): T[] {
   const match = matchByKey(previous.map(keyOf), incoming.map(keyOf));
@@ -578,6 +646,10 @@ function reconcileBulletedSection<T extends BulletedNode>(
           path,
           acc,
         ),
+        /* The matched stored node, handed to the caller so a NESTED pool is
+           scoped to this one parent. Nothing else may read it. */
+        previousNode,
+        path,
       );
     }
 
@@ -637,6 +709,13 @@ function reconcileBulletedSection<T extends BulletedNode>(
         acc.firstUpload ? 'no_previous_profile' : 'new_parent',
         acc,
       ),
+      /* NULL, AND THIS IS THE LOAD-BEARING HALF OF THE NEW SIGNATURE. The parent
+         did not match, so there is no previous node whose nested pool could
+         legitimately be searched - and searching a DIFFERENT parent's pool is
+         the migration decision 1 exists to make unrepresentable. Passing null
+         rather than omitting the argument makes the caller state that case. */
+      null,
+      path,
     );
   });
 
@@ -670,14 +749,62 @@ function reconcileBulletedSection<T extends BulletedNode>(
         label: labelFor(bullet.text),
       });
     });
+    /* Anything else id-bearing under the parent - see `dropNested`. Called after
+       the bullets so the drop list reads in the same order as the profile
+       walk. */
+    dropNested?.(node, sectionPath + '[' + String(index) + ']');
   });
 
   return output;
 }
 
+/* WHERE A FLAT SECTION HANGS, AND WHAT AN EMPTY POOL UNDER IT MEANS.
+ *
+ * Added 2026-09-11 with project links - the first flat section in this package
+ * that is NOT at the root of the profile. Passed as ONE object rather than three
+ * parameters because all three answer the same question ("whose links are
+ * these"), and a caller that got one right and another wrong would emit a report
+ * row that contradicts itself: a row naming a parent while claiming its content
+ * is brand new. */
+interface SectionPlacement {
+  /* The RECONCILED parent's id - the id that will be in the stored profile, not
+     the throwaway one the parse produced. Null means "this node HAS no parent",
+     never "the parent is unknown", which is the contract `NodePlacement` states
+     in report.ts. */
+  readonly parentId: NodeId | null;
+  /* Pre-rendered, so every consumer shows the same string. Null exactly when
+     `parentId` is null. */
+  readonly parentLabel: string | null;
+  /* The mint reason for a node that found no candidate at all.
+   *
+   * At the root, an empty pool genuinely means new content, so `no_candidate` is
+   * true. Inside a parent that FAILED to match, the pool was empty only because
+   * the parent was - and reporting `no_candidate` there would assert that a
+   * GitHub link unchanged since the first upload is new content. `new_parent`
+   * says the true thing, in the vocabulary the bullets already use, so a reader
+   * seeing several of these goes and looks at the parent rather than at the
+   * links. */
+  readonly noCandidateReason: MintReason;
+}
+
+/* The root of the profile: identity links, skills, top-level links. Named rather
+ * than written inline three times, so the three root callers cannot drift. */
+const TOP_LEVEL: SectionPlacement = {
+  parentId: null,
+  parentLabel: null,
+  noCandidateReason: 'no_candidate',
+};
+
 /* Reconcile a section of id-only nodes: skills and links. Same key logic, no
  * bullets, so it cannot share the function above without giving every skill an
- * empty bullets array it does not have. */
+ * empty bullets array it does not have.
+ *
+ * USED FOR NESTED POOLS TOO, as of 2026-09-11: a project's links are reconciled
+ * by this same function against that ONE project's previous links. Reusing it
+ * rather than hand-writing a fourth walk is the same argument the bulleted
+ * generic makes - a second copy is a second chance to lose the parent scoping,
+ * and the loss would be invisible in a test that only exercised identity
+ * links. */
 function reconcileFlatSection<T extends { readonly id: NodeId }>(
   previous: readonly T[],
   incoming: readonly T[],
@@ -686,6 +813,7 @@ function reconcileFlatSection<T extends { readonly id: NodeId }>(
   keyOf: (node: T) => MatchKey,
   labelOf: (node: T) => string,
   rebuild: (node: T, id: NodeId) => T,
+  placement: SectionPlacement,
   acc: Accumulator,
 ): T[] {
   const match = matchByKey(previous.map(keyOf), incoming.map(keyOf));
@@ -702,17 +830,20 @@ function reconcileFlatSection<T extends { readonly id: NodeId }>(
         kind,
         id: previousNode.id,
         supersededId: node.id,
-        /* A top-level node has no parent, rather than an unknown one. */
-        parentId: null,
-        parentLabel: null,
+        /* Null at the root; the owning project for a project link. A link row
+           naming no parent would be unreviewable in the one way that matters -
+           "Source <github.com/example/x>" is only checkable beside the project
+           it is claimed to belong to. */
+        parentId: placement.parentId,
+        parentLabel: placement.parentLabel,
         path,
         match: 'exact_key',
         similarity: null,
         label: labelOf(node),
         /* Meaningful even for an exact-KEY match: the key deliberately reads
-           only part of the node, so a project whose tagline was reworded
-           carries its id while its label changes - and that difference is
-           exactly what a reviewer wants to see. */
+           only part of the node, so a link whose LABEL was reworded carries its
+           id while its rendered label changes - and that difference is exactly
+           what a reviewer wants to see. */
         previousLabel: labelOf(previousNode),
       });
       return rebuild(node, previousNode.id);
@@ -731,8 +862,8 @@ function reconcileFlatSection<T extends { readonly id: NodeId }>(
       acc.ambiguous.push({
         kind,
         reason: 'duplicate_match_key',
-        parentId: null,
-        parentLabel: null,
+        parentId: placement.parentId,
+        parentLabel: placement.parentLabel,
         path,
         candidateIds,
         score: null,
@@ -747,14 +878,18 @@ function reconcileFlatSection<T extends { readonly id: NodeId }>(
     acc.minted.push({
       kind,
       id,
-      parentId: null,
-      parentLabel: null,
+      parentId: placement.parentId,
+      parentLabel: placement.parentLabel,
       path,
+      /* Most-specific reason first, as everywhere else: a first upload explains
+         everything at once, an unresolved key is the thing a human can act on,
+         and only then the placement's own answer to "nothing matched" - which
+         differs between the root and a parent that is itself new. */
       reason: acc.firstUpload
         ? 'no_previous_profile'
         : tiedPrevious !== undefined
           ? 'ambiguous'
-          : 'no_candidate',
+          : placement.noCandidateReason,
       label: labelOf(node),
       bestScore: null,
     });
@@ -768,14 +903,114 @@ function reconcileFlatSection<T extends { readonly id: NodeId }>(
     acc.dropped.push({
       kind,
       id: node.id,
-      parentId: null,
-      parentLabel: null,
+      parentId: placement.parentId,
+      parentLabel: placement.parentLabel,
       previousPath: sectionPath + '[' + String(index) + ']',
       label: labelOf(node),
     });
   });
 
   return output;
+}
+
+/* --- The summary: one node, and therefore no pool ------------------------ */
+
+/* Reconcile the single summary node.
+ *
+ * WHY THIS IS BESPOKE RATHER THAN A ONE-ELEMENT SECTION. Every other reconciler
+ * in this file answers "which of these previous nodes is this incoming node",
+ * and the whole apparatus above - match keys, tiebreaks, ambiguity reporting -
+ * exists to REFUSE that question when it has more than one answer. The summary
+ * has no pool: `MasterProfile.summary` is one nullable node, so if a previous
+ * summary and an incoming summary both exist there is exactly one candidate and
+ * exactly one claimant. AMBIGUITY IS NOT MERELY UNLIKELY HERE, IT IS
+ * UNREPRESENTABLE - the type cannot hold a second summary - so there is nothing
+ * for a key or a threshold to decide, and running this through the generic would
+ * have invented a key whose only purpose was to be trivially unique.
+ *
+ * WHICH MEANS THE TEXT IS DELIBERATELY NOT CONSULTED. A completely rewritten
+ * summary still carries its id, because it is still THE summary, and the
+ * alternative is the churn that matters most: `TailoredSummary.refs` points at
+ * this id, so minting a fresh one on a rewording breaks every pinned tailoring's
+ * one non-bullet ref on an edit Teja makes constantly. The change is still
+ * visible - `label` and `previousLabel` carry both texts - so a reader sees what
+ * happened without the id having moved.
+ *
+ * `match: 'exact_key'`, because the KEY IS THE FIELD ITSELF: `profile.summary`
+ * identifies this node the way a normalised name identifies a skill, and it can
+ * never be ambiguous. `fuzzy_text` would be a lie (nothing was scored, and
+ * `similarity` would have to be null beside it) and would put the summary in the
+ * human-review list on every single upload, which is how a review list stops
+ * being read. `exact_text` would be a lie whenever the paragraph changed. */
+function reconcileSummary(
+  previous: MasterSummary | null,
+  incoming: MasterSummary | null,
+  acc: Accumulator,
+): MasterSummary | null {
+  /* THE DELETION CASE, AND IT IS THE REASON `dropped` EXISTS. A pinned tailoring
+     may hold a ref to this id; the paragraph going away makes that ref dangling,
+     and a dangling ref is a decision for a person rather than a tidy-up. Handled
+     before the null-incoming early return, or the one case the report is built
+     around would be the one case it stayed silent about. */
+  if (incoming === null) {
+    if (previous !== null) {
+      acc.dropped.push({
+        kind: 'summary',
+        id: previous.id,
+        /* A top-level node: it has no parent, rather than an unknown one. */
+        parentId: null,
+        parentLabel: null,
+        /* No index: there is one summary, so `summary[0]` would suggest a
+           section that does not exist and would not match the JSON an operator
+           searches. */
+        previousPath: 'summary',
+        label: labelFor(previous.text),
+      });
+    }
+    return null;
+  }
+
+  /* CARRY. One candidate, one claimant, no pool - see the header. */
+  if (previous !== null) {
+    acc.carried.push({
+      kind: 'summary',
+      id: previous.id,
+      /* The parse's throwaway id, kept only so a debugging session can trace the
+         node back to what the parser produced. */
+      supersededId: incoming.id,
+      parentId: null,
+      parentLabel: null,
+      path: 'summary',
+      match: 'exact_key',
+      /* Null, because nothing was scored. A number here would make this
+         indistinguishable from a judgement a human should check. */
+      similarity: null,
+      label: labelFor(incoming.text),
+      /* THE FIELD THAT MAKES A REWRITTEN SUMMARY VISIBLE despite the id not
+         moving. Unrecoverable from the output, because the output replaced it. */
+      previousLabel: labelFor(previous.text),
+    });
+    return { ...incoming, id: previous.id };
+  }
+
+  /* MINT. Either the very first upload, or a summary that did not exist before.
+     Those are different facts and the report says which: `no_previous_profile`
+     on a first upload would otherwise be reported as `no_candidate`, which reads
+     like a summary that failed to match something. */
+  const id = acc.mintId();
+  acc.minted.push({
+    kind: 'summary',
+    id,
+    parentId: null,
+    parentLabel: null,
+    path: 'summary',
+    reason: acc.firstUpload ? 'no_previous_profile' : 'no_candidate',
+    label: labelFor(incoming.text),
+    /* Null: no comparison happened, and 0 would claim one did and found nothing
+       alike. */
+    bestScore: null,
+  });
+  return { ...incoming, id };
 }
 
 /* --- The entry point ---------------------------------------------------- */
@@ -828,6 +1063,14 @@ export function reconcileMasterProfile(input: ReconcileInput): ReconcileOutput {
   const previousExperience: readonly MasterExperience[] = previous?.experience ?? [];
   const previousProjects: readonly MasterProject[] = previous?.projects ?? [];
   const previousEducation: readonly MasterEducation[] = previous?.education ?? [];
+  /* Added 2026-09-11, when the contract gained real nodes for the three things
+     the real resume contained and `MasterProfile` could not hold. Without these
+     pools the sections would still COMPILE - they would simply be reconciled
+     against nothing and re-minted on every upload, which is the silent
+     re-identification this package exists to prevent, reintroduced in three new
+     fields. */
+  const previousAchievements: readonly MasterAchievement[] = previous?.achievements ?? [];
+  const previousCertifications: readonly MasterCertification[] = previous?.certifications ?? [];
   const previousLinks: readonly MasterLink[] = previous?.links ?? [];
   const previousIdentityLinks: readonly MasterLink[] = previous?.identity.links ?? [];
 
@@ -839,10 +1082,15 @@ export function reconcileMasterProfile(input: ReconcileInput): ReconcileOutput {
     'link',
     'identity.links',
     linkKey,
-    (link) => link.label + ' <' + link.url + '>',
+    linkLabel,
     (link, id) => ({ ...link, id }),
+    TOP_LEVEL,
     acc,
   );
+
+  /* Second, matching `collectNodeIds`. The summary is one node rather than a
+     section, so it has its own reconciler - see `reconcileSummary`. */
+  const summary = reconcileSummary(previous?.summary ?? null, incoming.summary, acc);
 
   const skills = reconcileFlatSection<MasterSkill>(
     previousSkills,
@@ -852,6 +1100,7 @@ export function reconcileMasterProfile(input: ReconcileInput): ReconcileOutput {
     skillKey,
     (skill) => skill.name,
     (skill, id) => ({ ...skill, id }),
+    TOP_LEVEL,
     acc,
   );
 
@@ -863,6 +1112,8 @@ export function reconcileMasterProfile(input: ReconcileInput): ReconcileOutput {
     experienceKey,
     (node) => node.role + ' at ' + node.company,
     (node, id, bullets) => ({ ...node, id, bullets }),
+    /* Nothing nested but bullets, and the generic already lists those. */
+    null,
     acc,
   );
 
@@ -873,7 +1124,86 @@ export function reconcileMasterProfile(input: ReconcileInput): ReconcileOutput {
     'projects',
     projectKey,
     (node) => node.name,
-    (node, id, bullets) => ({ ...node, id, bullets }),
+    /* PROJECT LINKS ARE RECONCILED HERE, INSIDE THE PROJECT, AND NOWHERE ELSE.
+     *
+     * `MasterProject.url` became `links` on 2026-09-11 because one real project
+     * has a live URL AND a GitHub URL and the single slot silently dropped one.
+     * A `MasterLink` carries a NodeId, so project links are now real nodes in the
+     * one global id space and need carrying forward like anything else.
+     *
+     * THE POOL IS `previousNode.links` - THIS project's previous links - and that
+     * scoping is decision 1 applied one level down. Reconciling every project's
+     * links against one global pool would let the "Source" link of project A
+     * inherit the id of the "Source" link of project B whenever the URLs happened
+     * to match, which they do across forks, org renames and template repos. The
+     * result would be a link node whose id says it belongs to a project it was
+     * never about - the same misattribution as a bullet under the wrong employer,
+     * arrived at by the same mechanism, and just as invisible.
+     *
+     * `previousNode === null` means the PARENT did not match, so the empty pool is
+     * a cascade rather than evidence of new content, and the mint reason says so.
+     * Reconciled inside `rebuild` rather than in a second pass over the output,
+     * because a second pass would have to re-derive which previous project each
+     * output project matched - a second matcher, free to disagree with the first. */
+    (node, id, bullets, previousNode, path) => ({
+      ...node,
+      id,
+      bullets,
+      links: reconcileFlatSection<MasterLink>(
+        previousNode?.links ?? [],
+        node.links,
+        'link',
+        path + '.links',
+        linkKey,
+        linkLabel,
+        (link, linkId) => ({ ...link, id: linkId }),
+        {
+          /* The RECONCILED project id, so a link row names the id a pin would
+             actually reference rather than the throwaway one the parse made. */
+          parentId: id,
+          /* The INCOMING name, because that is the wording on the reviewer's
+             screen - the same choice the bullet rows make. */
+          parentLabel: node.name,
+          noCandidateReason: previousNode === null ? 'new_parent' : 'no_candidate',
+        },
+        acc,
+      ),
+    }),
+    /* A DELETED PROJECT TAKES ITS LINKS WITH IT, and those ids have to be listed
+     * the same way its bullets are: a pinned application references the LINK id,
+     * not the project id, so reporting only the parent leaves a reader to infer
+     * which references broke - the "visible, not inferred" rule the whole report
+     * is built around.
+     *
+     * Written as `reconcileFlatSection` against an EMPTY incoming pool rather
+     * than by pushing rows by hand. Every previous link is then unmatched, which
+     * is precisely what "the project is gone" means, and the row shape - kind,
+     * path, parent, label - stays defined in exactly one place. A second
+     * hand-written copy would be free to spell the path differently from the one
+     * the live walk emits, and a path that does not match is a path an operator
+     * cannot search for. */
+    (node, previousPath) => {
+      reconcileFlatSection<MasterLink>(
+        node.links,
+        [],
+        'link',
+        previousPath + '.links',
+        linkKey,
+        linkLabel,
+        (link, linkId) => ({ ...link, id: linkId }),
+        {
+          /* The STORED project - it is the previous side that is being reported,
+             and its id is the one a pin would have referenced. */
+          parentId: node.id,
+          parentLabel: node.name,
+          /* Unreachable with an empty incoming pool - nothing is minted - and
+             stated rather than left to a default, because a default is how a
+             wrong reason gets reported the day this function grows a caller. */
+          noCandidateReason: 'no_candidate',
+        },
+        acc,
+      );
+    },
     acc,
   );
 
@@ -885,6 +1215,40 @@ export function reconcileMasterProfile(input: ReconcileInput): ReconcileOutput {
     educationKey,
     (node) => node.degree + ', ' + node.institution,
     (node, id, bullets) => ({ ...node, id, bullets }),
+    null,
+    acc,
+  );
+
+  /* ACHIEVEMENTS AND CERTIFICATIONS ARE BULLETED PARENTS, so they go through the
+     SAME generic as experience, projects and education rather than through two
+     more hand-written walks. That is not tidiness: the generic is where decision
+     1 is enforced - `reconcileBullets` is only ever handed ONE parent's bullets -
+     and a fourth or fifth hand-written copy is a fourth or fifth chance for one
+     section to lose that scoping, in a way no test of the other sections would
+     see. Most achievements have no bullets at all, which makes the omission even
+     easier to miss: the walk would look correct until the one achievement that
+     does have them. */
+  const achievements = reconcileBulletedSection<MasterAchievement>(
+    previousAchievements,
+    incoming.achievements,
+    'achievement',
+    'achievements',
+    achievementKey,
+    labelledEntryLabel,
+    (node, id, bullets) => ({ ...node, id, bullets }),
+    null,
+    acc,
+  );
+
+  const certifications = reconcileBulletedSection<MasterCertification>(
+    previousCertifications,
+    incoming.certifications,
+    'certification',
+    'certifications',
+    certificationKey,
+    labelledEntryLabel,
+    (node, id, bullets) => ({ ...node, id, bullets }),
+    null,
     acc,
   );
 
@@ -894,8 +1258,9 @@ export function reconcileMasterProfile(input: ReconcileInput): ReconcileOutput {
     'link',
     'links',
     linkKey,
-    (link) => link.label + ' <' + link.url + '>',
+    linkLabel,
     (link, id) => ({ ...link, id }),
+    TOP_LEVEL,
     acc,
   );
 
@@ -909,10 +1274,21 @@ export function reconcileMasterProfile(input: ReconcileInput): ReconcileOutput {
        reason to tailor a name or a phone number, and the contract gives the
        Tailor no way to touch them either. */
     identity: { ...incoming.identity, links: identityLinks },
+    /* REQUIRED FIELDS, NOT OPTIONAL ONES, and that is why they are listed here
+       rather than spread from `incoming`. `MasterProfile` declares `summary`,
+       `achievements` and `certifications` as required-but-nullable/possibly-empty
+       precisely so that a construction site which forgot one fails to compile
+       instead of storing a profile with the section silently gone. Spreading
+       `...incoming` would have satisfied the type while shipping the incoming
+       THROWAWAY ids straight into the stored profile - the one thing the header
+       of this file says never happens. */
+    summary,
     education,
     experience,
     projects,
     skills,
+    achievements,
+    certifications,
     links,
   };
 

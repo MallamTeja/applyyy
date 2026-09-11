@@ -23,6 +23,12 @@ import { readFileSync, writeFileSync } from 'node:fs';
 // URL-relative paths so the suite runs from any working directory.
 import { fileURLToPath } from 'node:url';
 
+// The render input type, so the hand-built variants below are checked against
+// the real contract rather than merely cast into shape. A cast would let a
+// variant drift out of the type and keep passing against a resume nothing in
+// production could produce.
+import type { MasterLink, ResolvedResume } from '@applyy/shared-types';
+
 // The subject under test, imported through the package's public surface so the
 // tests exercise the same entry point the worker and React use.
 import { renderResumeHtml, ResumeRenderError, RESUME_STYLESHEET } from '../src/index.ts';
@@ -132,7 +138,7 @@ describe('renderResumeHtml — ATS structure (section 17.2)', () => {
   it('uses conventional section headings a keyword matcher recognises', () => {
     // A clever heading is a heading the parser does not recognise, so the
     // content beneath it is filed as unclassified prose.
-    for (const heading of ['SKILLS', 'EXPERIENCE', 'PROJECTS', 'EDUCATION']) {
+    for (const heading of ['SKILLS', 'EXPERIENCE', 'PROJECTS', 'EDUCATION', 'ACHIEVEMENTS', 'CERTIFICATIONS']) {
       // The stylesheet uppercases visually; the markup carries title case.
       const titleCase = heading.charAt(0) + heading.slice(1).toLowerCase();
       assert.ok(html.includes(`>${titleCase}</h2>`), `missing standard heading: ${titleCase}`);
@@ -254,5 +260,210 @@ describe('renderResumeHtml — self-contained document', () => {
     // honour and Chromium silently falls back to Letter.
     assert.match(RESUME_STYLESHEET, /@page\s*\{[^}]*size:\s*A4/);
     assert.match(RESUME_STYLESHEET, /@page\s*\{[^}]*margin:/);
+  });
+});
+
+/**
+ * A resume identical to the worked example except for one project's links.
+ *
+ * Built as a helper rather than as four fixtures because the link count is the
+ * ONLY dimension these tests vary. Two inputs that differ in one property are
+ * what makes a rejection test and its non-vacuity twin comparable — if the
+ * fixtures differed in anything else, a failure would not say which difference
+ * caused it (docs/verification-traps.md, step 4).
+ */
+function resumeWithProjectLinks(links: readonly MasterLink[]): ResolvedResume {
+  return {
+    // Spread the real fixture so every other field stays production-shaped; only
+    // `projects` is replaced.
+    ...zomatoBackendIntern,
+    projects: [
+      {
+        ref: 'prj_link_probe',
+        name: 'Link probe',
+        // The one variable under test.
+        links,
+        start_display: '2025',
+        end_display: '2025',
+        // No bullets: they are irrelevant to the subtitle line and would only
+        // add noise to a failure message.
+        bullets: [],
+      },
+    ],
+  };
+}
+
+describe('renderProject — a project has many addresses, not one', () => {
+  it('renders every link as its label, not as a raw URL', () => {
+    // THE CASE THAT MOTIVATED THE CONTRACT CHANGE. The old single `url` slot
+    // discarded the second address on every ingest, silently. Two links must
+    // both survive, and each must print its LABEL — three raw URLs side by side
+    // is a line a recruiter skips and a parser gains nothing from.
+    const html = renderResumeHtml(resumeWithProjectLinks([
+      { id: 'lnk_live', label: 'Live', url: 'https://applyy.example.com' },
+      { id: 'lnk_src', label: 'Source', url: 'https://github.com/MallamTeja/applyy' },
+    ]));
+    assert.match(html, /<a href="https:\/\/applyy\.example\.com">Live<\/a>/);
+    assert.match(html, /<a href="https:\/\/github\.com\/MallamTeja\/applyy">Source<\/a>/);
+    // The URL must not be the visible text. Asserted as an absence because the
+    // regression here is additive: a renderer that printed both label AND URL
+    // would satisfy the two assertions above while doubling the line.
+    assert.equal(html.includes('>https://github.com/MallamTeja/applyy</a>'), false, 'the raw URL must not be the anchor text');
+  });
+
+  it('separates links with a REAL character, not CSS generated content', () => {
+    // Not a style preference. Generated content (::before, ::after, a border) is
+    // INVISIBLE to a text extractor, so two adjacent anchors with a styled gap
+    // parse as the single token 'LiveSource' and neither label matches anything.
+    // renderContact carries the same rule; this is the same failure mode at a
+    // second call site, which is exactly where a rule stops being applied.
+    const html = renderResumeHtml(resumeWithProjectLinks([
+      { id: 'lnk_live', label: 'Live', url: 'https://applyy.example.com' },
+      { id: 'lnk_src', label: 'Source', url: 'https://github.com/MallamTeja/applyy' },
+    ]));
+    // The separator character itself must be in the MARKUP, between the anchors.
+    assert.match(html, /<\/a><span class="resume__link-sep">•<\/span><a /);
+    // And the two labels must never be adjacent with nothing between them.
+    assert.equal(html.includes('>Live</a><a '), false, 'labels are fused with no separator character');
+  });
+
+  it('NON-VACUITY TWIN: one link renders no separator at all', () => {
+    // The twin for the assertion above. A renderer that appended a separator
+    // after every link — the obvious wrong implementation — would satisfy the
+    // 'separator is present' test and print a dangling bullet on the far more
+    // common single-link project. Only this input distinguishes them.
+    const html = renderResumeHtml(resumeWithProjectLinks([
+      { id: 'lnk_src', label: 'Source', url: 'https://github.com/MallamTeja/applyy' },
+    ]));
+    // The subtitle exists...
+    assert.match(html, /<div class="resume__entry-subtitle"><a href="https:\/\/github\.com\/MallamTeja\/applyy">Source<\/a><\/div>/);
+    // ...and carries no separator span. SCOPED TO THE ENTRY, not to the whole
+    // document: the stylesheet is inlined into the page and now DEFINES
+    // .resume__link-sep, so a document-wide `includes` can never be false and
+    // would have reported a pass that had nothing to do with the markup. The
+    // first draft of this assertion did exactly that and failed loudly, which is
+    // the only reason it is written correctly now.
+    const entry = html.slice(html.indexOf('data-ref="prj_link_probe"'));
+    const body = entry.slice(0, entry.indexOf('</section>'));
+    assert.ok(body.includes('Source'), 'sliced the wrong region — this assertion would be vacuous');
+    assert.equal(body.includes('resume__link-sep'), false, 'a single link must not print a separator');
+  });
+
+  it('renders no subtitle at all for a project with no public address', () => {
+    // Empty links is NORMAL — a private or coursework project has no address —
+    // and it is a different fact from 'the parser found none'. An empty subtitle
+    // div would still occupy vertical space on the page.
+    const html = renderResumeHtml(resumeWithProjectLinks([]));
+    // The project itself must still render; only its subtitle disappears.
+    assert.match(html, /<div class="resume__entry" data-ref="prj_link_probe">/);
+    // The entry must end its head and go straight to the bullets, with no
+    // subtitle div anywhere between the two.
+    const entry = html.slice(html.indexOf('data-ref="prj_link_probe"'));
+    const body = entry.slice(0, entry.indexOf('</section>'));
+    assert.equal(body.includes('resume__entry-subtitle'), false, 'empty links produced a subtitle div');
+    assert.equal(body.includes('resume__link-sep'), false, 'empty links produced a stray separator');
+  });
+
+  it('applies safeHref to a PROJECT link, not only to a contact link', () => {
+    // THE VERIFICATION-TRAPS CASE. The existing 'refuses a javascript: URL' test
+    // exercises renderContact only, so it would stay green with safeHref deleted
+    // from renderProject — the guard and the test would have quietly stopped
+    // being about the same code. A project link is a second, independent call
+    // site and needs its own input.
+    const html = renderResumeHtml(resumeWithProjectLinks([
+      { id: 'lnk_evil', label: 'Demo', url: 'javascript:alert(document.cookie)' },
+    ]));
+    assert.equal(/javascript:/i.test(html), false, 'a javascript: project link must not survive into the href');
+    // Collapsed to a dead link, with the label intact — a dead link is cosmetic,
+    // an executable one is a vulnerability in the one document a human clicks.
+    assert.match(html, /<a href="#">Demo<\/a>/);
+  });
+
+  it('NON-VACUITY TWIN: an ordinary https project link is NOT rewritten', () => {
+    // safeHref must be an allow-list, not a blanket rejector. Without this twin,
+    // a safeHref that returned '#' for everything would pass every rejection
+    // assertion above and silently strip every real link from every resume.
+    const html = renderResumeHtml(resumeWithProjectLinks([
+      { id: 'lnk_ok', label: 'Demo', url: 'https://applyy.example.com/demo' },
+    ]));
+    assert.match(html, /<a href="https:\/\/applyy\.example\.com\/demo">Demo<\/a>/);
+    assert.equal(html.includes('<a href="#">'), false, 'a valid https link was rewritten to a dead one');
+  });
+});
+
+describe('renderResumeHtml — achievements and certifications (undated sections)', () => {
+  const html = renderResumeHtml(zomatoBackendIntern);
+
+  it('renders both new sections under conventional headings', () => {
+    // These two kinds joined TailoredSectionKind and so became a compile error
+    // in renderSection's exhaustive switch. The compile error is the feature;
+    // this asserts it was answered with a real rendering rather than silenced.
+    assert.match(html, /<section class="resume__section" data-section="achievements">/);
+    assert.match(html, /<section class="resume__section" data-section="certifications">/);
+    assert.ok(html.includes('>Achievements</h2>'), 'achievements needs a heading an ATS recognises');
+    assert.ok(html.includes('>Certifications</h2>'), 'certifications needs a heading an ATS recognises');
+  });
+
+  it('anchors every achievement and certification to its master node', () => {
+    // data-ref is what lets the approval diff view highlight one entry against
+    // the master it came from. An entry without one is invisible to that view.
+    for (const ref of ['ach_sih', 'ach_codechef', 'cert_meta_backend', 'cert_nptel_dbms']) {
+      assert.ok(html.includes(`<div class="resume__entry" data-ref="${ref}">`), `entry ${ref} rendered without a master ref`);
+    }
+  });
+
+  it('prints a present description as its own detail line', () => {
+    // Follows renderEducation's grade_display pattern: a detail line rather than
+    // a suffix on the title, so the qualifying fact is scannable.
+    assert.match(html, /<div class="resume__entry-detail">national finals, 300\+ teams<\/div>/);
+    assert.match(html, /<div class="resume__entry-detail">Coursera<\/div>/);
+  });
+
+  it('NON-VACUITY TWIN: a null description prints no detail line and no separator', () => {
+    // The twin. A renderer that always emitted the detail div would pass the
+    // assertion above and print an empty italic line — or the string 'null' —
+    // under every entry whose label already says everything. The contract says
+    // null is the common case, not the exception.
+    const codechef = html.slice(html.indexOf('data-ref="ach_codechef"'));
+    const entry = codechef.slice(0, codechef.indexOf('</section>'));
+    assert.ok(entry.includes('CodeChef'), 'sliced the wrong entry — this assertion would be vacuous');
+    assert.equal(entry.includes('resume__entry-detail'), false, 'a null description produced a detail line');
+    assert.equal(entry.includes('null'), false, 'a null description leaked into the markup');
+  });
+
+  it('invents no date line for an undated entry', () => {
+    // The contract deliberately carries NO date for these, because the real
+    // document writes them undated. An empty resume__entry-dates span would be
+    // the renderer asserting a field the type refused to have, and the DATE
+    // CONTRACT forbids a date the renderer decided for itself.
+    const achievements = html.slice(
+      html.indexOf('data-section="achievements"'),
+      html.indexOf('data-section="certifications"'),
+    );
+    assert.ok(achievements.includes('Smart India Hackathon'), 'the achievements section did not render — this assertion would be vacuous');
+    assert.equal(achievements.includes('resume__entry-dates'), false, 'an undated entry printed a dates slot');
+  });
+
+  it('omits an asked-for section that has nothing to show', () => {
+    // The hostile fixture LISTS certifications in section_order and supplies an
+    // empty array. That is the only input that proves wrapSection suppresses the
+    // heading: projects and education are absent from section_order entirely, so
+    // the renderer is never even asked for them.
+    const sparse = renderResumeHtml(injectionAttempt);
+    assert.equal(sparse.includes('data-section="certifications"'), false, 'an empty asked-for section printed a heading');
+    // The twin, one line away: the section that DOES have content still renders,
+    // so this is a suppression rule and not a blanket refusal of new sections.
+    assert.ok(sparse.includes('data-section="achievements"'), 'the populated new section failed to render');
+  });
+
+  it('escapes markup reaching the new sections from an uploaded resume', () => {
+    // label and description come from the master by ref, so they are NOT
+    // downstream of a job description — but the master is parsed out of a file
+    // the user uploaded, so the text is still user-supplied. These two renderers
+    // are new call sites, and a new call site is where a missing escapeHtml lands.
+    const sparse = renderResumeHtml(injectionAttempt);
+    assert.equal(/<img\b/i.test(sparse), false, 'an injected img tag survived as markup');
+    assert.match(sparse, /&lt;img src=x onerror=alert\(1\)&gt;/, 'the payload should appear escaped, as inert text');
+    assert.match(sparse, /judged by &quot;Acme&quot; &amp; &lt;b&gt;Corp&lt;\/b&gt;/, 'description must be escaped exactly once');
   });
 });

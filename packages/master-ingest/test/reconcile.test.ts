@@ -28,7 +28,9 @@ import {
   reconcileMasterProfile,
 } from '../src/index.ts';
 import {
+  achievement,
   bullet,
+  certification,
   experience,
   link,
   makeMinter,
@@ -37,6 +39,7 @@ import {
   reparse,
   skill,
   STORED,
+  summary,
 } from './fixtures/profiles.ts';
 
 /* Every id in a profile, keyed by the path it sits at. The comparison unit for
@@ -51,8 +54,28 @@ function idsByPath(profile: MasterProfile): Record<string, string> {
 
 /* Finds the output bullet at a known position. Returns undefined rather than
    throwing so a test asserts on the value and reports a useful message. */
-function bulletIdAt(profile: MasterProfile, section: 'experience' | 'projects', parentIndex: number, bulletIndex: number): string | undefined {
+function bulletIdAt(
+  profile: MasterProfile,
+  /* All FIVE bulleted sections, not the original three. Achievements and
+     certifications became bulleted parents on 2026-09-11, and a helper that
+     could not reach their bullets would have quietly pushed their tests towards
+     weaker assertions than the sections it did cover. */
+  section: 'experience' | 'projects' | 'education' | 'achievements' | 'certifications',
+  parentIndex: number,
+  bulletIndex: number,
+): string | undefined {
   return profile[section][parentIndex]?.bullets[bulletIndex]?.id;
+}
+
+/* The id of one link inside one project. Project links are nested two levels
+ * deep, which is exactly why they are easy to leave unreconciled - nothing at
+ * the top level of the profile changes shape when they churn. */
+function projectLinkIdAt(
+  profile: MasterProfile,
+  projectIndex: number,
+  linkIndex: number,
+): string | undefined {
+  return profile.projects[projectIndex]?.links[linkIndex]?.id;
 }
 
 describe('byte-identical re-upload', () => {
@@ -224,8 +247,21 @@ describe('one reworded bullet plus one genuinely new project', () => {
     assert.equal(mintedBullets[0]?.path, 'projects[2].bullets[0]');
     assert.equal(mintedBullets[0]?.reason, 'new_parent');
 
-    /* Nothing else moved: two mints total, no drops. */
-    assert.equal(result.report.minted.length, 2);
+    /* And its LINK, which the project fixture gives every project by default.
+       Minted for the SAME cascade reason as the bullet rather than
+       `no_candidate`: the pool was empty because the parent is new, not because
+       this address is new content, and the two read completely differently to
+       somebody scanning the report for what to look at. */
+    const mintedLinks = result.report.minted.filter((m) => m.kind === 'link');
+    assert.equal(mintedLinks.length, 1);
+    assert.equal(mintedLinks[0]?.path, 'projects[2].links[0]');
+    assert.equal(mintedLinks[0]?.reason, 'new_parent');
+    /* The link row names the project it belongs to - a bare "Live <...>" row is
+       not reviewable without it. */
+    assert.equal(mintedLinks[0]?.parentLabel, 'Telemetry Explorer');
+
+    /* Nothing else moved: three mints total, no drops. */
+    assert.equal(result.report.minted.length, 3);
     assert.deepEqual(result.report.dropped, []);
 
     /* And every pre-existing node kept its exact id at its exact path. */
@@ -564,14 +600,19 @@ describe('project taglines and skill categories', () => {
     });
     const result = reconcileMasterProfile({ previous: STORED, incoming, mintId: makeMinter('new') });
     assert.notEqual(result.profile.projects[0]?.id, 'prj-oneonone');
-    /* One project plus both of its bullets, and the bullets say new_parent -
-       which is how the report makes a cascade legible instead of looking like
-       three unrelated mints. */
-    assert.equal(result.report.minted.length, 3);
-    assert.equal(result.report.minted.filter((m) => m.reason === 'new_parent').length, 2);
+    /* One project, both of its bullets AND both of its links - five mints, four
+       of them `new_parent`. The links are in the cascade for the same reason the
+       bullets are: their pool is scoped to the previous version of THIS project,
+       and there is no previous version of this project any more. */
+    assert.equal(result.report.minted.length, 5);
+    assert.equal(result.report.minted.filter((m) => m.reason === 'new_parent').length, 4);
     assert.ok(result.report.dropped.some((d) => d.id === 'prj-oneonone'));
     assert.ok(result.report.dropped.some((d) => d.id === 'b-oo-1'));
     assert.ok(result.report.dropped.some((d) => d.id === 'b-oo-2'));
+    /* The link ids go dangling too, and dangling is reported rather than
+       inferred from the project's own row. */
+    assert.ok(result.report.dropped.some((d) => d.id === 'lnk-oo-live'));
+    assert.ok(result.report.dropped.some((d) => d.id === 'lnk-oo-repo'));
   });
 
   it('carries a skill id when it is re-filed under a different category', () => {
@@ -616,19 +657,31 @@ describe('project taglines and skill categories', () => {
 describe('a deleted project', () => {
   /* `dropped` earns its place here: old pinned applications still reference
      this project's bullets, and that has to be visible rather than inferred. */
-  it('reports the project and every bullet under it', () => {
+  it('reports the project and every id under it - bullets AND links', () => {
     const incoming = reparse({
       ...STORED,
       projects: STORED.projects.filter((p) => p.id !== 'prj-racepace'),
     });
     const result = reconcileMasterProfile({ previous: STORED, incoming, mintId: makeMinter('new') });
     const droppedIds = result.report.dropped.map((d) => d.id).sort();
-    assert.deepEqual(droppedIds, ['b-rp-1', 'prj-racepace']);
+    /* THE LINK IS IN THIS LIST BECAUSE OF THIS TEST. The first version of the
+       2026-09-11 change listed a deleted project's bullets and silently omitted
+       its links - a second nested id-bearing array with exactly the same
+       property, added on the same day, dangling with nothing reporting it. An
+       exhaustive `deepEqual` on the whole list is what caught it; a
+       `dropped.some(...)` per id would have passed unchanged. */
+    assert.deepEqual(droppedIds, ['b-rp-1', 'prj-racepace', 'prj-racepace-live']);
     /* Each dropped entry names where it used to live, so a reader can find it
        in the version that still has it. */
     const projectDrop = result.report.dropped.find((d) => d.id === 'prj-racepace');
     assert.equal(projectDrop?.previousPath, 'projects[1]');
     assert.equal(projectDrop?.label, 'Race Pace Predictor');
+    /* And the link drop points at the project that went away, so three rows read
+       as one deletion rather than three unexplained disappearances. */
+    const linkDrop = result.report.dropped.find((d) => d.id === 'prj-racepace-live');
+    assert.equal(linkDrop?.previousPath, 'projects[1].links[0]');
+    assert.equal(linkDrop?.parentId, 'prj-racepace');
+    assert.equal(linkDrop?.parentLabel, 'Race Pace Predictor');
   });
 });
 
@@ -723,5 +776,443 @@ describe('links are reconciled too', () => {
     const result = reconcileMasterProfile({ previous: STORED, incoming, mintId: makeMinter('new') });
     assert.equal(result.report.minted.filter((m) => m.kind === 'link').length, 1);
     assert.ok(result.report.dropped.some((d) => d.id === 'lnk-github'));
+  });
+});
+
+describe('the summary - one node, one candidate, no pool', () => {
+  /* THE ROUND TRIP, AND IT IS NOT VACUOUS. `reparse` re-identifies the summary
+     as `p-summary-0` on purpose; feeding STORED straight back in would leave
+     `sum-headline` already in place and this assertion would pass with the
+     summary reconciler deleted. That is instance 13 of the repo's
+     verification-traps document, reintroduced in a brand-new field. */
+  it('carries its id across a re-parse', () => {
+    const incoming = reparse(STORED);
+    assert.equal(incoming.summary?.id, 'p-summary-0', 'the fixture must hand in a throwaway id');
+    const result = reconcileMasterProfile({ previous: STORED, incoming, mintId: makeMinter('new') });
+    assert.equal(result.profile.summary?.id, 'sum-headline');
+    assert.deepEqual(result.report.minted, []);
+    assert.deepEqual(result.report.dropped, []);
+  });
+
+  /* THE CASE THE DESIGN TURNS ON. There is exactly one summary, so a rewritten
+     paragraph is still THE summary and its id must not move - `TailoredSummary`
+     refs point at it, and Teja rewrites this paragraph constantly. */
+  it('carries its id even when the paragraph is completely rewritten', () => {
+    const incoming = reparse({
+      ...STORED,
+      summary: summary('ignored', 'Backend engineer who ships reliable data platforms.'),
+    });
+    const result = reconcileMasterProfile({ previous: STORED, incoming, mintId: makeMinter('new') });
+    assert.equal(result.profile.summary?.id, 'sum-headline');
+    /* Not silent about it: the row carries both texts, so a reader sees the
+       rewrite without the id having churned. */
+    const carry = result.report.carried.find((entry) => entry.kind === 'summary');
+    assert.equal(carry?.path, 'summary');
+    assert.equal(carry?.label, 'Backend engineer who ships reliable data platforms.');
+    assert.equal(carry?.previousLabel, 'Full stack engineer shipping AI products end to end.');
+    /* `exact_key`, not `fuzzy_text`: nothing was scored, and a score here would
+       put the summary in the human-review list on every single upload. */
+    assert.equal(carry?.match, 'exact_key');
+    assert.equal(carry?.similarity, null);
+    assert.deepEqual(nonExactCarries(result.report), []);
+  });
+
+  /* TWIN to both carries: a profile that had NO summary must mint rather than
+     carry, or the two tests above would pass against a reconciler that returned
+     `previous.summary` unconditionally. */
+  it('mints when the stored profile had no summary', () => {
+    const withoutSummary: MasterProfile = { ...STORED, summary: null };
+    const incoming = reparse(STORED);
+    const result = reconcileMasterProfile({
+      previous: withoutSummary,
+      incoming,
+      mintId: makeMinter('new'),
+    });
+    assert.equal(result.profile.summary?.id, 'new-1');
+    const mint = result.report.minted.find((m) => m.kind === 'summary');
+    assert.equal(mint?.path, 'summary');
+    /* `no_candidate`, not `no_previous_profile`: there WAS a previous profile,
+       it simply had no summary, and the two are different facts. */
+    assert.equal(mint?.reason, 'no_candidate');
+  });
+
+  it('says no_previous_profile instead on a genuine first upload', () => {
+    const result = reconcileMasterProfile({
+      previous: null,
+      incoming: reparse(STORED),
+      mintId: makeMinter('new'),
+    });
+    assert.equal(
+      result.report.minted.find((m) => m.kind === 'summary')?.reason,
+      'no_previous_profile',
+    );
+  });
+
+  /* THE CASE `dropped` EXISTS FOR. A pinned tailoring may hold a ref to this id;
+     the paragraph disappearing makes that ref dangling, and a dangling ref is a
+     decision for a person rather than a cleanup detail. */
+  it('reports a deleted summary as dropped, by id', () => {
+    const incoming = reparse({ ...STORED, summary: null });
+    const result = reconcileMasterProfile({ previous: STORED, incoming, mintId: makeMinter('new') });
+    assert.equal(result.profile.summary, null);
+    const drop = result.report.dropped.find((d) => d.kind === 'summary');
+    assert.equal(drop?.id, 'sum-headline');
+    /* No index in the path: there is one summary, so `summary[0]` would name a
+       section that does not exist in the JSON an operator searches. */
+    assert.equal(drop?.previousPath, 'summary');
+    assert.equal(drop?.parentId, null);
+    /* Exactly one drop - nothing else in the profile moved. */
+    assert.equal(result.report.dropped.length, 1);
+  });
+
+  /* TWIN to the drop: no summary on either side is not a deletion, and must
+     report nothing at all. Without this, a reconciler that emitted a `dropped`
+     row whenever the incoming summary was null would pass the test above. */
+  it('reports nothing when there was no summary on either side', () => {
+    const noSummary: MasterProfile = { ...STORED, summary: null };
+    const result = reconcileMasterProfile({
+      previous: noSummary,
+      incoming: reparse(noSummary),
+      mintId: makeMinter('new'),
+    });
+    assert.deepEqual(result.report.dropped, []);
+    assert.deepEqual(result.report.minted, []);
+    assert.equal(result.report.carried.filter((entry) => entry.kind === 'summary').length, 0);
+  });
+});
+
+describe('achievements and certifications', () => {
+  it('carry their ids, and their nested bullet ids, across a re-parse', () => {
+    const incoming = reparse(STORED);
+    /* The throwaway ids the parse hands in, asserted so this round trip cannot
+       quietly become the vacuous one. */
+    assert.equal(incoming.achievements[0]?.id, 'p-ach-0');
+    assert.equal(incoming.certifications[0]?.id, 'p-cert-0');
+
+    const result = reconcileMasterProfile({ previous: STORED, incoming, mintId: makeMinter('new') });
+
+    assert.equal(result.profile.achievements[0]?.id, 'ach-sih');
+    assert.equal(result.profile.achievements[1]?.id, 'ach-gsoc');
+    assert.equal(result.profile.achievements[2]?.id, 'ach-rank');
+    assert.equal(result.profile.certifications[0]?.id, 'cert-aws');
+    assert.equal(result.profile.certifications[3]?.id, 'cert-sec');
+    /* THE DESCENT A NEW BULLETED KIND FORGETS. The parent id is the obvious
+       part; the bullets underneath it are the second id-bearing place nobody
+       remembers, and they would churn in silence. */
+    assert.equal(bulletIdAt(result.profile, 'achievements', 0, 0), 'b-ach-1');
+    assert.deepEqual(result.report.minted, []);
+    assert.deepEqual(result.report.dropped, []);
+  });
+
+  /* THE KEY DECISION, TESTED DIRECTLY. The label is the primary key and the
+     description is the reworded half, so rewording the detail line must not
+     churn the achievement id - nor, through the parent-scoping cascade, the ids
+     of the bullets underneath it. */
+  it('carries an achievement id when only its description is reworded, and its bullet with it', () => {
+    const incoming = reparse({
+      ...STORED,
+      achievements: STORED.achievements.map((a) =>
+        a.id !== 'ach-sih' ? a : { ...a, description: '312 teams through to the national finals' },
+      ),
+    });
+    const result = reconcileMasterProfile({ previous: STORED, incoming, mintId: makeMinter('new') });
+    assert.equal(result.profile.achievements[0]?.id, 'ach-sih');
+    assert.equal(bulletIdAt(result.profile, 'achievements', 0, 0), 'b-ach-1');
+    assert.deepEqual(result.report.minted, []);
+  });
+
+  /* TWIN - changing the LABEL is changing which achievement this is, so it must
+     mint and report the cascade. Without this, the test above would pass against
+     a key that matched everything. The two inputs differ in exactly one
+     dimension: which half of the line was edited. */
+  it('mints when the achievement label itself changes, and reports the cascade', () => {
+    const incoming = reparse({
+      ...STORED,
+      achievements: STORED.achievements.map((a) =>
+        a.id !== 'ach-sih' ? a : { ...a, label: 'Runner-up - Smart India Hackathon 2025' },
+      ),
+    });
+    const result = reconcileMasterProfile({ previous: STORED, incoming, mintId: makeMinter('new') });
+    assert.notEqual(result.profile.achievements[0]?.id, 'ach-sih');
+    assert.equal(result.report.minted.length, 2, 'the achievement and its one bullet');
+    assert.equal(result.report.minted.filter((m) => m.reason === 'new_parent').length, 1);
+    assert.ok(result.report.dropped.some((d) => d.id === 'ach-sih'));
+    assert.ok(result.report.dropped.some((d) => d.id === 'b-ach-1'));
+  });
+
+  it('carries a certification id when only its issuer is reworded', () => {
+    const incoming = reparse({
+      ...STORED,
+      certifications: STORED.certifications.map((c) =>
+        c.id !== 'cert-aws' ? c : { ...c, description: 'AWS' },
+      ),
+    });
+    const result = reconcileMasterProfile({ previous: STORED, incoming, mintId: makeMinter('new') });
+    assert.equal(result.profile.certifications[0]?.id, 'cert-aws');
+    assert.deepEqual(result.report.minted, []);
+    /* The report still shows the change, so the carry is reviewable rather than
+       merely silent. */
+    const carry = result.report.carried.find((entry) => entry.id === 'cert-aws');
+    assert.equal(carry?.kind, 'certification');
+    assert.equal(carry?.label, 'AWS Certified Cloud Practitioner - AWS');
+    assert.equal(carry?.previousLabel, 'AWS Certified Cloud Practitioner - Amazon Web Services');
+  });
+
+  /* TWIN for certifications, separately from achievements: the two are distinct
+     types with distinct key functions, and a test of one proves nothing about
+     the other. */
+  it('mints when the certification name changes', () => {
+    const incoming = reparse({
+      ...STORED,
+      certifications: STORED.certifications.map((c) =>
+        c.id !== 'cert-aws' ? c : { ...c, label: 'AWS Certified Solutions Architect' },
+      ),
+    });
+    const result = reconcileMasterProfile({ previous: STORED, incoming, mintId: makeMinter('new') });
+    assert.equal(result.report.minted.length, 1);
+    assert.equal(result.report.minted[0]?.kind, 'certification');
+    assert.ok(result.report.dropped.some((d) => d.id === 'cert-aws'));
+  });
+
+  /* THE REJECTED KEY, MADE VISIBLE. Keying on the DESCRIPTION would collapse
+     every description-less entry onto one empty key, make all of them ambiguous
+     at once, and carry nothing - so both of these must carry, and neither may be
+     reported ambiguous. Most real achievement lines have no description, which
+     is what makes this the common case rather than an edge one. */
+  it('carries two achievements that both have a null description', () => {
+    const previous = profileOf({
+      achievements: [
+        achievement('ach-one', 'Winner - Regional Hackathon 2025'),
+        achievement('ach-two', 'Department rank 2 of 180'),
+      ],
+    });
+    const result = reconcileMasterProfile({
+      previous,
+      incoming: reparse(previous),
+      mintId: makeMinter('new'),
+    });
+    assert.equal(result.profile.achievements[0]?.id, 'ach-one');
+    assert.equal(result.profile.achievements[1]?.id, 'ach-two');
+    assert.deepEqual(result.report.ambiguous, []);
+    assert.deepEqual(result.report.minted, []);
+  });
+
+  /* THE TIEBREAK DOING ITS JOB: one label, two entries, separated by their
+     descriptions. This is the case the primary key alone cannot resolve, and the
+     acceptance half of the pair below. */
+  it('separates two achievements that share a label by their descriptions', () => {
+    const previous = profileOf({
+      achievements: [
+        achievement('ach-spring', 'Winner - Internal Hackathon', 'Spring edition'),
+        achievement('ach-autumn', 'Winner - Internal Hackathon', 'Autumn edition'),
+      ],
+    });
+    const result = reconcileMasterProfile({
+      previous,
+      incoming: reparse(previous),
+      mintId: makeMinter('new'),
+    });
+    assert.equal(result.profile.achievements[0]?.id, 'ach-spring');
+    assert.equal(result.profile.achievements[1]?.id, 'ach-autumn');
+    assert.deepEqual(result.report.ambiguous, []);
+  });
+
+  /* REFUSAL - identical on both halves, so the tiebreak has nothing left. Two
+     equally good candidates for one incoming node is a coin flip, and a coin
+     flip is the misattribution this package exists to prevent. */
+  it('refuses to guess between two achievements identical on both halves', () => {
+    const previous = profileOf({
+      achievements: [
+        achievement('ach-a', 'Winner - Internal Hackathon', 'Spring edition'),
+        achievement('ach-b', 'Winner - Internal Hackathon', 'Spring edition'),
+      ],
+    });
+    const result = reconcileMasterProfile({
+      previous,
+      incoming: reparse(previous),
+      mintId: makeMinter('new'),
+    });
+    assert.equal(result.report.ambiguous.length, 2);
+    assert.ok(result.report.ambiguous.every((a) => a.reason === 'duplicate_match_key'));
+    assert.ok(result.report.ambiguous.every((a) => a.kind === 'achievement'));
+    assert.equal(result.report.minted.filter((m) => m.reason === 'ambiguous').length, 2);
+    assert.equal(needsHumanReview(result.report), true);
+  });
+
+  /* A deleted achievement is a dangling reference, reported by id rather than
+     left for a reader to notice. */
+  it('reports a deleted certification and a deleted achievement as dropped', () => {
+    const incoming = reparse({
+      ...STORED,
+      achievements: STORED.achievements.filter((a) => a.id !== 'ach-rank'),
+      certifications: STORED.certifications.filter((c) => c.id !== 'cert-pg'),
+    });
+    const result = reconcileMasterProfile({ previous: STORED, incoming, mintId: makeMinter('new') });
+    const droppedIds = result.report.dropped.map((d) => d.id).sort();
+    assert.deepEqual(droppedIds, ['ach-rank', 'cert-pg']);
+    assert.equal(
+      result.report.dropped.find((d) => d.id === 'ach-rank')?.previousPath,
+      'achievements[2]',
+    );
+    assert.equal(result.report.dropped.find((d) => d.id === 'cert-pg')?.kind, 'certification');
+  });
+
+  /* An achievement and a certification with the SAME label must not match each
+     other. They are separate pools, and a cross-section carry would be the same
+     class of error as a bullet under the wrong employer. */
+  it('does not match an achievement against a certification with the same label', () => {
+    const previous = profileOf({
+      achievements: [achievement('ach-only', 'Machine Learning Specialization')],
+      certifications: [],
+    });
+    const incoming = reparse({
+      ...previous,
+      achievements: [],
+      certifications: [certification('throwaway', 'Machine Learning Specialization')],
+    });
+    const result = reconcileMasterProfile({ previous, incoming, mintId: makeMinter('new') });
+    assert.notEqual(result.profile.certifications[0]?.id, 'ach-only');
+    assert.ok(result.report.dropped.some((d) => d.id === 'ach-only'));
+  });
+});
+
+describe('project links are reconciled inside their own project', () => {
+  it('carries both links of a two-link project, and the single link of the other', () => {
+    const incoming = reparse(STORED);
+    /* The parse hands in positional throwaway ids that span every project, which
+       is what a parser numbering anchors down the page actually produces. */
+    assert.equal(incoming.projects[0]?.links[0]?.id, 'p-plink-0');
+    assert.equal(incoming.projects[1]?.links[0]?.id, 'p-plink-2');
+
+    const result = reconcileMasterProfile({ previous: STORED, incoming, mintId: makeMinter('new') });
+
+    /* BOTH, not just the first. The single `url` slot dropped one of these two on
+       every upload, and a test asserting only `links[0]` would not have noticed
+       the loss it replaced. */
+    assert.equal(projectLinkIdAt(result.profile, 0, 0), 'lnk-oo-live');
+    assert.equal(projectLinkIdAt(result.profile, 0, 1), 'lnk-oo-repo');
+    assert.equal(projectLinkIdAt(result.profile, 1, 0), 'prj-racepace-live');
+    assert.deepEqual(result.report.minted, []);
+    assert.deepEqual(result.report.dropped, []);
+  });
+
+  it('carries a project link when only its label is reworded', () => {
+    const incoming = reparse({
+      ...STORED,
+      projects: STORED.projects.map((p) =>
+        p.id !== 'prj-oneonone'
+          ? p
+          : {
+              ...p,
+              links: [
+                link('whatever', 'Demo', 'https://oneonone.example.invalid'),
+                link('whatever2', 'GitHub', 'https://github.com/example/oneonone'),
+              ],
+            },
+      ),
+    });
+    const result = reconcileMasterProfile({ previous: STORED, incoming, mintId: makeMinter('new') });
+    /* The URL is the stable half and the label is the reworded one - the same
+       decision `linkKey` already makes for identity links, now exercised two
+       levels deep. */
+    assert.equal(projectLinkIdAt(result.profile, 0, 0), 'lnk-oo-live');
+    assert.equal(projectLinkIdAt(result.profile, 0, 1), 'lnk-oo-repo');
+    assert.deepEqual(result.report.minted, []);
+  });
+
+  /* THE MISATTRIBUTION CASE, ONE LEVEL DOWN, AND IT IS A REAL TEST RATHER THAN A
+     COMMENT. One URL moves from project A to project B between uploads. A global
+     link pool would carry A's link id across - and forks, org renames and
+     template repositories make two projects sharing a URL ordinary rather than
+     contrived. The result would be a link node whose id says it belongs to a
+     project it was never about. */
+  const previous = profileOf({
+    projects: [
+      project('prj-alpha', 'Alpha', [bullet('b-alpha', 'Shipped alpha.')], [
+        link('lnk-shared', 'Source', 'https://github.com/example/shared'),
+      ]),
+      project('prj-beta', 'Beta', [bullet('b-beta', 'Shipped beta.')], []),
+    ],
+  });
+
+  it('does not let a link id migrate to another project even on an exact URL match', () => {
+    const incoming = reparse({
+      ...previous,
+      projects: [
+        /* Alpha loses the address ... */
+        project('prj-alpha', 'Alpha', [bullet('b-alpha', 'Shipped alpha.')], []),
+        /* ... and the identical address appears under Beta. */
+        project('prj-beta', 'Beta', [bullet('b-beta', 'Shipped beta.')], [
+          link('throwaway', 'Source', 'https://github.com/example/shared'),
+        ]),
+      ],
+    });
+    const result = reconcileMasterProfile({ previous, incoming, mintId: makeMinter('new') });
+
+    const migrated = projectLinkIdAt(result.profile, 1, 0);
+    assert.notEqual(migrated, 'lnk-shared');
+    assert.ok(migrated?.startsWith('new-'), 'it must be a freshly minted id');
+    /* And the original is reported dropped, naming the project it used to hang
+       under - which is how a reader tells one relocation from two unrelated
+       edits. */
+    const drop = result.report.dropped.find((d) => d.id === 'lnk-shared');
+    assert.equal(drop?.previousPath, 'projects[0].links[0]');
+    assert.equal(drop?.parentId, 'prj-alpha');
+    assert.equal(drop?.parentLabel, 'Alpha');
+  });
+
+  /* TWIN - the identical URL under the SAME project must carry. Without this, a
+     reconciler that never carried any project link id would pass the test above.
+     The two inputs differ in exactly one dimension: which project the link sits
+     under. */
+  it('does carry that same link id when it stays under its own project', () => {
+    const result = reconcileMasterProfile({
+      previous,
+      incoming: reparse(previous),
+      mintId: makeMinter('new'),
+    });
+    assert.equal(projectLinkIdAt(result.profile, 0, 0), 'lnk-shared');
+    assert.deepEqual(result.report.dropped, []);
+  });
+
+  /* A link ADDED to an existing project is genuinely new content, and must say
+     so rather than borrowing the cascade reason. The pair of reasons is the
+     whole point of `noCandidateReason`: `new_parent` means "go look at the
+     parent", `no_candidate` means "this is new". */
+  it('mints a link added to a project that itself carried, with reason no_candidate', () => {
+    const incoming = reparse({
+      ...previous,
+      projects: previous.projects.map((p) =>
+        p.id !== 'prj-beta'
+          ? p
+          : { ...p, links: [link('throwaway', 'Docs', 'https://beta.example.invalid/docs')] },
+      ),
+    });
+    const result = reconcileMasterProfile({ previous, incoming, mintId: makeMinter('new') });
+    assert.equal(result.profile.projects[1]?.id, 'prj-beta', 'the parent must have carried');
+    const mint = result.report.minted.find((m) => m.kind === 'link');
+    assert.equal(mint?.path, 'projects[1].links[0]');
+    assert.equal(mint?.reason, 'no_candidate');
+    assert.equal(mint?.parentId, 'prj-beta');
+  });
+
+  /* A project that keeps its id while losing one of two links: the surviving one
+     must keep its id and the other must be reported, rather than the pair being
+     treated as one changed slot. This is the case the old single `url` field
+     could not even express. */
+  it('keeps the surviving link and reports the removed one', () => {
+    const incoming = reparse({
+      ...STORED,
+      projects: STORED.projects.map((p) =>
+        p.id !== 'prj-oneonone'
+          ? p
+          : { ...p, links: p.links.filter((l) => l.id !== 'lnk-oo-live') },
+      ),
+    });
+    const result = reconcileMasterProfile({ previous: STORED, incoming, mintId: makeMinter('new') });
+    assert.equal(result.profile.projects[0]?.id, 'prj-oneonone');
+    assert.equal(projectLinkIdAt(result.profile, 0, 0), 'lnk-oo-repo');
+    assert.equal(result.report.dropped.length, 1);
+    assert.equal(result.report.dropped[0]?.id, 'lnk-oo-live');
   });
 });

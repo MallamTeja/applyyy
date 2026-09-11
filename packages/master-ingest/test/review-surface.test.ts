@@ -85,18 +85,67 @@ describe('placement on nodes that have no parent', () => {
   /* TWIN to the parent tests: null must mean "has no parent", not "parent
      unknown". Without this, a report that left the fields null everywhere would
      pass nothing above and nothing here would notice. */
-  it('is null for skills, links and section parents', () => {
+  /* A row is NESTED when its path steps through an index - `projects[0].links[0]`
+     but not `identity.links[0]`, which is a root section that merely happens to
+     live under a key. That string test is the same distinction the reconciler
+     makes structurally, written in the one form a test can check without
+     re-implementing the walk. */
+  const isNested = (path: string): boolean => path.includes('].');
+
+  it('is null for every section that sits at the root of the profile', () => {
     const result = reconcileMasterProfile({
       previous: STORED,
       incoming: reparse(STORED),
       mintId: makeMinter('new'),
     });
-    const topLevel = result.report.carried.filter((entry) => entry.kind !== 'bullet');
-    assert.ok(topLevel.length > 0, 'the fixture must contain top-level nodes');
-    for (const entry of topLevel) {
+    const rootLevel = result.report.carried.filter(
+      (entry) => entry.kind !== 'bullet' && !isNested(entry.path),
+    );
+    assert.ok(rootLevel.length > 0, 'the fixture must contain root-level nodes');
+    for (const entry of rootLevel) {
       assert.equal(entry.parentId, null, entry.path + ' must have no parent');
       assert.equal(entry.parentLabel, null, entry.path + ' must have no parent label');
     }
+    /* Naming the kinds explicitly, so a section that stopped being reconciled
+       altogether could not pass this by simply not appearing. The summary is in
+       the list because it is the one root node with no index in its path. */
+    const kinds = [...new Set(rootLevel.map((entry) => entry.kind))].sort();
+    assert.deepEqual(kinds, [
+      'achievement',
+      'certification',
+      'education',
+      'experience',
+      'link',
+      'project',
+      'skill',
+      'summary',
+    ]);
+  });
+
+  /* THE COUNTERPART, ADDED 2026-09-11 WITH PROJECT LINKS. A project link is not a
+     root node, and a row claiming `parentId: null` for it would assert "this has
+     no parent" - which report.ts says is a different fact from "the parent is
+     unknown", and in this case a false one. A link row is only reviewable beside
+     the project it is claimed to belong to, exactly as a bullet row is only
+     reviewable beside its employer. */
+  it('names the owning project on every project-link row', () => {
+    const result = reconcileMasterProfile({
+      previous: STORED,
+      incoming: reparse(STORED),
+      mintId: makeMinter('new'),
+    });
+    const projectLinks = result.report.carried.filter(
+      (entry) => entry.kind === 'link' && isNested(entry.path),
+    );
+    assert.equal(projectLinks.length, 3, 'two on the first project, one on the second');
+    for (const entry of projectLinks) {
+      assert.notEqual(entry.parentId, null, entry.path + ' must name its project');
+    }
+    const first = projectLinks.find((entry) => entry.path === 'projects[0].links[1]');
+    assert.equal(first?.id, 'lnk-oo-repo');
+    assert.equal(first?.parentId, 'prj-oneonone');
+    /* Pre-rendered, so a consumer shows the same project name the diff shows. */
+    assert.equal(first?.parentLabel, 'One-on-One - AI-Powered Learning Platform');
   });
 
   it('is populated on every bullet row, with no exceptions', () => {
@@ -106,7 +155,14 @@ describe('placement on nodes that have no parent', () => {
       mintId: makeMinter('new'),
     });
     const bullets = result.report.carried.filter((entry) => entry.kind === 'bullet');
-    assert.equal(bullets.length, 7, 'the fixture has seven bullets');
+    /* Eight, not seven: the achievement bullet joined the fixture on 2026-09-11.
+       A bulleted ACHIEVEMENT is the descent a new kind forgets, and this count is
+       where forgetting it shows up rather than passing silently. */
+    assert.equal(bullets.length, 8, 'the fixture has eight bullets, one of them an achievement');
+    assert.ok(
+      bullets.some((entry) => entry.path === 'achievements[0].bullets[0]'),
+      'the achievement bullet must be reconciled, not skipped',
+    );
     for (const entry of bullets) {
       assert.notEqual(entry.parentId, null, entry.path + ' must name its parent');
       assert.ok(
@@ -251,7 +307,7 @@ describe('reviewableRows - the gate the accept button uses', () => {
     });
     const result = reconcileMasterProfile({ previous: STORED, incoming, mintId: makeMinter('new') });
     const dropped = reviewableRows(result.report).filter((row) => row.reviewKind === 'dropped');
-    assert.equal(dropped.length, 2, 'the project and its one bullet');
+    assert.equal(dropped.length, 3, 'the project, its one bullet and its one link');
     assert.equal(needsHumanReview(result.report), true);
   });
 

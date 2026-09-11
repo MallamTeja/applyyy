@@ -85,6 +85,13 @@ export { normaliseKey, tokenSet, tokenise } from './normalise.ts';
 /* The per-kind match keys, exported for tests and for anything that needs to
  * explain WHY two nodes were considered the same thing. */
 export {
+  /* Added 2026-09-11 alongside the contract change. Exported for the same
+     reason as the other five and for one more: an achievement and a
+     certification key on their LABEL and not on their description, which is a
+     decision a consumer explaining a carry has to be able to state rather than
+     guess at from the outcome. */
+  achievementKey,
+  certificationKey,
   educationKey,
   experienceKey,
   linkKey,

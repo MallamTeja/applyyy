@@ -186,6 +186,26 @@ body {
   margin: 0.4mm 0 0 0;
 }
 
+/* The separator between a project's links, e.g. 'Live * Source'. A real
+   character in the markup for the same reason as .resume__contact-sep above:
+   generated content is invisible to a text extractor, so without it the parsed
+   line reads 'LiveSource' and neither label matches anything. This rule only
+   styles a character that is already there; it never supplies one. */
+.resume__link-sep {
+  /* Muted so it reads as punctuation rather than as a third link. */
+  color: #444;
+  /* Breathing room either side, matching the contact line's rhythm. */
+  padding: 0 1.5mm;
+}
+
+/* Project links print as their label in black with an underline. The UA default
+   is blue, which costs ink on a printed copy and reads as a web page rather
+   than a document; the URL survives in the href for the PDF link annotation. */
+.resume__entry-subtitle a {
+  color: #000;
+  text-decoration: underline;
+}
+
 /* Date range. Pre-formatted upstream and printed verbatim -- the renderer does
    no date maths, so output cannot vary with the host timezone or ICU build. */
 .resume__entry-dates {

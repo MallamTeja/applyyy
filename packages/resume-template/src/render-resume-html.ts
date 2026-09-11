@@ -31,7 +31,9 @@
 // anti-fabrication defence, and a second definition of it would be the drift
 // that defence cannot survive.
 import type {
+  ResolvedAchievement,
   ResolvedBullet,
+  ResolvedCertification,
   ResolvedEducation,
   ResolvedExperience,
   ResolvedProject,
@@ -77,6 +79,14 @@ const SECTION_HEADINGS: Readonly<Record<TailoredSectionKind, string>> = {
   experience: 'Experience',
   projects: 'Projects',
   education: 'Education',
+  // 'Achievements' and 'Certifications' are the plain dictionary words, chosen
+  // for the same reason as the five above rather than by analogy with them: an
+  // ATS keyword-matches the SECTION on its heading, so 'Awards & Recognition'
+  // or 'Credentials' would file every line beneath it as unclassified prose.
+  // They are also the words the master types are named after, so a reader never
+  // has to hold a translation between the contract and the printed page.
+  achievements: 'Achievements',
+  certifications: 'Certifications',
 };
 
 /**
@@ -156,16 +166,39 @@ ${renderBullets(entry.bullets)}
 </div>`;
 }
 
-/** Render one project. The URL, when present, becomes the subtitle. */
+/** Render one project. Every address the project has becomes the subtitle line. */
 function renderProject(entry: ResolvedProject): string {
-  // A project URL is rendered as a real anchor so the PDF carries a clickable
-  // link annotation; safeHref rejects any scheme that is not http(s)/mailto.
-  const subtitle = entry.url === null || entry.url === ''
-    ? ''
-    : `<a href="${safeHref(entry.url)}">${escapeHtml(entry.url)}</a>`;
+  // EVERY link, not one: `links` replaced a single `url` slot precisely because
+  // the real resume has a project with both a live deployment and a source
+  // repository, and the single slot discarded one of the two on every upload.
+  // A loop is therefore the contract's whole point, not a generalisation of it.
+  const anchors = entry.links.map(
+    // The LABEL is the anchor text and the URL stays in the href. Three raw URLs
+    // side by side is a line no recruiter reads and no parser gains from, and
+    // `MasterLink` carries a label ('Live', 'Source') exactly so it can be the
+    // visible text; the PDF still gets a clickable link annotation from the href.
+    // safeHref on every href with no exceptions — it collapses anything that is
+    // not http(s)/mailto to '#', which is what stops a javascript: URL firing in
+    // the React approval preview, the one place a human deliberately clicks a
+    // link in a document derived from untrusted input.
+    (link) => `<a href="${safeHref(link.url)}">${escapeHtml(link.label)}</a>`,
+  );
+  // The separator is a REAL CHARACTER IN THE MARKUP, for the same reason
+  // renderContact spells out: CSS generated content (a ::before, a ::after, a
+  // border) is INVISIBLE to a text extractor, so 'Live' and 'Source' would be
+  // concatenated into the single token 'LiveSource' in the parsed text and
+  // neither word would match anything. This is a correctness choice about what
+  // a machine reads, not a visual preference — test/ats-parse.test.ts is what
+  // holds it. join() also means a one-link project emits no separator at all,
+  // rather than a trailing bullet with nothing after it.
+  const subtitle = anchors.join('<span class="resume__link-sep">•</span>');
   // Built by hand rather than through renderEntryHead because the subtitle here
   // is markup, and renderEntryHead escapes its subtitle as plain text.
-  const subtitleHtml = subtitle === '' ? '' : `\n<div class="resume__entry-subtitle">${subtitle}</div>`;
+  // Keyed on the ANCHOR COUNT rather than on `subtitle === ''`: a project with
+  // no public address must print no subtitle div whatsoever, and an empty div
+  // still occupies vertical space. A link whose label happens to be empty is a
+  // different fact — it still has an address worth carrying into the PDF.
+  const subtitleHtml = anchors.length === 0 ? '' : `\n<div class="resume__entry-subtitle">${subtitle}</div>`;
   return `<div class="resume__entry" data-ref="${escapeHtml(entry.ref)}">
 <div class="resume__entry-head">
 <h3 class="resume__entry-title">${escapeHtml(entry.name)}</h3>
@@ -190,6 +223,69 @@ function renderEducation(entry: ResolvedEducation): string {
 ${renderEntryHead(degreeLine, entry.institution, joinDates(entry.start_display, entry.end_display))}${gradeHtml}
 ${renderBullets(entry.bullets)}
 </div>`;
+}
+
+/**
+ * The shared body of an UNDATED entry — an achievement or a certification.
+ *
+ * ONE implementation because the two must not drift. renderEntryHead was
+ * extracted for the same reason: divergence in entry markup is how one section
+ * starts parsing differently from its neighbours, and a parser reading two
+ * shapes for two adjacent lists is the failure this package exists to avoid.
+ *
+ * The union parameter is honest about today's contract rather than clever.
+ * shared-types keeps ResolvedAchievement and ResolvedCertification as separate
+ * interfaces — not an alias — so a future divergence arrives as an ADDED FIELD
+ * rather than a breaking rename. On the day one of them grows a field, this
+ * union stops being sufficient and the two named wrappers below take over; that
+ * is why they exist as wrappers instead of the switch calling this directly.
+ */
+function renderUndatedEntry(entry: ResolvedAchievement | ResolvedCertification): string {
+  // NO DATES ROW, and deliberately not an empty `<span class="resume__entry-dates">`
+  // standing in for one. The contract carries no date for these because the real
+  // document writes them undated, so printing an empty slot would be the renderer
+  // asserting the existence of a field the type refused to have — and the DATE
+  // CONTRACT says a rendered date must be decided upstream and printed verbatim,
+  // which a field with no upstream source cannot satisfy.
+  //
+  // The resume__entry-head wrapper is kept even with a single child so the class
+  // structure is identical to experience, projects and education: a stylesheet
+  // rule or a diff-view selector written against one entry kind then holds for
+  // all five.
+  const head = `<div class="resume__entry-head">
+<h3 class="resume__entry-title">${escapeHtml(entry.label)}</h3>
+</div>`;
+  // `description` follows renderEducation's grade_display pattern exactly: its
+  // own detail line when present, and NOTHING at all when null or empty.
+  // Appending it to the label instead would print 'AWS Certified Practitioner – '
+  // with a dangling separator on every entry that has no description, and the
+  // contract says null is the normal case rather than the exception.
+  const descriptionHtml = entry.description === null || entry.description === ''
+    ? ''
+    : `\n<div class="resume__entry-detail">${escapeHtml(entry.description)}</div>`;
+  // data-ref anchors the entry to its master node so the approval diff view can
+  // highlight this exact line, the same as every other entry kind. It is an
+  // attribute, so a text extractor never sees it on the PDF.
+  return `<div class="resume__entry" data-ref="${escapeHtml(entry.ref)}">
+${head}${descriptionHtml}
+${renderBullets(entry.bullets)}
+</div>`;
+}
+
+/**
+ * Render one achievement — a hackathon placing, a ranking, a scholarship.
+ *
+ * A named wrapper rather than calling renderUndatedEntry from the switch: this
+ * is the seam where achievements and certifications are allowed to diverge, and
+ * a seam that does not exist yet is a seam nobody adds under pressure later.
+ */
+function renderAchievement(entry: ResolvedAchievement): string {
+  return renderUndatedEntry(entry);
+}
+
+/** Render one certification. Same shape and same seam reasoning as renderAchievement. */
+function renderCertification(entry: ResolvedCertification): string {
+  return renderUndatedEntry(entry);
 }
 
 /**
@@ -269,6 +365,15 @@ function renderSection(kind: TailoredSectionKind, resume: ResolvedResume): strin
       return wrapSection(kind, resume.projects.map(renderProject).join('\n'));
     case 'education':
       return wrapSection(kind, resume.education.map(renderEducation).join('\n'));
+    case 'achievements':
+      // A real rendering, not a placeholder. These two cases are why the `never`
+      // below is worth its weight: the contract grew two section kinds, and the
+      // compiler refused to build until each one had somewhere to print. A cast
+      // or a `default: return ''` would have bought a green build by turning the
+      // silent drop this change exists to fix back into a silent drop.
+      return wrapSection(kind, resume.achievements.map(renderAchievement).join('\n'));
+    case 'certifications':
+      return wrapSection(kind, resume.certifications.map(renderCertification).join('\n'));
     default: {
       // Unreachable while the switch is exhaustive; the assignment is what makes
       // tsc prove that for us on every build.

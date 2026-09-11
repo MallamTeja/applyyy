@@ -53,7 +53,15 @@ export const zomatoBackendIntern = {
   // Skills first for this JD: it is a technology-led posting, so the keywords the
   // parser needs should appear before the narrative. Section order is a tailoring
   // decision carried as data, never recovered by sorting in the renderer.
-  section_order: ['skills', 'experience', 'projects', 'education'],
+  //
+  // 'achievements' and 'certifications' were added here in the SAME change that
+  // gave renderSection a real case for each. THE RULE: a section kind belongs in
+  // section_order only where the renderer can actually emit it — listing a kind
+  // the renderer cannot draw is a claim the code does not honour, and it fails
+  // silently, because a section that never renders looks exactly like a section
+  // the Tailor chose to omit. They go last because they are supporting evidence
+  // for a fresher, not the thing a backend JD is scanned for.
+  section_order: ['skills', 'experience', 'projects', 'education', 'achievements', 'certifications'],
   // No summary for this fixture. Prose is the weakest point in the honesty model
   // — it cannot be ref-constrained the way a bullet can — so the safe default for
   // a fresher resume is to spend the space on evidence instead.
@@ -105,7 +113,17 @@ export const zomatoBackendIntern = {
     {
       ref: 'prj_applyy',
       name: 'applyy — job application automation',
-      url: 'https://github.com/MallamTeja/applyy',
+      // TWO links, and that is the point of this fixture rather than incidental
+      // detail. The old contract had a single `url` slot, so this project — which
+      // genuinely has both a deployment and a repository — lost one of the two on
+      // every ingest with nothing erroring. A one-link fixture would compile,
+      // render and pass while proving nothing about the case that motivated the
+      // change. Order is data: 'Live' first because a recruiter who clicks once
+      // should land on the running thing, not on source code.
+      links: [
+        { id: 'lnk_applyy_live', label: 'Live', url: 'https://applyy.example.com' },
+        { id: 'lnk_applyy_source', label: 'Source', url: 'https://github.com/MallamTeja/applyy' },
+      ],
       start_display: 'Sep 2026',
       // 'Present' arrives as a display value from upstream; the renderer never
       // computes it, because computing it would need a clock.
@@ -129,6 +147,64 @@ export const zomatoBackendIntern = {
       end_display: '2026',
       grade_display: 'CGPA 8.4 / 10',
       // No bullets: coursework rarely earns its space against real projects.
+      bullets: [],
+    },
+  ],
+  // Achievements and certifications. BOTH BRANCHES OF EVERY CONDITIONAL ARE
+  // EXERCISED HERE ON PURPOSE — the fixture equivalent of a non-vacuity twin.
+  // A fixture in which every optional field is populated cannot distinguish a
+  // correct renderer from one that ignores the null case, because the null case
+  // is never rendered. So each list carries one entry WITH a description and one
+  // WITHOUT, and one entry WITH bullets and one without.
+  achievements: [
+    {
+      ref: 'ach_sih',
+      // label and description come from the master by ref and are never
+      // reworded: an achievement line is a bare superlative with no surrounding
+      // context to contradict an inflated one, so 'national' must not become
+      // 'international' anywhere downstream.
+      label: 'Winner — Smart India Hackathon 2025',
+      // The populated branch of the nullable description.
+      description: 'national finals, 300+ teams',
+      // The populated branch of the bullets list. Bullets are ordinary
+      // ResolvedBullets here, which is what makes an achievement tailorable at
+      // all — the Tailor rewords it through a ref, not through free text.
+      bullets: [
+        {
+          ref: 'bul_sih_scope',
+          text: 'Led a four-person team to build a civic-issue triage service in 36 hours',
+          master_text: 'Built a civic issue reporting tool with three teammates at SIH',
+        },
+      ],
+    },
+    {
+      ref: 'ach_codechef',
+      label: 'Global rank 412 — CodeChef Starters 98',
+      // The null branch: the label says everything and there is nothing to add.
+      description: null,
+      // The empty branch: renderBullets must emit no <ul> at all, because an
+      // empty list still takes vertical space and some extractors emit a stray
+      // bullet character for it.
+      bullets: [],
+    },
+  ],
+  certifications: [
+    {
+      ref: 'cert_meta_backend',
+      label: 'Meta Back-End Developer Professional Certificate',
+      // Whatever follows the dash on the real document. Named `description` and
+      // not `issuer` because the half after the dash is an issuing body on some
+      // lines and a platform or a year on others.
+      description: 'Coursera',
+      bullets: [],
+    },
+    {
+      ref: 'cert_nptel_dbms',
+      label: 'NPTEL Database Management Systems — Elite',
+      // Null again, so the null path is covered in BOTH sections rather than
+      // only in achievements: the two go through separate switch cases, and a
+      // case that is never exercised with a null is a case nobody has tested.
+      description: null,
       bullets: [],
     },
   ],
@@ -159,7 +235,14 @@ export const injectionAttempt = {
       { id: 'lnk_evil', label: 'Portfolio', url: 'javascript:alert(document.cookie)' },
     ],
   },
-  section_order: ['skills', 'experience'],
+  // 'achievements' is listed and populated; 'certifications' is listed and EMPTY.
+  // The empty one is deliberate and is not covered by projects/education below:
+  // those are absent from section_order entirely, so the renderer is never even
+  // asked for them. A kind that IS asked for and has nothing to show is the only
+  // input that proves wrapSection suppresses the heading rather than printing a
+  // bare 'Certifications' rule with nothing beneath it — which would add a
+  // keyword the document does not support, a small fabrication.
+  section_order: ['skills', 'experience', 'achievements', 'certifications'],
   summary: null,
   skills: [
     // Ampersand must survive as a single &amp;, not become &amp;amp;.
@@ -185,4 +268,21 @@ export const injectionAttempt = {
   ],
   projects: [],
   education: [],
+  achievements: [
+    {
+      ref: 'ach_inj',
+      // A payload in `label` and another in `description`. These fields are NOT
+      // downstream of a job description — they come from the master by ref — but
+      // the master is itself parsed out of an uploaded resume, so the text is
+      // still user-supplied and still reaches the renderer unescaped. The two
+      // new renderers are new call sites, and a new call site is exactly where a
+      // missing escapeHtml lands.
+      label: 'Winner <img src=x onerror=alert(1)> Hackathon',
+      description: 'judged by "Acme" & <b>Corp</b>',
+      bullets: [],
+    },
+  ],
+  // Empty, but LISTED in section_order above — the input that proves an asked-for
+  // section with no content prints no heading at all.
+  certifications: [],
 } satisfies ResolvedResume;

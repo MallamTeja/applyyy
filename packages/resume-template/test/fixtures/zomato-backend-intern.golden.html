@@ -164,6 +164,26 @@ body {
   margin: 0.4mm 0 0 0;
 }
 
+/* The separator between a project's links, e.g. 'Live * Source'. A real
+   character in the markup for the same reason as .resume__contact-sep above:
+   generated content is invisible to a text extractor, so without it the parsed
+   line reads 'LiveSource' and neither label matches anything. This rule only
+   styles a character that is already there; it never supplies one. */
+.resume__link-sep {
+  /* Muted so it reads as punctuation rather than as a third link. */
+  color: #444;
+  /* Breathing room either side, matching the contact line's rhythm. */
+  padding: 0 1.5mm;
+}
+
+/* Project links print as their label in black with an underline. The UA default
+   is blue, which costs ink on a printed copy and reads as a web page rather
+   than a document; the URL survives in the href for the PDF link annotation. */
+.resume__entry-subtitle a {
+  color: #000;
+  text-decoration: underline;
+}
+
 /* Date range. Pre-formatted upstream and printed verbatim -- the renderer does
    no date maths, so output cannot vary with the host timezone or ICU build. */
 .resume__entry-dates {
@@ -245,7 +265,7 @@ body {
 <h3 class="resume__entry-title">applyy — job application automation</h3>
 <span class="resume__entry-dates">Sep 2026 – Present</span>
 </div>
-<div class="resume__entry-subtitle"><a href="https://github.com/MallamTeja/applyy">https://github.com/MallamTeja/applyy</a></div>
+<div class="resume__entry-subtitle"><a href="https://applyy.example.com">Live</a><span class="resume__link-sep">•</span><a href="https://github.com/MallamTeja/applyy">Source</a></div>
 <ul class="resume__bullets">
 <li class="resume__bullet" data-ref="bul_applyy_pipeline">Built a Postgres-backed agent pipeline that discovers, scores and tailors applications with a human approval gate</li>
 </ul>
@@ -260,6 +280,40 @@ body {
 </div>
 <div class="resume__entry-subtitle">MLR Institute of Technology</div>
 <div class="resume__entry-detail">CGPA 8.4 / 10</div>
+
+</div>
+</section>
+<section class="resume__section" data-section="achievements">
+<h2 class="resume__section-title">Achievements</h2>
+<div class="resume__entry" data-ref="ach_sih">
+<div class="resume__entry-head">
+<h3 class="resume__entry-title">Winner — Smart India Hackathon 2025</h3>
+</div>
+<div class="resume__entry-detail">national finals, 300+ teams</div>
+<ul class="resume__bullets">
+<li class="resume__bullet" data-ref="bul_sih_scope">Led a four-person team to build a civic-issue triage service in 36 hours</li>
+</ul>
+</div>
+<div class="resume__entry" data-ref="ach_codechef">
+<div class="resume__entry-head">
+<h3 class="resume__entry-title">Global rank 412 — CodeChef Starters 98</h3>
+</div>
+
+</div>
+</section>
+<section class="resume__section" data-section="certifications">
+<h2 class="resume__section-title">Certifications</h2>
+<div class="resume__entry" data-ref="cert_meta_backend">
+<div class="resume__entry-head">
+<h3 class="resume__entry-title">Meta Back-End Developer Professional Certificate</h3>
+</div>
+<div class="resume__entry-detail">Coursera</div>
+
+</div>
+<div class="resume__entry" data-ref="cert_nptel_dbms">
+<div class="resume__entry-head">
+<h3 class="resume__entry-title">NPTEL Database Management Systems — Elite</h3>
+</div>
 
 </div>
 </section>

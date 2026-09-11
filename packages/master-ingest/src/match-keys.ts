@@ -25,6 +25,8 @@
  */
 
 import type {
+  MasterAchievement,
+  MasterCertification,
   MasterEducation,
   MasterExperience,
   MasterLink,
@@ -157,4 +159,64 @@ export function projectKey(project: MasterProject): MatchKey {
 export function linkKey(link: MasterLink): MatchKey {
   const url = normaliseKey(link.url);
   return { primary: url, tiebreak: composite(url, normaliseKey(link.label)) };
+}
+
+/* ACHIEVEMENTS - keyed on the normalised LABEL alone, tiebroken by
+ * (label, description).
+ *
+ * VERIFIED: the real resume writes achievements as undated lines of the form
+ * "Winner - Smart India Hackathon 2025", optionally followed by a qualifying
+ * detail ("national finals, 312 teams"). The parser splits those two halves into
+ * `label` and `description`, and `description` is null on the lines where the
+ * label already says everything - which is most of them.
+ *
+ * WHY THE LABEL ALONE IS THE PRIMARY KEY. Same reasoning as `linkKey`, where the
+ * URL is the stable half and the human-facing label is the reworded one: here it
+ * is the label that names the thing and the description that gets rephrased
+ * between drafts ("national finals, 312 teams" -> "312 teams, national finals").
+ * Keying on the pair makes that rephrasing load-bearing, and an achievement is a
+ * BULLETED PARENT - bullets only match inside an already-reconciled parent - so a
+ * failed parent key mints the achievement id AND every bullet id under it with no
+ * similarity search attempted at all. Reordering four words of a subtitle would
+ * break every pinned reference beneath it, on an upload where the achievement
+ * itself was untouched. That is the exact cascade `projectKey` was corrected for.
+ *
+ * WHY NOT THE DESCRIPTION AS THE PRIMARY, the alternative worth naming: it is
+ * null on most lines, so every description-less achievement would normalise to
+ * the SAME empty key, the key would be ambiguous across all of them at once, and
+ * nothing in the section would carry anything. A key that collapses the common
+ * case is worse than no key.
+ *
+ * The tiebreak then handles the only way the label alone goes ambiguous - two
+ * achievements genuinely sharing a label, separated by their detail lines. */
+export function achievementKey(achievement: MasterAchievement): MatchKey {
+  const label = normaliseKey(achievement.label);
+  /* `?? ''` rather than skipping the tiebreak: `composite` needs a string, and a
+     null description is a real distinguishing value - "label with no detail" and
+     "label with a detail" are two different nodes, which is exactly what the
+     tiebreak is being asked to separate. */
+  return { primary: label, tiebreak: composite(label, normaliseKey(achievement.description ?? '')) };
+}
+
+/* CERTIFICATIONS - the same key, and written out separately rather than aliased.
+ *
+ * VERIFIED: four entries in the real resume, each written "Name - Issuer", so the
+ * halves land in `label` and `description` exactly as they do for an achievement.
+ * The issuer is the half that gets rewritten across drafts ("Amazon Web Services"
+ * / "AWS" / "AWS Training"), so the same argument applies unchanged: label
+ * primary, (label, description) as the tiebreak.
+ *
+ * NOT `achievementKey` UNDER A SECOND NAME, and not a shared generic over the
+ * structural shape. `MasterAchievement` and `MasterCertification` are separate
+ * interfaces on purpose - `profile-nodes.ts` says a future divergence should be an
+ * added field rather than a breaking rename - and a shared key function would make
+ * that divergence a change to BOTH sections, which is the moment somebody writes a
+ * cast and a certification starts matching against an achievement pool. Two
+ * functions cost a duplicated body once; sharing costs a wrong match forever. */
+export function certificationKey(certification: MasterCertification): MatchKey {
+  const label = normaliseKey(certification.label);
+  return {
+    primary: label,
+    tiebreak: composite(label, normaliseKey(certification.description ?? '')),
+  };
 }
