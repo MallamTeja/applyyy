@@ -84,3 +84,314 @@ describe('extractFields on a real Greenhouse form', () => {
     expect(unlabelled).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// GROUP METADATA — the wrapper-level label and required-ness.
+//
+// THE DEFECT THESE COVER: on this capture both file inputs report
+// label 'Attach' and required false, because "Resume/CV" and
+// aria-required="true" sit on a <div role="group"> five levels above the input
+// and the extractor only ever read the control element. The mandatory resume
+// box was therefore indistinguishable from the optional cover-letter box.
+//
+// WHAT THE FIX DELIBERATELY DOES NOT DO: it does not move the wrapper text into
+// `label`. 'Attach' IS the accessible name of that input per accname, so
+// `label` is already correct; preferring the wrapper would put every
+// answer-bank key in the system permanently downstream of that choice. The
+// wrapper text is a better KEY, not a corrected NAME, so it lives in its own
+// field and the tests below pin `label` and `required` as UNCHANGED.
+// ---------------------------------------------------------------------------
+describe('group metadata on the real Greenhouse form', () => {
+  test('the resume upload gains Resume/CV + required WITHOUT its label or required changing', async () => {
+    // Extraction over the whole real form.
+    const fields = await extractFields(page);
+    // The mandatory upload, the field the whole change exists for.
+    const resume = fields.find((field) => field.id === 'resume');
+
+    // REGRESSION PIN, and the most important pair of lines in this file. If a
+    // later refactor "improves" the extractor by promoting the wrapper text
+    // into `label`, these fail — which is the point. Every stored answer-bank
+    // key was computed from `label`, so silently changing it invalidates the
+    // bank for every question on every board at once.
+    expect(resume?.label).toBe('Attach');
+    // Likewise `required`: the control itself carries no required marker, and
+    // that remains the honest reading of the control.
+    expect(resume?.required).toBe(false);
+
+    // THE NEW INFORMATION. Recovered from
+    // <div role="group" aria-labelledby="upload-label-resume"> five levels up.
+    expect(resume?.groupLabel).toBe('Resume/CV');
+    // The asterisk is stripped: the heading renders as
+    // Resume/CV<span class="required">*</span>, and a key carrying the marker
+    // would not match the same question on a board that marks required-ness
+    // any other way. Asserted separately so a failure says WHY.
+    expect(resume?.groupLabel).not.toContain('*');
+    // And the obligation the control hid: aria-required="true" on the wrapper.
+    // This is what tells an attachment planner the resume box is not optional,
+    // which `required: false` above actively denies.
+    expect(resume?.groupRequired).toBe(true);
+  });
+
+  test('the cover letter upload is distinguishable from the resume ONLY by group metadata', async () => {
+    // Extraction over the whole real form.
+    const fields = await extractFields(page);
+    // The two uploads.
+    const resume = fields.find((field) => field.id === 'resume');
+    const cover = fields.find((field) => field.id === 'cover_letter');
+
+    // NON-VACUITY FOR THE WHOLE FEATURE: the two controls really are identical
+    // on every pre-existing property. Without these three lines the test above
+    // could be passing on a form where `label` alone already separated them,
+    // and the group walk would be doing no work at all.
+    expect(cover?.label).toBe(resume?.label);
+    expect(cover?.required).toBe(resume?.required);
+    expect(cover?.kind).toBe(resume?.kind);
+
+    // And the group metadata is the ONLY thing that tells them apart: a
+    // different name...
+    expect(cover?.groupLabel).toBe('Cover Letter');
+    // ...and a different obligation, aria-required="false" against "true".
+    expect(cover?.groupRequired).toBe(false);
+  });
+
+  test('exactly two fields carry a group label, and exactly one a different required-ness', async () => {
+    // THE MEASUREMENT. Written as a census over the whole form rather than as
+    // two spot checks, because the risk this change carries is not "the resume
+    // is wrong" — it is "some OTHER field quietly acquired a group label from a
+    // distant wrapper and its answer-bank key moved". A census catches that; a
+    // spot check on #resume cannot.
+    const fields = await extractFields(page);
+
+    // Total control count, restated here so this test fails loudly if the
+    // fixture is ever swapped: the counts below are only meaningful against a
+    // known denominator.
+    expect(fields).toHaveLength(22);
+
+    // Fields whose wrapper supplies a name the control itself does not.
+    const differingLabel = fields.filter(
+      (field) => field.groupLabel !== undefined && field.groupLabel !== field.label,
+    );
+    // Named rather than merely counted, so a regression reports WHICH field
+    // moved instead of "expected 2, got 3" with no way to tell which one.
+    expect(differingLabel.map((field) => field.id)).toEqual(['resume', 'cover_letter']);
+    // The predicted count, asserted separately from the identities so a length
+    // change and an identity change fail distinguishably.
+    expect(differingLabel).toHaveLength(2);
+
+    // Fields whose wrapper contradicts the control's own required-ness. Only
+    // the resume: the cover letter's wrapper says aria-required="false", which
+    // AGREES with its control and so must not be counted here.
+    const differingRequired = fields.filter(
+      (field) => field.groupRequired !== undefined && field.groupRequired !== field.required,
+    );
+    expect(differingRequired.map((field) => field.id)).toEqual(['resume']);
+    expect(differingRequired).toHaveLength(1);
+
+    // THE OTHER TWENTY. Every remaining field must have picked up nothing at
+    // all: the fixture has exactly two role="group" wrappers and both are file
+    // uploads. This is the assertion that fails if the ancestor walk ever
+    // starts reaching page-level landmarks, and it is why the bound exists.
+    const untouched = fields.filter(
+      (field) => field.groupLabel === undefined && field.groupRequired === undefined,
+    );
+    expect(untouched).toHaveLength(20);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GUARD TESTS, on SYNTHETIC DOM.
+//
+// These deliberately do NOT use the real capture, and the distinction matters:
+// the captured form contains no group carrying aria-describedby and no group
+// twenty levels up, so it cannot exercise either guard. Per
+// docs/verification-traps.md, a guard no available input can reach is untested
+// no matter how green the suite looks.
+//
+// Synthetic markup is labelled as such for the same reason this repository
+// refuses to hand-author a Lever or Ashby fixture: these snippets prove a
+// property of the ALGORITHM, not a fact about any vendor's DOM, and a reader
+// must never be able to mistake one for the other.
+// ---------------------------------------------------------------------------
+
+/**
+ * Run the extractor over a synthetic document.
+ *
+ * A fresh page per call rather than the shared one, because setContent on the
+ * page the fixture tests use would erase the real form under them and turn
+ * this file's failures into someone else's.
+ */
+async function extractFromMarkup(markup: string) {
+  // Its own tab, closed before returning so no Chromium target leaks.
+  const isolated = await browser.newPage();
+  // setContent, not a fixture file: nothing here is a captured form.
+  await isolated.setContent(markup);
+  // Extract before teardown; the result is plain data and outlives the page.
+  const fields = await extractFields(isolated);
+  await isolated.close();
+  return fields;
+}
+
+describe('group label resolution guards', () => {
+  test('a legitimate aria-labelledby group label IS picked up', async () => {
+    // THE NON-VACUITY TWIN for both rejection tests below. A guard that
+    // refuses every input is indistinguishable from a correct guard unless
+    // something proves it still ACCEPTS what it is supposed to accept. This is
+    // the minimal accept case: one group, one aria-labelledby, no describedby
+    // and no deep nesting.
+    const fields = await extractFromMarkup(`
+      <div role="group" aria-labelledby="grp-name" aria-required="true">
+        <div id="grp-name">Resume/CV</div>
+        <input id="upload" type="file" aria-label="Attach" />
+      </div>
+    `);
+    // The control is found at all — without this the rejections below could
+    // both be passing because extraction returned an empty array.
+    const upload = fields.find((field) => field.id === 'upload');
+    expect(upload).toBeDefined();
+    // The control's own name is untouched, exactly as on the real form.
+    expect(upload?.label).toBe('Attach');
+    // And the wrapper's name arrives.
+    expect(upload?.groupLabel).toBe('Resume/CV');
+    // As does the wrapper's obligation, which the control does not carry.
+    expect(upload?.groupRequired).toBe(true);
+  });
+
+  test('aria-describedby content does NOT leak into the group label', async () => {
+    // THE MOST DANGEROUS MISTAKE AVAILABLE IN THIS MODULE, pinned.
+    //
+    // On the real form aria-describedby resolves to
+    // "first_name-description first_name-error first_name-help" — description,
+    // ERROR and help text. If the group-label resolver ever fell back to
+    // aria-describedby, validation text would be spliced into the answer-bank
+    // key, so the key would CHANGE the moment a submit failed and the bank
+    // would silently stop matching answers it had already stored. That defect
+    // is invisible to every test that never triggers an error state, which is
+    // every other test in this repository.
+    //
+    // The group here carries BOTH attributes, which is what makes this
+    // non-vacuous: the group IS found and it DOES get a label, so the only
+    // question under test is which attribute supplied it.
+    const fields = await extractFromMarkup(`
+      <div
+        role="group"
+        aria-labelledby="grp-name"
+        aria-describedby="grp-description grp-error grp-help"
+        aria-required="true"
+      >
+        <div id="grp-name">Resume/CV</div>
+        <div id="grp-description">Upload your most recent CV</div>
+        <div id="grp-error">Please attach a file before continuing</div>
+        <div id="grp-help">Accepted file types: pdf, doc, docx</div>
+        <input id="upload" type="file" aria-label="Attach" />
+      </div>
+    `);
+    const upload = fields.find((field) => field.id === 'upload');
+
+    // The label is EXACTLY the aria-labelledby text and nothing more. An
+    // equality assertion, not a "contains", because a describedby fallback
+    // that APPENDED would still satisfy a contains check.
+    expect(upload?.groupLabel).toBe('Resume/CV');
+    // Named per describedby target so a failure says which text leaked rather
+    // than only that the string was wrong. The error string matters most: it
+    // is the one that varies with validation state.
+    expect(upload?.groupLabel).not.toContain('Please attach a file');
+    expect(upload?.groupLabel).not.toContain('Upload your most recent CV');
+    expect(upload?.groupLabel).not.toContain('Accepted file types');
+  });
+
+  test('a group with ONLY aria-describedby yields no group label at all', async () => {
+    // The second half of the same guard. The test above proves describedby
+    // cannot CONTAMINATE a real label; this proves it cannot SUBSTITUTE for a
+    // missing one. A fallback implementation passes the test above and fails
+    // here, so both are needed — the composite-result trap from
+    // docs/verification-traps.md.
+    const fields = await extractFromMarkup(`
+      <div role="group" aria-describedby="grp-error" aria-required="true">
+        <div id="grp-error">Please attach a file before continuing</div>
+        <input id="upload" type="file" aria-label="Attach" />
+      </div>
+    `);
+    const upload = fields.find((field) => field.id === 'upload');
+
+    // Extraction still happened and the control is present, so the assertion
+    // below is about the group label and not about an empty result set.
+    expect(upload?.label).toBe('Attach');
+    // No name, because the only attribute that may name a group is absent.
+    expect(upload?.groupLabel).toBeUndefined();
+    // But the group WAS located — aria-required came off it. This separates
+    // "the walk failed to find the group" from "the walk found it and
+    // correctly refused to name it from describedby", which a bare
+    // toBeUndefined() on groupLabel cannot distinguish.
+    expect(upload?.groupRequired).toBe(true);
+  });
+});
+
+describe('the ancestor-walk bound', () => {
+  /**
+   * Wrap `inner` in `depth` plain divs.
+   *
+   * Built programmatically so the two tests below differ in exactly one
+   * number. Hand-typing twenty nested divs would make them differ in ways a
+   * reader cannot check by eye, which is how a "control" stops controlling.
+   */
+  function nest(depth: number, inner: string): string {
+    // Reduce over a fixed-length array: each step adds one more enclosing div.
+    return Array.from({ length: depth }).reduce<string>(
+      (accumulated) => `<div>${accumulated}</div>`,
+      inner,
+    );
+  }
+
+  /** The input plus its group heading, with a configurable gap between them. */
+  function groupedUpload(gap: number): string {
+    // aria-label so the control survives the "no recoverable label" drop and
+    // the test is about the walk rather than about label resolution.
+    const input = '<input id="upload" type="file" aria-label="Attach" />';
+    // The heading sits directly under the group; only the INPUT moves, so the
+    // two cases differ solely in ancestor distance.
+    return `
+      <div role="group" aria-labelledby="grp-name" aria-required="true">
+        <div id="grp-name">Resume/CV</div>
+        ${nest(gap, input)}
+      </div>
+    `;
+  }
+
+  test('a group at the real form depth IS found', async () => {
+    // THE NON-VACUITY TWIN for the rejection below. Greenhouse buries the file
+    // input five levels inside its upload group
+    // (group > file-upload__wrapper > button-container > secondary-button >
+    // div > input), so this is the depth the bound MUST clear. If the bound is
+    // ever tightened past the one real DOM we have, this is what says so.
+    const fields = await extractFromMarkup(groupedUpload(4));
+    const upload = fields.find((field) => field.id === 'upload');
+    // Found, named, and carrying the wrapper's obligation.
+    expect(upload?.groupLabel).toBe('Resume/CV');
+    expect(upload?.groupRequired).toBe(true);
+  });
+
+  test('a distant page-level group is NOT treated as the field group', async () => {
+    // THE BOUND ITSELF. Without it the walk climbs to <html>, so a page that
+    // wraps the whole form in role="group" stamps ONE section heading onto all
+    // 22 fields — collapsing 22 distinct answer-bank keys into a single key,
+    // which makes the bank return the WRONG stored answer rather than no
+    // answer. That is a constraint #3 hazard (a false statement submitted in
+    // Teja's name), not merely a miss.
+    //
+    // Twenty levels rather than nine: the claim under test is "a distant
+    // landmark is not this field's group", not "the constant is exactly 8".
+    // Pinning the constant would make a legitimate bump of it look like a
+    // regression.
+    const fields = await extractFromMarkup(groupedUpload(20));
+    const upload = fields.find((field) => field.id === 'upload');
+
+    // The field is still extracted in full — only the group metadata is
+    // withheld. Without this line a bug that dropped the control entirely
+    // would pass the two assertions below.
+    expect(upload?.label).toBe('Attach');
+    expect(upload?.kind).toBe('file');
+    // Neither piece of group metadata may cross a twenty-level gap.
+    expect(upload?.groupLabel).toBeUndefined();
+    expect(upload?.groupRequired).toBeUndefined();
+  });
+});

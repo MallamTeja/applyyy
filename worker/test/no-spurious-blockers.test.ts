@@ -130,9 +130,19 @@ test('a LABELLED aria-hidden sentinel is still excluded', async () => {
   //
   // So this uses a SYNTHETIC DOM, deliberately not the real capture: it needs a
   // sentinel that has a label, which real Greenhouse does not currently serve.
-  // It is labelled synthetic for the same reason the Lever fixture is — it
-  // proves something different from a real capture, and conflating the two is
-  // how a test comes to look like evidence it is not.
+  // It is labelled synthetic explicitly, and that label is load-bearing: a
+  // synthetic DOM proves something different from a real capture, and
+  // conflating the two is how a test comes to look like evidence it is not.
+  //
+  // CORRECTED 2026-09-11. This previously read "for the same reason the Lever
+  // fixture is". THERE IS NO LEVER FIXTURE, and there never has been —
+  // `worker/fixtures/` holds exactly one real capture,
+  // `greenhouse/gitlab-remix-form.html`. The sentence was worth deleting rather
+  // than softening, because a comment that casually cites a fixture nobody has
+  // ever captured does the same damage as hand-authoring one: it converts a
+  // KNOWN gap (we have never seen a Lever DOM, so we cannot claim the extractor
+  // handles it) into an unknown one, by leaving the next reader believing the
+  // coverage exists. A missing fixture is an honest gap; a phantom one is not.
   const isolated = await browser.newPage();
   // One genuine question and one sentinel that differs ONLY by aria-hidden.
   // Every other attribute is identical, so the assertion below can attribute

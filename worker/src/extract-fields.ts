@@ -23,6 +23,21 @@ export interface FormField {
   // Whether leaving this blank blocks submission. Drives the difference between
   // "skip it" and "route the row to blocked_needs_human" (constraint #4).
   readonly required: boolean;
+  // The human-meaningful name of the WRAPPER this control sits inside, when
+  // that wrapper is a role="group". Deliberately NOT merged into `label`: the
+  // accessible name of Greenhouse's file input genuinely IS "Attach" — accname
+  // says so, and `label` stays correct — but "Attach" is a useless answer-bank
+  // key and BOTH uploads on the real form share it. Every answer-bank key in
+  // the system would become downstream of that merge forever, so the better key
+  // gets its own field and the caller decides which one to look up by.
+  readonly groupLabel?: string;
+  // The wrapper's own aria-required. Greenhouse puts aria-required="true" on
+  // the upload group, never on the <input type="file"> inside it, so `required`
+  // reads false for a resume box that genuinely blocks submission. Separate for
+  // the same reason as groupLabel: `required` is the truth about the CONTROL,
+  // this is the truth about the GROUP, and folding one into the other would
+  // silently change what every existing caller means by `required`.
+  readonly groupRequired?: boolean;
 }
 
 export async function extractFields(page: Page): Promise<FormField[]> {
@@ -39,6 +54,13 @@ export async function extractFields(page: Page): Promise<FormField[]> {
     // Accumulator; built imperatively so unlabelled controls can be skipped
     // outright rather than filtered out of a mapped array afterwards.
     const fields: FormField[] = [];
+
+    // How far up the ancestor chain a role="group" wrapper may sit before it
+    // stops counting as THIS control's group. See the walk further down for why
+    // a bound is needed at all; 8 clears Greenhouse's five-level file-upload
+    // nesting with room for a vendor inserting another wrapper div, and stops
+    // well short of a page-level landmark that wraps the whole form.
+    const GROUP_ANCESTOR_LIMIT = 8;
 
     for (const element of elements) {
       // Sentinel inputs first. Real Greenhouse forms include aria-hidden,
@@ -114,8 +136,105 @@ export async function extractFields(page: Page): Promise<FormField[]> {
       const required =
         element.getAttribute('aria-required') === 'true' || element.hasAttribute('required');
 
-      // Emit the normalised field.
-      fields.push({ id: element.id, label, kind, required });
+      // GROUP METADATA — strictly additive. Nothing above this point changes.
+      //
+      // THE DEFECT THIS ANSWERS: on the real capture BOTH file inputs report
+      // label 'Attach' (from <label class="visually-hidden" for="resume">) and
+      // required false, because the human-meaningful "Resume/CV" text AND the
+      // aria-required="true" both live on a <div role="group"> five levels
+      // above the input. The walk above never left the control element, so the
+      // mandatory resume box was indistinguishable from the optional cover
+      // letter box — same label, same required, different obligation.
+
+      // Nearest ancestor carrying role="group". Written as an explicit walk
+      // rather than element.closest('[role="group"]') because closest() always
+      // searches to <html> and offers no way to stop early, and stopping early
+      // is the entire point of the next few lines.
+      let group: HTMLElement | null = null;
+      // Start at the parent: a control is never its own group.
+      let ancestor: HTMLElement | null = element.parentElement;
+      // THE BOUND. An unbounded walk reaches <html>, so a page that wraps the
+      // whole form in role="group" would stamp one section heading onto all 22
+      // fields — collapsing 22 distinct answer-bank keys into a single key and
+      // making the bank return the wrong stored answer rather than no answer,
+      // which is the failure mode constraint #3 exists to prevent. A group
+      // eight levels up is a page landmark, not this field's group.
+      for (let depth = 0; ancestor !== null && depth < GROUP_ANCESTOR_LIMIT; depth += 1) {
+        // Nearest wins and the walk stops there: an inner group is more
+        // specific than an outer one, exactly as a screen reader treats nested
+        // groups. Continuing past it would let an outer section override the
+        // wrapper that actually describes this control.
+        if (ancestor.getAttribute('role') === 'group') {
+          group = ancestor;
+          break;
+        }
+        // Step up one level, spending one unit of the bound.
+        ancestor = ancestor.parentElement;
+      }
+
+      // Declared undefined and assigned only when the group genuinely supplies
+      // them, so "no group said anything" stays distinguishable from "the group
+      // said false" — under exactOptionalPropertyTypes those are different
+      // types, and conflating them would have `groupRequired: false` assert
+      // something no markup ever claimed.
+      let groupLabel: string | undefined;
+      let groupRequired: boolean | undefined;
+
+      if (group !== null) {
+        // aria-labelledby AND NOTHING ELSE — the single most dangerous mistake
+        // available in this file is adding an aria-describedby fallback here.
+        // On this very form aria-describedby resolves to
+        // "first_name-description first_name-error first_name-help", so a
+        // describedby fallback would splice VALIDATION TEXT into the key. The
+        // key would then change the instant a submit failed, and the answer
+        // bank would quietly stop matching answers it had already stored — a
+        // defect invisible to any test run that never triggers an error state.
+        const groupLabelledBy = group.getAttribute('aria-labelledby');
+        if (groupLabelledBy) {
+          // Same multi-id resolution the control-level branch uses above: one
+          // aria-labelledby may name several elements whose text concatenates.
+          const resolved = groupLabelledBy
+            .split(/\s+/)
+            .map((labelId) => document.getElementById(labelId)?.textContent?.trim() ?? '')
+            .join(' ')
+            .trim()
+            // Identical trailing-asterisk strip to `label`'s, because the group
+            // heading renders as Resume/CV<span class="required">*</span> and a
+            // key carrying the required marker would fail to match the same
+            // question on a board that marks required-ness any other way.
+            .replace(/\s*\*\s*$/, '')
+            .trim();
+          // Emitted only when it actually resolved to text: an aria-labelledby
+          // pointing at an id that is not in the document must produce no key
+          // at all rather than an empty-string key that matches everything.
+          if (resolved) groupLabel = resolved;
+        }
+
+        // Only when the group actually declares it. A group with no
+        // aria-required has said nothing, and emitting `false` there would be
+        // an assertion the markup does not support. The native `required`
+        // attribute is deliberately NOT checked the way it is for the control:
+        // it is invalid on a <div role="group">, so honouring it would invent a
+        // signal no ATS emits and no fixture can ever confirm.
+        if (group.hasAttribute('aria-required')) {
+          groupRequired = group.getAttribute('aria-required') === 'true';
+        }
+      }
+
+      // Emit the normalised field. The two group properties are spread in
+      // conditionally rather than assigned undefined, because
+      // exactOptionalPropertyTypes makes `{ groupLabel: undefined }` a type
+      // error against `groupLabel?: string` — and because an absent key is the
+      // honest encoding of "this control has no group to speak for it".
+      fields.push({
+        id: element.id,
+        label,
+        kind,
+        required,
+        ...(groupLabel === undefined ? {} : { groupLabel }),
+        ...(groupRequired === undefined ? {} : { groupRequired }),
+      });
+
     }
 
     return fields;
