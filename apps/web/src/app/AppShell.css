@@ -222,6 +222,91 @@
   min-width: 0;
 }
 
+/* --- Operator session footer ------------------------------------------- */
+
+.rail__auth {
+  padding-top: var(--gap-3);
+  border-top: 1px solid var(--rule);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-2);
+  min-width: 0;
+}
+
+.rail__auth-user {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  min-width: 0;
+}
+
+.rail__auth-indicator {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--traced);
+  flex-shrink: 0;
+}
+
+.rail__auth-email {
+  font-family: var(--font-id);
+  font-size: var(--size-xs);
+  color: var(--ink-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail__signout-btn {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+  color: var(--ink);
+  font-size: var(--size-xs);
+  padding: var(--gap-1) var(--gap-2);
+  cursor: pointer;
+  transition: background-color 120ms ease;
+  align-self: flex-start;
+}
+
+.rail__signout-btn:hover {
+  background: var(--surface-hover);
+}
+
+/* Loading gate screen while auth hydrates */
+.shell-gate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--ground);
+  padding: var(--gap-4);
+}
+
+.shell-gate__card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--gap-2);
+  padding: var(--gap-5);
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+  box-shadow: var(--lift);
+}
+
+.shell-gate__name {
+  font-family: var(--font-paper);
+  font-size: var(--size-md);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.shell-gate__status {
+  font-size: var(--size-xs);
+  color: var(--ink-muted);
+}
+
 /* --- Narrow screens --------------------------------------------------- */
 
 /* Below this the rail and a resume pane cannot share the width. The rail
@@ -278,5 +363,15 @@
        three segments stretched across 400px would be a very wide way to say
        "Light". */
     max-width: 18rem;
+  }
+
+  .rail__auth {
+    margin-top: 0;
+    flex-basis: 100%;
+    padding-top: var(--gap-2);
+    border-top: 1px solid var(--rule);
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
   }
 }

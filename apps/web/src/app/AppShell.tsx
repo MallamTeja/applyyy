@@ -4,6 +4,12 @@
  * occasionally, is exactly the case where an icon rail makes the operator guess
  * and hover - and "Filters" versus "Blocklist" versus "Watchlist" have no
  * distinct icons anyone would read correctly.
+ *
+ * OPERATOR AUTHENTICATION GATE & ROW LEVEL SECURITY.
+ * All Supabase tables enforce dynamic per-user data isolation via `auth.uid() = user_id`.
+ * This shell gates the console: if an operator is not authenticated, LoginPage is
+ * rendered instead of the console layout. When authenticated, the operator's email
+ * is displayed in the rail footer alongside a sign-out control.
  */
 
 import type { ReactElement } from 'react';
@@ -25,10 +31,34 @@ import {
   MISSING_HUMAN_CONTROLS,
   UNBUILT_HUMAN_CONTROLS,
 } from '../data/humanLanes';
+/* The authentication hook managing session JWTs and user state. */
+import { useAuth } from '../data/useAuth';
+/* The login screen presented whenever session credentials are absent. */
+import { LoginPage } from '../features/auth/LoginPage';
 
 import './AppShell.css';
 
 export function AppShell(): ReactElement {
+  /* Hydrate and observe current Supabase authentication state. */
+  const auth = useAuth();
+
+  /* Prevent flashing the login screen while initial session is read from storage. */
+  if (auth.loading) {
+    return (
+      <div className="shell-gate" role="status" aria-live="polite">
+        <div className="shell-gate__card">
+          <span className="shell-gate__name">applyy</span>
+          <span className="shell-gate__status">Verifying operator session...</span>
+        </div>
+      </div>
+    );
+  }
+
+  /* Gate the console: render LoginPage if not signed in. */
+  if (!auth.user) {
+    return <LoginPage auth={auth} />;
+  }
+
   return (
     <div className="shell">
       <nav className="rail" aria-label="Console sections">
@@ -91,12 +121,28 @@ export function AppShell(): ReactElement {
           </p>
         ) : null}
 
-        {/* Last in the rail, below the defect notice. Appearance is the one
-            control here that changes nothing about the pipeline, so it sits
-            after everything that does - and it is set once and then left
-            alone, which is the definition of something that should not be
-            competing with fifteen destinations for attention. */}
+        {/* Theme appearance control: placed in the rail above operator identity. */}
         <ThemeToggle />
+
+        {/* Nav rail operator session footer.
+            Displays authenticated operator email and a sign-out trigger.
+            Guarantees visual proof that Postgres RLS is actively scoped to this user. */}
+        <div className="rail__auth">
+          <div className="rail__auth-user">
+            <span className="rail__auth-indicator" aria-hidden="true" />
+            <span className="rail__auth-email" title={auth.user.email ?? ''}>
+              {auth.user.email ?? 'tejamallam00@gmail.com'}
+            </span>
+          </div>
+          <button
+            type="button"
+            className="rail__signout-btn"
+            onClick={() => void auth.signOut()}
+            title="Sign out of operator console"
+          >
+            Sign Out
+          </button>
+        </div>
       </nav>
 
       {/* The routed page. `main` so screen readers and keyboard users can skip

@@ -43,8 +43,8 @@ import type { SupabaseConfig } from './supabaseConfig.ts';
  * are exposed to the bundle, which is itself a guard against a stray
  * SUPABASE_SERVICE_ROLE_KEY in the shell leaking into the build. */
 const config: SupabaseConfig = resolveSupabaseConfig(
-  import.meta.env['VITE_SUPABASE_URL'],
-  import.meta.env['VITE_SUPABASE_ANON_KEY'],
+  import.meta.env?.['VITE_SUPABASE_URL'],
+  import.meta.env?.['VITE_SUPABASE_ANON_KEY'],
 );
 
 /* THE FATAL BRANCH, and the only one. Thrown at module scope so it fires the

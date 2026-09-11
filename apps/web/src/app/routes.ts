@@ -50,6 +50,11 @@ export const OPERATIONS_SECTION: ConsoleSection = {
       label: 'System health',
       lede: 'Whether the automation is actually running. Nothing here fails loudly, so this page exists to notice when something has quietly stopped.',
     },
+    {
+      path: 'emails',
+      label: 'Email monitoring',
+      lede: 'Live feed of inbound recruiter emails, classification status, detected companies, and linked application stages.',
+    },
   ],
 };
 

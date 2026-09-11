@@ -1,0 +1,210 @@
+/* Styles for the operator LoginPage component.
+ *
+ * Adheres strictly to the Obsidian/Midnight design tokens:
+ * - Canvas sits on --ground desk surface.
+ * - Elevated card sits on --sheet paper surface with --lift elevation.
+ * - Inputs use --panel chrome tone with --rule borders and --accent focus rings.
+ * - Alerts use semantic status tokens (--fabricated for errors, --traced for notice).
+ */
+
+.login-canvas {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: var(--gap-4);
+  background: var(--ground);
+}
+
+.login-card {
+  width: 100%;
+  max-width: 24rem;
+  padding: var(--gap-6);
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+  box-shadow: var(--lift);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-4);
+}
+
+.login-card__brand {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-1);
+}
+
+.login-card__name {
+  font-family: var(--font-paper);
+  font-size: var(--size-lg);
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+}
+
+.login-card__tagline {
+  font-size: var(--size-xs);
+  color: var(--ink-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.login-card__desc {
+  font-size: var(--size-sm);
+  color: var(--ink-muted);
+  line-height: 1.45;
+  margin: 0;
+}
+
+.login-card__quickfill-row {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  padding: var(--gap-2) var(--gap-3);
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+  font-size: var(--size-xs);
+}
+
+.login-card__quickfill-label {
+  color: var(--ink-muted);
+  font-weight: 500;
+}
+
+.login-card__quickfill-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-family: var(--font-id);
+  font-size: var(--size-xs);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.login-card__quickfill-btn:hover {
+  color: var(--accent-strong);
+}
+
+.login-card__alert {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--gap-2);
+  padding: var(--gap-2) var(--gap-3);
+  border-radius: var(--radius-control);
+  font-size: var(--size-xs);
+  line-height: 1.4;
+}
+
+.login-card__alert--error {
+  background: var(--fabricated-wash);
+  border-left: 3px solid var(--fabricated);
+  color: var(--fabricated-strong);
+}
+
+.login-card__alert--notice {
+  background: var(--traced-wash);
+  border-left: 3px solid var(--traced);
+  color: var(--traced-strong);
+}
+
+.login-card__alert-icon {
+  font-weight: 700;
+  font-family: var(--font-id);
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-4);
+}
+
+.login-form__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-1);
+}
+
+.login-form__label {
+  font-size: var(--size-xs);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.login-form__input {
+  font-family: var(--font-machine);
+  font-size: var(--size-base);
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+  padding: var(--gap-2) var(--gap-3);
+  outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.login-form__input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.login-form__input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.login-form__submit-btn {
+  margin-top: var(--gap-2);
+  background: var(--accent);
+  color: var(--ink-on-fill);
+  border: 1px solid var(--accent-strong);
+  border-radius: var(--radius-control);
+  padding: var(--gap-2) var(--gap-4);
+  font-size: var(--size-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.login-form__submit-btn:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.login-form__submit-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.login-card__footer {
+  border-top: 1px solid var(--rule);
+  padding-top: var(--gap-3);
+  text-align: center;
+}
+
+.login-card__toggle-text {
+  margin: 0;
+  font-size: var(--size-xs);
+  color: var(--ink-muted);
+}
+
+.login-card__toggle-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: var(--size-xs);
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.login-card__toggle-btn:hover {
+  color: var(--accent-strong);
+}

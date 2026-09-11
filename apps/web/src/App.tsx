@@ -12,6 +12,7 @@ import { DEFAULT_ROUTE } from './app/routes';
 import { ApprovalQueuePage } from './features/approval/ApprovalQueuePage';
 import { PipelinePage } from './features/pipeline/PipelinePage';
 import { HealthPage } from './features/health/HealthPage';
+import { EmailMonitoringPage } from './features/emails/EmailMonitoringPage';
 
 /* The six configuration screens. */
 import { SearchPreferencesPage } from './features/settings/SearchPreferencesPage';
@@ -41,6 +42,7 @@ export function App(): ReactElement {
           <Route path="approvals" element={<ApprovalQueuePage />} />
           <Route path="pipeline" element={<PipelinePage />} />
           <Route path="health" element={<HealthPage />} />
+          <Route path="emails" element={<EmailMonitoringPage />} />
 
           <Route path="search-preferences" element={<SearchPreferencesPage />} />
           <Route path="master-profile" element={<MasterProfilePage />} />

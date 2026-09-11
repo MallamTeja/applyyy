@@ -1,0 +1,204 @@
+/* Stylesheet for the Email Intake & Tracker Monitoring view.
+ * Uses Obsidian/Midnight design tokens:
+ * --ground: Background canvas
+ * --sheet: Elevated monitoring cards and table containers
+ * --panel: Distinct row surfaces and interactive filters
+ * --ink: High contrast text
+ * --ink-muted: Secondary metadata labels
+ * --accent: Indigo accent highlights
+ */
+
+.email-monitor {
+  /* Prevent horizontal scroll bleed across viewport */
+  width: 100%;
+  /* Comfortable vertical padding */
+  padding-bottom: var(--gap-6);
+}
+
+.email-monitor__header {
+  /* Separation between top lede and metrics bar */
+  margin-bottom: var(--gap-4);
+}
+
+.email-monitor__stats {
+  /* Responsive grid displaying intake summary KPIs */
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--gap-3);
+  margin-bottom: var(--gap-4);
+}
+
+.email-stat-card {
+  /* Elevated surface container */
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  padding: var(--gap-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-1);
+}
+
+.email-stat-card__label {
+  /* Small secondary label describing the metric */
+  font-size: var(--size-xs);
+  color: var(--ink-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.email-stat-card__value {
+  /* High contrast numerical metric */
+  font-size: var(--size-xl);
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.email-monitor__toolbar {
+  /* Surface containing search and filter controls */
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-2);
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--gap-3);
+}
+
+.email-monitor__search {
+  /* Search input styling */
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  padding: var(--gap-1) var(--gap-2);
+  color: var(--ink);
+  font-size: var(--size-sm);
+  min-width: 240px;
+}
+
+.email-monitor__search:focus {
+  /* Focus highlight utilizing accent color */
+  border-color: var(--accent);
+  outline: none;
+}
+
+.email-list {
+  /* Container holding the list of processed and pending email cards */
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-3);
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.email-card {
+  /* Individual email event surface */
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  padding: var(--gap-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-2);
+  transition: border-color 0.15s ease;
+}
+
+.email-card:hover {
+  /* Interactive hover indication */
+  border-color: var(--accent);
+}
+
+.email-card__top {
+  /* Header flex row containing sender, category badge, and timestamp */
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--gap-2);
+}
+
+.email-card__sender {
+  /* High-contrast sender display */
+  font-weight: 600;
+  font-size: var(--size-sm);
+  color: var(--ink);
+}
+
+.email-card__time {
+  /* Subtle timestamp */
+  font-size: var(--size-xs);
+  color: var(--ink-muted);
+}
+
+.email-card__subject {
+  /* Prominent email subject line */
+  font-size: var(--size-base);
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0;
+}
+
+.email-card__snippet {
+  /* Fenced untrusted email snippet text */
+  font-size: var(--size-sm);
+  color: var(--ink-muted);
+  line-height: 1.4;
+  margin: 0;
+}
+
+.email-card__meta {
+  /* Metadata footer showing provider message id and link info */
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--size-xs);
+  color: var(--ink-muted);
+  border-top: 1px solid var(--rule);
+  padding-top: var(--gap-2);
+  margin-top: var(--gap-1);
+}
+
+.email-badge {
+  /* Category indicator badge */
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: var(--size-xs);
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.email-badge--interview {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.email-badge--rejection {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.email-badge--acknowledgement {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.email-badge--unclassified {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.3);
+}
+
+.email-empty {
+  /* Clean empty state presentation */
+  background: var(--sheet);
+  border: 1px dashed var(--rule);
+  border-radius: var(--radius-md);
+  padding: var(--gap-6) var(--gap-4);
+  text-align: center;
+  color: var(--ink-muted);
+}

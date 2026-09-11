@@ -13,10 +13,12 @@ import type { MasterProfile } from '../../data/contract.ts';
 
 export async function extractPdf(pdfBytes: Uint8Array): Promise<MasterProfile> {
   try {
-    // Dynamically resolve extractPdf from @applyy/master-pdf
-    const mod = await import('@applyy/master-pdf' as string);
+    // Dynamically resolve extractPdf from @applyy/master-pdf if available
+    const pkg = '@applyy/master-pdf';
+    // @ts-ignore
+    const mod = (await import(/* @vite-ignore */ pkg)) as Record<string, unknown>;
     if (typeof mod.extractPdf === 'function') {
-      return (await mod.extractPdf(pdfBytes)) as MasterProfile;
+      return (await (mod.extractPdf as (bytes: Uint8Array) => Promise<MasterProfile>)(pdfBytes));
     }
   } catch {
     // Fallback if package is compiling concurrently across peer sessions
