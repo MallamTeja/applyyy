@@ -34,6 +34,7 @@ supabase/.branches/
 .DS_Store
 Thumbs.db
 *.swp
+.vscode/
 
 # --- This repo's stray artifact, already present
 bash.exe.stackdump

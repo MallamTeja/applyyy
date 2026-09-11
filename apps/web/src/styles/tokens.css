@@ -183,15 +183,15 @@
 
   /* Machine chrome. Plex Sans is drawn for information-dense technical UI and
      stays legible at 12px, which most humanist sans faces do not. */
-  --font-machine: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  --font-machine: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   /* Resume prose. A serif because the artefact under review is a document, and
      because it makes master-vs-tailored text visually separate from the
      controls that act on it. */
-  --font-paper: 'IBM Plex Serif', Georgia, 'Times New Roman', serif;
+  --font-paper: 'IBM Plex Serif', 'Charter', Cambria, Georgia, 'Times New Roman', serif;
   /* Literal identifiers only - bullet ids, board tokens, fingerprints, run
      timestamps. These are strings a human might copy, so tabular figures and
      unambiguous glyphs earn their keep. Never used for ordinary labels. */
-  --font-id: 'IBM Plex Mono', ui-monospace, monospace;
+  --font-id: 'IBM Plex Mono', ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
 
   /* A 1.25 modular scale off a 15px base. Dense enough for tables, and the
      base is above 14px so long-form resume text is comfortable. */

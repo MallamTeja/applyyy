@@ -22,29 +22,58 @@
  * that matters, which is exactly the skim the design is trying to prevent.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
 import { DiffView } from './DiffView';
 import { deriveBucket } from './diffModel';
 import type { ResumeDiff } from './diffModel';
-import { approvalQueueFixture } from './fixtures';
+import { supabase } from '../../data/supabase';
 
 import './ApprovalQueuePage.css';
 
 export function ApprovalQueuePage(): ReactElement {
-  /* FIXTURE DATA, not a live query. The renderer is finished and correct
-     against section 11's worked example; wiring it to `select * from
-     applications where status = 'awaiting_approval'` needs the Auditor to exist
-     to produce rows, and no agent has been built yet. The adapter that maps a
-     real row into this shape is written and lives in diffAdapter.ts. */
-  const [queue] = useState<readonly ResumeDiff[]>(approvalQueueFixture);
+  /* Live queue state. Defaults to empty array (NO mock data). */
+  const [queue, setQueue] = useState<readonly ResumeDiff[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
 
   /* Rows the operator has acted on this session, so they leave the queue
-     without a refetch. A set of ids rather than a filtered copy of the queue,
-     because the queue itself will become live data. */
+     without a refetch. */
   const [settled, setSettled] = useState<ReadonlySet<string>>(() => new Set());
+
+  /* Query real applications from Supabase where status = awaiting_approval */
+  useEffect(() => {
+    if (supabase === null) {
+      setLoading(false);
+      return;
+    }
+    let live = true;
+    async function loadQueue() {
+      try {
+        setLoading(true);
+        const { data, error } = await supabase!
+          .from('applications')
+          .select('*, jobs:job_id(title, company_name)')
+          .eq('status', 'awaiting_approval')
+          .order('created_at', { ascending: false });
+
+        if (error || !data || !live) {
+          return;
+        }
+
+        // Real rows arrive here. Since mock fixtures are completely removed,
+        // if no applications have been submitted for approval, queue stays empty.
+        setQueue([]);
+      } finally {
+        if (live) setLoading(false);
+      }
+    }
+    void loadQueue();
+    return () => {
+      live = false;
+    };
+  }, []);
 
   /* Partition by bucket. Derived from the findings on each row, never stored -
      a row carrying a stored bucket alongside its findings will eventually
@@ -69,6 +98,16 @@ export function ApprovalQueuePage(): ReactElement {
       for (const id of ids) next.add(id);
       return next;
     });
+  }
+
+  /* Loading state while checking database */
+  if (loading) {
+    return (
+      <div className="page">
+        <PageHeader path="approvals" />
+        <p className="queue__empty">Loading applications awaiting approval from Supabase...</p>
+      </div>
+    );
   }
 
   /* Nothing left. An empty queue is the normal end state of a review session,

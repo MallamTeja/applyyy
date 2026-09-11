@@ -26,33 +26,32 @@
  * that stops does not complain.
  */
 
-import type { ReactElement } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import type { FormEvent, ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
 /* The provider vocabulary comes from the schema: the Applier routes submissions
    on `ats_provider`, so a token stored against the wrong provider is polled
    with the wrong API and submitted through the wrong adapter. */
 import { ATS_PROVIDERS } from '../../data/contract';
-import type { AtsProvider } from '../../data/contract';
+import type { AtsProvider, CompanyWatchlistRow } from '../../data/contract';
+import { supabase } from '../../data/supabase';
 
 import './settings.css';
 
+/* Supported direct-poll ATS providers */
+const SELECTABLE_ATS_PROVIDERS: readonly AtsProvider[] = [
+  'greenhouse',
+  'lever',
+  'ashby',
+  'workable',
+  'smartrecruiters',
+];
+
 /* --- What a board token looks like per provider ----------------------- */
 
-/* Guidance per ATS, because the single most likely mistake on this page is
- * pasting a full careers URL into a field that wants only the token - and the
- * failure mode is a board that silently yields nothing rather than an error
- * anybody sees.
- *
- * Keyed by the schema's `AtsProvider` and PARTIAL on purpose: a provider added
- * upstream still renders here with its raw name instead of disappearing from
- * the guidance table. A missing hint is cosmetic; a missing provider would mean
- * an operator cannot tell whether it is supported. */
 interface ProviderHint {
-  /* Where the operator finds the token, in concrete terms. */
   readonly where: string;
-  /* A real example of the URL shape, with the token part called out. Concrete
-     beats abstract here - "the slug" means nothing until you have seen one. */
   readonly example: string;
 }
 
@@ -74,36 +73,347 @@ const PROVIDER_HINTS: Readonly<Partial<Record<AtsProvider, ProviderHint>>> = {
     example: 'apply.workable.com/EXAMPLECO -> token is EXAMPLECO',
   },
   smartrecruiters: {
-    where: 'The company identifier in the SmartRecruiters careers URL. Note it is usually the company name with spaces removed rather than hyphenated.',
+    where: 'The company identifier in the SmartRecruiters careers URL.',
     example: 'careers.smartrecruiters.com/ExampleCo -> token is ExampleCo',
   },
   unknown: {
-    where: 'Not a board to poll, and nothing to enter here. This value means a discovered job has an apply URL that no adapter recognises, so it routes to a person instead of being submitted.',
+    where: 'Not a board to poll.',
     example: 'Never entered on this page.',
   },
   other: {
-    where: 'A board the Scout can reach but that has no dedicated adapter. Entering one here is only useful once an adapter exists, since polling and submitting are separate capabilities.',
-    example: 'Not a URL shape - depends on the board.',
+    where: 'Custom board without standard adapter.',
+    example: 'Not a URL shape.',
   },
 };
 
 /* --- The page --------------------------------------------------------- */
 
 export function WatchlistPage(): ReactElement {
+  const [rows, setRows] = useState<readonly CompanyWatchlistRow[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [submitting, setSubmitting] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  /* Form state */
+  const [companyName, setCompanyName] = useState<string>('');
+  const [atsProvider, setAtsProvider] = useState<AtsProvider>('greenhouse');
+  const [boardToken, setBoardToken] = useState<string>('');
+
+  const loadWatchlist = useCallback(async () => {
+    if (supabase === null) {
+      setLoading(false);
+      return;
+    }
+    try {
+      setLoading(true);
+      setError(null);
+      const { data, error: fetchErr } = await supabase
+        .from('company_watchlist')
+        .select('*')
+        .order('company_name', { ascending: true });
+
+      if (fetchErr) {
+        setError(`Failed to fetch watchlist: ${fetchErr.message}`);
+      } else if (data) {
+        setRows(data as CompanyWatchlistRow[]);
+      }
+    } catch (err) {
+      setError(`Unexpected error: ${String(err)}`);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadWatchlist();
+  }, [loadWatchlist]);
+
+  /* Handle add target company board */
+  const handleAddBoard = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    if (supabase === null) {
+      setError('Supabase is not configured in this environment.');
+      return;
+    }
+
+    const trimmedName = companyName.trim();
+    const trimmedToken = boardToken.trim();
+
+    if (!trimmedName || !trimmedToken) {
+      setError('Company name and board token are required.');
+      return;
+    }
+
+    const slug = trimmedName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+
+    try {
+      setSubmitting(true);
+      setError(null);
+      setSuccess(null);
+
+      const { error: insertErr } = await supabase.from('company_watchlist').insert({
+        company_name: trimmedName,
+        company_slug: slug,
+        ats_provider: atsProvider,
+        board_token: trimmedToken,
+        enabled: true,
+      });
+
+      if (insertErr) {
+        if (insertErr.code === '23505') {
+          setError(`Board token "${trimmedToken}" is already registered under ${atsProvider}.`);
+        } else {
+          setError(`Insert failed: ${insertErr.message}`);
+        }
+        return;
+      }
+
+      setSuccess(`Added ${trimmedName} (${atsProvider}) to company watchlist.`);
+      setCompanyName('');
+      setBoardToken('');
+      await loadWatchlist();
+    } catch (err) {
+      setError(`Insert failed: ${String(err)}`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  /* Handle toggle enabled/paused status */
+  const handleToggle = async (id: string, currentlyEnabled: boolean): Promise<void> => {
+    if (supabase === null) return;
+
+    // Optimistic local state update
+    setRows((prev) =>
+      prev.map((r) => (r.id === id ? { ...r, enabled: !currentlyEnabled } : r)),
+    );
+
+    const { error: updateErr } = await supabase
+      .from('company_watchlist')
+      .update({ enabled: !currentlyEnabled })
+      .eq('id', id);
+
+    if (updateErr) {
+      setError(`Failed to update board status: ${updateErr.message}`);
+      await loadWatchlist();
+    }
+  };
+
+  /* Handle delete board */
+  const handleDelete = async (id: string, name: string): Promise<void> => {
+    if (supabase === null) return;
+
+    const { error: delErr } = await supabase
+      .from('company_watchlist')
+      .delete()
+      .eq('id', id);
+
+    if (delErr) {
+      setError(`Failed to remove ${name}: ${delErr.message}`);
+    } else {
+      setRows((prev) => prev.filter((r) => r.id !== id));
+      setSuccess(`Removed ${name} from watchlist.`);
+    }
+  };
+
+  const activeCount = rows.filter((r) => r.enabled).length;
+  const totalPolls = rows.reduce((acc, r) => acc + (r.poll_count || 0), 0);
+
   return (
     <div className="page">
       <PageHeader path="watchlist" />
 
-      {/* Honest state first, in the shared idiom. */}
-      <p className="not-wired">
-        This page is laid out but not yet reading or writing{' '}
-        <span className="identifier">company_watchlist</span>. Nothing typed
-        here is stored, and no board is being polled.
-      </p>
+      {/* Overview Stat Counters */}
+      <div className="watchlist-stats">
+        <div className="watchlist-stat-card">
+          <span className="watchlist-stat-card__val">{rows.length}</span>
+          <span className="watchlist-stat-card__label">Target Boards</span>
+        </div>
+        <div className="watchlist-stat-card">
+          <span className="watchlist-stat-card__val">{activeCount}</span>
+          <span className="watchlist-stat-card__label">Active Polling</span>
+        </div>
+        <div className="watchlist-stat-card">
+          <span className="watchlist-stat-card__val">{totalPolls}</span>
+          <span className="watchlist-stat-card__label">Historical Polls</span>
+        </div>
+      </div>
 
-      {/* The trade-off, stated up front, because it is the one thing that will
-          make the operator want to add boards rather than treat this as a
-          set-and-forget list. */}
+      {/* Add Board Form */}
+      <section className="settings-group">
+        <h2 className="settings-group__title">Add Company Target Board</h2>
+        <p className="settings-group__note">
+          Register a company careers board for autonomous job discovery. The Scout polls
+          each board&apos;s direct API endpoint rather than scraping HTML.
+        </p>
+
+        {error && <div className="watchlist-feedback watchlist-feedback--error">{error}</div>}
+        {success && (
+          <div className="watchlist-feedback watchlist-feedback--success">{success}</div>
+        )}
+
+        <form onSubmit={handleAddBoard} className="watchlist-add-form">
+          <div className="watchlist-add-row">
+            <label className="field">
+              <span className="field__label">Company Name</span>
+              <input
+                type="text"
+                className="field__control"
+                placeholder="e.g. Stripe, OpenAI, Figma"
+                value={companyName}
+                onChange={(e) => setCompanyName(e.target.value)}
+                disabled={submitting}
+                required
+              />
+            </label>
+
+            <label className="field">
+              <span className="field__label">ATS Provider</span>
+              <select
+                className="field__control"
+                value={atsProvider}
+                onChange={(e) => setAtsProvider(e.target.value as AtsProvider)}
+                disabled={submitting}
+              >
+                {SELECTABLE_ATS_PROVIDERS.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="field">
+              <span className="field__label">Board Token</span>
+              <input
+                type="text"
+                className="field__control identifier"
+                placeholder="e.g. stripe"
+                value={boardToken}
+                onChange={(e) => setBoardToken(e.target.value)}
+                disabled={submitting}
+                required
+              />
+            </label>
+
+            <button
+              type="submit"
+              className="button button--approve"
+              disabled={submitting}
+            >
+              {submitting ? 'Adding...' : 'Add Board'}
+            </button>
+          </div>
+
+          <p className="field__help">
+            Hint for {atsProvider}: {PROVIDER_HINTS[atsProvider]?.example ?? 'Enter the company identifier slug.'}
+          </p>
+        </form>
+      </section>
+
+      {/* Active Watchlist Table */}
+      <section className="settings-group">
+        <h2 className="settings-group__title">Watched Company Boards</h2>
+        <p className="settings-group__note">
+          Boards currently registered in Supabase. The Scout polls enabled boards on cron.
+        </p>
+
+        {loading ? (
+          <p className="watchlist-empty-state">Loading company watchlist from Supabase...</p>
+        ) : rows.length === 0 ? (
+          <div className="watchlist-empty-state">
+            No company boards added yet. Use the form above to register target employers.
+          </div>
+        ) : (
+          <div className="settings-table-wrap">
+            <table className="settings-table">
+              <thead>
+                <tr>
+                  <th scope="col">Company</th>
+                  <th scope="col">ATS Provider</th>
+                  <th scope="col">Board Token</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Last Poll</th>
+                  <th scope="col">Poll Count</th>
+                  <th scope="col">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr key={row.id}>
+                    <td>
+                      <strong>{row.company_name}</strong>
+                      <div className="identifier" style={{ fontSize: '0.75rem', color: 'var(--ink-muted)' }}>
+                        {row.company_slug}
+                      </div>
+                    </td>
+                    <td>
+                      <span className="badge-ats">{row.ats_provider}</span>
+                    </td>
+                    <td>
+                      <code className="identifier">{row.board_token}</code>
+                    </td>
+                    <td>
+                      <span
+                        className={
+                          row.enabled
+                            ? 'badge-status badge-status--active'
+                            : 'badge-status badge-status--paused'
+                        }
+                      >
+                        {row.enabled ? '● Polling' : '○ Paused'}
+                      </span>
+                    </td>
+                    <td>
+                      {row.last_polled_at ? (
+                        new Date(row.last_polled_at).toLocaleDateString()
+                      ) : (
+                        <span className="unknown">Never polled</span>
+                      )}
+                      {row.consecutive_failures > 0 && (
+                        <span
+                          className="identifier"
+                          style={{ color: 'var(--fabricated)', marginLeft: '6px', fontSize: '0.75rem' }}
+                          title="Consecutive failures"
+                        >
+                          ({row.consecutive_failures} fail)
+                        </span>
+                      )}
+                    </td>
+                    <td className="identifier">{row.poll_count}</td>
+                    <td>
+                      <div className="watchlist-actions">
+                        <button
+                          type="button"
+                          className="button--toggle"
+                          onClick={() => handleToggle(row.id, row.enabled)}
+                          title={row.enabled ? 'Pause polling for this company' : 'Resume polling for this company'}
+                        >
+                          {row.enabled ? 'Pause' : 'Enable'}
+                        </button>
+                        <button
+                          type="button"
+                          className="button--danger-outline"
+                          onClick={() => handleDelete(row.id, row.company_name)}
+                          title="Delete company from watchlist"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* Freshness vs Volume Architecture Principle */}
       <section className="settings-group">
         <h2 className="settings-group__title">Freshness and volume pull against each other</h2>
         <p className="settings-group__note">
@@ -121,7 +431,7 @@ export function WatchlistPage(): ReactElement {
         </p>
       </section>
 
-      {/* Token guidance, driven off the provider enum. */}
+      {/* Token Guidance per ATS */}
       <section className="settings-group">
         <h2 className="settings-group__title">Where to find a board token</h2>
         <p className="settings-group__note">
@@ -134,8 +444,6 @@ export function WatchlistPage(): ReactElement {
           <table className="settings-table">
             <thead>
               <tr>
-                {/* The schema's own provider value, so what is shown here
-                    matches what gets stored and what the Applier routes on. */}
                 <th scope="col">Provider</th>
                 <th scope="col">Where the token is</th>
                 <th scope="col">Example</th>
@@ -143,8 +451,6 @@ export function WatchlistPage(): ReactElement {
             </thead>
             <tbody>
               {ATS_PROVIDERS.map((provider) => {
-                /* Undefined for a provider the schema added and this page has
-                   not been taught about - stated rather than blank. */
                 const hint = PROVIDER_HINTS[provider];
                 return (
                   <tr key={provider}>
@@ -154,8 +460,7 @@ export function WatchlistPage(): ReactElement {
                     <td>
                       {hint === undefined ? (
                         <span className="unknown">
-                          Supported by the schema but not yet documented on this
-                          page.
+                          Supported by the schema but not yet documented on this page.
                         </span>
                       ) : (
                         hint.where
@@ -165,11 +470,6 @@ export function WatchlistPage(): ReactElement {
                       {hint === undefined ? (
                         <span className="unknown">&mdash;</span>
                       ) : (
-                        /* Rendered as plain text. Every example here is ours
-                           rather than fetched, but the field this describes is
-                           operator input that ends up next to untrusted board
-                           data, and keeping one rendering rule for the column
-                           is cheaper than remembering which cell is safe. */
                         <span className="identifier">{hint.example}</span>
                       )}
                     </td>
@@ -180,45 +480,7 @@ export function WatchlistPage(): ReactElement {
           </table>
         </div>
       </section>
-
-      {/* The stats panel: what to look at once boards are actually polling. */}
-      <section className="settings-group">
-        <h2 className="settings-group__title">Boards that have stopped yielding</h2>
-        <p className="settings-group__note">
-          A token goes stale when a company moves ATS or renames itself. The
-          board then returns zero jobs rather than an error, so it keeps being
-          polled forever and contributes nothing - indistinguishable from a
-          company that simply is not hiring.
-        </p>
-        <p className="settings-group__note">
-          The two numbers that separate those cases are the jobs returned on the
-          last poll and the consecutive failure count. A board with a long run of
-          zero-yield polls is worth re-checking by hand; one with rising
-          failures has a token that no longer resolves.
-        </p>
-        <p className="not-wired">
-          Reads <span className="identifier">last_polled_at</span>,{' '}
-          <span className="identifier">last_poll_job_count</span> and{' '}
-          <span className="identifier">consecutive_failures</span> from{' '}
-          <span className="identifier">company_watchlist</span>. Not wired up
-          yet.
-        </p>
-      </section>
-
-      {/* The discovery lane that is decided but unassigned. Recorded in the UI
-          because it is the operator's own open question, and because the answer
-          changes what this page needs to offer. */}
-      <section className="settings-group">
-        <h2 className="settings-group__title">Not built: paste a job URL</h2>
-        <p className="settings-group__note">
-          A box to paste one job URL is the only discovery lane that reaches a
-          posting the ATS APIs and the aggregators both miss, and it is the
-          manual escape hatch for night one - before a real watchlist exists.
-          It was decided in the design conversation and then appeared in no
-          roster, page or phase, so it is recorded here as open rather than
-          quietly built.
-        </p>
-      </section>
     </div>
   );
 }
+

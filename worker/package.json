@@ -11,6 +11,7 @@
     "apply": "node src/cli/apply.ts",
     "keepalive": "node src/cli/keepalive.ts",
     "test": "vitest run",
+    "test:e2e": "node --experimental-strip-types test/e2e-runner.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },

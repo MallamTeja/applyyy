@@ -38,12 +38,22 @@ body {
   /* Machine chrome is the default voice; resume prose opts into the serif. */
   font-family: var(--font-machine);
   font-size: var(--size-base);
-  /* 1.5 for UI text — tight enough to keep dense tables scannable. */
-  line-height: 1.5;
-  /* Grayscale antialiasing keeps 13px labels from looking bolder than they are
-     on the pale ground. */
+  /* 1.55 for UI text — tight and balanced to keep dense tables scannable. */
+  line-height: 1.55;
+  letter-spacing: -0.005em;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-machine);
+  color: var(--ink);
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.018em;
+}
+
 
 /* Form controls do not inherit type by default, which is how a settings page
    ends up rendering inputs in the browser's default sans while its labels use
@@ -232,6 +242,9 @@ button {
   font-family: var(--font-id);
   font-size: var(--size-xs);
   color: var(--ink-muted);
+  font-feature-settings: 'tnum' 1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
 }
 
 /* --- Screen-reader-only ------------------------------------------------ */
