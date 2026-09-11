@@ -130,7 +130,16 @@ the way it is.
    - **Payload**: Extracts `message_id`, `thread_id`, `from`, `to`, `subject`, `snippet` (plain body truncated to 4096 chars — never full body), `received_at`, and `label_ids`. Batched into chunks of 50.
    - **Post**: Sent to `POST /functions/v1/email-tracker-intake`.
    - **Idempotency & Labeling**: Upon receiving `202 Accepted`, the script applies Gmail label `applyy-ingested`. Any trigger double-fire is absorbed harmlessly at Postgres via `ON CONFLICT (user_id, provider_message_id) DO NOTHING`.
-   - **Automated Trigger**: `applyyInstallTrigger` configures a 15-minute time-driven trigger.
+   - **On-Demand Trigger (No 15-Min Cron)**:
+     - The continuous 15-minute background polling trigger has been replaced with **on-demand Web App monitoring**.
+     - In the Apps Script editor, run `applyyRemoveTriggers()` to delete any active scheduled triggers.
+     - Deploy as a Web App: Click **Deploy → New deployment → Type: Web app**.
+       - **Execute as**: `Me (tejamallam00@gmail.com)`
+       - **Who has access**: `Anyone`
+     - Copy the Web App URL (e.g. `https://script.google.com/macros/s/.../exec`).
+     - Append your secret query parameter: `?secret=<APPLYY_INTAKE_SECRET>`.
+     - Set this in `apps/web/.env.local` as `VITE_EMAIL_SYNC_WEBHOOK_URL` or paste it into the **Sync Settings** drawer on `/emails`.
+     - Whenever you navigate to `/emails` or click the **"Refresh Interviews"** button, the web console triggers this Web App to immediately ingest new recruiter emails from Gmail without any 15-minute lag!
 
 4. **Live Verification Record (2026-09-11 17:51 IST)**:
    - **Apps Script Execution Log**:

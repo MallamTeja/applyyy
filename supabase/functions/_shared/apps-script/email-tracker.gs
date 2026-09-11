@@ -73,33 +73,31 @@ var APPLYY_SNIPPET_LIMIT = 4096;
 var APPLYY_MAX_THREADS = 200;
 
 /**
- * THE ENTRY POINT. This is the function the time trigger calls.
+ * THE ENTRY POINT. Called either directly on-demand via Web App HTTP trigger (doGet/doPost)
+ * or manually from the Apps Script editor.
  */
 function applyyIngest() {
-  // Serialise runs against each other. APPS SCRIPT TIME TRIGGERS GENUINELY DOUBLE-FIRE,
-  // and two concurrent runs would both read the same unlabelled threads and both POST
-  // them. The endpoint is idempotent so nothing would corrupt — but this is the cheap
-  // half of the defence, and defending in one place only is how the other place rots.
+  // Serialise runs against each other.
   var lock = LockService.getScriptLock();
-  // Do not queue behind a run already in progress; the next trigger is 15 minutes away
-  // and the work is not urgent. Waiting would risk two runs overlapping at the tail.
   if (!lock.tryLock(1000)) {
     Logger.log('applyy: another run holds the lock, skipping this tick');
-    return;
+    return { ok: false, message: 'Another sync run already holds the lock.' };
   }
   try {
     // The configuration lives in Script Properties, never in this file (constraint #11).
     var config = applyyReadConfig_();
     // Fail loudly rather than looping forever against a misconfiguration.
-    if (config === null) return;
+    if (config === null) {
+      return { ok: false, message: 'Missing APPLYY_INTAKE_URL or APPLYY_INTAKE_SECRET.' };
+    }
     // Find or create the label. Doing it once per run keeps the per-thread work cheap.
     var label = applyyEnsureLabel_();
     // Everything recent that this script has not already handed over.
     var threads = GmailApp.search(APPLYY_SEARCH_WINDOW + ' -label:' + APPLYY_LABEL, 0, APPLYY_MAX_THREADS);
-    // Nothing to do is the common case — 96 ticks a day, most of them idle.
+    // Nothing to do is the common case.
     if (threads.length === 0) {
       Logger.log('applyy: nothing new');
-      return;
+      return { ok: true, threadsFound: 0, messagesIngested: 0, message: 'No new emails to ingest.' };
     }
     // Flatten threads to messages: a thread with three replies is three events, and
     // collapsing them would lose the rejection that arrived after the acknowledgement.
@@ -107,13 +105,18 @@ function applyyIngest() {
     // Guard against a thread whose messages are all older than the window.
     if (messages.length === 0) {
       Logger.log('applyy: threads matched but no messages inside the window');
-      return;
+      return { ok: true, threadsFound: threads.length, messagesIngested: 0, message: 'No recent messages in matched threads.' };
     }
     // Send in chunks, labelling each chunk's threads only once it is safely stored.
     applyySendInChunks_(messages, config, label, APPLYY_BATCH_SIZE);
+    return {
+      ok: true,
+      threadsFound: threads.length,
+      messagesIngested: messages.length,
+      message: 'Ingestion completed successfully.'
+    };
   } finally {
-    // Always release, even on an exception — a lock leaked by a crash would silence
-    // this script until the lock's own timeout, which presents as "tracking stopped".
+    // Always release, even on an exception.
     lock.releaseLock();
   }
 }
@@ -445,3 +448,67 @@ function applyyTestConnection() {
   // Anything else, with the body, which usually names the cause.
   Logger.log('applyy: unexpected ' + status + ': ' + response.getContentText());
 }
+
+/**
+ * Remove ALL time-driven triggers.
+ *
+ * RUN THIS FUNCTION ONCE from the Apps Script editor to eliminate continuous
+ * 15-minute background polling triggers.
+ * After running this, monitoring runs solely on-demand when you open or refresh the web console.
+ */
+function applyyRemoveTriggers() {
+  var existing = ScriptApp.getProjectTriggers();
+  var count = 0;
+  for (var i = 0; i < existing.length; i += 1) {
+    ScriptApp.deleteTrigger(existing[i]);
+    count += 1;
+  }
+  Logger.log('applyy: Successfully deleted ' + count + ' trigger(s). 15-minute background polling is stopped.');
+}
+
+/**
+ * Web App HTTP GET handler for on-demand sync.
+ * Invoked when the web dashboard is opened or when the operator clicks "Refresh Interviews".
+ */
+function doGet(e) {
+  return handleOnDemandSync_(e);
+}
+
+/**
+ * Web App HTTP POST handler for on-demand sync.
+ */
+function doPost(e) {
+  return handleOnDemandSync_(e);
+}
+
+/**
+ * Internal handler for Web App HTTP requests.
+ * Authenticates against APPLYY_INTAKE_SECRET passed via query parameter ?secret=... or ?key=...
+ */
+function handleOnDemandSync_(e) {
+  var config = applyyReadConfig_();
+  if (config === null) {
+    return ContentService.createTextOutput(JSON.stringify({
+      ok: false,
+      error: 'APPLYY_INTAKE_URL or APPLYY_INTAKE_SECRET not configured in Script Properties.'
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // Verify authorization secret token
+  var secretParam = (e && e.parameter && (e.parameter.secret || e.parameter.key)) || '';
+  if (secretParam !== config.secret) {
+    return ContentService.createTextOutput(JSON.stringify({
+      ok: false,
+      error: 'Unauthorized: invalid or missing secret parameter.'
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // Execute ingestion
+  var result = applyyIngest();
+  return ContentService.createTextOutput(JSON.stringify({
+    ok: result ? result.ok : true,
+    timestamp: new Date().toISOString(),
+    details: result
+  })).setMimeType(ContentService.MimeType.JSON);
+}
+

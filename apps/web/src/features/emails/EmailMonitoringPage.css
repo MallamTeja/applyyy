@@ -234,3 +234,58 @@
   text-align: center;
   color: var(--ink-muted);
 }
+
+.email-monitor__settings-toggle {
+  /* Small secondary toggle button for webhook configuration */
+  background: transparent;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  color: var(--ink-muted);
+  font-size: var(--size-xs);
+  padding: var(--gap-1) var(--gap-2);
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+}
+
+.email-monitor__settings-toggle:hover {
+  color: var(--ink);
+  border-color: var(--accent);
+}
+
+.email-monitor__settings-box {
+  /* Container for inline sync URL configuration */
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  padding: var(--gap-3);
+  margin-bottom: var(--gap-3);
+}
+
+.email-monitor__url-input {
+  /* Input box for pasting Apps Script Web App URL */
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  padding: var(--gap-2);
+  font-size: var(--size-xs);
+  color: var(--ink);
+  font-family: var(--font-mono);
+}
+
+.email-monitor__url-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.store-notice--info {
+  /* Info notice styling matching dark token elevations */
+  background: rgba(99, 102, 241, 0.1);
+  color: #a5b4fc;
+  border-left: 3px solid var(--accent);
+  padding: var(--gap-2) var(--gap-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--size-sm);
+}
+

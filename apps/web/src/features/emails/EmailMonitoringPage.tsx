@@ -4,6 +4,11 @@
  * Displays strictly interview invitations and recruiter screening requests
  * received from recruiters in the user's Gmail.
  *
+ * ON-DEMAND SYNC INVARIANT:
+ * Zero continuous 15-minute background polling triggers.
+ * Monitoring is triggered automatically on page mount (opening the page)
+ * and manually when the operator clicks "Refresh Interviews".
+ *
  * FILTERING INVARIANT:
  * ONLY interview emails are displayed. General alerts, Google security notices,
  * social newsletters (Reddit, LinkedIn suggestions) and non-interview mail
@@ -19,84 +24,52 @@ import type { ReactElement } from 'react';
 
 import { supabase } from '../../data/supabase.ts';
 import { PageHeader } from '../../app/PageHeader.tsx';
+import {
+  canTriggerSync,
+  EMAIL_SYNC_STORAGE_KEY,
+  formatSyncTime,
+  isInterviewEmail,
+  resolveEmailSyncUrl,
+  triggerGmailSync,
+  type EmailEventRow,
+} from './emailSync.ts';
 
 import './EmailMonitoringPage.css';
-
-/* Data model matching the public.email_events schema */
-export interface EmailEventRow {
-  readonly id: string;
-  readonly user_id: string;
-  readonly provider_message_id: string;
-  readonly from_address: string;
-  readonly subject: string;
-  readonly snippet: string;
-  readonly received_at: string;
-  readonly classification: string;
-  readonly classification_confidence: number | null;
-  readonly matched_application_id: string | null;
-  readonly processed_at: string | null;
-  readonly created_at: string;
-}
-
-/* Pure helper: determines if an inbound email represents a legitimate interview invitation.
- * Rejects newsletters, security alerts, and social digests outright. */
-export function isInterviewEmail(ev: EmailEventRow): boolean {
-  /* 1. Explicit classifier positive match */
-  if (ev.classification === 'interview_invite' || ev.classification === 'interview') {
-    return true;
-  }
-
-  /* 2. Disqualify known system and social senders */
-  const fromLower = ev.from_address.toLowerCase();
-  if (
-    fromLower.includes('no-reply@accounts.google.com') ||
-    fromLower.includes('redditmail.com') ||
-    fromLower.includes('updates-noreply@linkedin.com') ||
-    fromLower.includes('messages-noreply@linkedin.com') ||
-    fromLower.includes('notifications@') ||
-    fromLower.includes('security-noreply')
-  ) {
-    return false;
-  }
-
-  /* 3. Disqualify obvious automated newsletters by subject */
-  const subjectLower = ev.subject.toLowerCase();
-  if (
-    subjectLower.includes('security alert') ||
-    subjectLower.includes('digest') ||
-    subjectLower.includes('new sign-in') ||
-    subjectLower.includes('passkey added')
-  ) {
-    return false;
-  }
-
-  /* 4. Detect interview invitation intent in subject or body snippet */
-  const content = (ev.subject + ' ' + ev.snippet).toLowerCase();
-  return (
-    content.includes('interview') ||
-    content.includes('invitation to interview') ||
-    content.includes('screening call') ||
-    content.includes('schedule a call') ||
-    content.includes('schedule a chat') ||
-    content.includes('technical round') ||
-    content.includes('hiring manager chat') ||
-    content.includes('shortlisted')
-  );
-}
 
 export function EmailMonitoringPage(): ReactElement {
   /* Raw list of email events retrieved from the database */
   const [events, setEvents] = useState<readonly EmailEventRow[]>([]);
-  /* Loading state while query is in flight */
+  /* Loading state while database query is in flight */
   const [loading, setLoading] = useState<boolean>(true);
-  /* Error state if query fails or client is disconnected */
+  /* Sync state while live Gmail fetch is in flight */
+  const [syncing, setSyncing] = useState<boolean>(false);
+  /* Error state if query or sync fails */
   const [error, setError] = useState<string | null>(null);
+  /* Informational notice describing sync result */
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  /* Timestamp of last successful sync execution */
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
   /* Query filter string for instant search */
   const [searchQuery, setSearchQuery] = useState<string>('');
+  /* Custom webhook URL saved in localStorage */
+  const [customSyncUrl, setCustomSyncUrl] = useState<string>(() => {
+    try {
+      return localStorage.getItem(EMAIL_SYNC_STORAGE_KEY) ?? '';
+    } catch {
+      return '';
+    }
+  });
+  /* Toggle for sync settings drawer */
+  const [showSettings, setShowSettings] = useState<boolean>(false);
+
+  /* Resolved sync URL from environment or localStorage */
+  const activeSyncUrl = useMemo(() => {
+    const envUrl = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_EMAIL_SYNC_WEBHOOK_URL;
+    return resolveEmailSyncUrl(envUrl, customSyncUrl);
+  }, [customSyncUrl]);
 
   /* Fetch latest email events from Supabase */
   const fetchEvents = useCallback(async () => {
-    /* If Supabase client is unconfigured, transition safely */
     if (supabase === null) {
       setLoading(false);
       setError('Supabase client is unconfigured. Connect your environment to view live email events.');
@@ -107,7 +80,6 @@ export function EmailMonitoringPage(): ReactElement {
     setError(null);
 
     try {
-      /* Query email_events ordered by received_at descending */
       const { data, error: queryError } = await supabase
         .from('email_events')
         .select('*')
@@ -126,10 +98,69 @@ export function EmailMonitoringPage(): ReactElement {
     }
   }, []);
 
-  /* Initial fetch on mount */
+  /* Execute on-demand live Gmail sync and re-fetch events */
+  const performSync = useCallback(
+    async (manual: boolean) => {
+      // Always re-fetch current DB events first
+      await fetchEvents();
+
+      // If no sync URL is configured, report advice on manual click
+      if (!activeSyncUrl) {
+        if (manual) {
+          setSyncNotice(
+            'Tip: Deploy the updated Apps Script Web App and paste the URL in "Sync Settings" to enable live 1-click Gmail sync.',
+          );
+        }
+        return;
+      }
+
+      // Check lock and cooldown constraints
+      if (!canTriggerSync(lastSyncedAt, syncing)) {
+        if (manual) {
+          setSyncNotice('Sync cooldown active. Please wait a few seconds before checking Gmail again.');
+        }
+        return;
+      }
+
+      setSyncing(true);
+      setSyncNotice('Connecting to Gmail & ingesting new interview emails...');
+
+      try {
+        const result = await triggerGmailSync(activeSyncUrl);
+        if (result.ok) {
+          setLastSyncedAt(Date.now());
+          setSyncNotice('Gmail sync complete. Checking for latest events...');
+          // Refresh database rows to surface any newly ingested emails
+          await fetchEvents();
+          setSyncNotice(null);
+        } else {
+          setError(result.message);
+          setSyncNotice(null);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Error triggering Gmail sync.');
+        setSyncNotice(null);
+      } finally {
+        setSyncing(false);
+      }
+    },
+    [activeSyncUrl, fetchEvents, lastSyncedAt, syncing],
+  );
+
+  /* Initial on-demand sync and fetch on page mount (Page Open) */
   useEffect(() => {
-    void fetchEvents();
-  }, [fetchEvents]);
+    void performSync(false);
+  }, [performSync]);
+
+  /* Save custom sync URL to localStorage */
+  const handleSaveSyncUrl = useCallback((newUrl: string) => {
+    setCustomSyncUrl(newUrl);
+    try {
+      localStorage.setItem(EMAIL_SYNC_STORAGE_KEY, newUrl.trim());
+    } catch {
+      // LocalStorage access restricted in some sandboxes
+    }
+  }, []);
 
   /* STRICT INTERVIEW FILTER: Discard all non-interview emails */
   const interviewEvents = useMemo(() => {
@@ -179,13 +210,20 @@ export function EmailMonitoringPage(): ReactElement {
         </div>
         <div className="email-stat-card">
           <span className="email-stat-card__label">Direct Inbound Invites</span>
-          <span className="email-stat-card__value">
-            {metrics.directInvites}
+          <span className="email-stat-card__value">{metrics.directInvites}</span>
+        </div>
+        <div className="email-stat-card">
+          <span className="email-stat-card__label">Monitoring Mode</span>
+          <span className="email-stat-card__value" style={{ fontSize: 'var(--size-base)', fontWeight: 600 }}>
+            {activeSyncUrl ? '⚡ On-Demand (Page Open)' : '📦 Supabase Cached'}
+          </span>
+          <span style={{ fontSize: 'var(--size-xs)', color: 'var(--ink-muted)' }}>
+            Last checked: {formatSyncTime(lastSyncedAt)}
           </span>
         </div>
       </div>
 
-      {/* Action toolbar with search and refresh button */}
+      {/* Action toolbar with search, refresh button and settings toggle */}
       <div className="email-monitor__toolbar">
         <input
           type="search"
@@ -195,18 +233,56 @@ export function EmailMonitoringPage(): ReactElement {
           onChange={(e) => setSearchQuery(e.target.value)}
           aria-label="Filter interview invitations"
         />
-        <button
-          type="button"
-          className="ingest__button"
-          style={{ padding: 'var(--gap-1) var(--gap-3)', fontSize: 'var(--size-sm)' }}
-          onClick={() => void fetchEvents()}
-          disabled={loading}
-        >
-          {loading ? 'Refreshing...' : 'Refresh Interviews'}
-        </button>
+        <div style={{ display: 'flex', gap: 'var(--gap-2)', alignItems: 'center' }}>
+          <button
+            type="button"
+            className="ingest__button"
+            style={{ padding: 'var(--gap-1) var(--gap-3)', fontSize: 'var(--size-sm)' }}
+            onClick={() => void performSync(true)}
+            disabled={loading || syncing}
+          >
+            {syncing ? 'Checking Gmail...' : loading ? 'Refreshing...' : 'Refresh Interviews'}
+          </button>
+          <button
+            type="button"
+            className="email-monitor__settings-toggle"
+            onClick={() => setShowSettings((prev) => !prev)}
+            title="Configure Gmail On-Demand Sync URL"
+          >
+            ⚙️ {showSettings ? 'Close Settings' : 'Sync Settings'}
+          </button>
+        </div>
       </div>
 
-      {/* Error banner if query failed */}
+      {/* Sync settings drawer for configuring the Apps Script Web App URL */}
+      {showSettings && (
+        <div className="email-monitor__settings-box">
+          <h4 style={{ margin: '0 0 var(--gap-2) 0', fontSize: 'var(--size-sm)' }}>
+            Gmail On-Demand Webhook Configuration
+          </h4>
+          <p style={{ fontSize: 'var(--size-xs)', color: 'var(--ink-muted)', margin: '0 0 var(--gap-2) 0' }}>
+            Paste your Google Apps Script Web App URL below (including <code>?secret=...</code>). When configured,
+            visiting this page or clicking &quot;Refresh Interviews&quot; will instantly check Gmail for newly received
+            interview requests without running any 15-minute background triggers.
+          </p>
+          <input
+            type="url"
+            className="email-monitor__url-input"
+            placeholder="https://script.google.com/macros/s/.../exec?secret=YOUR_SECRET"
+            value={customSyncUrl}
+            onChange={(e) => handleSaveSyncUrl(e.target.value)}
+          />
+        </div>
+      )}
+
+      {/* Informational notification */}
+      {syncNotice !== null && (
+        <p className="store-notice store-notice--info" style={{ marginBottom: 'var(--gap-3)' }}>
+          {syncNotice}
+        </p>
+      )}
+
+      {/* Error banner if query or sync failed */}
       {error !== null && (
         <p className="store-notice store-notice--bad" style={{ marginBottom: 'var(--gap-3)' }}>
           {error}
@@ -218,7 +294,8 @@ export function EmailMonitoringPage(): ReactElement {
         <div className="email-empty">
           <p style={{ fontWeight: 600, margin: '0 0 var(--gap-1) 0' }}>No interview invitations found.</p>
           <p style={{ margin: 0, fontSize: 'var(--size-sm)' }}>
-            When recruiters email you regarding interviews, screening rounds, or technical chats, they will automatically be isolated and displayed here.
+            When recruiters email you regarding interviews, screening rounds, or technical chats, they will
+            automatically be isolated and displayed here.
           </p>
         </div>
       ) : (
@@ -240,9 +317,7 @@ export function EmailMonitoringPage(): ReactElement {
                     >
                       Open in Gmail ↗
                     </a>
-                    <span className="email-badge email-badge--interview">
-                      Interview Invite
-                    </span>
+                    <span className="email-badge email-badge--interview">Interview Invite</span>
                     <span className="email-card__time">{formattedDate}</span>
                   </div>
                 </div>
