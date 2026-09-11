@@ -95,7 +95,35 @@ export interface AttachedFile {
  */
 export type ResumeRenderer = (resume: ResolvedResume) => Promise<RenderedResume>;
 
-/** The database operations this module needs, narrowed to five. */
+/**
+ * Where this application's artifacts ended up, as a record to be written.
+ *
+ * A SEPARATE TYPE FROM THE OUTCOME, even though the dry-run outcome carries the
+ * same three values. The outcome is what the run summary REPORTS; this is what
+ * the row RECORDS, and giving one type both jobs is how a field added for a log
+ * line quietly becomes a database column nobody meant to write.
+ *
+ * Every field is nullable because every field genuinely can be absent: a form
+ * that asks for no document produces no resume and no digest. Null means "this
+ * run learned nothing about that artifact" and must therefore ERASE NOTHING —
+ * see the gateway, where that rule is enforced once for all callers.
+ */
+export interface ArtifactPaths {
+  // `applications.resume_storage_path`. Null when planResumeAttachment found no
+  // target, which is a normal form shape and not a failure.
+  readonly resumePath: string | null;
+  // `applications.screenshot_storage_path`. Always present in practice, since
+  // the screenshot is taken unconditionally, but typed nullable so the gateway's
+  // one skip-nulls rule covers both fields rather than special-casing one.
+  readonly screenshotPath: string | null;
+  // The digest of the bytes that were attached. Accepted and threaded THROUGH
+  // this type even though no column exists to hold it yet — dropping it at the
+  // call site would make the gap invisible, and the gap is the whole reason it
+  // cannot be written. The gateway names the missing column at the exact spot.
+  readonly resumeSha256: string | null;
+}
+
+/** The database operations this module needs: advance, release, two uploads, one record. */
 export interface ApplierGateway extends StatusWriter {
   // Give the row back untouched, still `approved`. The dry-run path and only
   // the dry-run path uses this.
@@ -106,6 +134,13 @@ export interface ApplierGateway extends StatusWriter {
   // AFTER the render and from the same buffer, so what is kept is the artifact
   // that went out rather than a second render that might not match it.
   uploadResume(applicationId: string, bytes: Uint8Array): Promise<string>;
+  // Record where those uploads landed, WITHOUT moving the row. Its own operation
+  // rather than an argument to advanceStatus, because the two answer different
+  // questions and a dry run may only ever ask the first: "where is the file" is
+  // a fact about storage, while "what state is this row in" is a fact about the
+  // workflow, and tying the first to the second is precisely the defect this
+  // method exists to fix.
+  setArtifactPaths(applicationId: string, paths: ArtifactPaths): Promise<void>;
 }
 
 /** The claimed row, narrowed to what applying to it actually requires. */
@@ -300,6 +335,41 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
   // ---- The dry-run exit. No status write of any kind beyond this point -----
 
   if (!mode.submits) {
+    // THE EVIDENCE WRITE, and the single most important line on this path.
+    //
+    // Uploading an artifact returns a path and does nothing else. Until this
+    // call existed, the ONLY place either path reached the row was the
+    // `applying -> applied` detail eighty lines below — inside a status
+    // transition a dry run returns before ever reaching. DRY_RUN is absolute
+    // (constraint #16), so execution ALWAYS stops here, which made
+    // `resume_storage_path` and `screenshot_storage_path` permanently empty in
+    // the only mode this system can run in: real bytes sitting in storage,
+    // unreferenced by the row they belong to, and a §18.6 review with no way to
+    // get from an application to the screenshot that is supposed to justify it.
+    //
+    // A BARE UPDATE BEHIND THIS CALL, deliberately NOT guardedAdvance. Coupling
+    // "record where the file went" to "move the row" IS the defect; a dry run
+    // may not move anything, and an evidence write that requires a transition
+    // can therefore never happen during the trust period. The database agrees:
+    // `guard_status_transition()` returns early on
+    // `new.status is not distinct from old.status`, and its own comment names
+    // "an agent writing a score or a storage path" as the case it is exempting.
+    //
+    // BEFORE releaseClaim, not after, and that ordering is load-bearing: the
+    // lease is what makes this row ours to write. Releasing first would open a
+    // window in which the next run claims the row and writes its own paths
+    // underneath ours — a lost update whose only symptom is evidence pointing
+    // at the wrong file.
+    await gateway.setArtifactPaths(row.id, {
+      resumePath,
+      screenshotPath,
+      // Threaded rather than dropped even though the gateway cannot persist it
+      // yet: `applications` has no `resume_sha256` column. Passing it keeps the
+      // gap visible at both ends instead of turning a schema problem into a
+      // silently missing argument. See the gateway for the exact spot.
+      resumeSha256: resume?.sha256 ?? null,
+    });
+
     // Hand the row back still `approved`, so the next run — or the first run
     // after the flag is flipped — picks up exactly the same queue.
     await gateway.releaseClaim(row.id, `dry_run: ${mode.reason}`);
@@ -383,6 +453,22 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
     from: 'applying',
     to: 'applied',
     agent: ACTING_AGENT,
+    // !! THIS DETAIL DOES NOT POPULATE THE COLUMNS OF THE SAME NAME. !!
+    //
+    // Verified in supabase/migrations/20260909235100_queue_and_pool_functions
+    // .sql: `advance_application_status` updates only `status` and the three
+    // lease fields, then inserts `p_detail` VERBATIM as a `note` row in
+    // `application_events`. So these keys land in an event's jsonb blob and
+    // `applications.resume_storage_path` / `.screenshot_storage_path` stay NULL
+    // even on a successful real submission — not only in dry run. The names
+    // matching the columns is what makes that easy to miss.
+    //
+    // NOT FIXED HERE, deliberately: this path is unreachable while DRY_RUN is
+    // absolute (constraint #16), so changing it would be an untested edit to
+    // the one code path that can reach a real employer. The dry-run path calls
+    // `gateway.setArtifactPaths` for exactly this reason; extending that call
+    // to cover this branch is a decision for whoever lifts the flag, and it is
+    // recorded here so they are not the first to discover it.
     detail: {
       screenshot_storage_path: screenshotPath,
       // WHAT WAS SENT, recorded in the same write that asserts it was sent, so

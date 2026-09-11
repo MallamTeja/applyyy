@@ -92,6 +92,21 @@ function fakeGateway(overrides: Partial<RunGateway> = {}) {
     },
     uploadScreenshot: async () => 'screens/a.png',
     uploadResume: async () => 'resumes/a.pdf',
+    // `runApplierBatch` ITSELF NEVER CALLS THIS — it is required here only
+    // because `RunGateway` extends `ApplierGateway`, and the evidence write is
+    // issued one layer down by applyToOne on its dry-run path. (The dry-run
+    // tests in this file therefore DO record it, through that delegation.) It
+    // exists at all because a dry run writes no status, and the only code that
+    // persisted the storage paths used to live inside a status transition.
+    //
+    // Recorded into `calls` rather than stubbed as an empty function, for the
+    // same reason every other operation here is: `calls` is the ordering record
+    // this file asserts against, so a future change that moves path-recording
+    // up into the loop shows up as a new step rather than being absorbed
+    // silently — and a future test can assert on it without rewriting the fake.
+    setArtifactPaths: async () => {
+      calls.push('setArtifactPaths');
+    },
     ...overrides,
   };
   return { gateway, calls, closed };

@@ -17,6 +17,8 @@ import type { AnswerBankRow } from '@applyy/shared-types';
 import { startFixtureServer, type FixtureServer } from '../src/fixture-server.ts';
 import { createPlaywrightPage } from '../src/playwright-page.ts';
 import { runApplierBatch, type RunGateway } from '../src/claim-loop.ts';
+// Type-only: the shape of the record the loop writes back to the row.
+import type { ArtifactPaths } from '../src/apply-one.ts';
 // The renderer and the snapshot it renders from. Wired here so the end-to-end
 // run exercises the REAL composition, including the resume path.
 import { createResumeRenderer } from '../src/resume-renderer.ts';
@@ -61,6 +63,11 @@ test('a full dry-run batch fills, screenshots and submits NOTHING', async () => 
   // Resume uploads, counted separately from screenshots: this run must produce
   // NONE, and the reason is asserted below.
   const resumeUploads: number[] = [];
+  // Where the loop says the artifacts landed. THE COLUMN WRITE, which for the
+  // whole of the dry-run period never happened: the uploads returned paths and
+  // the paths were dropped, because the only code that persisted them sat
+  // inside a status transition a dry run returns before ever reaching.
+  const artifactWrites: Array<{ id: string; paths: ArtifactPaths }> = [];
   const closed: Array<Record<string, unknown>> = [];
 
   // One row, pointing at the real captured Greenhouse form.
@@ -104,6 +111,12 @@ test('a full dry-run batch fills, screenshots and submits NOTHING', async () => 
     uploadResume: async (_id, bytes) => {
       resumeUploads.push(bytes.length);
       return 'resumes/app-e2e-1.pdf';
+    },
+    // The evidence write. Recorded rather than performed, like everything else
+    // on this fake, because the assertion is about what the LOOP decided to
+    // persist and not about whether Supabase accepted it.
+    setArtifactPaths: async (id, paths) => {
+      artifactWrites.push({ id, paths });
     },
   };
 
@@ -166,6 +179,21 @@ test('a full dry-run batch fills, screenshots and submits NOTHING', async () => 
   // about to park must not pay for a PDF or leave an artifact in storage that
   // looks exactly like one that was really attached.
   expect(resumeUploads).toHaveLength(0);
+
+  // BUT THE SCREENSHOT PATH WAS STILL RECORDED ON THE ROW, and this is the
+  // assertion the whole §18.6 trust period rests on. Every other expectation in
+  // this test was already green before the evidence write existed — the run
+  // screenshotted, reported and released exactly as it does now — and the
+  // review was still impossible, because nothing connected the application to
+  // the image. A dry run writes no status, so a bare UPDATE is the only moment
+  // at which that connection can be made.
+  expect(artifactWrites).toHaveLength(1);
+  expect(artifactWrites[0]?.id).toBe('app-e2e-1');
+  expect(artifactWrites[0]?.paths.screenshotPath).toBe('screens/app-e2e-1.png');
+  // Null for the same reason no resume was uploaded: the form blocked. Paired
+  // with the assertion above so "it recorded the paths" cannot be satisfied by
+  // an implementation that records nulls for everything.
+  expect(artifactWrites[0]?.paths.resumePath).toBeNull();
 
   // Released so the renderer's page does not outlive the run. Before the shared
   // browser is torn down in afterAll, so the page is closed by its owner.

@@ -256,6 +256,108 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
       return path;
     },
 
+    async setArtifactPaths(applicationId, paths) {
+      // A BARE UPDATE, AND THAT IS THE WHOLE POINT — read this before "fixing"
+      // it to go through advance_application_status like every other write in
+      // this file.
+      //
+      // Storage paths are not a status change. Routing them through the RPC
+      // would make recording WHERE A FILE WENT require a legal status edge, and
+      // the only edge out of `approved` is `approved -> applying` — so a dry
+      // run, which must move nothing, could never record anything. That
+      // coupling is the defect this method was written to remove, not a safety
+      // property to preserve.
+      //
+      // AND THE TRIGGER PERMITS IT, verified in
+      // supabase/migrations/20260909234900_status_transition_guard.sql rather
+      // than assumed: `guard_status_transition()` opens with
+      //
+      //     if new.status is not distinct from old.status then return new; end if;
+      //
+      // and the comment above that line names "an agent writing a score or a
+      // storage path" as exactly the case it exists to wave through. So no
+      // `applyy.acting_agent` GUC is needed here and no 42501 is possible — the
+      // guard never reaches its actor check. `log_status_change()` short-
+      // circuits identically, so this write also correctly produces NO audit
+      // event: nothing about the workflow happened.
+      //
+      // An earlier session refused to build this believing the trigger would
+      // reject it. It does not. The belief was worth checking and wrong.
+      const update: Record<string, string> = {};
+
+      // SKIP NULLS, DO NOT WRITE THEM. The trap this guards is destructive and
+      // silent: `resumePath` is legitimately null whenever the form asked for
+      // no document (plan-resume-attachment returns a null target), so a
+      // re-run of an application that DID attach a resume would overwrite the
+      // recorded path with null and destroy the only pointer to the artifact an
+      // employer actually received. Null here means "this run learned nothing
+      // about that artifact", which is not the same claim as "there is none".
+      if (paths.resumePath !== null && paths.resumePath !== undefined) {
+        update.resume_storage_path = paths.resumePath;
+      }
+
+      // Same rule, same reason. Written as a second independent check rather
+      // than a loop over the object so that a future field cannot be added to
+      // the payload without someone deciding what its null means.
+      if (paths.screenshotPath !== null && paths.screenshotPath !== undefined) {
+        update.screenshot_storage_path = paths.screenshotPath;
+      }
+
+      // THE DIGEST. Same skip-nulls rule, and it earns it twice over: a
+      // resume-less application has no digest to record, and a re-run that
+      // wrote null over a recorded one would destroy the only thing that can
+      // ever answer "is the file in that bucket the file that was approved?".
+      // The path proves something was uploaded; only the digest proves WHAT.
+      //
+      // !! DO NOT DELETE THIS AS REDUNDANT WITH apply-one.ts's p_detail. !!
+      //
+      // `apply-one.ts` also passes a `resume_sha256` key into the
+      // `advance_application_status` p_detail, and JSONB ACCEPTS ANY KEY — so
+      // that write appeared to succeed for as long as no column existed, which
+      // is exactly why it reads as proof that this one is superfluous. It is
+      // not. THEY ARE DIFFERENT THINGS:
+      //
+      //   * the p_detail key is an EVENT PAYLOAD attached to one status
+      //     transition. It lands in `application_events.detail`, is reachable
+      //     only by digging through that table, describes a moment rather than
+      //     the row — and in dry run is never written at all, because no
+      //     transition happens. That absence IS the defect this method fixes.
+      //   * this column is a DURABLE PROPERTY OF THE APPLICATION, queryable,
+      //     indexable and true for as long as the row exists.
+      //
+      // Neither covers the other. Deleting either one loses something real.
+      //
+      // SHAPE IS ENFORCED IN THE DATABASE, not here:
+      // `applications_resume_sha256_is_hex` checks `^[0-9a-f]{64}$` or null
+      // (supabase/migrations/20260911114300_add_resume_sha256_to_applications
+      // .sql), so a truncated or uppercased digest fails with 23514 rather than
+      // being stored. Not re-checked in TypeScript, because a second copy of
+      // the rule here would be one that can drift from the authority — and the
+      // check is about legibility anyway: it cannot catch a well-formed digest
+      // of the WRONG BYTES, which has already happened once on this project.
+      if (paths.resumeSha256 !== null && paths.resumeSha256 !== undefined) {
+        update.resume_sha256 = paths.resumeSha256;
+      }
+
+      // NOTHING TO SAY, SO SAY NOTHING. With every field null the payload is
+      // `{}`, and PostgREST rejects an empty update rather than no-opping — a
+      // 400 on a call that had no work to do. Returning early also means the
+      // common "form wanted no document" case costs zero round trips.
+      if (Object.keys(update).length === 0) {
+        return;
+      }
+
+      // Matched on `id` alone, exactly as closeRun does. The user scoping is not
+      // omitted, it is delegated: the "own applications" RLS policy
+      // (migration 05) restricts every authenticated write to
+      // `auth.uid() = user_id`, so a second `.eq('user_id', ...)` would
+      // duplicate the database's own answer in a place that can drift from it.
+      unwrap(
+        await client.from('applications').update(update).eq('id', applicationId),
+        'setArtifactPaths',
+      );
+    },
+
     sessionExpiresAtEpochSeconds() {
       return expiresAtEpochSeconds;
     },

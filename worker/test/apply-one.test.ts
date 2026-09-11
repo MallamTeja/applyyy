@@ -17,6 +17,7 @@ import {
   applyToOne,
   type ApplicationPage,
   type ApplierGateway,
+  type ArtifactPaths,
   type ResumeRenderer,
 } from '../src/apply-one.ts';
 import type { FormField } from '../src/extract-fields.ts';
@@ -85,17 +86,28 @@ function fakeRenderer(bytes = new Uint8Array([37, 80, 68, 70, 45])) {
 function fakeGateway() {
   const transitions: string[] = [];
   const released: string[] = [];
+  // The evidence writes, and the ORDER they interleave with the release. Both
+  // matter: the paths must be recorded at all (they were not, for the whole of
+  // the dry-run period), and they must be recorded while the lease is still
+  // ours to write under.
+  const artifactWrites: Array<{ id: string; paths: ArtifactPaths }> = [];
+  const ordered: string[] = [];
   const gateway: ApplierGateway = {
     advanceStatus: async (_id, to) => {
       transitions.push(to);
     },
     releaseClaim: async (id) => {
       released.push(id);
+      ordered.push('release');
     },
     uploadScreenshot: async () => 'screens/app-1.png',
     uploadResume: async () => 'resumes/app-1.pdf',
+    setArtifactPaths: async (id, paths) => {
+      artifactWrites.push({ id, paths });
+      ordered.push('set_paths');
+    },
   };
-  return { transitions, released, gateway };
+  return { transitions, released, artifactWrites, ordered, gateway };
 }
 
 /** The claimed row under test, carrying the snapshot the human approved. */
@@ -178,6 +190,9 @@ describe('applyToOne', () => {
       releaseClaim: async () => {},
       uploadScreenshot: async () => 'screens/app-1.png',
       uploadResume: async () => 'resumes/app-1.pdf',
+      // Present so the literal satisfies the port. These tests are about the
+      // submit path, where the evidence write is not the property under test.
+      setArtifactPaths: async () => {},
     };
 
     await applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
@@ -319,6 +334,12 @@ describe('applyToOne — the resume', () => {
         observed.push('upload_resume');
         return 'resumes/app-1.pdf';
       },
+      // Recorded in the same sequence as everything else, so if the evidence
+      // write ever moves onto the submit path the ordering assertion below
+      // catches it rather than silently absorbing a new step.
+      setArtifactPaths: async () => {
+        observed.push('set_paths');
+      },
     };
 
     await applyToOne({
@@ -425,6 +446,9 @@ describe('applyToOne — the resume', () => {
       releaseClaim: async () => {},
       uploadScreenshot: async () => 'screens/app-1.png',
       uploadResume: async () => 'resumes/app-1.pdf',
+      // Present so the literal satisfies the port. These tests are about the
+      // submit path, where the evidence write is not the property under test.
+      setArtifactPaths: async () => {},
     };
 
     await applyToOne({
@@ -561,5 +585,127 @@ describe('applyToOne — the resume', () => {
     expect(submit).toHaveBeenCalledTimes(1);
     expect(transitions).toEqual(['applying', 'applied']);
     expect(outcome.kind).toBe('submitted');
+  });
+});
+
+/**
+ * The evidence write on the dry-run path.
+ *
+ * THE DEFECT THIS BLOCK EXISTS TO PREVENT, stated exactly: the screenshot and
+ * the resume were uploaded, their paths were returned, and NOTHING PERSISTED
+ * THEM. The only code that put either path near the database was the
+ * `applying -> applied` transition detail — and `if (!mode.submits)` returns
+ * roughly eighty lines earlier, so with DRY_RUN absolute (constraint #16) that
+ * line has never once executed. Real bytes in storage, two empty columns, and
+ * a fully green suite the whole time, because every existing test asserted on
+ * the UPLOAD and none on the RECORD.
+ *
+ * That is the same shape as this file's header story and as instance 1 of
+ * docs/verification-traps.md: the thing everyone believed was protecting the
+ * §18.6 review was never the thing doing it.
+ */
+describe('applyToOne — recording where the artifacts went', () => {
+  it('records both storage paths on the dry-run path', async () => {
+    // THE REGRESSION TEST. Without this call the trust period produces
+    // screenshots Teja cannot navigate to from the application they document.
+    const { page } = fakePage({ extractFields: async () => formWithResumeUpload });
+    const { gateway, artifactWrites, transitions } = fakeGateway();
+
+    await applyToOne({ row, page, gateway, answers, env: {}, renderResume: fakeRenderer().render });
+
+    expect(artifactWrites).toHaveLength(1);
+    expect(artifactWrites[0]?.id).toBe('app-1');
+    expect(artifactWrites[0]?.paths.screenshotPath).toBe('screens/app-1.png');
+    expect(artifactWrites[0]?.paths.resumePath).toBe('resumes/app-1.pdf');
+    // And it did it WITHOUT moving the row, which is the half that makes the
+    // fix legal at all: `approved -> applying` is the only edge out of
+    // `approved`, so an evidence write that needed a transition could never run
+    // in dry run. A bare UPDATE is exempted by the guard trigger, which returns
+    // early on `new.status is not distinct from old.status`.
+    expect(transitions).toHaveLength(0);
+  });
+
+  it('records the paths BEFORE releasing the claim', async () => {
+    // The lease is what makes this row ours to write. Releasing first would
+    // open a window in which the next run claims the row and writes its own
+    // paths underneath ours — a lost update whose only symptom is evidence
+    // pointing at the wrong file, which is worse than no evidence because it
+    // reads as verified.
+    //
+    // The ORDER is the property, so the sequence is asserted rather than the
+    // two facts separately; a test that only checked both happened would pass
+    // with them the wrong way round.
+    const { page } = fakePage({ extractFields: async () => formWithResumeUpload });
+    const { gateway, ordered } = fakeGateway();
+
+    await applyToOne({ row, page, gateway, answers, env: {}, renderResume: fakeRenderer().render });
+
+    expect(ordered).toEqual(['set_paths', 'release']);
+  });
+
+  it('records the digest of the bytes it rendered, in dry run', async () => {
+    // The digest is the field the §18.6 review cannot do without: the path
+    // proves something was uploaded, the digest proves WHAT. Recorded on the
+    // row by the same bare UPDATE as the paths, deliberately NOT only inside
+    // the `applied` transition detail — which a dry run never reaches, and
+    // which lands in `application_events` rather than on the application.
+    //
+    // Reported from the render's own result, not recomputed, so it describes
+    // the buffer that was actually attached.
+    const { page } = fakePage({ extractFields: async () => formWithResumeUpload });
+    const { gateway, artifactWrites } = fakeGateway();
+
+    await applyToOne({ row, page, gateway, answers, env: {}, renderResume: fakeRenderer().render });
+
+    expect(artifactWrites[0]?.paths.resumeSha256).toBe('a'.repeat(64));
+    // SHAPE, because the live column carries
+    // `applications_resume_sha256_is_hex` (`^[0-9a-f]{64}$` or null). A
+    // placeholder digest would satisfy the assertion above and be rejected by
+    // the database with 23514, which no fake-client test can otherwise see.
+    expect(artifactWrites[0]?.paths.resumeSha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('reports a null resumePath when the form asked for no document', async () => {
+    // THE NULL THAT MUST NOT ERASE ANYTHING. A form with no upload control
+    // legitimately produces no resume, so this call carries `resumePath: null`
+    // — and the gateway's job is to OMIT that key rather than write it, since
+    // an earlier run of the same application may have recorded a real path.
+    // Pinned here as well as in the gateway because this is where the null is
+    // MANUFACTURED; the gateway test proves what is done with it.
+    const { page } = fakePage();
+    const { gateway, artifactWrites } = fakeGateway();
+
+    await applyToOne({ row, page, gateway, answers, env: {}, renderResume: fakeRenderer().render });
+
+    expect(artifactWrites).toHaveLength(1);
+    expect(artifactWrites[0]?.paths.resumePath).toBeNull();
+    // NON-VACUITY HALF, in the same assertion pair: the screenshot path is
+    // still real. Without it, an implementation that passed nulls for
+    // everything would satisfy the line above perfectly.
+    expect(artifactWrites[0]?.paths.screenshotPath).toBe('screens/app-1.png');
+  });
+
+  it('still records the screenshot for an application that would have blocked', async () => {
+    // The §18.6 signal Teja most needs is the one for applications that did NOT
+    // go out: the screenshot is the evidence of WHY. A blocked dry run renders
+    // nothing, so `resumePath` is null here, and the screenshot path must
+    // survive on its own — an implementation that only wrote paths when both
+    // were present would lose exactly the interesting half of the trust period.
+    const { page } = fakePage({ detectBlocker: async () => 'captcha' });
+    const { gateway, artifactWrites, transitions } = fakeGateway();
+
+    const outcome = await applyToOne({
+      row,
+      page,
+      gateway,
+      answers,
+      env: {},
+      renderResume: fakeRenderer().render,
+    });
+
+    expect(artifactWrites[0]?.paths.screenshotPath).toBe('screens/app-1.png');
+    expect(artifactWrites[0]?.paths.resumePath).toBeNull();
+    expect(transitions).toHaveLength(0);
+    expect(outcome.kind).toBe('dry_run_complete');
   });
 });

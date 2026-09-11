@@ -11,6 +11,19 @@ import { createSupabaseGateway, type SupabaseLike } from '../src/supabase-gatewa
 /** Builds a fake client that records the calls the gateway makes. */
 function fakeClient(overrides: Partial<SupabaseLike> = {}) {
   const rpcCalls: Array<{ fn: string; args: unknown }> = [];
+  // Every bare UPDATE the gateway issues, recorded with the TABLE, the exact
+  // PAYLOAD OBJECT and the filter. The payload is kept by reference and
+  // inspected key-by-key rather than compared with toMatchObject, because the
+  // property under test for setArtifactPaths is which keys are ABSENT — and a
+  // partial match cannot see an absence.
+  const updateCalls: Array<{
+    table: string;
+    payload: Record<string, unknown>;
+    eq: Array<[string, unknown]>;
+  }> = [];
+  // Error injected into the UPDATE leg only, so the unwrap test can fail a bare
+  // update without also failing every RPC the same fake serves.
+  let updateError: { message: string } | null = null;
   const client: SupabaseLike = {
     rpc: async (fn, args) => {
       rpcCalls.push({ fn, args });
@@ -21,7 +34,10 @@ function fakeClient(overrides: Partial<SupabaseLike> = {}) {
       }
       return { data: null, error: null };
     },
-    from: () => ({
+    // Takes the table name now, because "which table did the write land on" is
+    // an assertion these tests make: a storage path belongs on `applications`
+    // and nowhere else.
+    from: (table: string) => ({
       select: () => ({
         eq: () => ({
           maybeSingle: async () => ({ data: { system_enabled: true }, error: null }),
@@ -31,7 +47,14 @@ function fakeClient(overrides: Partial<SupabaseLike> = {}) {
       insert: () => ({
         select: () => ({ single: async () => ({ data: { id: 'run-1' }, error: null }) }),
       }),
-      update: () => ({ eq: async () => ({ data: null, error: null }) }),
+      update: (payload: Record<string, unknown>) => ({
+        eq: async (column: string, value: unknown) => {
+          updateCalls.push({ table, payload, eq: [[column, value]] });
+          // Mirrors supabase-js: a database error arrives as a VALUE, not a
+          // throw, which is the whole reason `unwrap` exists.
+          return { data: null, error: updateError };
+        },
+      }),
     }),
     storage: {
       from: () => ({
@@ -50,8 +73,18 @@ function fakeClient(overrides: Partial<SupabaseLike> = {}) {
     },
     ...overrides,
   };
-  return { client, rpcCalls };
+  // `failUpdates` is a setter rather than a constructor argument so the SAME
+  // fake can serve a healthy call and then a failing one, which is what lets
+  // the unwrap test differ from the happy-path test in exactly one dimension.
+  return { client, rpcCalls, updateCalls, failUpdates: (message: string) => { updateError = { message }; } };
 }
+
+/** Every field present. Tests below vary ONE field from this at a time. */
+const allPaths = {
+  resumePath: 'u1/app-1/1.pdf',
+  screenshotPath: 'u1/app-1/1.png',
+  resumeSha256: 'a'.repeat(64),
+} as const;
 
 describe('createSupabaseGateway', () => {
   it('reads sweep_stale_claims as an ARRAY, not an object', async () => {
@@ -127,5 +160,198 @@ describe('createSupabaseGateway', () => {
     await gateway.refreshSession();
 
     expect(gateway.sessionExpiresAtEpochSeconds()).toBe(123);
+  });
+});
+
+/**
+ * setArtifactPaths — the evidence write.
+ *
+ * THE DEFECT THIS BLOCK EXISTS TO PREVENT: `uploadScreenshot` and
+ * `uploadResume` both upload real bytes and return a path, and until this
+ * method existed NOTHING persisted either path except the
+ * `applying -> applied` transition detail — which DRY_RUN, being absolute,
+ * guarantees is never reached. Real artifacts in storage, two permanently empty
+ * columns, and a green suite throughout, because every test asserted on the
+ * upload rather than on the record.
+ */
+describe('createSupabaseGateway — setArtifactPaths', () => {
+  it('writes both paths to `applications` with a bare UPDATE, never a status RPC', async () => {
+    // THE CENTRAL ASSERTION. Routing this through advance_application_status
+    // would make recording where a file went require a legal status edge, and
+    // the only edge out of `approved` is `approved -> applying` — so a dry run,
+    // which must move nothing, could never record anything. That coupling IS
+    // the bug. The database agrees: guard_status_transition() returns early on
+    // `new.status is not distinct from old.status`.
+    const { client, updateCalls, rpcCalls } = fakeClient();
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    await gateway.setArtifactPaths('app-1', allPaths);
+
+    // Exactly one write, on the applications row, filtered by its id.
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0]?.table).toBe('applications');
+    expect(updateCalls[0]?.eq).toEqual([['id', 'app-1']]);
+    expect(updateCalls[0]?.payload).toEqual({
+      resume_storage_path: 'u1/app-1/1.pdf',
+      screenshot_storage_path: 'u1/app-1/1.png',
+      resume_sha256: 'a'.repeat(64),
+    });
+    // THE SHAPE, asserted separately from the value. The live column carries
+    // `applications_resume_sha256_is_hex` (`^[0-9a-f]{64}$` or null), and this
+    // fake client accepts anything — so a placeholder like 'abc123' would pass
+    // a value assertion here and fail against the real database with 23514.
+    // Pinning the shape is what stops this suite from certifying a digest the
+    // database will reject.
+    expect(updateCalls[0]?.payload.resume_sha256).toMatch(/^[0-9a-f]{64}$/);
+    // And NO transition was requested. Asserted explicitly rather than implied
+    // by the update above, because an implementation that did both would
+    // satisfy every other assertion here while reintroducing the coupling.
+    expect(rpcCalls.filter((call) => call.fn === 'advance_application_status')).toHaveLength(0);
+  });
+
+  it('omits a null resumePath rather than overwriting a recorded one with null', async () => {
+    // THE DESTRUCTIVE TRAP, and the reason the guard is a skip and not a write.
+    // `resumePath` is legitimately null whenever the form asked for no document
+    // — planResumeAttachment returns a null target — so a re-run of an
+    // application that DID attach a resume would blank out the only pointer to
+    // the artifact an employer actually received. Null means "this run learned
+    // nothing about that artifact", never "there is none".
+    //
+    // Asserting on KEY ABSENCE, not on value: `{resume_storage_path: null}` and
+    // `{}` are different UPDATE statements and only the second is safe, yet a
+    // toMatchObject on the screenshot key would pass for both.
+    const { client, updateCalls } = fakeClient();
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    await gateway.setArtifactPaths('app-1', { ...allPaths, resumePath: null });
+
+    expect('resume_storage_path' in (updateCalls[0]?.payload ?? {})).toBe(false);
+    // The other two keys survive. Pairs the absence with a presence, so
+    // "omits the resume path" cannot be satisfied by omitting everything.
+    expect(Object.keys(updateCalls[0]?.payload ?? {}).sort()).toEqual([
+      'resume_sha256',
+      'screenshot_storage_path',
+    ]);
+  });
+
+  it('DOES write the resumePath when there is one', async () => {
+    // NON-VACUITY TWIN for the test above, differing in exactly one dimension:
+    // the same call with a real path instead of null. Without it, a guard that
+    // dropped `resume_storage_path` unconditionally — or dropped every key —
+    // would satisfy the rejection test perfectly.
+    const { client, updateCalls } = fakeClient();
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    await gateway.setArtifactPaths('app-1', { ...allPaths, resumePath: 'u1/app-1/9.pdf' });
+
+    expect(updateCalls[0]?.payload.resume_storage_path).toBe('u1/app-1/9.pdf');
+  });
+
+  it('omits a null screenshotPath too', async () => {
+    // The same rule on the other field, tested separately because the
+    // implementation checks the two independently — a single shared check could
+    // pass one field and fail the other, and one test could not tell which.
+    const { client, updateCalls } = fakeClient();
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    await gateway.setArtifactPaths('app-1', { ...allPaths, screenshotPath: null });
+
+    expect('screenshot_storage_path' in (updateCalls[0]?.payload ?? {})).toBe(false);
+    expect(Object.keys(updateCalls[0]?.payload ?? {}).sort()).toEqual([
+      'resume_sha256',
+      'resume_storage_path',
+    ]);
+  });
+
+  it('issues NO update at all when every path is null', async () => {
+    // An all-null input produces the payload `{}`, and PostgREST answers an
+    // empty update with a 400 rather than a no-op. So the skip-nulls rule needs
+    // a floor: a call with nothing to say must make no round trip, not a
+    // failing one.
+    const { client, updateCalls } = fakeClient();
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    await gateway.setArtifactPaths('app-1', {
+      resumePath: null,
+      screenshotPath: null,
+      resumeSha256: null,
+    });
+
+    expect(updateCalls).toHaveLength(0);
+  });
+
+  it('issues exactly one update when a single path is present', async () => {
+    // NON-VACUITY TWIN for the empty-payload guard, one field away from the
+    // test above. Without it, an early return that fired on every call would
+    // pass "no update when all null" while silently persisting nothing, ever —
+    // which is indistinguishable from the original defect.
+    const { client, updateCalls } = fakeClient();
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    await gateway.setArtifactPaths('app-1', {
+      resumePath: null,
+      screenshotPath: 'u1/app-1/1.png',
+      resumeSha256: null,
+    });
+
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0]?.payload).toEqual({ screenshot_storage_path: 'u1/app-1/1.png' });
+  });
+
+  it('omits a null resumeSha256 rather than erasing a recorded digest', async () => {
+    // The same destructive trap as the paths, and the digest is the field it
+    // costs most to lose: the path only proves something was uploaded, while
+    // the digest is the one thing that can ever answer "is the file in that
+    // bucket the file that was approved?" — the question actually asked months
+    // later when a recruiter quotes a line back. A resume-less application
+    // legitimately has no digest, so null must mean "omit", never "clear".
+    const { client, updateCalls } = fakeClient();
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    await gateway.setArtifactPaths('app-1', { ...allPaths, resumeSha256: null });
+
+    expect('resume_sha256' in (updateCalls[0]?.payload ?? {})).toBe(false);
+    // NON-VACUITY HALF: the other two keys still went. Without this, a guard
+    // that dropped the whole payload would satisfy the line above.
+    expect(Object.keys(updateCalls[0]?.payload ?? {}).sort()).toEqual([
+      'resume_storage_path',
+      'screenshot_storage_path',
+    ]);
+  });
+
+  it('writes the digest under its own column, NOT only inside a status detail', async () => {
+    // NON-VACUITY TWIN for the test above, and a guard against a specific
+    // deletion. `apply-one.ts` also puts a `resume_sha256` key into the
+    // advance_application_status p_detail, and jsonb accepts any key — so a
+    // reader can easily conclude this column write is redundant and remove it.
+    // It is not: the p_detail key is an event payload attached to one status
+    // transition, reachable only through `application_events` and NEVER written
+    // in dry run, which is the only mode this system runs in. This test fails
+    // the moment the column write is dropped in favour of the jsonb one.
+    const { client, updateCalls, rpcCalls } = fakeClient();
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    await gateway.setArtifactPaths('app-1', allPaths);
+
+    expect(updateCalls[0]?.payload.resume_sha256).toBe('a'.repeat(64));
+    // On the `applications` row itself, not on an event, and with no
+    // transition involved.
+    expect(updateCalls[0]?.table).toBe('applications');
+    expect(rpcCalls).toHaveLength(0);
+  });
+
+  it('throws when the UPDATE returns an error instead of reporting success', async () => {
+    // supabase-js does NOT throw on a database error; it returns
+    // `{data: null, error}`. An unwrapped bare update would let a REFUSED
+    // evidence write look like a recorded one — the dry run would report a
+    // screenshot path the row never received, which is worse than the empty
+    // column it replaced, because it reads as verified.
+    const { client, failUpdates } = fakeClient();
+    failUpdates('permission denied for table applications');
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    await expect(gateway.setArtifactPaths('app-1', allPaths)).rejects.toThrow(
+      /setArtifactPaths failed: permission denied/,
+    );
   });
 });
