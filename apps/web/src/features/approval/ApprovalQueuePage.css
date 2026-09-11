@@ -58,12 +58,16 @@
   display: flex;
   flex-wrap: wrap;
   justify-content: space-between;
-  align-items: baseline;
+  align-items: center;
   gap: var(--gap-3);
   padding: var(--gap-3) var(--gap-4);
-  /* Hairline between rows, and none after the last, so the list has no
-     dangling rule at its foot. */
+  /* Hairline between rows, and none after the last */
   border-bottom: 1px solid var(--rule);
+  transition: background-color 100ms ease;
+}
+
+.queue__clean-row:hover {
+  background: var(--surface-hover);
 }
 
 .queue__clean-row:last-child {

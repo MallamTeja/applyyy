@@ -81,8 +81,6 @@
 
 .column__head {
   display: flex;
-  /* Title left, count hard right - a consistent place for the eye to find the
-     number across every column. */
   justify-content: space-between;
   align-items: center;
   gap: var(--gap-2);
@@ -95,14 +93,20 @@
   margin: 0;
   display: flex;
   align-items: center;
-  font-size: var(--size-xs);
-  font-weight: 600;
+  min-width: 0;
 }
 
 .column__count {
   font-family: var(--font-id);
   font-size: var(--size-xs);
-  color: var(--ink-muted);
+  color: var(--text-muted);
+  background: var(--panel);
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--rule);
+  font-feature-settings: 'tnum' 1;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
 }
 
 /* --- The manual moves out of a column -------------------------------- */

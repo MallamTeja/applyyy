@@ -38,12 +38,11 @@
 }
 
 .diff__title {
-  /* Page Title: 1.75rem (28px), weight 700, line-height 1.2 */
   font-size: var(--size-lg);
-  font-weight: 700;
-  line-height: 1.2;
+  font-weight: 650;
+  line-height: 1.25;
   color: var(--text-primary);
-  letter-spacing: -0.02em;
+  letter-spacing: -0.028em;
 }
 
 .diff__badges {
@@ -56,8 +55,8 @@
 .diff__meta {
   margin-top: var(--gap-1);
   color: var(--text-secondary);
-  font-size: var(--size-base);
-  line-height: 1.5;
+  font-size: var(--size-sm);
+  line-height: 1.4;
 }
 
 /* --- Coverage --------------------------------------------------------- */
@@ -142,13 +141,16 @@
 .coverage__ats-badge {
   display: inline-flex;
   align-items: center;
-  padding: 2px 8px;
-  border-radius: var(--radius-sm);
+  padding: 2px 7px;
+  border-radius: var(--radius-badge);
+  font-family: var(--font-id);
   font-size: var(--size-xs);
-  font-weight: 700;
+  font-weight: 600;
+  font-feature-settings: 'tnum' 1;
+  font-variant-numeric: tabular-nums;
   background: var(--traced-wash);
   color: var(--traced);
-  border: 1px solid var(--traced);
+  border: 1px solid var(--traced-edge);
 }
 
 .coverage__keywords {

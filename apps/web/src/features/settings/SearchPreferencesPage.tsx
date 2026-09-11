@@ -145,27 +145,27 @@ export function SearchPreferencesPage(): ReactElement {
       </section>
 
       <section className="settings-group">
-        <h2 className="settings-group__title">System safety & operational execution</h2>
+        <h2 className="settings-group__title">Pipeline safety & dispatch controls</h2>
         <p className="settings-group__note">
-          Core circuit-breakers and timing rules governing autonomous agent execution.
+          Circuit-breakers and timing rules governing autonomous agent tasks.
         </p>
 
         <div className="settings-group__fields">
           <label className="field field--wide">
-            <span className="field__label">Emergency Kill Switch</span>
+            <span className="field__label">Emergency kill switch</span>
             <span className="field__help">
-              <strong>What Kill Switch does:</strong> Immediately freezes all autonomous agent tasks (Scout, Matcher, Tailor, Applier). No jobs will be polled, scored, tailored, or submitted while active. Use this emergency stop at any time to pause the loop without losing state.
+              Immediately halts autonomous agent dispatch (Scout, Tailor, Applier). Running jobs terminate cleanly and pending items remain safely queued.
             </span>
             <select className="field__control" defaultValue="active">
-              <option value="active">Enabled (System Running Normally)</option>
-              <option value="disabled">Emergency Stop (All Agents Paused)</option>
+              <option value="active">Active (normal pipeline execution)</option>
+              <option value="disabled">Paused (emergency halt engaged)</option>
             </select>
           </label>
 
           <label className="field">
-            <span className="field__label">API Quota Cooldown</span>
+            <span className="field__label">Rate-limit backoff (seconds)</span>
             <span className="field__help">
-              <strong>What Cooldown does:</strong> The backoff delay in seconds enforced when Gemini or an ATS API returns HTTP 429 (Resource Exhausted). The system parks the row and waits out the cooling window before rotating keys or retrying, preventing quota exhaustion.
+              Cooldown window enforced when an LLM or ATS endpoint returns HTTP 429 before attempting key rotation.
             </span>
             <input
               type="number"
@@ -176,9 +176,9 @@ export function SearchPreferencesPage(): ReactElement {
           </label>
 
           <label className="field">
-            <span className="field__label">Daily Application Cap</span>
+            <span className="field__label">Daily submission cap</span>
             <span className="field__help">
-              Hard limit on submissions per 24 hours (default 35/day) to stay within GitHub Actions runner budget and maintain high-fit quality.
+              Maximum successful applications permitted within a rolling 24-hour window to protect fit quality.
             </span>
             <input
               type="number"

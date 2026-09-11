@@ -33,49 +33,54 @@
 .rail__brand {
   display: flex;
   flex-direction: column;
-  padding-bottom: var(--gap-4);
-  border-bottom: 1px solid var(--rule-strong);
+  padding-bottom: var(--gap-3);
+  border-bottom: 1px solid var(--rule);
 }
 
 .rail__name {
   font-family: var(--font-machine);
   font-size: var(--size-md);
-  font-weight: 700;
+  font-weight: 650;
   color: var(--text-primary);
-  letter-spacing: -0.02em;
+  letter-spacing: -0.03em;
 }
 
 .rail__role {
   color: var(--text-muted);
   font-size: var(--size-xs);
   line-height: 1.4;
-  margin-top: 2px;
+  letter-spacing: 0.01em;
+  margin-top: 1px;
 }
 
 .rail__section {
   display: flex;
   flex-direction: column;
-  gap: var(--gap-2);
+  gap: 2px;
 }
 
 .rail__heading {
-  color: var(--text-secondary);
-  font-size: var(--size-xs);
-  font-weight: 700;
+  color: var(--text-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
+  padding: 0 var(--gap-2);
+  margin-bottom: 2px;
 }
 
 .rail__link {
-  display: block;
-  padding: var(--gap-2) var(--gap-3);
+  display: flex;
+  align-items: center;
+  padding: 5px 8px;
   border-radius: var(--radius-control);
   color: var(--text-secondary);
   text-decoration: none;
-  font-size: var(--size-base);
+  font-size: var(--size-sm);
   line-height: 1.4;
-  font-weight: 500;
-  transition: background-color 120ms ease, color 120ms ease;
+  font-weight: 450;
+  border: 1px solid transparent;
+  transition: background-color 100ms ease, color 100ms ease, border-color 100ms ease;
 }
 
 .rail__link:hover {
@@ -83,12 +88,13 @@
   color: var(--text-primary);
 }
 
-/* The active page */
+/* The active page: refined elevated chip with subtle border and shadow */
 .rail__link--active {
   background: var(--sheet);
-  border-left: 3px solid var(--accent);
+  border-color: var(--rule);
   color: var(--text-primary);
   font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
 /* A gap in this console's own coverage of the workflow. Bronze, because it

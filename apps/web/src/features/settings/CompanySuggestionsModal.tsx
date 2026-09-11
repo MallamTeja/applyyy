@@ -194,9 +194,8 @@ export function CompanySuggestionsModal({
         <div className="suggestions-header">
           <div className="suggestions-header__info">
             <div className="suggestions-header__title-row">
-              <span className="suggestions-header__sparkle">✨</span>
               <h2 id="suggestions-modal-title" className="suggestions-header__title">
-                Target Company Directory & ATS Auto-Discovery
+                Target Company Directory & ATS Discovery
               </h2>
             </div>
             <p className="suggestions-header__desc">
@@ -226,11 +225,10 @@ export function CompanySuggestionsModal({
         <section className="suggestions-ai-bar">
           <form onSubmit={handleAiDiscover} className="suggestions-ai-form">
             <div className="suggestions-ai-input-wrap">
-              <span className="suggestions-ai-icon">🤖</span>
               <input
                 type="text"
                 className="suggestions-ai-input"
-                placeholder="Ask Gemini: e.g. Bangalore AI startups, US Tech GCCs, Fintech Unicorns..."
+                placeholder="Find companies with Gemini: e.g. Bangalore AI startups, US Tech GCCs, Fintech Unicorns..."
                 value={aiQuery}
                 onChange={(e) => setAiQuery(e.target.value)}
                 disabled={isDiscovering}
@@ -241,7 +239,7 @@ export function CompanySuggestionsModal({
               className="button button--ai-discover"
               disabled={isDiscovering || !aiQuery.trim()}
             >
-              {isDiscovering ? 'Discovering...' : '✨ Discover with Gemini'}
+              {isDiscovering ? 'Discovering...' : 'Discover with Gemini'}
             </button>
             {aiCompanies !== null && (
               <button
@@ -258,7 +256,7 @@ export function CompanySuggestionsModal({
               className="button--text-toggle"
               onClick={() => setShowApiKeyInput((prev) => !prev)}
             >
-              {showApiKeyInput ? 'Hide API Key' : 'Gemini Key ⚙'}
+              {showApiKeyInput ? 'Hide API Key' : 'API Key'}
             </button>
           </form>
 
@@ -383,13 +381,11 @@ export function CompanySuggestionsModal({
                     {/* Cooldown Section */}
                     <div className="company-card__cooldown">
                       <div className="cooldown-item">
-                        <span className="cooldown-icon">🕒</span>
-                        <span className="cooldown-label">Interview Cool-off:</span>
+                        <span className="cooldown-label">Interview Cooldown:</span>
                         <span className="cooldown-val">{company.cooldown.interview}</span>
                       </div>
                       <div className="cooldown-item">
-                        <span className="cooldown-icon">📋</span>
-                        <span className="cooldown-label">Screening Cool-off:</span>
+                        <span className="cooldown-label">Screening Cooldown:</span>
                         <span className="cooldown-val">{company.cooldown.screening}</span>
                       </div>
                       {company.cooldown.notes && (

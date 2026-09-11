@@ -312,7 +312,7 @@ export function WatchlistPage(): ReactElement {
             className="button button--suggest"
             onClick={() => setSuggestionsOpen(true)}
           >
-            ✨ Suggest Companies
+            Suggest Target Companies
           </button>
         </div>
 
@@ -375,7 +375,7 @@ export function WatchlistPage(): ReactElement {
           </div>
 
           <p className="field__help">
-            <strong>What ATS Identifier does:</strong> The exact company slug or board token on the ATS provider (e.g. &quot;stripe&quot; in boards.greenhouse.io/stripe or &quot;figma&quot; in jobs.ashbyhq.com/figma). The Scout agent uses this to query official JSON API endpoints directly without scraping. {PROVIDER_HINTS[atsProvider]?.example ? `Example: ${PROVIDER_HINTS[atsProvider]?.example}` : ''}
+            Company board slug on the ATS provider (e.g. &quot;stripe&quot; in boards.greenhouse.io/stripe or &quot;figma&quot; in jobs.ashbyhq.com/figma). Queried directly via public JSON endpoints without DOM scraping. {PROVIDER_HINTS[atsProvider]?.example ? `Example: ${PROVIDER_HINTS[atsProvider]?.example}` : ''}
           </p>
         </form>
       </section>
@@ -498,12 +498,9 @@ export function WatchlistPage(): ReactElement {
 
       {/* Cooldown Periods & Re-application Protection */}
       <section className="settings-group">
-        <h2 className="settings-group__title">Application cooldown periods & lockout protection</h2>
+        <h2 className="settings-group__title">Submission cooldown & lockout protection</h2>
         <p className="settings-group__note">
-          <strong>What Cooldown does:</strong> Employers and ATS systems track candidate submission history. Following a screening or interview rejection, companies enforce a mandatory cooldown window (typically 3 to 6 months) during which subsequent applications are automatically filtered or discarded.
-        </p>
-        <p className="settings-group__note">
-          The system checks your historical application log and active blocklist before submitting, preventing wasted quota on locked-out boards and protecting your candidate profile.
+          Most ATS systems automatically discard repeat applications to the same company within a 90-to-180-day cooling-off window. The Scout cross-references your application log and blocklist to suppress locked-out targets before tailoring.
         </p>
       </section>
 

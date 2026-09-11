@@ -57,43 +57,30 @@
 
   /* --- Surfaces: the three-step elevation ladder ----------------------- */
 
-  /* The desk, and the lowest step. Off-white rather than #fff in light so the
-     paper sheets have somewhere lighter to go; deep obsidian #090a0f in dark
-     to eliminate muddy brown tones and establish a clean midnight floor. */
-  --ground: light-dark(#f4f4f2, #090a0f);
-  /* Machine chrome one step up: the nav rail, table headers, inset panels.
-     Layered midnight blue-black #11141c in dark, cool off-white in light,
-     maintaining separation from the ground without muddy undertones. */
-  --panel: light-dark(#eaeae7, #11141c);
-  /* Paper: resume content and any coherent settings group. The top step,
-     elevated to pure white in light and a distinct obsidian surface #181c26
-     in dark so resume cards remain distinctly readable as active material. */
-  --sheet: light-dark(#ffffff, #181c26);
-  /* Any surface a pointer is over. A translucent wash rather than a fixed
-     colour, so one value works across all three elevation steps while
-     lifting dark surfaces with subtle white translucency. */
-  --surface-hover: light-dark(rgba(23, 24, 26, 0.055), rgba(255, 255, 255, 0.055));
+  /* The desk, and the lowest step: clean neutral porcelain in light, deep
+     charcoal/midnight in dark to avoid flat grey or muddy tones. */
+  --ground: light-dark(#f8f9fa, #090b10);
+  /* Machine chrome one step up: the nav rail, table headers, inset panels. */
+  --panel: light-dark(#f1f3f5, #0f121a);
+  /* Paper: resume content and coherent settings groups. Crisp white in light,
+     elevated midnight slate in dark. */
+  --sheet: light-dark(#ffffff, #151924);
+  /* Any surface a pointer is over: subtle, delicate translucency. */
+  --surface-hover: light-dark(rgba(0, 0, 0, 0.035), rgba(255, 255, 255, 0.045));
 
   /* THE ALARM SURFACE. Reserved for the fabrication band on the diff view and
-     nothing else - its scarcity is the whole signal, and spending it on
-     navigation furniture would cost the console its loudest voice.
-     In light mode it is scarce because it is the only DARK surface. In dark
-     mode darkness is universal, so the channel changes: it becomes the only
-     surface carrying CHROMA in an otherwise strictly neutral UI. What the
-     signal rests on changes between themes; the scarcity does not. */
+     nothing else - its scarcity is the whole signal. */
   --alarm-ground: light-dark(#1a1215, #2b1216);
-  /* A claim lifted off the alarm ground so the operator can work through them
-     one at a time. Translucent, so it tracks whichever alarm ground applies. */
   --alarm-raised: rgba(246, 236, 233, 0.07);
 
   /* --- High-contrast semantic text hierarchy (WCAG AA certified) ----- */
 
-  /* Pure readable text: #0f172a in light / #f8fafc in dark */
+  /* Pure readable text */
   --text-primary: light-dark(#0f172a, #f8fafc);
-  /* High-clarity subtitles/labels: #475569 in light / #cbd5e1 in dark */
-  --text-secondary: light-dark(#475569, #cbd5e1);
-  /* Explanatory helper text: #64748b in light / #94a3b8 in dark */
-  --text-muted: light-dark(#64748b, #94a3b8);
+  /* High-clarity subtitles, field labels, metadata */
+  --text-secondary: light-dark(#475569, #94a3b8);
+  /* Explanatory helper text, disabled states, subtle captions */
+  --text-muted: light-dark(#64748b, #6b7280);
 
   /* Legacy ink tokens mapped directly to semantic text hierarchy for backwards compatibility */
   --ink: var(--text-primary);
@@ -101,131 +88,83 @@
   --ink-muted: var(--text-muted);
 
   /* Status badge text and border helpers */
-  --traced-ink: light-dark(#166534, #86efac);
-  --traced-edge: light-dark(#86efac, #14532d);
+  --traced-ink: light-dark(#15803d, #4ade80);
+  --traced-edge: light-dark(rgba(22, 163, 74, 0.25), rgba(74, 222, 128, 0.25));
 
-  /* Text on the alarm surface. Faintly warm so it does not read as the body
-     ink accidentally inverted, and light in both themes because the alarm
-     ground is dark in both. */
+  /* Text on the alarm surface */
   --ink-inverse: #f6ece9;
-  /* The procedural second line on the alarm band. Dimmer than the finding
-     above it, because the finding outranks the procedure. */
   --alarm-ink-muted: light-dark(rgba(246, 236, 233, 0.65), rgba(246, 236, 233, 0.62));
-  /* Text sitting on top of a filled semantic colour (the approve button, the
-     ingest button). */
   --ink-on-fill: light-dark(#ffffff, #0d0f11);
 
   /* --- Structure ------------------------------------------------------- */
 
-  /* Hairlines: table rows, sheet edges, field separators. Subdued dark slate
-     #232734 in dark mode to softly delimit boundaries without cluttering dense
-     tabular data. */
-  --rule: light-dark(#e0e0dc, #232734);
-  /* The stronger rule, for boundaries that are real semantic divisions - the
-     master/tailored split, a table's header edge. Defined slate #32384a in dark
-     to clearly demarcate major structural breaks from ordinary hairlines. */
-  --rule-strong: light-dark(#b9b9b3, #32384a);
+  /* Hairlines: table rows, sheet edges, field separators */
+  --rule: light-dark(rgba(0, 0, 0, 0.08), rgba(255, 255, 255, 0.08));
+  /* Major semantic divisions, card headers, active boundaries */
+  --rule-strong: light-dark(rgba(0, 0, 0, 0.14), rgba(255, 255, 255, 0.14));
 
   /* --- The interactive accent ------------------------------------------ */
 
-  /* THE SINGLE VIBRANT ACCENT: focus rings, the active rail item, primary
-     interaction. Electric indigo (#4f46e5 / #6366f1) provides vibrant modern
-     contrast against midnight surfaces while remaining distinct from semantic
-     verdicts (green, oxblood, bronze). */
   --accent: light-dark(#4f46e5, #6366f1);
-  /* Hover and pressed states for primary interactions. Deep indigo #4338ca
-     in light, luminous periwinkle-indigo #818cf8 in dark to deliver clear
-     interactive feedback. */
   --accent-strong: light-dark(#4338ca, #818cf8);
+  --accent-subtle: light-dark(rgba(79, 70, 229, 0.12), rgba(99, 102, 241, 0.18));
 
-  /* --- Semantic status colours. One meaning each, never used for styling.
-         Each is paired in the CSS with a non-colour channel, because hue
-         alone is not a signal a colour-blind operator can read. ---------- */
+  /* --- Semantic status colours ----------------------------------------- */
 
-  /* TRACED: this line resolves to a real node in the master profile. Green,
-     and deliberately LOW salience - safe content must not compete for
-     attention with dangerous content. Its quietness is the design decision. */
-  --traced: light-dark(#2f6f4e, #4e9e6e);
-  /* The emphatic tone: the approve button's hover, provenance that must hold
-     its own against body text. */
-  --traced-strong: light-dark(#275c41, #63b583);
-  /* A wash for marking safely-reworded text inline and for all-clear notices.
-     A pale tint in light, a DARK tint in dark - a pale wash on a near-black
-     ground would make the safest line on screen the brightest thing on it. */
-  --traced-wash: light-dark(#e7f0ea, #16241c);
+  /* TRACED: safe, verified node in master profile */
+  --traced: light-dark(#15803d, #4ade80);
+  --traced-strong: light-dark(#166534, #86efac);
+  --traced-wash: light-dark(rgba(22, 163, 74, 0.08), rgba(34, 197, 94, 0.12));
 
-  /* FABRICATED: this claim traces to nothing. Oxblood rather than a bright
-     alert red, because it reads as an authoritative stamp rather than a
-     transient browser error - this verdict is a finding, not a glitch. It
-     lifts to a rose-red in dark, where oxblood goes muddy against near-black
-     and stops being visible from two feet away, which is the requirement the
-     colour exists to meet. */
-  --fabricated: light-dark(#a3182f, #e0576b);
-  /* The emphatic tone, for text and for marks that must survive being printed
-     or screenshotted. Renamed from the old --fabricated-deep: "deep" names a
-     direction, and the direction inverts between themes - darker here,
-     lighter there. A name that is actively wrong in one theme is worse than a
-     vague one. */
-  --fabricated-strong: light-dark(#74111f, #f4879a);
-  /* Tinted ground behind a blocking finding. */
-  --fabricated-wash: light-dark(#f9e6e9, #2a1519);
+  /* FABRICATED: untraced claim / warning alarm */
+  --fabricated: light-dark(#be123c, #fb7185);
+  --fabricated-strong: light-dark(#9f1239, #fda4af);
+  --fabricated-wash: light-dark(rgba(225, 29, 72, 0.08), rgba(244, 63, 94, 0.12));
 
-  /* SIGNAL: a human is required and the machine has stopped - the
-     blocked_needs_human queue, a human-only pipeline edge, an unwired page.
-     Bronze reads as a warning lamp rather than a validation error, which is
-     the distinction between "waiting for you" and "broken". It lifts to amber
-     in dark for the same reason a lamp has to look lit. */
-  --signal: light-dark(#a8701f, #d29a44);
-  /* The emphatic tone, for signal text that must clear AA on its own wash. */
-  --signal-strong: light-dark(#7d520f, #e8b66a);
-  --signal-wash: light-dark(#f8eeda, #261d0f);
+  /* SIGNAL: needs human intervention / paused queue */
+  --signal: light-dark(#b45309, #fbbf24);
+  --signal-strong: light-dark(#92400e, #fde68a);
+  --signal-wash: light-dark(rgba(217, 119, 6, 0.08), rgba(245, 158, 11, 0.12));
 
   /* --- Type ------------------------------------------------------------ */
 
-  /* Modern high-legibility clean sans-serif font stack */
+  /* Modern high-legibility sans-serif with system fallbacks */
   --font-machine: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   /* Resume prose: distinct serif for document evaluation */
   --font-paper: 'IBM Plex Serif', 'Charter', Cambria, Georgia, 'Times New Roman', serif;
-  /* Literal identifiers only - bullet ids, board tokens, fingerprints, run
-     timestamps. Kept monospace strictly for IDs, hashes, and tokens. */
-  --font-id: 'IBM Plex Mono', ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
+  /* Literal identifiers only - bullet ids, tokens, hashes, timestamps */
+  --font-id: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
-  /* Typography scale with increased baseline font sizes for effortless readability:
-     - Page Title: 1.75rem (28px), weight 700, line-height 1.2
-     - Section Headers: 1.25rem (20px), weight 600, line-height 1.3
-     - Card / Table Headers: 1rem (16px), weight 600
-     - Body & Form Inputs: 0.9375rem (15px), line-height 1.5
-     - Helper / Meta Text: 0.8125rem (13px), line-height 1.4, clear muted color */
-  --size-xs: 0.8125rem;   /* 13px - Helper / Meta Text (line-height: 1.4) */
-  --size-sm: 0.875rem;    /* 14px - Subtitles, secondary metadata */
-  --size-base: 0.9375rem; /* 15px - Body & Form Inputs (line-height: 1.5) */
-  --size-card-head: 1rem; /* 16px - Card / Table Headers (weight: 600) */
-  --size-md: 1.25rem;     /* 20px - Section Headers (weight: 600, line-height: 1.3) */
-  --size-lg: 1.75rem;     /* 28px - Page Title (weight: 700, line-height: 1.2) */
-  --size-xl: 2rem;        /* 32px - Large display headline */
+  /* Calibrated desktop operator typography scale */
+  --size-2xs: 0.6875rem;  /* 11px - Micro labels, tiny tags */
+  --size-xs: 0.75rem;     /* 12px - Badges, timestamps, monospace IDs */
+  --size-sm: 0.8125rem;   /* 13px - Secondary text, subtitles, table meta */
+  --size-base: 0.875rem;  /* 14px - Body text, form controls, primary cells */
+  --size-card-head: 0.9375rem; /* 15px - Card titles, table headers */
+  --size-md: 1.125rem;    /* 18px - Section headers */
+  --size-lg: 1.5rem;      /* 24px - Page titles (letter-spacing: -0.025em) */
+  --size-xl: 1.75rem;     /* 28px - Display headlines */
 
   /* Semantic Typography Hierarchy Tokens */
-  --font-size-page-title: 1.75rem;
-  --font-weight-page-title: 700;
-  --line-height-page-title: 1.2;
+  --font-size-page-title: 1.5rem;
+  --font-weight-page-title: 650;
+  --line-height-page-title: 1.25;
 
-  --font-size-section-header: 1.25rem;
+  --font-size-section-header: 1.125rem;
   --font-weight-section-header: 600;
-  --line-height-section-header: 1.3;
+  --line-height-section-header: 1.35;
 
-  --font-size-card-header: 1rem;
+  --font-size-card-header: 0.9375rem;
   --font-weight-card-header: 600;
 
-  --font-size-body: 0.9375rem;
+  --font-size-body: 0.875rem;
   --line-height-body: 1.5;
 
-  --font-size-helper: 0.8125rem;
+  --font-size-helper: 0.75rem;
   --line-height-helper: 1.4;
 
   /* --- Space ----------------------------------------------------------- */
 
-  /* A 4px base grid. Dense screens need a finer step than the usual 8px, or
-     every table row inherits eight pixels of padding it does not want. */
   --gap-1: 0.25rem;
   --gap-2: 0.5rem;
   --gap-3: 0.75rem;
@@ -236,24 +175,17 @@
 
   /* --- Geometry -------------------------------------------------------- */
 
-  /* Sheets get a small radius so they read as paper with a trimmed edge, not
-     as a rounded app card. Controls get a smaller one still. Rules get none.
-     Three values, applied by material rather than uniformly. */
-  --radius-sheet: 3px;
-  --radius-control: 2px;
+  /* Refined, modern radii: no oversized tacky pills */
+  --radius-sm: 3px;
+  --radius-control: 4px;
+  --radius-sheet: 6px;
+  --radius-badge: 4px;
 
-  /* Rail width. Nine pages plus three operational views need full labels - an
-     icon rail would make the operator guess. */
-  --rail-width: 15rem;
+  /* Rail width */
+  --rail-width: 14.5rem;
 
-  /* One elevation, used only to lift a sheet off the desk. A hairline plus a
-     short soft shadow rather than a wide blur, because a dense screen with a
-     generic soft grey under every element loses its own hierarchy.
-     THIS IS THE ONE TOKEN THAT CANNOT USE light-dark(): it is a box-shadow,
-     and light-dark() resolves <color> values only. It is themed the long way
-     in the three rules at the foot of this file, which is also why those
-     rules exist at all. */
-  --lift: 0 1px 0 rgba(23, 24, 26, 0.05), 0 2px 8px rgba(23, 24, 26, 0.05);
+  /* Surface elevation */
+  --lift: 0 1px 2px 0 rgba(0, 0, 0, 0.05), 0 1px 1px 0 rgba(0, 0, 0, 0.02);
 }
 
 /* --- The theme override -------------------------------------------------
@@ -284,14 +216,11 @@
    faint top highlight - the way a raised surface catches light - with only a
    little shadow left underneath to seat it. */
 @media (prefers-color-scheme: dark) {
-  /* The :not() is load-bearing: without it, choosing light on a dark-mode
-     machine would keep the dark shadow and every sheet would sit on a bright
-     ground with a highlight along its top edge. */
   :root:not([data-theme='light']) {
-    --lift: 0 1px 0 rgba(255, 255, 255, 0.035), 0 2px 8px rgba(0, 0, 0, 0.45);
+    --lift: inset 0 1px 0 0 rgba(255, 255, 255, 0.05), 0 1px 3px 0 rgba(0, 0, 0, 0.4);
   }
 }
 
 :root[data-theme='dark'] {
-  --lift: 0 1px 0 rgba(255, 255, 255, 0.035), 0 2px 8px rgba(0, 0, 0, 0.45);
+  --lift: inset 0 1px 0 0 rgba(255, 255, 255, 0.05), 0 1px 3px 0 rgba(0, 0, 0, 0.4);
 }
