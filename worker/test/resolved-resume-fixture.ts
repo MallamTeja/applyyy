@@ -93,7 +93,18 @@ export const syntheticResume = {
     {
       ref: 'prj_one',
       name: 'Example project',
-      url: 'https://example.com/project',
+      // REPLACED A SINGLE `url` SCALAR ON 2026-09-11, and two links rather than
+      // one is the whole point of the change: the real resume has a project with
+      // both a live deployment and a source repository, and the old single slot
+      // silently discarded one of them on every ingest. A fixture carrying one
+      // link would compile perfectly and still fail to exercise the case the
+      // contract was widened for.
+      links: [
+        // Ordering is data here exactly as it is for identity links — the
+        // renderer prints them in declared order and must never sort.
+        { id: 'lnk_prj_live', label: 'Live', url: 'https://example.com/project' },
+        { id: 'lnk_prj_src', label: 'Source', url: 'https://github.com/example/project' },
+      ],
       start_display: 'Sep 2026',
       // Arrives as a display value from upstream; computing it would need a
       // clock, and a clock in the renderer is a determinism leak.
@@ -118,6 +129,40 @@ export const syntheticResume = {
       grade_display: 'CGPA 8.4 / 10',
       // Empty: coursework rarely earns its space against real projects, and the
       // empty-bullets branch is worth rendering at least once.
+      bullets: [],
+    },
+  ],
+  // ACHIEVEMENTS AND CERTIFICATIONS — required arrays as of 2026-09-11, and
+  // populated with real-shaped entries rather than left empty. An empty array
+  // satisfies the compiler and proves nothing: it exercises neither the
+  // resolution path nor the renderer, so the first resume that actually carries
+  // an achievement would be the first test of it, in production.
+  achievements: [
+    {
+      ref: 'ach_one',
+      label: 'Runner-up, Example National Hackathon',
+      // Nullable by contract; populated here so the non-null branch is covered.
+      // The certification below takes the null branch, so one fixture exercises
+      // both without needing a second.
+      description: 'Team of four, 36 hours, 210 competing teams',
+      bullets: [
+        {
+          ref: 'bul_ach',
+          text: 'Built the judging pipeline that scored 210 submissions in under a minute',
+          master_text: 'Built a scoring pipeline for the hackathon',
+        },
+      ],
+    },
+  ],
+  certifications: [
+    {
+      ref: 'cert_one',
+      label: 'AWS Certified Cloud Practitioner',
+      // The null branch of `description`, deliberately — see above.
+      description: null,
+      // Empty bullets, matching the education entry: a certification is usually
+      // a bare line, and the empty-bullets branch deserves coverage in the two
+      // places it genuinely occurs rather than nowhere.
       bullets: [],
     },
   ],
