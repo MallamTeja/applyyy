@@ -1,0 +1,11 @@
+-- ============================================================================
+-- Add `linkedin_post` to the `discovery_source` enum.
+--
+-- TIER 2 SCOUT DISCOVERY:
+-- Public founder and recruiter hiring posts on LinkedIn (distinct from the
+-- LinkedIn Job Board portal in Tier 3).
+--
+-- Appended at the end to preserve declaration order of existing enum values.
+-- Idempotent via `if not exists`.
+-- ============================================================================
+alter type public.discovery_source add value if not exists 'linkedin_post';

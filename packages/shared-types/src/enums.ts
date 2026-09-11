@@ -162,6 +162,8 @@ export const DISCOVERY_SOURCES = [
   /** A human pasted a URL into the dashboard. */
   'manual',
   'other',
+  /** Public founder or recruiter hiring post on LinkedIn (Tier 2 discovery). */
+  'linkedin_post',
 ] as const;
 /** Union of every legal element of the `jobs.discovered_via` array. */
 export type DiscoverySource = (typeof DISCOVERY_SOURCES)[number];

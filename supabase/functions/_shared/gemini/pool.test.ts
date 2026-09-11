@@ -337,3 +337,20 @@ test("no configured keys yields an empty list rather than an error", () => {
   // Nothing set.
   assert.deepEqual([...discoverConfiguredKeyIndices(NO_KEYS)], []);
 });
+
+// A FULL 20-KEY POOL IS DISCOVERED AND RESOLVED IN EXACT NUMERIC SEQUENCE.
+// Confirms that all 20 configured Gemini keys (01 through 20) are discovered
+// without truncation, sorting bugs, or boundary issues.
+test("discovers all 20 keys in exact numeric order up to key 20", () => {
+  const twentyKeys: Record<number, string> = {};
+  for (let i = 1; i <= 20; i += 1) {
+    twentyKeys[i] = `key_${i}`;
+  }
+  const reader = keysFrom(twentyKeys);
+  const discovered = discoverConfiguredKeyIndices(reader);
+  assert.equal(discovered.length, 20);
+  assert.equal(discovered[0], 1);
+  assert.equal(discovered[19], 20);
+  assert.deepEqual([...discovered], Array.from({ length: 20 }, (_, i) => i + 1));
+});
+

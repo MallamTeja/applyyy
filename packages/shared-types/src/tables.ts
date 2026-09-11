@@ -204,6 +204,8 @@ export interface JobSourceRef {
   first_seen_at: string;
   /** Last time it was still present on THIS source. A gap here is the reposted-job signal. */
   last_seen_at: string;
+  /** Optional source-specific metadata (e.g. `{ type: 'post', author?: string, tier?: number }`). */
+  metadata?: Record<string, unknown> | null;
 }
 
 /**
