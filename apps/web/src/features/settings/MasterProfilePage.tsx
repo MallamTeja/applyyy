@@ -29,29 +29,7 @@ import type { MasterProfile } from '../../data/contract';
 
 import './settings.css';
 
-/* The sections of the master, in the order a resume is read. */
-const SECTIONS: readonly { readonly name: string; readonly note: string }[] = [
-  {
-    name: 'Identity',
-    note: 'Name, email, phone, links. Copied verbatim into every resume and never tailored - there is no shape in the contract that lets an employer or a name be reworded.',
-  },
-  {
-    name: 'Skills',
-    note: 'Each skill is a node with an id. A tailored resume can only choose from these and reorder them. A skill carries no free text anywhere in the pipeline, so there is nowhere to type one that is not here.',
-  },
-  {
-    name: 'Experience',
-    note: 'Companies and roles, each with bullets. A tailored bullet must reference one of these and may only reword it, so the facts survive but the language can match the job.',
-  },
-  {
-    name: 'Projects',
-    note: 'Same structure as experience. The two most relevant to each job get featured.',
-  },
-  {
-    name: 'Education',
-    note: 'Institution, degree, dates, grade.',
-  },
-];
+
 
 /* Findings, grouped by severity. */
 function Findings({ result }: { readonly result: IngestResult }): ReactElement {
@@ -245,12 +223,319 @@ export function MasterProfilePage(): ReactElement {
         )}
       </section>
 
-      {SECTIONS.map((section) => (
-        <section key={section.name} className="settings-group">
-          <h2 className="settings-group__title">{section.name}</h2>
-          <p className="settings-group__note">{section.note}</p>
+      {/* Stored Master Profile Sections */}
+      {stored !== null && (
+        <div className="store-notice store-notice--ok" style={{ marginBottom: 'var(--gap-4)' }}>
+          <strong>Active Stored Master Profile Loaded:</strong> {stored.skills.length} skills,{' '}
+          {stored.experience.length} experiences, {stored.projects.length} projects,{' '}
+          {stored.education.length} qualifications.
+        </div>
+      )}
+
+      {/* 1. Identity */}
+      <section className="settings-group">
+        <div className="section-head-with-meta">
+          <h2 className="settings-group__title">Identity</h2>
+          <span className="section-counter">Contact & Links</span>
+        </div>
+        <p className="settings-group__note">
+          Name, email, phone, links. Copied verbatim into every resume and never tailored.
+        </p>
+        {stored ? (
+          <div className="profile-card">
+            <div className="profile-card__identity-header">
+              <h3 className="profile-card__name">{stored.identity.full_name}</h3>
+              {stored.identity.headline && (
+                <span className="profile-card__headline">{stored.identity.headline}</span>
+              )}
+            </div>
+            <div className="profile-card__contact-row">
+              <span className="contact-item">📧 {stored.identity.email}</span>
+              {stored.identity.phone && (
+                <span className="contact-item">📞 {stored.identity.phone}</span>
+              )}
+              {stored.identity.location && (
+                <span className="contact-item">📍 {stored.identity.location}</span>
+              )}
+            </div>
+            {stored.identity.links.length > 0 && (
+              <div className="profile-card__links-row">
+                {stored.identity.links.map((link) => (
+                  <a
+                    key={link.id}
+                    href={link.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="profile-link-badge"
+                  >
+                    🔗 {link.label}
+                  </a>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="profile-empty-note">
+            No profile stored yet. Upload your master resume PDF above or paste JSON to populate.
+          </p>
+        )}
+      </section>
+
+      {/* 2. Executive Summary (if present) */}
+      {stored?.summary && (
+        <section className="settings-group">
+          <div className="section-head-with-meta">
+            <h2 className="settings-group__title">Professional Summary</h2>
+            <span className="section-counter">
+              Node: <code className="identifier">{stored.summary.id}</code>
+            </span>
+          </div>
+          <p className="settings-group__note">
+            Human-maintained ground-truth summary. Reworded into tailored resumes referencing this node.
+          </p>
+          <div className="profile-card">
+            <p style={{ margin: 0, lineHeight: 1.5 }}>{stored.summary.text}</p>
+          </div>
         </section>
-      ))}
+      )}
+
+      {/* 3. Skills */}
+      <section className="settings-group">
+        <div className="section-head-with-meta">
+          <h2 className="settings-group__title">Skills</h2>
+          <span className="section-counter">
+            {stored ? `${stored.skills.length} skills stored` : '0 skills'}
+          </span>
+        </div>
+        <p className="settings-group__note">
+          Each skill is a node with an id. A tailored resume can only choose from these and reorder them.
+        </p>
+        {stored && stored.skills.length > 0 ? (
+          <div className="skills-cloud">
+            {stored.skills.map((skill) => (
+              <div key={skill.id} className="skill-chip-full">
+                <span className="skill-chip-full__name">{skill.name}</span>
+                {skill.category && (
+                  <span className="skill-chip-full__category">{skill.category}</span>
+                )}
+                <code className="skill-chip-full__id">{skill.id}</code>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="profile-empty-note">No skills stored yet.</p>
+        )}
+      </section>
+
+      {/* 4. Experience */}
+      <section className="settings-group">
+        <div className="section-head-with-meta">
+          <h2 className="settings-group__title">Experience</h2>
+          <span className="section-counter">
+            {stored ? `${stored.experience.length} roles` : '0 roles'}
+          </span>
+        </div>
+        <p className="settings-group__note">
+          Companies and roles, each with bullets. A tailored bullet must reference one of these and may only reword it.
+        </p>
+        {stored && stored.experience.length > 0 ? (
+          <div className="profile-stack">
+            {stored.experience.map((exp) => (
+              <div key={exp.id} className="profile-entry-card">
+                <div className="profile-entry-card__top">
+                  <div>
+                    <h3 className="profile-entry-card__role">{exp.role}</h3>
+                    <span className="profile-entry-card__company">{exp.company}</span>
+                  </div>
+                  <div className="profile-entry-card__meta">
+                    <span className="profile-entry-card__date">
+                      {exp.start_display} - {exp.end_display}
+                    </span>
+                    {exp.location && (
+                      <span className="profile-entry-card__loc">📍 {exp.location}</span>
+                    )}
+                  </div>
+                </div>
+                {exp.bullets.length > 0 && (
+                  <ul className="profile-bullet-list">
+                    {exp.bullets.map((b) => (
+                      <li key={b.id} className="profile-bullet-item">
+                        <span className="profile-bullet-text">{b.text}</span>
+                        <div className="profile-bullet-meta">
+                          <code className="identifier">{b.id}</code>
+                          {b.tags.map((t) => (
+                            <span key={t} className="profile-tag">
+                              #{t}
+                            </span>
+                          ))}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="profile-empty-note">No experience stored yet.</p>
+        )}
+      </section>
+
+      {/* 5. Projects */}
+      <section className="settings-group">
+        <div className="section-head-with-meta">
+          <h2 className="settings-group__title">Projects</h2>
+          <span className="section-counter">
+            {stored ? `${stored.projects.length} projects` : '0 projects'}
+          </span>
+        </div>
+        <p className="settings-group__note">
+          Same structure as experience. The most relevant projects to each job get featured.
+        </p>
+        {stored && stored.projects.length > 0 ? (
+          <div className="profile-stack">
+            {stored.projects.map((proj) => (
+              <div key={proj.id} className="profile-entry-card">
+                <div className="profile-entry-card__top">
+                  <div>
+                    <h3 className="profile-entry-card__role">{proj.name}</h3>
+                    {proj.links && proj.links.length > 0 && (
+                      <div style={{ display: 'flex', gap: 'var(--gap-2)', marginTop: '4px' }}>
+                        {proj.links.map((l) => (
+                          <a
+                            key={l.id}
+                            href={l.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="profile-link-badge"
+                          >
+                            🔗 {l.label}
+                          </a>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="profile-entry-card__meta">
+                    <span className="profile-entry-card__date">
+                      {proj.start_display} - {proj.end_display}
+                    </span>
+                  </div>
+                </div>
+                {proj.bullets.length > 0 && (
+                  <ul className="profile-bullet-list">
+                    {proj.bullets.map((b) => (
+                      <li key={b.id} className="profile-bullet-item">
+                        <span className="profile-bullet-text">{b.text}</span>
+                        <div className="profile-bullet-meta">
+                          <code className="identifier">{b.id}</code>
+                          {b.tags.map((t) => (
+                            <span key={t} className="profile-tag">
+                              #{t}
+                            </span>
+                          ))}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="profile-empty-note">No projects stored yet.</p>
+        )}
+      </section>
+
+      {/* 6. Education */}
+      <section className="settings-group">
+        <div className="section-head-with-meta">
+          <h2 className="settings-group__title">Education</h2>
+          <span className="section-counter">
+            {stored ? `${stored.education.length} qualifications` : '0 qualifications'}
+          </span>
+        </div>
+        <p className="settings-group__note">
+          Degrees and institutions. Copied verbatim or formatted per template.
+        </p>
+        {stored && stored.education.length > 0 ? (
+          <div className="profile-stack">
+            {stored.education.map((edu) => (
+              <div key={edu.id} className="profile-entry-card">
+                <div className="profile-entry-card__top">
+                  <div>
+                    <h3 className="profile-entry-card__role">{edu.degree}</h3>
+                    <span className="profile-entry-card__company">
+                      {edu.institution} {edu.field ? `• ${edu.field}` : ''}
+                    </span>
+                  </div>
+                  <div className="profile-entry-card__meta">
+                    <span className="profile-entry-card__date">
+                      {edu.start_display} - {edu.end_display}
+                    </span>
+                    {edu.grade_display && (
+                      <span className="profile-entry-card__loc">🎓 {edu.grade_display}</span>
+                    )}
+                  </div>
+                </div>
+                {edu.bullets && edu.bullets.length > 0 && (
+                  <ul className="profile-bullet-list">
+                    {edu.bullets.map((b) => (
+                      <li key={b.id} className="profile-bullet-item">
+                        <span className="profile-bullet-text">{b.text}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="profile-empty-note">No education stored yet.</p>
+        )}
+      </section>
+
+      {/* 7. Certifications & Achievements */}
+      {stored && (stored.certifications.length > 0 || stored.achievements.length > 0) && (
+        <section className="settings-group">
+          <h2 className="settings-group__title">Certifications & Achievements</h2>
+          <div className="profile-stack">
+            {stored.certifications.map((cert) => (
+              <div key={cert.id} className="profile-entry-card">
+                <div className="profile-entry-card__top">
+                  <div>
+                    <h3 className="profile-entry-card__role">{cert.label}</h3>
+                    {cert.description && (
+                      <span className="profile-entry-card__company">{cert.description}</span>
+                    )}
+                  </div>
+                  <code className="identifier">{cert.id}</code>
+                </div>
+                {cert.bullets.length > 0 && (
+                  <ul className="profile-bullet-list">
+                    {cert.bullets.map((b) => (
+                      <li key={b.id} className="profile-bullet-item">
+                        <span className="profile-bullet-text">{b.text}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+            {stored.achievements.map((ach) => (
+              <div key={ach.id} className="profile-entry-card">
+                <h3 className="profile-entry-card__role">{ach.label}</h3>
+                <ul className="profile-bullet-list">
+                  {ach.bullets.map((b) => (
+                    <li key={b.id} className="profile-bullet-item">
+                      <span className="profile-bullet-text">{b.text}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }

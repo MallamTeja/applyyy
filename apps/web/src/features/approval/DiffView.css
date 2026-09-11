@@ -114,6 +114,58 @@
   font-weight: 500;
 }
 
+.coverage__header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-2);
+}
+
+.coverage__ats-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--size-xs);
+  font-weight: 700;
+  background: var(--traced-wash);
+  color: var(--traced);
+  border: 1px solid var(--traced);
+}
+
+.coverage__keywords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-1);
+  margin-top: var(--gap-3);
+}
+
+.kw-chip {
+  font-size: var(--size-xs);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-machine);
+  font-weight: 500;
+}
+
+.kw-chip--matched {
+  background: var(--traced-wash);
+  color: var(--traced);
+  border: 1px solid var(--traced);
+}
+
+.kw-chip--flagged {
+  background: var(--fabricated-wash);
+  color: var(--fabricated-strong);
+  border: 1px solid var(--fabricated);
+}
+
+.kw-chip--missing {
+  background: var(--panel);
+  color: var(--ink-muted);
+  border: 1px dashed var(--rule);
+}
+
 /* --- The fabrication alert -------------------------------------------- */
 
 /* The ONLY dark surface in the application. Its scarcity is the signal: a dark

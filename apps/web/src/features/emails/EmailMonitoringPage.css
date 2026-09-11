@@ -138,6 +138,38 @@
   margin: 0;
 }
 
+.email-card__subject-link {
+  color: var(--ink);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.email-card__subject-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.email-card__gmail-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-1);
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  color: var(--ink);
+  padding: 3px var(--gap-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--size-xs);
+  font-weight: 500;
+  text-decoration: none;
+  transition: all 0.15s ease;
+}
+
+.email-card__gmail-button:hover {
+  background: var(--accent);
+  color: #ffffff;
+  border-color: var(--accent);
+}
+
 .email-card__snippet {
   /* Fenced untrusted email snippet text */
   font-size: var(--size-sm);

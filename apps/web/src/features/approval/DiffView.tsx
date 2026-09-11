@@ -80,9 +80,19 @@ function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactElement {
   /* The purchased portion is the gap between them. */
   const purchased = total - honest;
 
+  /* Keywords missing from both master and tailored */
+  const matchedSet = new Set([
+    ...diff.coverage.honestlyMatched,
+    ...diff.coverage.matchedByFabrication,
+  ]);
+  const missingKeywords = diff.coverage.jdKeywords.filter((k) => !matchedSet.has(k));
+
   return (
     <div className="coverage">
-      <h3 className="coverage__title">Keyword coverage</h3>
+      <div className="coverage__header-row">
+        <h3 className="coverage__title">ATS Match Score</h3>
+        <span className="coverage__ats-badge">{honest}% Match</span>
+      </div>
 
       {/* The track. aria attributes carry the honest number, because that is
           the one that describes the resume the operator can defend. */}
@@ -115,18 +125,37 @@ function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactElement {
       <p className="coverage__legend">
         {/* The honest figure leads, because it is the real one. */}
         <span className="coverage__stat coverage__stat--honest">
-          {honest}% traced
+          {honest}% verified from master
         </span>
         {/* The purchased figure is stated as an addition, not a total, so it
             never reads as an achievement. */}
         {purchased > 0 ? (
           <span className="coverage__stat coverage__stat--purchased">
-            plus {purchased}% only if you keep the flagged claims
+            plus {purchased}% unverified / flagged
           </span>
         ) : (
-          <span className="coverage__stat">nothing invented</span>
+          <span className="coverage__stat">100% verified claims</span>
         )}
       </p>
+
+      {/* JD Keyword chips: Matched, Flagged, and Missing */}
+      <div className="coverage__keywords">
+        {diff.coverage.honestlyMatched.map((kw) => (
+          <span key={kw} className="kw-chip kw-chip--matched" title="Verified in master resume">
+            ✓ {kw}
+          </span>
+        ))}
+        {diff.coverage.matchedByFabrication.map((kw) => (
+          <span key={kw} className="kw-chip kw-chip--flagged" title="Flagged untraced claim">
+            ⚠ {kw}
+          </span>
+        ))}
+        {missingKeywords.map((kw) => (
+          <span key={kw} className="kw-chip kw-chip--missing" title="Missing from resume">
+            ✕ {kw}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }

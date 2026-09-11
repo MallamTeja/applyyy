@@ -231,6 +231,15 @@ export function EmailMonitoringPage(): ReactElement {
                 <div className="email-card__top">
                   <span className="email-card__sender">{event.from_address}</span>
                   <div style={{ display: 'flex', gap: 'var(--gap-2)', alignItems: 'center' }}>
+                    <a
+                      href={`https://mail.google.com/mail/u/0/#all/${encodeURIComponent(event.provider_message_id)}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="email-card__gmail-button"
+                      title="Open email thread in Gmail"
+                    >
+                      Open in Gmail ↗
+                    </a>
                     <span className="email-badge email-badge--interview">
                       Interview Invite
                     </span>
@@ -238,7 +247,17 @@ export function EmailMonitoringPage(): ReactElement {
                   </div>
                 </div>
 
-                <h3 className="email-card__subject">{event.subject}</h3>
+                <h3 className="email-card__subject">
+                  <a
+                    href={`https://mail.google.com/mail/u/0/#all/${encodeURIComponent(event.provider_message_id)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="email-card__subject-link"
+                    title="Open email thread in Gmail"
+                  >
+                    {event.subject}
+                  </a>
+                </h3>
                 <p className="email-card__snippet">{event.snippet}</p>
 
                 <div className="email-card__meta">
