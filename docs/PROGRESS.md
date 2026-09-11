@@ -361,6 +361,15 @@ and unmeasured.
   `EMAIL_INTAKE_SHARED_SECRET` unset it returned **500 "server misconfigured"** —
   not 401, and critically not 202. A guard verified in a live deployment rather
   than in a test.
+- **`email-tracker-intake` LIVE END-TO-END VERIFIED (2026-09-11 17:51 IST).**
+  Google Apps Script (`supabase/functions/_shared/apps-script/email-tracker.gs`)
+  bound to `tejamallam00@gmail.com` executed `applyyIngest` live against
+  `https://xynqxekcqizwhtskzqrq.supabase.co/functions/v1/email-tracker-intake`.
+  Returned `202 Accepted: {"accepted":9,"duplicates":0,"rejected":0}`. 9 rows
+  confirmed stored in `public.email_events` under RLS (`SELECT count(*) FROM email_events`),
+  and all 9 threads in Gmail automatically received the `applyy-ingested` label.
+  Auth credentials (`APPLYY_APP_USER_EMAIL` / `APPLYY_APP_USER_PASSWORD`) set in Supabase
+  secrets, and user provisioned in `auth.users`.
 - **A `service_role` token was embedded verbatim in `dist/assets/index-*.js`
   while `vite build` exited 0.** Decoded out of the bundle to confirm. `dist/` is
   gitignored (`.gitignore:21`) and no `dist/` file is tracked, so **nothing

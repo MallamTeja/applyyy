@@ -103,31 +103,43 @@ the way it is.
 
 ---
 
-## Setup — the human half
+## Setup & Live Verification — COMPLETED & WORKING (2026-09-11)
 
-> ⏸️ **Do not paste a script yet.** The wire contract — exact JSON field names,
-> the shared-secret header, expected status codes — is owned by **`applyyy-d0`**
-> and has not been published. A script written against a guessed contract would
-> fail silently at the one place we cannot observe it: inside Google's
-> infrastructure, with no logs you'd think to check.
->
-> The script body will live in **d0's tree, version-controlled**, not in this
-> document. Copying it here would create a second home for it, and the two
-> copies would drift.
+> ✅ **LIVE AND END-TO-END VERIFIED.** The wire contract and script are published in the repo:
+> [`supabase/functions/_shared/apps-script/email-tracker.gs`](file:///c:/Users/tejam/OneDrive/myproj/applyyy/supabase/functions/_shared/apps-script/email-tracker.gs).
+> On 2026-09-11 17:51 IST, a live execution ingested 9 emails, returned HTTP 202 Accepted,
+> and verified 9 rows stored in `public.email_events` via the Supabase CLI.
 
-When d0 publishes it, the steps are:
+### Configuration
 
-1. Open [script.google.com](https://script.google.com) **signed in as
-   `tejamallam00@gmail.com`** — the binding is to whichever account you're in,
-   so this is the step that actually matters.
-2. New project; name it `applyy-mail-tracker`.
-3. Paste the published script. Set the Supabase function URL and shared secret
-   in **Project Settings → Script properties**, never inline in the source.
-4. Run it once manually to trigger the auth prompt, and grant it.
-   *You will see an "unverified app" style warning — that is expected and it is
-   your own script asking for access to your own mailbox.*
-5. **Triggers → Add trigger** → time-driven → every 15 minutes.
-6. Confirm one row lands in `email_events`, then check the pipeline advanced.
+1. **Google Apps Script Project**:
+   - Location: [script.google.com](https://script.google.com), signed in as **`tejamallam00@gmail.com`**.
+   - Code: Copied verbatim from [`supabase/functions/_shared/apps-script/email-tracker.gs`](file:///c:/Users/tejam/OneDrive/myproj/applyyy/supabase/functions/_shared/apps-script/email-tracker.gs).
+   - **Project Settings → Script Properties**:
+     - `APPLYY_INTAKE_URL`: `https://xynqxekcqizwhtskzqrq.supabase.co/functions/v1/email-tracker-intake`
+     - `APPLYY_INTAKE_SECRET`: `<EMAIL_INTAKE_SHARED_SECRET>`
+
+2. **Supabase Secrets & Auth (Required for RLS storage)**:
+   - `EMAIL_INTAKE_SHARED_SECRET`: Shared secret used for header authentication (`X-Applyy-Intake-Secret`).
+   - `APPLYY_APP_USER_EMAIL`: `tejamallam00@gmail.com`
+   - `APPLYY_APP_USER_PASSWORD`: Configured password
+   - Auth user: Provisioned in `auth.users` so the Edge Function signs in and writes rows under RLS.
+
+3. **How It Works**:
+   - **Search query**: `newer_than:2d -label:applyy-ingested`, max 200 threads.
+   - **Payload**: Extracts `message_id`, `thread_id`, `from`, `to`, `subject`, `snippet` (plain body truncated to 4096 chars — never full body), `received_at`, and `label_ids`. Batched into chunks of 50.
+   - **Post**: Sent to `POST /functions/v1/email-tracker-intake`.
+   - **Idempotency & Labeling**: Upon receiving `202 Accepted`, the script applies Gmail label `applyy-ingested`. Any trigger double-fire is absorbed harmlessly at Postgres via `ON CONFLICT (user_id, provider_message_id) DO NOTHING`.
+   - **Automated Trigger**: `applyyInstallTrigger` configures a 15-minute time-driven trigger.
+
+4. **Live Verification Record (2026-09-11 17:51 IST)**:
+   - **Apps Script Execution Log**:
+     ```text
+     applyy: accepted {"accepted":9,"duplicates":0,"rejected":0,"rejected_detail":[],"batch_id":"39b94b74-59d3-4e74-9582-d64ff4768339"}
+     ```
+   - **Supabase Query Verification**:
+     `npx supabase db query --linked "SELECT count(*) FROM email_events;"` returned `{ "count": 9 }`.
+     Rows stored with `classification = 'unclassified'` and `processed_at = null`.
 
 ### What to check when it stops working
 

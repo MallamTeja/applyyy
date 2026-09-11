@@ -28,7 +28,7 @@ of `supabase/functions/**` for what exists.
 | 6 | **Tailor** | Edge Function, cron | **yes** | **logic built, no entrypoint** |
 | 7 | **Auditor** | Edge Function, cron | **yes** | **not built** |
 | 8 | **Applier** | GitHub Actions + Playwright | no | **BUILT AND RUNS** (dry-run only) |
-| 9 | **Tracker** | Edge Function, **push** | yes (classification) | **intake BUILT AND LIVE**, classifier not built |
+| 9 | **Tracker** | Edge Function, **push** | yes (classification) | **intake LIVE & VERIFIED END-TO-END**, classifier not built |
 | 10 | **Sweeper** | database function, cron | no | **BUILT** (SQL, live) |
 | 11 | **Keepalives** ×2 | Actions cron / DB query | no | **one built but disabled, one implicit** |
 | — | **`human`** | you, in the dashboard | no | the most powerful identity in the system |
@@ -258,12 +258,18 @@ would otherwise mean it is never ingested, and read state belongs to you. And
 (`interview → oa_pending`), which is correct: an employer really can move a
 candidate back a stage. Every other backward edge is human-only.
 
-*Built:* the intake endpoint **is deployed and live** —
-`email-tracker-intake`, ACTIVE, deliberately `verify_jwt = false` because Apps
-Script cannot hold a Supabase JWT; it authenticates on a shared secret header
-instead. **It is inert until you set `EMAIL_INTAKE_SHARED_SECRET`** (it returns
-500 "server misconfigured" with the secret unset — it fails closed, verified
-live). The Gemini classifier that reads those rows is **not built**.
+*Built:* the intake endpoint **is deployed, configured and live** —
+`email-tracker-intake`, ACTIVE, `verify_jwt = false` because Apps Script cannot hold
+a Supabase JWT; it authenticates on `X-Applyy-Intake-Secret` instead.
+
+**End-to-end verified live on 2026-09-11 17:51 IST**:
+- `EMAIL_INTAKE_SHARED_SECRET` set in Supabase secrets.
+- `APPLYY_APP_USER_EMAIL` and `APPLYY_APP_USER_PASSWORD` set in Supabase secrets.
+- `tejamallam00@gmail.com` provisioned in `auth.users`.
+- Google Apps Script [`supabase/functions/_shared/apps-script/email-tracker.gs`](file:///c:/Users/tejam/OneDrive/myproj/applyyy/supabase/functions/_shared/apps-script/email-tracker.gs) executed `applyyIngest()`: 9 emails ingested, status `202 Accepted` (`{"accepted":9,"duplicates":0,"rejected":0}`), threads labelled `applyy-ingested` in Gmail.
+- Verified in Postgres via Supabase CLI (`SELECT count(*) FROM email_events` = 9).
+
+The Gemini classifier that reads those rows (`processed_at is null`) is **not built**.
 
 ⚠️ Known gap: `email_events` has no column for `thread_id`, so it is validated
 and dropped. That is the one that hurts — `thread_id` is the key for "has this
