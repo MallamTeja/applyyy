@@ -683,3 +683,396 @@ test("a master with all-unique ids still validates normally", () => {
   // Accepted, as before the guard existed.
   assert.equal(result.ok, true);
 });
+
+// ---------------------------------------------------------------------------
+// THE 2026-09-11 CONTRACT CHANGE: project links, achievements, certifications,
+// and the master summary as a citable node.
+//
+// WHY THESE ARE GROUPED AND CALLED OUT. Every test above this line ran GREEN
+// against the OLD contract and would have kept running green against the new one:
+// `supabase/functions/deno.json` excludes `**/*.test.ts` from `deno check`, and
+// `node --test` strips types without checking them, so a `MasterProfile` literal
+// here can disagree with the contract in every field and still report pass. The
+// fixture was in fact wrong — `url: null` on a project, no `summary`, no
+// `achievements`, no `certifications` — and nothing said so. These tests therefore
+// assert BEHAVIOUR for the new shape rather than relying on the shape being checked.
+// ---------------------------------------------------------------------------
+
+// A tailoring that selects the award sections. Separate from `baseline()` so the
+// twenty-six tests above keep validating exactly what their names say.
+function withAwards(): TailoredProfile {
+  return {
+    // Start from the honest baseline, so a failure here is about the awards only.
+    ...baseline(),
+    // Realistic order. The validator does not police `section_order` against the
+    // selection, but a fixture that named sections it did not select would model a
+    // Tailor response nobody would ever see.
+    section_order: ["skills", "experience", "projects", "education", "achievements", "certifications"],
+    // A REWORDED achievement bullet rather than a verbatim one, because verbatim
+    // text passes the vocabulary check trivially and would not prove the award
+    // sections go through the same honesty machinery as everything else. Every
+    // added word is either in the master bullet or in the closed rhetorical set.
+    achievements: [
+      {
+        ref: "ach-sih",
+        bullets: [{ ref: "ach-bullet-sih", text: "Designed and built a REST API prototype in Node.js for the national finals" }],
+      },
+    ],
+    // Verbatim, so this half isolates resolution from rewording.
+    certifications: [
+      {
+        ref: "cert-aws-ccp",
+        bullets: [{ ref: "cert-bullet-aws", text: "Covered core services and the shared responsibility model" }],
+      },
+    ],
+  };
+}
+
+// THE POSITIVE CONTROL FOR BOTH NEW LOOPS, and the non-vacuity twin every rejection
+// below depends on. Without it, a validator that refused every achievement would
+// satisfy all five rejection tests that follow.
+test("accepts a tailoring that selects a real achievement and a real certification", () => {
+  // The honest selection.
+  const result = validateTailoredProfile(withAwards(), MASTER, PINNED_VERSION);
+  // Accepted, or the award sections are unusable and the contract change bought nothing.
+  assert.equal(result.ok, true, result.ok === false ? JSON.stringify(result.violations) : "");
+});
+
+// THE STRUCTURAL GUARANTEE THAT `TailoredAchievement` CARRIES NO `label`. The type
+// makes "International Winner" inexpressible; this asserts the validator actually
+// materialises the master's wording rather than leaving the field blank or echoing
+// something the model supplied.
+test("renders achievement and certification labels from the master, never from the model", () => {
+  // Resolve the honest selection.
+  const result = validateTailoredProfile(withAwards(), MASTER, PINNED_VERSION);
+  // Must have succeeded to inspect the artifact.
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  // The award's label and qualifying detail, byte-for-byte from the master node.
+  assert.equal(result.resume.achievements[0]?.label, "Winner — Smart India Hackathon 2025");
+  assert.equal(result.resume.achievements[0]?.description, "national finals");
+  // And the credential's.
+  assert.equal(result.resume.certifications[0]?.label, "AWS Certified Cloud Practitioner");
+  assert.equal(result.resume.certifications[0]?.description, "Amazon Web Services");
+});
+
+// The award bullets must reach the resolved resume carrying their master text, like
+// every other bullet — otherwise the §15 approval diff has nothing to show for these
+// two sections and a reviewer cannot see what was reworded.
+test("resolves award bullets with their master text for the approval diff", () => {
+  // Resolve.
+  const result = validateTailoredProfile(withAwards(), MASTER, PINNED_VERSION);
+  // Must have succeeded.
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  // The rewording prints.
+  assert.equal(
+    result.resume.achievements[0]?.bullets[0]?.text,
+    "Designed and built a REST API prototype in Node.js for the national finals",
+  );
+  // And the original travels with it.
+  assert.equal(
+    result.resume.achievements[0]?.bullets[0]?.master_text,
+    "Built a REST API prototype in Node.js for the national finals",
+  );
+  // The certification half too, so a regression in one loop cannot hide behind the other.
+  assert.equal(result.resume.certifications[0]?.bullets[0]?.master_text, "Covered core services and the shared responsibility model");
+});
+
+// `ResolvedResume.achievements` and `.certifications` are REQUIRED arrays, so the
+// renderer may iterate them without a guard. An omitted field and an empty array are
+// the same value to `.length` but not to `for..of`, and the crash would land in the
+// PDF worker rather than here.
+test("the resolved resume always carries achievements and certifications arrays", () => {
+  // The baseline selects neither.
+  const result = validateTailoredProfile(baseline(), MASTER, PINNED_VERSION);
+  // Accepted.
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  // Present and empty, not absent.
+  assert.deepEqual(result.resume.achievements, []);
+  assert.deepEqual(result.resume.certifications, []);
+});
+
+// THE REGRESSION THAT MOTIVATED REPLACING `url: string | null`. A project with a live
+// deployment AND a source repository had one of the two silently discarded on every
+// upload. Asserting the COUNT is what makes this test fail under the old single-slot
+// shape; asserting only that a link survived would pass under both.
+test("carries every project link into the resolved resume, not just the first", () => {
+  // Resolve the honest baseline, whose project has two links.
+  const result = validateTailoredProfile(baseline(), MASTER, PINNED_VERSION);
+  // Accepted.
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  // Both addresses survive resolution.
+  assert.equal(result.resume.projects[0]?.links.length, 2);
+  // With their labels, which is why a bare `string[]` would not have been enough —
+  // the renderer has to print "Live" and "Source", not two naked URLs.
+  assert.deepEqual(
+    result.resume.projects[0]?.links.map((link) => link.label),
+    ["Live", "Source"],
+  );
+  // And their ids, which is what lets `master-ingest` reconcile a link across
+  // re-uploads instead of treating an unchanged GitHub URL as a new link.
+  assert.deepEqual(
+    result.resume.projects[0]?.links.map((link) => link.id),
+    ["link-portfolio-live", "link-portfolio-repo"],
+  );
+});
+
+// An award the master does not contain. §10's "add Docker" case aimed at the section
+// where it is cheapest to lie: an achievement line is a bare superlative with no
+// surrounding context to contradict it.
+test("rejects an achievement ref that does not exist in the master", () => {
+  // A hackathon win that never happened.
+  const result = validateTailoredProfile(
+    { ...withAwards(), achievements: [{ ref: "ach-google-summer-of-code", bullets: [] }] },
+    MASTER,
+    PINNED_VERSION,
+  );
+  // Refused before the Auditor ever runs.
+  assert.equal(result.ok, false);
+  // Named, and named with its SECTION, so the dashboard can point at the award list
+  // rather than reporting an anonymous bad id.
+  assert.ok(
+    result.ok === false &&
+      result.violations.some((v) => v.kind === "unresolved_ref" && v.ref === "ach-google-summer-of-code" && v.where === "achievements"),
+    "expected an unresolved_ref violation naming ach-google-summer-of-code under achievements",
+  );
+});
+
+// Constraint #2 names certifications explicitly, and this is that clause.
+test("rejects a certification ref that does not exist in the master", () => {
+  // A credential the candidate does not hold.
+  const result = validateTailoredProfile(
+    { ...withAwards(), certifications: [{ ref: "cert-aws-solutions-architect", bullets: [] }] },
+    MASTER,
+    PINNED_VERSION,
+  );
+  // Refused.
+  assert.equal(result.ok, false);
+  // Named with its own section, distinct from achievements — the two resolve through
+  // separate maps precisely so a certification ref cannot land on an achievement.
+  assert.ok(
+    result.ok === false &&
+      result.violations.some((v) => v.kind === "unresolved_ref" && v.ref === "cert-aws-solutions-architect" && v.where === "certifications"),
+    "expected an unresolved_ref violation naming cert-aws-solutions-architect under certifications",
+  );
+});
+
+// The two sections must not share a namespace. A certification ref naming a real
+// ACHIEVEMENT is every id being real and the resume still being wrong — the same
+// family as the misattributed bullet, one level up.
+//
+// BUILT ON `baseline()` RATHER THAN `withAwards()`, AND THE FIRST DRAFT GOT THIS
+// WRONG — worth recording, because the wrong version still FAILED and so still
+// looked like a passing rejection test at a glance. `withAwards()` already selects
+// `ach-sih` under achievements, and `seenRefs` is ONE set shared by every section
+// (see the note on it in the validator), so the second mention fired `duplicate_ref`
+// and `continue`d before the resolution check ran at all. The test would have been
+// refused for the right verdict and the wrong reason — verification-traps' rule
+// about capturing the failure text rather than the fact of failure, in miniature.
+test("rejects a certification ref that names an achievement", () => {
+  // A real id, in the wrong section, and mentioned exactly once in the whole
+  // tailoring so nothing but the section mismatch can explain the refusal.
+  const result = validateTailoredProfile(
+    { ...baseline(), certifications: [{ ref: "ach-sih", bullets: [] }] },
+    MASTER,
+    PINNED_VERSION,
+  );
+  // Refused, because `certificationsById` never contains it.
+  assert.equal(result.ok, false);
+  // And reported as an unresolved ref under certifications.
+  assert.ok(
+    result.ok === false &&
+      result.violations.some((v) => v.kind === "unresolved_ref" && v.ref === "ach-sih" && v.where === "certifications"),
+    "expected ach-sih to be unresolvable as a certification",
+  );
+});
+
+// The same award listed twice reads on the page as two separate placings.
+test("rejects a duplicated achievement reference", () => {
+  // The honest selection, with its one award repeated.
+  const tailored = withAwards();
+  // Same ref twice.
+  const result = validateTailoredProfile(
+    { ...tailored, achievements: [...tailored.achievements, ...tailored.achievements] },
+    MASTER,
+    PINNED_VERSION,
+  );
+  // Refused rather than silently collapsed — a silent repair hides a bad prompt.
+  assert.equal(result.ok, false);
+  // Reported with the section, like every other duplicate.
+  assert.ok(
+    result.ok === false && result.violations.some((v) => v.kind === "duplicate_ref" && v.ref === "ach-sih" && v.where === "achievements"),
+    "expected a duplicate_ref violation naming ach-sih under achievements",
+  );
+});
+
+// THE TEST THAT PROVES `indexBullets` REACHES INTO THE AWARD SECTIONS, and it is
+// built to discriminate rather than merely to fail. `ach-bullet-sih` is nested under
+// the EXPERIENCE node: if achievement bullets are indexed, the lookup succeeds and
+// the parent comparison fires `misattributed_bullet`; if they are NOT indexed, the
+// lookup misses and the result is `unresolved_ref` instead. Asserting the exact kind
+// is what tells those two worlds apart — "it was refused" would not.
+test("an achievement bullet nested under an employer is misattributed, not merely unresolved", () => {
+  // Credit a hackathon line to a named employer.
+  const result = validateTailoredProfile(
+    {
+      ...withAwards(),
+      experience: [
+        {
+          ref: "exp-eventportal",
+          bullets: [{ ref: "ach-bullet-sih", text: "Built a REST API prototype in Node.js for the national finals" }],
+        },
+      ],
+    },
+    MASTER,
+    PINNED_VERSION,
+  );
+  // Refused.
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  // Specifically as a misattribution, which is only possible if the bullet resolved.
+  assert.ok(
+    result.violations.some((v) => v.kind === "misattributed_bullet" && v.ref === "ach-bullet-sih"),
+    `expected misattributed_bullet, got ${JSON.stringify(result.violations)}`,
+  );
+  // And explicitly NOT as an unresolved ref, which is the symptom of an index that
+  // never walked the achievements array.
+  assert.equal(
+    result.violations.some((v) => v.kind === "unresolved_ref" && v.ref === "ach-bullet-sih"),
+    false,
+    "ach-bullet-sih must be IN the bullet index; an unresolved_ref here means indexBullets skipped achievements",
+  );
+});
+
+// The certification half of the same proof, because two loops written from the same
+// template still fail independently.
+test("a certification bullet nested under an employer is misattributed, not merely unresolved", () => {
+  // Credit a course line to a named employer.
+  const result = validateTailoredProfile(
+    {
+      ...withAwards(),
+      experience: [
+        {
+          ref: "exp-eventportal",
+          bullets: [{ ref: "cert-bullet-aws", text: "Covered core services and the shared responsibility model" }],
+        },
+      ],
+    },
+    MASTER,
+    PINNED_VERSION,
+  );
+  // Refused.
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  // As a misattribution, proving certification bullets are in the index too.
+  assert.ok(
+    result.violations.some((v) => v.kind === "misattributed_bullet" && v.ref === "cert-bullet-aws"),
+    `expected misattributed_bullet, got ${JSON.stringify(result.violations)}`,
+  );
+});
+
+// THE TEST THAT PROVES `findDuplicateMasterIds` WALKS THE AWARD SECTIONS. Adding the
+// resolution loops without extending this guard would have put the newest and least
+// examined section into the flat bullet index with no uniqueness check behind it —
+// reopening, in a fresh place, the exact hole the guard exists to close.
+test("an achievement id colliding with an experience id refuses the tailoring", () => {
+  // Clone and collide the award with the employer.
+  const master = masterClone();
+  master.achievements[0]!.id = "exp-eventportal";
+  // Validate an otherwise-perfectly-honest tailoring.
+  const result = validateTailoredProfile(baseline(), master, PINNED_VERSION);
+  // Refused outright.
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  // For the ambiguity, not for anything about the tailoring.
+  assert.equal(result.violations[0]?.kind, "ambiguous_master_ids");
+});
+
+// The bullet-level version, which is the collision that actually corrupts the index:
+// a certification bullet sharing an id with an experience bullet silently reparents
+// one of the two, after which the misattribution check compares against the wrong
+// parent and reports clean.
+test("a certification bullet id colliding with an experience bullet id refuses the tailoring", () => {
+  // Clone and steal the §11 bullet's id for a certification bullet.
+  const master = masterClone();
+  mutableBullets(master.certifications[0]!).push({ id: "bullet-rest-api", text: "A certification bullet stealing the id", tags: [] });
+  // Validate.
+  const result = validateTailoredProfile(baseline(), master, PINNED_VERSION);
+  // Refused.
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  // Named, so the fix is one edit rather than a hunt.
+  assert.equal(result.violations[0]?.kind, "ambiguous_master_ids");
+  const violation = result.violations[0];
+  assert.equal(violation?.kind === "ambiguous_master_ids" && violation.ids.includes("bullet-rest-api"), true);
+});
+
+// THE POINT OF `MasterSummary` EXISTING AT ALL. Before the summary had an id, the
+// one source a summary most obviously draws on was the one thing it could not cite,
+// so "reword the paragraph I wrote" was indistinguishable from "invent a paragraph".
+// If this ref is not accepted here, the contract change is inert.
+test("a summary may cite the master summary node", () => {
+  // An honest summary declaring the human's own paragraph as its source.
+  const result = validateTailoredProfile(
+    { ...baseline(), summary: { text: "Backend engineer who builds REST APIs in Node.js.", refs: ["summary-master"] } },
+    MASTER,
+    PINNED_VERSION,
+  );
+  // Accepted.
+  assert.equal(result.ok, true, result.ok === false ? JSON.stringify(result.violations) : "");
+});
+
+// THE TWIN. The test above alone would pass against a checker that accepted every
+// summary ref, which is the failure mode a rejection-free test cannot see. This one
+// differs from it in exactly one character sequence — the id — and must be refused.
+test("rejects a summary citing an id that resembles the master summary but is not it", () => {
+  // One character off from a real node, which is what a hallucinated id looks like.
+  const result = validateTailoredProfile(
+    { ...baseline(), summary: { text: "Backend engineer who builds REST APIs in Node.js.", refs: ["summary-mastr"] } },
+    MASTER,
+    PINNED_VERSION,
+  );
+  // Refused.
+  assert.equal(result.ok, false);
+  // Reported as an unresolved ref in the summary's metadata, where it is hardest to spot.
+  assert.ok(
+    result.ok === false && result.violations.some((v) => v.kind === "unresolved_ref" && v.ref === "summary-mastr"),
+    "expected an unresolved_ref violation naming summary-mastr",
+  );
+});
+
+// A summary that cannot cite an award is a summary forced to leave its strongest
+// evidence undeclared, which pushes the honest case toward the empty-refs violation.
+test("a summary may cite an achievement and a certification", () => {
+  // Both award sections named as sources.
+  const result = validateTailoredProfile(
+    { ...baseline(), summary: { text: "Hackathon winner and certified cloud practitioner.", refs: ["ach-sih", "cert-aws-ccp"] } },
+    MASTER,
+    PINNED_VERSION,
+  );
+  // Accepted.
+  assert.equal(result.ok, true, result.ok === false ? JSON.stringify(result.violations) : "");
+});
+
+// A resume that is one credential line and nothing else is a FAILED tailoring, not a
+// minimal one. Recorded as a test because the tempting change while adding the award
+// loops is to count them as substance, and that would quietly weaken the guard.
+test("awards alone do not satisfy the substantive-selection check", () => {
+  // Every real section emptied, awards kept.
+  const tailored = withAwards();
+  const result = validateTailoredProfile(
+    { ...tailored, experience: [], projects: [], education: [] },
+    MASTER,
+    PINNED_VERSION,
+  );
+  // Refused.
+  assert.equal(result.ok, false);
+  // For emptiness specifically, not for anything about the awards.
+  assert.ok(
+    result.ok === false && result.violations.some((v) => v.kind === "empty_selection"),
+    "expected an empty_selection violation",
+  );
+});

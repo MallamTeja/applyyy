@@ -429,7 +429,18 @@ export function validateTailoredProfile(
     violations.push({ kind: "empty_selection" });
   }
 
-  // Duplicate tracking, one set per namespace so a skill and a project may share an id.
+  // Duplicate tracking. ONE SET SHARED BY EVERY SECTION, not one per kind — the
+  // comment that stood here until 2026-09-11 said "one set per namespace so a skill
+  // and a project may share an id", which describes code that was never written and
+  // a rule `findDuplicateMasterIds` above directly contradicts: the master's id space
+  // is GLOBAL, so a skill and a project sharing an id is a refused master, not an
+  // allowed one. The single set is correct; only its description was wrong.
+  //
+  // The consequence is worth knowing when writing a test against this function: an
+  // id mentioned in two DIFFERENT sections of one tailoring is reported as
+  // `duplicate_ref` by whichever section is walked second, and that section's own
+  // resolution check never runs. That is the right verdict — the same master node
+  // cannot honestly appear twice on one resume, whatever sections it appears under.
   const seenRefs = new Set<NodeId>();
 
   // --- Skills -------------------------------------------------------------
