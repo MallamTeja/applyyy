@@ -38,18 +38,18 @@
 }
 
 .rail__name {
-  /* Set in the serif, and the only place the serif appears outside document
-     content. The product name is the one piece of chrome allowed a voice. */
-  font-family: var(--font-paper);
+  font-family: var(--font-machine);
   font-size: var(--size-md);
-  font-weight: 600;
-  /* Slightly tightened, which the serif at this size can carry. */
-  letter-spacing: -0.01em;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
 }
 
 .rail__role {
-  color: var(--ink-muted);
+  color: var(--text-muted);
   font-size: var(--size-xs);
+  line-height: 1.4;
+  margin-top: 2px;
 }
 
 .rail__section {
@@ -59,39 +59,35 @@
 }
 
 .rail__heading {
-  color: var(--ink-muted);
+  color: var(--text-secondary);
   font-size: var(--size-xs);
-  font-weight: 600;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 .rail__link {
   display: block;
   padding: var(--gap-2) var(--gap-3);
   border-radius: var(--radius-control);
-  color: var(--ink);
-  /* The rail is a list of destinations; underlines on all fifteen would be
-     noise, and the active state carries the affordance instead. */
+  color: var(--text-secondary);
   text-decoration: none;
-  font-size: var(--size-sm);
-  transition: background-color 120ms ease;
+  font-size: var(--size-base);
+  line-height: 1.4;
+  font-weight: 500;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
 .rail__link:hover {
-  /* The shared hover wash rather than a rail-specific tint. It is translucent
-     ink, so the one value works over the panel here and over paper elsewhere,
-     and it inverts to a light wash in dark mode without a second rule. */
   background: var(--surface-hover);
+  color: var(--text-primary);
 }
 
-/* The active page. A filled pill in the paper tone: the current destination
-   looks like the paper it leads to, which ties the rail to the page beside
-   it. */
+/* The active page */
 .rail__link--active {
   background: var(--sheet);
-  /* The accent, not the traced green. Navigation is interaction, not a
-     verdict - marking the current page in the colour that elsewhere means
-     "this claim checks out" spends a status colour on furniture. */
   border-left: 3px solid var(--accent);
+  color: var(--text-primary);
   font-weight: 600;
 }
 

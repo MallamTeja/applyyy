@@ -10,17 +10,19 @@
 }
 
 .queue__bucket-heading {
+  /* Section Headers: 1.25rem (20px), weight 600, line-height 1.3 */
   font-size: var(--size-md);
   font-weight: 600;
+  line-height: 1.3;
+  color: var(--text-primary);
 }
 
 .queue__bucket-note {
   margin-top: var(--gap-1);
-  /* Under 80 characters: this sentence explains why the bucket exists and is
-     meant to be read, not scanned. */
-  max-width: 60ch;
-  color: var(--ink-muted);
-  font-size: var(--size-sm);
+  max-width: 65ch;
+  color: var(--text-secondary);
+  font-size: var(--size-base);
+  line-height: 1.5;
 }
 
 .queue__list {

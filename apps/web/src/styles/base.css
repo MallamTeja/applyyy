@@ -34,13 +34,13 @@ ol {
 body {
   /* The desk colour covers the viewport; sheets sit on top of it. */
   background: var(--ground);
-  color: var(--ink);
-  /* Machine chrome is the default voice; resume prose opts into the serif. */
+  color: var(--text-primary);
+  /* Modern clean sans-serif machine chrome */
   font-family: var(--font-machine);
   font-size: var(--size-base);
-  /* 1.55 for UI text — tight and balanced to keep dense tables scannable. */
-  line-height: 1.55;
-  letter-spacing: -0.005em;
+  /* 1.5 line-height for effortless body readability */
+  line-height: 1.5;
+  letter-spacing: -0.011em;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
@@ -48,22 +48,45 @@ body {
 
 h1, h2, h3, h4, h5, h6 {
   font-family: var(--font-machine);
-  color: var(--ink);
+  color: var(--text-primary);
   font-weight: 600;
-  line-height: 1.25;
+  line-height: 1.3;
   letter-spacing: -0.018em;
 }
 
+/* Page Title: 1.75rem (28px), weight 700, line-height 1.2 */
+h1 {
+  font-size: var(--size-lg);
+  font-weight: 700;
+  line-height: 1.2;
+}
 
-/* Form controls do not inherit type by default, which is how a settings page
-   ends up rendering inputs in the browser's default sans while its labels use
-   the design font. */
+/* Section Headers: 1.25rem (20px), weight 600, line-height 1.3 */
+h2 {
+  font-size: var(--size-md);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+/* Card / Table Headers: 1rem (16px), weight 600 */
+h3 {
+  font-size: var(--size-card-head);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+/* Form controls inherit type by default */
 input,
 select,
 textarea,
 button {
   font: inherit;
   color: inherit;
+}
+
+::placeholder {
+  color: var(--text-muted);
+  opacity: 0.85;
 }
 
 /* --- Focus ------------------------------------------------------------- */
@@ -120,53 +143,70 @@ button {
 }
 
 .page__title {
+  /* Page Title: 1.75rem (28px), weight 700, line-height 1.2 */
   font-size: var(--size-lg);
-  /* 600 rather than 700 — Plex Sans bold is heavy enough to shout at this
-     size, and nothing on a settings page needs to shout. */
-  font-weight: 600;
-  /* Large type carries the extra tracking browsers add at default; pulling it
-     back keeps the word looking set rather than spaced out. */
-  letter-spacing: -0.01em;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
 }
 
-/* One line of orientation under each page title, in the interface's voice.
-   Sentence case, plain verbs, no eyebrow label above it. */
+/* One line of orientation under each page title, in the interface's voice. */
 .page__lede {
   margin-top: var(--gap-2);
-  max-width: 58ch;
-  color: var(--ink-muted);
-  font-size: var(--size-sm);
+  max-width: 65ch;
+  color: var(--text-secondary);
+  font-size: var(--size-base);
+  line-height: 1.5;
 }
 
 /* --- Forms ------------------------------------------------------------- */
 
-/* Every row of the §8 filter cascade and every §15 settings field is one of
-   these. Label above input, because side-by-side labels break the moment a
-   field needs a sentence of help text. */
+/* Every row of the filter cascade and settings fields */
 .field {
   display: flex;
   flex-direction: column;
   gap: var(--gap-1);
 }
 
+/* Bold label on top for effortless visual hierarchy */
 .field__label {
-  font-size: var(--size-sm);
-  font-weight: 500;
+  font-size: var(--size-base);
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.3;
 }
 
-/* Help text explains the consequence of the setting, not the setting. It sits
-   under the label and above the control so it is read before the change. */
+/* Clear muted explanatory helper text */
 .field__help {
-  max-width: 54ch;
-  color: var(--ink-muted);
+  max-width: 58ch;
+  color: var(--text-muted);
   font-size: var(--size-xs);
+  line-height: 1.4;
+  margin-top: 2px;
 }
 
+/* Form input: 8px padding, crisp placeholder, distinct focus ring */
 .field__control {
-  padding: var(--gap-2) var(--gap-3);
+  padding: 8px 12px;
   background: var(--sheet);
   border: 1px solid var(--rule-strong);
   border-radius: var(--radius-control);
+  font-size: var(--size-base);
+  line-height: 1.5;
+  color: var(--text-primary);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.field__control::placeholder {
+  color: var(--text-muted);
+  opacity: 0.85;
+}
+
+.field__control:focus {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* --- Buttons ----------------------------------------------------------- */
@@ -296,4 +336,75 @@ button {
   border: 1px solid var(--signal);
   border-radius: var(--radius-control);
   font-size: var(--size-sm);
+}
+
+/* --- Status Badges (Pill containers with solid WCAG AA contrast) ----- */
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.65rem;
+  border-radius: 9999px;
+  font-family: var(--font-machine);
+  font-size: var(--size-xs); /* 13px */
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+  border: 1px solid transparent;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+/* Success / Verified statuses (e.g. audit_clean, approved, offer) */
+.status-badge--clean,
+.status-badge--audit_clean,
+.status-badge--approved,
+.status-badge--offer {
+  background: light-dark(#ecfdf5, #064e3b);
+  color: light-dark(#065f46, #a7f3d0);
+  border-color: light-dark(#a7f3d0, #047857);
+}
+
+/* Action Required / Attention statuses (e.g. awaiting_approval, blocked_needs_human, needs_verification) */
+.status-badge--awaiting_approval,
+.status-badge--oa_pending,
+.status-badge--needs_verification,
+.status-badge--blocked_needs_human {
+  background: light-dark(#fffbeb, #78350f);
+  color: light-dark(#92400e, #fde68a);
+  border-color: light-dark(#fde68a, #b45309);
+}
+
+/* Active in-flight / Progressing statuses (e.g. applied, applying, interview, tailored, scored) */
+.status-badge--applying,
+.status-badge--applied,
+.status-badge--interview,
+.status-badge--tailored,
+.status-badge--scored {
+  background: light-dark(#eff6ff, #1e3a8a);
+  color: light-dark(#1e40af, #bfdbfe);
+  border-color: light-dark(#bfdbfe, #1d4ed8);
+}
+
+/* Pipeline discovery & screening statuses */
+.status-badge--discovered,
+.status-badge--deduped,
+.status-badge--passed_filters,
+.status-badge--employer_screening {
+  background: light-dark(#f1f5f9, #1e293b);
+  color: light-dark(#334155, #cbd5e1);
+  border-color: light-dark(#cbd5e1, #475569);
+}
+
+/* Flagged / Rejected / Terminal drops */
+.status-badge--flagged,
+.status-badge--audit_flagged,
+.status-badge--rejected,
+.status-badge--failed,
+.status-badge--dropped_filter,
+.status-badge--dropped_duplicate {
+  background: light-dark(#fef2f2, #7f1d1d);
+  color: light-dark(#991b1b, #fecaca);
+  border-color: light-dark(#fecaca, #b91c1c);
 }

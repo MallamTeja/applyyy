@@ -143,6 +143,53 @@ export function SearchPreferencesPage(): ReactElement {
           </label>
         </div>
       </section>
+
+      <section className="settings-group">
+        <h2 className="settings-group__title">System safety & operational execution</h2>
+        <p className="settings-group__note">
+          Core circuit-breakers and timing rules governing autonomous agent execution.
+        </p>
+
+        <div className="settings-group__fields">
+          <label className="field field--wide">
+            <span className="field__label">Emergency Kill Switch</span>
+            <span className="field__help">
+              <strong>What Kill Switch does:</strong> Immediately freezes all autonomous agent tasks (Scout, Matcher, Tailor, Applier). No jobs will be polled, scored, tailored, or submitted while active. Use this emergency stop at any time to pause the loop without losing state.
+            </span>
+            <select className="field__control" defaultValue="active">
+              <option value="active">Enabled (System Running Normally)</option>
+              <option value="disabled">Emergency Stop (All Agents Paused)</option>
+            </select>
+          </label>
+
+          <label className="field">
+            <span className="field__label">API Quota Cooldown</span>
+            <span className="field__help">
+              <strong>What Cooldown does:</strong> The backoff delay in seconds enforced when Gemini or an ATS API returns HTTP 429 (Resource Exhausted). The system parks the row and waits out the cooling window before rotating keys or retrying, preventing quota exhaustion.
+            </span>
+            <input
+              type="number"
+              className="field__control"
+              min={10}
+              defaultValue={60}
+            />
+          </label>
+
+          <label className="field">
+            <span className="field__label">Daily Application Cap</span>
+            <span className="field__help">
+              Hard limit on submissions per 24 hours (default 35/day) to stay within GitHub Actions runner budget and maintain high-fit quality.
+            </span>
+            <input
+              type="number"
+              className="field__control"
+              min={1}
+              max={100}
+              defaultValue={35}
+            />
+          </label>
+        </div>
+      </section>
     </div>
   );
 }

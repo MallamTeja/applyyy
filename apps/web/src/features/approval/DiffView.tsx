@@ -37,6 +37,7 @@ import {
   coveragePercent,
   deriveBucket,
 } from './diffModel';
+import { StatusBadge } from '../../app/StatusBadge';
 
 import './DiffView.css';
 
@@ -424,10 +425,18 @@ export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactEle
     <article className="diff">
       <header className="diff__header">
         <div className="diff__identity">
-          {/* Plain language, no separator characters standing in for a verb. */}
-          <h2 className="diff__title">
-            {diff.jobTitle} at {diff.companyName}
-          </h2>
+          <div className="diff__title-row">
+            <h2 className="diff__title">
+              {diff.jobTitle} at {diff.companyName}
+            </h2>
+            <div className="diff__badges">
+              <StatusBadge
+                status={bucket === 'A' ? 'audit_clean' : 'audit_flagged'}
+                label={bucket === 'A' ? 'audit_clean' : 'audit_flagged'}
+              />
+              <StatusBadge status="awaiting_approval" label="awaiting_approval" />
+            </div>
+          </div>
           <p className="diff__meta">
             Tailored from master version {diff.masterVersion}
           </p>

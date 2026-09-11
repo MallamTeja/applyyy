@@ -26,6 +26,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
+import { StatusBadge } from '../../app/StatusBadge';
 import { DiffView } from './DiffView';
 import { deriveBucket } from './diffModel';
 import type { ResumeDiff } from './diffModel';
@@ -185,13 +186,13 @@ export function ApprovalQueuePage(): ReactElement {
             {bucketA.map((diff) => (
               <li key={diff.applicationId} className="queue__clean-row">
                 <span className="queue__clean-job">
-                  {/* Both strings came from an ATS board and are UNTRUSTED
-                      (constraint #17). Rendered as React text children, which
-                      React escapes - no raw-HTML path exists in this file. */}
                   {diff.jobTitle} at {diff.companyName}
                 </span>
-                <span className="identifier">
-                  master v{diff.masterVersion}
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <StatusBadge status="audit_clean" label="audit_clean" />
+                  <span className="identifier">
+                    master v{diff.masterVersion}
+                  </span>
                 </span>
               </li>
             ))}

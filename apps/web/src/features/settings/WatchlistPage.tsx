@@ -288,11 +288,11 @@ export function WatchlistPage(): ReactElement {
             </label>
 
             <label className="field">
-              <span className="field__label">Board Token</span>
+              <span className="field__label">ATS Identifier (Board Slug)</span>
               <input
                 type="text"
                 className="field__control identifier"
-                placeholder="e.g. stripe"
+                placeholder="e.g. stripe, openai, figma"
                 value={boardToken}
                 onChange={(e) => setBoardToken(e.target.value)}
                 disabled={submitting}
@@ -310,7 +310,7 @@ export function WatchlistPage(): ReactElement {
           </div>
 
           <p className="field__help">
-            Hint for {atsProvider}: {PROVIDER_HINTS[atsProvider]?.example ?? 'Enter the company identifier slug.'}
+            <strong>What ATS Identifier does:</strong> The exact company slug or board token on the ATS provider (e.g. &quot;stripe&quot; in boards.greenhouse.io/stripe or &quot;figma&quot; in jobs.ashbyhq.com/figma). The Scout agent uses this to query official JSON API endpoints directly without scraping. {PROVIDER_HINTS[atsProvider]?.example ? `Example: ${PROVIDER_HINTS[atsProvider]?.example}` : ''}
           </p>
         </form>
       </section>
@@ -431,9 +431,20 @@ export function WatchlistPage(): ReactElement {
         </p>
       </section>
 
+      {/* Cooldown Periods & Re-application Protection */}
+      <section className="settings-group">
+        <h2 className="settings-group__title">Application cooldown periods & lockout protection</h2>
+        <p className="settings-group__note">
+          <strong>What Cooldown does:</strong> Employers and ATS systems track candidate submission history. Following a screening or interview rejection, companies enforce a mandatory cooldown window (typically 3 to 6 months) during which subsequent applications are automatically filtered or discarded.
+        </p>
+        <p className="settings-group__note">
+          The system checks your historical application log and active blocklist before submitting, preventing wasted quota on locked-out boards and protecting your candidate profile.
+        </p>
+      </section>
+
       {/* Token Guidance per ATS */}
       <section className="settings-group">
-        <h2 className="settings-group__title">Where to find a board token</h2>
+        <h2 className="settings-group__title">Where to find an ATS identifier slug</h2>
         <p className="settings-group__note">
           A board token is the short company identifier in a careers URL, not
           the URL itself. Pasting a whole URL is the usual mistake, and it fails

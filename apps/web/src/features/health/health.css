@@ -29,16 +29,20 @@
 }
 
 .panel__title {
+  /* Section Headers: 1.25rem (20px), weight 600, line-height 1.3 */
   font-size: var(--size-md);
   font-weight: 600;
+  line-height: 1.3;
+  color: var(--text-primary);
   /* Machine face throughout - everything on this page is system state. */
   font-family: var(--font-machine);
   margin-bottom: var(--gap-2);
 }
 
 .panel__note {
-  color: var(--ink-muted);
-  font-size: var(--size-sm);
+  color: var(--text-secondary);
+  font-size: var(--size-base);
+  line-height: 1.5;
   /* Readable measure. These paragraphs carry the reasoning that makes the
      numbers interpretable, so they need to actually get read. */
   max-width: 72ch;
@@ -79,7 +83,7 @@
 .table {
   width: 100%;
   border-collapse: collapse;
-  font-size: var(--size-sm);
+  font-size: var(--size-base);
 }
 
 .table th,
@@ -87,18 +91,20 @@
   text-align: left;
   padding: var(--gap-2) var(--gap-3);
   border-bottom: 1px solid var(--rule);
+  font-size: var(--size-base);
+  line-height: 1.5;
+  color: var(--text-primary);
   /* Top-aligned: the "why" cells wrap to several lines and centring them
      against a one-line agent name makes the row hard to follow. */
   vertical-align: top;
 }
 
 .table thead th {
-  /* Lighter than the body text. A header row that competes with the data is a
-     header row that gets read every time instead of once. */
-  color: var(--ink-muted);
+  /* Card / Table Headers: 1rem (16px), weight 600 */
+  color: var(--text-primary);
   font-weight: 600;
-  font-size: var(--size-xs);
-  border-bottom: 1px solid var(--rule-strong);
+  font-size: var(--size-card-head);
+  border-bottom: 2px solid var(--rule-strong);
 }
 
 /* The agent name cell. Mono, because these are the literal identifiers written

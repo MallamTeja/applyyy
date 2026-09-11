@@ -30,16 +30,34 @@
   border-bottom: 1px solid var(--rule);
 }
 
+.diff__title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--gap-3);
+}
+
 .diff__title {
+  /* Page Title: 1.75rem (28px), weight 700, line-height 1.2 */
   font-size: var(--size-lg);
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+.diff__badges {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-2);
+  flex-wrap: wrap;
 }
 
 .diff__meta {
   margin-top: var(--gap-1);
-  color: var(--ink-muted);
-  font-size: var(--size-sm);
+  color: var(--text-secondary);
+  font-size: var(--size-base);
+  line-height: 1.5;
 }
 
 /* --- Coverage --------------------------------------------------------- */

@@ -194,35 +194,37 @@
   /* Category indicator badge */
   display: inline-flex;
   align-items: center;
-  padding: 2px 8px;
-  border-radius: 999px;
+  padding: 0.2rem 0.65rem;
+  border-radius: 9999px;
   font-size: var(--size-xs);
   font-weight: 600;
+  line-height: 1.2;
   text-transform: capitalize;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
 .email-badge--interview {
-  background: rgba(34, 197, 94, 0.15);
-  color: #4ade80;
-  border: 1px solid rgba(34, 197, 94, 0.3);
+  background: light-dark(#ecfdf5, #064e3b);
+  color: light-dark(#065f46, #a7f3d0);
+  border: 1px solid light-dark(#a7f3d0, #047857);
 }
 
 .email-badge--rejection {
-  background: rgba(239, 68, 68, 0.15);
-  color: #f87171;
-  border: 1px solid rgba(239, 68, 68, 0.3);
+  background: light-dark(#fef2f2, #7f1d1d);
+  color: light-dark(#991b1b, #fecaca);
+  border: 1px solid light-dark(#fecaca, #b91c1c);
 }
 
 .email-badge--acknowledgement {
-  background: rgba(59, 130, 246, 0.15);
-  color: #60a5fa;
-  border: 1px solid rgba(59, 130, 246, 0.3);
+  background: light-dark(#eff6ff, #1e3a8a);
+  color: light-dark(#1e40af, #bfdbfe);
+  border: 1px solid light-dark(#bfdbfe, #1d4ed8);
 }
 
 .email-badge--unclassified {
-  background: rgba(168, 85, 247, 0.15);
-  color: #c084fc;
-  border: 1px solid rgba(168, 85, 247, 0.3);
+  background: light-dark(#faf5ff, #581c87);
+  color: light-dark(#6b21a8, #e9d5ff);
+  border: 1px solid light-dark(#e9d5ff, #7e22ce);
 }
 
 .email-empty {

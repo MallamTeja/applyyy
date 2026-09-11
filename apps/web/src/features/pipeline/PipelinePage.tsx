@@ -29,6 +29,7 @@
 import type { ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
+import { StatusBadge } from '../../app/StatusBadge';
 /* Enum and helpers imported rather than restated - see the note above about
    readers keeping copies. `contract.ts` is the only domain-type import surface
    anywhere under apps/web. */
@@ -165,11 +166,9 @@ function StatusColumn({
       className={terminal ? 'column column--terminal' : 'column'}
     >
       <header className="column__head">
-        {/* The raw status value is the heading on purpose. The operator reads
-            these same strings in the database, in the event log and in a peer's
-            message; a prettier per-status label would mean two vocabularies for
-            one workflow. */}
-        <h3 className="column__title">{status}</h3>
+        <h3 className="column__title">
+          <StatusBadge status={status} />
+        </h3>
         {/* THE HONEST COUNT. A number appears only when a read actually
             completed; otherwise the column shows WHY it has no number, in words.
             Never a bare 0 - "nobody is signed in" and "no applications in this

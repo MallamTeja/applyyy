@@ -84,7 +84,7 @@
   /* Title left, count hard right - a consistent place for the eye to find the
      number across every column. */
   justify-content: space-between;
-  align-items: baseline;
+  align-items: center;
   gap: var(--gap-2);
   border-bottom: 1px solid var(--rule);
   padding-bottom: var(--gap-2);
@@ -92,15 +92,11 @@
 }
 
 .column__title {
-  /* Mono, because this is the literal status value from the database and the
-     operator will match it against a row, an event log and a peer's message.
-     Setting it in the body face would imply it is prose we chose. */
-  font-family: var(--font-id);
+  margin: 0;
+  display: flex;
+  align-items: center;
   font-size: var(--size-xs);
   font-weight: 600;
-  /* No text-transform: changing the case of an identifier the operator has to
-     match by eye is exactly the wrong kind of polish. */
-  word-break: break-word;
 }
 
 .column__count {
