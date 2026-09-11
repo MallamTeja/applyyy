@@ -73,9 +73,12 @@ All core frontend, backend database schemas, worker automation pipelines, and en
 
 ### Completed Infrastructure & Setup Items (2026-09-11 23:22 IST) ✅
 
-1. **GitHub Actions Secrets Configuration:**
+1. **GitHub Actions Secrets Configuration & Live Execution:**
    * **State:** Configured under GitHub Repository `Settings > Secrets and variables > Actions`.
    * **Secrets Live:** `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `APPLYY_APP_USER_EMAIL`, `APPLYY_APP_USER_PASSWORD`, `STORAGE_STATE_ENC_KEY`.
+   * **Live Verification Confirmed:**
+     * `applyy keepalive` (Run `34635276043`): **PASSED ✅** (Supabase pinged, idle-pause reset).
+     * `applyy applier (daily batch)` (Run `34635284619`): **PASSED ✅** (Chromium installed, kill switch checked, dry-run executed safely).
 
 2. **Supabase Database Seeding (Gemini API Keys & User Defaults):**
    * **State:** Successfully seeded on live remote Supabase instance for operator `0f4b24da-e85b-40bb-8606-c81824493b45` (`tejamallam00@gmail.com`).
