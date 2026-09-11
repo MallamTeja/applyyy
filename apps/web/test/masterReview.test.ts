@@ -23,7 +23,11 @@ import {
   buildMasterReview,
   isCleanReview,
   looksLikeReflow,
+  noNodeIdentityChanges,
 } from '../src/features/settings/masterReview.ts';
+/* The package's own policy, imported so the drift test below compares this
+   module against the real thing rather than against a number typed by hand. */
+import { reviewableRows } from '@applyy/master-ingest';
 import type {
   AmbiguousMatch,
   CarriedNode,
@@ -314,4 +318,131 @@ test('isCleanReview agrees with what the screen actually lists', () => {
   const review = buildMasterReview(report({ dropped: [dropped()] }));
   assert.equal(isCleanReview(review), review.rows.length === 0);
   assert.equal(isCleanReview(review), false);
+});
+
+/* --- The review POLICY lives in the package, not here ------------------
+ *
+ * These were added on 2026-09-11 with the change that deleted this module's
+ * second copy of it. `buildMasterReview` used to keep its own
+ * `MINT_REASONS_NEEDING_REVIEW = ['below_threshold', 'candidate_taken']` - a
+ * literal duplicate of `REVIEWABLE_MINT_REASONS` in `report.ts` - and rebuilt
+ * the risky-row set by hand from the four report arrays. `report.ts:288` says
+ * the policy lives there and nowhere else, because two implementations "will
+ * disagree about the only question that matters".
+ *
+ * They agreed. That is exactly what made it dangerous: nothing connected them,
+ * so agreement was a coincidence that the first upstream policy change would
+ * have ended, silently, with this screen quietly dropping a row nobody was then
+ * asked about.
+ *
+ * THE TEST THAT ACTUALLY CATCHES DRIFT is the last one: it asserts this
+ * module's row count against `reviewableRows()` itself rather than against a
+ * number written by hand. A hand-written number is a second copy of the policy
+ * in the test file, which is the same defect one layer out - and
+ * `docs/verification-traps.md` records precisely that failure, where an
+ * occurrence-count assertion passed because it counted the walk's own output. */
+
+test('a mint reason the policy does not flag is collapsed, not shown', () => {
+  /* `no_candidate` is genuinely new content with no counterpart. Asking for an
+     acknowledgement on it buries the reasons that matter in noise, and a
+     reviewer shown too much stops reading. */
+  const review = buildMasterReview(report({ minted: [minted({ reason: 'no_candidate' })] }));
+
+  assert.equal(review.rows.length, 0);
+  assert.equal(review.plainlyNew.length, 1);
+});
+
+/* THE TWIN. Same shape, a reason the policy DOES flag - so a `buildMasterReview`
+ * that collapsed everything would pass the test above and fail this one. */
+test('a mint reason the policy flags reaches the human', () => {
+  const review = buildMasterReview(
+    report({ minted: [minted({ reason: 'below_threshold', bestScore: 0.61 })] }),
+  );
+
+  assert.equal(review.rows.length, 1);
+  assert.equal(review.rows[0]?.cause, 'uncertain_mint');
+  /* And it is NOT also counted as plainly new, or one node would be described
+     twice - once as needing a look and once as nothing to worry about. */
+  assert.equal(review.plainlyNew.length, 0);
+});
+
+test('a fuzzy carry is shown and is NOT counted among the settled', () => {
+  const review = buildMasterReview(
+    report({
+      carried: [
+        carried({ id: 'b1', match: 'exact_text' }),
+        carried({ id: 'b2', match: 'fuzzy_text', similarity: 0.71, previousLabel: 'Old text' }),
+      ],
+    }),
+  );
+
+  /* The fuzzy one is on screen... */
+  assert.equal(review.rows.length, 1);
+  assert.equal(review.rows[0]?.cause, 'fuzzy_carry');
+  /* ...and the collapsed list is its exact complement. A row that appeared in
+     both would be shown as risky and counted as safe in the same breath. */
+  assert.deepEqual(
+    review.settled.map((entry) => entry.id),
+    ['b1'],
+  );
+});
+
+test('the rows this module shows are exactly the rows the package calls reviewable', () => {
+  /* One of every kind, so no single-variant implementation can pass by
+     accident. */
+  const full = report({
+    carried: [
+      carried({ id: 'c-exact', match: 'exact_key' }),
+      carried({ id: 'c-fuzzy', match: 'fuzzy_text', similarity: 0.7 }),
+    ],
+    minted: [
+      minted({ id: 'm-plain', reason: 'no_candidate' }),
+      minted({ id: 'm-near', reason: 'below_threshold', bestScore: 0.6 }),
+      minted({ id: 'm-taken', reason: 'candidate_taken', bestScore: 0.8 }),
+      /* Present in BOTH arrays by design - the package puts every ambiguity in
+         `minted` too - and it must produce exactly ONE row, the richer one. */
+      minted({ id: 'm-amb', reason: 'ambiguous' }),
+    ],
+    dropped: [dropped({ id: 'd1' })],
+    ambiguous: [ambiguous()],
+  });
+
+  /* Derived from the package, never hand-counted. If `report.ts` widens or
+     narrows its policy, THIS is the assertion that notices - which is the whole
+     reason the duplicate was deleted. */
+  assert.equal(buildMasterReview(full).rows.length, reviewableRows(full).length);
+});
+
+/* --- "Nothing moved" is not the same question as "nothing changed" ----- */
+
+test('a re-upload where every node kept its id reports no identity changes', () => {
+  const review = buildMasterReview(
+    report({ carried: [carried({ match: 'exact_key' }), carried({ id: 'b2', match: 'exact_text' })] }),
+  );
+
+  assert.equal(noNodeIdentityChanges(review), true);
+});
+
+/* THE TWIN THAT MAKES IT MEAN SOMETHING, and the case `isCleanReview` gets
+ * right for a different question. A brand-new bullet with no counterpart needs
+ * no ACKNOWLEDGEMENT - so there are zero rows and the review is "clean" - but a
+ * node id has still appeared that did not exist before. Telling Teja "nothing
+ * moved" there would be false.
+ *
+ * A `noNodeIdentityChanges` that just returned `rows.length === 0` would pass
+ * the test above and fail this one, which is exactly why the two predicates are
+ * separate functions rather than one. */
+test('a plainly-new node means identity DID change, even with nothing to review', () => {
+  const review = buildMasterReview(report({ minted: [minted({ reason: 'no_candidate' })] }));
+
+  /* Nothing to acknowledge... */
+  assert.equal(isCleanReview(review), true);
+  /* ...but something is genuinely new, so the quiet wording must not be used. */
+  assert.equal(noNodeIdentityChanges(review), false);
+});
+
+test('a dropped node means identity changed', () => {
+  const review = buildMasterReview(report({ dropped: [dropped()] }));
+
+  assert.equal(noNodeIdentityChanges(review), false);
 });
