@@ -37,6 +37,9 @@ import { ATS_PROVIDERS } from '../../data/contract';
 import type { AtsProvider, CompanyWatchlistRow } from '../../data/contract';
 import { supabase } from '../../data/supabase';
 
+import { CompanySuggestionsModal } from './CompanySuggestionsModal';
+import type { SuggestedCompany } from './companyCatalog';
+
 import './settings.css';
 
 /* Supported direct-poll ATS providers */
@@ -94,6 +97,7 @@ export function WatchlistPage(): ReactElement {
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [suggestionsOpen, setSuggestionsOpen] = useState<boolean>(false);
 
   /* Form state */
   const [companyName, setCompanyName] = useState<string>('');
@@ -183,6 +187,56 @@ export function WatchlistPage(): ReactElement {
     }
   };
 
+  /* Handle 1-click add from suggestions modal */
+  const handleAddSuggestedCompany = async (company: SuggestedCompany): Promise<boolean> => {
+    if (supabase === null) {
+      setError('Supabase is not configured in this environment.');
+      return false;
+    }
+
+    const trimmedName = company.name.trim();
+    const trimmedToken = company.atsIdentifier.trim();
+
+    if (!trimmedName || !trimmedToken) {
+      setError('Company name and board token are required.');
+      return false;
+    }
+
+    const slug = trimmedName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+
+    try {
+      setError(null);
+      setSuccess(null);
+
+      const { error: insertErr } = await supabase.from('company_watchlist').insert({
+        company_name: trimmedName,
+        company_slug: slug,
+        ats_provider: company.atsProvider,
+        board_token: trimmedToken,
+        enabled: true,
+      });
+
+      if (insertErr) {
+        if (insertErr.code === '23505') {
+          setError(`Board token "${trimmedToken}" is already registered under ${company.atsProvider}.`);
+        } else {
+          setError(`Insert failed: ${insertErr.message}`);
+        }
+        return false;
+      }
+
+      setSuccess(`Added ${trimmedName} (${company.atsProvider}) to company watchlist.`);
+      await loadWatchlist();
+      return true;
+    } catch (err) {
+      setError(`Insert failed: ${String(err)}`);
+      return false;
+    }
+  };
+
   /* Handle toggle enabled/paused status */
   const handleToggle = async (id: string, currentlyEnabled: boolean): Promise<void> => {
     if (supabase === null) return;
@@ -245,11 +299,22 @@ export function WatchlistPage(): ReactElement {
 
       {/* Add Board Form */}
       <section className="settings-group">
-        <h2 className="settings-group__title">Add Company Target Board</h2>
-        <p className="settings-group__note">
-          Register a company careers board for autonomous job discovery. The Scout polls
-          each board&apos;s direct API endpoint rather than scraping HTML.
-        </p>
+        <div className="settings-group__header-row">
+          <div>
+            <h2 className="settings-group__title">Add Company Target Board</h2>
+            <p className="settings-group__note">
+              Register a company careers board for autonomous job discovery. The Scout polls
+              each board&apos;s direct API endpoint rather than scraping HTML.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="button button--suggest"
+            onClick={() => setSuggestionsOpen(true)}
+          >
+            ✨ Suggest Companies
+          </button>
+        </div>
 
         {error && <div className="watchlist-feedback watchlist-feedback--error">{error}</div>}
         {success && (
@@ -491,6 +556,12 @@ export function WatchlistPage(): ReactElement {
           </table>
         </div>
       </section>
+      <CompanySuggestionsModal
+        isOpen={suggestionsOpen}
+        onClose={() => setSuggestionsOpen(false)}
+        existingRows={rows}
+        onAddCompany={handleAddSuggestedCompany}
+      />
     </div>
   );
 }
