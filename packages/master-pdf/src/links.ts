@@ -112,6 +112,7 @@ export function resolveLinks(
       .map((item) => item.str)
       .join('')
       .replace(/\s+/gu, ' ')
+      .replace(/\s*\|\s*$/gu, '')
       .trim();
 
     /* An empty label means the rectangle covered nothing readable. Treating

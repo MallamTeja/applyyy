@@ -84,18 +84,35 @@ export interface LayoutMeasurement {
  * within one band, so that fold belongs to whoever joins bands into a paragraph.
  */
 function joinBandText(items: readonly TextItem[]): string {
-  const raw = items.map((item) => item.str).join('');
+  if (items.length === 0) {
+    return '';
+  }
+
+  let raw = items[0]!.str;
+  for (let i = 1; i < items.length; i++) {
+    const prev = items[i - 1]!;
+    const curr = items[i]!;
+    if (
+      !/\s$/u.test(prev.str) &&
+      !/^\s/u.test(curr.str) &&
+      prev.x + prev.width < curr.x
+    ) {
+      raw += ' ';
+    }
+    raw += curr.str;
+  }
+
   return raw.replace(/\s+/gu, ' ').trim();
 }
 
 /* Group one page's items into lines and put those lines in reading order. */
 export function measurePage(page: PageSnapshot): LayoutMeasurement {
-  /* Drop items carrying no ink. A zero-width item holding only whitespace is a
-     spacing artefact of the text layer; keeping them inflates every number in
-     the report and makes a count like "218 items" useless as a check against
-     the file. An item with a real string survives even at zero height, because
-     height is a rendering detail and the string is the evidence. */
-  const inked = page.items.filter((item) => item.str.trim() !== '' || item.width > 0);
+  /* Keep items carrying text or ink. In LaTeX/pdfTeX output, inter-word spaces
+     arrive as separate zero-width items with str: ' ' and width: 0. Trimming
+     them drops them and welds words together, so any item with non-empty string
+     or positive width must be preserved. Empty strings with zero width are
+     true no-ops and can be dropped. */
+  const inked = page.items.filter((item) => item.str.length > 0 || item.width > 0);
 
   /* Build bands by SCANNING, not by sorting first. Scanning preserves the
      stored order inside each band, which is exactly the evidence needed to
