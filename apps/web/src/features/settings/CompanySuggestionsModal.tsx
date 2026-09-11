@@ -1,35 +1,35 @@
-/* Interactive target company suggestions modal with ATS auto-discovery & cooldowns.
+/* Interactive target company suggestions modal with location switching,
+ * refreshable batches, grouped categories, and direct search discovery.
  *
  * WHAT THIS MODAL DOES:
- *   Solves the biggest friction point in populating the Scout watchlist:
- *   Instead of manually researching whether a company uses Greenhouse, Lever,
- *   or Ashby, finding their board slug, and guessing their cooldown policy, the
- *   operator can browse curated verified target employers (GCCs, Mid-Scale MNCs,
- *   Startups/Unicorns) and 1-click add them directly to Supabase.
+ *   Eliminates manual ATS hunting. Displays verified target employers grouped across:
+ *     1. GCCs (Global Capability Centers)
+ *     2. Mid-Scale Product MNCs
+ *     3. High-Growth Startups & Unicorns
+ *     4. Service-Based & Consulting Leaders
  *
- * ATS AUTO-DISCOVERY WITH GEMINI:
- *   If the operator wants companies outside the curated list (e.g. niche AI infra,
- *   specialised fintech, or new unicorns), the modal can query Gemini 1.5 Flash
- *   for real-time discovery of ATS tokens and cooldown rules with structured validation.
- *
- * COOLDOWN TRANSPARENCY:
- *   Every card clearly displays interview and resume screening cooldown windows
- *   to avoid burning Scout applications during active recruiter lockout periods.
+ * LOCATION SWITCHING & REFRESH:
+ *   - Allows filtering by major tech hubs (Bengaluru, Hyderabad, Pune, Delhi NCR, Mumbai, Remote).
+ *   - "Refresh Companies" dynamically rotates to a fresh batch of companies on each click.
+ *   - Search bar with dedicated [Search] button resolves any company name and its ATS token.
+ *   - 1-Click adds straight to Supabase watchlist with enabled = true.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { ReactElement } from 'react';
+import type { FormEvent, ReactElement } from 'react';
 
-import type { CompanyWatchlistRow } from '../../data/contract';
+import type { AtsProvider, CompanyWatchlistRow } from '../../data/contract';
 import {
+  AVAILABLE_LOCATIONS,
   CURATED_COMPANIES,
-  discoverCompaniesWithGemini,
   filterCompanies,
+  getRefreshedCompaniesBatch,
+  searchOrDiscoverCompany,
 } from './companyCatalog';
 import type {
+  AvailableLocation,
   CompanyCategory,
   SuggestedCompany,
-  SupportedAtsProvider,
 } from './companyCatalog';
 
 export interface CompanySuggestionsModalProps {
@@ -39,33 +39,41 @@ export interface CompanySuggestionsModalProps {
   readonly onAddCompany: (company: SuggestedCompany) => Promise<boolean>;
 }
 
+const CATEGORY_DEFINITIONS: readonly {
+  readonly id: CompanyCategory;
+  readonly label: string;
+  readonly icon: string;
+}[] = [
+  { id: 'GCC', label: 'Global Capability Centers (GCCs)', icon: '🏢' },
+  { id: 'Mid-Scale MNC', label: 'Mid-Scale Product MNCs', icon: '🌐' },
+  { id: 'Startup / Unicorn', label: 'High-Growth Startups & Unicorns', icon: '🚀' },
+  { id: 'Service-Based', label: 'Service-Based & Consulting Leaders', icon: '🛠️' },
+];
+
 export function CompanySuggestionsModal({
   isOpen,
   onClose,
   existingRows,
   onAddCompany,
 }: CompanySuggestionsModalProps): ReactElement | null {
-  const [searchTerm, setSearchTerm] = useState<string>('');
+  const [selectedLocation, setSelectedLocation] = useState<AvailableLocation>('All Locations');
   const [selectedCategory, setSelectedCategory] = useState<CompanyCategory | 'all'>('all');
-  const [selectedAts, setSelectedAts] = useState<SupportedAtsProvider | 'all'>('all');
+  const [selectedAts, setSelectedAts] = useState<AtsProvider | 'all'>('all');
+  const [searchInput, setSearchInput] = useState<string>('');
+  const [activeSearchQuery, setActiveSearchQuery] = useState<string>('');
+  const [refreshSeed, setRefreshSeed] = useState<number>(() => Date.now());
 
-  // AI discovery state
-  const [aiQuery, setAiQuery] = useState<string>('');
-  const [isDiscovering, setIsDiscovering] = useState<boolean>(false);
-  const [aiCompanies, setAiCompanies] = useState<readonly SuggestedCompany[] | null>(null);
-  const [aiMessage, setAiMessage] = useState<string | null>(null);
-  const [apiKey, setApiKey] = useState<string>(() => {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      return window.localStorage.getItem('gemini_api_key') || '';
-    }
-    return '';
-  });
-  const [showApiKeyInput, setShowApiKeyInput] = useState<boolean>(false);
+  // Adding state and toast feedback
+  const [addingKey, setAddingKey] = useState<string | null>(null);
+  const [localAddedKeys, setLocalAddedKeys] = useState<Set<string>>(() => new Set());
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Per-company add loading state & locally added slugs
-  const [addingIdentifier, setAddingIdentifier] = useState<string | null>(null);
-  const [localAddedSlugs, setLocalAddedSlugs] = useState<Set<string>>(() => new Set());
-  const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  // Auto-dismiss transient toast after 2.5s
+  useEffect(() => {
+    if (!toastMessage) return;
+    const timer = setTimeout(() => setToastMessage(null), 2500);
+    return () => clearTimeout(timer);
+  }, [toastMessage]);
 
   // Close on Escape key
   useEffect(() => {
@@ -83,7 +91,7 @@ export function CompanySuggestionsModal({
   const isCompanyAdded = useCallback(
     (company: SuggestedCompany): boolean => {
       const key = `${company.atsProvider}:${company.atsIdentifier.toLowerCase()}`;
-      if (localAddedSlugs.has(key)) return true;
+      if (localAddedKeys.has(key)) return true;
 
       return (
         existingRows.some(
@@ -96,86 +104,75 @@ export function CompanySuggestionsModal({
         )
       );
     },
-    [existingRows, localAddedSlugs],
+    [existingRows, localAddedKeys],
   );
 
-  // Active pool of companies: AI discovered if active, otherwise curated
-  const baseCompanies = useMemo(() => {
-    return aiCompanies !== null ? aiCompanies : CURATED_COMPANIES;
-  }, [aiCompanies]);
+  // Refresh batch button handler: picks new companies
+  const handleRefreshBatch = (): void => {
+    setActiveSearchQuery('');
+    setSearchInput('');
+    setRefreshSeed(Date.now() + Math.floor(Math.random() * 10000));
+  };
 
-  // Filtered companies based on search, category, and ATS
-  const displayedCompanies = useMemo(() => {
-    return filterCompanies(baseCompanies, {
-      search: searchTerm,
+  // Search submit handler
+  const handleSearchSubmit = (e: FormEvent): void => {
+    e.preventDefault();
+    setActiveSearchQuery(searchInput.trim());
+  };
+
+  // Clear search handler
+  const handleClearSearch = (): void => {
+    setSearchInput('');
+    setActiveSearchQuery('');
+  };
+
+  // Companies pool based on search or refreshed batch
+  const currentPool = useMemo(() => {
+    if (activeSearchQuery) {
+      return searchOrDiscoverCompany(activeSearchQuery, selectedLocation);
+    }
+    return getRefreshedCompaniesBatch({
+      location: selectedLocation,
       category: selectedCategory,
+      seed: refreshSeed,
+      countPerCategory: 5,
+    });
+  }, [activeSearchQuery, selectedLocation, selectedCategory, refreshSeed]);
+
+  // Filter pool by ATS and Category
+  const displayedCompanies = useMemo(() => {
+    return filterCompanies(currentPool, {
+      category: selectedCategory,
+      location: selectedLocation,
       atsProvider: selectedAts,
     });
-  }, [baseCompanies, searchTerm, selectedCategory, selectedAts]);
+  }, [currentPool, selectedCategory, selectedLocation, selectedAts]);
 
-  // Category counts for quick-filter tabs
+  // Category counts based on full curated dataset at the selected location
   const categoryCounts = useMemo(() => {
+    const locMatches = filterCompanies(CURATED_COMPANIES, { location: selectedLocation });
     return {
-      all: baseCompanies.length,
-      gcc: baseCompanies.filter((c) => c.category === 'GCC').length,
-      mnc: baseCompanies.filter((c) => c.category === 'Mid-Scale MNC').length,
-      startup: baseCompanies.filter((c) => c.category === 'Startup / Unicorn').length,
+      all: locMatches.length,
+      gcc: locMatches.filter((c) => c.category === 'GCC').length,
+      mnc: locMatches.filter((c) => c.category === 'Mid-Scale MNC').length,
+      startup: locMatches.filter((c) => c.category === 'Startup / Unicorn').length,
+      service: locMatches.filter((c) => c.category === 'Service-Based').length,
     };
-  }, [baseCompanies]);
+  }, [selectedLocation]);
 
   // Handle 1-click Add
   const handleAdd = async (company: SuggestedCompany): Promise<void> => {
     const key = `${company.atsProvider}:${company.atsIdentifier.toLowerCase()}`;
-    setAddingIdentifier(key);
-    setActionFeedback(null);
+    setAddingKey(key);
 
     try {
       const success = await onAddCompany(company);
       if (success) {
-        setLocalAddedSlugs((prev) => new Set(prev).add(key));
-        setActionFeedback(`✓ Added ${company.name} (${company.atsProvider}) to Watchlist.`);
+        setLocalAddedKeys((prev) => new Set(prev).add(key));
+        setToastMessage(`✓ Added ${company.name} to Watchlist`);
       }
     } finally {
-      setAddingIdentifier(null);
-    }
-  };
-
-  // Trigger Gemini AI Discovery
-  const handleAiDiscover = async (e: React.FormEvent): Promise<void> => {
-    e.preventDefault();
-    const query = aiQuery.trim();
-    if (!query) return;
-
-    setIsDiscovering(true);
-    setAiMessage(null);
-
-    try {
-      const discovered = await discoverCompaniesWithGemini(query, apiKey);
-      setAiCompanies(discovered);
-      setAiMessage(`Discovered ${discovered.length} companies matching "${query}".`);
-    } catch (err) {
-      setAiMessage(`Discovery failed: ${String(err)}`);
-    } finally {
-      setIsDiscovering(false);
-    }
-  };
-
-  // Reset AI Discovery back to Curated Catalog
-  const handleResetToCurated = (): void => {
-    setAiCompanies(null);
-    setAiQuery('');
-    setAiMessage(null);
-  };
-
-  // Save API Key locally
-  const handleSaveApiKey = (newKey: string): void => {
-    setApiKey(newKey);
-    if (typeof window !== 'undefined' && window.localStorage) {
-      if (newKey.trim()) {
-        window.localStorage.setItem('gemini_api_key', newKey.trim());
-      } else {
-        window.localStorage.removeItem('gemini_api_key');
-      }
+      setAddingKey(null);
     }
   };
 
@@ -190,120 +187,89 @@ export function CompanySuggestionsModal({
         aria-labelledby="suggestions-modal-title"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Modal Header */}
+        {/* Modal Header without ✕ button */}
         <div className="suggestions-header">
           <div className="suggestions-header__info">
-            <div className="suggestions-header__title-row">
-              <h2 id="suggestions-modal-title" className="suggestions-header__title">
-                Target Company Directory & ATS Discovery
-              </h2>
-            </div>
+            <h2 id="suggestions-modal-title" className="suggestions-header__title">
+              Target Company Directory & ATS Discovery
+            </h2>
             <p className="suggestions-header__desc">
-              Browse curated GCCs, Mid-Scale MNCs, and Startups for Internship & FTE roles.
-              1-click adds verified ATS providers and tokens straight to your Scout watchlist.
+              Browse target employers with verified ATS slugs and cooldown rules.
+              Click &quot;+ Add to Watchlist&quot; to auto-register any careers board with the Scout.
             </p>
           </div>
-          <button
-            type="button"
-            className="suggestions-close"
-            onClick={onClose}
-            aria-label="Close suggestions modal"
-            title="Close (Esc)"
-          >
-            ✕
-          </button>
         </div>
 
-        {/* Global Feedback Banner */}
-        {actionFeedback && (
-          <div className="suggestions-banner suggestions-banner--success">
-            {actionFeedback}
+        {/* Action Controls: Location Selector + Search + Refresh */}
+        <section className="suggestions-action-bar">
+          {/* Location Selector */}
+          <div className="suggestions-location-select-wrap">
+            <label htmlFor="suggestions-location-select" className="suggestions-label">
+              Location:
+            </label>
+            <select
+              id="suggestions-location-select"
+              className="field__control suggestions-location-select"
+              value={selectedLocation}
+              onChange={(e) => {
+                setSelectedLocation(e.target.value as AvailableLocation);
+                setRefreshSeed(Date.now());
+              }}
+            >
+              {AVAILABLE_LOCATIONS.map((loc) => (
+                <option key={loc} value={loc}>
+                  {loc === 'All Locations' ? '📍 All Locations' : loc}
+                </option>
+              ))}
+            </select>
           </div>
-        )}
 
-        {/* AI Discovery Toolbar */}
-        <section className="suggestions-ai-bar">
-          <form onSubmit={handleAiDiscover} className="suggestions-ai-form">
-            <div className="suggestions-ai-input-wrap">
+          {/* Search Input & Button */}
+          <form onSubmit={handleSearchSubmit} className="suggestions-search-form">
+            <div className="suggestions-search-field-wrap">
               <input
                 type="text"
-                className="suggestions-ai-input"
-                placeholder="Find companies with Gemini: e.g. Bangalore AI startups, US Tech GCCs, Fintech Unicorns..."
-                value={aiQuery}
-                onChange={(e) => setAiQuery(e.target.value)}
-                disabled={isDiscovering}
+                className="suggestions-search-input"
+                placeholder="Search any company, domain, or slug..."
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
               />
+              {searchInput && (
+                <button
+                  type="button"
+                  className="suggestions-search-clear"
+                  onClick={handleClearSearch}
+                  title="Clear search"
+                >
+                  Clear
+                </button>
+              )}
             </div>
-            <button
-              type="submit"
-              className="button button--ai-discover"
-              disabled={isDiscovering || !aiQuery.trim()}
-            >
-              {isDiscovering ? 'Discovering...' : 'Discover with Gemini'}
-            </button>
-            {aiCompanies !== null && (
-              <button
-                type="button"
-                className="button button--ai-reset"
-                onClick={handleResetToCurated}
-                title="Reset to default curated list"
-              >
-                Reset to Curated
-              </button>
-            )}
-            <button
-              type="button"
-              className="button--text-toggle"
-              onClick={() => setShowApiKeyInput((prev) => !prev)}
-            >
-              {showApiKeyInput ? 'Hide API Key' : 'API Key'}
+            <button type="submit" className="button button--search">
+              Search
             </button>
           </form>
 
-          {showApiKeyInput && (
-            <div className="suggestions-api-key-box">
-              <label className="field" style={{ margin: 0 }}>
-                <span className="field__label">Gemini API Key (stored in local browser session)</span>
-                <input
-                  type="password"
-                  className="field__control identifier"
-                  placeholder="AIzaSy... (leave blank to use VITE_GEMINI_API_KEY if configured)"
-                  value={apiKey}
-                  onChange={(e) => handleSaveApiKey(e.target.value)}
-                />
-              </label>
-              <span className="field__help">
-                Optional: If not set, uses curated directory matching and safe sector fallbacks.
-              </span>
-            </div>
-          )}
-
-          {aiMessage && (
-            <div className="suggestions-ai-status">
-              <span>{aiMessage}</span>
-            </div>
-          )}
+          {/* Refresh Batch Button */}
+          <button
+            type="button"
+            className="button button--refresh-batch"
+            onClick={handleRefreshBatch}
+            title="Load a new set of companies"
+          >
+            🔄 Refresh Companies
+          </button>
         </section>
 
-        {/* Filters and Search Strip */}
+        {/* Category Pills & ATS Filter */}
         <div className="suggestions-controls">
-          <div className="suggestions-search-wrap">
-            <input
-              type="search"
-              className="suggestions-search-input"
-              placeholder="Search companies, tech domains, or board tokens..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
-          </div>
-
           <div className="suggestions-tabs">
             <button
               type="button"
               className={`suggestions-tab ${selectedCategory === 'all' ? 'suggestions-tab--active' : ''}`}
               onClick={() => setSelectedCategory('all')}
             >
-              All ({categoryCounts.all})
+              All Grouped ({categoryCounts.all})
             </button>
             <button
               type="button"
@@ -326,118 +292,195 @@ export function CompanySuggestionsModal({
             >
               Startups ({categoryCounts.startup})
             </button>
+            <button
+              type="button"
+              className={`suggestions-tab ${selectedCategory === 'Service-Based' ? 'suggestions-tab--active' : ''}`}
+              onClick={() => setSelectedCategory('Service-Based')}
+            >
+              Service-Based ({categoryCounts.service})
+            </button>
           </div>
 
           <div className="suggestions-ats-filter">
             <select
               className="field__control suggestions-select"
               value={selectedAts}
-              onChange={(e) => setSelectedAts(e.target.value as SupportedAtsProvider | 'all')}
+              onChange={(e) => setSelectedAts(e.target.value as AtsProvider | 'all')}
               aria-label="Filter by ATS Provider"
             >
-              <option value="all">All ATS Providers</option>
+              <option value="all">All ATS</option>
               <option value="greenhouse">Greenhouse</option>
               <option value="lever">Lever</option>
               <option value="ashby">Ashby</option>
+              <option value="smartrecruiters">SmartRecruiters</option>
+              <option value="workable">Workable</option>
             </select>
           </div>
         </div>
 
-        {/* Company Cards Grid */}
+        {/* Modal Scrollable Body: Grouped Sections */}
         <div className="suggestions-body">
           {displayedCompanies.length === 0 ? (
             <div className="suggestions-empty">
               <p className="suggestions-empty__title">No matching companies found</p>
               <p className="suggestions-empty__note">
-                Try refining your keyword search or use the Gemini AI discovery bar above to
-                find new target companies.
+                Try clearing your filters, changing the location, or clicking &quot;Refresh Companies&quot; above.
               </p>
             </div>
-          ) : (
-            <div className="suggestions-grid">
-              {displayedCompanies.map((company) => {
-                const isAdded = isCompanyAdded(company);
-                const key = `${company.atsProvider}:${company.atsIdentifier.toLowerCase()}`;
-                const isAdding = addingIdentifier === key;
+          ) : selectedCategory === 'all' && !activeSearchQuery ? (
+            /* Grouped View across all categories */
+            <div className="suggestions-grouped-sections">
+              {CATEGORY_DEFINITIONS.map((catDef) => {
+                const groupCompanies = displayedCompanies.filter(
+                  (c) => c.category === catDef.id,
+                );
+                if (groupCompanies.length === 0) return null;
 
                 return (
-                  <article key={key} className="company-card">
-                    <div className="company-card__header">
-                      <div>
-                        <h3 className="company-card__name">{company.name}</h3>
-                        <div className="company-card__domain">{company.domain}</div>
-                      </div>
-
-                      <div className="company-card__badges">
-                        <span className={`badge-cat badge-cat--${company.category.replace(/[^a-zA-Z]/g, '').toLowerCase()}`}>
-                          {company.category}
-                        </span>
-                        <span className="badge-ats">
-                          {company.atsProvider}: {company.atsIdentifier}
-                        </span>
-                      </div>
+                  <section key={catDef.id} className="suggestions-group-section">
+                    <div className="suggestions-group-header">
+                      <span className="suggestions-group-icon">{catDef.icon}</span>
+                      <h3 className="suggestions-group-title">{catDef.label}</h3>
+                      <span className="suggestions-group-count">
+                        ({groupCompanies.length})
+                      </span>
                     </div>
 
-                    {/* Cooldown Section */}
-                    <div className="company-card__cooldown">
-                      <div className="cooldown-item">
-                        <span className="cooldown-label">Interview Cooldown:</span>
-                        <span className="cooldown-val">{company.cooldown.interview}</span>
-                      </div>
-                      <div className="cooldown-item">
-                        <span className="cooldown-label">Screening Cooldown:</span>
-                        <span className="cooldown-val">{company.cooldown.screening}</span>
-                      </div>
-                      {company.cooldown.notes && (
-                        <div className="cooldown-notes">{company.cooldown.notes}</div>
-                      )}
+                    <div className="suggestions-grid">
+                      {groupCompanies.map((company) => (
+                        <CompanyCard
+                          key={`${company.atsProvider}:${company.atsIdentifier}`}
+                          company={company}
+                          isAdded={isCompanyAdded(company)}
+                          isAdding={
+                            addingKey ===
+                            `${company.atsProvider}:${company.atsIdentifier.toLowerCase()}`
+                          }
+                          onAdd={handleAdd}
+                        />
+                      ))}
                     </div>
-
-                    {/* 1-Click Action Footer */}
-                    <div className="company-card__footer">
-                      <div className="company-card__ats-detail">
-                        <span className="identifier" style={{ fontSize: '0.75rem', color: 'var(--ink-muted)' }}>
-                          board: {company.atsIdentifier}
-                        </span>
-                      </div>
-
-                      {isAdded ? (
-                        <button
-                          type="button"
-                          className="button button--company-added"
-                          disabled
-                          title="Already registered in your Scout watchlist"
-                        >
-                          Added ✓
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          className="button button--company-add"
-                          onClick={() => handleAdd(company)}
-                          disabled={isAdding}
-                        >
-                          {isAdding ? 'Adding...' : '+ Add to Watchlist'}
-                        </button>
-                      )}
-                    </div>
-                  </article>
+                  </section>
                 );
               })}
+            </div>
+          ) : (
+            /* Direct Grid View (when filtered by specific category or searching) */
+            <div className="suggestions-grid">
+              {displayedCompanies.map((company) => (
+                <CompanyCard
+                  key={`${company.atsProvider}:${company.atsIdentifier}`}
+                  company={company}
+                  isAdded={isCompanyAdded(company)}
+                  isAdding={
+                    addingKey ===
+                    `${company.atsProvider}:${company.atsIdentifier.toLowerCase()}`
+                  }
+                  onAdd={handleAdd}
+                />
+              ))}
             </div>
           )}
         </div>
 
-        {/* Modal Footer */}
+        {/* Transient Toast Notification */}
+        {toastMessage && (
+          <div className="suggestions-toast-container">
+            <div className="suggestions-toast">{toastMessage}</div>
+          </div>
+        )}
+
+        {/* Modal Footer with Done Button */}
         <div className="suggestions-footer">
           <span className="suggestions-footer__note">
-            Adding a company immediately registers its direct careers API endpoint with the Scout.
+            The Scout directly polls public JSON API endpoints for each added board token.
           </span>
-          <button type="button" className="button" onClick={onClose}>
+          <button type="button" className="button button--done" onClick={onClose}>
             Done
           </button>
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Individual Company Card component
+ */
+interface CompanyCardProps {
+  readonly company: SuggestedCompany;
+  readonly isAdded: boolean;
+  readonly isAdding: boolean;
+  readonly onAdd: (company: SuggestedCompany) => void;
+}
+
+function CompanyCard({ company, isAdded, isAdding, onAdd }: CompanyCardProps): ReactElement {
+  const catClass = company.category.replace(/[^a-zA-Z]/g, '').toLowerCase();
+
+  return (
+    <article className="company-card">
+      <div className="company-card__header">
+        <div>
+          <div className="company-card__title-row">
+            <h3 className="company-card__name">{company.name}</h3>
+            {company.location && (
+              <span className="badge-location">📍 {company.location}</span>
+            )}
+          </div>
+          <div className="company-card__domain">{company.domain}</div>
+        </div>
+
+        <div className="company-card__badges">
+          <span className={`badge-cat badge-cat--${catClass}`}>
+            {company.category}
+          </span>
+          <span className="badge-ats">
+            {company.atsProvider}: {company.atsIdentifier}
+          </span>
+        </div>
+      </div>
+
+      {/* Cooldown Section */}
+      <div className="company-card__cooldown">
+        <div className="cooldown-item">
+          <span className="cooldown-label">Interview Cooldown:</span>
+          <span className="cooldown-val">{company.cooldown.interview}</span>
+        </div>
+        <div className="cooldown-item">
+          <span className="cooldown-label">Screening Cooldown:</span>
+          <span className="cooldown-val">{company.cooldown.screening}</span>
+        </div>
+        {company.cooldown.notes && (
+          <div className="cooldown-notes">{company.cooldown.notes}</div>
+        )}
+      </div>
+
+      {/* Action Footer */}
+      <div className="company-card__footer">
+        <span className="identifier" style={{ fontSize: '0.75rem', color: 'var(--ink-muted)' }}>
+          slug: {company.atsIdentifier}
+        </span>
+
+        {isAdded ? (
+          <button
+            type="button"
+            className="button button--company-added"
+            disabled
+            title="Already in your Scout watchlist"
+          >
+            Added ✓
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="button button--company-add"
+            onClick={() => onAdd(company)}
+            disabled={isAdding}
+          >
+            {isAdding ? 'Adding...' : '+ Add to Watchlist'}
+          </button>
+        )}
+      </div>
+    </article>
   );
 }

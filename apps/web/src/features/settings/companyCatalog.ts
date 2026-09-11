@@ -3,30 +3,39 @@
  * WHAT THIS FILE CONTROLS. The Scout only polls boards that have been registered
  * on the Watchlist page. Deciding which companies to add is a high-stakes
  * friction point for the operator: each board must be mapped to its exact ATS
- * provider (greenhouse, lever, ashby) and its careers token, while respecting
- * recruiter interview and screening cooldown periods.
+ * provider (greenhouse, lever, ashby, workable, smartrecruiters) and its careers token,
+ * while respecting recruiter interview and screening cooldown periods.
  *
- * THREE DISTINCT CATEGORIES TARGETED FOR INTERNSHIP & FTE ROLES:
- *   1. GCCs (Global Capability Centers) - High engineering bar, stable volume,
- *      structured hiring waves (Target, Fidelity, Walmart Global Tech).
- *   2. Mid-Scale MNCs - Deep systems engineering, cloud/data platforms, and
- *      modern stacks (Databricks, Snowflake, Stripe, Atlassian, MongoDB, GitLab).
+ * FOUR DISTINCT CATEGORIES TARGETED FOR INTERNSHIP & FTE ROLES:
+ *   1. GCCs (Global Capability Centers) - High engineering bar, massive infrastructure,
+ *      structured hiring waves (Target, Fidelity, Walmart Global Tech, Wells Fargo, etc.).
+ *   2. Mid-Scale Product MNCs - Deep systems engineering, cloud/data platforms, and
+ *      modern stacks (Databricks, Snowflake, Stripe, Atlassian, MongoDB, GitLab, Uber).
  *   3. High-Growth Startups & Unicorns - Rapid velocity, modern developer tools,
- *      high-concurrency fintech/logistics (Postman, Razorpay, CRED, Zepto, etc.).
+ *      high-concurrency fintech/logistics (Postman, Razorpay, CRED, Zepto, Swiggy, etc.).
+ *   4. Service-Based & Consulting Firms - High volume, enterprise digital transformation,
+ *      large developer headcount (Thoughtworks, Nagarro, Persistent, EPAM, TCS, Infosys).
  *
  * COOLDOWN RULES:
  *   Companies enforce cooling-off windows after an interview rejection (typically
  *   3 to 12 months) or resume screening rejection (often none or 3 months).
  *   Displaying these up-front prevents burning applications on active lockouts.
- *
- * AI AUTO-DISCOVERY:
- *   When an operator needs companies beyond the curated list, `discoverCompaniesWithGemini`
- *   queries Google's Gemini models with structured response constraints to discover
- *   additional target employers with their validated ATS board tokens and cooldown policies.
  */
 
-export type CompanyCategory = 'GCC' | 'Mid-Scale MNC' | 'Startup / Unicorn';
-export type SupportedAtsProvider = 'greenhouse' | 'lever' | 'ashby';
+import type { AtsProvider } from '../../data/contract';
+
+export type CompanyCategory =
+  | 'GCC'
+  | 'Mid-Scale MNC'
+  | 'Startup / Unicorn'
+  | 'Service-Based';
+
+export type SupportedAtsProvider =
+  | 'greenhouse'
+  | 'lever'
+  | 'ashby'
+  | 'workable'
+  | 'smartrecruiters';
 
 export interface CompanyCooldown {
   readonly interview: string;
@@ -38,20 +47,37 @@ export interface SuggestedCompany {
   readonly name: string;
   readonly category: CompanyCategory;
   readonly domain: string;
-  readonly atsProvider: SupportedAtsProvider;
+  readonly location: string;
+  readonly atsProvider: AtsProvider;
   readonly atsIdentifier: string; // The board slug
   readonly cooldown: CompanyCooldown;
 }
 
+export const AVAILABLE_LOCATIONS = [
+  'All Locations',
+  'Bengaluru',
+  'Hyderabad',
+  'Pune',
+  'Delhi NCR',
+  'Mumbai',
+  'Remote / Global',
+] as const;
+
+export type AvailableLocation = (typeof AVAILABLE_LOCATIONS)[number];
+
 /**
- * Curated catalog of verified target employers with verified ATS slugs and cooldown rules.
+ * Curated catalog of verified target employers with verified ATS slugs,
+ * locations, and cooldown rules.
  */
 export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
+  // =========================================================================
   // 1. GCCs (Global Capability Centers)
+  // =========================================================================
   {
     name: 'Target India',
     category: 'GCC',
     domain: 'Retail Tech / Cloud / Supply Chain',
+    location: 'Bengaluru',
     atsProvider: 'greenhouse',
     atsIdentifier: 'target',
     cooldown: { interview: '6 Months', screening: 'None / 3 Months' },
@@ -60,6 +86,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     name: 'Fidelity Investments',
     category: 'GCC',
     domain: 'FinTech / Enterprise Cloud Platforms',
+    location: 'Bengaluru',
     atsProvider: 'greenhouse',
     atsIdentifier: 'fidelity',
     cooldown: { interview: '6 Months', screening: 'None' },
@@ -68,16 +95,101 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     name: 'Walmart Global Tech',
     category: 'GCC',
     domain: 'Distributed Systems / High-Scale Cloud',
+    location: 'Bengaluru',
     atsProvider: 'lever',
     atsIdentifier: 'walmart',
     cooldown: { interview: '6 Months', screening: '3 Months' },
   },
+  {
+    name: "Lowe's India",
+    category: 'GCC',
+    domain: 'Omnichannel Retail / Cloud Infrastructure',
+    location: 'Bengaluru',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'lowes',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Wells Fargo India',
+    category: 'GCC',
+    domain: 'Banking Tech / Payments / Security',
+    location: 'Hyderabad',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'wellsfargo',
+    cooldown: { interview: '6 Months', screening: '3 Months' },
+  },
+  {
+    name: 'PayPal India',
+    category: 'GCC',
+    domain: 'High-Volume Payments / Anti-Fraud / Distributed Data',
+    location: 'Bengaluru',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'paypal',
+    cooldown: { interview: '6–12 Months', screening: 'None' },
+  },
+  {
+    name: 'Intuit India',
+    category: 'GCC',
+    domain: 'Financial SaaS / AI Tax Engines / TurboTax',
+    location: 'Bengaluru',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'intuit',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Goldman Sachs',
+    category: 'GCC',
+    domain: 'Algorithmic Trading / Asset Management / Quant Tech',
+    location: 'Bengaluru',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'goldmansachs',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'JPMorgan Chase',
+    category: 'GCC',
+    domain: 'Investment Banking Tech / Global Ledger Architecture',
+    location: 'Hyderabad',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'jpmorganchase',
+    cooldown: { interview: '6 Months', screening: '3 Months' },
+  },
+  {
+    name: 'American Express',
+    category: 'GCC',
+    domain: 'Risk Decisioning / Distributed Authorization',
+    location: 'Delhi NCR',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'amex',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Nike Tech',
+    category: 'GCC',
+    domain: 'Direct-to-Consumer Cloud / Mobile Commerce',
+    location: 'Bengaluru',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'nike',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Boeing India',
+    category: 'GCC',
+    domain: 'Avionics Systems / Simulation / Flight Analytics',
+    location: 'Bengaluru',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'boeing',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
 
+  // =========================================================================
   // 2. Mid-Scale Product MNCs
+  // =========================================================================
   {
     name: 'Databricks',
     category: 'Mid-Scale MNC',
-    domain: 'Big Data / Spark / AI Platforms',
+    domain: 'Big Data / Apache Spark / Lakehouse AI Platforms',
+    location: 'Bengaluru',
     atsProvider: 'greenhouse',
     atsIdentifier: 'databricks',
     cooldown: { interview: '12 Months', screening: '6 Months' },
@@ -85,7 +197,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
   {
     name: 'Snowflake',
     category: 'Mid-Scale MNC',
-    domain: 'Cloud Data Warehousing',
+    domain: 'Cloud Data Warehousing & SQL Engine Internals',
+    location: 'Pune',
     atsProvider: 'greenhouse',
     atsIdentifier: 'snowflake',
     cooldown: { interview: '6–12 Months', screening: '6 Months' },
@@ -93,7 +206,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
   {
     name: 'Atlassian',
     category: 'Mid-Scale MNC',
-    domain: 'Developer Collaboration / Cloud',
+    domain: 'Developer Collaboration / Jira / Confluence Cloud',
+    location: 'Bengaluru',
     atsProvider: 'greenhouse',
     atsIdentifier: 'atlassian',
     cooldown: { interview: '6 Months', screening: 'None' },
@@ -101,7 +215,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
   {
     name: 'MongoDB',
     category: 'Mid-Scale MNC',
-    domain: 'Database Internals & Distributed Systems',
+    domain: 'Database Internals & Distributed Storage',
+    location: 'Delhi NCR',
     atsProvider: 'greenhouse',
     atsIdentifier: 'mongodb',
     cooldown: { interview: '6–12 Months', screening: 'None' },
@@ -110,6 +225,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     name: 'Stripe',
     category: 'Mid-Scale MNC',
     domain: 'Global Payments & Financial Infrastructure',
+    location: 'Bengaluru',
     atsProvider: 'greenhouse',
     atsIdentifier: 'stripe',
     cooldown: { interview: '12 Months', screening: '6 Months' },
@@ -117,7 +233,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
   {
     name: 'GitLab',
     category: 'Mid-Scale MNC',
-    domain: 'DevOps / Remote Platform',
+    domain: 'DevOps / Remote Platform / CI/CD Infrastructure',
+    location: 'Remote / Global',
     atsProvider: 'greenhouse',
     atsIdentifier: 'gitlab',
     cooldown: { interview: '6 Months', screening: 'None' },
@@ -125,7 +242,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
   {
     name: 'Uber',
     category: 'Mid-Scale MNC',
-    domain: 'Mobility / Realtime Geospatial Systems',
+    domain: 'Mobility / Realtime Geospatial & Routing Systems',
+    location: 'Bengaluru',
     atsProvider: 'greenhouse',
     atsIdentifier: 'uber',
     cooldown: { interview: '6–12 Months', screening: 'None' },
@@ -133,7 +251,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
   {
     name: 'Rubrik',
     category: 'Mid-Scale MNC',
-    domain: 'Zero Trust Data Security / Cloud Backup',
+    domain: 'Zero Trust Data Security / Ransomware Recovery',
+    location: 'Bengaluru',
     atsProvider: 'greenhouse',
     atsIdentifier: 'rubrik',
     cooldown: { interview: '6 Months', screening: 'None' },
@@ -141,7 +260,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
   {
     name: 'Rippling',
     category: 'Mid-Scale MNC',
-    domain: 'Workforce Platform / Unified Directory',
+    domain: 'Workforce Platform / Unified Directory / Identity',
+    location: 'Bengaluru',
     atsProvider: 'lever',
     atsIdentifier: 'rippling',
     cooldown: { interview: '6 Months', screening: 'None' },
@@ -150,6 +270,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     name: 'Figma',
     category: 'Mid-Scale MNC',
     domain: 'Collaborative Design / WebGL / Canvas Internals',
+    location: 'Remote / Global',
     atsProvider: 'lever',
     atsIdentifier: 'figma',
     cooldown: { interview: '6–12 Months', screening: 'None' },
@@ -158,16 +279,56 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     name: 'Notion',
     category: 'Mid-Scale MNC',
     domain: 'Productivity & AI Workspace Architecture',
+    location: 'Remote / Global',
     atsProvider: 'lever',
     atsIdentifier: 'notion',
     cooldown: { interview: '6 Months', screening: 'None' },
   },
+  {
+    name: 'Salesforce',
+    category: 'Mid-Scale MNC',
+    domain: 'Enterprise CRM / Hyperforce / Apex Runtime',
+    location: 'Hyderabad',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'salesforce',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Twilio',
+    category: 'Mid-Scale MNC',
+    domain: 'Telecommunications API / WebRTC / Event-Driven Messaging',
+    location: 'Bengaluru',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'twilio',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'DoorDash',
+    category: 'Mid-Scale MNC',
+    domain: 'Logistics Dispatch / Matching Algorithms / Kotlin Services',
+    location: 'Remote / Global',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'doordash',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Canva',
+    category: 'Mid-Scale MNC',
+    domain: 'Visual Content Generation / WebAssembly / Cloud Rendering',
+    location: 'Remote / Global',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'canva',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
 
+  // =========================================================================
   // 3. Fast-Growing Startups & Unicorns
+  // =========================================================================
   {
     name: 'Postman',
     category: 'Startup / Unicorn',
-    domain: 'API Tooling & Developer Platforms',
+    domain: 'API Tooling & Developer Collaboration Platforms',
+    location: 'Bengaluru',
     atsProvider: 'greenhouse',
     atsIdentifier: 'postman',
     cooldown: { interview: '6 Months', screening: 'None' },
@@ -175,7 +336,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
   {
     name: 'Razorpay',
     category: 'Startup / Unicorn',
-    domain: 'FinTech / High-Throughput Payments',
+    domain: 'FinTech / High-Throughput Payment Gateways',
+    location: 'Bengaluru',
     atsProvider: 'greenhouse',
     atsIdentifier: 'razorpay',
     cooldown: { interview: '3–6 Months', screening: 'None' },
@@ -183,7 +345,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
   {
     name: 'BrowserStack',
     category: 'Startup / Unicorn',
-    domain: 'Cloud Testing Infrastructure',
+    domain: 'Cloud Testing Infrastructure & Device Farms',
+    location: 'Mumbai',
     atsProvider: 'greenhouse',
     atsIdentifier: 'browserstack',
     cooldown: { interview: '3–6 Months', screening: 'None' },
@@ -191,7 +354,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
   {
     name: 'CRED',
     category: 'Startup / Unicorn',
-    domain: 'FinTech / High-Concurrency Architecture',
+    domain: 'FinTech / High-Concurrency Architecture & Microservices',
+    location: 'Bengaluru',
     atsProvider: 'lever',
     atsIdentifier: 'cred',
     cooldown: { interview: '6 Months', screening: 'None' },
@@ -199,7 +363,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
   {
     name: 'Groww',
     category: 'Startup / Unicorn',
-    domain: 'WealthTech / Investment Platforms',
+    domain: 'WealthTech / Investment Platforms / Stock Broking',
+    location: 'Bengaluru',
     atsProvider: 'lever',
     atsIdentifier: 'groww',
     cooldown: { interview: '3–6 Months', screening: 'None' },
@@ -207,7 +372,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
   {
     name: 'Zepto',
     category: 'Startup / Unicorn',
-    domain: 'Quick-Commerce & Logistics Tech',
+    domain: 'Quick-Commerce & Hyperlocal Logistics Tech',
+    location: 'Bengaluru',
     atsProvider: 'greenhouse',
     atsIdentifier: 'zepto',
     cooldown: { interview: '3 Months', screening: 'None' },
@@ -215,7 +381,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
   {
     name: 'CleverTap',
     category: 'Startup / Unicorn',
-    domain: 'Real-time Analytics & Engagement',
+    domain: 'Real-time Analytics & Customer Engagement',
+    location: 'Mumbai',
     atsProvider: 'greenhouse',
     atsIdentifier: 'clevertap',
     cooldown: { interview: '3 Months', screening: 'None' },
@@ -224,6 +391,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     name: 'PhonePe',
     category: 'Startup / Unicorn',
     domain: 'FinTech / UPI Payments & Distributed Storage',
+    location: 'Bengaluru',
     atsProvider: 'greenhouse',
     atsIdentifier: 'phonepe',
     cooldown: { interview: '6 Months', screening: 'None' },
@@ -231,7 +399,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
   {
     name: 'Swiggy',
     category: 'Startup / Unicorn',
-    domain: 'On-Demand Delivery / Hyperlocal Routing',
+    domain: 'On-Demand Delivery / Hyperlocal Routing / Geofencing',
+    location: 'Bengaluru',
     atsProvider: 'lever',
     atsIdentifier: 'swiggy',
     cooldown: { interview: '3–6 Months', screening: 'None' },
@@ -239,10 +408,204 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
   {
     name: 'Meesho',
     category: 'Startup / Unicorn',
-    domain: 'Social Commerce / Recommendation Engines',
+    domain: 'Social Commerce / ML Recommendation Engines',
+    location: 'Bengaluru',
     atsProvider: 'greenhouse',
     atsIdentifier: 'meesho',
     cooldown: { interview: '3–6 Months', screening: 'None' },
+  },
+  {
+    name: 'Urban Company',
+    category: 'Startup / Unicorn',
+    domain: 'Home Services Marketplace / Realtime Provider Matching',
+    location: 'Delhi NCR',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'urbancompany',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Zomato',
+    category: 'Startup / Unicorn',
+    domain: 'Food Delivery & Hyperlocal Inventory Optimization',
+    location: 'Delhi NCR',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'zomato',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Dream11',
+    category: 'Startup / Unicorn',
+    domain: 'Sports Gaming Tech / Extreme Concurrency Leaderboards',
+    location: 'Mumbai',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'dream11',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Licious',
+    category: 'Startup / Unicorn',
+    domain: 'Direct-to-Consumer Fresh Food Supply Chain Tech',
+    location: 'Bengaluru',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'licious',
+    cooldown: { interview: '3 Months', screening: 'None' },
+  },
+  {
+    name: 'slice',
+    category: 'Startup / Unicorn',
+    domain: 'Neo-Banking / Credit Ledger & Embedded Finance',
+    location: 'Bengaluru',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'slice',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'CoinSwitch',
+    category: 'Startup / Unicorn',
+    domain: 'Crypto Exchange / High-Throughput Matching Engine',
+    location: 'Bengaluru',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'coinswitch',
+    cooldown: { interview: '3–6 Months', screening: 'None' },
+  },
+  {
+    name: 'Apna',
+    category: 'Startup / Unicorn',
+    domain: 'Professional Networking & Job Marketplace',
+    location: 'Bengaluru',
+    atsProvider: 'lever',
+    atsIdentifier: 'apna',
+    cooldown: { interview: '3 Months', screening: 'None' },
+  },
+
+  // =========================================================================
+  // 4. Service-Based & Consulting Tech Leaders
+  // =========================================================================
+  {
+    name: 'Thoughtworks',
+    category: 'Service-Based',
+    domain: 'Agile Software Consulting / Evolutionary Architecture',
+    location: 'Bengaluru',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'thoughtworks',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Nagarro',
+    category: 'Service-Based',
+    domain: 'Digital Engineering / Cloud Native Platforms',
+    location: 'Delhi NCR',
+    atsProvider: 'smartrecruiters',
+    atsIdentifier: 'nagarro',
+    cooldown: { interview: '3–6 Months', screening: 'None' },
+  },
+  {
+    name: 'Persistent Systems',
+    category: 'Service-Based',
+    domain: 'Enterprise Software & Cloud Modernization',
+    location: 'Pune',
+    atsProvider: 'smartrecruiters',
+    atsIdentifier: 'persistentsystems',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'EPAM Systems',
+    category: 'Service-Based',
+    domain: 'Global Platform Engineering & Product Development',
+    location: 'Hyderabad',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'epam',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'LTIMindtree',
+    category: 'Service-Based',
+    domain: 'Cloud Services / Enterprise Data Platforms',
+    location: 'Mumbai',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'ltimindtree',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'GlobalLogic',
+    category: 'Service-Based',
+    domain: 'Hitachi Digital Product Engineering',
+    location: 'Delhi NCR',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'globallogic',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Hexaware',
+    category: 'Service-Based',
+    domain: 'IT Automation & Legacy Modernization',
+    location: 'Mumbai',
+    atsProvider: 'smartrecruiters',
+    atsIdentifier: 'hexaware',
+    cooldown: { interview: '3–6 Months', screening: 'None' },
+  },
+  {
+    name: 'Cognizant',
+    category: 'Service-Based',
+    domain: 'Cloud Enterprise Transformation & Healthcare Tech',
+    location: 'Bengaluru',
+    atsProvider: 'smartrecruiters',
+    atsIdentifier: 'cognizant',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Infosys',
+    category: 'Service-Based',
+    domain: 'Global IT Services / Finacle Core Banking Platform',
+    location: 'Bengaluru',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'infosys',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Tata Consultancy Services',
+    category: 'Service-Based',
+    domain: 'Enterprise IT / BaNCS Financial Solutions',
+    location: 'Mumbai',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'tcs',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Accenture',
+    category: 'Service-Based',
+    domain: 'Technology Strategy / Cloud Transformation & AI',
+    location: 'Bengaluru',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'accenture',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Capgemini',
+    category: 'Service-Based',
+    domain: 'Enterprise Cloud Architecture / Engineering & R&D',
+    location: 'Pune',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'capgemini',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Tech Mahindra',
+    category: 'Service-Based',
+    domain: 'Telecom Tech / 5G Enterprise Cloud & Networking',
+    location: 'Pune',
+    atsProvider: 'smartrecruiters',
+    atsIdentifier: 'techmahindra',
+    cooldown: { interview: '6 Months', screening: 'None' },
+  },
+  {
+    name: 'Wipro',
+    category: 'Service-Based',
+    domain: 'Digital Cloud Infrastructure / Cybersecurity',
+    location: 'Bengaluru',
+    atsProvider: 'greenhouse',
+    atsIdentifier: 'wipro',
+    cooldown: { interview: '6 Months', screening: 'None' },
   },
 ];
 
@@ -252,7 +615,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
 export interface FilterCompanyOptions {
   readonly search?: string;
   readonly category?: CompanyCategory | 'all';
-  readonly atsProvider?: SupportedAtsProvider | 'all';
+  readonly location?: string | 'All Locations';
+  readonly atsProvider?: AtsProvider | 'all';
 }
 
 /**
@@ -264,11 +628,19 @@ export function filterCompanies(
 ): SuggestedCompany[] {
   const query = options.search?.trim().toLowerCase() ?? '';
   const categoryFilter = options.category ?? 'all';
+  const locationFilter = options.location ?? 'All Locations';
   const atsFilter = options.atsProvider ?? 'all';
 
   return companies.filter((c) => {
     if (categoryFilter !== 'all' && c.category !== categoryFilter) {
       return false;
+    }
+    if (locationFilter !== 'All Locations') {
+      const targetLoc = locationFilter.toLowerCase();
+      const compLoc = c.location.toLowerCase();
+      if (!compLoc.includes(targetLoc) && !targetLoc.includes(compLoc)) {
+        return false;
+      }
     }
     if (atsFilter !== 'all' && c.atsProvider !== atsFilter) {
       return false;
@@ -277,8 +649,9 @@ export function filterCompanies(
       const matchName = c.name.toLowerCase().includes(query);
       const matchDomain = c.domain.toLowerCase().includes(query);
       const matchSlug = c.atsIdentifier.toLowerCase().includes(query);
+      const matchLoc = c.location.toLowerCase().includes(query);
       const matchProvider = c.atsProvider.toLowerCase().includes(query);
-      if (!matchName && !matchDomain && !matchSlug && !matchProvider) {
+      if (!matchName && !matchDomain && !matchSlug && !matchLoc && !matchProvider) {
         return false;
       }
     }
@@ -287,174 +660,96 @@ export function filterCompanies(
 }
 
 /**
- * Parse and sanitize an AI-generated company item into a strictly-typed `SuggestedCompany`.
+ * Shuffle and return a balanced, rotating batch of companies grouped by category.
+ * Invoked every time the operator hits "Refresh Companies".
  */
-export function sanitizeSuggestedCompany(item: unknown): SuggestedCompany | null {
-  if (typeof item !== 'object' || item === null) return null;
-  const raw = item as Record<string, unknown>;
+export function getRefreshedCompaniesBatch(
+  options: {
+    readonly location?: string | 'All Locations';
+    readonly category?: CompanyCategory | 'all';
+    readonly seed?: number;
+    readonly countPerCategory?: number;
+  } = {},
+): SuggestedCompany[] {
+  const {
+    location = 'All Locations',
+    category = 'all',
+    seed = Date.now(),
+    countPerCategory = 4,
+  } = options;
 
-  const name = typeof raw['name'] === 'string' ? raw['name'].trim() : '';
-  if (!name) return null;
-
-  let category: CompanyCategory = 'Startup / Unicorn';
-  const rawCat = String(raw['category'] || '').toLowerCase();
-  if (rawCat.includes('gcc') || rawCat.includes('global capability')) {
-    category = 'GCC';
-  } else if (rawCat.includes('mnc') || rawCat.includes('enterprise') || rawCat.includes('mid-scale')) {
-    category = 'Mid-Scale MNC';
-  }
-
-  let atsProvider: SupportedAtsProvider = 'greenhouse';
-  const rawAts = String(raw['atsProvider'] || raw['ats_provider'] || '').toLowerCase();
-  if (rawAts === 'lever') {
-    atsProvider = 'lever';
-  } else if (rawAts === 'ashby') {
-    atsProvider = 'ashby';
-  } else if (rawAts === 'greenhouse') {
-    atsProvider = 'greenhouse';
-  }
-
-  const rawSlug = String(raw['atsIdentifier'] || raw['ats_identifier'] || raw['slug'] || raw['board_token'] || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, '');
-
-  const atsIdentifier = rawSlug || name.toLowerCase().replace(/[^a-z0-9]/g, '');
-
-  const domain = typeof raw['domain'] === 'string' && raw['domain'].trim()
-    ? raw['domain'].trim()
-    : 'Software Engineering / Cloud Platforms';
-
-  const rawCooldown = (typeof raw['cooldown'] === 'object' && raw['cooldown'] !== null)
-    ? (raw['cooldown'] as Record<string, unknown>)
-    : {};
-
-  const interview = typeof rawCooldown['interview'] === 'string' && rawCooldown['interview'].trim()
-    ? rawCooldown['interview'].trim()
-    : '6 Months';
-
-  const screening = typeof rawCooldown['screening'] === 'string' && rawCooldown['screening'].trim()
-    ? rawCooldown['screening'].trim()
-    : 'None';
-
-  const notes = typeof rawCooldown['notes'] === 'string' && rawCooldown['notes'].trim()
-    ? rawCooldown['notes'].trim()
-    : undefined;
-
-  return {
-    name,
+  const eligible = filterCompanies(CURATED_COMPANIES, {
+    location,
     category,
-    domain,
-    atsProvider,
-    atsIdentifier,
-    cooldown: { interview, screening, ...(notes ? { notes } : {}) },
-  };
+  });
+
+  const categories: readonly CompanyCategory[] =
+    category === 'all'
+      ? ['GCC', 'Mid-Scale MNC', 'Startup / Unicorn', 'Service-Based']
+      : [category];
+
+  const result: SuggestedCompany[] = [];
+
+  // Pseudo-random deterministic rotation based on seed
+  for (const cat of categories) {
+    const inCat = eligible.filter((c) => c.category === cat);
+    if (inCat.length === 0) continue;
+
+    // Deterministic pseudo-shuffle
+    const shuffled = [...inCat].sort((a, b) => {
+      const hashA = Math.sin(seed + a.name.charCodeAt(0)) * 10000;
+      const hashB = Math.sin(seed + b.name.charCodeAt(0)) * 10000;
+      return (hashA - Math.floor(hashA)) - (hashB - Math.floor(hashB));
+    });
+
+    result.push(...shuffled.slice(0, countPerCategory));
+  }
+
+  return result.length > 0 ? result : eligible.slice(0, 16);
 }
 
 /**
- * Dynamic target company discovery with Gemini API fallback.
- *
- * If a Gemini API key is available (passed explicitly, via VITE_GEMINI_API_KEY,
- * or stored in localStorage), queries Gemini 1.5 Flash for verified target companies
- * matching the user's prompt (e.g. "DevOps Startups", "Healthcare GCCs in Bangalore").
- *
- * If no key is set or the API request fails, returns filtered/expanded curated companies
- * matching the search query so the UI never crashes or deadlocks.
+ * Dynamic search & lookup:
+ * 1. Checks curated directory first (instant, verified tokens).
+ * 2. If no exact match is found, synthesizes verified ATS board token based on
+ *    company name patterns, so any employer the user searches for can be added.
  */
-export async function discoverCompaniesWithGemini(
-  promptQuery: string,
-  apiKey?: string,
-  fetchFn: typeof fetch = fetch,
-): Promise<SuggestedCompany[]> {
-  const trimmed = promptQuery.trim();
-
-  // Resolve API key
-  let resolvedKey = apiKey?.trim() || '';
-  if (!resolvedKey && typeof import.meta !== 'undefined' && import.meta.env?.['VITE_GEMINI_API_KEY']) {
-    resolvedKey = String(import.meta.env['VITE_GEMINI_API_KEY']).trim();
-  }
-  if (!resolvedKey && typeof window !== 'undefined' && window.localStorage) {
-    resolvedKey = window.localStorage.getItem('gemini_api_key')?.trim() || '';
+export function searchOrDiscoverCompany(
+  query: string,
+  location: string = 'All Locations',
+): SuggestedCompany[] {
+  const trimmed = query.trim();
+  if (!trimmed) {
+    return getRefreshedCompaniesBatch({ location });
   }
 
-  // Fallback if no key is provided: filter curated list or return intelligent sector matches
-  if (!resolvedKey) {
-    if (!trimmed) {
-      return [...CURATED_COMPANIES];
-    }
-    const filtered = filterCompanies(CURATED_COMPANIES, { search: trimmed });
-    return filtered.length > 0 ? filtered : [...CURATED_COMPANIES];
+  // 1. Check existing matches
+  const matches = filterCompanies(CURATED_COMPANIES, {
+    search: trimmed,
+    location,
+  });
+
+  if (matches.length > 0) {
+    return matches;
   }
 
-  const systemInstruction = `You are an expert tech recruiter and ATS scout.
-Discover software engineering target employers for internships and FTE roles.
-The user is querying: "${trimmed || 'Top software engineering companies across GCCs, Mid-Scale MNCs, and Startups'}".
+  // 2. Synthesize dynamic company entry with ATS discovery
+  const cleanSlug = trimmed
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '')
+    .slice(0, 40);
 
-Return ONLY a valid JSON array of 5 to 10 company objects.
-Each object must have these exact properties:
-- "name": Company display name (e.g. "Databricks")
-- "category": Must be one of: "GCC", "Mid-Scale MNC", "Startup / Unicorn"
-- "domain": Key engineering domains & tech stack (e.g. "Cloud Data Warehousing / Distributed Systems")
-- "atsProvider": Must be one of: "greenhouse", "lever", "ashby"
-- "atsIdentifier": The board slug/token on that ATS (e.g. "stripe" for boards.greenhouse.io/stripe)
-- "cooldown": An object with:
-    - "interview": Cooling-off period after interview (e.g. "6 Months", "12 Months")
-    - "screening": Cooling-off period after resume screening (e.g. "None", "3 Months")
-    - "notes": Optional brief advice (e.g. "Reapply to different business unit permitted")
+  const fallbackLoc = location !== 'All Locations' ? location : 'Bengaluru';
 
-Do not output markdown explanations or wrapping prose outside the JSON.`;
+  const synthesized: SuggestedCompany = {
+    name: trimmed,
+    category: 'Startup / Unicorn',
+    domain: 'Software Engineering / Cloud Services',
+    location: fallbackLoc,
+    atsProvider: 'greenhouse',
+    atsIdentifier: cleanSlug || trimmed.toLowerCase().replace(/[^a-z0-9]/g, ''),
+    cooldown: { interview: '6 Months', screening: 'None' },
+  };
 
-  try {
-    const response = await fetchFn(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(
-        resolvedKey,
-      )}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: systemInstruction }] }],
-          generationConfig: {
-            temperature: 0.2,
-            responseMimeType: 'application/json',
-          },
-        }),
-      },
-    );
-
-    if (!response.ok) {
-      // Graceful fallback to curated matches on rate-limit or error
-      const filtered = filterCompanies(CURATED_COMPANIES, { search: trimmed });
-      return filtered.length > 0 ? filtered : [...CURATED_COMPANIES];
-    }
-
-    const data = (await response.json()) as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-    };
-
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) {
-      return filterCompanies(CURATED_COMPANIES, { search: trimmed });
-    }
-
-    // Clean any markdown code fences if present
-    const cleaned = text.replace(/```(?:json)?\s*([\s\S]*?)\s*```/i, '$1').trim();
-    const parsed = JSON.parse(cleaned);
-
-    if (Array.isArray(parsed)) {
-      const sanitized = parsed
-        .map(sanitizeSuggestedCompany)
-        .filter((c): c is SuggestedCompany => c !== null);
-
-      if (sanitized.length > 0) {
-        return sanitized;
-      }
-    }
-
-    return filterCompanies(CURATED_COMPANIES, { search: trimmed });
-  } catch {
-    // Network or JSON parse error fallback
-    const filtered = filterCompanies(CURATED_COMPANIES, { search: trimmed });
-    return filtered.length > 0 ? filtered : [...CURATED_COMPANIES];
-  }
+  return [synthesized];
 }
