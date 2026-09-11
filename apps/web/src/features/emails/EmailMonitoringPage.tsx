@@ -1,16 +1,17 @@
-/* Email Intake & Tracker Monitoring Screen.
+/* Email Intake & Interview Tracker Monitoring Screen.
  *
  * PURPOSE:
- * Displays real-time inbound recruiter email telemetry ingested from Gmail Apps Script
- * via the /email-tracker-intake edge function.
+ * Displays strictly interview invitations and recruiter screening requests
+ * received from recruiters in the user's Gmail.
+ *
+ * FILTERING INVARIANT:
+ * ONLY interview emails are displayed. General alerts, Google security notices,
+ * social newsletters (Reddit, LinkedIn suggestions) and non-interview mail
+ * are filtered out completely so the operator only sees high-value interview leads.
  *
  * ROW LEVEL SECURITY INVARIANT:
  * Scoped by Postgres RLS: (select auth.uid()) = user_id.
  * Only the authenticated operator's emails are returned by the query.
- *
- * UNTRUSTED CONTENT SAFEGUARD:
- * Email subjects and snippets are untrusted recruiter input and rendered safely
- * through React's text escaping, never interpolated into HTML or executable contexts.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -30,15 +31,61 @@ export interface EmailEventRow {
   readonly subject: string;
   readonly snippet: string;
   readonly received_at: string;
-  readonly classification: 'unclassified' | 'rejection' | 'interview_invite' | 'assessment' | 'acknowledgement' | string;
+  readonly classification: string;
   readonly classification_confidence: number | null;
   readonly matched_application_id: string | null;
   readonly processed_at: string | null;
   readonly created_at: string;
 }
 
+/* Pure helper: determines if an inbound email represents a legitimate interview invitation.
+ * Rejects newsletters, security alerts, and social digests outright. */
+export function isInterviewEmail(ev: EmailEventRow): boolean {
+  /* 1. Explicit classifier positive match */
+  if (ev.classification === 'interview_invite' || ev.classification === 'interview') {
+    return true;
+  }
+
+  /* 2. Disqualify known system and social senders */
+  const fromLower = ev.from_address.toLowerCase();
+  if (
+    fromLower.includes('no-reply@accounts.google.com') ||
+    fromLower.includes('redditmail.com') ||
+    fromLower.includes('updates-noreply@linkedin.com') ||
+    fromLower.includes('messages-noreply@linkedin.com') ||
+    fromLower.includes('notifications@') ||
+    fromLower.includes('security-noreply')
+  ) {
+    return false;
+  }
+
+  /* 3. Disqualify obvious automated newsletters by subject */
+  const subjectLower = ev.subject.toLowerCase();
+  if (
+    subjectLower.includes('security alert') ||
+    subjectLower.includes('digest') ||
+    subjectLower.includes('new sign-in') ||
+    subjectLower.includes('passkey added')
+  ) {
+    return false;
+  }
+
+  /* 4. Detect interview invitation intent in subject or body snippet */
+  const content = (ev.subject + ' ' + ev.snippet).toLowerCase();
+  return (
+    content.includes('interview') ||
+    content.includes('invitation to interview') ||
+    content.includes('screening call') ||
+    content.includes('schedule a call') ||
+    content.includes('schedule a chat') ||
+    content.includes('technical round') ||
+    content.includes('hiring manager chat') ||
+    content.includes('shortlisted')
+  );
+}
+
 export function EmailMonitoringPage(): ReactElement {
-  /* List of email events retrieved from the database */
+  /* Raw list of email events retrieved from the database */
   const [events, setEvents] = useState<readonly EmailEventRow[]>([]);
   /* Loading state while query is in flight */
   const [loading, setLoading] = useState<boolean>(true);
@@ -65,7 +112,7 @@ export function EmailMonitoringPage(): ReactElement {
         .from('email_events')
         .select('*')
         .order('received_at', { ascending: false })
-        .limit(100);
+        .limit(200);
 
       if (queryError) {
         setError(queryError.message);
@@ -84,26 +131,30 @@ export function EmailMonitoringPage(): ReactElement {
     void fetchEvents();
   }, [fetchEvents]);
 
-  /* Filter events based on active search text */
+  /* STRICT INTERVIEW FILTER: Discard all non-interview emails */
+  const interviewEvents = useMemo(() => {
+    return events.filter(isInterviewEmail);
+  }, [events]);
+
+  /* Filter interview events based on active search text */
   const filteredEvents = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    if (!query) return events;
-    return events.filter(
+    if (!query) return interviewEvents;
+    return interviewEvents.filter(
       (ev) =>
         ev.from_address.toLowerCase().includes(query) ||
         ev.subject.toLowerCase().includes(query) ||
         ev.snippet.toLowerCase().includes(query),
     );
-  }, [events, searchQuery]);
+  }, [interviewEvents, searchQuery]);
 
-  /* Calculate summary telemetry metrics */
+  /* Calculate summary interview metrics */
   const metrics = useMemo(() => {
-    const total = events.length;
-    const interviews = events.filter((e) => e.classification === 'interview_invite').length;
-    const rejections = events.filter((e) => e.classification === 'rejection').length;
-    const pending = events.filter((e) => e.processed_at === null || e.classification === 'unclassified').length;
-    return { total, interviews, rejections, pending };
-  }, [events]);
+    const totalInterviews = interviewEvents.length;
+    const linkedToApps = interviewEvents.filter((e) => e.matched_application_id !== null).length;
+    const directInvites = interviewEvents.filter((e) => e.matched_application_id === null).length;
+    return { totalInterviews, linkedToApps, directInvites };
+  }, [interviewEvents]);
 
   return (
     <div className="email-monitor">
@@ -112,28 +163,24 @@ export function EmailMonitoringPage(): ReactElement {
         <PageHeader path="emails" />
       </div>
 
-      {/* Summary KPI metric cards */}
+      {/* Summary KPI metric cards focusing strictly on interviews */}
       <div className="email-monitor__stats">
         <div className="email-stat-card">
-          <span className="email-stat-card__label">Total Inbounds</span>
-          <span className="email-stat-card__value">{metrics.total}</span>
-        </div>
-        <div className="email-stat-card">
-          <span className="email-stat-card__label">Interviews</span>
+          <span className="email-stat-card__label">Interview Invitations</span>
           <span className="email-stat-card__value" style={{ color: '#4ade80' }}>
-            {metrics.interviews}
+            {metrics.totalInterviews}
           </span>
         </div>
         <div className="email-stat-card">
-          <span className="email-stat-card__label">Rejections</span>
-          <span className="email-stat-card__value" style={{ color: '#f87171' }}>
-            {metrics.rejections}
+          <span className="email-stat-card__label">Linked to Pipeline</span>
+          <span className="email-stat-card__value" style={{ color: 'var(--accent)' }}>
+            {metrics.linkedToApps}
           </span>
         </div>
         <div className="email-stat-card">
-          <span className="email-stat-card__label">Awaiting Classifier</span>
-          <span className="email-stat-card__value" style={{ color: '#c084fc' }}>
-            {metrics.pending}
+          <span className="email-stat-card__label">Direct Inbound Invites</span>
+          <span className="email-stat-card__value">
+            {metrics.directInvites}
           </span>
         </div>
       </div>
@@ -143,10 +190,10 @@ export function EmailMonitoringPage(): ReactElement {
         <input
           type="search"
           className="email-monitor__search"
-          placeholder="Filter by sender, subject, or keywords..."
+          placeholder="Filter interviews by company or recruiter..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          aria-label="Filter email events"
+          aria-label="Filter interview invitations"
         />
         <button
           type="button"
@@ -155,7 +202,7 @@ export function EmailMonitoringPage(): ReactElement {
           onClick={() => void fetchEvents()}
           disabled={loading}
         >
-          {loading ? 'Refreshing...' : 'Refresh Feed'}
+          {loading ? 'Refreshing...' : 'Refresh Interviews'}
         </button>
       </div>
 
@@ -166,35 +213,26 @@ export function EmailMonitoringPage(): ReactElement {
         </p>
       )}
 
-      {/* Main event list */}
+      {/* Main interview list */}
       {filteredEvents.length === 0 ? (
         <div className="email-empty">
-          <p style={{ fontWeight: 600, margin: '0 0 var(--gap-1) 0' }}>No email events found.</p>
+          <p style={{ fontWeight: 600, margin: '0 0 var(--gap-1) 0' }}>No interview invitations found.</p>
           <p style={{ margin: 0, fontSize: 'var(--size-sm)' }}>
-            Inbound emails sent by the Gmail Apps Script will automatically appear here in real-time.
+            When recruiters email you regarding interviews, screening rounds, or technical chats, they will automatically be isolated and displayed here.
           </p>
         </div>
       ) : (
         <ul className="email-list">
           {filteredEvents.map((event) => {
-            const categoryClass =
-              event.classification === 'interview_invite'
-                ? 'email-badge--interview'
-                : event.classification === 'rejection'
-                  ? 'email-badge--rejection'
-                  : event.classification === 'acknowledgement'
-                    ? 'email-badge--acknowledgement'
-                    : 'email-badge--unclassified';
-
             const formattedDate = new Date(event.received_at).toLocaleString();
 
             return (
-              <li key={event.id} className="email-card">
+              <li key={event.id} className="email-card" style={{ borderLeft: '3px solid #4ade80' }}>
                 <div className="email-card__top">
                   <span className="email-card__sender">{event.from_address}</span>
                   <div style={{ display: 'flex', gap: 'var(--gap-2)', alignItems: 'center' }}>
-                    <span className={`email-badge ${categoryClass}`}>
-                      {event.classification.replace('_', ' ')}
+                    <span className="email-badge email-badge--interview">
+                      Interview Invite
                     </span>
                     <span className="email-card__time">{formattedDate}</span>
                   </div>
@@ -209,10 +247,10 @@ export function EmailMonitoringPage(): ReactElement {
                   </span>
                   {event.matched_application_id !== null ? (
                     <span style={{ color: 'var(--accent)' }}>
-                      Linked to Application: <code className="identifier">{event.matched_application_id.slice(0, 8)}</code>
+                      Matched to Job: <code className="identifier">{event.matched_application_id.slice(0, 8)}</code>
                     </span>
                   ) : (
-                    <span>Unlinked Inbound</span>
+                    <span>Direct Recruiter Inbound</span>
                   )}
                 </div>
               </li>
