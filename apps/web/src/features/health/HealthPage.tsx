@@ -780,6 +780,60 @@ function BlockedQueuePanel(): ReactElement {
   );
 }
 
+/* STATUS GRAPH CYCLE OBSERVABILITY - active warning indicator.
+ *
+ * Discovered by graph engineering analysis (docs/architecture/graph-engineering.md §3.1).
+ * The machine-reachable status transition graph contains an unbounded 2-cycle:
+ *   oa_pending -> interview  (allowedAgents: ['tracker', 'human'])
+ *   interview  -> oa_pending (allowedAgents: ['tracker', 'human'])
+ *
+ * Why this warning is active:
+ * Both edges are legitimate: post-interview assessments really happen. However,
+ * tracker classifies inbound emails autonomously via Gemini. Because there is no
+ * traversal bound, loop count, or status_history hysteresis on this pair, an
+ * oscillating or noisy classifier can cycle a candidate application indefinitely.
+ * This panel monitors and surfaces that cycle risk.
+ */
+function StatusGraphCyclePanel(): ReactElement {
+  return (
+    <section className="panel" aria-label="Status graph cycle warning">
+      <h2 className="panel__title">Status graph cycle observability</h2>
+      <p className="panel__note">
+        Active surveillance of automated feedback cycles. Monitored to catch unbounded
+        oscillation between assessment and interview stages.
+      </p>
+
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th scope="col">Cycle</th>
+              <th scope="col">Acting Agent</th>
+              <th scope="col">Warning & Invariant Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="table__row--attention">
+              <th scope="row" className="table__id">
+                oa_pending &harr; interview
+              </th>
+              <td>
+                <span className="identifier">tracker</span>
+              </td>
+              <td>
+                <strong className="table__never">Active Warning: Unbounded automated cycle.</strong>{' '}
+                Both transitions permit the automated <span className="identifier">tracker</span> agent.
+                No traversal counter or rate limit bounds how many times a fluctuating model classification
+                on a noisy recruiter email thread can walk this edge pair.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 /* --- The page --------------------------------------------------------- */
 
 export function HealthPage(): ReactElement {
@@ -814,6 +868,8 @@ export function HealthPage(): ReactElement {
       <KeepalivePanel read={agentRuns} />
       <GeminiPoolPanel />
       <ControlCoveragePanel />
+      {/* Active cycle observer: surfaces the unbounded oa_pending <-> interview cycle */}
+      <StatusGraphCyclePanel />
       <BlockedQueuePanel />
     </div>
   );

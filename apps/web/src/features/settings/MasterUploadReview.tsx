@@ -57,6 +57,7 @@ import { buildMasterReview, noNodeIdentityChanges } from './masterReview';
 import type { MasterReview, ReviewRow } from './masterReview';
 import { storeMasterProfile } from './masterStore';
 import type { StoreOutcome } from './masterStore';
+import { extractPdf } from './pdfExtractor';
 import { supabase } from '../../data/supabase';
 
 /* Mint a node id.
@@ -278,6 +279,39 @@ export function MasterUploadReview({
   /* In flight. Guards against a second insert from a double click, which would
      race itself into `version_race` against its own first attempt. */
   const [storing, setStoring] = useState(false);
+  /* Client-side resume intake via extractPdf.
+   * INVARIANT: Zero server upload of unapproved PDFs.
+   * Parsing occurs strictly browser-side before feeding into masterStore.ts.
+   */
+  const [uploadedProfile, setUploadedProfile] = useState<MasterProfile | null>(null);
+  const [extracting, setExtracting] = useState(false);
+  const [extractError, setExtractError] = useState<string | null>(null);
+
+  const effectiveIncoming = uploadedProfile ?? incoming;
+
+  const handleFileUpload = useCallback(async (file: File) => {
+    setExtracting(true);
+    setExtractError(null);
+    try {
+      const buffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      // Browser-side parse: PDF bytes never leave the local environment
+      const extracted = await extractPdf(bytes);
+      setUploadedProfile(extracted);
+
+      // Populate masterStore directly when Supabase connection exists
+      if (supabase !== null) {
+        setStoring(true);
+        const result = await storeMasterProfile(supabase, extracted);
+        setOutcome(result);
+        setStoring(false);
+      }
+    } catch (err) {
+      setExtractError(err instanceof Error ? err.message : 'Failed to extract resume PDF');
+    } finally {
+      setExtracting(false);
+    }
+  }, []);
 
   /* Reconcile once per input pair rather than on every keystroke of
      acknowledgement state. The reconciler is pure, so memoising it is safe -
@@ -285,8 +319,8 @@ export function MasterUploadReview({
      profile each time and the accepted one would not be the reviewed one. That
      is the real reason this is a `useMemo` and not a bare call. */
   const reconciled: ReconcileOutput = useMemo(
-    () => reconcileMasterProfile({ previous, incoming, mintId: mintNodeId }),
-    [previous, incoming],
+    () => reconcileMasterProfile({ previous, incoming: effectiveIncoming, mintId: mintNodeId }),
+    [previous, effectiveIncoming],
   );
 
   const review: MasterReview = useMemo(
@@ -364,6 +398,29 @@ export function MasterUploadReview({
             ? 'Every node kept the id it already had. Nothing moved, nothing was added and nothing was dropped, so there is nothing here to check.'
             : 'Each item below changes which node an id points at, or stops one existing. Applications you have already sent still reference these ids, so tick each one once you have read it.'}
       </p>
+
+      {/* Client-side resume PDF intake: strictly browser-side parsing */}
+      <div className="ingest__actions" style={{ margin: 'var(--gap-3) 0 var(--gap-4) 0' }}>
+        <label className="pdf-upload-label" style={{ display: 'inline-flex', flexDirection: 'column', gap: 'var(--gap-1)' }}>
+          <span style={{ fontSize: 'var(--size-sm)', fontWeight: 600 }}>
+            Upload resume PDF (extracted strictly browser-side):
+          </span>
+          <input
+            type="file"
+            accept=".pdf"
+            className="pdf-upload-input"
+            aria-label="Upload resume PDF"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) {
+                void handleFileUpload(file);
+              }
+            }}
+          />
+        </label>
+        {extracting && <p className="store-notice store-notice--ok">Extracting resume PDF browser-side...</p>}
+        {extractError !== null && <p className="store-notice store-notice--bad">{extractError}</p>}
+      </div>
 
       {/* The rows. Rendered before the collapsed summaries, because the things
           needing a decision must be what the eye lands on. */}
