@@ -59,11 +59,18 @@ export interface DuplicateNodeId {
   readonly paths: readonly string[];
 }
 
-/* Appends the bullets of one parent. Shared by all three bulleted sections
- * rather than written three times, and that sharing is the point: the tailor
- * validator walks all three into ONE index, so a checker that walked them
- * separately would be shaped like the document instead of like the consumer -
- * which is exactly how the per-section design gets written by accident. */
+/* Appends the bullets of one parent. Shared by all FIVE bulleted sections -
+ * experience, projects, education, and as of 2026-09-11 achievements and
+ * certifications - rather than written five times, and that sharing is the
+ * point: the tailor validator walks all of them into ONE index, so a checker
+ * that walked them separately would be shaped like the document instead of like
+ * the consumer - which is exactly how the per-section design gets written by
+ * accident.
+ *
+ * It also makes adding a bulleted kind cheap enough that there is no excuse for
+ * skipping it, which matters because a forgotten descent is SILENT: the new
+ * kind's bullets simply stop participating in uniqueness and every existing
+ * test stays green. */
 function pushBullets(
   into: NodeIdOccurrence[],
   bullets: readonly MasterBullet[],
@@ -84,7 +91,19 @@ function pushBullets(
  * inventory itself - the reconciler's own tests assert on the total count, and
  * counting occurrences here rather than in the test keeps the walk in one
  * place. A test with its own second walk would drift from this one and then
- * pass against a profile this function cannot see. */
+ * pass against a profile this function cannot see.
+ *
+ * ADDING A NODE KIND TO `MasterProfile` AND NOT TO THIS WALK IS A SILENT HOLE,
+ * NOT A FAILING TEST. Nothing in the type system connects a new field to this
+ * function, so the omission compiles, the whole suite stays green, and global
+ * uniqueness has quietly become uniqueness-over-the-kinds-someone-remembered.
+ * Measured, not theorised: when `summary`, `achievements`, `certifications` and
+ * `MasterProject.links` landed on 2026-09-11, the STORED fixture gained twelve
+ * ids and this package's 81 tests all still passed - including the one that
+ * asserts the exact occurrence count, because it was counting the walk's output
+ * against a number written from the walk. So the count test below is only worth
+ * anything when the number is re-derived from the FIXTURE by hand; see its note
+ * in `node-id-uniqueness.test.ts`. */
 export function collectNodeIds(profile: MasterProfile): readonly NodeIdOccurrence[] {
   const found: NodeIdOccurrence[] = [];
 
@@ -95,6 +114,23 @@ export function collectNodeIds(profile: MasterProfile): readonly NodeIdOccurrenc
   profile.identity.links.forEach((link, index) => {
     found.push({ id: link.id, path: 'identity.links[' + String(index) + ']', kind: 'link' });
   });
+
+  /* The summary, which is a SINGLE node rather than a section - one id, no
+     index, so its path is the bare string 'summary' with no '[0]'. Walked here
+     because `MasterSummary` stopped being a bare string on 2026-09-11 precisely
+     so `TailoredSummary.refs` could point at it; an id that refs can name and
+     this walk cannot see is a collision the reconciler would carry straight
+     through its own postcondition.
+
+     NULL IS THE COMMON CASE and it is SKIPPED, not pushed as an occurrence with
+     an undefined id. A profile with no summary is normal, and a
+     `{ id: undefined }` occurrence would make every summary-less profile
+     collide with every other summary-less profile the moment a second one
+     appeared in the same list - a duplicate reported for two nodes that do not
+     exist. */
+  if (profile.summary !== null) {
+    found.push({ id: profile.summary.id, path: 'summary', kind: 'summary' });
+  }
 
   /* Skills. The kind whose collision with a BULLET id was one of the two cases
      the per-section checker missed. */
@@ -112,12 +148,58 @@ export function collectNodeIds(profile: MasterProfile): readonly NodeIdOccurrenc
     const path = 'projects[' + String(index) + ']';
     found.push({ id: project.id, path, kind: 'project' });
     pushBullets(found, project.bullets, path);
+    /* Project links, which became a THIRD id-bearing link array on 2026-09-11
+       when `MasterProject.url: string | null` was replaced by
+       `links: DocumentOrdered<MasterLink>`. The replacement is exactly why this
+       has to be walked: the old scalar carried no id, so there was nothing here
+       to collide; the new one carries a `NodeId` drawn from the same global
+       pool as everything else, and it is reconciled across re-uploads like an
+       identity link.
+
+       Nested two levels deep, which is the same reason `identity.links` is
+       called out above as easy to forget - and the kind is 'link' rather than
+       'project' because a review UI groups by kind, and a link filed under
+       projects would be invisible in the link bucket a reviewer actually
+       opens. */
+    project.links.forEach((link, linkIndex) => {
+      found.push({
+        id: link.id,
+        path: path + '.links[' + String(linkIndex) + ']',
+        kind: 'link',
+      });
+    });
   });
 
   profile.education.forEach((education, index) => {
     const path = 'education[' + String(index) + ']';
     found.push({ id: education.id, path, kind: 'education' });
     pushBullets(found, education.bullets, path);
+  });
+
+  /* Achievements and certifications, added to the contract on 2026-09-11
+     because the real resume had both and ingest was silently truncating them.
+     Walked HERE, between education and the top-level links, so the walk follows
+     the field order `MasterProfile` declares for them.
+
+     TWO SEPARATE LOOPS OVER STRUCTURALLY IDENTICAL TYPES, on purpose. They are
+     distinct interfaces with distinct match keys, and `kind` is what the review
+     UI groups by - collapsing them into one loop would need a shared parameter
+     for the kind and the path prefix, which is machinery that buys four saved
+     lines and costs the ability to see at a glance that both are present.
+
+     Both descend into bullets. That descent is the part a new kind gets wrong:
+     the parent id is obvious because it is the thing being added, and the
+     bullets under it are a second id-bearing place nobody remembers. */
+  profile.achievements.forEach((achievement, index) => {
+    const path = 'achievements[' + String(index) + ']';
+    found.push({ id: achievement.id, path, kind: 'achievement' });
+    pushBullets(found, achievement.bullets, path);
+  });
+
+  profile.certifications.forEach((certification, index) => {
+    const path = 'certifications[' + String(index) + ']';
+    found.push({ id: certification.id, path, kind: 'certification' });
+    pushBullets(found, certification.bullets, path);
   });
 
   /* Top-level links, which are a DIFFERENT array from `identity.links` in the

@@ -200,11 +200,119 @@ export interface MasterEducation {
 export interface MasterProject {
   id: NodeId;
   name: string;
-  url: string | null;
+  /**
+   * Every address this project has, in document order — a live deployment AND a
+   * source repository, not one or the other.
+   *
+   * REPLACED A SINGLE `url: string | null` ON 2026-09-11, and the single slot was
+   * WRONG rather than merely limiting. The real resume has a project carrying both
+   * a live URL and a GitHub URL, so ingest had to silently discard one of the two
+   * on every upload — a fact present in the document and absent from the contract,
+   * which is the same class of loss as the achievements and certifications below.
+   *
+   * WHY NOT A SECOND SCALAR (`url2`, `repo_url`). It makes the loss smaller without
+   * making it impossible — a third address is back to dropping — and it leaves the
+   * original field meaning "the first one, whichever that happened to be", which is
+   * a name that documents nothing. Renaming to `live_url`/`repo_url` asserts a
+   * semantic the parser cannot actually verify: a project link is sometimes a demo
+   * video or a paper.
+   *
+   * WHY `MasterLink` AND NOT `readonly string[]`. Two reasons and the second is the
+   * load-bearing one. A link needs a LABEL to render ("Live" vs "Source"), and a
+   * `MasterLink` carries a `NodeId` — so a project link lives in the same global id
+   * space as everything else and is RECONCILED across re-uploads exactly like an
+   * identity link. A bare string array would have no id, so a re-upload could not
+   * tell "the GitHub link is unchanged" from "a new link appeared", which is the
+   * precise failure `master-ingest` exists to prevent.
+   *
+   * Empty is normal and means the project has no public address. That is a
+   * different fact from "the parser did not find one", and nothing here records the
+   * second — deliberately, because the master is human-maintained truth, not a
+   * parser's confidence report.
+   */
+  links: DocumentOrdered<MasterLink>;
   start_display: DisplayDate;
   end_display: DisplayDate;
   start_date: string | null;
   end_date: string | null;
+  bullets: DocumentOrdered<MasterBullet>;
+}
+
+/**
+ * THE MASTER SUMMARY — A NODE WITH A STABLE `NodeId`, NEVER A BARE `summary: string`.
+ *
+ * `TailoredSummary` below calls the summary the weakest point in this file, and it
+ * is right: prose cannot be constrained by refs the way a bullet can. But read that
+ * note carefully — the danger was never that a summary EXISTS. It is a summary with
+ * nothing behind it. `TailoredSummary.refs` is already required and already
+ * non-empty, so the Tailor must declare which master nodes its paragraph is drawn
+ * from; before this type existed the one thing it could not declare was the human's
+ * OWN summary, because that had no id to point at.
+ *
+ * So this closes the loop rather than widening the hole: the paragraph Teja wrote
+ * himself becomes a resolvable ref like every other node, and "reword my summary"
+ * stops being indistinguishable from "invent a summary". Stored as a bare string it
+ * would have been the one piece of prose in the system that the Tailor could draw on
+ * with no way for the validator to check that it had.
+ *
+ * WHY NOT REUSE `MasterBullet`. A bullet carries `tags`, which exist so the Tailor
+ * can SELECT among many. There is one summary; selection is not the operation, and a
+ * tags array on a singleton is a field whose only possible value is noise.
+ */
+export interface MasterSummary {
+  id: NodeId;
+  /** The paragraph as the human wrote it. Ground truth for any rewording that refs it. */
+  text: string;
+}
+
+/**
+ * One achievement — a hackathon placing, a ranking, a scholarship.
+ *
+ * NO DATE FIELDS, AND THAT IS A DECISION RATHER THAN AN OMISSION. The real resume
+ * writes achievements as undated lines, so a `date_display` here would have exactly
+ * one honest value — the empty string — and one tempting dishonest one: a date
+ * inferred by the parser. The DATE CONTRACT at the top of this file exists because a
+ * rendered date must be decided upstream and printed verbatim; a field with no
+ * upstream source cannot satisfy it. Add dates when the document grows them.
+ *
+ * A BULLETED PARENT, like experience and projects, so its detail lines are ordinary
+ * `MasterBullet`s. That is what makes an achievement TAILORABLE at all: the Tailor
+ * reworks it through `TailoredBullet`, which is `{ ref, text }`, so it can rephrase
+ * "Winner, national hackathon" for a JD without being able to promote it to "Winner,
+ * international hackathon". Giving this type its own bespoke free-text field would
+ * have opened a second fabrication surface parallel to the one the whole file
+ * defends. Usually empty — most achievements are one line.
+ */
+export interface MasterAchievement {
+  id: NodeId;
+  /** The achievement itself, e.g. "Winner — Smart India Hackathon 2025". Copied verbatim; never reworded. */
+  label: string;
+  /** The qualifying detail after the label, e.g. "national finals, 300+ teams". Verbatim. Null when the label says everything. */
+  description: string | null;
+  bullets: DocumentOrdered<MasterBullet>;
+}
+
+/**
+ * One certification. Structurally identical to `MasterAchievement` and deliberately
+ * a SEPARATE interface rather than an alias: they are different resume sections with
+ * different match keys in `master-ingest`, and one name covering both would make a
+ * future divergence a breaking rename instead of an added field.
+ *
+ * WHY `description` AND NOT `issuer`, given every certification in the real resume is
+ * written `Name – Issuer`. `issuer` asserts a semantic the parser cannot verify: the
+ * half after the dash is an issuing body on some lines and a platform or a year on
+ * others, and a field named `issuer` holding "2025" is a name that lies. `description`
+ * claims only what is true of every line — the qualifying detail that follows the
+ * label. Rename it the day the parser can actually tell those apart.
+ *
+ * NO DATES, for the same reason as `MasterAchievement`: the document has none.
+ */
+export interface MasterCertification {
+  id: NodeId;
+  /** The certification name, e.g. "AWS Certified Cloud Practitioner". Verbatim. */
+  label: string;
+  /** Whatever follows the dash, e.g. "Amazon Web Services". Verbatim. Null when absent. */
+  description: string | null;
   bullets: DocumentOrdered<MasterBullet>;
 }
 
@@ -218,10 +326,30 @@ export interface MasterProfile {
   /** Bumped when this shape changes incompatibly, so an old stored profile is detected rather than misread. */
   schema_version: 1;
   identity: MasterIdentity;
+  /**
+   * The human's own summary paragraph, or null when there is none.
+   *
+   * REQUIRED FIELD, NULLABLE VALUE — not an optional property. `summary?:` would let
+   * a construction site that forgot the summary compile clean and store a profile
+   * whose paragraph had been dropped, which is the exact bug this whole change
+   * exists to fix. `| null` forces every site to state which case it is in.
+   */
+  summary: MasterSummary | null;
   education: DocumentOrdered<MasterEducation>;
   experience: DocumentOrdered<MasterExperience>;
   projects: DocumentOrdered<MasterProject>;
   skills: DocumentOrdered<MasterSkill>;
+  /**
+   * Achievements and certifications. REQUIRED ARRAYS, POSSIBLY EMPTY — never
+   * optional, for the same reason as `summary` above and one more: an empty array
+   * and a missing property are the same value to every consumer that reads
+   * `profile.achievements.length`, but only the required form makes the compiler
+   * name every construction site that has not been updated. Weakening these to `?:`
+   * would buy a smaller diff today by converting a compile error into a silent data
+   * loss, which is the trade this file never takes.
+   */
+  achievements: DocumentOrdered<MasterAchievement>;
+  certifications: DocumentOrdered<MasterCertification>;
   links: DocumentOrdered<MasterLink>;
 }
 
@@ -229,8 +357,23 @@ export interface MasterProfile {
 // TailoredProfile — what Gemini is allowed to return
 // ---------------------------------------------------------------------------
 
-/** Which sections appear, in which order. Order is a tailoring decision, carried in the data. */
-export type TailoredSectionKind = 'summary' | 'skills' | 'experience' | 'projects' | 'education';
+/**
+ * Which sections appear, in which order. Order is a tailoring decision, carried in
+ * the data.
+ *
+ * `achievements` and `certifications` joined this union on 2026-09-11. They had to:
+ * a section the master can store but `section_order` cannot name is a section the
+ * renderer has no instruction to emit, so adding the master types alone would have
+ * moved the silent drop from ingest to tailoring rather than removing it.
+ */
+export type TailoredSectionKind =
+  | 'summary'
+  | 'skills'
+  | 'experience'
+  | 'projects'
+  | 'education'
+  | 'achievements'
+  | 'certifications';
 
 /**
  * A reworded bullet. `ref` is REQUIRED — this is the load-bearing line of the file.
@@ -270,6 +413,24 @@ export interface TailoredProject {
 }
 
 /**
+ * A selected achievement. Carries NO `label` and NO `description` — those come from
+ * the master by ref, so "Winner" cannot be tailored into "International Winner".
+ * Same reasoning as `TailoredExperience`, and it matters more here: an achievement
+ * line is a bare superlative with no surrounding context to contradict an inflated
+ * one, so it is the cheapest place in a resume to lie and the hardest to spot.
+ */
+export interface TailoredAchievement {
+  ref: NodeId;
+  bullets: DocumentOrdered<TailoredBullet>;
+}
+
+/** A selected certification. Same reasoning again: the name and the issuer are the master's, by ref. */
+export interface TailoredCertification {
+  ref: NodeId;
+  bullets: DocumentOrdered<TailoredBullet>;
+}
+
+/**
  * The optional summary paragraph — THE WEAKEST POINT IN THIS FILE, stated plainly.
  *
  * Prose cannot be constrained by refs the way a bullet can, and prose is exactly where
@@ -278,6 +439,15 @@ export interface TailoredProject {
  * master nodes it is drawn from; and the Auditor gates summaries even though section
  * 18.8 lets cover letters skip human approval. If you are looking for the place this
  * design is weakest, it is here — not in the bullets.
+ *
+ * NARROWED 2026-09-11, NOT CLOSED. `MasterSummary` now exists, so the human's own
+ * summary paragraph has a `NodeId` and `refs` can name it — which means "reword the
+ * summary I wrote" is finally expressible as a resolvable ref instead of being
+ * indistinguishable from "invent a summary". Before that node existed, the one source
+ * a summary most obviously draws on was the one thing it could not cite. The residual
+ * weakness is unchanged and still real: `text` is free prose, and `refs` proves what
+ * the paragraph was DRAWN FROM, never that it is faithful to it. That last step is the
+ * Auditor's, and it is judgement rather than structure.
  */
 export interface TailoredSummary {
   text: string;
@@ -300,6 +470,11 @@ export interface TailoredProfile {
   experience: DocumentOrdered<TailoredExperience>;
   projects: DocumentOrdered<TailoredProject>;
   education: DocumentOrdered<TailoredEducation>;
+  /* Required arrays, same reasoning as on `MasterProfile`: a Tailor response that
+     omitted these would otherwise parse clean and render a resume missing two
+     sections, with the omission indistinguishable from a deliberate choice. */
+  achievements: DocumentOrdered<TailoredAchievement>;
+  certifications: DocumentOrdered<TailoredCertification>;
 }
 
 // ---------------------------------------------------------------------------
@@ -350,9 +525,35 @@ export interface ResolvedEducation {
 export interface ResolvedProject {
   ref: NodeId;
   name: string;
-  url: string | null;
+  /* Copied whole from the master project, label and all. `MasterLink` rather than a
+     resolved variant because a link has no tailorable part: the validator carries it
+     across unchanged, so a second shape would differ from this one only in name. */
+  links: DocumentOrdered<MasterLink>;
   start_display: DisplayDate;
   end_display: DisplayDate;
+  bullets: DocumentOrdered<ResolvedBullet>;
+}
+
+/**
+ * An achievement after resolution — `label` and `description` materialised from the
+ * master by the validator, bullets resolved like any other.
+ *
+ * No dates, matching `MasterAchievement`. There is nothing here for the renderer to
+ * decide: every string prints verbatim, which is what keeps the React preview and
+ * the Playwright PDF byte-identical.
+ */
+export interface ResolvedAchievement {
+  ref: NodeId;
+  label: string;
+  description: string | null;
+  bullets: DocumentOrdered<ResolvedBullet>;
+}
+
+/** A certification after resolution. Same shape and same reasoning as ResolvedAchievement. */
+export interface ResolvedCertification {
+  ref: NodeId;
+  label: string;
+  description: string | null;
   bullets: DocumentOrdered<ResolvedBullet>;
 }
 
@@ -374,9 +575,16 @@ export interface ResolvedResume {
   /** Verbatim from the master. Never tailored. */
   identity: MasterIdentity;
   section_order: DocumentOrdered<TailoredSectionKind>;
+  /* Stays a bare string, and only here. This is the END of the pipeline: the
+     paragraph has already been checked against its refs by the validator, so an id
+     on it would be an id nothing can look anything up with — the renderer has no
+     master to resolve against, by design. The id lives on `MasterSummary`, which is
+     where a ref needs to land. */
   summary: string | null;
   skills: DocumentOrdered<ResolvedSkill>;
   experience: DocumentOrdered<ResolvedExperience>;
   projects: DocumentOrdered<ResolvedProject>;
   education: DocumentOrdered<ResolvedEducation>;
+  achievements: DocumentOrdered<ResolvedAchievement>;
+  certifications: DocumentOrdered<ResolvedCertification>;
 }

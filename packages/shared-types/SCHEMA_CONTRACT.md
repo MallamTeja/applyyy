@@ -409,8 +409,14 @@ divergence.
 ### `NodeId` is unique across the WHOLE master profile — one global id space
 
 **Decided 2026-09-10.** Every `NodeId` must be unique across the entire
-`MasterProfile`: across experience, projects, education, skills, links, and every bullet
-nested inside any of them. **Not per section. Not per node kind.**
+`MasterProfile`: across experience, projects, education, skills, links, achievements,
+certifications, the summary node, the links nested inside a project, and every bullet
+nested inside any parent. **Not per section. Not per node kind.**
+
+That list is exhaustive as of 2026-09-11 and it is a list that grows. **Every new
+id-bearing place must be added to `collectNodeIds` in `packages/master-ingest` in the
+same change that adds it here** — a kind missing from the walk does not fail a test, it
+silently stops participating in uniqueness while every existing test stays green.
 
 This follows from the tailored types rather than being a preference. `TailoredBullet` is
 `{ref, text}` and `TailoredSkill` is `{ref}` — a bare id with **no section qualifier and
@@ -430,6 +436,43 @@ Why this was worth deciding explicitly: the ambiguity was itself load-bearing. T
 validator's flat index assumes global; a reader of `profile-nodes.ts` could reasonably
 assume per-section. Both readings could call the other's code a bug, so the contract has
 to say which — and a confirmed collision bug already existed in that gap.
+
+### The four things the contract could not represent — closed 2026-09-11
+
+Teja's real resume carried four facts the type contract had no field for, so ingest
+dropped them **silently**: three achievements, four certifications, his summary
+paragraph, and a project that has both a live URL and a GitHub URL. Nothing errored;
+the data simply did not survive the parse.
+
+| Added | Shape | Why this shape |
+|---|---|---|
+| `MasterSummary` | `{ id, text }` | **A node with a `NodeId`, never a bare `summary: string`.** The id is the entire point — see below. |
+| `MasterAchievement` | `{ id, label, description, bullets }` | Bulleted parent, **no date fields**. The document writes achievements undated, so a `date_display` would have one honest value and one tempting inferred one. |
+| `MasterCertification` | same shape, separate interface | `description`, **not `issuer`**: the half after the dash is an issuing body on some lines and a platform or a year on others, and a field named `issuer` holding `"2025"` is a name that lies. |
+| `MasterProject.links` | `DocumentOrdered<MasterLink>`, **replacing** `url: string \| null` | One slot silently discarded the second address on every upload. Not `url2`/`repo_url`: a second scalar shrinks the loss without removing it and leaves `url` meaning "the first one, whichever that was". |
+
+**Why the summary had to become a node.** `TailoredSummary.refs` is required and must be
+non-empty, so every generated summary declares which master nodes it drew on. Before
+`MasterSummary` existed, the one source a summary most obviously draws on — the
+paragraph the human wrote — was the only thing it could not cite. Stored as a bare
+string it would have been the single piece of prose in the system that the Tailor could
+draw on with no way for the validator to check that it had. The danger was never that a
+summary exists; it is a summary with nothing behind it.
+
+**Why these are required fields, not optional ones.** `summary: MasterSummary | null` and
+required-but-possibly-empty `achievements` / `certifications` arrays. `summary?:` would
+let a construction site that forgot the summary compile clean and store a profile with
+the paragraph dropped — which is the exact bug being fixed. The required form converts
+every un-updated construction site into a compile error that names it. Verified rather
+than assumed: a `MasterProfile` literal omitting all three fails with `TS2739` naming
+`summary, achievements, certifications`, and the same literal with them present compiles.
+
+**The change was carried through Tailored and Resolved too, deliberately.** A section the
+master can store but `TailoredSectionKind` cannot name is a section the renderer is never
+told to emit — so Master-only types would have *moved* the silent drop from ingest to
+tailoring rather than removed it. `ResolvedResume.summary` stays a bare `string | null`
+and only there: that is the end of the pipeline, the renderer has no master to resolve
+against, and an id at that point would refer to nothing.
 
 ### Three types, three stages, one direction
 

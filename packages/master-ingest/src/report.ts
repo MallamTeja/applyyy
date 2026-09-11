@@ -31,6 +31,18 @@ export type ReconciledKind =
   | 'experience'
   | 'education'
   | 'project'
+  /* Added 2026-09-11 with the contract change that gave achievements,
+     certifications and the summary real nodes. Each is a SEPARATE member rather
+     than folded into an existing one: `kind` is what a review UI groups and
+     filters by, so calling a certification a `project` would put it in the wrong
+     bucket on screen, and calling it `bullet` would lose the distinction the
+     report exists to show. */
+  | 'achievement'
+  | 'certification'
+  /* The summary is a single node, not a section, and it still needs a kind: it
+     has an id, so it can be carried, minted or dropped like anything else, and a
+     report entry with no kind for it could not be rendered. */
+  | 'summary'
   | 'bullet';
 
 /* HOW a node was matched, and this distinction is what the human review reads.

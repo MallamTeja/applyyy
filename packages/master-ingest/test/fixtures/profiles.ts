@@ -20,13 +20,16 @@
  */
 
 import type {
+  MasterAchievement,
   MasterBullet,
+  MasterCertification,
   MasterEducation,
   MasterExperience,
   MasterLink,
   MasterProfile,
   MasterProject,
   MasterSkill,
+  MasterSummary,
   NodeId,
 } from '@applyy/shared-types';
 
@@ -76,15 +79,52 @@ export function experience(
   };
 }
 
+/* The summary node. An id, never a bare string - that id is what
+   `TailoredSummary.refs` points at. */
+export function summary(id: string, text: string): MasterSummary {
+  return { id, text };
+}
+
+/* An achievement. `description` defaults to null and `bullets` to empty, because
+   that is the shape of most real achievement lines - a single undated string. A
+   test that needs the bulleted form passes them explicitly, so the default cannot
+   quietly make every fixture exercise the nested case. */
+export function achievement(
+  id: string,
+  label: string,
+  description: string | null = null,
+  bullets: readonly MasterBullet[] = [],
+): MasterAchievement {
+  return { id, label, description, bullets };
+}
+
+/* A certification. Structurally identical to `achievement` and written out
+   separately anyway: they are distinct types with distinct match keys, and a
+   shared builder returning a cast would let a certification fixture silently
+   satisfy an achievement assertion. */
+export function certification(
+  id: string,
+  label: string,
+  description: string | null = null,
+  bullets: readonly MasterBullet[] = [],
+): MasterCertification {
+  return { id, label, description, bullets };
+}
+
 export function project(
   id: string,
   name: string,
   bullets: readonly MasterBullet[],
+  /* Defaults to ONE link, which is the common case in the real document. The
+     two-link project - the case that motivated replacing `url: string | null` -
+     passes both explicitly, so the default must not silently make every project
+     look like the multi-link one and hide whether the walk handles it. */
+  links: readonly MasterLink[] = [link(id + '-live', 'Live', 'https://example.invalid/' + id)],
 ): MasterProject {
   return {
     id,
     name,
-    url: 'https://example.invalid/' + id,
+    links,
     start_display: 'Jan 2026',
     end_display: 'Present',
     start_date: null,
@@ -119,10 +159,13 @@ export function education(
  * localise. */
 export function profileOf(parts: {
   readonly identityLinks?: readonly MasterLink[];
+  readonly summary?: MasterSummary | null;
   readonly skills?: readonly MasterSkill[];
   readonly experience?: readonly MasterExperience[];
   readonly projects?: readonly MasterProject[];
   readonly education?: readonly MasterEducation[];
+  readonly achievements?: readonly MasterAchievement[];
+  readonly certifications?: readonly MasterCertification[];
   readonly links?: readonly MasterLink[];
 }): MasterProfile {
   return {
@@ -135,10 +178,16 @@ export function profileOf(parts: {
       location: 'Hyderabad, IN',
       links: parts.identityLinks ?? [],
     },
+    /* Defaults to null - the ABSENT case, not an empty-text node. A default
+       summary node would put an extra id into every fixture that never asked for
+       one, and `collectNodeIds` counts are asserted exactly. */
+    summary: parts.summary ?? null,
     education: parts.education ?? [],
     experience: parts.experience ?? [],
     projects: parts.projects ?? [],
     skills: parts.skills ?? [],
+    achievements: parts.achievements ?? [],
+    certifications: parts.certifications ?? [],
     links: parts.links ?? [],
   };
 }
@@ -150,6 +199,10 @@ export function profileOf(parts: {
  * skills across three categories, two education rows, two links. */
 export const STORED: MasterProfile = profileOf({
   identityLinks: [link('lnk-github', 'GitHub', 'https://github.com/example')],
+  /* A summary NODE, because that is the whole point of the 2026-09-11 contract
+     change: the paragraph has an id, so `TailoredSummary.refs` can name it and the
+     validator can resolve it like any other ref. */
+  summary: summary('sum-headline', 'Full stack engineer shipping AI products end to end.'),
   skills: [
     skill('sk-python', 'Python', 'Programming'),
     skill('sk-sql', 'SQL', 'Programming'),
@@ -174,11 +227,24 @@ export const STORED: MasterProfile = profileOf({
     ),
   ],
   projects: [
-    /* Name plus a rewordable tagline, exactly like the real document. */
-    project('prj-oneonone', 'One-on-One - AI-Powered Learning Platform', [
-      bullet('b-oo-1', 'Built a full-stack booking platform with paid sessions.'),
-      bullet('b-oo-2', 'Developed backend services using PostgreSQL, Redis and JWT auth.'),
-    ]),
+    /* Name plus a rewordable tagline, exactly like the real document. TWO LINKS -
+       a live deployment and a source repository. This is the case that made
+       `url: string | null` wrong: under the old contract one of these two was
+       dropped on every upload, with nothing reporting it. */
+    project(
+      'prj-oneonone',
+      'One-on-One - AI-Powered Learning Platform',
+      [
+        bullet('b-oo-1', 'Built a full-stack booking platform with paid sessions.'),
+        bullet('b-oo-2', 'Developed backend services using PostgreSQL, Redis and JWT auth.'),
+      ],
+      [
+        link('lnk-oo-live', 'Live', 'https://oneonone.example.invalid'),
+        link('lnk-oo-repo', 'Source', 'https://github.com/example/oneonone'),
+      ],
+    ),
+    /* One link, taking the builder's default: the single-address case still has to
+       work, and a fixture where every project had two would not prove that. */
     project('prj-racepace', 'Race Pace Predictor', [
       bullet('b-rp-1', 'Trained gradient boosting models on qualifying telemetry.'),
     ]),
@@ -186,6 +252,24 @@ export const STORED: MasterProfile = profileOf({
   education: [
     education('edu-mlr', 'Placeholder Institute of Technology', 'B.Tech (CSD)'),
     education('edu-tkr', 'Placeholder College of Engineering', 'Diploma (ECE)'),
+  ],
+  /* Three achievements, matching the count in the real document. One carries a
+     bullet so the NESTED id under a new kind is exercised - an achievement's
+     bullets are a fresh place for a walk to forget to descend into. */
+  achievements: [
+    achievement('ach-sih', 'Winner - Smart India Hackathon 2025', 'National finals, 312 teams', [
+      bullet('b-ach-1', 'Led a team of six building an offline-first grievance tracker.'),
+    ]),
+    achievement('ach-gsoc', 'Top 5% - Google Summer of Code applicant pool', null),
+    achievement('ach-rank', 'Department rank 2 of 180', 'B.Tech CSD, 2024-25'),
+  ],
+  /* Four certifications, matching the real document, each written "Name - Issuer"
+     so `label` and `description` carry the two halves the parser actually sees. */
+  certifications: [
+    certification('cert-aws', 'AWS Certified Cloud Practitioner', 'Amazon Web Services'),
+    certification('cert-ml', 'Machine Learning Specialization', 'DeepLearning.AI'),
+    certification('cert-pg', 'PostgreSQL for Developers', 'EDB'),
+    certification('cert-sec', 'Web Security Fundamentals', 'Portswigger'),
   ],
   links: [link('lnk-site', 'Portfolio', 'https://example.invalid')],
 });
@@ -215,12 +299,28 @@ export function reparse(source: MasterProfile): MasterProfile {
   const reparseBullets = (bullets: readonly MasterBullet[]): readonly MasterBullet[] =>
     bullets.map((b) => ({ ...b, id: nextBulletId() }));
 
+  /* Project links get their own positional counter, spanning ALL projects rather
+     than restarting per project - a parser numbering anchors as it walks the page
+     has no idea which project it is inside. Restarting per project would hand the
+     reconciler ids that are already distinct in a way a real parse would not. */
+  let projectLinkCount = 0;
+  const reparseProjectLinks = (links: readonly MasterLink[]): readonly MasterLink[] =>
+    links.map((l) => {
+      const id = 'p-plink-' + String(projectLinkCount);
+      projectLinkCount += 1;
+      return { ...l, id };
+    });
+
   return {
     schema_version: 1,
     identity: {
       ...source.identity,
       links: source.identity.links.map((l, i) => ({ ...l, id: 'p-ilink-' + String(i) })),
     },
+    /* The summary is re-identified too. Left alone it would keep its STORED id and
+       every summary-carry assertion would pass with the summary reconciler deleted -
+       instance 13's vacuous expectation, reintroduced in a new field. */
+    summary: source.summary === null ? null : { ...source.summary, id: 'p-summary-0' },
     skills: source.skills.map((s, i) => ({ ...s, id: 'p-skill-' + String(i) })),
     experience: source.experience.map((e, i) => ({
       ...e,
@@ -230,12 +330,27 @@ export function reparse(source: MasterProfile): MasterProfile {
     projects: source.projects.map((p, i) => ({
       ...p,
       id: 'p-prj-' + String(i),
+      links: reparseProjectLinks(p.links),
       bullets: reparseBullets(p.bullets),
     })),
     education: source.education.map((e, i) => ({
       ...e,
       id: 'p-edu-' + String(i),
       bullets: reparseBullets(e.bullets),
+    })),
+    /* Achievement and certification bullets share the ONE bullet counter with every
+       other section, because a parser labelling bullets positionally down the page
+       does not restart at each heading. That shared counter is also what makes a
+       cross-kind id collision expressible in a reparse at all. */
+    achievements: source.achievements.map((a, i) => ({
+      ...a,
+      id: 'p-ach-' + String(i),
+      bullets: reparseBullets(a.bullets),
+    })),
+    certifications: source.certifications.map((c, i) => ({
+      ...c,
+      id: 'p-cert-' + String(i),
+      bullets: reparseBullets(c.bullets),
     })),
     links: source.links.map((l, i) => ({ ...l, id: 'p-link-' + String(i) })),
   };
