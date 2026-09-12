@@ -150,9 +150,89 @@
   font-size: var(--size-base);
   line-height: 1.5;
   color: var(--text-primary);
-  /* Top-aligned: a wrapped note in one cell should not centre the short cells
-     beside it. */
   vertical-align: top;
+}
+
+/* --- Answer Bank Interactive Toolbar & Chips ------------------------- */
+
+.answer-bank__toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-3);
+  margin-top: var(--gap-4);
+  padding-bottom: var(--gap-2);
+}
+
+.answer-bank__search-wrap {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  padding: 6px 12px;
+  background: var(--ground);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-control);
+  max-width: 28rem;
+}
+
+.answer-bank__search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  font-size: var(--size-sm);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.answer-bank__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-2);
+}
+
+.chip-btn {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 9999px;
+  padding: 3px 10px;
+  font-size: var(--size-xs);
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background-color 100ms ease, color 100ms ease, border-color 100ms ease;
+}
+
+.chip-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.chip-btn--active {
+  background: var(--sheet);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.copy-btn {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+  padding: 3px 8px;
+  font-size: var(--size-xs);
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: background-color 100ms ease, color 100ms ease, border-color 100ms ease;
+}
+
+.copy-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+  border-color: var(--rule-strong);
 }
 
 /* --- Not-yet-wired notice --------------------------------------------- */

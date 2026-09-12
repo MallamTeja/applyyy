@@ -22,12 +22,12 @@ import { FiltersPage } from './features/settings/FiltersPage';
 import { WatchlistPage } from './features/settings/WatchlistPage';
 import { BlocklistPage } from './features/settings/BlocklistPage';
 
+import { ToastProvider } from './app/Toast';
+
 export function App(): ReactElement {
   return (
-    /* BrowserRouter rather than HashRouter because apps/web/vercel.json
-       rewrites every path to index.html, so real URLs work and can be
-       bookmarked - the operator will want a link straight to the queue. */
-    <BrowserRouter>
+    <ToastProvider>
+      <BrowserRouter>
       <Routes>
         {/* The shell is the layout route: it renders the rail plus an Outlet,
             so switching pages never remounts the navigation. */}
@@ -57,6 +57,7 @@ export function App(): ReactElement {
           <Route path="*" element={<Navigate to={'/' + DEFAULT_ROUTE} replace />} />
         </Route>
       </Routes>
-    </BrowserRouter>
+      </BrowserRouter>
+    </ToastProvider>
   );
 }

@@ -359,18 +359,14 @@ function Line({ line }: { readonly line: DiffLine }): ReactElement {
 /* --- The screen -------------------------------------------------------- */
 
 export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactElement {
-  /* Derived, never stored: a row is Bucket B if any line is fabricated. */
   const claims = useMemo(() => collectFlaggedClaims(diff), [diff]);
   const bucket = useMemo(() => deriveBucket(diff), [diff]);
+  const [viewMode, setViewMode] = useState<'split' | 'unified'>('split');
 
-  /* The operator's decisions, keyed by claim. A Map rather than an object so
-     claim keys containing dots and colons cannot collide with prototype keys. */
   const [decisions, setDecisions] = useState<ReadonlyMap<string, ClaimDecision>>(
     () => new Map(),
   );
 
-  /* Record one decision. Replaces the Map rather than mutating it, so React
-     sees a new reference and the gate below re-evaluates. */
   function decide(key: string, decision: ClaimDecision): void {
     setDecisions((previous) => {
       const next = new Map(previous);
@@ -379,21 +375,13 @@ export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactEle
     });
   }
 
-  /* THE GATE. Bucket A is approvable immediately; Bucket B is approvable only
-     once every single claim carries a decision. This is the structural half of
-     the two-bucket design - the colour is the half that gets noticed, this is
-     the half that actually holds. */
   const undecided = claims.filter((claim) => !decisions.has(claim.key));
   const canApprove = undecided.length === 0;
 
-  /* How many claims the operator chose to cut, so the button can say what it
-     will actually do rather than a generic "Approve". */
   const cutCount = claims.filter(
     (claim) => decisions.get(claim.key) === 'remove',
   ).length;
 
-  /* The button keeps the same verb throughout the flow - approve produces
-     "approved" - and states the consequence when there is one. */
   const approveLabel =
     cutCount > 0
       ? 'Approve without ' + cutCount + (cutCount === 1 ? ' claim' : ' claims')
@@ -442,7 +430,7 @@ export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactEle
             )}
             {diff.locations && diff.locations.length > 0 && (
               <span className="tag-pill tag-pill--location">
-                📍 {diff.locations.slice(0, 2).join(', ')}
+                {diff.locations.slice(0, 2).join(', ')}
                 {diff.locations.length > 2 ? ` +${diff.locations.length - 2}` : ''}
               </span>
             )}
@@ -452,13 +440,9 @@ export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactEle
           </p>
         </div>
 
-        {/* Coverage sits in the header because it answers "did the tailoring do
-            anything", which is a question about the whole row. */}
         <CoverageBar diff={diff} />
       </header>
 
-      {/* The fork. Bucket B gets the dark band; Bucket A gets one quiet line.
-          Nothing else on the screen differs, so the band is the difference. */}
       {bucket === 'B' ? (
         <FabricationAlert
           claims={claims}
@@ -473,39 +457,86 @@ export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactEle
         </p>
       )}
 
-      {/* The comparison grid. Two columns, one row per line, so master and
-          tailored text sit at the same vertical position and can be read
-          across. A pair of independently-scrolling panes would break that. */}
-      <div className="diff__panes">
-        <h3 className="diff__pane-head">Your master profile</h3>
-        <h3 className="diff__pane-head">Tailored for this job</h3>
-
-        {diff.lines.map((line) => (
-          <Line key={line.id} line={line} />
-        ))}
+      {/* View Mode Toolbar */}
+      <div className="diff__toolbar">
+        <span className="coverage__title">Comparison View</span>
+        <div className="diff__view-toggle" role="radiogroup" aria-label="Diff view mode">
+          <button
+            type="button"
+            className={`diff__view-btn ${viewMode === 'split' ? 'diff__view-btn--active' : ''}`}
+            onClick={() => setViewMode('split')}
+          >
+            Side-by-side
+          </button>
+          <button
+            type="button"
+            className={`diff__view-btn ${viewMode === 'unified' ? 'diff__view-btn--active' : ''}`}
+            onClick={() => setViewMode('unified')}
+          >
+            Inline Unified
+          </button>
+        </div>
       </div>
 
+      {viewMode === 'split' ? (
+        <div className="diff__panes">
+          <h3 className="diff__pane-head">Your master profile</h3>
+          <h3 className="diff__pane-head">Tailored for this job</h3>
+
+          {diff.lines.map((line) => (
+            <Line key={line.id} line={line} />
+          ))}
+        </div>
+      ) : (
+        <div className="diff__panes--unified">
+          {diff.lines.map((line) => {
+            const fabricated = line.tailoredRuns.filter((r) => r.verdict === 'fabricated');
+            return (
+              <div key={line.id} className="unified-line">
+                <div className="unified-line__meta">
+                  <span className="identifier">{line.masterNodeId}</span>
+                  <span className="tag-pill">{line.kind}</span>
+                </div>
+                <p className={`line__text line__text--${line.kind}`}>
+                  {line.tailoredRuns.map((run, idx) => (
+                    <Run key={`${line.id}-unified-${idx}`} run={run} />
+                  ))}
+                </p>
+                {fabricated.length > 0 ? (
+                  <p className="line__provenance line__provenance--fabricated">
+                    {fabricated.map((r) => r.text).join(' and ')} trace to nothing
+                  </p>
+                ) : (
+                  <p className="line__provenance line__provenance--traced">
+                    traced to <span className="identifier">{line.masterNodeId}</span>
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       <footer className="diff__actions">
-        <button
-          type="button"
-          className="button button--approve"
-          /* Disabled is a first-class state here, not an edge case. */
-          disabled={!canApprove}
-          onClick={() => onApprove(decisions)}
-        >
-          {approveLabel}
-        </button>
+        <div className="diff__actions-group">
+          <button
+            type="button"
+            className="button button--approve"
+            disabled={!canApprove}
+            onClick={() => onApprove(decisions)}
+          >
+            {approveLabel}
+          </button>
 
-        <button
-          type="button"
-          className="button button--reject"
-          onClick={() => onReject('rejected at approval gate')}
-        >
-          Reject this application
-        </button>
+          <button
+            type="button"
+            className="button button--reject"
+            onClick={() => onReject('rejected at approval gate')}
+          >
+            Reject application
+          </button>
+        </div>
 
-        {/* Explains the disabled button rather than leaving the operator to
-            work out why nothing happens when they click it. */}
         {canApprove ? null : (
           <p className="diff__gate-note">
             {undecided.length} {undecided.length === 1 ? 'claim needs' : 'claims need'}{' '}

@@ -1,0 +1,173 @@
+/* Pipeline Slide-over Drawer styles */
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(3px);
+  z-index: 9000;
+  display: flex;
+  justify-content: flex-end;
+  animation: drawer-fade-in 140ms ease-out;
+}
+
+@keyframes drawer-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.drawer {
+  width: 100%;
+  max-width: 32rem;
+  height: 100vh;
+  background: var(--sheet);
+  border-left: 1px solid var(--rule-strong);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.15);
+  display: flex;
+  flex-direction: column;
+  animation: drawer-slide-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  overflow: hidden;
+}
+
+@keyframes drawer-slide-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.drawer__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--gap-4) var(--gap-5);
+  border-bottom: 1px solid var(--rule);
+  background: var(--panel);
+}
+
+.drawer__title-group {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-3);
+}
+
+.drawer__title {
+  font-size: var(--size-md);
+  font-weight: 650;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.drawer__close-btn {
+  background: none;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+  padding: 4px 8px;
+  color: var(--text-secondary);
+  font-size: var(--size-xs);
+  cursor: pointer;
+  transition: background-color 100ms ease, color 100ms ease;
+}
+
+.drawer__close-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.drawer__content {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--gap-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-4);
+}
+
+.drawer__summary {
+  font-size: var(--size-sm);
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin: 0;
+}
+
+.drawer__app-card {
+  padding: var(--gap-4);
+  background: var(--ground);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-2);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.drawer__app-card:hover {
+  border-color: var(--rule-strong);
+  box-shadow: var(--lift);
+}
+
+.drawer__app-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--gap-2);
+}
+
+.drawer__app-role {
+  font-size: var(--size-base);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.drawer__app-company {
+  font-size: var(--size-sm);
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.drawer__app-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: var(--gap-1);
+  padding-top: var(--gap-2);
+  border-top: 1px solid var(--rule);
+  font-size: var(--size-xs);
+  color: var(--text-muted);
+}
+
+.drawer__empty {
+  padding: var(--gap-7) var(--gap-4);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--size-sm);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--gap-2);
+}
+
+.drawer__empty-icon {
+  font-size: 1.5rem;
+  opacity: 0.5;
+}
+
+/* Make Status Column headers clickable in pipeline board */
+.column__head--interactive {
+  cursor: pointer;
+  border-radius: var(--radius-control);
+  padding: 2px 4px;
+  margin: -2px -4px;
+  transition: background-color 100ms ease;
+}
+
+.column__head--interactive:hover {
+  background: var(--surface-hover);
+}

@@ -12,35 +12,37 @@
  * is displayed in the rail footer alongside a sign-out control.
  */
 
+import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 
 import { CONSOLE_SECTIONS } from './routes';
-/* The appearance control. It lives in the rail rather than on a settings page
-   because the palette is designed dark-first while the console follows the
-   operating system by default - so on a light-mode machine the dark theme is
-   unreachable, and a control the operator cannot find does not fix that. */
+import { CommandPalette } from './CommandPalette';
 import { ThemeToggle } from './ThemeToggle';
-/* Two coverage sets, not one, and the second is why this import changed.
-   `MISSING_HUMAN_CONTROLS` only catches a status NO screen claims, and every
-   status is claimed - so it is empty, and the rail said nothing while eight
-   human-reachable edges had no screen behind the claim. `UNBUILT_HUMAN_CONTROLS`
-   is the set whose claiming screen does not exist, which is the defect the
-   operator is actually exposed to. */
 import {
   MISSING_HUMAN_CONTROLS,
   UNBUILT_HUMAN_CONTROLS,
 } from '../data/humanLanes';
-/* The authentication hook managing session JWTs and user state. */
 import { useAuth } from '../data/useAuth';
-/* The login screen presented whenever session credentials are absent. */
 import { LoginPage } from '../features/auth/LoginPage';
 
 import './AppShell.css';
 
 export function AppShell(): ReactElement {
-  /* Hydrate and observe current Supabase authentication state. */
   const auth = useAuth();
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
+  // Global Cmd + K / Ctrl + K shortcut
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   /* Prevent flashing the login screen while initial session is read from storage. */
   if (auth.loading) {
@@ -61,15 +63,23 @@ export function AppShell(): ReactElement {
 
   return (
     <div className="shell">
+      <CommandPalette isOpen={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <nav className="rail" aria-label="Console sections">
         <div className="rail__brand">
-          {/* The product is applyy, two y's. The repo folder and the Vercel
-              project still read applyyy pending a rename Teja does himself;
-              nothing user-visible carries the typo. */}
           <span className="rail__name">applyy</span>
-          {/* Says what the thing is, in the operator's terms. Not a tagline. */}
           <span className="rail__role">application console</span>
         </div>
+
+        {/* Quick Search / Command Palette Trigger */}
+        <button
+          type="button"
+          className="rail-search-btn"
+          onClick={() => setPaletteOpen(true)}
+          title="Open Command Palette (Cmd + K)"
+        >
+          <span>Search screens...</span>
+          <span className="palette-kbd-hint">⌘K</span>
+        </button>
 
         {CONSOLE_SECTIONS.map((section) => (
           <div key={section.heading} className="rail__section">

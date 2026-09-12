@@ -470,19 +470,100 @@
   border-top-color: var(--fabricated);
 }
 
-/* --- Actions ---------------------------------------------------------- */
+/* --- View Mode Toggle ------------------------------------------------ */
+
+.diff__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-3);
+  padding: var(--gap-2) 0;
+}
+
+.diff__view-toggle {
+  display: inline-flex;
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+  padding: 2px;
+  gap: 2px;
+}
+
+.diff__view-btn {
+  background: none;
+  border: none;
+  padding: 4px 10px;
+  font-size: var(--size-xs);
+  font-weight: 500;
+  color: var(--text-secondary);
+  border-radius: calc(var(--radius-control) - 2px);
+  cursor: pointer;
+  transition: background-color 100ms ease, color 100ms ease;
+}
+
+.diff__view-btn--active {
+  background: var(--sheet);
+  color: var(--text-primary);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+/* --- Unified View Mode ------------------------------------------------ */
+
+.diff__panes--unified {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-4);
+}
+
+.unified-line {
+  padding: var(--gap-3) var(--gap-4);
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-2);
+}
+
+.unified-line__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--size-xs);
+  color: var(--text-muted);
+}
+
+/* --- Actions (Sticky Floating Bar) ----------------------------------- */
 
 .diff__actions {
+  position: sticky;
+  bottom: var(--gap-3);
+  z-index: 80;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: space-between;
   gap: var(--gap-3);
-  padding-top: var(--gap-4);
-  border-top: 1px solid var(--rule);
+  padding: var(--gap-3) var(--gap-5);
+  background: var(--sheet);
+  background-color: light-dark(rgba(255, 255, 255, 0.88), rgba(21, 25, 36, 0.88));
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sheet);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12), 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
-/* Explains the disabled Approve button. Sits beside it rather than under, so
-   it is read in the same glance as the button it explains. */
+.diff__actions-group {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-3);
+  flex-wrap: wrap;
+}
+
+/* Explains the disabled Approve button. */
 .diff__gate-note {
   color: var(--fabricated-strong);
   font-size: var(--size-sm);
@@ -491,17 +572,11 @@
 
 /* --- Narrow screens --------------------------------------------------- */
 
-/* Below this width two resume panes cannot both hold a readable measure, so
-   they stack. Master first, tailored second: the reference before the change,
-   which is the order the comparison is made in. */
 @media (max-width: 62rem) {
   .diff__panes {
     grid-template-columns: 1fr;
   }
 
-  /* Both column headings go: in one column they would sit at the top of the
-     page and correctly label only the first two cells, silently mislabelling
-     every pair after. Each sheet names its own side instead. */
   .diff__pane-head {
     display: none;
   }
@@ -511,8 +586,6 @@
     margin-bottom: var(--gap-2);
     padding-bottom: var(--gap-1);
     border-bottom: 1px solid var(--rule);
-    /* Sans, small and muted: it is chrome identifying the sheet, not part of
-       the document the sheet contains. */
     font-family: var(--font-machine);
     font-size: var(--size-xs);
     font-weight: 600;

@@ -1,0 +1,205 @@
+/* Global Command Palette (Cmd + K) styles */
+
+.palette-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  z-index: 10000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 12vh var(--gap-4) var(--gap-4);
+  animation: palette-fade-in 140ms ease-out;
+}
+
+@keyframes palette-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.palette-modal {
+  width: 100%;
+  max-width: 36rem;
+  background: var(--sheet);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sheet);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.25), 0 4px 12px rgba(0, 0, 0, 0.12);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: palette-scale-in 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes palette-scale-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.palette-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-3);
+  padding: var(--gap-3) var(--gap-4);
+  border-bottom: 1px solid var(--rule);
+}
+
+.palette-search-icon {
+  color: var(--text-muted);
+  font-size: var(--size-base);
+  user-select: none;
+}
+
+.palette-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  font-family: var(--font-machine);
+  font-size: var(--size-md);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.palette-input::placeholder {
+  color: var(--text-muted);
+  font-size: var(--size-base);
+}
+
+.palette-kbd-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 6px;
+  font-family: var(--font-id);
+  font-size: var(--size-2xs);
+  color: var(--text-muted);
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+
+.palette-list {
+  max-height: 22rem;
+  overflow-y: auto;
+  padding: var(--gap-2);
+  margin: 0;
+  list-style: none;
+}
+
+.palette-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-3);
+  padding: 8px 12px;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  transition: background-color 80ms ease, color 80ms ease;
+  user-select: none;
+}
+
+.palette-item--selected {
+  background: var(--surface-hover);
+}
+
+.palette-item__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.palette-item__label-row {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+}
+
+.palette-item__label {
+  font-size: var(--size-sm);
+  font-weight: 550;
+  color: var(--text-primary);
+}
+
+.palette-item__category {
+  font-size: var(--size-2xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  color: var(--text-secondary);
+}
+
+.palette-item__lede {
+  font-size: var(--size-xs);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-item__kbd {
+  font-family: var(--font-id);
+  font-size: var(--size-2xs);
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.palette-empty {
+  padding: var(--gap-6) var(--gap-4);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--size-sm);
+}
+
+.palette-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--gap-2) var(--gap-4);
+  background: var(--panel);
+  border-top: 1px solid var(--rule);
+  font-size: var(--size-2xs);
+  color: var(--text-muted);
+}
+
+.palette-footer__shortcuts {
+  display: flex;
+  gap: var(--gap-3);
+}
+
+/* Quick Search Button in Rail */
+.rail-search-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+  color: var(--text-secondary);
+  font-size: var(--size-xs);
+  cursor: pointer;
+  transition: border-color 100ms ease, background-color 100ms ease;
+  margin-bottom: var(--gap-1);
+}
+
+.rail-search-btn:hover {
+  border-color: var(--rule-strong);
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
