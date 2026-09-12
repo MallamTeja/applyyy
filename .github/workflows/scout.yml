@@ -1,0 +1,61 @@
+# applyy — scheduled ATS scout (job discovery).
+#
+# Regularly polls registered company career boards (Greenhouse, Lever, Ashby) from
+# public.company_watchlist, deduplicates postings by canonical fingerprint into
+# public.jobs, and creates initial public.applications rows at status 'discovered'.
+#
+# Fast and lightweight: requires NO Playwright or Chromium download (~10-15 seconds runtime).
+name: applyy scout (ats discovery)
+
+on:
+  schedule:
+    # Runs 4 times a day: 00:00, 06:00, 12:00, 18:00 UTC
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Set to "true" to discover jobs even if system_settings.system_enabled is false'
+        required: false
+        default: 'true'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: applyy-scout
+  cancel-in-progress: false
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      APPLYY_APP_USER_EMAIL: ${{ secrets.APPLYY_APP_USER_EMAIL }}
+      APPLYY_APP_USER_PASSWORD: ${{ secrets.APPLYY_APP_USER_PASSWORD }}
+      SCOUT_FORCE: ${{ inputs.force == 'false' && 'false' || 'true' }}
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Scout ATS Discovery
+        run: pnpm --filter '@applyy/worker' run scout
