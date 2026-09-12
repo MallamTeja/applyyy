@@ -202,10 +202,11 @@ export function parseLinkedInHiringPost(input: LinkedInPostInput): ParsedHiringP
 function extractTitleFromPost(text: string): string {
   // Common hiring phrases on LinkedIn: "We're hiring a <Role>", "Looking for a <Role>", "Hiring: <Role>"
   const patterns = [
-    /(?:we(?:'re| are|\s+)hiring(?:\s+for)?(?:\s+an?|\s+the)?)\s+([A-Za-z0-9\s/+#.-]{3,45}?)(?:[.,!\n]|\s+to|\s+who|\s+with|\s+in)/i,
-    /(?:looking for(?:\s+an?|\s+the)?)\s+([A-Za-z0-9\s/+#.-]{3,45}?)(?:[.,!\n]|\s+to|\s+who|\s+with|\s+in)/i,
-    /(?:hiring(?:\s*:|\s+-))\s*([A-Za-z0-9\s/+#.-]{3,45}?)(?:[.,!\n]|\s+in|\s+at)/i,
-    /(?:open role(?:\s*:|\s+-)?)\s*([A-Za-z0-9\s/+#.-]{3,45}?)(?:[.,!\n]|\s+in|\s+at)/i,
+    // Handles ASCII apostrophe (U+0027), left single quote (U+2018), right single quote (U+2019)
+    /(?:we(?:['\u2018\u2019]re|\s+are)\s+hiring(?:\s+for)?(?:\s+an?|\s+the)?)\s+([A-Za-z0-9\s/+#.-]{3,45}?)(?:[.,!\n]|\s+to\b|\s+who\b|\s+with\b|\s+in\b|\s+at\b)/i,
+    /(?:looking for(?:\s+an?|\s+the)?)\s+([A-Za-z0-9\s/+#.-]{3,45}?)(?:[.,!\n]|\s+to\b|\s+who\b|\s+with\b|\s+in\b|\s+at\b)/i,
+    /(?:hiring(?:\s*:|\s*-))\s*([A-Za-z0-9\s/+#.-]{3,45}?)(?:[.,!\n]|\s+in\b|\s+at\b)/i,
+    /(?:open role(?:\s*:|\s+-)?)\s*([A-Za-z0-9\s/+#.-]{3,45}?)(?:[.,!\n]|\s+in\b|\s+at\b)/i,
   ];
 
   for (const pat of patterns) {
@@ -219,7 +220,7 @@ function extractTitleFromPost(text: string): string {
 }
 
 function extractCompanyFromPost(text: string, authorName?: string): string | null {
-  const atPattern = /(?:at|join|joining)\s+([A-Z][A-Za-z0-9&.\s]{1,30}?)(?:[.,!\n]|\s+team|\s+family|\s+as)/;
+  const atPattern = /(?:at|join|joining)\s+([A-Z][A-Za-z0-9&.\s]{1,30}?)(?:[.,!\n]|\s+team|\s+family|\s+as|\s+in\b|\s+for\b)/;
   const m = text.match(atPattern);
   if (m && m[1] && m[1].trim().length > 1) {
     return m[1].trim();

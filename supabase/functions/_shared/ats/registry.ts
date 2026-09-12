@@ -134,6 +134,11 @@ export async function toJobInsert(
     // advances `last_seen_at` on subsequent polls.
     first_seen_at: context.firstSeenAt.toISOString(),
     last_seen_at: context.now.toISOString(),
+    metadata: {
+      tier: 1,
+      type: "career_page",
+      ats_provider: adapter.provider,
+    },
   };
 
   // The row.
