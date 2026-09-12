@@ -32,7 +32,7 @@ export function CommandPalette({
   // Build command items list
   const commands: readonly CommandItem[] = useMemo(() => {
     const routeCommands: CommandItem[] = ALL_ROUTES.map((route) => {
-      const isOp = ['approvals', 'pipeline', 'health', 'emails'].includes(route.path);
+      const isOp = ['approvals', 'pipeline', 'discovered', 'health', 'emails'].includes(route.path);
       return {
         id: `route-${route.path}`,
         label: route.label,
