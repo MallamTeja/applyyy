@@ -187,7 +187,14 @@ export const ATS_PROVIDERS = [
 export type AtsProvider = (typeof ATS_PROVIDERS)[number];
 
 /** Employment shape — both a job attribute and a search preference. */
-export const EMPLOYMENT_TYPES = ['internship', 'full_time', 'part_time', 'contract', 'unknown'] as const;
+export const EMPLOYMENT_TYPES = [
+  'internship',
+  'full_time',
+  'part_time',
+  'contract',
+  'unknown',
+  'apprenticeship',
+] as const;
 /** Union of every legal employment type. */
 export type EmploymentType = (typeof EMPLOYMENT_TYPES)[number];
 

@@ -762,8 +762,14 @@ export interface SearchPreferencesRow {
   max_experience_years: number | null;
   locations: string[];
   remote_only: boolean;
+  /** Work arrangements to scout for (onsite, hybrid, remote, unknown). */
+  work_arrangements: WorkArrangement[];
   min_salary: number | null;
+  /** Maximum salary or target ceiling. */
+  max_salary: number | null;
   salary_currency: string;
+  /** Allowed compensation models: 'paid', 'unpaid', 'stipend'. */
+  compensation_types: string[];
   created_at: string;
   updated_at: string;
 }
