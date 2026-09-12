@@ -14,147 +14,133 @@
  * own. The page is built to make that visible, which is why `times_used` is a
  * first-class column rather than a debugging detail: it is the evidence that
  * answering once paid off many times.
- *
- * WHY REFUSAL IS A FIRST-CLASS OUTCOME AND NOT AN EMPTY ANSWER. Some questions
- * cannot be answered honestly at all - a form asking the operator to certify
- * something untrue, or to claim years of a skill he has never used. That is not
- * a data-entry gap, it is a decision about whether to apply to that employer at
- * all, and possibly a reason to abandon the application. Storing it as "blank"
- * would mean the Applier asks again tomorrow and every tomorrow after. So a
- * refusal has to be recordable AS a refusal.
- *
- * SCHEMA NOTE, stated rather than worked around: `AnswerBankRow` carries
- * `needs_human: boolean`, which distinguishes "answered" from "still needs a
- * person" but not "answered", "uncertain match" and "refused on principle".
- * Those three need different operator actions, so they need different states.
- * Flagged to the schema stream; this page renders what the row can currently
- * express and says so.
  */
 
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
-import type { AnswerType } from '../../data/contract';
 import { useToast } from '../../app/Toast';
+import { AddQuestionModal } from './AddQuestionModal';
+import {
+  deleteCustomBankQuestion,
+  formatAnswerPreview,
+  loadAnswerBank,
+  saveBankAnswer,
+} from './answerBankStore';
+import type { BankQuestion, QuestionCategory } from './answerBankStore';
 
 import './settings.css';
 
-interface SeedQuestion {
-  readonly key: string;
-  readonly asks: string;
-  readonly type: AnswerType;
-  readonly category: 'compensation' | 'auth' | 'eeo' | 'written';
-  readonly answerPreview: string;
-  readonly why: string;
-}
+type ExtendedCategoryFilter = QuestionCategory | 'needs_attention';
 
-const SEED_QUESTIONS: readonly SeedQuestion[] = [
-  {
-    key: 'notice_period_days',
-    asks: 'Notice period (days)',
-    type: 'number',
-    category: 'compensation',
-    answerPreview: '0 days (Immediate)',
-    why: 'Availability in days for full-time onboarding.',
-  },
-  {
-    key: 'current_ctc_inr',
-    asks: 'Current CTC',
-    type: 'number',
-    category: 'compensation',
-    answerPreview: '₹ 0 (Fresher / Student)',
-    why: 'Current annual compensation in INR.',
-  },
-  {
-    key: 'expected_ctc_inr',
-    asks: 'Expected CTC',
-    type: 'number',
-    category: 'compensation',
-    answerPreview: '₹ 8,00,000 - 15,00,000',
-    why: 'Target annual compensation in INR submitted with applications.',
-  },
-  {
-    key: 'willing_to_relocate',
-    asks: 'Are you willing to relocate?',
-    type: 'boolean',
-    category: 'auth',
-    answerPreview: 'Yes',
-    why: 'Willingness to relocate to office locations.',
-  },
-  {
-    key: 'work_authorisation_india',
-    asks: 'Are you authorised to work in India?',
-    type: 'boolean',
-    category: 'auth',
-    answerPreview: 'Yes (Citizen / Permanent Resident)',
-    why: 'Legal authorization status to work in India.',
-  },
-  {
-    key: 'visa_sponsorship_required',
-    asks: 'Do you require visa sponsorship?',
-    type: 'boolean',
-    category: 'auth',
-    answerPreview: 'No',
-    why: 'Whether visa sponsorship is requested from employer.',
-  },
-  {
-    key: 'earliest_start_date',
-    asks: 'Earliest start date',
-    type: 'date',
-    category: 'compensation',
-    answerPreview: 'Immediate',
-    why: 'Earliest available date to join.',
-  },
-  {
-    key: 'gender',
-    asks: 'Gender (EEO / diversity)',
-    type: 'single_select',
-    category: 'eeo',
-    answerPreview: 'Decline to self-identify',
-    why: 'Standard EEO diversity disclosure.',
-  },
-  {
-    key: 'disability_status',
-    asks: 'Disability status (EEO)',
-    type: 'single_select',
-    category: 'eeo',
-    answerPreview: 'No disability',
-    why: 'Standard EEO disability status disclosure.',
-  },
-  {
-    key: 'cover_letter_generic',
-    asks: 'Cover letter / notes',
-    type: 'long_text',
-    category: 'written',
-    answerPreview: 'Experienced software engineer focused on building robust full-stack applications and AI systems...',
-    why: 'Default introductory note submitted when portals require a cover letter.',
-  },
-];
-
-type CategoryFilter = 'all' | 'compensation' | 'auth' | 'eeo' | 'written';
-
-const CATEGORIES: readonly { id: CategoryFilter; label: string }[] = [
+const CATEGORIES: readonly { id: ExtendedCategoryFilter; label: string }[] = [
   { id: 'all', label: 'All Questions' },
-  { id: 'compensation', label: 'Compensation & Notice' },
+  { id: 'compensation', label: 'Compensation & Availability' },
   { id: 'auth', label: 'Work Authorization' },
   { id: 'eeo', label: 'EEO & Diversity' },
   { id: 'written', label: 'Written Responses' },
+  { id: 'general', label: 'General / Custom' },
 ];
 
 export function AnswerBankPage(): ReactElement {
   const toast = useToast();
-  const [search, setSearch] = useState('');
-  const [activeCategory, setActiveCategory] = useState<CategoryFilter>('all');
+  const [questions, setQuestions] = useState<readonly BankQuestion[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [search, setSearch] = useState<string>('');
+  const [activeCategory, setActiveCategory] = useState<ExtendedCategoryFilter>('all');
+  const [addModalOpen, setAddModalOpen] = useState<boolean>(false);
 
+  // Track which question is currently in edit mode and its draft value
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [draftValue, setDraftValue] = useState<unknown>('');
+  const [savingKey, setSavingKey] = useState<string | null>(null);
+
+  const fetchBank = useCallback(async () => {
+    try {
+      setLoading(true);
+      const items = await loadAnswerBank();
+      setQuestions(items);
+    } catch (err) {
+      toast.error(`Failed to load answer bank: ${String(err)}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    void fetchBank();
+  }, [fetchBank]);
+
+  // Statistics
+  const totalQuestions = questions.length;
+  const needsAttentionCount = useMemo(
+    () => questions.filter((q) => q.needsHuman).length,
+    [questions],
+  );
+  const totalTimesUsed = useMemo(
+    () => questions.reduce((sum, q) => sum + (q.timesUsed || 0), 0),
+    [questions],
+  );
+
+  // Filtered view
   const filtered = useMemo(() => {
-    return SEED_QUESTIONS.filter((q) => {
-      const matchCategory = activeCategory === 'all' || q.category === activeCategory;
-      const qText = `${q.asks} ${q.key} ${q.why} ${q.answerPreview}`.toLowerCase();
-      const matchSearch = !search.trim() || qText.includes(search.trim().toLowerCase());
-      return matchCategory && matchSearch;
+    return questions.filter((q) => {
+      if (activeCategory === 'needs_attention') {
+        if (!q.needsHuman) return false;
+      } else if (activeCategory !== 'all') {
+        if (q.category !== activeCategory) return false;
+      }
+
+      if (!search.trim()) return true;
+      const query = search.trim().toLowerCase();
+      const strVal = formatAnswerPreview(q.type, q.value, q.key).toLowerCase();
+      return (
+        q.asks.toLowerCase().includes(query) ||
+        q.key.toLowerCase().includes(query) ||
+        q.why.toLowerCase().includes(query) ||
+        strVal.includes(query)
+      );
     });
-  }, [search, activeCategory]);
+  }, [questions, activeCategory, search]);
+
+  const startEditing = (q: BankQuestion) => {
+    setEditingKey(q.key);
+    setDraftValue(q.value);
+  };
+
+  const cancelEditing = () => {
+    setEditingKey(null);
+    setDraftValue('');
+  };
+
+  const handleSaveEdit = async (question: BankQuestion) => {
+    try {
+      setSavingKey(question.key);
+      const res = await saveBankAnswer(question, draftValue);
+      if (res.ok) {
+        toast.success(`Saved standing answer for "${question.asks}"`);
+        setQuestions((prev) =>
+          prev.map((item) =>
+            item.key === question.key
+              ? { ...item, value: draftValue, needsHuman: false }
+              : item,
+          ),
+        );
+        setEditingKey(null);
+      } else {
+        toast.error(res.error || 'Failed to save answer');
+      }
+    } catch (err) {
+      toast.error(`Error saving answer: ${String(err)}`);
+    } finally {
+      setSavingKey(null);
+    }
+  };
+
+  const handleResetToDefault = (question: BankQuestion) => {
+    setDraftValue(question.defaultValue);
+  };
 
   const handleCopy = async (text: string, label: string) => {
     try {
@@ -165,15 +151,82 @@ export function AnswerBankPage(): ReactElement {
     }
   };
 
+  const handleDeleteCustom = async (question: BankQuestion) => {
+    if (!window.confirm(`Are you sure you want to delete "${question.asks}" from the Answer Bank?`)) {
+      return;
+    }
+    try {
+      const res = await deleteCustomBankQuestion(question.key);
+      if (res.ok) {
+        toast.success(`Deleted question "${question.asks}"`);
+        setQuestions((prev) => prev.filter((item) => item.key !== question.key));
+        if (editingKey === question.key) {
+          cancelEditing();
+        }
+      } else {
+        toast.error(res.error || 'Failed to delete question');
+      }
+    } catch (err) {
+      toast.error(`Error deleting question: ${String(err)}`);
+    }
+  };
+
+  const handleAddQuestion = async (newQ: BankQuestion) => {
+    const res = await saveBankAnswer(newQ, newQ.value);
+    if (res.ok) {
+      toast.success(`Added "${newQ.asks}" to Answer Bank`);
+      setQuestions((prev) => [...prev, newQ]);
+      return { ok: true };
+    }
+    return res;
+  };
+
   return (
     <div className="page">
       <PageHeader path="answer-bank" />
 
       <section className="settings-group">
-        <h2 className="settings-group__title">Standard Application Questions</h2>
+        <h2 className="settings-group__title">Standing Answers & Screening Questions</h2>
         <p className="settings-group__note">
-          Pre-configured standing answers used by the Applier across job application portals.
+          Pre-configured answers used by the Applier across job application portals. Update your
+          values below to prevent the bot from pausing or guessing.
         </p>
+
+        {/* Top Summary Bar & Add Button */}
+        <div className="answer-bank__top-bar">
+          <div className="answer-bank__stats-bar">
+            <span className="answer-bank__stat-pill">
+              📋 <strong>{totalQuestions}</strong> Standard Questions
+            </span>
+            <span className="answer-bank__stat-pill">
+              ⚡ <strong>{totalTimesUsed}</strong> Answers Injected
+            </span>
+            {needsAttentionCount > 0 && (
+              <span className="answer-bank__stat-pill answer-bank__stat-pill--alert">
+                ⚠️ <strong>{needsAttentionCount}</strong> Needs Human Answer
+              </span>
+            )}
+          </div>
+
+          <div className="answer-bank__top-actions">
+            <button
+              type="button"
+              className="chip-btn"
+              onClick={() => void fetchBank()}
+              title="Reload from Supabase"
+            >
+              ↻ Refresh
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => setAddModalOpen(true)}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+            >
+              <span>➕</span> Add Question
+            </button>
+          </div>
+        </div>
 
         {/* Search & Category Filter Toolbar */}
         <div className="answer-bank__toolbar">
@@ -182,7 +235,7 @@ export function AnswerBankPage(): ReactElement {
             <input
               type="text"
               className="answer-bank__search-input"
-              placeholder="Search questions or keywords..."
+              placeholder="Search questions, prompts, or values..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
@@ -209,51 +262,340 @@ export function AnswerBankPage(): ReactElement {
                 {cat.label}
               </button>
             ))}
+
+            {needsAttentionCount > 0 && (
+              <button
+                type="button"
+                className={`chip-btn ${activeCategory === 'needs_attention' ? 'chip-btn--active' : ''}`}
+                onClick={() => setActiveCategory('needs_attention')}
+                style={{ color: '#b45309', borderColor: '#f59e0b' }}
+              >
+                ⚠️ Needs Attention ({needsAttentionCount})
+              </button>
+            )}
           </div>
         </div>
 
+        {/* Table of Questions & Inputs */}
         <div className="settings-table-wrap">
           <table className="settings-table">
             <thead>
               <tr>
-                <th scope="col">Question Prompt</th>
-                <th scope="col">Type</th>
-                <th scope="col">Stored Standing Answer</th>
-                <th scope="col">Purpose / Notes</th>
-                <th scope="col">Action</th>
+                <th scope="col" style={{ width: '28%' }}>Question Prompt</th>
+                <th scope="col" style={{ width: '12%' }}>Type</th>
+                <th scope="col" style={{ width: '36%' }}>Configured Standing Answer</th>
+                <th scope="col" style={{ width: '14%' }}>Usage</th>
+                <th scope="col" style={{ width: '10%' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {filtered.length > 0 ? (
-                filtered.map((question) => (
-                  <tr key={question.key}>
-                    <th scope="row">
-                      {question.asks}
-                      <span className="identifier">{question.key}</span>
-                    </th>
-                    <td>
-                      <span className="identifier">{question.type}</span>
-                    </td>
-                    <td>
-                      <strong>{question.answerPreview}</strong>
-                    </td>
-                    <td>{question.why}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="copy-btn"
-                        onClick={() => void handleCopy(question.answerPreview, question.asks)}
-                        title="Copy answer to clipboard"
-                      >
-                        📋 Copy
-                      </button>
-                    </td>
-                  </tr>
-                ))
+              {loading ? (
+                <tr>
+                  <td colSpan={5} style={{ textAlign: 'center', padding: 'var(--gap-5)', color: 'var(--text-muted)' }}>
+                    Loading standing answers...
+                  </td>
+                </tr>
+              ) : filtered.length > 0 ? (
+                filtered.map((question) => {
+                  const isEditing = editingKey === question.key;
+                  const isSaving = savingKey === question.key;
+
+                  return (
+                    <tr key={question.key}>
+                      <th scope="row">
+                        <div>{question.asks}</div>
+                        <span className="identifier">{question.key}</span>
+                        {question.needsHuman && (
+                          <div>
+                            <span className="answer-bank__badge-needs-human">
+                              ⚠️ Needs Human Answer
+                            </span>
+                          </div>
+                        )}
+                        <div style={{ marginTop: '4px', fontSize: 'var(--size-xs)', color: 'var(--text-secondary)', fontWeight: 'normal' }}>
+                          {question.why}
+                        </div>
+                      </th>
+
+                      <td>
+                        <span className="identifier">{question.type}</span>
+                        {question.isCustom && (
+                          <div style={{ marginTop: '4px', fontSize: '0.7rem', color: 'var(--accent)' }}>
+                            Custom
+                          </div>
+                        )}
+                      </td>
+
+                      <td>
+                        {isEditing ? (
+                          <div className="answer-bank__edit-container">
+                            {/* NUMBER INPUT */}
+                            {question.type === 'number' && (
+                              <div>
+                                <input
+                                  type="number"
+                                  className="answer-bank__input"
+                                  value={String(draftValue ?? '')}
+                                  onChange={(e) => setDraftValue(e.target.value === '' ? '' : Number(e.target.value))}
+                                  autoFocus
+                                />
+                                {question.key === 'notice_period_days' && (
+                                  <div className="answer-bank__quick-pills">
+                                    <button type="button" className="answer-bank__quick-pill" onClick={() => setDraftValue(0)}>
+                                      0 (Immediate)
+                                    </button>
+                                    <button type="button" className="answer-bank__quick-pill" onClick={() => setDraftValue(15)}>
+                                      15 days
+                                    </button>
+                                    <button type="button" className="answer-bank__quick-pill" onClick={() => setDraftValue(30)}>
+                                      30 days
+                                    </button>
+                                    <button type="button" className="answer-bank__quick-pill" onClick={() => setDraftValue(60)}>
+                                      60 days
+                                    </button>
+                                    <button type="button" className="answer-bank__quick-pill" onClick={() => setDraftValue(90)}>
+                                      90 days
+                                    </button>
+                                  </div>
+                                )}
+                                {question.key === 'current_ctc_inr' && (
+                                  <div className="answer-bank__quick-pills">
+                                    <button type="button" className="answer-bank__quick-pill" onClick={() => setDraftValue(0)}>
+                                      ₹0 (Fresher/Student)
+                                    </button>
+                                    <button type="button" className="answer-bank__quick-pill" onClick={() => setDraftValue(300000)}>
+                                      ₹3 LPA
+                                    </button>
+                                    <button type="button" className="answer-bank__quick-pill" onClick={() => setDraftValue(600000)}>
+                                      ₹6 LPA
+                                    </button>
+                                    <button type="button" className="answer-bank__quick-pill" onClick={() => setDraftValue(1000000)}>
+                                      ₹10 LPA
+                                    </button>
+                                  </div>
+                                )}
+                                {question.key === 'expected_ctc_inr' && (
+                                  <div className="answer-bank__quick-pills">
+                                    <button type="button" className="answer-bank__quick-pill" onClick={() => setDraftValue(800000)}>
+                                      ₹8 LPA
+                                    </button>
+                                    <button type="button" className="answer-bank__quick-pill" onClick={() => setDraftValue(1200000)}>
+                                      ₹12 LPA
+                                    </button>
+                                    <button type="button" className="answer-bank__quick-pill" onClick={() => setDraftValue(1500000)}>
+                                      ₹15 LPA
+                                    </button>
+                                    <button type="button" className="answer-bank__quick-pill" onClick={() => setDraftValue(2000000)}>
+                                      ₹20 LPA
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {/* BOOLEAN INPUT */}
+                            {question.type === 'boolean' && (
+                              <div className="answer-bank__bool-group">
+                                <button
+                                  type="button"
+                                  className={`answer-bank__bool-btn ${draftValue === true || draftValue === 'true' ? 'answer-bank__bool-btn--active-yes' : ''}`}
+                                  onClick={() => setDraftValue(true)}
+                                >
+                                  ✓ Yes (True)
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`answer-bank__bool-btn ${draftValue === false || draftValue === 'false' ? 'answer-bank__bool-btn--active-no' : ''}`}
+                                  onClick={() => setDraftValue(false)}
+                                >
+                                  ✕ No (False)
+                                </button>
+                              </div>
+                            )}
+
+                            {/* SINGLE SELECT (Gender, Disability, etc.) */}
+                            {question.type === 'single_select' && (
+                              <div>
+                                {question.key === 'gender' ? (
+                                  <select
+                                    className="answer-bank__input"
+                                    value={String(draftValue ?? '')}
+                                    onChange={(e) => setDraftValue(e.target.value)}
+                                  >
+                                    <option value="Decline to self-identify">Decline to self-identify</option>
+                                    <option value="Male">Male</option>
+                                    <option value="Female">Female</option>
+                                    <option value="Non-binary">Non-binary</option>
+                                    <option value="Prefer to self-describe">Prefer to self-describe</option>
+                                  </select>
+                                ) : question.key === 'disability_status' ? (
+                                  <select
+                                    className="answer-bank__input"
+                                    value={String(draftValue ?? '')}
+                                    onChange={(e) => setDraftValue(e.target.value)}
+                                  >
+                                    <option value="No disability">No disability</option>
+                                    <option value="Yes, I have a disability">Yes, I have a disability</option>
+                                    <option value="Decline to self-identify">Decline to self-identify</option>
+                                  </select>
+                                ) : (
+                                  <input
+                                    type="text"
+                                    className="answer-bank__input"
+                                    value={String(draftValue ?? '')}
+                                    onChange={(e) => setDraftValue(e.target.value)}
+                                  />
+                                )}
+                              </div>
+                            )}
+
+                            {/* DATE INPUT */}
+                            {question.type === 'date' && (
+                              <div>
+                                <input
+                                  type="text"
+                                  className="answer-bank__input"
+                                  placeholder="e.g. Immediate or YYYY-MM-DD"
+                                  value={String(draftValue ?? '')}
+                                  onChange={(e) => setDraftValue(e.target.value)}
+                                />
+                                <div className="answer-bank__quick-pills">
+                                  <button
+                                    type="button"
+                                    className="answer-bank__quick-pill"
+                                    onClick={() => setDraftValue('Immediate')}
+                                  >
+                                    Immediate
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="answer-bank__quick-pill"
+                                    onClick={() => {
+                                      const d = new Date();
+                                      d.setDate(d.getDate() + 15);
+                                      setDraftValue(d.toISOString().slice(0, 10));
+                                    }}
+                                  >
+                                    In 15 days
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* LONG TEXT (Cover letter / statement) */}
+                            {question.type === 'long_text' && (
+                              <textarea
+                                className="answer-bank__textarea"
+                                rows={4}
+                                value={String(draftValue ?? '')}
+                                onChange={(e) => setDraftValue(e.target.value)}
+                                placeholder="Enter introductory statement or cover letter..."
+                              />
+                            )}
+
+                            {/* SHORT TEXT */}
+                            {question.type === 'text' && (
+                              <input
+                                type="text"
+                                className="answer-bank__input"
+                                value={String(draftValue ?? '')}
+                                onChange={(e) => setDraftValue(e.target.value)}
+                              />
+                            )}
+
+                            {/* Save / Cancel Action Buttons */}
+                            <div className="answer-bank__edit-actions">
+                              <button
+                                type="button"
+                                className="answer-bank__btn-save"
+                                onClick={() => void handleSaveEdit(question)}
+                                disabled={isSaving}
+                              >
+                                {isSaving ? 'Saving...' : '💾 Save Answer'}
+                              </button>
+                              <button
+                                type="button"
+                                className="answer-bank__btn-cancel"
+                                onClick={cancelEditing}
+                                disabled={isSaving}
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                className="answer-bank__btn-reset"
+                                onClick={() => handleResetToDefault(question)}
+                                title="Reset to standard default"
+                              >
+                                ↺ Reset to default
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                            <strong style={{ fontSize: 'var(--size-sm)', color: 'var(--text-primary)' }}>
+                              {formatAnswerPreview(question.type, question.value, question.key)}
+                            </strong>
+                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '2px' }}>
+                              <button
+                                type="button"
+                                className="answer-bank__action-btn answer-bank__action-btn--edit"
+                                onClick={() => startEditing(question)}
+                              >
+                                ✏️ Edit Answer
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </td>
+
+                      <td>
+                        <span className="identifier">
+                          {question.timesUsed > 0 ? `${question.timesUsed}x used` : 'Unused'}
+                        </span>
+                        {question.lastUsedAt && (
+                          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                            {new Date(question.lastUsedAt).toLocaleDateString()}
+                          </div>
+                        )}
+                      </td>
+
+                      <td>
+                        <div className="answer-bank__row-actions">
+                          <button
+                            type="button"
+                            className="answer-bank__action-btn"
+                            onClick={() =>
+                              void handleCopy(
+                                typeof question.value === 'object'
+                                  ? JSON.stringify(question.value)
+                                  : String(question.value),
+                                question.asks,
+                              )
+                            }
+                            title="Copy answer value to clipboard"
+                          >
+                            📋 Copy
+                          </button>
+                          {question.isCustom && (
+                            <button
+                              type="button"
+                              className="answer-bank__action-btn answer-bank__action-btn--delete"
+                              onClick={() => void handleDeleteCustom(question)}
+                              title="Delete custom question"
+                            >
+                              🗑️
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
               ) : (
                 <tr>
                   <td colSpan={5} style={{ textAlign: 'center', padding: 'var(--gap-5)', color: 'var(--text-muted)' }}>
-                    No questions matching your search criteria.
+                    No screening questions matching your search criteria.
                   </td>
                 </tr>
               )}
@@ -261,6 +603,13 @@ export function AnswerBankPage(): ReactElement {
           </table>
         </div>
       </section>
+
+      {/* Add Custom Question Modal */}
+      <AddQuestionModal
+        isOpen={addModalOpen}
+        onClose={() => setAddModalOpen(false)}
+        onAdd={handleAddQuestion}
+      />
     </div>
   );
 }
