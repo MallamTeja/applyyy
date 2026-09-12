@@ -753,3 +753,23 @@ export function searchOrDiscoverCompany(
 
   return [synthesized];
 }
+
+/**
+ * Look up curated cooldown policies (interview and screening cool-off windows)
+ * for any employer by company name or slug.
+ */
+export function getCompanyCooldownInfo(companyName: string): CompanyCooldown | null {
+  if (!companyName || typeof companyName !== 'string') return null;
+  const q = companyName.trim().toLowerCase();
+
+  const exact = CURATED_COMPANIES.find(
+    (c) =>
+      c.name.toLowerCase() === q ||
+      c.atsIdentifier.toLowerCase() === q ||
+      q.includes(c.atsIdentifier.toLowerCase()) ||
+      c.name.toLowerCase().includes(q),
+  );
+
+  return exact ? exact.cooldown : null;
+}
+

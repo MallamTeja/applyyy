@@ -8,9 +8,10 @@ import { BrowserRouter } from 'react-router-dom';
 import { AppShell } from './app/AppShell';
 import { DEFAULT_ROUTE } from './app/routes';
 
-/* The three daily screens. */
+/* The daily screens. */
 import { ApprovalQueuePage } from './features/approval/ApprovalQueuePage';
 import { PipelinePage } from './features/pipeline/PipelinePage';
+import { DiscoveredJobsPage } from './features/discovery/DiscoveredJobsPage';
 import { HealthPage } from './features/health/HealthPage';
 import { EmailMonitoringPage } from './features/emails/EmailMonitoringPage';
 
@@ -41,6 +42,7 @@ export function App(): ReactElement {
 
           <Route path="approvals" element={<ApprovalQueuePage />} />
           <Route path="pipeline" element={<PipelinePage />} />
+          <Route path="discovered" element={<DiscoveredJobsPage />} />
           <Route path="health" element={<HealthPage />} />
           <Route path="emails" element={<EmailMonitoringPage />} />
 

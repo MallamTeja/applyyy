@@ -99,16 +99,25 @@ export function CommandPalette({
     setSelectedIndex(0);
   }, [query]);
 
-  // Auto-focus input on open
+  // Auto-focus input and bind Escape on open
   useEffect(() => {
     if (isOpen) {
       setQuery('');
       setSelectedIndex(0);
       setTimeout(() => inputRef.current?.focus(), 50);
-    }
-  }, [isOpen]);
 
-  // Global keyboard shortcuts: Esc, ArrowDown, ArrowUp, Enter
+      const handleGlobalKeyDown = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          onClose();
+        }
+      };
+      window.addEventListener('keydown', handleGlobalKeyDown);
+      return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+    }
+  }, [isOpen, onClose]);
+
+  // Keyboard navigation: ArrowDown, ArrowUp, Enter
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (e.key === 'Escape') {

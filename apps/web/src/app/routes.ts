@@ -44,6 +44,11 @@ export const OPERATIONS_SECTION: ConsoleSection = {
       lede: 'Status tracking across active and submitted applications.',
     },
     {
+      path: 'discovered',
+      label: 'Discovered jobs',
+      lede: 'Explore discovered jobs across watched ATS career pages and hiring feeds.',
+    },
+    {
       path: 'health',
       label: 'System health',
       lede: 'Automation status, worker freshness, and database connectivity.',

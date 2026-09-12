@@ -281,8 +281,20 @@ function Run({ run }: { readonly run: TailoredRun }): ReactElement {
 }
 
 /* One aligned row: master text on the left, tailored runs on the right, plus a
- * provenance footer under the tailored side. */
-function Line({ line }: { readonly line: DiffLine }): ReactElement {
+ * provenance footer under the tailored side and optional operator inline editing. */
+function Line({
+  line,
+  customText,
+  onSaveCustomText,
+}: {
+  readonly line: DiffLine;
+  readonly customText?: string | undefined;
+  readonly onSaveCustomText?: ((lineId: string, text: string) => void) | undefined;
+}): ReactElement {
+  const [isEditing, setIsEditing] = useState<boolean>(false);
+  const currentTailoredText = customText ?? line.tailoredRuns.map((r) => r.text).join('');
+  const [draftText, setDraftText] = useState<string>(currentTailoredText);
+
   /* The untraceable runs on this line, so the footer can name them. */
   const fabricated = line.tailoredRuns.filter(
     (run) => run.verdict === 'fabricated',
@@ -292,25 +304,23 @@ function Line({ line }: { readonly line: DiffLine }): ReactElement {
      sentence. Different reading modes want different measure and leading. */
   const kindClass = 'line__text line__text--' + line.kind;
 
+  function handleSave() {
+    if (onSaveCustomText) {
+      onSaveCustomText(line.id, draftText);
+    }
+    setIsEditing(false);
+  }
+
+  function handleCancel() {
+    setDraftText(currentTailoredText);
+    setIsEditing(false);
+  }
+
   return (
-    /* React.Fragment with a key: the two cells are siblings in the parent grid,
-       so wrapping them in a div would break the column alignment that makes the
-       comparison possible. */
     <>
       <div className="line line--master">
-        {/* Per-cell side label. Invisible on wide screens where the column
-            headings do this job, and revealed when the grid collapses to one
-            column - at which point a single pair of headings at the top would
-            label only the first two cells and mislabel every cell after. */}
         <p className="line__side-label">Master</p>
 
-        {/* A null master text is meaningful rather than missing. A bullet
-            rewords exactly one master bullet, so it has a counterpart to sit
-            beside; a summary is prose drawn from several nodes, so there is
-            none. Saying that is important: an empty pane beside generated
-            prose reads as "wholly invented", when the truth is "assembled from
-            several real things, and therefore harder to check" - which is why
-            prose is the weakest point in the honesty design. */}
         {line.masterText === null ? (
           <p className="line__no-master">
             No single master line to compare. This paragraph draws on several
@@ -321,32 +331,75 @@ function Line({ line }: { readonly line: DiffLine }): ReactElement {
           <p className={kindClass}>{line.masterText}</p>
         )}
 
-        {/* The master node id, in mono because it is a literal string the
-            operator can look up on the Master Profile page. */}
         <p className="identifier">{line.masterNodeId}</p>
       </div>
 
       <div className="line line--tailored">
-        {/* Matching side label, same reasoning as the master cell above. */}
-        <p className="line__side-label">Tailored</p>
-        <p className={kindClass}>
-          {line.tailoredRuns.map((run, index) => (
-            /* Index keys are correct here: runs are a positional decomposition
-               of one immutable line, never reordered or inserted into. */
-            <Run key={line.id + '-run-' + index} run={run} />
-          ))}
-        </p>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <p className="line__side-label">Tailored</p>
+          {!isEditing && (
+            <button
+              type="button"
+              className="line__edit-trigger"
+              onClick={() => {
+                setDraftText(currentTailoredText);
+                setIsEditing(true);
+              }}
+              title="Edit this tailored bullet directly"
+            >
+              ✏️ Edit text
+            </button>
+          )}
+        </div>
 
-        {fabricated.length > 0 ? (
-          /* The loud footer. Names the claims in plain words so the finding
-             survives a screenshot, a printout, and colour-blind vision. */
+        {isEditing ? (
+          <div className="line__edit-box">
+            <textarea
+              className="line__edit-textarea"
+              value={draftText}
+              onChange={(e) => setDraftText(e.target.value)}
+              placeholder="Edit tailored text..."
+              autoFocus
+            />
+            <div className="line__edit-actions">
+              <button
+                type="button"
+                className="line__edit-cancel"
+                onClick={handleCancel}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="line__edit-save"
+                onClick={handleSave}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        ) : (
+          <p className={kindClass}>
+            {customText ? (
+              <span className="run run--traced">{customText}</span>
+            ) : (
+              line.tailoredRuns.map((run, index) => (
+                <Run key={line.id + '-run-' + index} run={run} />
+              ))
+            )}
+          </p>
+        )}
+
+        {customText ? (
+          <p className="line__provenance line__provenance--edited">
+            ✏️ customized by operator
+          </p>
+        ) : fabricated.length > 0 ? (
           <p className="line__provenance line__provenance--fabricated">
             {fabricated.map((run) => run.text).join(' and ')} trace
             {fabricated.length === 1 ? 's' : ''} to nothing
           </p>
         ) : (
-          /* The quiet footer. Present so the operator can confirm provenance
-             exists, small and forest so it never competes with the loud one. */
           <p className="line__provenance line__provenance--traced">
             traced to <span className="identifier">{line.masterNodeId}</span>
           </p>
@@ -366,6 +419,11 @@ export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactEle
   const [decisions, setDecisions] = useState<ReadonlyMap<string, ClaimDecision>>(
     () => new Map(),
   );
+  const [customLines, setCustomLines] = useState<Record<string, string>>({});
+
+  function handleSaveCustomLine(lineId: string, text: string) {
+    setCustomLines((prev) => ({ ...prev, [lineId]: text }));
+  }
 
   function decide(key: string, decision: ClaimDecision): void {
     setDecisions((previous) => {
@@ -484,7 +542,12 @@ export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactEle
           <h3 className="diff__pane-head">Tailored for this job</h3>
 
           {diff.lines.map((line) => (
-            <Line key={line.id} line={line} />
+            <Line
+              key={line.id}
+              line={line}
+              customText={customLines[line.id]}
+              onSaveCustomText={handleSaveCustomLine}
+            />
           ))}
         </div>
       ) : (

@@ -271,7 +271,7 @@ async function main() {
     assert.match(emailTitle, /Email monitoring/i);
 
     const emailStats = await page.locator('.email-stat-card').count();
-    assert.equal(emailStats, 3, 'Must render 3 email metric boxes (Interviews, Linked, Direct)');
+    assert.equal(emailStats, 4, 'Must render 4 email metric boxes (Interviews, Linked, Direct, Mode)');
 
     const hasRefreshBtn = await page.locator('button:has-text("Refresh")').isVisible();
     assert.ok(hasRefreshBtn, 'Must render Refresh Interviews button');
@@ -281,7 +281,7 @@ async function main() {
     console.log('\n[E2E 7/7] Testing typography styles and theme switching...');
     const bodyFont = await page.evaluate(() => window.getComputedStyle(document.body).fontFamily);
     console.log(`[E2E 7/7] Computed body font: ${bodyFont}`);
-    assert.ok(bodyFont.toLowerCase().includes('ibm plex sans'), 'Body font must resolve to IBM Plex Sans');
+    assert.ok(bodyFont.toLowerCase().includes('inter'), 'Body font must resolve to Inter');
 
     const themeToggle = page.locator('.rail__theme-btn');
     if ((await themeToggle.count()) > 0) {
