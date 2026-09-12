@@ -38,40 +38,24 @@ import {
   deriveBucket,
 } from './diffModel';
 import { StatusBadge } from '../../app/StatusBadge';
+import { SourceBadge } from '../../app/SourceBadge';
+import type { DiscoverySource } from '../../data/contract';
 
 import './DiffView.css';
 
-/* What the operator decides about one untraceable claim.
- *
- * Deliberately NOT a single "I acknowledge" checkbox. An acknowledgement is
- * satisfied by clicking, which is what a tired operator does automatically. A
- * choice between two named outcomes cannot be satisfied without reading, and it
- * is also more honest: sometimes the master profile is simply incomplete and
- * the claim is true, which "remove everything flagged" would wrongly forbid. */
+/* Two named outcomes per claim, not a single acknowledgement checkbox. */
 type ClaimDecision = 'remove' | 'keep';
 
-/* Callbacks out. This component owns no data access - no Supabase import, no
- * fetch - which is what makes it testable against the section 11 fixture and
- * what lets it render identically for a live row or a fixture. */
+/* Pure presentation component - no data access, no Supabase. */
 export interface DiffViewProps {
   readonly diff: ResumeDiff;
-  /* Called with the operator's per-claim decisions so the caller can write the
-   * status transition. Constraint #15: nothing here submits anything, and there
-   * is no code path that reaches an ATS without passing through this callback. */
   readonly onApprove: (decisions: ReadonlyMap<string, ClaimDecision>) => void;
   readonly onReject: (reason: string) => void;
 }
 
 /* --- Coverage ---------------------------------------------------------- */
 
-/* Section 18.7: keyword coverage, "so you can see whether the tailoring
- * actually did anything".
- *
- * Rendered as ONE bar with TWO segments rather than one percentage. A single
- * number rewards fabrication - inventing PostgreSQL and Docker lifts coverage
- * from 50% to 100%, and a lone "100%" reads as success. Showing the second
- * segment in oxblood makes the trade visible: the operator can see that the
- * last half of that bar was bought with two claims they cannot defend. */
+/* Two-segment bar: honest coverage vs coverage purchased by fabrication. */
 function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactElement {
   /* Coverage the master genuinely supports. */
   const honest = coveragePercent(diff.coverage, 'honest');
@@ -161,15 +145,9 @@ function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactElement {
   );
 }
 
-/* --- The fabrication alert -------------------------------------------- */
+/* --- Fabrication alert ------------------------------------------------- */
 
-/* The only dark surface in the entire application.
- *
- * That scarcity is the design: the operator learns within a day that a dark
- * band means "this one can hurt you", and can identify a dangerous row from
- * across the room without reading a word. Reusing this surface anywhere else
- * would destroy the signal, which is why the token is named --alarm-ground and
- * documented as single-use. */
+/* Dark-surface alert for untraceable claims. Single-use alarm surface. */
 function FabricationAlert({
   claims,
   masterVersion,
@@ -430,6 +408,12 @@ export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactEle
               {diff.jobTitle} at {diff.companyName}
             </h2>
             <div className="diff__badges">
+              {diff.discoveredVia && diff.discoveredVia.length > 0 && (
+                <SourceBadge
+                  discoveredVia={diff.discoveredVia as readonly DiscoverySource[]}
+                  sourceRefs={diff.sourceRefs}
+                />
+              )}
               <StatusBadge
                 status={bucket === 'A' ? 'audit_clean' : 'audit_flagged'}
                 label={bucket === 'A' ? 'audit_clean' : 'audit_flagged'}

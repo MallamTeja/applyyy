@@ -60,39 +60,17 @@ import type { StoreOutcome } from './masterStore';
 import { extractPdf } from './pdfExtractor';
 import { supabase } from '../../data/supabase';
 
-/* Mint a node id.
- *
- * INJECTED INTO THE RECONCILER RATHER THAN REACHED FOR INSIDE IT, which is
- * `reconcile.ts` decision 4: it keeps that package free of every Node and
- * browser API so Deno, Node and the browser can all import it, and it makes
- * every test deterministic without stubbing a global. This is the browser's
- * half of that contract.
- *
- * `crypto.randomUUID()` rather than a counter. A counter would produce
- * `node-1`, `node-2` on every upload, and the reconciler's postcondition exists
- * because a `mintId` that repeats itself silently re-identifies nodes - the
- * exact failure the package throws `ReconciliationError` for. A UUID cannot
- * collide with a previously stored id by construction, so the postcondition
- * never has to fire. */
+/* Mint a node id. Injected into the reconciler to keep it pure and testable. */
 function mintNodeId(): NodeId {
   return crypto.randomUUID();
 }
 
 /* --- One review row ---------------------------------------------------- */
 
-/* Why this row is here, in the interface's voice.
- *
- * A WORD PER CAUSE RATHER THAN A COLOURED DOT. `tokens.css` states the rule:
- * no status in this console relies on hue alone, so every cause pairs its
- * colour with a readable word. A colour-blind operator reads the same screen. */
+/* Cause labels - pairs colour with a readable word for accessibility. */
 const CAUSE_LABEL: Readonly<Record<ReviewRow['cause'], string>> = {
-  /* The reconciler refused to decide. Named for what it wants from him - a
-     choice - rather than for the internal state that produced it. */
   ambiguous: 'Needs your decision',
-  /* A decision WAS made, silently, by a score. The dangerous one. */
   fuzzy_carry: 'Matched by similarity',
-  /* Named for the consequence rather than the event: "removed" sounds like
-     tidying, and the consequence is a dangling reference. */
   dropped: 'No longer in your resume',
   uncertain_mint: 'Treated as new',
 };

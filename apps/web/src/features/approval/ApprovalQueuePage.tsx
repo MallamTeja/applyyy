@@ -27,6 +27,8 @@ import type { ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
 import { StatusBadge } from '../../app/StatusBadge';
+import { SourceBadge } from '../../app/SourceBadge';
+import type { DiscoverySource } from '../../data/contract';
 import { DiffView } from './DiffView';
 import { deriveBucket } from './diffModel';
 import type { ResumeDiff } from './diffModel';
@@ -181,6 +183,12 @@ export function ApprovalQueuePage(): ReactElement {
                   {diff.jobTitle} at {diff.companyName}
                 </span>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.75rem' }}>
+                  {diff.discoveredVia && diff.discoveredVia.length > 0 && (
+                    <SourceBadge
+                      discoveredVia={diff.discoveredVia as readonly DiscoverySource[]}
+                      sourceRefs={diff.sourceRefs}
+                    />
+                  )}
                   <StatusBadge status="audit_clean" label="audit_clean" />
                   <span className="identifier">
                     master v{diff.masterVersion}

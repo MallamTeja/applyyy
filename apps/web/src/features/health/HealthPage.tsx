@@ -92,25 +92,8 @@ import './health.css';
 
 /* --- Panels ----------------------------------------------------------- */
 
-/* AGENT FRESHNESS - the panel section 14 exists for, now reading real rows.
- *
- * WHAT IT READS AND WHY THAT TABLE FIRST. `agent_runs` carries an agent name,
- * an outcome and two timestamps: no resume, no job description, no answer bank,
- * nothing personal. So it is the safest real read available, and the worst case
- * if the read is wrong is a misleading age on one panel rather than misleading
- * resume content on the highest-consequence screen in the console. Prove the
- * read pattern where a mistake is cheap.
- *
- * THE TABLE IS DRIVEN BY THE ROSTER, NOT BY THE ROWS, and that is the whole
- * design. `GROUP BY agent` produces no row for an agent that has never run - so
- * the agent whose failure is TOTAL would be the one missing from the page, and
- * its absence would look like tidiness. `AGENT_NAMES` drives the rows and the
- * query only fills them in; a missing agent reports "has never run", loudly.
- *
- * AND EVERY COLUMN IS AN AGE. A green tick meaning "the last run succeeded" is
- * exactly the wrong indicator: a job that stopped a month ago has a perfectly
- * successful last run. Freshness is the signal, outcome is the qualifier.
- */
+/* Agent freshness panel: roster-driven table showing age since last run.
+ * Driven by AGENT_NAMES roster, not query results, so missing agents are visible. */
 function AgentFreshnessPanel({
   read,
 }: {
@@ -403,26 +386,13 @@ function KeepalivePanel({
       <ul className="keepalive">
         <li className="keepalive__item">
           <span className="keepalive__what">Supabase project activity</span>
-          {/* The mechanism is stated because the reason it matters is not
-              obvious from the name: a paused project fails every query, so this
-              keepalive is what stands between the operator and a dead app. */}
           <span className="keepalive__why">
-            A free project pauses after one week idle. The daily Actions cron
-            runs one database query purely so that clock never reaches a week.
-            Measured here as the newest run by ANY agent, since the pause clock
-            counts any activity at all rather than one particular job.
+            Prevents database auto-pause by tracking periodic agent activity.
           </span>
           {unreadable !== null ? (
-            /* The read's own phrase. Never a number, and never "just now". */
             <span className="unknown">{unreadable}</span>
           ) : anyActivity === null ? (
-            /* A conclusive read with no runs at all. This is the alarming case
-               and it is stated as one: nothing has ever written to this
-               database through an agent, so the pause clock is running with
-               nothing resetting it. */
-            <span className="table__never">
-              no agent has ever run, so nothing is resetting the pause clock
-            </span>
+            <span className="table__never">No agent activity recorded</span>
           ) : (
             <span className="table__age">
               last activity {formatAge(anyActivity.ageMs)} ago, by{' '}
@@ -433,21 +403,13 @@ function KeepalivePanel({
         <li className="keepalive__item">
           <span className="keepalive__what">GitHub scheduled workflows</span>
           <span className="keepalive__why">
-            GitHub disables cron schedules after 60 days of repository
-            inactivity - silently, and every scheduled agent stops with them. A
-            weekly workflow touches a timestamp file to reset that counter.
+            Ensures GitHub Actions cron schedules stay active.
           </span>
           {unreadable !== null ? (
             <span className="unknown">{unreadable}</span>
           ) : keepalive === undefined ||
             keepalive.heartbeatAgeMs === null ? (
-            /* THE WORST CASE ON THIS PANEL, and worth spelling out rather than
-               dashing. The keepalive never having run means the 60-day clock
-               has never been reset - and when it expires, every scheduled agent
-               stops at once, silently. */
-            <span className="table__never">
-              has never run, so the 60-day clock has never been reset
-            </span>
+            <span className="table__never">Never run</span>
           ) : (
             <span className="table__age">
               {formatAge(keepalive.heartbeatAgeMs)} ago
@@ -508,13 +470,7 @@ function ControlCoveragePanel(): ReactElement {
     <section className="panel">
       <h2 className="panel__title">Manual control coverage</h2>
       <p className="panel__note">
-        Derived from the status graph at load time, so this check cannot go
-        stale. Every transition a human is permitted to make is counted in
-        exactly one of the four rows below, and the four add up to{' '}
-        {/* Rendered rather than hardcoded: the number comes from the graph, so
-            a schema change moves it without an edit here. */}
-        {total} - which is how you can tell nothing quietly fell out of the
-        count.
+        Live coverage of manual workflow transitions across {total} permitted human actions.
       </p>
 
       {/* The same scroll container the freshness table above uses, and it was

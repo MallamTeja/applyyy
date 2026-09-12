@@ -32,6 +32,7 @@ import type {
   ApplicationRow,
   AuditFinding,
   JobRow,
+  JobSourceRef,
   MasterProfile,
   ResolvedResume,
 } from '../../data/contract';
@@ -52,7 +53,10 @@ export interface DiffAdapterInput {
   /* The job, for the title and company shown in the header. Both are UNTRUSTED
    * (they came from an ATS board), so both are rendered as React text children
    * and nothing else. */
-  readonly job: Pick<JobRow, 'title' | 'company_name'>;
+  readonly job: Pick<JobRow, 'title' | 'company_name'> & {
+    readonly discovered_via?: readonly string[] | null;
+    readonly source_refs?: readonly JobSourceRef[] | null;
+  };
   /* The immutable snapshot the worker will render to PDF. What was approved is
    * byte-for-byte what gets sent, so this is the correct thing to review. */
   readonly resolved: ResolvedResume;
@@ -323,6 +327,8 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
     },
     lines,
     unlocatedClaims,
+    discoveredVia: job.discovered_via,
+    sourceRefs: job.source_refs,
   };
 }
 

@@ -1,0 +1,98 @@
+﻿/* SourceBadge — three-tier source origin pills.
+ *
+ * Tier 1 (career-page)   : emerald green  — highest signal, direct ATS
+ * Tier 2 (linkedin-post) : electric blue  — secondary signal, founder/recruiter post
+ * Tier 3 (portal)        : indigo/slate   — lowest signal, aggregator
+ *
+ * Each pill is clickable (opens source URL) and shows a tooltip with provider + URL
+ * on hover. Uses the same CSS-variable token system as StatusBadge so it inherits
+ * light/dark theme switching automatically.
+ */
+
+.source-badge-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  align-items: center;
+}
+
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 9999px;
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  /* Smooth transition for hover brightness */
+  transition: filter 120ms ease, box-shadow 120ms ease;
+  /* Pointer only when URL is present (role=link) */
+  cursor: default;
+}
+
+.source-badge[role='link'] {
+  cursor: pointer;
+}
+
+.source-badge[role='link']:hover {
+  filter: brightness(1.12);
+  box-shadow: 0 0 0 2px currentColor;
+}
+
+.source-badge[role='link']:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+/* ── Tier 1: Career Page (emerald green) ─────────────────────────────────── */
+.source-badge--career-page {
+  background: oklch(0.92 0.08 145 / 0.18);
+  color: oklch(0.45 0.14 145);
+  border: 1px solid oklch(0.70 0.12 145 / 0.45);
+}
+
+[data-theme='dark'] .source-badge--career-page {
+  background: oklch(0.30 0.09 145 / 0.30);
+  color: oklch(0.78 0.14 145);
+  border-color: oklch(0.55 0.13 145 / 0.50);
+}
+
+/* ── Tier 2: LinkedIn Post (electric blue) ───────────────────────────────── */
+.source-badge--linkedin-post {
+  background: oklch(0.92 0.08 250 / 0.18);
+  color: oklch(0.42 0.18 250);
+  border: 1px solid oklch(0.65 0.16 250 / 0.45);
+}
+
+[data-theme='dark'] .source-badge--linkedin-post {
+  background: oklch(0.28 0.10 250 / 0.35);
+  color: oklch(0.76 0.17 250);
+  border-color: oklch(0.52 0.16 250 / 0.55);
+}
+
+/* ── Tier 3: Portal / Aggregator (indigo-slate) ──────────────────────────── */
+.source-badge--portal {
+  background: oklch(0.92 0.04 270 / 0.14);
+  color: oklch(0.45 0.10 270);
+  border: 1px solid oklch(0.65 0.08 270 / 0.40);
+}
+
+[data-theme='dark'] .source-badge--portal {
+  background: oklch(0.28 0.05 270 / 0.28);
+  color: oklch(0.72 0.10 270);
+  border-color: oklch(0.50 0.08 270 / 0.45);
+}
+
+/* ── Icon + label layout ─────────────────────────────────────────────────── */
+.source-badge__icon {
+  font-size: 0.82em;
+  line-height: 1;
+  /* Prevent emoji from inheriting text colour transforms */
+  color: inherit;
+}
+
+.source-badge__label {
+  line-height: 1;
+}

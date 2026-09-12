@@ -119,10 +119,8 @@ export function LoginPage({ auth }: LoginPageProps): ReactElement {
           <span className="login-card__tagline">operator authentication</span>
         </div>
 
-        {/* Console mission and dynamic isolation explainer */}
         <p className="login-card__desc">
-          Verification desk console. Access is strictly gated by Postgres Row Level Security (RLS)
-          scoped to your authenticated user identity.
+          Sign in to access your operator console and application pipeline.
         </p>
 
         {/* Quick-fill shortcut for known operator account */}

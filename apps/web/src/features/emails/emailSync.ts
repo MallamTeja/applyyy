@@ -155,8 +155,6 @@ export async function triggerGmailSync(
       signal: controller.signal,
     });
 
-    clearTimeout(timeoutId);
-
     if (!response.ok) {
       return {
         ok: false,
@@ -179,7 +177,6 @@ export async function triggerGmailSync(
       };
     }
   } catch (err) {
-    clearTimeout(timeoutId);
     if (err instanceof Error && err.name === 'AbortError') {
       return {
         ok: false,
@@ -190,5 +187,7 @@ export async function triggerGmailSync(
       ok: false,
       message: err instanceof Error ? err.message : 'Network error communicating with Gmail sync service.',
     };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }

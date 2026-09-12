@@ -76,6 +76,11 @@ export type { AgentRunStatus } from '@applyy/shared-types';
 export { ATS_PROVIDERS, EMPLOYMENT_TYPES, WORK_ARRANGEMENTS } from '@applyy/shared-types';
 export type { AtsProvider, EmploymentType, WorkArrangement } from '@applyy/shared-types';
 
+/* Where a job was discovered. Drives the SourceBadge pill theme (Tier 1 = career page,
+ * Tier 2 = linkedin post, Tier 3 = portal/aggregator). */
+export { DISCOVERY_SOURCES } from '@applyy/shared-types';
+export type { DiscoverySource } from '@applyy/shared-types';
+
 /* --- The status graph -------------------------------------------------- */
 
 /* THE SINGLE DEFINITION OF THE WORKFLOW. The database trigger, the agents and

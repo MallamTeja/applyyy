@@ -119,6 +119,8 @@ export interface ResumeDiff {
    * the bucket calculation, and still blocks approval until decided. Fail loud,
    * never fail clean. */
   readonly unlocatedClaims: readonly FlaggedClaim[];
+  readonly discoveredVia?: readonly string[] | null | undefined;
+  readonly sourceRefs?: readonly import('../../data/contract').JobSourceRef[] | null | undefined;
 }
 
 /* A single flagged claim, flattened out of the line structure so the alert band

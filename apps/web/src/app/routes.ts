@@ -31,68 +31,63 @@ export interface ConsoleSection {
 /* The daily work. These three are where the operator spends the ~12 minutes a
  * day the whole system is built around, so they come first. */
 export const OPERATIONS_SECTION: ConsoleSection = {
-  heading: 'Every day',
+  heading: 'Operations',
   routes: [
     {
-      /* The default landing route: if there is anything waiting, this is what
-       * the operator opened the console to do. */
       path: 'approvals',
       label: 'Approval queue',
-      lede: 'Check what the Tailor wrote before it goes out. Clean applications batch-approve together; anything the Auditor could not trace is reviewed one at a time.',
+      lede: 'Review and approve tailored applications before submission.',
     },
     {
       path: 'pipeline',
       label: 'Pipeline',
-      lede: 'Where every application stands. The email Tracker advances these on its own - this board reports, it does not drive.',
+      lede: 'Status tracking across active and submitted applications.',
     },
     {
       path: 'health',
       label: 'System health',
-      lede: 'Whether the automation is actually running. Nothing here fails loudly, so this page exists to notice when something has quietly stopped.',
+      lede: 'Automation status, worker freshness, and database connectivity.',
     },
     {
       path: 'emails',
       label: 'Email monitoring',
-      lede: 'Live feed of inbound recruiter emails, classification status, detected companies, and linked application stages.',
+      lede: 'Recruiter communication feed, interview detection, and application stages.',
     },
   ],
 };
 
-/* The configuration surface. Nothing in this system is hardcoded: every filter
- * threshold, every search term and every standing answer lives in one of these
- * pages, which is why there are six of them rather than one settings screen. */
 export const CONFIGURATION_SECTION: ConsoleSection = {
-  heading: 'How it decides',
+  heading: 'Configuration',
   routes: [
     {
       path: 'search-preferences',
       label: 'Search preferences',
-      lede: 'What counts as a job worth finding: titles, keywords, locations, experience range and the salary floor.',
+      lede: 'Target job titles, required skills, locations, and compensation limits.',
     },
     {
       path: 'master-profile',
       label: 'Master profile',
-      lede: 'Your resume as structured fields. Every tailored resume is a selection and rewording of these, and nothing else. Editing creates a new version rather than changing an old one.',
+      lede: 'Structured source resume data used for generating tailored applications.',
     },
     {
       path: 'answer-bank',
       label: 'Answer bank',
-      lede: 'Standing answers to the questions application forms ask. New questions land here for you to answer once, and then never again.',
+      lede: 'Reusable answers for common application and screening questions.',
     },
     {
       path: 'filters',
       label: 'Filters',
-      lede: 'The cheap checks that run before any AI does. Most discovered jobs are rejected here, which is what keeps the running cost near zero.',
+      lede: 'Automated pre-screening rules and discard thresholds.',
     },
     {
       path: 'watchlist',
       label: 'Company watchlist',
-      lede: 'The job boards to poll. Freshness and volume trade against each other, so a three-day window needs a lot of boards.',
+      lede: 'Target company career pages and ATS boards to monitor.',
     },
     {
       path: 'blocklist',
       label: 'Blocklist',
-      lede: 'Companies never to apply to. Without this, one staffing firm posting thirty near-identical listings gets thirty applications.',
+      lede: 'Excluded companies and recruitment agencies.',
     },
   ],
 };
