@@ -11,6 +11,7 @@
     "apply": "node src/cli/apply.ts",
     "keepalive": "node src/cli/keepalive.ts",
     "scout": "node src/cli/scout.ts",
+    "scout:remote": "node src/cli/scout-remote.ts",
     "test": "vitest run",
     "test:e2e": "node --experimental-strip-types test/e2e-runner.mjs",
     "test:watch": "vitest",
