@@ -250,33 +250,7 @@ export function PipelinePage(): ReactElement {
     <div className="page">
       <PageHeader path="pipeline" />
 
-      {/* Stated before anything else, because a board full of columns looks
-          live. It is not, and the operator must not plan a day around it. */}
-      <p className="not-wired">
-        The columns, and the moves out of each, are read from the status graph -
-        so this layout matches the real workflow. Counts are now read from{' '}
-        <span className="identifier">applications</span>, but every control is
-        still disabled: this board reports and does not write. No control on this
-        page will ever fire{' '}
-        <span className="identifier">awaiting_approval &rarr; approved</span> -
-        that edge belongs to the approval queue, and to a person.
-      </p>
-
-      {/* Shown whenever a number is on screen, because a number invites a
-          conclusion. The policies are confirmed to exist and have never been
-          exercised as `authenticated` - every verifying query ran as
-          `postgres`, which holds BYPASSRLS - so a count is evidence that the
-          database answered, not that it answered with the right rows. */}
-      {(state.kind === 'rows' || state.kind === 'empty') && (
-        <p className="contract-gap">
-          <strong>These counts are not yet trustworthy.</strong> Row-level
-          security is confirmed to exist but has never been exercised as{' '}
-          <span className="identifier">authenticated</span>, so a policy with an
-          inverted predicate would produce numbers that look perfectly
-          reasonable. Treat what follows as proof the query ran, not as proof it
-          returned your rows.
-        </p>
-      )}
+      {/* Read-only board notice */}
 
       {(['needs_you', 'in_flight', 'closed'] as const).map((group) => (
         <section key={group} className="lane">

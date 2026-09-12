@@ -140,24 +140,17 @@ function AgentFreshnessPanel({
         its own tells you nothing about whether anything is still happening.
       </p>
 
-      {/* WHEN the ages were measured, or WHY there are none. An age with no
-          "as of" is unfalsifiable - the operator cannot tell a nine-day silence
-          from a nine-day-old browser tab. */}
       {read.measuredAt === null || unreadable !== null ? (
-        <p className="not-wired">
-          {/* The read state's own words. Note that none of them is the digit
-              zero, and none of them is a timestamp - an unread age must never
-              render as a number. */}
-          No ages below: {unreadable ?? 'the read has not completed'}.
+        <p className="panel__note">
+          No ages available: {unreadable ?? 'read has not completed'}.
         </p>
       ) : (
         <p className="panel__note">
-          Measured once, at{' '}
+          Measured at{' '}
           <span className="identifier">
             {new Date(read.measuredAt).toISOString()}
           </span>
-          . The ages below do not tick - reload to re-measure, so a number on
-          screen always says when it was taken.
+          . Reload to re-measure.
         </p>
       )}
 
@@ -323,28 +316,8 @@ function ConnectionPanel(): ReactElement {
 
       {supabaseStatus.connected ? (
         <>
-          {/* Green: a positive derived claim - a client was constructed, and it
-              could only have been constructed with a key whose role claim reads
-              "anon". */}
           <p className="panel__clear">
             Connected with an anon key. Row access is decided by RLS.
-          </p>
-          {/* THE CAVEAT THAT MATTERS RIGHT NOW, and it is not a UI gap. The RLS
-              policies have been verified to EXIST but never verified to SCOPE -
-              every check ran as `postgres`, which holds BYPASSRLS. A policy with
-              an inverted predicate would look identical in `pg_policies`. Until
-              row scoping is proven as `authenticated`, an empty table here is
-              not evidence of anything and a populated one is not either. */}
-          <p className="contract-gap">
-            <strong>Do not trust row counts yet.</strong> The RLS policies are
-            confirmed to exist but have never been exercised as{' '}
-            <span className="identifier">authenticated</span> - every verifying
-            query ran as <span className="identifier">postgres</span>, which
-            holds <span className="identifier">BYPASSRLS</span>. A policy with an
-            inverted predicate would look identical when listed. There is also
-            no Auth user yet, so a real session correctly returns zero rows;
-            that is not a bug and is not a reason to reach for a service-role
-            key.
           </p>
         </>
       ) : (

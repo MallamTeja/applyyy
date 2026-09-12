@@ -347,7 +347,7 @@ export function MasterProfilePage(): ReactElement {
                       {exp.start_display} - {exp.end_display}
                     </span>
                     {exp.location && (
-                      <span className="profile-entry-card__loc">📍 {exp.location}</span>
+                      <span className="profile-entry-card__loc">{exp.location}</span>
                     )}
                   </div>
                 </div>
@@ -404,7 +404,7 @@ export function MasterProfilePage(): ReactElement {
                             rel="noopener noreferrer"
                             className="profile-link-badge"
                           >
-                            🔗 {l.label}
+                            {l.label}
                           </a>
                         ))}
                       </div>
@@ -468,7 +468,7 @@ export function MasterProfilePage(): ReactElement {
                       {edu.start_display} - {edu.end_display}
                     </span>
                     {edu.grade_display && (
-                      <span className="profile-entry-card__loc">🎓 {edu.grade_display}</span>
+                      <span className="profile-entry-card__loc">{edu.grade_display}</span>
                     )}
                   </div>
                 </div>
