@@ -147,7 +147,7 @@ export function MasterProfilePage(): ReactElement {
 
         <div className="pdf-upload-card">
           <label className="pdf-upload-card__button">
-            <span>📄 Choose Master Resume PDF</span>
+            <span>Choose Master Resume PDF (.pdf)</span>
             <input
               type="file"
               accept=".pdf"
@@ -160,7 +160,7 @@ export function MasterProfilePage(): ReactElement {
             />
           </label>
           <span className="ingest__reassurance">
-            Runs 100% browser-side on your device. Zero unapproved server uploads.
+            Parsed locally in browser.
           </span>
           {pdfExtracting && (
             <p className="store-notice store-notice--ok">Extracting resume PDF browser-side...</p>
@@ -180,10 +180,9 @@ export function MasterProfilePage(): ReactElement {
 
       {/* Secondary / Advanced: Paste JSON */}
       <section className="settings-group">
-        <h2 className="settings-group__title">Or paste master profile JSON to check it</h2>
+        <h2 className="settings-group__title">Paste Master Profile JSON</h2>
         <p className="settings-group__note">
-          Nothing is stored by this button. It reads the JSON, reports every problem in one pass,
-          and lets you check whether the profile is safe to become the next version.
+          Validate JSON structure and schema compliance before updating your master profile.
         </p>
 
         <textarea
@@ -208,10 +207,6 @@ export function MasterProfilePage(): ReactElement {
           >
             Check this profile
           </button>
-          <span className="ingest__reassurance">
-            Checking runs entirely in this page - nothing leaves your machine. Storing is a
-            separate step below, and only happens after you accept.
-          </span>
         </div>
 
         {result !== null && <Findings result={result} />}
@@ -250,12 +245,12 @@ export function MasterProfilePage(): ReactElement {
               )}
             </div>
             <div className="profile-card__contact-row">
-              <span className="contact-item">📧 {stored.identity.email}</span>
+              <span className="contact-item">{stored.identity.email}</span>
               {stored.identity.phone && (
-                <span className="contact-item">📞 {stored.identity.phone}</span>
+                <span className="contact-item">{stored.identity.phone}</span>
               )}
               {stored.identity.location && (
-                <span className="contact-item">📍 {stored.identity.location}</span>
+                <span className="contact-item">{stored.identity.location}</span>
               )}
             </div>
             {stored.identity.links.length > 0 && (
@@ -268,7 +263,7 @@ export function MasterProfilePage(): ReactElement {
                     rel="noopener noreferrer"
                     className="profile-link-badge"
                   >
-                    🔗 {link.label}
+                    {link.label}
                   </a>
                 ))}
               </div>

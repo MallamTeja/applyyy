@@ -249,7 +249,7 @@ export function EmailMonitoringPage(): ReactElement {
             onClick={() => setShowSettings((prev) => !prev)}
             title="Configure Gmail On-Demand Sync URL"
           >
-            ⚙️ {showSettings ? 'Close Settings' : 'Sync Settings'}
+            {showSettings ? 'Close Settings' : 'Sync Settings'}
           </button>
         </div>
       </div>
@@ -258,12 +258,10 @@ export function EmailMonitoringPage(): ReactElement {
       {showSettings && (
         <div className="email-monitor__settings-box">
           <h4 style={{ margin: '0 0 var(--gap-2) 0', fontSize: 'var(--size-sm)' }}>
-            Gmail On-Demand Webhook Configuration
+            Gmail Webhook Configuration
           </h4>
           <p style={{ fontSize: 'var(--size-xs)', color: 'var(--ink-muted)', margin: '0 0 var(--gap-2) 0' }}>
-            Paste your Google Apps Script Web App URL below (including <code>?secret=...</code>). When configured,
-            visiting this page or clicking &quot;Refresh Interviews&quot; will instantly check Gmail for newly received
-            interview requests without running any 15-minute background triggers.
+            Enter your Google Apps Script Web App URL to enable on-demand Gmail sync for interview invitations.
           </p>
           <input
             type="url"

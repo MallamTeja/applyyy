@@ -18,26 +18,17 @@ export function SearchPreferencesPage(): ReactElement {
     <div className="page">
       <PageHeader path="search-preferences" />
 
-      <p className="not-wired">
-        These controls are laid out but not yet reading or writing{' '}
-        <span className="identifier">search_preferences</span>. Changing one
-        does nothing until the page is wired up.
-      </p>
-
       <section className="settings-group">
-        <h2 className="settings-group__title">What to look for</h2>
+        <h2 className="settings-group__title">Target Roles & Skills</h2>
         <p className="settings-group__note">
-          Titles and keywords are matched against the boards on your watchlist.
-          Being broad here is cheap - the filters do the rejecting, before
-          anything costs an AI call.
+          Job titles and technologies to search across your target company boards.
         </p>
 
         <div className="settings-group__fields">
           <label className="field field--wide">
-            <span className="field__label">Job titles to hunt</span>
+            <span className="field__label">Target Job Titles</span>
             <span className="field__help">
-              Separate with commas. Matched loosely, so &quot;backend&quot;
-              also finds &quot;Backend Engineer I&quot;.
+              Comma-separated titles.
             </span>
             <input
               type="text"
@@ -47,10 +38,9 @@ export function SearchPreferencesPage(): ReactElement {
           </label>
 
           <label className="field field--wide">
-            <span className="field__label">Keywords</span>
+            <span className="field__label">Keywords & Technologies</span>
             <span className="field__help">
-              These also become the keywords the Tailor emphasises, so they are
-              what the coverage figure on the diff view is measured against.
+              Prioritized by the Tailor during resume customization.
             </span>
             <input
               type="text"
@@ -62,22 +52,17 @@ export function SearchPreferencesPage(): ReactElement {
       </section>
 
       <section className="settings-group">
-        <h2 className="settings-group__title">What you would accept</h2>
+        <h2 className="settings-group__title">Role Constraints & Location</h2>
         <p className="settings-group__note">
-          The bounds of a job you would actually take. Anything outside these is
-          rejected before it is read.
+          Required working arrangements, experience bounds, and geographic filters.
         </p>
 
         <div className="settings-group__fields">
           <label className="field">
-            <span className="field__label">Kind of role</span>
-            {/* Options come from the schema stream's enum, so this list cannot
-                offer a value the database will refuse. */}
+            <span className="field__label">Employment Type</span>
             <select className="field__control" defaultValue="internship">
               {EMPLOYMENT_TYPES.map((type) => (
                 <option key={type} value={type}>
-                  {/* Underscores are a column-name artefact, not something to
-                      show a person. */}
                   {type.replace('_', ' ')}
                 </option>
               ))}
@@ -85,7 +70,7 @@ export function SearchPreferencesPage(): ReactElement {
           </label>
 
           <label className="field">
-            <span className="field__label">Where you would work</span>
+            <span className="field__label">Work Arrangement</span>
             <select className="field__control" defaultValue="onsite">
               {WORK_ARRANGEMENTS.map((arrangement) => (
                 <option key={arrangement} value={arrangement}>
@@ -96,8 +81,8 @@ export function SearchPreferencesPage(): ReactElement {
           </label>
 
           <label className="field">
-            <span className="field__label">Least experience asked for</span>
-            <span className="field__help">Years. Usually zero.</span>
+            <span className="field__label">Min Experience (Years)</span>
+            <span className="field__help">Minimum required years.</span>
             <input
               type="number"
               className="field__control"
@@ -107,10 +92,8 @@ export function SearchPreferencesPage(): ReactElement {
           </label>
 
           <label className="field">
-            <span className="field__label">Most experience asked for</span>
-            <span className="field__help">
-              Years. The Filters page enforces this as a hard ceiling.
-            </span>
+            <span className="field__label">Max Experience (Years)</span>
+            <span className="field__help">Ceiling enforced by filter cascade.</span>
             <input
               type="number"
               className="field__control"
@@ -120,20 +103,15 @@ export function SearchPreferencesPage(): ReactElement {
           </label>
 
           <label className="field">
-            <span className="field__label">Salary floor</span>
-            <span className="field__help">
-              Rupees per year. Leave blank to keep jobs that publish no figure -
-              most Indian listings do not, so a floor here quietly drops a lot
-              of real jobs.
-            </span>
+            <span className="field__label">Minimum Annual Salary (INR)</span>
+            <span className="field__help">Optional. Leave empty for no floor.</span>
             <input type="number" className="field__control" min={0} />
           </label>
 
           <label className="field field--wide">
-            <span className="field__label">Locations</span>
+            <span className="field__label">Target Locations</span>
             <span className="field__help">
-              An allowlist, not a blocklist: a city you forget to add is a city
-              you never see.
+              Comma-separated target cities or Remote.
             </span>
             <input
               type="text"
@@ -145,16 +123,16 @@ export function SearchPreferencesPage(): ReactElement {
       </section>
 
       <section className="settings-group">
-        <h2 className="settings-group__title">Pipeline safety & dispatch controls</h2>
+        <h2 className="settings-group__title">Pipeline Dispatch & Rate Limits</h2>
         <p className="settings-group__note">
-          Circuit-breakers and timing rules governing autonomous agent tasks.
+          Autonomous execution limits and safety controls.
         </p>
 
         <div className="settings-group__fields">
           <label className="field field--wide">
-            <span className="field__label">Emergency kill switch</span>
+            <span className="field__label">Emergency Kill Switch</span>
             <span className="field__help">
-              Immediately halts autonomous agent dispatch (Scout, Tailor, Applier). Running jobs terminate cleanly and pending items remain safely queued.
+              Halts autonomous agent dispatch across Scout, Tailor, and Applier.
             </span>
             <select className="field__control" defaultValue="active">
               <option value="active">Active (normal pipeline execution)</option>
@@ -163,9 +141,9 @@ export function SearchPreferencesPage(): ReactElement {
           </label>
 
           <label className="field">
-            <span className="field__label">Rate-limit backoff (seconds)</span>
+            <span className="field__label">Rate-Limit Backoff (Seconds)</span>
             <span className="field__help">
-              Cooldown window enforced when an LLM or ATS endpoint returns HTTP 429 before attempting key rotation.
+              Cooldown window when HTTP 429 is encountered.
             </span>
             <input
               type="number"
@@ -176,9 +154,9 @@ export function SearchPreferencesPage(): ReactElement {
           </label>
 
           <label className="field">
-            <span className="field__label">Daily submission cap</span>
+            <span className="field__label">Daily Submission Cap</span>
             <span className="field__help">
-              Maximum successful applications permitted within a rolling 24-hour window to protect fit quality.
+              Maximum applications per rolling 24 hours.
             </span>
             <input
               type="number"

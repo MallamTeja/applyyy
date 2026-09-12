@@ -109,16 +109,16 @@ function groupOf(status: ApplicationStatus): BoardGroup {
 /* Lane headings plus the reason each lane exists, in the operator's words. */
 const GROUP_COPY: Readonly<Record<BoardGroup, { title: string; note: string }>> = {
   needs_you: {
-    title: 'Waiting on you',
-    note: 'Nothing in these columns moves without a person. Everything else on this page is informational.',
+    title: 'Action Required',
+    note: 'Applications requiring human approval, manual review, or verification.',
   },
   in_flight: {
-    title: 'Moving on its own',
-    note: 'The agents and the email Tracker advance these. The manual controls exist for when a scheduled job has quietly stopped - System health is where you find out that it has.',
+    title: 'In Flight',
+    note: 'Applications progressing through discovery, tailoring, submission, and tracking.',
   },
   closed: {
     title: 'Closed',
-    note: 'Terminal statuses, taken from the status graph rather than a list kept on this page. Nothing leaves these.',
+    note: 'Terminal pipeline stages (accepted, rejected, expired).',
   },
 };
 

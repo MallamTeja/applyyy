@@ -55,56 +55,56 @@ interface RuleCopy {
 const RULE_COPY: Readonly<Partial<Record<FilterRuleType, RuleCopy>>> = {
   experience_ceiling: {
     name: 'Experience ceiling',
-    drops: 'Jobs asking for more years than you have. A JD saying "5+ years" when you want up to one.',
-    threshold: { kind: 'number', label: 'Most years a job may ask for', suffix: 'years' },
+    drops: 'Filters out postings exceeding your maximum target years.',
+    threshold: { kind: 'number', label: 'Maximum experience required', suffix: 'years' },
   },
   title_blocklist: {
     name: 'Title blocklist',
-    drops: 'Senior, Staff, Principal, Lead, Manager, Architect. The cheapest useful check in the whole system - it reads one field and stops.',
+    drops: 'Excludes postings matching disqualified seniority or role titles.',
     threshold: {
       kind: 'list',
-      label: 'Words that disqualify a title',
+      label: 'Disqualified title terms',
       placeholder: 'Senior, Staff, Principal, Lead, Manager, Architect',
     },
   },
   location_allowlist: {
     name: 'Location allowlist',
-    drops: 'Anywhere you would not actually go. This is an allowlist, not a blocklist, so a city you forget to add is a city you never see.',
+    drops: 'Restricts listings strictly to your target cities or remote.',
     threshold: {
       kind: 'list',
-      label: 'Places you would work',
+      label: 'Target locations',
       placeholder: 'Hyderabad, Bangalore, Remote',
     },
   },
   employment_type: {
     name: 'Employment type',
-    drops: 'Contract and part-time roles when you want an internship or a full-time job.',
+    drops: 'Filters out non-matching contract, part-time, or internship roles.',
     threshold: { kind: 'none' },
   },
   already_applied: {
     name: 'Already applied',
-    drops: 'Jobs whose fingerprint is already in your history. A cheap pre-check ahead of the database constraint that would refuse the duplicate anyway - this one saves the work rather than the row.',
+    drops: 'Skips jobs already present in your historical application records.',
     threshold: { kind: 'none' },
   },
   company_blocklist: {
     name: 'Company blocklist',
-    drops: 'Everything from a company on your blocklist. Without it, one staffing firm posting thirty near-identical listings gets thirty applications and you never notice, because each looked like a different job.',
+    drops: 'Immediately drops postings from blocked companies and agencies.',
     threshold: { kind: 'none' },
   },
   staleness: {
     name: 'Staleness',
-    drops: 'Jobs posted more than a few days ago. Recruiters read in arrival order and often stop around the fiftieth, so applying inside a day is worth more than any resume tweak. Jobs whose posted date cannot be trusted skip this rule rather than being guessed at.',
-    threshold: { kind: 'number', label: 'Oldest posting to consider', suffix: 'days' },
+    drops: 'Discards job postings older than the maximum freshness window.',
+    threshold: { kind: 'number', label: 'Oldest posting age', suffix: 'days' },
   },
   degree_mismatch: {
     name: 'Degree mismatch',
-    drops: "Roles requiring a Master's or PhD.",
+    drops: "Excludes roles strictly requiring a Master's or PhD.",
     threshold: { kind: 'none' },
   },
   per_company_weekly_cap: {
     name: 'Per-company weekly cap',
-    drops: 'Applications beyond a few per company per week. Five in a week from one candidate is a visible negative in most applicant tracking systems.',
-    threshold: { kind: 'number', label: 'Applications per company per week', suffix: 'max' },
+    drops: 'Limits total submissions sent to the same company per 7-day window.',
+    threshold: { kind: 'number', label: 'Max applications per company', suffix: 'per week' },
   },
 };
 
@@ -113,18 +113,10 @@ export function FiltersPage(): ReactElement {
     <div className="page">
       <PageHeader path="filters" />
 
-      <p className="not-wired">
-        These controls are laid out but not yet reading or writing{' '}
-        <span className="identifier">filter_rules</span>. Changing one does
-        nothing until the page is wired up.
-      </p>
-
       <section className="settings-group">
-        <h2 className="settings-group__title">The cascade, in order</h2>
+        <h2 className="settings-group__title">Filter Cascade</h2>
         <p className="settings-group__note">
-          These run top to bottom, cheapest first, and stop at the first rule
-          that rejects a job. Most discovered jobs die here before any AI reads
-          them, which is what keeps the running cost near zero.
+          Rules execute in order, cheapest first, stopping at the first failing check.
         </p>
 
         <ol className="cascade">

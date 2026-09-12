@@ -30,10 +30,6 @@ import { useCallback, useEffect, useState } from 'react';
 import type { FormEvent, ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
-/* The provider vocabulary comes from the schema: the Applier routes submissions
-   on `ats_provider`, so a token stored against the wrong provider is polled
-   with the wrong API and submitted through the wrong adapter. */
-import { ATS_PROVIDERS } from '../../data/contract';
 import type { AtsProvider, CompanyWatchlistRow } from '../../data/contract';
 import { supabase } from '../../data/supabase';
 
@@ -303,8 +299,7 @@ export function WatchlistPage(): ReactElement {
           <div>
             <h2 className="settings-group__title">Add Company Target Board</h2>
             <p className="settings-group__note">
-              Register a company careers board for autonomous job discovery. The Scout polls
-              each board&apos;s direct API endpoint rather than scraping HTML.
+              Register company careers boards for automated job discovery.
             </p>
           </div>
           <button
@@ -375,7 +370,7 @@ export function WatchlistPage(): ReactElement {
           </div>
 
           <p className="field__help">
-            Company board slug on the ATS provider (e.g. &quot;stripe&quot; in boards.greenhouse.io/stripe or &quot;figma&quot; in jobs.ashbyhq.com/figma). Queried directly via public JSON endpoints without DOM scraping. {PROVIDER_HINTS[atsProvider]?.example ? `Example: ${PROVIDER_HINTS[atsProvider]?.example}` : ''}
+            Company identifier slug (e.g. &quot;stripe&quot; or &quot;figma&quot;). {PROVIDER_HINTS[atsProvider]?.example ? `Example: ${PROVIDER_HINTS[atsProvider]?.example}` : ''}
           </p>
         </form>
       </section>
@@ -384,7 +379,7 @@ export function WatchlistPage(): ReactElement {
       <section className="settings-group">
         <h2 className="settings-group__title">Watched Company Boards</h2>
         <p className="settings-group__note">
-          Boards currently registered in Supabase. The Scout polls enabled boards on cron.
+          Registered company boards monitored for new job postings.
         </p>
 
         {loading ? (
@@ -478,81 +473,6 @@ export function WatchlistPage(): ReactElement {
         )}
       </section>
 
-      {/* Freshness vs Volume Architecture Principle */}
-      <section className="settings-group">
-        <h2 className="settings-group__title">Freshness and volume pull against each other</h2>
-        <p className="settings-group__note">
-          Only jobs posted in the last few days survive the staleness filter,
-          and that rule is worth keeping - applying inside a day of a posting
-          beats any amount of resume tweaking, because recruiters read in
-          arrival order and often stop around the fiftieth.
-        </p>
-        <p className="settings-group__note">
-          But it means each board only ever yields what it posted this week. A
-          short watchlist plus a tight window is how the pipeline quietly runs
-          dry while every agent reports itself healthy. If you are seeing very
-          few applications a day, add boards here before you loosen the
-          freshness rule on the Filters page.
-        </p>
-      </section>
-
-      {/* Cooldown Periods & Re-application Protection */}
-      <section className="settings-group">
-        <h2 className="settings-group__title">Submission cooldown & lockout protection</h2>
-        <p className="settings-group__note">
-          Most ATS systems automatically discard repeat applications to the same company within a 90-to-180-day cooling-off window. The Scout cross-references your application log and blocklist to suppress locked-out targets before tailoring.
-        </p>
-      </section>
-
-      {/* Token Guidance per ATS */}
-      <section className="settings-group">
-        <h2 className="settings-group__title">Where to find an ATS identifier slug</h2>
-        <p className="settings-group__note">
-          A board token is the short company identifier in a careers URL, not
-          the URL itself. Pasting a whole URL is the usual mistake, and it fails
-          quietly: the board returns nothing and keeps returning nothing, which
-          looks exactly like a company that is not hiring.
-        </p>
-        <div className="settings-table-wrap">
-          <table className="settings-table">
-            <thead>
-              <tr>
-                <th scope="col">Provider</th>
-                <th scope="col">Where the token is</th>
-                <th scope="col">Example</th>
-              </tr>
-            </thead>
-            <tbody>
-              {ATS_PROVIDERS.map((provider) => {
-                const hint = PROVIDER_HINTS[provider];
-                return (
-                  <tr key={provider}>
-                    <th scope="row" className="identifier">
-                      {provider}
-                    </th>
-                    <td>
-                      {hint === undefined ? (
-                        <span className="unknown">
-                          Supported by the schema but not yet documented on this page.
-                        </span>
-                      ) : (
-                        hint.where
-                      )}
-                    </td>
-                    <td>
-                      {hint === undefined ? (
-                        <span className="unknown">&mdash;</span>
-                      ) : (
-                        <span className="identifier">{hint.example}</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </section>
       <CompanySuggestionsModal
         isOpen={suggestionsOpen}
         onClose={() => setSuggestionsOpen(false)}

@@ -118,8 +118,7 @@ export function ApprovalQueuePage(): ReactElement {
       <div className="page">
         <PageHeader path="approvals" />
         <p className="queue__empty">
-          Nothing waiting. The Scouts run on a schedule, so new applications
-          will appear here without you doing anything.
+          Queue is empty. Applications requiring review will appear here once tailored.
         </p>
       </div>
     );
@@ -135,16 +134,11 @@ export function ApprovalQueuePage(): ReactElement {
       {bucketB.length > 0 ? (
         <section className="queue__bucket" aria-labelledby="bucket-b-heading">
           <h2 id="bucket-b-heading" className="queue__bucket-heading">
-            {/* Says what these are and why they are here, in one line. */}
             {bucketB.length}{' '}
-            {bucketB.length === 1 ? 'application needs' : 'applications need'} a
-            claim-by-claim look
+            {bucketB.length === 1 ? 'Application Requires Review' : 'Applications Require Review'}
           </h2>
           <p className="queue__bucket-note">
-            The Auditor could not trace something in{' '}
-            {bucketB.length === 1 ? 'this one' : 'these'} back to your master
-            profile. Each is reviewed on its own - there is no batch option
-            here, on purpose.
+            Flagged modifications or untraced claims requiring manual verification.
           </p>
 
           {/* Expanded, one after another. Never a collapsed list: a row that
@@ -171,12 +165,10 @@ export function ApprovalQueuePage(): ReactElement {
         <section className="queue__bucket" aria-labelledby="bucket-a-heading">
           <h2 id="bucket-a-heading" className="queue__bucket-heading">
             {bucketA.length}{' '}
-            {bucketA.length === 1 ? 'application is' : 'applications are'} fully
-            traced
+            {bucketA.length === 1 ? 'Application Verified' : 'Applications Verified'} (Bucket A)
           </h2>
           <p className="queue__bucket-note">
-            Every line in {bucketA.length === 1 ? 'this one' : 'these'} rewords
-            something already in your master profile. Nothing was invented.
+            All tailored claims verified against master profile ground truth.
           </p>
 
           {/* One row per application, but as a compact line rather than a diff.

@@ -1,210 +1,261 @@
-/* The company blocklist - PROJECT_PLAN.md sections 15 and 16.
- *
- * WHY THIS EARNS A WHOLE PAGE for what is, technically, one table and one WHERE
- * clause. Because of a failure that is invisible from every other screen.
- *
- * Resume-harvesting consultancies post thirty near-identical listings a week -
- * "Hiring 500 freshers for MNC!" - purely to collect resumes. Each one has a
- * different title, a different job id and a different fingerprint, so the
- * deduper correctly treats them as thirty distinct jobs, because they are.
- * Without a blocklist the system sends thirty applications to one staffing firm
- * and THE OPERATOR NEVER NOTICES, because each looked like a different job in
- * the queue. At 35 applications a day that is very nearly an entire day spent
- * applying to a single firm that was never hiring.
- *
- * So the blocklist is not a preference list. It is the only defence against a
- * duplicate that is not a duplicate - and it works at the company level
- * precisely because the job level cannot see the pattern.
- *
- * WHY IT JOINS ON THE SLUG, NOT THE NAME. `jobs.company_slug` is the
- * lower-cased, punctuation-stripped name, and it is what both this blocklist
- * and the per-company weekly cap match on. Matching on the display name would
- * let "Acme Technologies", "ACME Technologies." and "acme technologies" past a
- * block the operator believed he had set. The display name is kept alongside
- * for reading; the slug is what the query uses.
- *
- * WHY A BLOCK CAN EXPIRE. `blocked_until` exists because one of the reasons is
- * inherently temporary: a company that rejected you recently is worth avoiding
- * for a few months, not forever. A permanent block for a time-boxed reason
- * would quietly remove a real employer from the funnel a year later, and
- * nothing on any screen would explain why they stopped appearing.
- */
+/* The company blocklist - manage excluded companies and agencies. */
 
-import type { ReactElement } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import type { FormEvent, ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
-/* The reason vocabulary comes from the schema. It is not decoration: the reason
-   is what tells the operator later why a company he now wants to apply to is
-   being skipped, and whether the block was meant to expire. */
 import { BLOCKLIST_REASONS } from '../../data/contract';
-import type { BlocklistReason } from '../../data/contract';
+import type { BlocklistReason, CompanyBlocklistRow } from '../../data/contract';
+import { supabase } from '../../data/supabase';
 
 import './settings.css';
 
-/* --- What each reason means, and how it behaves ----------------------- */
-
-/* Per-reason copy.
- *
- * Keyed by the schema's `BlocklistReason` and PARTIAL on purpose, so a reason
- * added upstream renders with its raw name rather than vanishing from the list
- * of things the operator can choose. */
-interface ReasonCopy {
-  /* The operator's name for it. */
-  readonly label: string;
-  /* What it catches, concretely. Vague categories get misused; concrete ones
-     get used correctly. */
-  readonly catches: string;
-  /* Whether a block for this reason should normally carry an expiry. This is
-     the field that keeps the list honest over time. */
-  readonly expiry: 'permanent' | 'time-boxed';
-}
-
-const REASON_COPY: Readonly<Partial<Record<BlocklistReason, ReasonCopy>>> = {
-  consultancy: {
-    label: 'Staffing firm / consultancy',
-    catches:
-      'Resume harvesters posting thirty near-identical listings a week. Each has its own fingerprint, so the deduper cannot help - this is the reason the page exists.',
-    expiry: 'permanent',
-  },
-  mlm: {
-    label: 'MLM or commission-only outfit',
-    catches:
-      'Sales and network-marketing schemes dressed up as marketing or business-development internships.',
-    expiry: 'permanent',
-  },
-  ghosted: {
-    label: 'Applied, never heard back',
-    catches:
-      'Companies that took an application and never replied. Worth pausing rather than banning outright - a hiring team changes, and a permanent block on a real employer is a cost you pay silently.',
-    expiry: 'time-boxed',
-  },
-  rejected_recently: {
-    label: 'Rejected recently',
-    catches:
-      'Reapplying immediately after a rejection reads as a negative in most applicant tracking systems. This is the reason that most needs an expiry date - in a few months it stops being true.',
-    expiry: 'time-boxed',
-  },
-  personal_choice: {
-    label: 'Would not join',
-    catches:
-      'Somewhere you have decided against, for whatever reason. At 35 slots a day every wasted slot is a real one, so this needs no further justification.',
-    expiry: 'permanent',
-  },
-  other: {
-    label: 'Other',
-    catches:
-      'Anything the list above does not cover. Worth a note, because in six months the note is the only thing that will explain the block.',
-    expiry: 'permanent',
-  },
+const REASON_LABELS: Record<BlocklistReason, string> = {
+  consultancy: 'Staffing Firm / Consultancy',
+  mlm: 'MLM / Unpaid Role',
+  ghosted: 'No Response / Ghosted',
+  rejected_recently: 'Rejected Recently',
+  personal_choice: 'Personal Preference',
+  other: 'Other',
 };
 
-/* --- The page --------------------------------------------------------- */
+function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
+}
 
 export function BlocklistPage(): ReactElement {
+  const [rows, setRows] = useState<readonly CompanyBlocklistRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [companyName, setCompanyName] = useState('');
+  const [reason, setReason] = useState<BlocklistReason>('consultancy');
+  const [note, setNote] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  const loadBlocklist = useCallback(async () => {
+    if (supabase === null) {
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const { data, error: queryError } = await supabase
+        .from('company_blocklist')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (queryError) {
+        setError(queryError.message);
+      } else {
+        setRows((data as CompanyBlocklistRow[]) ?? []);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to query blocklist');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadBlocklist();
+  }, [loadBlocklist]);
+
+  const handleAddBlock = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!companyName.trim()) return;
+
+    if (supabase === null) {
+      setError('Supabase client is unconfigured.');
+      return;
+    }
+
+    setSubmitting(true);
+    setError(null);
+    setSuccess(null);
+
+    const slug = slugify(companyName);
+
+    try {
+      const { error: insertError } = await supabase
+        .from('company_blocklist')
+        .insert({
+          company_name: companyName.trim(),
+          company_slug: slug,
+          reason,
+          note: note.trim() || null,
+        });
+
+      if (insertError) {
+        if (insertError.code === '23505') {
+          setError(`"${companyName}" is already on your blocklist.`);
+        } else {
+          setError(insertError.message);
+        }
+      } else {
+        setSuccess(`Blocked "${companyName}".`);
+        setCompanyName('');
+        setNote('');
+        await loadBlocklist();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to block company');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleRemoveBlock = async (id: string, name: string) => {
+    if (supabase === null) return;
+    setError(null);
+
+    try {
+      const { error: deleteError } = await supabase
+        .from('company_blocklist')
+        .delete()
+        .eq('id', id);
+
+      if (deleteError) {
+        setError(deleteError.message);
+      } else {
+        setSuccess(`Removed "${name}" from blocklist.`);
+        await loadBlocklist();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to remove block');
+    }
+  };
+
   return (
     <div className="page">
       <PageHeader path="blocklist" />
 
-      {/* Honest state, in the shared idiom. */}
-      <p className="not-wired">
-        This page is laid out but not yet reading or writing{' '}
-        <span className="identifier">company_blocklist</span>. No company is
-        currently being excluded.
-      </p>
-
-      {/* The argument for the page, stated once. Without it a reader assumes
-          this is a nice-to-have preferences screen. */}
+      {/* Add Block Form */}
       <section className="settings-group">
-        <h2 className="settings-group__title">The failure this prevents</h2>
+        <h2 className="settings-group__title">Block an Employer or Agency</h2>
         <p className="settings-group__note">
-          A staffing firm posts thirty near-identical listings in a week. Each
-          has its own title, its own job id and therefore its own fingerprint,
-          so the deduper treats them as thirty different jobs - correctly,
-          because that is what they are.
+          Excluded companies are skipped automatically during discovery and screening.
         </p>
-        <p className="settings-group__note">
-          Without a blocklist you send thirty applications to one firm that was
-          never hiring, and you do not notice, because each one looked like a
-          different job in the queue. At 35 applications a day that is most of a
-          day gone. This is the only screen that can see that pattern, because
-          it is the only one that works at the company level.
-        </p>
+
+        {error && <div className="watchlist-feedback watchlist-feedback--error">{error}</div>}
+        {success && <div className="watchlist-feedback watchlist-feedback--success">{success}</div>}
+
+        <form onSubmit={handleAddBlock} className="watchlist-add-form">
+          <div className="watchlist-add-row">
+            <label className="field">
+              <span className="field__label">Company Name</span>
+              <input
+                type="text"
+                className="field__control"
+                placeholder="e.g. Acme Staffing"
+                value={companyName}
+                onChange={(e) => setCompanyName(e.target.value)}
+                disabled={submitting}
+                required
+              />
+            </label>
+
+            <label className="field">
+              <span className="field__label">Block Reason</span>
+              <select
+                className="field__control"
+                value={reason}
+                onChange={(e) => setReason(e.target.value as BlocklistReason)}
+                disabled={submitting}
+              >
+                {BLOCKLIST_REASONS.map((r) => (
+                  <option key={r} value={r}>
+                    {REASON_LABELS[r] ?? r}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="field">
+              <span className="field__label">Note (Optional)</span>
+              <input
+                type="text"
+                className="field__control"
+                placeholder="e.g. Mass resume harvester"
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                disabled={submitting}
+              />
+            </label>
+
+            <button
+              type="submit"
+              className="button button--approve"
+              disabled={submitting || !companyName.trim()}
+            >
+              {submitting ? 'Blocking...' : 'Block Company'}
+            </button>
+          </div>
+        </form>
       </section>
 
-      {/* The reasons, driven off the enum. */}
+      {/* Active Blocklist Table */}
       <section className="settings-group">
-        <h2 className="settings-group__title">Reasons, and which ones should expire</h2>
+        <h2 className="settings-group__title">Blocked Companies ({rows.length})</h2>
         <p className="settings-group__note">
-          The reason is not a label for tidiness. Months later it is the only
-          thing that explains why a company you now want to apply to is being
-          skipped - and whether the block was ever meant to be permanent.
+          Jobs matching these company identifiers are dropped before reaching Tailor or Applier.
         </p>
-        <div className="settings-table-wrap">
-          <table className="settings-table">
-            <thead>
-              <tr>
-                <th scope="col">Reason</th>
-                <th scope="col">What it catches</th>
-                {/* The column that keeps the list from silently shrinking the
-                    funnel over years. */}
-                <th scope="col">Expiry</th>
-              </tr>
-            </thead>
-            <tbody>
-              {BLOCKLIST_REASONS.map((reason) => {
-                /* Undefined for a reason added upstream that this page has not
-                   been taught about. */
-                const copy = REASON_COPY[reason];
-                return (
-                  <tr key={reason}>
-                    <th scope="row">
-                      {copy === undefined ? reason : copy.label}
-                      {/* The stored value, shown quietly, so a row in the
-                          database can be matched to a row on this page without
-                          a translation table. */}
-                      <span className="identifier">{reason}</span>
-                    </th>
+
+        {loading ? (
+          <p className="watchlist-empty-state">Loading blocklist...</p>
+        ) : rows.length === 0 ? (
+          <div className="watchlist-empty-state">
+            No companies are currently blocked.
+          </div>
+        ) : (
+          <div className="settings-table-wrap">
+            <table className="settings-table">
+              <thead>
+                <tr>
+                  <th scope="col">Company</th>
+                  <th scope="col">Slug</th>
+                  <th scope="col">Reason</th>
+                  <th scope="col">Note</th>
+                  <th scope="col">Added</th>
+                  <th scope="col" style={{ textAlign: 'right' }}>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr key={row.id}>
+                    <th scope="row">{row.company_name}</th>
                     <td>
-                      {copy === undefined ? (
-                        <span className="unknown">
-                          Supported by the schema but not yet described here.
-                        </span>
-                      ) : (
-                        copy.catches
-                      )}
+                      <code className="identifier">{row.company_slug}</code>
                     </td>
                     <td>
-                      {copy === undefined ? (
-                        <span className="unknown">&mdash;</span>
-                      ) : (
-                        copy.expiry
-                      )}
+                      <span className="status-badge status-badge--stale">
+                        <span className="status-badge__dot" />
+                        {REASON_LABELS[row.reason] ?? row.reason}
+                      </span>
+                    </td>
+                    <td>{row.note ?? '—'}</td>
+                    <td className="identifier">
+                      {new Date(row.created_at).toLocaleDateString()}
+                    </td>
+                    <td style={{ textAlign: 'right' }}>
+                      <button
+                        type="button"
+                        className="button button--small"
+                        onClick={() => handleRemoveBlock(row.id, row.company_name)}
+                      >
+                        Unblock
+                      </button>
                     </td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      {/* The matching rule, stated because it determines whether a block the
-          operator sets actually works. */}
-      <section className="settings-group">
-        <h2 className="settings-group__title">How a block is matched</h2>
-        <p className="settings-group__note">
-          Blocks join on{' '}
-          <span className="identifier">company_slug</span> - the lower-cased,
-          punctuation-stripped name - and not on the display name. Matching the
-          display name would let &quot;Acme Technologies&quot;, &quot;ACME
-          Technologies.&quot; and &quot;acme technologies&quot; straight past a
-          block you thought you had set.
-        </p>
-        <p className="settings-group__note">
-          The same slug is what the per-company weekly cap on the Filters page
-          counts against, so the two rules agree by construction rather than by
-          both being maintained correctly.
-        </p>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
     </div>
   );
