@@ -121,6 +121,12 @@ export interface ResumeDiff {
   readonly unlocatedClaims: readonly FlaggedClaim[];
   readonly discoveredVia?: readonly string[] | null | undefined;
   readonly sourceRefs?: readonly import('../../data/contract').JobSourceRef[] | null | undefined;
+  readonly employmentType?: string | null | undefined;
+  readonly workArrangement?: string | null | undefined;
+  readonly locations?: readonly string[] | null | undefined;
+  readonly salaryMin?: number | null | undefined;
+  readonly salaryMax?: number | null | undefined;
+  readonly salaryCurrency?: string | null | undefined;
 }
 
 /* A single flagged claim, flattened out of the line structure so the alert band

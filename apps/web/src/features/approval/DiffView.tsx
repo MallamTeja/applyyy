@@ -421,6 +421,32 @@ export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactEle
               <StatusBadge status="awaiting_approval" label="awaiting_approval" />
             </div>
           </div>
+          <div className="diff__tags">
+            {diff.employmentType && diff.employmentType !== 'unknown' && (
+              <span className="tag-pill tag-pill--type">
+                {diff.employmentType.replace('_', ' ')}
+              </span>
+            )}
+            {diff.workArrangement && diff.workArrangement !== 'unknown' && (
+              <span className="tag-pill tag-pill--arrangement">
+                {diff.workArrangement}
+              </span>
+            )}
+            {((diff.salaryMin !== null && diff.salaryMin !== undefined) ||
+              (diff.salaryMax !== null && diff.salaryMax !== undefined)) && (
+              <span className="tag-pill tag-pill--salary">
+                {diff.salaryCurrency ?? 'INR'}{' '}
+                {diff.salaryMin ? Number(diff.salaryMin).toLocaleString() : '0'}
+                {diff.salaryMax ? ` – ${Number(diff.salaryMax).toLocaleString()}` : '+'}
+              </span>
+            )}
+            {diff.locations && diff.locations.length > 0 && (
+              <span className="tag-pill tag-pill--location">
+                📍 {diff.locations.slice(0, 2).join(', ')}
+                {diff.locations.length > 2 ? ` +${diff.locations.length - 2}` : ''}
+              </span>
+            )}
+          </div>
           <p className="diff__meta">
             Tailored from master version {diff.masterVersion}
           </p>

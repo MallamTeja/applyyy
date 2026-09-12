@@ -29,6 +29,8 @@ interface WatchlistRow {
   consecutive_failures: number;
 }
 
+const BATCH_SIZE = 50;
+
 async function main(): Promise<void> {
   console.log('[applyy-scout] starting ATS job board discovery scan...');
 
@@ -36,6 +38,7 @@ async function main(): Promise<void> {
   const anonKey = required('SUPABASE_ANON_KEY');
   const email = required('APPLYY_APP_USER_EMAIL');
   const password = required('APPLYY_APP_USER_PASSWORD');
+  const force = process.argv.includes('--force') || process.env.SCOUT_FORCE === 'true';
 
   const client = createClient(supabaseUrl, anonKey, {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -48,6 +51,24 @@ async function main(): Promise<void> {
 
   const userId = authResult.data.user.id;
   console.log(`[applyy-scout] authenticated as operator ${email} (${userId})`);
+
+  // Check system kill switch
+  const { data: settingsData } = await client
+    .from('system_settings')
+    .select('system_enabled')
+    .limit(1)
+    .single();
+
+  const systemEnabled = settingsData?.system_enabled ?? false;
+  if (!systemEnabled && !force) {
+    console.log('[applyy-scout] ⏸️ system_settings.system_enabled is false (kill switch active).');
+    console.log('[applyy-scout] Pass --force or SCOUT_FORCE=true to discover jobs while submissions are paused.');
+    return;
+  }
+
+  if (!systemEnabled && force) {
+    console.log('[applyy-scout] ⚡ force mode enabled: proceeding with discovery scan while applier remains paused.');
+  }
 
   // Query active company watchlist boards
   const { data: boards, error: boardsErr } = await client
@@ -127,55 +148,64 @@ async function main(): Promise<void> {
         isFirstPollOfBoard: (board.poll_count === 0 || !board.first_polled_at),
       };
 
+      // Convert postings into JobInsert rows with canonical fingerprint & freshness
+      const jobRows: JobInsert[] = await Promise.all(
+        parseResult.postings.map((p) => toJobInsert(p, adapter, context))
+      );
+
       let boardNewJobs = 0;
+      let boardNewApps = 0;
 
-      for (const posting of parseResult.postings) {
-        const jobRow: JobInsert = await toJobInsert(posting, adapter, context);
+      // Upsert in batches of BATCH_SIZE for high throughput
+      for (let i = 0; i < jobRows.length; i += BATCH_SIZE) {
+        const batch = jobRows.slice(i, i + BATCH_SIZE);
 
-        // Upsert job by user_id and fingerprint
-        const { data: jobData, error: jobErr } = await client
+        const { data: upsertedJobs, error: jobErr } = await client
           .from('jobs')
-          .upsert(jobRow, {
+          .upsert(batch, {
             onConflict: 'user_id,fingerprint',
             ignoreDuplicates: false,
           })
-          .select('id')
-          .single();
+          .select('id, fingerprint');
 
-        let jobId: string | null = jobData?.id ?? null;
+        let batchJobIds: string[] = [];
 
-        if (jobErr) {
-          // If conflict or constraint, fetch existing job id
+        if (!jobErr && upsertedJobs && upsertedJobs.length > 0) {
+          batchJobIds = upsertedJobs.map((j) => j.id);
+        } else {
+          // Fallback: fetch existing job IDs by fingerprints
+          const fps = batch.map((b) => b.fingerprint);
           const { data: existing } = await client
             .from('jobs')
             .select('id')
-            .eq('fingerprint', jobRow.fingerprint)
-            .single();
-          jobId = existing?.id ?? null;
-        } else {
-          boardNewJobs++;
-          totalDiscovered++;
-        }
-
-        if (jobId) {
-          // Seed applications row if none exists
-          const { error: appErr } = await client
-            .from('applications')
-            .upsert(
-              {
-                job_id: jobId,
-                status: 'discovered',
-              },
-              {
-                onConflict: 'user_id,job_id',
-                ignoreDuplicates: true,
-              },
-            );
-
-          if (!appErr) {
-            totalApplications++;
+            .in('fingerprint', fps);
+          if (existing) {
+            batchJobIds = existing.map((j) => j.id);
           }
         }
+
+        if (batchJobIds.length > 0) {
+          const appInserts = batchJobIds.map((job_id) => ({
+            job_id,
+            status: 'discovered' as const,
+          }));
+
+          const { data: insertedApps, error: appErr } = await client
+            .from('applications')
+            .upsert(appInserts, {
+              onConflict: 'user_id,job_id',
+              ignoreDuplicates: true,
+            })
+            .select('id');
+
+          if (!appErr && insertedApps) {
+            boardNewApps += insertedApps.length;
+            totalApplications += insertedApps.length;
+          }
+        }
+
+        boardNewJobs += batchJobIds.length;
+        totalDiscovered += batchJobIds.length;
       }
 
       // Update watchlist success telemetry
@@ -190,7 +220,7 @@ async function main(): Promise<void> {
         })
         .eq('id', board.id);
 
-      console.log(`[applyy-scout] ✓ ${board.company_name}: saved ${boardNewJobs} new unique jobs to database.`);
+      console.log(`[applyy-scout] ✓ ${board.company_name}: processed ${boardNewJobs} jobs (${boardNewApps} new applications created).`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[applyy-scout] error polling ${board.company_name}: ${msg}`);
@@ -206,8 +236,8 @@ async function main(): Promise<void> {
 
   console.log('====================================================');
   console.log(`[applyy-scout] scan completed.`);
-  console.log(`[applyy-scout] total new jobs discovered: ${totalDiscovered}`);
-  console.log(`[applyy-scout] total application rows created: ${totalApplications}`);
+  console.log(`[applyy-scout] total jobs processed: ${totalDiscovered}`);
+  console.log(`[applyy-scout] total new application rows created: ${totalApplications}`);
   console.log('====================================================');
 }
 

@@ -189,63 +189,62 @@ Deno.serve(async (req: Request): Promise<Response> => {
         isFirstPollOfBoard: (board.poll_count === 0 || !board.first_polled_at),
       };
 
+      const BATCH_SIZE = 50;
+      const jobRows: JobInsert[] = await Promise.all(
+        parseResult.postings.map((p) => toJobInsert(p, adapter, context))
+      );
+
       let boardInserted = 0;
+      let boardNewApps = 0;
 
-      for (const posting of parseResult.postings) {
-        const jobRow: JobInsert = await toJobInsert(posting, adapter, context);
+      for (let i = 0; i < jobRows.length; i += BATCH_SIZE) {
+        const batch = jobRows.slice(i, i + BATCH_SIZE);
 
-        // Upsert job by fingerprint (per-user)
-        const { data: insertedJob, error: jobError } = await db
+        const { data: upsertedJobs, error: jobError } = await db
           .from("jobs")
-          .upsert(jobRow, {
+          .upsert(batch, {
             onConflict: "user_id,fingerprint",
             ignoreDuplicates: false,
           })
-          .select("id")
-          .single();
+          .select("id, fingerprint");
 
-        if (jobError) {
-          // If upsert fails or conflict, query existing job id
-          const { data: existingJob } = await db
+        let batchJobIds: string[] = [];
+
+        if (!jobError && upsertedJobs && upsertedJobs.length > 0) {
+          batchJobIds = upsertedJobs.map((j) => j.id);
+        } else {
+          const fps = batch.map((b) => b.fingerprint);
+          const { data: existingJobs } = await db
             .from("jobs")
             .select("id")
-            .eq("fingerprint", jobRow.fingerprint)
-            .single();
-
-          if (existingJob) {
-            // Ensure application row exists at 'discovered'
-            const { error: appErr } = await db
-              .from("applications")
-              .insert({
-                job_id: existingJob.id,
-                status: "discovered",
-              })
-              .select("id")
-              .single();
-
-            if (!appErr) totalApplicationsCreated++;
+            .in("fingerprint", fps);
+          if (existingJobs) {
+            batchJobIds = existingJobs.map((j) => j.id);
           }
-          continue;
         }
 
-        if (insertedJob) {
-          boardInserted++;
-          totalJobsDiscovered++;
+        if (batchJobIds.length > 0) {
+          const appInserts = batchJobIds.map((job_id) => ({
+            job_id,
+            status: "discovered" as const,
+          }));
 
-          // Seed application row for the new job
-          const { error: appError } = await db
+          const { data: insertedApps, error: appErr } = await db
             .from("applications")
-            .insert({
-              job_id: insertedJob.id,
-              status: "discovered",
+            .upsert(appInserts, {
+              onConflict: "user_id,job_id",
+              ignoreDuplicates: true,
             })
-            .select("id")
-            .single();
+            .select("id");
 
-          if (!appError) {
-            totalApplicationsCreated++;
+          if (!appErr && insertedApps) {
+            boardNewApps += insertedApps.length;
+            totalApplicationsCreated += insertedApps.length;
           }
         }
+
+        boardInserted += batchJobIds.length;
+        totalJobsDiscovered += batchJobIds.length;
       }
 
       // Update watchlist success telemetry

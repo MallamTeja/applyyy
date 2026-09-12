@@ -59,6 +59,49 @@
   line-height: 1.4;
 }
 
+.diff__tags {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  flex-wrap: wrap;
+  margin-top: var(--gap-2);
+}
+
+.tag-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  font-size: var(--size-xs);
+  font-weight: 550;
+  text-transform: capitalize;
+  border-radius: var(--radius-control);
+  background: var(--panel);
+  color: var(--text-secondary);
+  border: 1px solid var(--rule);
+  letter-spacing: 0.01em;
+}
+
+.tag-pill--type {
+  background: var(--sheet);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tag-pill--arrangement {
+  background: var(--panel);
+  color: var(--text-primary);
+}
+
+.tag-pill--salary {
+  background: var(--traced-wash);
+  border-color: var(--traced);
+  color: var(--traced-strong);
+}
+
+.tag-pill--location {
+  color: var(--text-secondary);
+}
+
 /* --- Coverage --------------------------------------------------------- */
 
 .coverage {

@@ -56,6 +56,12 @@ export interface DiffAdapterInput {
   readonly job: Pick<JobRow, 'title' | 'company_name'> & {
     readonly discovered_via?: readonly string[] | null;
     readonly source_refs?: readonly JobSourceRef[] | null;
+    readonly employment_type?: string | null;
+    readonly work_arrangement?: string | null;
+    readonly locations?: readonly string[] | null;
+    readonly salary_min?: number | null;
+    readonly salary_max?: number | null;
+    readonly salary_currency?: string | null;
   };
   /* The immutable snapshot the worker will render to PDF. What was approved is
    * byte-for-byte what gets sent, so this is the correct thing to review. */
@@ -329,6 +335,12 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
     unlocatedClaims,
     discoveredVia: job.discovered_via,
     sourceRefs: job.source_refs,
+    employmentType: job.employment_type,
+    workArrangement: job.work_arrangement,
+    locations: job.locations,
+    salaryMin: job.salary_min,
+    salaryMax: job.salary_max,
+    salaryCurrency: job.salary_currency,
   };
 }
 

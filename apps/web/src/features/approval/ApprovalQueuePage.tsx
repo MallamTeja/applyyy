@@ -57,7 +57,7 @@ export function ApprovalQueuePage(): ReactElement {
         setLoading(true);
         const { data, error } = await supabase!
           .from('applications')
-          .select('*, jobs:job_id(title, company_name)')
+          .select('*, jobs:job_id(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency)')
           .eq('status', 'awaiting_approval')
           .order('created_at', { ascending: false });
 
