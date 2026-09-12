@@ -119,12 +119,52 @@ function tokenize(text: string): string[] {
 
 // Pull every numeric literal out of a text. Metrics get their own rule because a
 // changed digit is the cheapest lie to tell and the hardest to notice by eye.
-function numbersIn(text: string): string[] {
+export function numbersIn(text: string): string[] {
   // Strip thousands separators first, so "1,000" compares against the master's "1000".
   const withoutSeparators = text.replace(/(\d),(?=\d)/g, "$1");
   // Every run of digits. Suffixes like "+" and "%" fall outside the match, which is
   // what makes "500+" compare equal to the master's "500".
   return withoutSeparators.match(/\d+/g) ?? [];
+}
+
+// Pre-LLM Metric Sentinel (3b): extracts and indexes all metrics from master profile bullets.
+export function indexMasterMetrics(master: MasterProfile): ReadonlyMap<NodeId, ReadonlySet<string>> {
+  const metricIndex = new Map<NodeId, Set<string>>();
+  for (const parent of [
+    ...master.experience,
+    ...master.projects,
+    ...master.education,
+    ...master.achievements,
+    ...master.certifications,
+  ]) {
+    for (const bullet of parent.bullets) {
+      metricIndex.set(bullet.id, new Set(numbersIn(bullet.text)));
+    }
+  }
+  return metricIndex;
+}
+
+// Post-LLM Metric Sentinel (3b): verifies that every number in tailored text appears in the master bullet.
+export function verifyBulletMetrics(
+  tailoredText: string,
+  masterBulletText: string,
+): { readonly valid: boolean; readonly inventedMetrics: readonly string[] } {
+  const masterNumbers = new Set(numbersIn(masterBulletText));
+  const invented: string[] = [];
+  for (const value of numbersIn(tailoredText)) {
+    if (!masterNumbers.has(value)) {
+      invented.push(value);
+    }
+  }
+  return {
+    valid: invented.length === 0,
+    inventedMetrics: invented,
+  };
+}
+
+// Citation Reference Sentinel (3c): ensures a ref is non-empty and non-whitespace.
+export function isValidCitationRef(ref: unknown): ref is NodeId {
+  return typeof ref === "string" && ref.trim().length > 0;
 }
 
 // Collect every skill token in the profile once, so a rewording may legitimately name
@@ -281,6 +321,11 @@ function resolveBullet(
   skillTokens: ReadonlySet<string>,
   violations: TailorViolation[],
 ): ResolvedBullet | null {
+  // Validate citation reference integrity (3c).
+  if (!isValidCitationRef(tailored.ref)) {
+    violations.push({ kind: "unresolved_ref", ref: tailored.ref, where: `bullet under ${parentRef}` });
+    return null;
+  }
   // Look the reference up.
   const found = bulletIndex.get(tailored.ref);
   // A bullet id that exists nowhere is wholly invented experience — constraint #2.
@@ -321,16 +366,10 @@ function resolveBullet(
     }
   }
 
-  // THE METRIC RULE, stricter than the vocabulary rule: a number in the rewording
-  // must appear in THE REFERENCED MASTER BULLET. Skills and rhetoric cannot vouch
-  // for a quantity, and a quantity is the easiest thing to inflate unnoticed.
-  const masterNumbers = new Set(numbersIn(found.bullet.text));
-  // Check each number the model produced.
-  for (const value of numbersIn(tailored.text)) {
-    // A number the master does not contain is an invented metric even when every
-    // word around it is true.
-    if (!masterNumbers.has(value)) {
-      // Reported with the value, because "which number" is a reviewer's first question.
+  // Post-LLM Metric Sentinel (3b): verify that every number in tailored text appears in master bullet.
+  const metricCheck = verifyBulletMetrics(tailored.text, found.bullet.text);
+  if (!metricCheck.valid) {
+    for (const value of metricCheck.inventedMetrics) {
       violations.push({ kind: "invented_metric", ref: tailored.ref, value });
     }
   }
@@ -448,6 +487,11 @@ export function validateTailoredProfile(
   const resolvedSkills: ResolvedSkill[] = [];
   // Walk the selection in order; aa's ORDER CONTRACT says array order is document order.
   for (const selected of tailored.skills) {
+    // Validate citation reference integrity (3c).
+    if (!isValidCitationRef(selected.ref)) {
+      violations.push({ kind: "unresolved_ref", ref: selected.ref, where: "skills" });
+      continue;
+    }
     // A repeat is malformed output.
     if (isDuplicate(selected.ref, seenRefs, "skills", violations)) continue;
     // The reference check — this is the §11 "add Docker" case terminating.
@@ -469,6 +513,11 @@ export function validateTailoredProfile(
   const resolvedExperience: ResolvedExperience[] = [];
   // Same pattern for each of the three bullet-bearing kinds.
   for (const selected of tailored.experience) {
+    // Validate citation reference integrity (3c).
+    if (!isValidCitationRef(selected.ref)) {
+      violations.push({ kind: "unresolved_ref", ref: selected.ref, where: "experience" });
+      continue;
+    }
     // Repeated employer entry.
     if (isDuplicate(selected.ref, seenRefs, "experience", violations)) continue;
     // Resolve the employer itself.
@@ -506,6 +555,11 @@ export function validateTailoredProfile(
   // node types have genuinely different display fields, and a clever generic here
   // would obscure exactly the field-copying that makes the guarantee true.
   for (const selected of tailored.projects) {
+    // Validate citation reference integrity (3c).
+    if (!isValidCitationRef(selected.ref)) {
+      violations.push({ kind: "unresolved_ref", ref: selected.ref, where: "projects" });
+      continue;
+    }
     // Repeated project entry.
     if (isDuplicate(selected.ref, seenRefs, "projects", violations)) continue;
     // Resolve the project.
@@ -545,6 +599,11 @@ export function validateTailoredProfile(
   const resolvedEducation: ResolvedEducation[] = [];
   // Same pattern again.
   for (const selected of tailored.education) {
+    // Validate citation reference integrity (3c).
+    if (!isValidCitationRef(selected.ref)) {
+      violations.push({ kind: "unresolved_ref", ref: selected.ref, where: "education" });
+      continue;
+    }
     // Repeated education entry.
     if (isDuplicate(selected.ref, seenRefs, "education", violations)) continue;
     // Resolve the qualification.
@@ -585,6 +644,11 @@ export function validateTailoredProfile(
   // would hide the field-by-field copying, which is the part that makes the honesty
   // guarantee true rather than merely claimed.
   for (const selected of tailored.achievements) {
+    // Validate citation reference integrity (3c).
+    if (!isValidCitationRef(selected.ref)) {
+      violations.push({ kind: "unresolved_ref", ref: selected.ref, where: "achievements" });
+      continue;
+    }
     // Repeated award entry — the same placing listed twice reads as two placings.
     if (isDuplicate(selected.ref, seenRefs, "achievements", violations)) continue;
     // Resolve the achievement itself.
@@ -622,6 +686,11 @@ export function validateTailoredProfile(
   // never quietly land on an achievement of the same id — the two sections are
   // separate in the contract and separate here.
   for (const selected of tailored.certifications) {
+    // Validate citation reference integrity (3c).
+    if (!isValidCitationRef(selected.ref)) {
+      violations.push({ kind: "unresolved_ref", ref: selected.ref, where: "certifications" });
+      continue;
+    }
     // Repeated credential entry.
     if (isDuplicate(selected.ref, seenRefs, "certifications", violations)) continue;
     // Resolve the certification itself.
@@ -659,8 +728,19 @@ export function validateTailoredProfile(
       // Named for the dashboard.
       violations.push({ kind: "summary_without_refs" });
     }
-    // Every declared ref must resolve against some real master node.
+    // Every declared ref must resolve against some real master node, with no duplicate citations (3c).
+    const seenSummaryRefs = new Set<NodeId>();
     for (const ref of tailored.summary.refs) {
+      if (!isValidCitationRef(ref)) {
+        violations.push({ kind: "unresolved_ref", ref, where: "summary refs" });
+        continue;
+      }
+      if (seenSummaryRefs.has(ref)) {
+        violations.push({ kind: "duplicate_ref", ref, where: "summary refs" });
+        continue;
+      }
+      seenSummaryRefs.add(ref);
+
       // THE HUMAN'S OWN SUMMARY IS NOW A CITABLE SOURCE, and it has to be, or the
       // 2026-09-11 contract change buys nothing. `MasterSummary` exists so that
       // "reword the paragraph I wrote" stops being indistinguishable from "invent a

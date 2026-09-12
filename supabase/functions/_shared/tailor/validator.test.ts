@@ -11,8 +11,13 @@ import { test } from "node:test";
 // Strict: a validator that type-coerces is a validator that lets a truthy-but-wrong
 // value through.
 import assert from "node:assert/strict";
-// Explicit .ts extension — required by Deno, accepted by Node.
-import { validateTailoredProfile } from "./validator.ts";
+import {
+  validateTailoredProfile,
+  indexMasterMetrics,
+  verifyBulletMetrics,
+  isValidCitationRef,
+  numbersIn,
+} from "./validator.ts";
 // aa's contract, reached through this stream's single re-export module.
 // `MasterBullet` is imported for one narrow purpose — see `mutableBullets` below.
 import type { MasterBullet, MasterProfile, TailoredProfile } from "../contracts/shared-types.ts";
@@ -1076,3 +1081,109 @@ test("awards alone do not satisfy the substantive-selection check", () => {
     "expected an empty_selection violation",
   );
 });
+
+// --- PRE-LLM AND POST-LLM DETERMINISTIC METRIC SENTINELS (3b) -------------------
+
+test("indexMasterMetrics extracts and indexes all metrics from master profile (Pre-LLM Sentinel)", () => {
+  const index = indexMasterMetrics(MASTER);
+
+  // bullet-rest-api contains "500"
+  const restMetrics = index.get("bullet-rest-api");
+  assert.ok(restMetrics);
+  assert.equal(restMetrics.has("500"), true);
+  assert.equal(restMetrics.size, 1);
+
+  // ach-bullet-sih exists in index and has 0 numbers
+  const achMetrics = index.get("ach-bullet-sih");
+  assert.ok(achMetrics);
+  assert.equal(achMetrics.size, 0);
+});
+
+test("verifyBulletMetrics detects metric alterations and allows reformatted metrics (Post-LLM Sentinel)", () => {
+  const masterText = "Built a high-throughput API handling 500 users with 99.9% uptime and $10,000 cost savings";
+
+  // Reformatting and preserving numbers is valid
+  const honestRewrite = "Engineered a high-availability API serving 500+ users with 99.9% availability";
+  const honestCheck = verifyBulletMetrics(honestRewrite, masterText);
+  assert.equal(honestCheck.valid, true);
+  assert.deepEqual(honestCheck.inventedMetrics, []);
+
+  // Inflating 500 to 5000 is caught
+  const inflatedRewrite = "Built an API handling 5,000 users with 99.9% uptime";
+  const inflatedCheck = verifyBulletMetrics(inflatedRewrite, masterText);
+  assert.equal(inflatedCheck.valid, false);
+  assert.deepEqual(inflatedCheck.inventedMetrics, ["5000"]);
+
+  // Inventing an ungrounded metric (e.g. 50% improvement) is caught
+  const inventedRewrite = "Built an API handling 500 users, improving performance by 50%";
+  const inventedCheck = verifyBulletMetrics(inventedRewrite, masterText);
+  assert.equal(inventedCheck.valid, false);
+  assert.deepEqual(inventedCheck.inventedMetrics, ["50"]);
+});
+
+// --- REINFORCED FORCED CITATION REFERENCES (3c) -----------------------------------
+
+test("isValidCitationRef validates non-empty string references", () => {
+  assert.equal(isValidCitationRef("exp-1"), true);
+  assert.equal(isValidCitationRef("bullet-123"), true);
+  assert.equal(isValidCitationRef(""), false);
+  assert.equal(isValidCitationRef("   "), false);
+  assert.equal(isValidCitationRef(null), false);
+  assert.equal(isValidCitationRef(undefined), false);
+  assert.equal(isValidCitationRef(123), false);
+});
+
+test("rejects an empty or whitespace ref string across profile sections", () => {
+  // Empty skill ref
+  const emptySkillResult = validateTailoredProfile(
+    { ...baseline(), skills: [{ ref: "   " }] },
+    MASTER,
+    PINNED_VERSION,
+  );
+  assert.equal(emptySkillResult.ok, false);
+  assert.ok(
+    emptySkillResult.ok === false &&
+      emptySkillResult.violations.some((v) => v.kind === "unresolved_ref" && v.where === "skills"),
+  );
+
+  // Whitespace experience bullet ref
+  const emptyBulletResult = validateTailoredProfile(
+    {
+      ...baseline(),
+      experience: [
+        {
+          ref: "exp-eventportal",
+          bullets: [{ ref: "", text: "Built API" }],
+        },
+      ],
+    },
+    MASTER,
+    PINNED_VERSION,
+  );
+  assert.equal(emptyBulletResult.ok, false);
+  assert.ok(
+    emptyBulletResult.ok === false &&
+      emptyBulletResult.violations.some((v) => v.kind === "unresolved_ref" && v.where === "bullet under exp-eventportal"),
+  );
+});
+
+test("rejects duplicate citation references in summary.refs", () => {
+  const result = validateTailoredProfile(
+    {
+      ...baseline(),
+      summary: {
+        text: "Passionate backend engineer with proven project delivery.",
+        refs: ["exp-eventportal", "exp-eventportal"],
+      },
+    },
+    MASTER,
+    PINNED_VERSION,
+  );
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.ok === false &&
+      result.violations.some((v) => v.kind === "duplicate_ref" && v.where === "summary refs" && v.ref === "exp-eventportal"),
+    "expected duplicate_ref violation for summary refs",
+  );
+});
+

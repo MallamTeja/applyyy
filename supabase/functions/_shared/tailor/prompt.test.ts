@@ -390,3 +390,57 @@ test("a forged fence OPENER in the job title cannot create a second untrusted re
   // Exactly one opener means the forged one was neutralised.
   assert.equal(prompt.userContent.split(UNTRUSTED_FENCE_OPEN).length - 1, 1, "expected exactly one fence opener");
 });
+
+// --- XML STRUCTURAL FENCING & NEGATIVE FEW-SHOTS (2a & 3a) ------------------------
+
+test("prompt partitions trusted instructions and untrusted input with XML structural fencing", () => {
+  const prompt = buildTailorPrompt({
+    master: MASTER,
+    masterVersion: PINNED_VERSION,
+    jobDescription: CLEAN_JD,
+    jobTitle: "Backend Intern",
+    company: "Zomato",
+  });
+
+  // System instruction has <system_policy> and <candidate_truth> tags.
+  assert.ok(prompt.systemInstruction.includes("<system_policy>"));
+  assert.ok(prompt.systemInstruction.includes("</system_policy>"));
+  assert.ok(prompt.systemInstruction.includes(`<candidate_truth master_version="${PINNED_VERSION}">`));
+  assert.ok(prompt.systemInstruction.includes("</candidate_truth>"));
+
+  // Untrusted user content has <untrusted_job_posting> tag strictly enclosed in fence delimiters.
+  assert.ok(prompt.userContent.includes("<untrusted_job_posting>"));
+  assert.ok(prompt.userContent.includes("</untrusted_job_posting>"));
+  assert.ok(prompt.userContent.indexOf(UNTRUSTED_FENCE_OPEN) < prompt.userContent.indexOf("<untrusted_job_posting>"));
+  assert.ok(prompt.userContent.indexOf("</untrusted_job_posting>") < prompt.userContent.indexOf(UNTRUSTED_FENCE_CLOSE));
+});
+
+test("prompt enforces negative constraints with concrete near-miss few-shots", () => {
+  const prompt = buildTailorPrompt({
+    master: MASTER,
+    masterVersion: PINNED_VERSION,
+    jobDescription: CLEAN_JD,
+    jobTitle: "Backend Intern",
+    company: "Zomato",
+  });
+
+  const instructions = prompt.systemInstruction;
+
+  // 1. Technology promotion prohibition with near-miss example
+  assert.ok(instructions.includes("NO TECHNOLOGY PROMOTION"));
+  assert.ok(instructions.includes("PostgreSQL"));
+  assert.ok(instructions.includes("MongoDB"));
+
+  // 2. Metric inflation prohibition with near-miss example
+  assert.ok(instructions.includes("NO METRIC INFLATION"));
+  assert.ok(instructions.includes("500 users"));
+  assert.ok(instructions.includes("5,000 users"));
+
+  // 3. Title escalation prohibition with near-miss example
+  assert.ok(instructions.includes("NO TITLE ESCALATION"));
+  assert.ok(instructions.includes("Backend Intern"));
+  assert.ok(instructions.includes("Backend Lead"));
+
+  // 4. Forced citation references
+  assert.ok(instructions.includes("FORCED CITATION REFERENCES (ref_id)"));
+});
