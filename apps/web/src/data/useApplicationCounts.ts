@@ -29,7 +29,7 @@
  * business anywhere near it.
  */
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { supabase, supabaseStatus } from './supabase.ts';
 import { classifyRead } from './readState.ts';
@@ -55,23 +55,19 @@ export interface ApplicationCounts {
   /* Tallied per status, and only meaningful when `state.kind` is 'rows'. Empty
      otherwise - never a map of zeroes, which would be a fabricated answer. */
   readonly counts: StatusCounts;
+  readonly refetch: () => void;
 }
 
-/* Read the counts once on mount.
- *
- * NO POLLING. The pipeline is meant to live-update through Supabase Realtime
- * (section 5), which pushes changes rather than asking for them - a poll would
- * burn the free tier's request budget to learn nothing most of the time. The
- * subscription is not wired yet; when it is, it replaces the refetch rather
- * than being added alongside it. */
+/* Read the counts on mount and on refetch. */
 export function useApplicationCounts(): ApplicationCounts {
+  const [revision, setRevision] = useState(0);
+  const refetch = useCallback(() => setRevision((r) => r + 1), []);
+
   /* Raw facts, accumulated by the effect below and handed to the pure
      classifier on every render. Held separately from the classified state so
      the classification is never stale relative to the facts. */
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  /* NULL, not []. Null means no successful read has completed; an empty array
-     would claim the database was asked and answered nothing. */
   const [rows, setRows] = useState<readonly StatusRow[] | null>(null);
   const [signedIn, setSignedIn] = useState(false);
 
@@ -147,7 +143,7 @@ export function useApplicationCounts(): ApplicationCounts {
     return () => {
       live = false;
     };
-  }, []);
+  }, [revision]);
 
   /* Classified on every render from the current facts, by the pure function
      that has a test for each branch. */
@@ -173,5 +169,5 @@ export function useApplicationCounts(): ApplicationCounts {
     }
   }
 
-  return { state, counts };
+  return { state, counts, refetch };
 }

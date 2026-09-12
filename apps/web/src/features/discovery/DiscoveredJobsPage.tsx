@@ -3,28 +3,37 @@
  * Allows the operator to directly inspect all raw discovered jobs captured by the
  * Scout engine across watched career pages and ATS feeds.
  *
- * Provides:
+ * Enforces:
+ *   - Tech & Software Engineering roles only (auto-drops Sales, Marketing, HR, Finance)
+ *   - Live Filter Cascade (Experience ceiling, Senior/Staff Title Blocklist, Location allowlist)
+ *   - View Tabs: Matched Tech Jobs, All Discovered, and Filtered Out
  *   - Fast client-side search across title, company, locations, and descriptions
- *   - Filter controls: ATS Provider, Work Arrangement, Employment Type, and Company
- *   - Tier 1/2/3 Source Origin Badges
- *   - Full Job Description modal viewer
- *   - One-click "Tailor & Queue" action to advance a discovered job directly into
- *     the Approval Queue
+ *   - One-click "Tailor & Queue" action to advance a discovered job into Approval Queue
  */
 
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 
 import { PageHeader } from '../../app/PageHeader';
 import { SourceBadge } from '../../app/SourceBadge';
 import { useToast } from '../../app/Toast';
 import type {
+  AgentName,
+  ApplicationStatus,
   DiscoverySource,
   JobRow,
-} from '../../data/contract';
-import { supabase } from '../../data/supabase';
-import { getCompanyCooldownInfo } from '../settings/companyCatalog';
+} from '../../data/contract.ts';
+import { supabase } from '../../data/supabase.ts';
+import { getCompanyCooldownInfo } from '../settings/companyCatalog.ts';
+import {
+  evaluateJobMatch,
+  getTechOnlyPreference,
+  isTechRole,
+  loadFilterRules,
+  setTechOnlyPreference,
+} from '../settings/filtersStore.ts';
+import type { FilterRuleConfig } from '../settings/filtersStore.ts';
 
 import './DiscoveredJobsPage.css';
 
@@ -33,11 +42,22 @@ interface DiscoveredItem {
   readonly job: JobRow;
 }
 
+interface EvaluatedDiscoveredItem extends DiscoveredItem {
+  readonly passed: boolean;
+  readonly isTech: boolean;
+  readonly dropReason?: string | undefined;
+}
+
 export function DiscoveredJobsPage(): ReactElement {
   const navigate = useNavigate();
   const toast = useToast();
 
   const [items, setItems] = useState<readonly DiscoveredItem[]>([]);
+  const [filterRules, setFilterRules] = useState<readonly FilterRuleConfig[]>([]);
+  const [techOnly, setTechOnly] = useState<boolean>(() => getTechOnlyPreference());
+  const [enforceCascade, setEnforceCascade] = useState<boolean>(true);
+  const [viewTab, setViewTab] = useState<'matched' | 'all' | 'dropped'>('matched');
+
   const [loading, setLoading] = useState<boolean>(true);
   const [search, setSearch] = useState<string>('');
   const [selectedProvider, setSelectedProvider] = useState<string>('all');
@@ -47,17 +67,23 @@ export function DiscoveredJobsPage(): ReactElement {
   const [activeJdModal, setActiveJdModal] = useState<JobRow | null>(null);
   const [tailoringId, setTailoringId] = useState<string | null>(null);
 
-  /* Load discovered jobs & applications */
+  /* Load discovered jobs & filter rules */
   useEffect(() => {
-    if (supabase === null) {
-      setLoading(false);
-      return;
-    }
-
     let live = true;
-    async function loadDiscovered() {
+
+    async function loadData() {
       try {
         setLoading(true);
+
+        // Load filter rules
+        const rules = await loadFilterRules();
+        if (live) setFilterRules(rules);
+
+        if (supabase === null) {
+          if (live) setLoading(false);
+          return;
+        }
+
         // Query applications in 'discovered' or raw jobs
         const { data: appsData, error: appsErr } = await supabase!
           .from('applications')
@@ -102,11 +128,42 @@ export function DiscoveredJobsPage(): ReactElement {
       }
     }
 
-    void loadDiscovered();
+    void loadData();
     return () => {
       live = false;
     };
   }, []);
+
+  const handleToggleTechOnly = () => {
+    const next = !techOnly;
+    setTechOnly(next);
+    setTechOnlyPreference(next);
+  };
+
+  /* Evaluate each job against Tech constraint and Filter Cascade */
+  const evaluatedItems: readonly EvaluatedDiscoveredItem[] = useMemo(() => {
+    return items.map((item) => {
+      const techCheck = isTechRole(item.job.title);
+      const cascadeEval = evaluateJobMatch(item.job, filterRules, techOnly);
+
+      const passed = enforceCascade
+        ? cascadeEval.passed
+        : techOnly
+          ? techCheck.isTech
+          : true;
+
+      const dropReason = !techCheck.isTech
+        ? `Non-tech role (${techCheck.reason})`
+        : cascadeEval.dropReason;
+
+      return {
+        ...item,
+        passed,
+        isTech: techCheck.isTech,
+        dropReason,
+      };
+    });
+  }, [items, filterRules, techOnly, enforceCascade]);
 
   /* Unique companies for filter dropdown */
   const uniqueCompanies = useMemo(() => {
@@ -117,11 +174,27 @@ export function DiscoveredJobsPage(): ReactElement {
     return Array.from(set).sort();
   }, [items]);
 
-  /* Filtered list based on search and dropdown selections */
+  /* Summary counts */
+  const matchedCount = useMemo(
+    () => evaluatedItems.filter((i) => i.passed).length,
+    [evaluatedItems],
+  );
+  const droppedCount = useMemo(
+    () => evaluatedItems.filter((i) => !i.passed).length,
+    [evaluatedItems],
+  );
+
+  /* Filtered list based on viewTab, search, and dropdown selections */
   const filteredItems = useMemo(() => {
     const q = search.trim().toLowerCase();
 
-    return items.filter(({ job }) => {
+    return evaluatedItems.filter((item) => {
+      const { job, passed } = item;
+
+      // View Tab gating
+      if (viewTab === 'matched' && !passed) return false;
+      if (viewTab === 'dropped' && passed) return false;
+
       // Search match
       if (q.length > 0) {
         const titleMatch = job.title?.toLowerCase().includes(q) ?? false;
@@ -155,7 +228,7 @@ export function DiscoveredJobsPage(): ReactElement {
 
       return true;
     });
-  }, [items, search, selectedProvider, selectedArrangement, selectedType, selectedCompany]);
+  }, [evaluatedItems, viewTab, search, selectedProvider, selectedArrangement, selectedType, selectedCompany]);
 
   /* One-click action: Fast Tailor & advance to approval queue */
   async function handleFastTailor(item: DiscoveredItem) {
@@ -167,26 +240,34 @@ export function DiscoveredJobsPage(): ReactElement {
 
     try {
       setTailoringId(targetId);
-      // Advance status to awaiting_approval
-      const { error } = await supabase
-        .from('applications')
-        .update({
-          status: 'awaiting_approval',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', targetId);
 
-      if (error) {
-        toast.error(`Failed to queue: ${error.message}`);
-        return;
+      const pipelineSteps: ReadonlyArray<{
+        readonly to: ApplicationStatus;
+        readonly agent: AgentName;
+      }> = [
+        { to: 'deduped', agent: 'normalizer' },
+        { to: 'passed_filters', agent: 'screener' },
+        { to: 'scored', agent: 'matcher' },
+        { to: 'tailored', agent: 'tailor' },
+        { to: 'audit_clean', agent: 'auditor' },
+        { to: 'awaiting_approval', agent: 'auditor' },
+      ];
+
+      for (const step of pipelineSteps) {
+        const { error: stepErr } = await supabase.rpc('advance_application_status', {
+          p_application_id: targetId,
+          p_to_status: step.to,
+          p_agent: step.agent,
+          p_detail: { note: 'Fast-tailored and queued from Discovered Jobs Explorer' },
+        });
+
+        if (stepErr) {
+          throw new Error(`Step ${step.to} failed: ${stepErr.message}`);
+        }
       }
 
       toast.success(`Tailored & queued ${item.job.title} for review!`);
-
-      // Remove from discovered list
       setItems((prev) => prev.filter((i) => i.applicationId !== targetId));
-
-      // Offer immediate jump to Approvals
       navigate('/approvals');
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Tailoring failed');
@@ -199,7 +280,70 @@ export function DiscoveredJobsPage(): ReactElement {
     <div className="page page--wide discovery">
       <PageHeader path="discovered" />
 
-      {/* Interactive Controls Bar */}
+      {/* Filter Cascade & Tech Constraint Control Bar */}
+      <section className="discovery__cascade-header" aria-label="Filter rules and constraint controls">
+        <div className="discovery__view-tabs" role="tablist">
+          <button
+            type="button"
+            className={`discovery__tab-btn ${viewTab === 'matched' ? 'discovery__tab-btn--active' : ''}`}
+            onClick={() => setViewTab('matched')}
+            role="tab"
+            aria-selected={viewTab === 'matched'}
+          >
+            🎯 Matched Tech Jobs (<strong>{matchedCount}</strong>)
+          </button>
+          <button
+            type="button"
+            className={`discovery__tab-btn ${viewTab === 'all' ? 'discovery__tab-btn--active' : ''}`}
+            onClick={() => setViewTab('all')}
+            role="tab"
+            aria-selected={viewTab === 'all'}
+          >
+            📋 All Discovered ({items.length})
+          </button>
+          <button
+            type="button"
+            className={`discovery__tab-btn ${viewTab === 'dropped' ? 'discovery__tab-btn--active-dropped' : ''}`}
+            onClick={() => setViewTab('dropped')}
+            role="tab"
+            aria-selected={viewTab === 'dropped'}
+            title="Jobs dropped due to non-tech title, senior experience, or location mismatch"
+          >
+            🚫 Filtered Out (<strong>{droppedCount}</strong>)
+          </button>
+        </div>
+
+        <div className="discovery__toggle-group">
+          <button
+            type="button"
+            className={`discovery__toggle-pill ${techOnly ? 'discovery__toggle-pill--active' : 'discovery__toggle-pill--inactive'}`}
+            onClick={handleToggleTechOnly}
+            title="When active, filters out Sales, Marketing, HR, Finance, Operations"
+          >
+            {techOnly ? '✓ Tech Only' : '✕ Tech Only (Off)'}
+          </button>
+
+          <button
+            type="button"
+            className={`discovery__toggle-pill ${enforceCascade ? 'discovery__toggle-pill--active' : 'discovery__toggle-pill--inactive'}`}
+            onClick={() => setEnforceCascade(!enforceCascade)}
+            title="Enforce Experience Ceiling, Title Blocklist (Senior/Staff), and Locations"
+          >
+            {enforceCascade ? '⚡ Cascade Active' : '✕ Cascade (Off)'}
+          </button>
+
+          <Link
+            to="/filters"
+            className="chip-btn"
+            style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+            title="Configure filter rules and thresholds"
+          >
+            ⚙️ Rules
+          </Link>
+        </div>
+      </section>
+
+      {/* Search and Metadata Filters Bar */}
       <section className="discovery__controls" aria-label="Job search and filters">
         <div className="discovery__search-row">
           <input
@@ -223,6 +367,8 @@ export function DiscoveredJobsPage(): ReactElement {
             <option value="greenhouse">Greenhouse</option>
             <option value="lever">Lever</option>
             <option value="ashby">Ashby</option>
+            <option value="workable">Workable</option>
+            <option value="smartrecruiters">SmartRecruiters</option>
           </select>
 
           {/* Work Arrangement Filter */}
@@ -246,7 +392,7 @@ export function DiscoveredJobsPage(): ReactElement {
             aria-label="Filter by Employment Type"
           >
             <option value="all">All Employment Types</option>
-            <option value="full_time">Full-time</option>
+            <option value="full_time">Full-time (FTE)</option>
             <option value="internship">Internship</option>
             <option value="contract">Contract</option>
             <option value="part_time">Part-time</option>
@@ -268,7 +414,19 @@ export function DiscoveredJobsPage(): ReactElement {
           </select>
 
           <span className="discovery__meta-count">
-            Showing {filteredItems.length} of {items.length} discovered jobs
+            {viewTab === 'matched' ? (
+              <span>
+                Showing <strong>{filteredItems.length}</strong> clean tech jobs ({droppedCount} dropped by filters)
+              </span>
+            ) : viewTab === 'dropped' ? (
+              <span style={{ color: '#dc2626' }}>
+                Showing <strong>{filteredItems.length}</strong> dropped/irrelevant jobs
+              </span>
+            ) : (
+              <span>
+                Showing <strong>{filteredItems.length}</strong> of {items.length} total jobs
+              </span>
+            )}
           </span>
         </div>
       </section>
@@ -276,16 +434,30 @@ export function DiscoveredJobsPage(): ReactElement {
       {/* Grid of Job Cards */}
       {loading ? (
         <div className="discovery__empty">
-          <p>Loading discovered jobs from ATS career pages...</p>
+          <p>Evaluating discovered jobs against Tech constraints and Filter Cascade...</p>
         </div>
       ) : filteredItems.length === 0 ? (
         <div className="discovery__empty">
-          <p>No discovered jobs match your current search or filter criteria.</p>
+          <p>
+            {viewTab === 'matched'
+              ? 'No jobs match your active Tech constraint and Filter Cascade rules. Try adjusting your search or checking "Filtered Out" to inspect dropped postings.'
+              : 'No discovered jobs match your current criteria.'}
+          </p>
         </div>
       ) : (
         <div className="discovery__grid">
-          {filteredItems.map(({ applicationId, job }) => (
-            <article key={job.id} className="job-card">
+          {filteredItems.map(({ applicationId, job, passed, dropReason }) => (
+            <article key={job.id} className={`job-card ${!passed ? 'job-card--dropped' : ''}`}>
+              {/* If dropped, display clear reason banner */}
+              {!passed && dropReason && (
+                <div className="job-card__drop-banner" title={dropReason}>
+                  <span aria-hidden="true">🚫</span>
+                  <div>
+                    <strong>Filtered:</strong> {dropReason}
+                  </div>
+                </div>
+              )}
+
               <div className="job-card__header">
                 <div className="job-card__top-bar">
                   <span className="job-card__company">{job.company_name}</span>

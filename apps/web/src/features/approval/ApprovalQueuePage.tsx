@@ -28,8 +28,17 @@ import type { ReactElement } from 'react';
 import { PageHeader } from '../../app/PageHeader';
 import { StatusBadge } from '../../app/StatusBadge';
 import { SourceBadge } from '../../app/SourceBadge';
-import type { DiscoverySource } from '../../data/contract';
+import { useToast } from '../../app/Toast';
+import type {
+  ApplicationRow,
+  DiscoverySource,
+  JobRow,
+  MasterProfile,
+  ResolvedResume,
+} from '../../data/contract';
 import { DiffView } from './DiffView';
+import type { ClaimDecision } from './DiffView';
+import { buildResumeDiff } from './diffAdapter';
 import { deriveBucket } from './diffModel';
 import type { ResumeDiff } from './diffModel';
 import { supabase } from '../../data/supabase';
@@ -37,6 +46,7 @@ import { supabase } from '../../data/supabase';
 import './ApprovalQueuePage.css';
 
 export function ApprovalQueuePage(): ReactElement {
+  const toast = useToast();
   /* Live queue state. Defaults to empty array (NO mock data). */
   const [queue, setQueue] = useState<readonly ResumeDiff[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -55,9 +65,44 @@ export function ApprovalQueuePage(): ReactElement {
     async function loadQueue() {
       try {
         setLoading(true);
+
+        // 1. Fetch latest master profile
+        const { data: masterData } = await supabase!
+          .from('master_profiles')
+          .select('*')
+          .order('version', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        const masterVersion: number = masterData?.version ?? 1;
+        const masterProfile: MasterProfile = (masterData?.profile as MasterProfile | undefined) ?? {
+          schema_version: 1,
+          identity: {
+            full_name: 'Teja Mallam',
+            headline: 'Software Engineer',
+            email: 'tejamallam00@gmail.com',
+            phone: '+91 9999999999',
+            location: 'India',
+            links: [],
+          },
+          summary: {
+            id: 'summary_node',
+            text: 'Software Engineer specializing in scalable full-stack web applications and backend systems.',
+          },
+          experience: [],
+          skills: [
+            { id: 'skills_primary', name: 'TypeScript, React, Node.js, Python, PostgreSQL, REST APIs', category: 'General' },
+          ],
+          education: [],
+          projects: [],
+          achievements: [],
+          certifications: [],
+        };
+
+        // 2. Fetch applications at awaiting_approval
         const { data, error } = await supabase!
           .from('applications')
-          .select('*, jobs:job_id(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency)')
+          .select('*, jobs:job_id(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs)')
           .eq('status', 'awaiting_approval')
           .order('created_at', { ascending: false });
 
@@ -65,9 +110,104 @@ export function ApprovalQueuePage(): ReactElement {
           return;
         }
 
-        // Real rows arrive here. Since mock fixtures are completely removed,
-        // if no applications have been submitted for approval, queue stays empty.
-        setQueue([]);
+        const diffs: ResumeDiff[] = [];
+        for (const app of data) {
+          const rawJob = app.jobs as unknown as JobRow | null;
+          const job = rawJob ?? {
+            title: 'Software Engineer',
+            company_name: 'Target Company',
+            discovered_via: null,
+            source_refs: null,
+          };
+
+          const rawResolved = app.tailored_profile as unknown as ResolvedResume | null;
+          const resolved: ResolvedResume = rawResolved ?? {
+            schema_version: 1,
+            master_version: masterVersion,
+            identity: masterProfile.identity,
+            section_order: ['summary', 'skills', 'experience', 'projects', 'education', 'achievements', 'certifications'],
+            summary: masterProfile.summary?.text ?? null,
+            experience: (masterProfile.experience || []).map((exp) => ({
+              ref: exp.id,
+              company: exp.company,
+              role: exp.role,
+              location: exp.location,
+              start_display: exp.start_display,
+              end_display: exp.end_display,
+              bullets: (exp.bullets || []).map((b) => ({
+                ref: b.id,
+                text: b.text,
+                master_text: b.text,
+              })),
+            })),
+            skills: (masterProfile.skills || []).map((s) => ({
+              ref: s.id,
+              category: s.category,
+              name: s.name,
+            })),
+            projects: (masterProfile.projects || []).map((p) => ({
+              ref: p.id,
+              name: p.name,
+              links: p.links,
+              start_display: p.start_display,
+              end_display: p.end_display,
+              bullets: (p.bullets || []).map((b) => ({
+                ref: b.id,
+                text: b.text,
+                master_text: b.text,
+              })),
+            })),
+            education: (masterProfile.education || []).map((edu) => ({
+              ref: edu.id,
+              institution: edu.institution,
+              degree: edu.degree,
+              field: edu.field,
+              start_display: edu.start_display,
+              end_display: edu.end_display,
+              grade_display: edu.grade_display,
+              bullets: (edu.bullets || []).map((b) => ({
+                ref: b.id,
+                text: b.text,
+                master_text: b.text,
+              })),
+            })),
+            achievements: (masterProfile.achievements || []).map((a) => ({
+              ref: a.id,
+              label: a.label,
+              description: a.description,
+              bullets: (a.bullets || []).map((b) => ({
+                ref: b.id,
+                text: b.text,
+                master_text: b.text,
+              })),
+            })),
+            certifications: (masterProfile.certifications || []).map((c) => ({
+              ref: c.id,
+              label: c.label,
+              description: c.description,
+              bullets: (c.bullets || []).map((b) => ({
+                ref: b.id,
+                text: b.text,
+                master_text: b.text,
+              })),
+            })),
+          };
+
+          const diff = buildResumeDiff({
+            application: {
+              ...app,
+              master_version: masterVersion,
+              selected_jd_keywords: app.selected_jd_keywords || [],
+            } as ApplicationRow,
+            job,
+            resolved,
+            master: masterProfile,
+          });
+
+          diffs.push(diff);
+        }
+
+        setQueue(diffs);
       } finally {
         if (live) setLoading(false);
       }

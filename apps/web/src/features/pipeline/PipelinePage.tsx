@@ -38,6 +38,7 @@ import { useApplicationCounts } from '../../data/useApplicationCounts.ts';
 import { describeEmptyState } from '../../data/readState.ts';
 import type { ReadState } from '../../data/readState.ts';
 import { PipelineDrawer } from './PipelineDrawer';
+import { DiscoveryModal } from './DiscoveryModal';
 
 import './pipeline.css';
 
@@ -177,12 +178,56 @@ function StatusColumn({
 /* --- The page --------------------------------------------------------- */
 
 export function PipelinePage(): ReactElement {
-  const { state, counts } = useApplicationCounts();
+  const { state, counts, refetch } = useApplicationCounts();
   const [activeDrawerStatus, setActiveDrawerStatus] = useState<ApplicationStatus | null>(null);
+  const [discoveryMode, setDiscoveryMode] = useState<'remote' | 'watchlist' | null>(null);
 
   return (
     <div className="page">
       <PageHeader path="pipeline" />
+
+      {/* Operational Discovery Bar */}
+      <div className="pipeline-dispatch-bar">
+        <div className="pipeline-dispatch-bar__info">
+          <span className="pipeline-dispatch-bar__label">Live Scouting Dispatch</span>
+          <span className="pipeline-dispatch-bar__desc">
+            Trigger autonomous job discovery across open-web international remote boards or your registered watchlist ATS boards.
+          </span>
+        </div>
+        <div className="pipeline-dispatch-bar__actions">
+          <button
+            type="button"
+            className="btn-dispatch btn-dispatch--remote"
+            onClick={() => setDiscoveryMode('remote')}
+          >
+            🌍 Find Remote Jobs (Global)
+          </button>
+          <button
+            type="button"
+            className="btn-dispatch btn-dispatch--watchlist"
+            onClick={() => setDiscoveryMode('watchlist')}
+          >
+            🏢 Scan Watchlist Boards
+          </button>
+          <button
+            type="button"
+            className="btn-dispatch btn-dispatch--refresh"
+            onClick={refetch}
+            title="Reload pipeline counts from database"
+          >
+            ↻ Refresh
+          </button>
+        </div>
+      </div>
+
+      {discoveryMode && (
+        <DiscoveryModal
+          mode={discoveryMode}
+          onClose={() => setDiscoveryMode(null)}
+          onRefresh={refetch}
+          onOpenDiscovered={() => setActiveDrawerStatus('discovered')}
+        />
+      )}
 
       {activeDrawerStatus && (
         <PipelineDrawer

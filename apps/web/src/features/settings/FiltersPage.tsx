@@ -10,61 +10,52 @@
  * so 40 LLM calls instead of 400. And it compounds - the Tailor and the Auditor
  * also only ever see the 40, so the saving is 10x on three agents, not one.
  *
- * The pattern is a CASCADE (short-circuit, cheap-test-first): order the tests
- * by cost, run the cheapest first, let each stage shrink the input for the next.
- * Search engines rank this way - a cheap scorer over a million documents, an
- * expensive one over the surviving hundred.
- *
  * EVERY ROW HERE IS A SETTING, and that is the point of this page. Nothing
  * about the cascade is hardcoded anywhere in this system; `filter_rules` is a
- * table and this screen is its editor. A rule switched off is dimmed rather
- * than hidden, because hiding it would make "why did this job get through"
- * unanswerable.
+ * table and this screen is its live editor.
  */
 
+import { useCallback, useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
-import { FILTER_RULE_TYPES } from '../../data/contract';
-import type { FilterRuleType } from '../../data/contract';
+import { useToast } from '../../app/Toast';
+import { FILTER_RULE_TYPES } from '../../data/contract.ts';
+import type { FilterRuleType } from '../../data/contract.ts';
+import {
+  DEFAULT_FILTER_RULES,
+  getTechOnlyPreference,
+  loadFilterRules,
+  saveFilterRules,
+  setTechOnlyPreference,
+} from './filtersStore.ts';
+import type { FilterRuleConfig } from './filtersStore.ts';
 
 import './settings.css';
 
-/* What each rule throws away, in the operator's own words, plus the shape of
- * the threshold it needs.
- *
- * Keyed by the schema stream's `FilterRuleType` so that the page is driven by
- * the enum rather than by this list: a rule the schema adds and this file does
- * not describe still renders, with its raw name, instead of silently
- * disappearing from the cascade. A missing description is a cosmetic gap; a
- * missing row would be an invisible filter. */
 interface RuleCopy {
-  /* Named for what it does to a job, not for its column. */
   readonly name: string;
-  /* The consequence of switching it off - the most useful text on the page,
-   * because a rule name alone does not say what it is protecting you from. */
   readonly drops: string;
-  /* The control its threshold needs. `none` means the rule is a plain on/off
-   * with nothing to tune. */
   readonly threshold:
     | { readonly kind: 'none' }
-    | { readonly kind: 'number'; readonly label: string; readonly suffix: string }
-    | { readonly kind: 'list'; readonly label: string; readonly placeholder: string };
+    | { readonly kind: 'number'; readonly label: string; readonly suffix: string; readonly key: string }
+    | { readonly kind: 'list'; readonly label: string; readonly placeholder: string; readonly key: string };
 }
 
 const RULE_COPY: Readonly<Partial<Record<FilterRuleType, RuleCopy>>> = {
   experience_ceiling: {
     name: 'Experience ceiling',
     drops: 'Filters out postings exceeding your maximum target years.',
-    threshold: { kind: 'number', label: 'Maximum experience required', suffix: 'years' },
+    threshold: { kind: 'number', label: 'Maximum experience required', suffix: 'years', key: 'max_years' },
   },
   title_blocklist: {
     name: 'Title blocklist',
-    drops: 'Excludes postings matching disqualified seniority or role titles.',
+    drops: 'Excludes postings matching disqualified seniority (Senior/Staff) or non-tech role titles.',
     threshold: {
       kind: 'list',
       label: 'Disqualified title terms',
-      placeholder: 'Senior, Staff, Principal, Lead, Manager, Architect',
+      placeholder: 'Senior, Staff, Principal, Lead, Manager, Architect, Sales, Marketing',
+      key: 'blocked_titles',
     },
   },
   location_allowlist: {
@@ -73,7 +64,8 @@ const RULE_COPY: Readonly<Partial<Record<FilterRuleType, RuleCopy>>> = {
     threshold: {
       kind: 'list',
       label: 'Target locations',
-      placeholder: 'Hyderabad, Bangalore, Remote',
+      placeholder: 'Hyderabad, Bangalore, Pune, Remote, India',
+      key: 'allowed_locations',
     },
   },
   employment_type: {
@@ -94,7 +86,7 @@ const RULE_COPY: Readonly<Partial<Record<FilterRuleType, RuleCopy>>> = {
   staleness: {
     name: 'Staleness',
     drops: 'Discards job postings older than the maximum freshness window.',
-    threshold: { kind: 'number', label: 'Oldest posting age', suffix: 'days' },
+    threshold: { kind: 'number', label: 'Oldest posting age', suffix: 'days', key: 'window_days' },
   },
   degree_mismatch: {
     name: 'Degree mismatch',
@@ -104,92 +96,315 @@ const RULE_COPY: Readonly<Partial<Record<FilterRuleType, RuleCopy>>> = {
   per_company_weekly_cap: {
     name: 'Per-company weekly cap',
     drops: 'Limits total submissions sent to the same company per 7-day window.',
-    threshold: { kind: 'number', label: 'Max applications per company', suffix: 'per week' },
+    threshold: { kind: 'number', label: 'Max applications per company', suffix: 'per week', key: 'max_per_week' },
   },
 };
 
 export function FiltersPage(): ReactElement {
+  const toast = useToast();
+  const [rules, setRules] = useState<FilterRuleConfig[]>([...DEFAULT_FILTER_RULES]);
+  const [techOnly, setTechOnly] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [saving, setSaving] = useState<boolean>(false);
+  const [statusMessage, setStatusMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+
+  const fetchRules = useCallback(async () => {
+    try {
+      setLoading(true);
+      const loaded = await loadFilterRules();
+      setRules(loaded);
+      setTechOnly(getTechOnlyPreference());
+    } catch {
+      // Fallback
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchRules();
+  }, [fetchRules]);
+
+  const toggleRule = (ruleType: FilterRuleType) => {
+    setRules((prev) =>
+      prev.map((r) =>
+        r.ruleType === ruleType ? { ...r, isEnabled: !r.isEnabled } : r,
+      ),
+    );
+  };
+
+  const updateNumberConfig = (ruleType: FilterRuleType, key: string, val: number) => {
+    setRules((prev) =>
+      prev.map((r) =>
+        r.ruleType === ruleType
+          ? { ...r, config: { ...r.config, [key]: val } }
+          : r,
+      ),
+    );
+  };
+
+  const updateListConfig = (ruleType: FilterRuleType, key: string, commaSeparated: string) => {
+    const list = commaSeparated
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    setRules((prev) =>
+      prev.map((r) =>
+        r.ruleType === ruleType
+          ? { ...r, config: { ...r.config, [key]: list } }
+          : r,
+      ),
+    );
+  };
+
+  const handleTechOnlyToggle = () => {
+    const next = !techOnly;
+    setTechOnly(next);
+    setTechOnlyPreference(next);
+  };
+
+  const applyEarlyCareerSdePreset = () => {
+    setTechOnly(true);
+    setTechOnlyPreference(true);
+    setRules((prev) =>
+      prev.map((r) => {
+        if (r.ruleType === 'experience_ceiling') {
+          return { ...r, isEnabled: true, config: { max_years: 2 } };
+        }
+        if (r.ruleType === 'title_blocklist') {
+          return {
+            ...r,
+            isEnabled: true,
+            config: {
+              blocked_titles: [
+                'Senior',
+                'Staff',
+                'Principal',
+                'Lead',
+                'Manager',
+                'Director',
+                'Architect',
+                'VP',
+                'Head of',
+                'Sales',
+                'Marketing',
+                'Recruiter',
+                'HR',
+              ],
+            },
+          };
+        }
+        if (r.ruleType === 'location_allowlist') {
+          return {
+            ...r,
+            isEnabled: true,
+            config: {
+              allowed_locations: ['Hyderabad', 'Bangalore', 'Bengaluru', 'Pune', 'Remote', 'India'],
+            },
+          };
+        }
+        if (r.ruleType === 'degree_mismatch') {
+          return { ...r, isEnabled: true, config: {} };
+        }
+        return r;
+      }),
+    );
+    toast.success('Applied Early-Career SDE & Tech Preset!');
+  };
+
+  const handleSave = async () => {
+    try {
+      setSaving(true);
+      setStatusMessage(null);
+      setTechOnlyPreference(techOnly);
+      const res = await saveFilterRules(rules);
+      if (res.ok) {
+        setStatusMessage({ text: 'Filter rules saved successfully and applied to Job Discovery.', type: 'success' });
+        toast.success('Filter Cascade updated!');
+      } else {
+        setStatusMessage({ text: res.error || 'Failed to save rules', type: 'error' });
+        toast.error(res.error || 'Failed to save rules');
+      }
+    } catch (err) {
+      setStatusMessage({ text: String(err), type: 'error' });
+      toast.error(`Save error: ${String(err)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="page">
       <PageHeader path="filters" />
 
+      {/* Tech-Only Master Constraint Section */}
+      <section className="settings-group" style={{ borderLeft: '4px solid var(--accent)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 'var(--gap-3)' }}>
+          <div>
+            <h2 className="settings-group__title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span>🎯</span> Tech & Software Engineering Constraint
+            </h2>
+            <p className="settings-group__note">
+              Strictly restrict job discovery and automated pipeline to Software Engineering, Developer, AI/ML, Data, DevOps, and Technical roles.
+              Disqualifies all non-technical postings (Sales, Marketing, HR, Finance, Customer Support, Legal, Operations).
+            </p>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <button
+              type="button"
+              className="chip-btn"
+              onClick={applyEarlyCareerSdePreset}
+              title="Auto-fill 0-2 yrs exp, early-career software engineering filters"
+            >
+              ⚙️ Apply SDE / Fresher Preset
+            </button>
+
+            <button
+              type="button"
+              className={`answer-bank__bool-btn ${techOnly ? 'answer-bank__bool-btn--active-yes' : 'answer-bank__bool-btn--active-no'}`}
+              onClick={handleTechOnlyToggle}
+              style={{ minWidth: '130px' }}
+            >
+              {techOnly ? '✓ Tech Only (ON)' : '✕ All Roles (OFF)'}
+            </button>
+          </div>
+        </div>
+      </section>
+
+      {/* Main Cascade Section */}
       <section className="settings-group">
-        <h2 className="settings-group__title">Filter Cascade</h2>
-        <p className="settings-group__note">
-          Rules execute in order, cheapest first, stopping at the first failing check.
-        </p>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--gap-3)' }}>
+          <div>
+            <h2 className="settings-group__title">Filter Cascade</h2>
+            <p className="settings-group__note">
+              Rules execute in order, cheapest first, stopping at the first failing check. Configured rules strictly govern Job Discovery and automated applications.
+            </p>
+          </div>
 
-        <ol className="cascade">
-          {/* Driven by the schema stream's enum, in its declaration order,
-              which is the order the cascade actually runs in. Iterating the
-              enum rather than a local list means a rule added upstream appears
-              here without an edit. */}
-          {FILTER_RULE_TYPES.map((ruleType) => {
-            const copy = RULE_COPY[ruleType];
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => void handleSave()}
+            disabled={saving}
+          >
+            {saving ? 'Saving...' : '💾 Save Filter Cascade'}
+          </button>
+        </div>
 
-            return (
-              <li key={ruleType} className="cascade__row">
-                {/* The toggle leads, because "is this rule on" is the first
-                    question about any row. */}
-                <input
-                  type="checkbox"
-                  className="cascade__toggle"
-                  /* Every rule ships enabled: a filter that defaults off is a
-                      filter that silently does nothing on a fresh install. */
-                  defaultChecked
-                  aria-label={
-                    'Enable ' + (copy === undefined ? ruleType : copy.name)
-                  }
-                />
+        {statusMessage && (
+          <div
+            className={`ingest__item ${statusMessage.type === 'success' ? 'ingest__item--advisory' : 'ingest__item--blocking'}`}
+            style={{ marginTop: 'var(--gap-3)' }}
+          >
+            {statusMessage.text}
+          </div>
+        )}
 
-                <div>
-                  <p className="cascade__name">
-                    {/* Falls back to the raw enum name rather than rendering
-                        nothing, so a rule this file has not described is still
-                        visible and switchable. */}
-                    {copy === undefined ? ruleType : copy.name}
-                  </p>
-                  <p className="cascade__drops">
-                    {copy === undefined
-                      ? 'This rule was added to the schema after this page was written. It still runs; it just has no description here yet.'
-                      : copy.drops}
-                  </p>
-                </div>
+        {loading ? (
+          <p style={{ marginTop: 'var(--gap-4)', color: 'var(--text-secondary)' }}>
+            Loading filter rules...
+          </p>
+        ) : (
+          <ol className="cascade">
+            {FILTER_RULE_TYPES.map((ruleType) => {
+              const copy = RULE_COPY[ruleType];
+              const rule = rules.find((r) => r.ruleType === ruleType) || {
+                ruleType,
+                isEnabled: true,
+                config: {},
+              };
 
-                {/* The threshold, when the rule has one to tune. */}
-                {copy !== undefined && copy.threshold.kind === 'number' ? (
-                  <label className="field">
-                    <span className="field__label">{copy.threshold.label}</span>
-                    <input
-                      type="number"
-                      className="field__control"
-                      min={0}
-                      /* Narrow: a two-digit threshold in a full-width input
-                          reads as a text field and invites a sentence. */
-                      style={{ width: '7rem' }}
-                    />
-                    <span className="field__help">{copy.threshold.suffix}</span>
-                  </label>
-                ) : null}
+              return (
+                <li
+                  key={ruleType}
+                  className={`cascade__row ${!rule.isEnabled ? 'cascade__row--off' : ''}`}
+                >
+                  <input
+                    type="checkbox"
+                    className="cascade__toggle"
+                    checked={rule.isEnabled}
+                    onChange={() => toggleRule(ruleType)}
+                    aria-label={'Enable ' + (copy === undefined ? ruleType : copy.name)}
+                  />
 
-                {copy !== undefined && copy.threshold.kind === 'list' ? (
-                  <label className="field">
-                    <span className="field__label">{copy.threshold.label}</span>
-                    <input
-                      type="text"
-                      className="field__control"
-                      placeholder={copy.threshold.placeholder}
-                      style={{ width: '18rem' }}
-                    />
-                    <span className="field__help">
-                      Separate with commas
-                    </span>
-                  </label>
-                ) : null}
-              </li>
-            );
-          })}
-        </ol>
+                  <div>
+                    <p className="cascade__name">
+                      {copy === undefined ? ruleType : copy.name}
+                    </p>
+                    <p className="cascade__drops">
+                      {copy === undefined
+                        ? 'This rule was added to the schema after this page was written.'
+                        : copy.drops}
+                    </p>
+                  </div>
+
+                  {/* Number Threshold */}
+                  {copy !== undefined && copy.threshold.kind === 'number' ? (
+                    <label className="field">
+                      <span className="field__label">{copy.threshold.label}</span>
+                      <input
+                        type="number"
+                        className="field__control"
+                        min={0}
+                        style={{ width: '7rem' }}
+                        disabled={!rule.isEnabled}
+                        value={String(rule.config[copy.threshold.key] ?? '')}
+                        onChange={(e) =>
+                          updateNumberConfig(
+                            ruleType,
+                            (copy.threshold as { key: string }).key,
+                            Number(e.target.value),
+                          )
+                        }
+                      />
+                      <span className="field__help">{copy.threshold.suffix}</span>
+                    </label>
+                  ) : null}
+
+                  {/* List Threshold */}
+                  {copy !== undefined && copy.threshold.kind === 'list' ? (
+                    <label className="field">
+                      <span className="field__label">{copy.threshold.label}</span>
+                      <input
+                        type="text"
+                        className="field__control"
+                        placeholder={copy.threshold.placeholder}
+                        style={{ width: '18rem' }}
+                        disabled={!rule.isEnabled}
+                        value={
+                          Array.isArray(rule.config[copy.threshold.key])
+                            ? (rule.config[copy.threshold.key] as string[]).join(', ')
+                            : String(rule.config[copy.threshold.key] ?? '')
+                        }
+                        onChange={(e) =>
+                          updateListConfig(
+                            ruleType,
+                            (copy.threshold as { key: string }).key,
+                            e.target.value,
+                          )
+                        }
+                      />
+                      <span className="field__help">Separate with commas</span>
+                    </label>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ol>
+        )}
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'var(--gap-5)', paddingTop: 'var(--gap-4)', borderTop: '1px solid var(--rule)' }}>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => void handleSave()}
+            disabled={saving}
+          >
+            {saving ? 'Saving...' : '💾 Save Filter Cascade'}
+          </button>
+        </div>
       </section>
     </div>
   );

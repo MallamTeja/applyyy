@@ -36,7 +36,7 @@ type ExtendedCategoryFilter = QuestionCategory | 'needs_attention';
 
 const CATEGORIES: readonly { id: ExtendedCategoryFilter; label: string }[] = [
   { id: 'all', label: 'All Questions' },
-  { id: 'compensation', label: 'Compensation & Availability' },
+  { id: 'compensation', label: 'Compensation & Notice' },
   { id: 'auth', label: 'Work Authorization' },
   { id: 'eeo', label: 'EEO & Diversity' },
   { id: 'written', label: 'Written Responses' },
@@ -564,7 +564,7 @@ export function AnswerBankPage(): ReactElement {
                         <div className="answer-bank__row-actions">
                           <button
                             type="button"
-                            className="answer-bank__action-btn"
+                            className="copy-btn answer-bank__action-btn"
                             onClick={() =>
                               void handleCopy(
                                 typeof question.value === 'object'
