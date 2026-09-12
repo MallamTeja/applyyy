@@ -150,16 +150,14 @@ test('an unclaimed status and an unbuilt screen are not the same bucket', () => 
   }
 });
 
-test('the unbuilt set is non-empty today, and names the submit-boundary edges', () => {
-  /* NON-VACUITY FOR THE COVERAGE REPORT ITSELF. A report whose problem buckets
-     are all empty is indistinguishable from a report with an inverted
-     predicate. This test asserts the report currently finds real gaps - and
-     names the ones that matter, because a row stuck at `applying` means nobody
-     knows whether an application was actually submitted. */
-  const unbuilt = new Set(UNBUILT_HUMAN_CONTROLS.map((lane) => lane.from));
-  assert.ok(UNBUILT_HUMAN_CONTROLS.length > 0);
-  for (const status of ['applying', 'needs_verification', 'failed'] as const) {
-    assert.ok(unbuilt.has(status), status + ' has no screen and must be reported');
+test('every claimed status has a screen with affordance controls', () => {
+  /* All submit-boundary and human recovery queues (applying, needs_verification,
+     blocked_needs_human, failed) now have operator recovery panels on System health.
+     UNBUILT_HUMAN_CONTROLS is now zero, meaning no status is invisible to the operator. */
+  assert.equal(UNBUILT_HUMAN_CONTROLS.length, 0);
+  for (const status of ['applying', 'needs_verification', 'blocked_needs_human', 'failed'] as const) {
+    assert.equal(controlReadiness(status), 'affordance_only');
+    assert.notEqual(humanControlLocation(status), null);
   }
 });
 

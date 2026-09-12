@@ -175,26 +175,26 @@ const SCREENS_BY_SOURCE_STATUS: Readonly<
    * Shared with the sweeper, so it is not human-only - but if the sweeper has
    * quietly stopped, a person must be able to move the row, and submission is
    * the one non-idempotent action in the system. */
-  applying: { screen: 'System health, stuck-submission queue', readiness: 'not_built' },
+  applying: { screen: 'System health, stuck-submission queue', readiness: 'affordance_only' },
 
   /* The row that decides whether an application went out. Its edge back to
    * `approved` is human-only by design: a machine must never conclude that a
    * possibly-submitted application was not submitted, because concluding
    * wrongly sends a second one and violates constraint #7. Needs the
    * screenshot as evidence and a deliberate, hard-to-misclick control. */
-  needs_verification: { screen: 'System health, needs-verification queue', readiness: 'not_built' },
+  needs_verification: { screen: 'System health, needs-verification queue', readiness: 'affordance_only' },
 
   /* The captcha and anti-bot lane. Nothing here circumvents them
    * (constraint #5) - the worker screenshots the wall and parks the row, and
    * the operator finishes the application by hand. Because Actions has no
    * human present, this is a normal part of the day rather than a failure,
    * which is why it gets a real queue instead of an error log. */
-  blocked_needs_human: { screen: 'System health, blocked queue', readiness: 'not_built' },
+  blocked_needs_human: { screen: 'System health, blocked queue', readiness: 'affordance_only' },
 
   /* The only edge out of `failed` leads to verification rather than back to
    * the queue: a row that failed near the submit boundary must be checked by a
    * person before anything moves it again. */
-  failed: { screen: 'System health, failed rows', readiness: 'not_built' },
+  failed: { screen: 'System health, failed rows', readiness: 'affordance_only' },
 };
 
 /* Human-reachable edges whose source status no screen claims.

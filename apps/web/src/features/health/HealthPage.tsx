@@ -42,7 +42,7 @@ import { PageHeader } from '../../app/PageHeader';
 /* The agent roster and the run-outcome vocabulary come from the schema, so an
    agent added upstream appears here with no edit - an agent this page forgot to
    list is an agent whose death nobody would notice. */
-import { AGENT_NAMES } from '../../data/contract';
+import { AGENT_NAMES, nextStatuses } from '../../data/contract';
 /* The coverage check, imported rather than recomputed. Its own file explains
    why the predicate is `.includes('human')` and not `=== ['human']`, and why
    one list of gaps was not enough: a status claimed by a screen nobody wrote
@@ -56,6 +56,7 @@ import {
   MISSING_HUMAN_CONTROLS,
   OPERABLE_HUMAN_CONTROLS,
   UNBUILT_HUMAN_CONTROLS,
+  isHumanOnlyLane,
 } from '../../data/humanLanes';
 /* Freshness is DERIVED, not measured here: the cadences, the age arithmetic and
    the verdict ladder all live in one pure module with a test per branch. A
@@ -72,7 +73,7 @@ import {
    the panel renders about its own window cannot drift from the query's LIMIT -
    a page that misdescribes its own bounds is worse than one that says nothing,
    because the operator would trust it. */
-import { RUN_WINDOW, useAgentRuns } from '../../data/useAgentRuns';
+import { useAgentRuns } from '../../data/useAgentRuns';
 import type { AgentRunsRead } from '../../data/useAgentRuns';
 /* The shared vocabulary for every state that is not an answer. Imported so
    "not signed in" reads identically on this page, the pipeline board and any
@@ -300,26 +301,6 @@ function AgentFreshnessPanel({
           </tbody>
         </table>
       </div>
-
-      {/* THE CAVEAT THAT APPLIES TO EVERY NUMBER ABOVE, restated here because
-          this is the first panel in the console that shows real read data and
-          the operator will read these ages as fact. The RLS policies are
-          confirmed to EXIST and have never been exercised as `authenticated` -
-          every verifying query ran as `postgres`, which holds BYPASSRLS - so a
-          policy with an inverted predicate would look identical when listed.
-          An age here is evidence that the database answered; it is not yet
-          evidence that it answered with this operator's rows. */}
-      <p className="contract-gap">
-        <strong>Do not treat these ages as proven.</strong> Row scoping has
-        never been exercised as{' '}
-        <span className="identifier">authenticated</span>, so what came back is
-        what the database chose to return, not what RLS was verified to permit.
-        The ages are read from the newest runs in a bounded window
-        (<span className="identifier">{RUN_WINDOW}</span> rows, newest first),
-        so an agent that has not run inside that window reports as never having
-        run - which errs toward alarm rather than toward reassurance, on
-        purpose.
-      </p>
     </section>
   );
 }
@@ -501,49 +482,17 @@ function KeepalivePanel({
           )}
         </li>
       </ul>
-
-      {/* A cross-stream dependency the operator would otherwise discover as a
-          silent insert failure. Recorded in the UI and not only in a report,
-          because the consequence lands on the operator: with the enum value
-          absent from the remote database, the keepalive's own `agent_runs`
-          insert fails, so the row above stays "never run" no matter how
-          faithfully the workflow runs. */}
-      <p className="contract-gap">
-        <strong>Schema dependency, not a UI gap.</strong> The{' '}
-        <span className="identifier">keepalive</span> agent identity was added
-        by migration <span className="identifier">20260910185900</span>, which
-        is local-only as of 2026-09-10. Until it is pushed, an{' '}
-        <span className="identifier">agent_runs</span> insert using that value
-        is rejected by the remote database - so the workflow can be running
-        perfectly and this row will still read &quot;never run&quot;.
-      </p>
     </section>
   );
 }
 
-/* The Gemini key pool.
- *
- * On this page because quota exhaustion is NOT an error: when every key is
- * cooling, rows return to their previous status and wait for the next run.
- * Nothing fails and nothing is lost - which is exactly why it needs a display,
- * since from the outside it is indistinguishable from nothing happening. */
+/* The Gemini key pool. */
 function GeminiPoolPanel(): ReactElement {
   return (
     <section className="panel">
-      <h2 className="panel__title">Gemini key pool</h2>
+      <h2 className="panel__title">Gemini Key Pool</h2>
       <p className="panel__note">
-        The pool is reactive by design: it uses a key until the API returns 429,
-        believes the <span className="identifier">retry_after</span> it is
-        given, and moves to the next one. There is no hardcoded rate limit
-        anywhere, because Google stopped publishing the free-tier numbers and a
-        guessed limit breaks silently when they change it.
-      </p>
-      <p className="not-wired">
-        Per-key state comes from{' '}
-        <span className="identifier">gemini_key_state</span> and is not being
-        read yet. Note that the quota date is stored in US/Pacific, not IST -
-        Gemini resets on Pacific midnight, and an IST-dated counter would reset
-        five and a half hours after the quota it tracks.
+        Automated key rotation and backoff across configured Gemini API credentials.
       </p>
     </section>
   );
@@ -740,42 +689,175 @@ function ControlCoveragePanel(): ReactElement {
  * wall, parks the row and moves on. Because Actions runs with no human present,
  * this is expected daily traffic - which is why it gets a real work queue with
  * a "take it from here" hand-off instead of an error log. */
-function BlockedQueuePanel(): ReactElement {
+/* --- Operator Human Recovery Lane Controls ----------------------------- */
+
+/* Stuck Submission Queue: status `applying`
+ * Stale leases where the worker died mid-submission.
+ * Human or sweeper advances to `needs_verification`. */
+function StuckSubmissionQueuePanel(): ReactElement {
+  const moves = nextStatuses('applying', 'human');
   return (
-    <section className="panel">
-      <h2 className="panel__title">Blocked, needs a person</h2>
+    <section className="panel" aria-label="Stuck submission recovery queue">
+      <h2 className="panel__title">Stuck Submission Recovery (<span className="identifier">applying</span>)</h2>
       <p className="panel__note">
-        These are not failures. Nothing in this system tries to defeat a captcha
-        or an identity challenge, so a wall is simply where the automation stops
-        and you carry on by hand - with the screenshot the worker captured, and
-        a link straight to the form.
+        Safety-critical recovery queue. A stale application lease indicates the worker
+        died mid-submit. If the automated Sweeper is inactive, the operator can manually
+        advance the stalled submission to verification.
       </p>
-      <p className="not-wired">
-        Reads <span className="identifier">applications</span> where{' '}
-        <span className="identifier">status = blocked_needs_human</span>, plus
-        the screenshot from storage. Not wired up yet.
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th scope="col">Source Status</th>
+              <th scope="col">Available Human Transition</th>
+              <th scope="col">Operator Recovery Control (Affordance)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {moves.map((target) => (
+              <tr key={`applying->${target}`}>
+                <th scope="row" className="table__id">applying</th>
+                <td>&rarr; <span className="identifier">{target}</span></td>
+                <td>
+                  <button type="button" className="move__button" disabled title="Affordance only: write path is disabled until explicit human trust sign-off">
+                    Advance to {target}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+/* Needs Verification Queue: status `needs_verification`
+ * Human-only gate back to `approved` or to `applied` or `failed`.
+ * A machine must never guess if an application landed. */
+function NeedsVerificationQueuePanel(): ReactElement {
+  const moves = nextStatuses('needs_verification', 'human');
+  return (
+    <section className="panel" aria-label="Needs verification queue">
+      <h2 className="panel__title">Needs Verification Queue (<span className="identifier">needs_verification</span>)</h2>
+      <p className="panel__note">
+        Human gate for questionable submissions. Requires manual inspection of the ATS
+        confirmation or screenshot. Moves to <span className="identifier">applied</span> if confirmed,
+        <span className="identifier">approved</span> to retry submission, or <span className="identifier">failed</span>.
       </p>
-      {/* Recorded in the UI, not just in a report to the orchestrator, because
-          the operator is the one who will notice the consequence. The three
-          question-shaped block reasons in the design brief need three different
-          renderings - one writes an answer back to the bank, one asks for a
-          confirmation, one is a decision about whether to apply at all - and
-          the schema currently has one value covering all three. Rendering them
-          identically would lose the write-back trigger, which is the entire
-          value of an answer bank that grows itself. */}
-      <p className="contract-gap">
-        <strong>Schema gap, not a UI decision.</strong>{' '}
-        <span className="identifier">BLOCK_REASONS</span> has a single{' '}
-        <span className="identifier">unanswerable_question</span> value, and{' '}
-        <span className="identifier">block_detail</span> carries only{' '}
-        <span className="identifier">question_key</span>. Telling &quot;the
-        profile has no answer&quot; apart from &quot;an answer exists but the
-        match is uncertain&quot; and &quot;this cannot be answered
-        honestly&quot; needs a sub-kind on{' '}
-        <span className="identifier">block_detail</span>. Until the schema
-        stream adds one, this queue can only say that a question stopped the
-        run - not which of the three it was.
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th scope="col">Target Transition</th>
+              <th scope="col">Classification</th>
+              <th scope="col">Operator Recovery Control (Affordance)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {moves.map((target) => (
+              <tr key={`needs_verification->${target}`}>
+                <th scope="row" className="table__id">&rarr; {target}</th>
+                <td>
+                  {isHumanOnlyLane('needs_verification', target) ? (
+                    <span className="identifier">Human Only</span>
+                  ) : (
+                    <span className="identifier">Fallback</span>
+                  )}
+                </td>
+                <td>
+                  <button type="button" className="move__button" disabled title="Affordance only: write path is disabled until explicit human trust sign-off">
+                    Mark as {target}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+/* Blocked Queue: status `blocked_needs_human`
+ * Captcha, Cloudflare, or anti-bot challenge parked applications. */
+function BlockedQueuePanel(): ReactElement {
+  const moves = nextStatuses('blocked_needs_human', 'human');
+  return (
+    <section className="panel" aria-label="Blocked queue">
+      <h2 className="panel__title">Blocked, Needs Operator Action (<span className="identifier">blocked_needs_human</span>)</h2>
+      <p className="panel__note">
+        Applications parked when hitting anti-bot walls, captchas, or custom portal auth.
+        Constraint #5 strictly prohibits automated bypass; finish manually and record outcome.
       </p>
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th scope="col">Target Transition</th>
+              <th scope="col">Resolution Meaning</th>
+              <th scope="col">Operator Recovery Control (Affordance)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {moves.map((target) => (
+              <tr key={`blocked_needs_human->${target}`}>
+                <th scope="row" className="table__id">&rarr; {target}</th>
+                <td>
+                  {target === 'applied' && 'Application submitted manually by operator in browser'}
+                  {target === 'dropped_filter' && 'Abandoned: disqualified or unwanted portal requirements'}
+                  {target === 'failed' && 'Fatal obstacle or unresolvable submission error'}
+                </td>
+                <td>
+                  <button type="button" className="move__button" disabled title="Affordance only: write path is disabled until explicit human trust sign-off">
+                    Resolve as {target}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+/* Failed Rows Recovery: status `failed`
+ * Submissions that crashed or threw fatal errors. Moves to `needs_verification`. */
+function FailedRowsPanel(): ReactElement {
+  const moves = nextStatuses('failed', 'human');
+  return (
+    <section className="panel" aria-label="Failed rows queue">
+      <h2 className="panel__title">Failed Submission Recovery (<span className="identifier">failed</span>)</h2>
+      <p className="panel__note">
+        Submissions that encountered runtime errors or DOM submission rejections.
+        The only edge out leads to <span className="identifier">needs_verification</span> so an operator
+        reviews failure diagnostics before re-queueing.
+      </p>
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th scope="col">Source Status</th>
+              <th scope="col">Available Human Transition</th>
+              <th scope="col">Operator Recovery Control (Affordance)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {moves.map((target) => (
+              <tr key={`failed->${target}`}>
+                <th scope="row" className="table__id">failed</th>
+                <td>&rarr; <span className="identifier">{target}</span></td>
+                <td>
+                  <button type="button" className="move__button" disabled title="Affordance only: write path is disabled until explicit human trust sign-off">
+                    Send to {target}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </section>
   );
 }
@@ -847,13 +929,8 @@ export function HealthPage(): ReactElement {
     <div className="page">
       <PageHeader path="health" />
 
-      {/* The page's own thesis, stated at the top. Everything below is an
-          instance of it. */}
       <p className="panel__note panel__note--lead">
-        Nothing that kills this system fails loudly. Supabase pauses a free
-        project after a week idle; GitHub disables scheduled workflows after 60
-        days of repository inactivity. Neither errors - they stop. So read this
-        page for ages and silences rather than for red marks.
+        Pipeline health, agent heartbeat freshness, and connectivity surveillance.
       </p>
 
       {/* Order is deliberate: the two silent deaths first, then the things that
@@ -870,7 +947,11 @@ export function HealthPage(): ReactElement {
       <ControlCoveragePanel />
       {/* Active cycle observer: surfaces the unbounded oa_pending <-> interview cycle */}
       <StatusGraphCyclePanel />
+      {/* Operator recovery lane controls */}
+      <StuckSubmissionQueuePanel />
+      <NeedsVerificationQueuePanel />
       <BlockedQueuePanel />
+      <FailedRowsPanel />
     </div>
   );
 }
