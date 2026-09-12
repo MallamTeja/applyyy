@@ -62,23 +62,25 @@ All core frontend, backend database schemas, worker automation pipelines, and en
      7. Typography tokens (`IBM Plex Sans`) & theme toggle execution.
 
 ### C. Test & Quality Convergence
-* **Web Test Suite (`apps/web`):** 182 / 182 tests passing (956ms).
+* **Functions Test Suite (`supabase/functions`):** 273 / 273 tests passing (1.4s) — covering kill switch, key pool rotation, ATS adapters, LinkedIn post parsing, and tailoring audit.
+* **Web Test Suite (`apps/web`):** 207 / 207 tests passing across 7 suites (1.7s) — covering human lane graph coverage, master profile intake, tokens, themes, and RLS guards.
 * **Worker Unit Suite (`worker`):** 116 / 116 tests passing across 16 test files (26.1s).
-* **Workspace Typecheck:** Zero TypeScript errors (`tsc --noEmit` clean on both `web` and `worker`).
+* **Workspace Typecheck:** Zero TypeScript errors (`tsc --noEmit` clean on all packages).
 * **Vite Production Build:** Compiles cleanly to `apps/web/dist` with asset gzip optimization.
+* **Total Automated Tests:** 596 / 596 passing (100% green).
 
 ---
 
-## 3. Current Pending Works & Next Steps
+## 3. Current Completed Works & Operational State
 
-### Completed Infrastructure & Setup Items (2026-09-11 23:22 IST) ✅
+### Completed Infrastructure & Feature Items ✅
 
 1. **GitHub Actions Secrets Configuration & Live Execution:**
    * **State:** Configured under GitHub Repository `Settings > Secrets and variables > Actions`.
    * **Secrets Live:** `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `APPLYY_APP_USER_EMAIL`, `APPLYY_APP_USER_PASSWORD`, `STORAGE_STATE_ENC_KEY`.
    * **Live Verification Confirmed:**
-     * `applyy keepalive` (Run `34635276043`): **PASSED ✅** (Supabase pinged, idle-pause reset).
-     * `applyy applier (daily batch)` (Run `34635284619`): **PASSED ✅** (Chromium installed, kill switch checked, dry-run executed safely).
+     * `applyy keepalive` (Runs `34635276043`, `34635940759`): **PASSED ✅** (Supabase pinged, idle-pause reset).
+     * `applyy applier (daily batch)` (Runs `34635284619`, `34635944614`): **PASSED ✅** (Chromium installed, kill switch checked, dry-run executed safely).
 
 2. **Supabase Database Seeding (Gemini API Keys & User Defaults):**
    * **State:** Successfully seeded on live remote Supabase instance for operator `0f4b24da-e85b-40bb-8606-c81824493b45` (`tejamallam00@gmail.com`).
@@ -92,13 +94,17 @@ All core frontend, backend database schemas, worker automation pipelines, and en
    * **State:** Verified active via Vercel CLI across `Production`, `Preview`, and `Development` environments.
    * **Variables Configured:** `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
 
----
+4. **Human Recovery Lane Controls & Graph Coverage (`HealthPage.tsx`):**
+   * **State:** **COMPLETED & VERIFIED ✅** (Commit `a811841`).
+   * **Panels Added:**
+     * `StuckSubmissionQueuePanel` (`applying` &rarr; `needs_verification`).
+     * `NeedsVerificationQueuePanel` (`needs_verification` &rarr; `applied`, `approved`, `failed`).
+     * `BlockedQueuePanel` (`blocked_needs_human` &rarr; `applied`, `dropped_filter`, `failed`).
+     * `FailedRowsPanel` (`failed` &rarr; `needs_verification`).
+   * **Graph Invariant:** `UNBUILT_HUMAN_CONTROLS = 0`. All 31 human-reachable transitions now have dedicated affordance panels and controls.
 
-### Critical Action Items (Immediate Pending) 🟡
-
-1. **Human Recovery Lane Controls:**
-   * **State:** Console surfaces system notice for 8 unbuilt recovery transitions originating from `applying`, `needs_verification`, `blocked_needs_human`, and `failed`.
-   * **Action Needed:** Implement dedicated operator recovery actions (e.g., "Retry Application", "Mark Abandoned", "Manual Override") in `HealthPage.tsx`.
+5. **Edge Function Deployments on Supabase Remote:**
+   * **Functions Live:** `email-tracker-intake` (v5, `verify_jwt: false`), `rls-proof` (v9).
 
 ---
 
@@ -106,9 +112,12 @@ All core frontend, backend database schemas, worker automation pipelines, and en
 
 | Task | Command |
 |---|---|
-| **Run E2E Suite** | `pnpm --filter @applyy/worker run test:e2e` |
-| **Run Worker Unit Tests** | `pnpm --filter @applyy/worker test` |
+| **Run All Tests (Repo-wide)** | `pnpm test` (596 tests: 273 functions + 207 web + 116 worker) |
+| **Run Functions Unit Tests** | `pnpm run test:functions` |
 | **Run Web Unit Tests** | `pnpm --filter web test` |
-| **Typecheck Full Repo** | `pnpm --filter web typecheck && pnpm --filter @applyy/worker typecheck` |
+| **Run Worker Unit Tests** | `pnpm --filter @applyy/worker test` |
+| **Run Playwright E2E Suite** | `pnpm --filter @applyy/worker run test:e2e` |
+| **Typecheck Full Repo** | `pnpm run typecheck` |
 | **Build Web Bundle** | `pnpm --filter web build` |
-| **Start Web Dev Console** | `pnpm --filter web dev` |
+| **Deploy Functions** | `npx supabase functions deploy <slug>` |
+
