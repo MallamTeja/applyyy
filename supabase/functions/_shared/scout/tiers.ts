@@ -19,6 +19,9 @@ import type {
 } from "../contracts/shared-types.ts";
 import { jobFingerprint } from "../normalize/fingerprint.ts";
 import { extractPostedAt, type PostedAtContext } from "../normalize/posted-at.ts";
+// Apply-URL resolution. Its own module because the host check is a distinct concern with
+// its own adversarial test suite, and because the next aggregator source needs it too.
+import { resolveApplyUrl } from "./apply-url.ts";
 
 export type DiscoveryTier = 1 | 2 | 3;
 
@@ -144,6 +147,11 @@ export interface ParsedHiringPost {
   readonly companyName: string;
   readonly companySlug: string;
   readonly applyUrl: string;
+  // FALSE when `applyUrl` is the post permalink rather than a verified ATS link, because
+  // nothing trustworthy was found in the post. A consumer must route these to a human
+  // instead of presenting them as somewhere to apply — an unverified link is a lead, not
+  // an application target.
+  readonly applyUrlVerified: boolean;
   readonly descriptionRaw: string;
   readonly locationRaw: string | null;
   readonly employmentType: EmploymentType;
@@ -161,7 +169,20 @@ export function parseLinkedInHiringPost(input: LinkedInPostInput): ParsedHiringP
   const title = extractTitleFromPost(text);
   const company = input.companyName || extractCompanyFromPost(text, input.authorName) || "Startup / Stealth";
   const slug = company.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  const applyUrl = input.extractedApplyUrl || extractFirstUrl(text) || input.postUrl;
+  // THE POST BODY CHOOSES NOTHING. This previously took the first http(s) string anywhere
+  // in the text, which handed the destination to whoever wrote the post. Resolution now
+  // validates the scheme and the host by URL PARSING (not string inspection, which a
+  // userinfo trick defeats), prefers the first TRUSTED link over merely the first link,
+  // and falls back to the permalink marked unverified rather than promoting an untrusted
+  // candidate.
+  const resolvedApplyUrl = resolveApplyUrl({
+    // Our own structured extraction outranks prose, but is still validated, not exempted.
+    ...(input.extractedApplyUrl === undefined ? {} : { structuredUrl: input.extractedApplyUrl }),
+    postText: text,
+    // The permalink is truthful about where the sighting came from, so it is the honest
+    // last resort — but it is not an apply URL, which is what `verified: false` records.
+    fallbackUrl: input.postUrl,
+  });
 
   const workArrangement: WorkArrangement = text.toLowerCase().includes("remote")
     ? "remote"
@@ -189,7 +210,8 @@ export function parseLinkedInHiringPost(input: LinkedInPostInput): ParsedHiringP
     title,
     companyName: company,
     companySlug: slug,
-    applyUrl,
+    applyUrl: resolvedApplyUrl.url,
+    applyUrlVerified: resolvedApplyUrl.verified,
     descriptionRaw: text,
     locationRaw: extractLocationFromPost(text),
     employmentType,
@@ -236,12 +258,6 @@ function extractLocationFromPost(text: string): string | null {
   const locPattern = /(?:in|based in|location:)\s+([A-Za-z\s,]{3,30}?)(?:[.,!\n]|\s+or|\s+with)/i;
   const m = text.match(locPattern);
   return m && m[1] ? m[1].trim() : null;
-}
-
-function extractFirstUrl(text: string): string | null {
-  const urlPattern = /(https?:\/\/[^\s]+)/i;
-  const m = text.match(urlPattern);
-  return m && m[1] ? m[1] : null;
 }
 
 /**
