@@ -81,6 +81,27 @@ import type {
   PostedAtSource,
   WorkArrangement,
 } from './enums.ts';
+
+// -----------------------------------------------------------------------------
+// Re-export of the enum vocabulary the row types are WRITTEN IN.
+//
+// WHY: `tables.ts` is the module consumers outside this package actually import.
+// `worker/src/cli/scout.ts` and `scout-remote.ts` reach for `AtsProvider` and
+// `EmploymentType` in the same import as `JobInsert`/`JobSourceRef`, because those
+// are the types the row FIELDS are declared as — asking for the field's type from
+// the module that defines the field is the obvious thing to do, not a mistake.
+// Importing a type from a module that merely imports it itself is TS2459, and that
+// is what had `pnpm run typecheck` red on main. A red baseline is worse than the
+// four errors it reports: it makes every other stream's "typecheck passes" exit
+// gate unfalsifiable, because nobody can tell their breakage from the inherited one.
+//
+// Kept deliberately NARROW — only the two names a consumer has actually needed.
+// A blanket `export type * from './enums.ts'` would have to be re-reviewed every
+// time `enums.ts` gains a type, and `enums.ts` is under another session's write
+// grant right now. Widen this list when a consumer needs more, never pre-emptively.
+// -----------------------------------------------------------------------------
+export type { AtsProvider, EmploymentType } from './enums.ts';
+
 // The inner document shapes. Imported so the row types name a real structure instead
 // of `Json` — a jsonb column typed as `Json` teaches the reader nothing about what is
 // legal inside it, and these three shapes carry the anti-fabrication defence.

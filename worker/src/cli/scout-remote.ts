@@ -271,6 +271,13 @@ async function main(): Promise<void> {
     const sourceRef: JobSourceRef = {
       provider: 'other',
       url: raw.url,
+      // Explicit null, not omission. These tier-3 sources are open-web aggregator
+      // feeds rather than ATS vendors, so there is no vendor-side posting id to
+      // record. `ats_job_id` is REQUIRED on JobSourceRef precisely so that "this
+      // source exposes no id" has to be stated by whoever adds the source, instead
+      // of being a field that quietly went missing on one code path — a missing id
+      // and an unrecorded id look identical downstream in dedupe.
+      ats_job_id: null,
       first_seen_at: new Date().toISOString(),
       last_seen_at: new Date().toISOString(),
       metadata: {
