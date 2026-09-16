@@ -66,7 +66,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { db } = clientResult;
 
-  // 1. Check Kill Switch
+  // 1. Record run start in agent_runs
+  const { data: runRow } = await db
+    .from("agent_runs")
+    .insert({
+      agent: "scout_ats",
+      status: "running",
+      started_at: new Date().toISOString(),
+    })
+    .select("id")
+    .single();
+
+  const runId = runRow?.id;
+
+  // 2. Check Kill Switch
   const { data: settingsData, error: settingsError } = await db
     .from("system_settings")
     .select("system_enabled")
@@ -74,6 +87,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .single();
 
   if (settingsError && settingsError.code !== "PGRST116") {
+    if (runId) {
+      await db
+        .from("agent_runs")
+        .update({
+          status: "failed",
+          finished_at: new Date().toISOString(),
+          error_detail: `kill_switch_read_failed: ${settingsError.message}`,
+        })
+        .eq("id", runId);
+    }
     return jsonResponse(500, {
       error: "kill_switch_read_failed",
       detail: settingsError.message,
@@ -82,6 +105,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const systemEnabled = settingsData?.system_enabled ?? false;
   if (!systemEnabled && !force) {
+    if (runId) {
+      await db
+        .from("agent_runs")
+        .update({
+          status: "skipped_disabled",
+          finished_at: new Date().toISOString(),
+          error_detail: "system_settings.system_enabled is false",
+        })
+        .eq("id", runId);
+    }
     return jsonResponse(200, {
       status: "halted_by_kill_switch",
       message: "system_settings.system_enabled is false. Set ?force=true to override for manual discovery.",
@@ -105,6 +138,23 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { data: boards, error: boardsError } = await query;
   if (boardsError) {
+    // Close the run as failed before returning. The two kill-switch exits above already
+    // do this; these later exits did not, which meant the run row's status depended on
+    // WHICH failure occurred rather than on whether the run failed — the same class of
+    // defect as an exit code that describes a different program (docs/verification-traps.md §4).
+    if (runId) {
+      await db
+        .from("agent_runs")
+        .update({
+          status: "failed",
+          finished_at: new Date().toISOString(),
+          // Carry the reason, not just the fact. "It failed" is the composite result
+          // the traps doc warns about: a watchlist query failure and a kill-switch read
+          // failure are different incidents and must not read identically on the health page.
+          error_detail: `watchlist_query_failed: ${boardsError.message}`,
+        })
+        .eq("id", runId);
+    }
     return jsonResponse(500, {
       error: "watchlist_query_failed",
       detail: boardsError.message,
@@ -112,6 +162,21 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   if (!boards || boards.length === 0) {
+    // An empty watchlist is a successful no-op, NOT a crash. Recording it as 'succeeded'
+    // with explicit zero counters is what lets the health page distinguish "ran, nothing
+    // configured" from "never ran at all" — the precise distinction this table was created
+    // for, since both a paused Supabase project and an empty watchlist produce no jobs.
+    if (runId) {
+      await db
+        .from("agent_runs")
+        .update({
+          status: "succeeded",
+          finished_at: new Date().toISOString(),
+          rows_in: 0,
+          rows_out: 0,
+        })
+        .eq("id", runId);
+    }
     return jsonResponse(200, {
       status: "no_boards_due",
       message: "No enabled company boards matching supported ATS providers found.",
@@ -298,6 +363,29 @@ Deno.serve(async (req: Request): Promise<Response> => {
         error: msg,
       });
     }
+  }
+
+  // THE MOST IMPORTANT ONE OF THE THREE. Before this, the success path was the only
+  // exit that never closed its run row, so every HEALTHY scout invocation left a row
+  // stuck at 'running' — which the health page reads as the signature of a crash.
+  // That inverts the single signal this table exists to carry: the more reliably the
+  // function worked, the more broken it looked. A per-board failure inside the loop is
+  // already captured in `summaries` and does not make the RUN a failure; the run
+  // succeeded in doing its job of polling, so the row says so and the counters carry
+  // the detail.
+  if (runId) {
+    await db
+      .from("agent_runs")
+      .update({
+        status: "succeeded",
+        finished_at: new Date().toISOString(),
+        // rows_in is what we looked at, rows_out is what we created. Kept as two
+        // numbers because "polled 40 boards, created 0 applications" is the early
+        // warning that the pipeline is dry, and one combined total would hide it.
+        rows_in: totalJobsDiscovered,
+        rows_out: totalApplicationsCreated,
+      })
+      .eq("id", runId);
   }
 
   return jsonResponse(200, {

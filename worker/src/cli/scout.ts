@@ -52,6 +52,19 @@ async function main(): Promise<void> {
   const userId = authResult.data.user.id;
   console.log(`[applyy-scout] authenticated as operator ${email} (${userId})`);
 
+  // 1. Record run start in agent_runs
+  const { data: runRow } = await client
+    .from('agent_runs')
+    .insert({
+      agent: 'scout_ats',
+      status: 'running',
+      started_at: new Date().toISOString(),
+    })
+    .select('id')
+    .single();
+
+  const runId = runRow?.id;
+
   // Check system kill switch
   const { data: settingsData } = await client
     .from('system_settings')
@@ -63,6 +76,16 @@ async function main(): Promise<void> {
   if (!systemEnabled && !force) {
     console.log('[applyy-scout] ⏸️ system_settings.system_enabled is false (kill switch active).');
     console.log('[applyy-scout] Pass --force or SCOUT_FORCE=true to discover jobs while submissions are paused.');
+    if (runId) {
+      await client
+        .from('agent_runs')
+        .update({
+          status: 'skipped_disabled',
+          finished_at: new Date().toISOString(),
+          error_detail: 'system_settings.system_enabled is false',
+        })
+        .eq('id', runId);
+    }
     return;
   }
 
@@ -84,6 +107,27 @@ async function main(): Promise<void> {
 
   if (!boards || boards.length === 0) {
     console.log('[applyy-scout] no enabled company boards found for supported providers (greenhouse, lever, ashby).');
+    // Close the run row before returning. Without this the row opened above stays
+    // 'running' forever, and the health page reads a permanently-running row as the
+    // signature of a CRASH — see 20260909234800_supporting_tables.sql, which opens
+    // runs early on purpose so a death leaves a visible stuck row. An empty watchlist
+    // is not a death: it is a successful no-op, and it has to be recorded as one or
+    // the one table that exists to tell "working" from "silently dead" starts lying
+    // in the dangerous direction — reporting failure for a healthy scheduled run.
+    if (runId) {
+      await client
+        .from('agent_runs')
+        .update({
+          status: 'succeeded',
+          finished_at: new Date().toISOString(),
+          // Explicit zeros rather than leaving the defaults implicit: "polled nothing
+          // because nothing was configured" and "polled boards and found nothing" are
+          // different operational stories, and only the row's counters distinguish them.
+          rows_in: 0,
+          rows_out: 0,
+        })
+        .eq('id', runId);
+    }
     return;
   }
 
@@ -239,8 +283,29 @@ async function main(): Promise<void> {
   console.log(`[applyy-scout] total jobs processed: ${totalDiscovered}`);
   console.log(`[applyy-scout] total new application rows created: ${totalApplications}`);
   console.log('====================================================');
+
+  if (runId) {
+    await client
+      .from('agent_runs')
+      .update({
+        status: 'succeeded',
+        finished_at: new Date().toISOString(),
+        rows_in: totalDiscovered,
+        rows_out: totalApplications,
+      })
+      .eq('id', runId);
+  }
 }
 
+// Deliberately NOT async. An earlier edit marked this handler `async` without adding
+// anything awaited inside it — the fingerprint of an abandoned attempt to write a
+// 'failed' row here. Restored to sync because the async keyword advertised a
+// guarantee the body never delivered, and a handler that LOOKS like it records the
+// failure is worse than one that plainly does not: the next reader stops looking.
+// Leaving the row 'running' on a crash is the documented design, not an oversight —
+// 20260909234800_supporting_tables.sql opens the row before the work precisely so an
+// uncatchable death leaves a visible stuck run. `runId` and `client` are scoped
+// inside main(), so writing 'failed' here needs a hoist; flagged rather than taken.
 main().catch((err) => {
   console.error('[applyy-scout] fatal error:', err);
   process.exit(1);
