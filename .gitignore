@@ -88,3 +88,30 @@ worker/dist/
 *.pdf
 !worker/fixtures/**/*.pdf
 !packages/**/fixtures/**/*.pdf
+
+# --- Third-party reference checkouts, harvested from but never vendored.
+#
+# `reference/ai-job-search-upstream` is a clone of github.com/MadsLorentzen/
+# ai-job-search, kept on disk so its rubrics and adapter patterns can be read
+# and PORTED. It is 236 files and carries its own `.git` directory.
+#
+# Ignored for three separate reasons, any one of which would be sufficient:
+#
+# 1. It is a nested git repository. Staging it produces a gitlink (a bare commit
+#    SHA pointing at a submodule that is not configured), so the files appear to
+#    be committed while the tree holds nothing a fresh clone could restore.
+#    That failure is silent and survives review, which is the worst combination.
+# 2. It is MIT-licensed code owned by someone else. Porting a rubric under
+#    attribution is a different act from committing their tree into a private
+#    repo that holds Teja's resume, CTC and personal answers; keeping the two
+#    physically separate keeps the provenance question answerable later.
+# 3. Five sessions share ONE working tree, ONE index and ONE `.git` here. An
+#    untracked 236-file directory is exactly the shape that `git add -A` sweeps
+#    into an unrelated commit — the mechanism that has already fired three times
+#    in this repo (a sabotaged security guard mid-mutation-test, Playwright MCP
+#    snapshots at the repo root, and 392 lines of PROJECT_PLAN).
+#
+# The rule this does NOT replace: stage by explicit path. This removes the
+# write-into-tree half of the combination so a mistake on the staging half
+# cannot reach a commit.
+reference/
