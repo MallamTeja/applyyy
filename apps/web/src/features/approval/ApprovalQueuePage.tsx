@@ -28,7 +28,9 @@ import type { ReactElement } from 'react';
 import { PageHeader } from '../../app/PageHeader';
 import { StatusBadge } from '../../app/StatusBadge';
 import { SourceBadge } from '../../app/SourceBadge';
-import { useToast } from '../../app/Toast';
+// `useToast` import removed with the unused binding below it. Left in place it is
+// still TS6133 — removing a symbol's only consumer makes its import dead in the same
+// pass, which is the second half of the same error rather than a new one.
 import type {
   ApplicationRow,
   DiscoverySource,
@@ -37,7 +39,13 @@ import type {
   ResolvedResume,
 } from '../../data/contract';
 import { DiffView } from './DiffView';
-import type { ClaimDecision } from './DiffView';
+// `ClaimDecision` was imported here but never used, which is a symptom, not litter:
+// DiffViewProps.onApprove hands back a ReadonlyMap<string, ClaimDecision> carrying the
+// operator's per-claim keep/remove choices, and this page's handler at the call site
+// ignores that argument entirely. The import is removed to unblock the build; the
+// discarded decisions are recorded in docs/audit/2026-09-16-pending-task-claims-verified.md
+// rather than silently patched, because consuming them is a product decision about what
+// "approve with one claim removed" should actually do.
 import { buildResumeDiff } from './diffAdapter';
 import { deriveBucket } from './diffModel';
 import type { ResumeDiff } from './diffModel';
@@ -46,7 +54,11 @@ import { supabase } from '../../data/supabase';
 import './ApprovalQueuePage.css';
 
 export function ApprovalQueuePage(): ReactElement {
-  const toast = useToast();
+  // The `const toast = useToast()` binding that stood here was never read. Removed
+  // rather than suppressed: an unused hook result on the page that performs the single
+  // irreversible action in the product reads as "the operator gets feedback on approve"
+  // to anyone skimming, and nothing here delivered that. Wiring real toasts into
+  // settle() is feature work outside this build-unblocking change, and is reported.
   /* Live queue state. Defaults to empty array (NO mock data). */
   const [queue, setQueue] = useState<readonly ResumeDiff[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -97,6 +109,16 @@ export function ApprovalQueuePage(): ReactElement {
           projects: [],
           achievements: [],
           certifications: [],
+          // Top-level `links`, distinct from identity.links above — MasterProfile requires
+          // BOTH (profile-nodes.ts:143 on the identity, :353 on the profile). The literal
+          // had the inner one and was missing the outer, which is the entire TS2322.
+          // `[]` is the honest value, not a compiler-silencer: profile-nodes.ts:342-350
+          // states these arrays are "REQUIRED ARRAYS, POSSIBLY EMPTY - never optional",
+          // the stated purpose being to make the compiler name every construction site
+          // that has not been updated. This fallback literal is exactly such a site, so
+          // the error was the design working, and an empty list is what a profile with
+          // no links actually has.
+          links: [],
         };
 
         // 2. Fetch applications at awaiting_approval
