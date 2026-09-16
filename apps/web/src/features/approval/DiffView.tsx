@@ -44,7 +44,7 @@ import type { DiscoverySource } from '../../data/contract';
 import './DiffView.css';
 
 /* Two named outcomes per claim, not a single acknowledgement checkbox. */
-type ClaimDecision = 'remove' | 'keep';
+export type ClaimDecision = 'remove' | 'keep';
 
 /* Pure presentation component - no data access, no Supabase. */
 export interface DiffViewProps {

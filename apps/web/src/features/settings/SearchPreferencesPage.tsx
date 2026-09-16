@@ -13,6 +13,7 @@ import { PageHeader } from '../../app/PageHeader';
 import { EMPLOYMENT_TYPES, WORK_ARRANGEMENTS } from '../../data/contract';
 import type { EmploymentType, WorkArrangement } from '../../data/contract';
 import { supabase } from '../../data/supabase';
+import { DiscoveryModal } from '../pipeline/DiscoveryModal';
 
 import './settings.css';
 
@@ -76,6 +77,7 @@ export function SearchPreferencesPage(): ReactElement {
   const [loading, setLoading] = useState<boolean>(true);
   const [saving, setSaving] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+  const [discoveryModalOpen, setDiscoveryModalOpen] = useState<boolean>(false);
 
   // Target Roles & Keywords
   const [titles, setTitles] = useState<string>('Software Engineer Intern, Junior Developer, Graduate Engineer');
@@ -235,8 +237,7 @@ export function SearchPreferencesPage(): ReactElement {
     });
   };
 
-  const handleSave = async (e: FormEvent) => {
-    e.preventDefault();
+  const performSave = async (): Promise<boolean> => {
     setSaving(true);
     setStatusMessage(null);
 
@@ -269,7 +270,7 @@ export function SearchPreferencesPage(): ReactElement {
       // Offline / demo environment fallback
       setStatusMessage({ text: 'Preferences saved in local session (Supabase unconfigured).', type: 'success' });
       setSaving(false);
-      return;
+      return true;
     }
 
     try {
@@ -279,7 +280,7 @@ export function SearchPreferencesPage(): ReactElement {
       if (!userId) {
         setStatusMessage({ text: 'Not signed in. Changes saved in session memory.', type: 'error' });
         setSaving(false);
-        return;
+        return false;
       }
 
       const { error: upsertError } = await supabase
@@ -288,17 +289,25 @@ export function SearchPreferencesPage(): ReactElement {
 
       if (upsertError) {
         setStatusMessage({ text: `Failed to save: ${upsertError.message}`, type: 'error' });
+        return false;
       } else {
         setStatusMessage({ text: 'Search preferences saved successfully.', type: 'success' });
+        return true;
       }
     } catch (err) {
       setStatusMessage({
         text: err instanceof Error ? err.message : 'Error updating preferences',
         type: 'error',
       });
+      return false;
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleSave = async (e: FormEvent) => {
+    e.preventDefault();
+    await performSave();
   };
 
   return (
@@ -694,15 +703,39 @@ export function SearchPreferencesPage(): ReactElement {
               {statusMessage.text}
             </span>
           )}
-          <button
-            type="submit"
-            className="btn-primary"
-            disabled={saving || loading}
-          >
-            {saving ? 'Saving...' : 'Save Preferences'}
-          </button>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button
+              type="button"
+              className="button button--secondary"
+              onClick={async () => {
+                const ok = await performSave();
+                if (ok) {
+                  setDiscoveryModalOpen(true);
+                }
+              }}
+              disabled={saving || loading}
+              title="Save search preferences and immediately scout open global remote tech feeds"
+            >
+              🌐 Save & Find Remote Jobs Now
+            </button>
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={saving || loading}
+            >
+              {saving ? 'Saving...' : 'Save Preferences'}
+            </button>
+          </div>
         </div>
       </form>
+
+      {discoveryModalOpen && (
+        <DiscoveryModal
+          mode="remote"
+          onClose={() => setDiscoveryModalOpen(false)}
+          onRefresh={() => {}}
+        />
+      )}
     </div>
   );
 }

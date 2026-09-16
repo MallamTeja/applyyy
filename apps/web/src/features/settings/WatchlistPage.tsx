@@ -35,6 +35,7 @@ import { supabase } from '../../data/supabase';
 
 import { CompanySuggestionsModal } from './CompanySuggestionsModal';
 import type { SuggestedCompany } from './companyCatalog';
+import { DiscoveryModal } from '../pipeline/DiscoveryModal';
 
 import './settings.css';
 
@@ -94,6 +95,7 @@ export function WatchlistPage(): ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [suggestionsOpen, setSuggestionsOpen] = useState<boolean>(false);
+  const [discoveryModalOpen, setDiscoveryModalOpen] = useState<boolean>(false);
 
   /* Form state */
   const [companyName, setCompanyName] = useState<string>('');
@@ -377,10 +379,23 @@ export function WatchlistPage(): ReactElement {
 
       {/* Active Watchlist Table */}
       <section className="settings-group">
-        <h2 className="settings-group__title">Watched Company Boards</h2>
-        <p className="settings-group__note">
-          Registered company boards monitored for new job postings.
-        </p>
+        <div className="settings-group__header-row">
+          <div>
+            <h2 className="settings-group__title">Watched Company Boards</h2>
+            <p className="settings-group__note">
+              Registered company boards monitored for new job postings.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="button button--primary"
+            onClick={() => setDiscoveryModalOpen(true)}
+            disabled={rows.length === 0}
+            title="Scan active company ATS boards directly from browser"
+          >
+            ⚡ Scan Watchlist Boards Now
+          </button>
+        </div>
 
         {loading ? (
           <p className="watchlist-empty-state">Loading company watchlist from Supabase...</p>
@@ -472,6 +487,16 @@ export function WatchlistPage(): ReactElement {
           </div>
         )}
       </section>
+
+      {discoveryModalOpen && (
+        <DiscoveryModal
+          mode="watchlist"
+          onClose={() => setDiscoveryModalOpen(false)}
+          onRefresh={() => {
+            loadWatchlist();
+          }}
+        />
+      )}
 
       <CompanySuggestionsModal
         isOpen={suggestionsOpen}

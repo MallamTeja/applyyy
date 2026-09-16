@@ -11,7 +11,7 @@
  *   - One-click "Tailor & Queue" action to advance a discovered job into Approval Queue
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
@@ -25,6 +25,7 @@ import type {
   JobRow,
 } from '../../data/contract.ts';
 import { supabase } from '../../data/supabase.ts';
+import { DiscoveryModal } from '../pipeline/DiscoveryModal';
 import { getCompanyCooldownInfo } from '../settings/companyCatalog.ts';
 import {
   evaluateJobMatch,
@@ -66,73 +67,67 @@ export function DiscoveredJobsPage(): ReactElement {
   const [selectedCompany, setSelectedCompany] = useState<string>('all');
   const [activeJdModal, setActiveJdModal] = useState<JobRow | null>(null);
   const [tailoringId, setTailoringId] = useState<string | null>(null);
+  const [discoveryModalMode, setDiscoveryModalMode] = useState<'remote' | 'watchlist' | null>(null);
 
   /* Load discovered jobs & filter rules */
-  useEffect(() => {
-    let live = true;
+  const loadData = useCallback(async () => {
+    try {
+      setLoading(true);
 
-    async function loadData() {
-      try {
-        setLoading(true);
+      // Load filter rules
+      const rules = await loadFilterRules();
+      setFilterRules(rules);
 
-        // Load filter rules
-        const rules = await loadFilterRules();
-        if (live) setFilterRules(rules);
+      if (supabase === null) {
+        setLoading(false);
+        return;
+      }
 
-        if (supabase === null) {
-          if (live) setLoading(false);
-          return;
+      // Query applications in 'discovered' or raw jobs
+      const { data: appsData, error: appsErr } = await supabase!
+        .from('applications')
+        .select('id, status, job:job_id(*)')
+        .eq('status', 'discovered')
+        .order('created_at', { ascending: false })
+        .limit(300);
+
+      if (!appsErr && appsData && appsData.length > 0) {
+        const mapped: DiscoveredItem[] = [];
+        for (const app of appsData) {
+          if (app.job) {
+            mapped.push({
+              applicationId: app.id,
+              job: app.job as unknown as JobRow,
+            });
+          }
         }
-
-        // Query applications in 'discovered' or raw jobs
-        const { data: appsData, error: appsErr } = await supabase!
-          .from('applications')
-          .select('id, status, job:job_id(*)')
-          .eq('status', 'discovered')
+        setItems(mapped);
+      } else {
+        // Fallback: Query directly from jobs if applications were not joined
+        const { data: jobsData, error: jobsErr } = await supabase!
+          .from('jobs')
+          .select('*')
           .order('created_at', { ascending: false })
           .limit(300);
 
-        if (!live) return;
+        if (jobsErr || !jobsData) return;
 
-        if (!appsErr && appsData && appsData.length > 0) {
-          const mapped: DiscoveredItem[] = [];
-          for (const app of appsData) {
-            if (app.job) {
-              mapped.push({
-                applicationId: app.id,
-                job: app.job as unknown as JobRow,
-              });
-            }
-          }
-          setItems(mapped);
-        } else {
-          // Fallback: Query directly from jobs if applications were not joined
-          const { data: jobsData, error: jobsErr } = await supabase!
-            .from('jobs')
-            .select('*')
-            .order('created_at', { ascending: false })
-            .limit(300);
-
-          if (!live || jobsErr || !jobsData) return;
-
-          setItems(
-            jobsData.map((j) => ({
-              job: j as unknown as JobRow,
-            })),
-          );
-        }
-      } catch (e) {
-        console.error('Failed to load discovered jobs:', e);
-      } finally {
-        if (live) setLoading(false);
+        setItems(
+          jobsData.map((j) => ({
+            job: j as unknown as JobRow,
+          })),
+        );
       }
+    } catch (e) {
+      console.error('Failed to load discovered jobs:', e);
+    } finally {
+      setLoading(false);
     }
-
-    void loadData();
-    return () => {
-      live = false;
-    };
   }, []);
+
+  useEffect(() => {
+    void loadData();
+  }, [loadData]);
 
   const handleToggleTechOnly = () => {
     const next = !techOnly;
@@ -340,6 +335,26 @@ export function DiscoveredJobsPage(): ReactElement {
           >
             ⚙️ Rules
           </Link>
+
+          <button
+            type="button"
+            className="chip-btn"
+            style={{ fontWeight: 600, color: 'var(--accent, #6366f1)', borderColor: 'var(--accent, #6366f1)' }}
+            onClick={() => setDiscoveryModalMode('watchlist')}
+            title="Scan Greenhouse, Lever, and Ashby boards on your Company Watchlist"
+          >
+            ⚡ Scout Watchlist
+          </button>
+
+          <button
+            type="button"
+            className="chip-btn"
+            style={{ fontWeight: 600, color: 'var(--accent, #6366f1)', borderColor: 'var(--accent, #6366f1)' }}
+            onClick={() => setDiscoveryModalMode('remote')}
+            title="Discover international remote jobs from open tech feeds"
+          >
+            🌐 Scout Remote Feeds
+          </button>
         </div>
       </section>
 
@@ -504,7 +519,11 @@ export function DiscoveredJobsPage(): ReactElement {
                       className="job-pill job-pill--cooldown"
                       title={`Cool-off period for ${job.company_name}:\n• Interview Cooldown: ${cooldown.interview}\n• Screening Cooldown: ${cooldown.screening}${cooldown.notes ? `\n• Notes: ${cooldown.notes}` : ''}`}
                     >
-                      ⏳ Cooldown: {cooldown.interview} int.
+                      {/* Name the dimension in full: this pill carries only the interview
+                          cool-off, and the old "int." abbreviation made readers decode it */}
+                      {/* toLowerCase folds the catalog's "6 Months" into the sentence so the
+                          pill reads as one phrase, not two capitalised fragments */}
+                      ⏳ Interview cooldown: {cooldown.interview.toLowerCase()}
                     </span>
                   );
                 })()}
@@ -599,6 +618,15 @@ export function DiscoveredJobsPage(): ReactElement {
             </footer>
           </div>
         </div>
+      )}
+      {discoveryModalMode !== null && (
+        <DiscoveryModal
+          mode={discoveryModalMode}
+          onClose={() => setDiscoveryModalMode(null)}
+          onRefresh={() => {
+            void loadData();
+          }}
+        />
       )}
     </div>
   );
