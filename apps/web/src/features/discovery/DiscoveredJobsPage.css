@@ -157,6 +157,9 @@
   background: oklch(0.94 0.08 35 / 0.18);
   border-color: oklch(0.75 0.12 35 / 0.45);
   font-weight: 550;
+  /* The spelled-out label is long enough to break across two lines inside the
+     chip on a narrow card; keep it on one line and let the row wrap instead */
+  white-space: nowrap;
 }
 
 [data-theme='dark'] .job-pill--cooldown {
