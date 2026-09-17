@@ -136,6 +136,12 @@
   color: var(--ink-muted);
 }
 
+/* This name is now unique to this file. health.css used to declare
+   `.move__button` as well, and because component CSS is global the two raced on
+   module-graph order — health's centred variant kept overriding the left
+   alignment below. It was renamed to .health-recovery-button on 2026-09-17.
+   Keep the names distinct: the two controls disagree on alignment and width
+   deliberately, and a shared name makes that disagreement a coin toss. */
 .move__button {
   width: 100%;
   /* Left-aligned so the target status names line up down the column and can be

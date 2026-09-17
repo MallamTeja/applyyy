@@ -73,14 +73,29 @@
   --alarm-ground: light-dark(#1a1215, #2b1216);
   --alarm-raised: rgba(246, 236, 233, 0.07);
 
-  /* --- High-contrast semantic text hierarchy (WCAG AA certified) ----- */
+  /* --- Semantic text hierarchy ---------------------------------------
+     MEASURED, not asserted. This block used to be labelled "WCAG AA certified",
+     which was false of the third token and true only by accident of the first
+     two. Ratios below are against the surface each colour actually lands on;
+     re-measure before changing any of them rather than trusting this comment,
+     because a comment that claims a number is exactly how the last one survived
+     eighty-eight call sites. -------------------------------------------- */
 
-  /* Pure readable text */
+  /* Pure readable text. 16.9:1 dark on --sheet, 17.6:1 light on white. */
   --text-primary: light-dark(#0f172a, #f8fafc);
-  /* High-clarity subtitles, field labels, metadata */
+  /* High-clarity subtitles, field labels, metadata. 6.9:1 dark, 7.6:1 light. */
   --text-secondary: light-dark(#475569, #94a3b8);
-  /* Explanatory helper text, disabled states, subtle captions */
-  --text-muted: light-dark(#64748b, #6b7280);
+  /* Explanatory helper text, disabled states, subtle captions.
+     RETUNED 2026-09-17. The previous pair — light-dark(#64748b, #6b7280) —
+     measured 3.63:1 on --sheet in dark and failed AA on all three dark
+     surfaces; its light half failed on --panel too, which is the nav rail, so
+     .rail__role and .rail__heading were below AA in BOTH themes. This token
+     and its --ink-muted alias carry ~88 call sites, nearly all at 11-13px,
+     so it is the single widest-reaching colour in the file.
+     Now 5.1:1 dark on --sheet, 5.2:1 light on --panel. Kept deliberately below
+     --text-secondary: this still has to read as the quietest voice, and the
+     job was to clear the floor, not to flatten the hierarchy. */
+  --text-muted: light-dark(#5b6675, #818b9b);
 
   /* Legacy ink tokens mapped directly to semantic text hierarchy for backwards compatibility */
   --ink: var(--text-primary);

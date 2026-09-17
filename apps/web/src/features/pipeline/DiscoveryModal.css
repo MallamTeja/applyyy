@@ -94,7 +94,7 @@
 
 .discovery-modal__close-btn:hover {
   color: var(--text-primary);
-  background: var(--panel-hover);
+  background: var(--surface-hover);
 }
 
 .discovery-modal__body {

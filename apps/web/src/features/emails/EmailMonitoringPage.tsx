@@ -188,7 +188,12 @@ export function EmailMonitoringPage(): ReactElement {
   }, [interviewEvents]);
 
   return (
-    <div className="email-monitor">
+    /* `page` first: this was the ONLY screen in the app missing it, so the
+       title, the KPI cards and every email card sat flush against the nav
+       rail's border and the right edge of the viewport with no top padding,
+       where every other screen has a --gap-6 gutter. `email-monitor` keeps
+       carrying the page's own rules on top of the shared ones. */
+    <div className="page email-monitor">
       {/* Top page title and lede */}
       <div className="email-monitor__header">
         <PageHeader path="emails" />

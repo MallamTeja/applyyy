@@ -269,9 +269,22 @@
   color: var(--ink);
 }
 
-/* Affordance button styling for recovery controls */
-.move__button {
+/* RENAMED FROM .move__button, 2026-09-17. DO NOT MERGE THIS BACK.
+   pipeline.css:139 declares a `.move__button` too. Component-imported CSS is
+   still global, so the two declarations raced and whichever module-graph edge
+   loaded last won the page — health's `text-align: center` silently overrode
+   pipeline's deliberate `text-align: left`, which pipeline.css:141-143 comments
+   is the whole point there ("so the target status names line up down the column
+   and can be read as a list").
+   Both pages RENDER the class — this one four times — so the tempting fix of
+   deleting one declaration as dead code would have broken this page. Two
+   different intentions sharing one global name is the bug; distinct names are
+   the fix. If you are here to tidy two similar-looking rules into one, read
+   pipeline.css:139-152 first: they disagree on alignment and width on purpose. */
+.health-recovery-button {
   display: inline-block;
+  /* Centred, unlike pipeline's: these sit one-per-table-cell rather than
+     stacked in a column, so there is no list of names to align down an edge. */
   text-align: center;
   padding: var(--gap-1) var(--gap-2);
   border: 1px solid var(--rule);
@@ -279,11 +292,17 @@
   font-family: var(--font-id);
   font-size: var(--size-xs);
   cursor: pointer;
-  background: var(--surface);
+  /* --sheet: raised off the table row so a control reads as a control.
+     Was var(--surface), which is declared nowhere and resolved to transparent,
+     leaving these buttons with no fill at all. */
+  background: var(--sheet);
   color: var(--text-primary);
 }
 
-.move__button:disabled {
+/* Every one of these is disabled: the write path is not built. The styling says
+   so plainly, because a control that looks live but does nothing is worse than
+   a visibly dead one. */
+.health-recovery-button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }

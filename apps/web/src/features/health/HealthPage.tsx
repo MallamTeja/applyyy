@@ -648,7 +648,7 @@ function StuckSubmissionQueuePanel(): ReactElement {
                 <th scope="row" className="table__id">applying</th>
                 <td>&rarr; <span className="identifier">{target}</span></td>
                 <td>
-                  <button type="button" className="move__button" disabled title="Affordance only: write path is disabled until explicit human trust sign-off">
+                  <button type="button" className="health-recovery-button" disabled title="Affordance only: write path is disabled until explicit human trust sign-off">
                     Advance to {target}
                   </button>
                 </td>
@@ -695,7 +695,7 @@ function NeedsVerificationQueuePanel(): ReactElement {
                   )}
                 </td>
                 <td>
-                  <button type="button" className="move__button" disabled title="Affordance only: write path is disabled until explicit human trust sign-off">
+                  <button type="button" className="health-recovery-button" disabled title="Affordance only: write path is disabled until explicit human trust sign-off">
                     Mark as {target}
                   </button>
                 </td>
@@ -738,7 +738,7 @@ function BlockedQueuePanel(): ReactElement {
                   {target === 'failed' && 'Fatal obstacle or unresolvable submission error'}
                 </td>
                 <td>
-                  <button type="button" className="move__button" disabled title="Affordance only: write path is disabled until explicit human trust sign-off">
+                  <button type="button" className="health-recovery-button" disabled title="Affordance only: write path is disabled until explicit human trust sign-off">
                     Resolve as {target}
                   </button>
                 </td>
@@ -778,7 +778,7 @@ function FailedRowsPanel(): ReactElement {
                 <th scope="row" className="table__id">failed</th>
                 <td>&rarr; <span className="identifier">{target}</span></td>
                 <td>
-                  <button type="button" className="move__button" disabled title="Affordance only: write path is disabled until explicit human trust sign-off">
+                  <button type="button" className="health-recovery-button" disabled title="Affordance only: write path is disabled until explicit human trust sign-off">
                     Send to {target}
                   </button>
                 </td>

@@ -630,7 +630,10 @@
   font-family: var(--font-paper);
   font-size: var(--size-base);
   line-height: 1.6;
-  background: var(--surface);
+  /* --sheet because this is PAPER — the line above sets --font-paper, and an
+     editor for resume prose belongs on the document surface, not on chrome.
+     Resolved to `transparent` until now, so the textarea had no fill at all. */
+  background: var(--sheet);
   color: var(--text-primary);
   border: 1px solid var(--accent);
   border-radius: var(--radius-sheet);

@@ -9,9 +9,11 @@
  */
 
 .email-monitor {
-  /* Prevent horizontal scroll bleed across viewport */
-  width: 100%;
-  /* Comfortable vertical padding */
+  /* `width: 100%` is deliberately GONE. It was this rule standing in for the
+     shared .page wrapper, and it only ever supplied the full width — never the
+     gutter or the measure — which is why this screen ran flush to both edges.
+     .page now supplies the padding, so a width here would fight it. */
+  /* Extra room below the last card so the final row is not flush to the fold. */
   padding-bottom: var(--gap-6);
 }
 
@@ -32,7 +34,7 @@
   /* Elevated surface container */
   background: var(--sheet);
   border: 1px solid var(--rule);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sheet);
   padding: var(--gap-3);
   display: flex;
   flex-direction: column;
@@ -95,7 +97,7 @@
   /* Individual email event surface */
   background: var(--sheet);
   border: 1px solid var(--rule);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sheet);
   padding: var(--gap-3);
   display: flex;
   flex-direction: column;
@@ -231,7 +233,7 @@
   /* Clean empty state presentation */
   background: var(--sheet);
   border: 1px dashed var(--rule);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sheet);
   padding: var(--gap-6) var(--gap-4);
   text-align: center;
   color: var(--ink-muted);
@@ -258,7 +260,7 @@
   /* Container for inline sync URL configuration */
   background: var(--sheet);
   border: 1px solid var(--rule);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sheet);
   padding: var(--gap-3);
   margin-bottom: var(--gap-3);
 }
@@ -273,7 +275,7 @@
   padding: var(--gap-2);
   font-size: var(--size-xs);
   color: var(--ink);
-  font-family: var(--font-mono);
+  font-family: var(--font-id);
 }
 
 .email-monitor__url-input:focus {

@@ -269,6 +269,76 @@ button {
   background: var(--fabricated-wash);
 }
 
+/* --- The emphasis ladder -------------------------------------------------
+   ADDED 2026-09-17. These four modifiers were already in use at six call sites
+   and declared NOWHERE, so every one of them rendered as a bare .button: in the
+   job-description modal footer, "Open Career Page" (secondary) and "Done"
+   (primary) came out byte-identical. The app had no primary-action treatment at
+   all, which is why every screen reads as a field of equally-weighted controls.
+
+   The pair above this comment — approve and reject — is a SEMANTIC pair: it
+   says what an action means. This is an EMPHASIS ladder: it says how much an
+   action matters on the screen it is on. They are different axes and a button
+   may take one from each, so nothing here touches colour that carries meaning.
+
+   Ordered loudest to quietest, and the order is the point: exactly one control
+   per screen should wear --primary. -------------------------------------- */
+
+/* The one action a screen exists for. Filled, so it wins before anything is
+   read. --ink-on-fill rather than a literal white for the same reason
+   .button--approve uses it: the accent lifts in dark, and white on it measures
+   4.47:1, below the 4.5 floor. The token flips; a literal cannot. */
+.button--primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--ink-on-fill);
+  font-weight: 550;
+}
+
+.button--primary:hover:not(:disabled) {
+  /* The emphatic tone of the same hue, matching how --approve hovers. */
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+
+/* The supporting action beside a primary — "Open career page" next to "Done".
+   Deliberately identical to the base .button: naming it buys the call site a
+   statement of intent, and gives us one place to change if secondary ever needs
+   to differ. An empty ruleset would be dead weight, so it restates the border
+   to make the relationship to --primary explicit rather than implied. */
+.button--secondary {
+  border-color: var(--rule-strong);
+  background: var(--sheet);
+}
+
+/* The quietest real control: no fill, no border, just a hit area. For actions
+   that must be reachable but must not compete — "Close" on a modal that already
+   has an X, a tertiary link-like action in a toolbar. */
+.button--ghost {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-secondary);
+}
+
+.button--ghost:hover:not(:disabled) {
+  /* Only on hover does it take a surface, which is what tells the operator it
+     was a control the whole time. */
+  background: var(--surface-hover);
+  border-color: transparent;
+  color: var(--text-primary);
+}
+
+/* A size, not a rank — combine it with any of the above. Used where a control
+   sits inside a table row and a full-height button would stretch the row.
+   Padding shrinks but the 24px minimum hit target does not: WCAG 2.2 SC 2.5.8
+   applies to a small button exactly as it does to a large one. */
+.button--small {
+  padding: 0.2rem 0.5rem;
+  font-size: var(--size-xs);
+  min-height: 24px;
+}
+
 /* --- Identifiers ------------------------------------------------------- */
 
 /* Applied to master bullet ids, ATS board tokens, job fingerprints and run
