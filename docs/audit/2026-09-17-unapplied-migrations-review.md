@@ -26,6 +26,13 @@ standing in front of everything else.
 One sentence for the decision: **run it, but run `supabase migration list` first
 ([§4](#4-the-runbook)), and if the push dies, check which file it died on before retrying.**
 
+> **UPDATE 17:50 — the apply set is now EIGHT.** An eighth migration was added after this
+> review was written: `20260917174600_retract_forged_fast_path_agent_events.sql`, which
+> appends a retraction to every application whose history was forged by the deleted
+> "Tailor & Queue" button. It sorts last, so it changes nothing above it. See
+> [§9](#9-the-eighth-migration-added-after-this-review) — **including the caveat that I
+> wrote that file, so its review is a self-review and deserves a second reader.**
+
 ---
 
 **Files reviewed — all seven pending migrations:**
@@ -1143,6 +1150,85 @@ and the silent omissions are very likely the same cause.
 `bootstrap_user_defaults()` automatically — not the web app, not a trigger on `auth.users`.
 After `124500` lands, any *new* signup still gets no rows until someone invokes the RPC by
 hand. Worth a ticket.
+
+---
+
+## 9. The eighth migration, added after this review
+
+`supabase/migrations/20260917174600_retract_forged_fast_path_agent_events.sql`
+
+> **I wrote this file. Everything below is a self-review and should not carry the same
+> weight as §1–§3.** An independent reader is worth having before it goes.
+
+**What it is for.** The deleted "Tailor & Queue" button
+(`DiscoveredJobsPage.tsx`, removed in `75a75a0`) walked one application through six status
+transitions in a loop, each naming a different agent, while performing none of their work.
+Every click wrote **twelve** permanent rows: six `note` rows from
+`advance_application_status` (`20260909235100:147-150`, which fires whenever `p_detail` is
+non-empty — and the button always passed one) and six `status_change` rows from the
+`log_status_change` trigger (`20260909234900:273-314`), each stamped with a forged agent.
+
+**Two of the forged agents have no runnable code.** There is no `_shared/audit*` directory
+at all — the Auditor, whose `audit_clean` verdict the button forged, was never written. That
+is the one status asserting nothing was invented, i.e. exactly the claim the human approval
+gate rests on. (The Normalizer is subtler and is *not* claimed here to be absent:
+`_shared/normalize/` exists and is reachable; what is missing is any runner writing the
+`deduped` status.)
+
+**Why a retraction and not a cleanup.** `application_events` carries `forbid_update` and
+`forbid_delete` (`20260909234800:53-59`). The rows are append-only and undeletable by
+construction — the table doing its job, not an obstacle. Appending the correction is the only
+honest move and also the only possible one.
+
+**The discriminator, verified rather than assumed.** The button passed a fixed literal,
+`{ note: 'Fast-tailored and queued from Discovered Jobs Explorer' }`, and the RPC writes
+`p_detail` verbatim into `application_events.detail` (`jsonb not null`). So the marker is in
+the event row — **no manual application-id list is needed.** `git log -S` over `apps/web/src`
+returns exactly two commits for that string: `ab05ba4` which added it and `75a75a0` which
+removed it. Nothing else has ever written it, and no UI lets a human type a note.
+
+*What it does not find:* the six `status_change` rows, because the trigger builds its own
+detail and never sees `p_detail`. That is fine — the note rows identify the affected
+*applications*, and the retraction is written per application, so the status_change rows are
+covered by association rather than by matching.
+
+**It describes rather than asserts.** The button's loop threw on the first failing step, so a
+click that failed partway forged *fewer* than six transitions. A retraction hardcoding "six
+agents" would be false precisely where something had already gone wrong. Every fact in the
+payload is aggregated from the rows themselves — the note rows carry the claimed agent, so
+the data says which agents were claimed for *that* application, how many events, and when.
+
+**Idempotence.** Each retraction carries `detail->>'correction' =
+'fast_path_forged_agent_history_2026_09_17'`, and the insert is guarded by a `not exists` on
+that marker. Re-running appends nothing.
+
+**Honest when it matches nothing.** A `do` block counts matches before inserting and
+`raise warning`s on zero — deliberately a WARNING, not an exception, because aborting an
+eight-file push over "there was nothing to correct" would turn good news into an outage. It
+reports both the matched count and the written count, because their difference is the
+information: equal is a first run, `written = 0` with `matched > 0` is a correct re-run.
+
+**The trap it avoids, worth naming:** `application_events.user_id` defaults to `auth.uid()`,
+which is **NULL during a migration**, and the column is `not null`. Relying on the default
+would abort the file. The insert carries `user_id` across from the source row, which also
+keeps the retraction inside the same RLS tenant as the rows it corrects.
+
+**Where it could still be a no-op, and it is visible either way:** if the migration role
+cannot read `application_events` under `force row level security`, the match count is 0 and
+the WARNING fires. That is the same uncertainty as [§7](#7-what-i-could-not-determine) item 3,
+and it fails loudly here by design.
+
+**Nobody will see it yet.** No UI reads `application_events` — zero `from('application_events')`
+in `apps/web/src`; the Health page reads `agent_runs`, which this RPC never touches. The forged
+history is permanent, complete and invisible, and the retraction is invisible alongside it. It
+is written for whoever builds that reader, or for an auditor.
+
+**Effect on the runbook:** it sorts last, after `20260917130000`, so every ordering conclusion
+in [§0.2](#02-crossfile-interactions--what-a-perfile-read-misses) and
+[§3.6](#36-interdependence-all-seven) is unchanged, and [§0.3](#03-if-it-dies-partway--where-you-land)
+gains one row: **dies at file 8** → everything else applied, forged history un-retracted,
+entirely safe to re-push. Add its verification to §5: the query is in the migration's own
+footer.
 
 ---
 
