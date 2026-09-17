@@ -196,7 +196,12 @@ export async function loadFilterRules(): Promise<FilterRuleConfig[]> {
           const rType = row.rule_type as FilterRuleType;
           ruleMap.set(rType, {
             ruleType: rType,
-            isEnabled: row.is_enabled ?? true,
+            // `enabled`, NOT `is_enabled`. The column is declared `enabled` at
+            // supabase/migrations/20260909234800_supporting_tables.sql:220. Reading
+            // the wrong name yields undefined, the `?? true` fallback swallows it,
+            // and EVERY rule renders as on regardless of what the user saved — a
+            // disabled filter silently displaying as enabled.
+            isEnabled: row.enabled ?? true,
             config: (row.config as Record<string, unknown>) || {},
           });
         }
@@ -232,7 +237,12 @@ export async function saveFilterRules(
         sortOrder += 10;
         const payload = {
           rule_type: rule.ruleType,
-          is_enabled: rule.isEnabled,
+          // `enabled`, NOT `is_enabled`. PostgREST rejects an unknown column, so
+          // this upsert errored on every call and NOTHING a user configured on the
+          // Filters page ever reached Postgres. Renamed the CLIENT to match the
+          // database rather than the reverse: when two names disagree, converge on
+          // the one that actually exists and never introduce a third.
+          enabled: rule.isEnabled,
           config: rule.config,
           sort_order: sortOrder,
           updated_at: new Date().toISOString(),
