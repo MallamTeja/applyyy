@@ -1,0 +1,30 @@
+{
+  "// name": "Scoped @applyy (TWO y's) per the naming standard; only the repo folder is applyyy. Sibling of @applyy/master-ingest and @applyy/master-pdf.",
+  "name": "@applyy/master-robots",
+  "// version": "Workspace-internal only; nothing here is ever published to a registry.",
+  "version": "0.0.0",
+  "// private": "This repo carries resume and CTC data — an accidental `pnpm publish` must be impossible.",
+  "private": true,
+  "// type": "ESM only. The gate must be importable by a Deno Edge Function, the Node worker and the browser alike, and Deno cannot consume CommonJS.",
+  "type": "module",
+  "// exports": "Source-only export map pointing at .ts, exactly like master-ingest, master-pdf and resume-template. No build step: a compiled copy would be a second place the decision table lives, and the whole point of this package is that the robots decision is made in exactly one place.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "// types": "Redundant with exports for modern resolvers; kept for editors that still read this field.",
+  "types": "./src/index.ts",
+  "// files": "Only src ships if this is ever packed.",
+  "files": ["src"],
+  "// scripts.typecheck": "tsc is a checker only in this repo — noEmit is inherited from tsconfig.base.json.",
+  "// scripts.test": "The glob is REQUIRED. `node --test test` (a bare directory) fails on Node 24 with MODULE_NOT_FOUND, and that error reads exactly like missing fixtures, which has already cost two previous sessions time in master-ingest and master-pdf.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "// dependencies": "DELIBERATELY EMPTY, AND IT MUST STAY THAT WAY. This is not tidiness — it is what lets `node --test` run this package with an empty root node_modules and no install, which is how it was verified. The moment a workspace dependency is added, the tests stop running without a lockfile-touching install, and the gate that guards every outbound fetch becomes the hardest package in the repo to check. The fetch transport is an INJECTED STRUCTURAL SEAM (see src/fetch.ts RobotsFetcher) rather than an import, specifically so this stays true. src/fetch.ts has ONE cross-tree import — supabase/functions/_shared/http/retry-after.ts — which is a pure, dependency-free function reused rather than copied so the Date.parse(\"-5\") trap has exactly one implementation; it is a relative path, not a package dependency, and adds nothing to install.",
+  "// devDependencies": "@types/node is needed by the TESTS ONLY (node:test, node:assert). src/ uses no Node API at all — it relies only on fetch, URL, TextEncoder, AbortSignal and RegExp, every one of which exists in Node 24, Deno 2 and the browser. typescript for standalone type-checking; the floor is 5.8 because tsconfig.base.json sets erasableSyntaxOnly, which 5.6/5.7 reject as an unknown option. NOTE: these explanations live at the TOP level because pnpm validates dependency names and rejects a \"// x\" pseudo-key inside dependencies with ERR_PNPM_INVALID_DEPENDENCY_NAME.",
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  }
+}

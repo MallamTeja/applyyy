@@ -1,0 +1,24 @@
+{
+  // All compiler settings live in the root base config, so this package cannot drift
+  // from the values the cross-runtime spike proved.
+  // NOTE: real `//` comments, not "// key" entries — TypeScript validates the keys
+  // inside compilerOptions and rejects an unknown one with TS5025.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Consumed as source (see package.json exports). Emitting would create a stale
+    // second copy of the decision table.
+    "noEmit": true,
+    // Node builtins are needed by the TESTS ONLY (node:test, node:assert). src/ uses
+    // none: it relies only on fetch, URL, TextEncoder, AbortSignal and RegExp, which
+    // exist in all three runtimes. Note this does NOT pull in "DOM" — deliberately,
+    // because importing supabase/functions/_shared/http/transport.ts would have
+    // required it for `RequestRedirect`, and dragging the whole DOM global surface
+    // into a package that never touches a document is a cost with no benefit. That
+    // is why src/fetch.ts declares its own minimal RobotsResponse instead.
+    "types": ["node"]
+  },
+  // src and test together: the fixtures are typed against the real exported types,
+  // so a fixture that no longer matches the union becomes a compile error rather
+  // than a test passing against a shape nothing can produce.
+  "include": ["src", "test"]
+}
