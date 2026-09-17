@@ -339,17 +339,68 @@ added.**
 > still 1.49.1 and any run would have exercised the OLD version and gone green for an
 > unrelated reason. A local run needs three browser downloads (1.55.1 pins chromium `1193`
 > and ffmpeg `1011`; the machine has `1148` and `1010` — measured from
-> `playwright-core@1.55.1`'s `browsers.json`, not assumed), which is a Teja decision and was
-> not taken. **Honest status: closed in the dependency graph, unexercised.**
+> `playwright-core@1.55.1`'s `browsers.json`, not assumed). That download was **ruled
+> against** — see the deferral below; it was an open question for about twelve minutes and
+> is not one now. **Honest status: closed in the dependency graph, unexercised locally by
+> decision.**
 
-The original instruction below was right and still is: verify on a CI run, not locally — the
-advisory is about install-time integrity, and CI is where it installs. A local run, even a
-full one with browsers, would only ever show *no regression*. **The next CI run is the first
-real test of both the fix and the bump.**
+**RULED 2026-09-17 17:42 — DELIBERATELY DEFERRED TO CI. Not "pending a decision".** Teja
+chose this directly at 17:37 and the orchestrator concurrently; they agree. The reasoning:
+even a full local install with browsers establishes only *no regression*, while the defect
+is install-time, so a clean CI install gives something strictly stronger for free.
 
-Note for whoever watches that run: `apps/web`'s playwright is a devDependency and Vercel
-installs devDependencies, so **the first Vercel build after `b62be33` will download the new
-chromium revision and be slower than usual.** Do not read a slow first build as a failed one.
+### "CI" is three workflows and they do different things — name the one you mean
+
+Checked against `.github/workflows/`, because deferring to "CI" is only a real plan if you
+know which run you are deferring to.
+
+| Workflow | Schedule (IST) | Installs deps | Browsers |
+|---|---|---|---|
+| `scout.yml` | **23:30, 05:30, 11:30, 17:30** (`0 */6 * * *`) | `--frozen-lockfile` `:58` | **no cache, no install step** |
+| `keepalive.yml` | 11:45, every 3rd day (`15 6 */3 * *`) | `--frozen-lockfile` `:74` | none |
+| `apply.yml` | **08:00 daily** (`30 2 * * *`) | `--frozen-lockfile` `:110` | cache `:118`, install `:127` |
+
+**`apply.yml` is the one that submits real applications**, and its browser cache key is
+`playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}` (`:119`). `b62be33` changed
+the lockfile, so the key changed, so the cache **misses by construction** and `:127`
+re-downloads Chromium. That is not a risk the bump runs — it is a guarantee. The workflow's
+own comment anticipates it: *"Keyed on the lockfile so a Playwright version bump invalidates
+the cache automatically rather than serving a mismatched browser."*
+
+**But `apply.yml` is NOT first contact.** `scout.yml` runs every six hours and does
+`pnpm install --frozen-lockfile` with no browser cache, so the first clean-runner install of
+`playwright@1.55.1` happens at **23:30 IST, roughly eight hours before `apply.yml`** — and
+`scout.yml` submits nothing. If the bump breaks installation or lockfile resolution, it
+goes red there, harmlessly, first. That is a materially better first signal than the
+submission run and it was not visible until the workflows were actually read.
+
+> Not verified, flagged rather than asserted: whether `scout.yml`'s plain
+> `--frozen-lockfile` also pulls browsers via playwright's postinstall, given
+> `pnpm-workspace.yaml` sets `allowBuilds: playwright: true` and no
+> `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` is set anywhere. If it does, `scout.yml` silently
+> downloads ~130MB four times a day with no cache. **That would be a pre-existing cost
+> this bump merely makes visible, not a new one** — but nobody has measured it.
+
+### The option that was in neither (a) nor (b)
+
+`apply.yml` accepts `workflow_dispatch` with a `dry_run` input (`:26-33`) that **defaults to
+`'true'`**, deliberately, so an operator clicking through cannot submit by accident
+(constraint #15). So the identical path — fresh frozen-lockfile install, cache miss, browser
+download, worker startup — can be exercised **on demand, submitting nothing.**
+
+That is strictly better than both offered options, and it surfaced only because someone
+checked whether "CI installs" was even true. **When a plan defers verification to CI, name
+the workflow, its trigger and its side effects.** "CI" is not one thing, and here the
+cheapest safe answer was hiding behind the word.
+
+Triggering it is Teja's, not a session's.
+
+### Vercel, separately
+
+`apps/web`'s playwright is a devDependency and Vercel installs devDependencies, so **the
+first Vercel build after `b62be33` will fetch the new Chromium revision and be slower than
+usual.** Do not read a slow first build as a failed one — this repo has already lost four
+days to a deploy failure nobody noticed, and the inverse error is just as available.
 
 **Window 4 — vitest, alone.** 2.x → 4.x. Expect config churn. Verify:
 `pnpm test:workspace` green, and `pnpm test:functions` unaffected (it runs under
