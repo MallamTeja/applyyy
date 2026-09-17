@@ -300,6 +300,18 @@ Real instances found in this repo:
   right now"* — and renamed `ALLOWED_HOSTS` to `HUMAN_REVIEWED_HOSTS` because its meaning had
   changed from enforcement point to review record. **When you delete a control, state which
   question it was answering and who answers it now.** If you cannot, you are not simplifying.
+- **A brief that specifies the conclusion invites the conclusion.** The authoring-side twin of
+  this section's reader-side rule: *the permissiveness of the reader is the fail-open; the
+  confidence of the brief is the other one.* Earned 2026-09-17 — an orchestrator window brief told
+  a worker to establish "no regression" **and to say it in those words**, before anyone knew
+  whether the work would support the claim. It did not, and only the worker's refusal stopped the
+  phrase shipping. This is the `audit_clean` button one level up: **a verdict stated in advance
+  becomes true by being stated.** Ask for what the evidence supports; never pre-write the finding.
+- **Check that the premise of a decision still holds before relaying it.** Ruling "let CI be the
+  first run" is only meaningful if CI installs — here it does (`apply.yml:110` runs
+  `pnpm install --frozen-lockfile`, and `:126` reinstalls browsers on a cache miss keyed to
+  `hashFiles('pnpm-lock.yaml')`, so a lockfile change **guarantees** the fresh download). But
+  see §4: *which* CI run it is matters more than *that* one exists.
 - **A correct citation can carry a wrong conclusion**, and that is nastier than a wrong
   citation because it arrives with its own justification. Always ask: **is this path
   actually reached?** (Cost us a retracted claim on 2026-09-17: `scout-remote.ts` was
@@ -471,6 +483,17 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   regression", never "verified". This is §5's shape wearing a green checkmark: a guard passing for
   a reason unrelated to what it claims to check. `…dependency-remediation-plan.md:261` already said
   this and an orchestrator brief contradicted it.
+- **"CI will catch it" — ask WHICH workflow, and what that workflow DOES.** There are three
+  (`apply.yml`, `keepalive.yml`, `scout.yml`) and all three run `pnpm install --frozen-lockfile`,
+  but **only `apply.yml` installs playwright browsers** (`:126`, on a cache miss keyed to
+  `hashFiles('pnpm-lock.yaml')`). `apply.yml` is scheduled `30 2 * * *` — **02:30 UTC / 08:00 IST
+  daily — and it is the workflow that SUBMITS REAL APPLICATIONS.** So "let CI exercise the bump"
+  means *"first execution is tomorrow morning, live, mid-submission"*, which is a materially
+  different proposition from what it sounds like.
+  It also takes `workflow_dispatch` with a **`dry_run` input** (`:27`), so the same code path can
+  be exercised on demand without submitting anything. **When a plan defers verification to CI,
+  name the workflow, its trigger and its side effects** — "CI" is not one thing, and here the
+  cheapest safe answer was hiding behind the word.
 - **A LOCKFILE window and a NODE_MODULES window are different blast radii.** Use
   `pnpm install --lockfile-only`: it resolves and writes `pnpm-lock.yaml` **without linking
   `node_modules`**. In a tree shared by four sessions that distinction is the whole game — the
