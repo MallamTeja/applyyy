@@ -59,6 +59,22 @@ committing, and got back **fourteen** — a peer's fourteen files had landed in 
 index between the add and the check. Its `git commit -- <ten paths>` took exactly ten.
 Both sessions' work went out clean, on separate commits.
 
+### The pathspec protects the COMMITTER. It does not protect the STAGER.
+Third finding, 2026-09-17, and it is the **inverse** of the one above. A session ran
+`git add <its file>`, then `git diff --cached --name-status` (which showed exactly its one
+file), then `git commit -- <that path>` — and got **"nothing to commit, working tree clean"**.
+Between its add and its commit, **a peer had committed its staged file**. Content intact,
+message not its own, already pushed.
+
+So the rule cuts both ways: the trailing pathspec protects *the person who uses it* from a
+peer's staged work, and **does nothing for the person whose work is sitting in the shared
+index**. **Stage immediately before committing, never while you still have edits to make** —
+staged-and-waiting is a window, and in this tree somebody will step through it.
+
+The carrier here was the orchestrator, sweeping up "uncommitted work" before sessions closed
+without checking whether its author was still editing. **"Uncommitted" and "abandoned" are not
+the same state, and `git status` cannot tell them apart.** Ask before you rescue.
+
 ### The pathspec protects the INDEX. It does not protect the PUSH.
 Second finding, 2026-09-17: a session's `git push` carried a peer's
 already-committed-but-unpushed commit to `origin` along with its own. No staging
@@ -437,6 +453,16 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   (`docs/status/2026-09-16-tailor-queue-deploy-blocker.md:85`) — **was never implemented.** A
   completed post-mortem whose action item never landed is the "past tense for future work" trap
   applied to ourselves.
+- **`20260910220800_create_private_storage_buckets.sql` is NOT re-runnable, and its own comment
+  says it is.** Lines `:43-45` claim *"on conflict do nothing so re-running is safe"* — true of
+  the bucket insert it describes, **false of the file**. Lines `:86`, `:99`, `:110`, `:127` are
+  bare `create policy`; Postgres has **no** `create policy if not exists` and **no**
+  `create or replace policy`, and nothing drops them first. A second run raises **42710**.
+  It is **first in the apply order and gates the other six.** Do **not** pre-emptively patch it:
+  bare `create policy` is house style here (`rls_policies.sql` has 17 creates and 0 drops), and
+  editing a migration to fix an unconfirmed problem is exactly how the `evaluation_order` bug got
+  in. **Run the one-second pre-flight** (do those four policy names already exist?) and fix only
+  if it returns rows. Corrected SQL is in the review doc §3.1.
 - **The unapplied-migration backlog is SEVEN files, not two**, and `supabase db push` applies
   all of them in one command. Verified 2026-09-17 by `applyyy-5c`. Only `20260917124500` and
   `20260917130000` have been reviewed; `20260911235500`, `20260912001500`, `20260912120000` and
