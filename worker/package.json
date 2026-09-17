@@ -20,7 +20,7 @@
   "dependencies": {
     "@applyy/resume-template": "workspace:*",
     "@applyy/shared-types": "workspace:*",
-    "@supabase/supabase-js": "2.47.10",
+    "@supabase/supabase-js": "2.50.0",
     "playwright": "1.49.1"
   },
   "devDependencies": {
