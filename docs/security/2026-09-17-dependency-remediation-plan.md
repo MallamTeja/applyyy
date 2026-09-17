@@ -19,6 +19,14 @@ a scheduled window someone else opens.
 
 ## Counts
 
+> **Scope — never quote "26" without this line.** 26 is the total for the trees
+> `pnpm audit` can reach: `apps/*`, `packages/*`, `worker`. It is **not** this
+> repo's total. `supabase/functions/` is a separate Deno project with its own
+> `deno.lock` (3592 bytes, confirmed present) that `pnpm audit` cannot see and
+> that **has not been audited by anything**. A second Vite major (`vite@5.4.21`,
+> alongside `apps/web`'s `6.0.3`) is also present and its advisories were not
+> enumerated. **Absence of a finding here is not a finding of absence.**
+
 `pnpm audit` reports **26 advisories**: 2 critical, 4 high, 17 moderate, 3 low.
 
 GitHub Dependabot reports **44** on the same tree. The gap is not a
@@ -164,6 +172,12 @@ session are exactly what changed.
 **Window 2 — Tier 3 vite.** Bump `vite` to >= 6.4.3. Closes 13 advisories in one
 move. Verify: `vite build` emits, and `pnpm --filter @applyy/web run typecheck`
 stays green. This is the highest advisory-count-per-unit-risk fix available.
+
+> **Caveat: W2 may not close `vite` as cleanly as "13" suggests.** The 13
+> advisories are scoped to 6.x ranges, and a second copy — `vite@5.4.21`, pulled
+> in by `@vitest/mocker` — remains in the tree after this bump. Whether it
+> carries its own exposure is **unchecked**. Re-run `pnpm audit` after W2 rather
+> than assuming the count went to zero; the 5.x copy leaves with W4, not W2.
 
 **Window 3 — Tier 2 playwright.** Bump to >= 1.55.1. Verify on a CI run, not
 locally — the advisory is about install-time integrity, and CI is where it
