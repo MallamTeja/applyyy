@@ -463,6 +463,23 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   editing a migration to fix an unconfirmed problem is exactly how the `evaluation_order` bug got
   in. **Run the one-second pre-flight** (do those four policy names already exist?) and fix only
   if it returns rows. Corrected SQL is in the review doc §3.1.
+- **`auth.uid()` IS NULL INSIDE A MIGRATION.** There is no authenticated session during a deploy.
+  So any table whose column is `not null default auth.uid()` — e.g. `application_events.user_id`
+  (`20260909234800:41`) — will **abort the whole file on a NOT NULL violation** if you let the
+  default apply. Carry `user_id` across from the source row instead, which also keeps the new row
+  in the **same RLS tenant** as the rows it relates to. Nearly shipped 2026-09-17; same shape as
+  `20260917124500`'s reason for not calling `bootstrap_user_defaults()` directly.
+- **A correction must DESCRIBE, not ASSERT.** The deleted fast-path button `throw`w on the first
+  failing step, so a click that failed partway forged **fewer than six** transitions. A retraction
+  hard-coding *"six agents were forged"* would be **false exactly for the rows where something had
+  already gone wrong** — a correction introducing its own inaccuracy, on the rows most likely to be
+  examined. Aggregate what the data actually says; never template the finding. (Generalises: this
+  is §5's *"a brief that specifies the conclusion"* applied to data rather than to a worker.)
+- **A `raise warning` is usually right where a `raise exception` is tempting.** A retraction that
+  matched nothing is *news*, not a failure — aborting an eight-file push over "there was nothing to
+  correct" turns good news into an outage. Report **both** the matched count and the written count:
+  their **difference** is the information (written=matched → first run; written=0, matched>0 →
+  correct re-run; anything between → a partial earlier run).
 - **The unapplied-migration backlog is SEVEN files, not two**, and `supabase db push` applies
   all of them in one command. Verified 2026-09-17 by `applyyy-5c`. Only `20260917124500` and
   `20260917130000` have been reviewed; `20260911235500`, `20260912001500`, `20260912120000` and

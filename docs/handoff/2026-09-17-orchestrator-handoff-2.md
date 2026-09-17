@@ -23,11 +23,13 @@ Say that out loud rather than letting a reader assume it was checked.
 
 **Teja's next step is applying the migrations.** It is unblocked from our side:
 
-- The backlog is **seven** files, not the two everyone said. `supabase db push` applies all seven
-  in one command, and **it needs no Docker** — `db push` is a network operation; only
+- The backlog is **eight** files — seven inherited (not the *two* everyone said all afternoon) plus
+  the retraction migration `bb6a988`, which sorts last. `supabase db push` applies **all of them in
+  one command**, and **it needs no Docker** — `db push` is a network operation; only
   `start`/`reset`/`diff` need containers. The no-Docker rule was never the obstacle.
-- **All seven are reviewed and cleared**, zero SQL edits proposed —
+- **The seven inherited files are reviewed and cleared**, zero SQL edits proposed —
   [`audit/2026-09-17-unapplied-migrations-review.md`](../audit/2026-09-17-unapplied-migrations-review.md).
+  **The eighth is self-reviewed only.** See §3.1.
 - The risk is **ordering, not content**. `20260910220800_create_private_storage_buckets.sql` is
   first, writes four `create policy` statements against `storage.objects` (a table owned by
   `supabase_storage_admin`), and is the only file with no re-run guard on its main statements.
@@ -61,7 +63,7 @@ of everything else in the report.
 | Decision | Ruling | Who |
 |---|---|---|
 | The `audit_clean` fast-path button | **Delete it.** Shipped `75a75a0` | Teja, 16:55, re-confirmed ~17:40 to a second session |
-| The forged audit history | **Write a compensating event.** Ruled; migration **not yet written** | Teja, 16:55 |
+| The forged audit history | **Write a compensating event.** Written and shipped `bb6a988`; **needs a second reader** (§3.1) | Teja, 16:55 |
 | Playwright verification | **Defer to CI deliberately.** Shipped `b62be33` | Teja 17:37, re-ruled by me when he delegated |
 | The tier scheme rewrite | **Bundle it with W2**, not standalone churn | me |
 | Test comment-density band | **Description, not a ceiling.** Only the ≥1.00 source floor is a requirement | me |
@@ -71,13 +73,23 @@ of everything else in the report.
 
 ## 3. Still owed — ranked
 
-1. **The compensating-event migration.** Ruled at 16:55, assigned at 17:46, **never written** —
-   the session was closed first. `application_events` carries `forbid_update`/`forbid_delete`
-   (`20260909234800_supporting_tables.sql:53-59`), so appending a retraction is the only possible
-   correction, not a cleanup. The hard part is identifying affected rows without DB access; the
-   strongest discriminator is the literal detail note the button wrote —
-   `{note: 'Fast-tailored and queued from Discovered Jobs Explorer'}`. It must be idempotent, and
-   it must be **loud when it matches nothing**.
+1. **A SECOND READER FOR `20260917174600_retract_forged_fast_path_agent_events.sql`** (`bb6a988`).
+   The compensating-event migration is **written** — this is the *review* that is owed, and it is
+   now the top item. Its author flagged plainly that §9 of the review doc is a **self-review** and
+   said it should not clear its own file. **Nobody else has read it, and the sessions closed.**
+   It is low-risk by position — it sorts **last of eight**, so if it fails everything else has
+   already applied and the forged history is merely un-retracted. But read it before pushing.
+   What it does, so a reviewer starts informed: discriminator is
+   `detail->>'note' = 'Fast-tailored and queued from Discovered Jobs Explorer'` on
+   `event_type='note'` — verified unique (`git log -S` returns only `ab05ba4` which added it and
+   `75a75a0` which removed it), and no UI lets a human type a note. **No manual id list needed.**
+   Idempotent via a stable `detail->>'correction'` marker. Reports **both** matched and written
+   counts, and `raise warning` (not `exception`) on zero matches.
+   Two design points worth preserving if it is revised: it **aggregates from the data instead of
+   templating** — the button `throw`s on the first failing step, so a partial click forged fewer
+   than six transitions and a hard-coded "six" would be false exactly for the rows where something
+   had already gone wrong. And it carries `user_id` from the source row because **`auth.uid()` is
+   NULL inside a migration**, which would otherwise abort the file.
 2. **`ApprovalQueuePage.tsx:214` null-check → shape check**, deleting the now-unreachable fallback
    at `:223-245` in the same pass. Mechanism in
    [`status/2026-09-17-pending-work-audit.md`](../status/2026-09-17-pending-work-audit.md) §5.2.
