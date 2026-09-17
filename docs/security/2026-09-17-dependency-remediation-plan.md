@@ -1,8 +1,87 @@
 # Dependency vulnerability remediation plan
 
 **Date:** 2026-09-17
-**Status:** plan only — **nothing installed, lockfile untouched**
+**Status:** **W1 SHIPPED** at `99c42e8` (13:00 IST). W2–W4 open.
 **Source:** `pnpm audit` run 2026-09-17 against the committed lockfile
+
+---
+
+## Amendments — read these before following anything below
+
+This plan was written at 12:40 and parts of it were wrong or went stale within
+the hour. Corrections are recorded here rather than silently edited into the
+body, so that anyone who read the original can see what changed.
+
+### A1. `react-router-dom` — the plan's target was stale and would have made things worse
+
+The plan said bump to **>= 6.30.4**. That number is wrong. An advisory published
+since put `6.30.2`–`6.30.5` in the vulnerable range, patched at **>= 6.30.6**.
+The installed `6.28.0` sat *below* that range, so **installing the planned
+6.30.4 would have added an advisory that did not previously apply.**
+
+W1 shipped **6.30.6**. Do not "correct" it back to the plan's number.
+
+This is not a reasoning error in the original analysis — 6.30.4 was the right
+target when the advisory data was read. **A version number has a shelf life.**
+Re-resolve the target against the registry at install time rather than trusting
+a number written earlier the same day.
+
+### A2. Tier 1 is BETTER, not CLEAN — do not report it as closed
+
+Two `react-router` advisories **cannot be closed within 6.x**. Both require
+**>= 7.18.0**, a major. One of them is the open redirect this plan named as
+Tier 1's actual attack story.
+
+Measured after W1: **26 → 21** advisories, and `@remix-run/router`'s XSS-via-open-redirect
+(high) and `@supabase/auth-js` (low) are both closed. **Two moderate
+`react-router` open-redirect / constructor-injection advisories remain open and
+are production-reachable.** They need their own window with the v6 → v7 major
+as its subject.
+
+### A3. `@supabase/supabase-js` — take 2.50.0 exactly, never "latest 2.x"
+
+The plan said "latest 2.x". That is wrong and would have shipped a hidden major.
+
+Supabase synchronised every sub-package onto one version line, so the umbrella
+package's semver **conceals** what moves underneath it:
+
+| supabase-js | auth-js | postgrest-js |
+|---|---|---|
+| 2.49.4 | 2.69.1 — still vulnerable | 1.17.7 |
+| **2.50.0** | **2.70.0 — patched, the exact minimum** | 1.19.4 — still 1.x |
+| 2.116.0 | patched | **2.116.0 — a major** |
+
+`2.116.0` looks like a minor on the umbrella and carries `postgrest-js` across a
+major. The blanking guard shipped this morning reads behaviour out of
+`postgrest-js` 1.x — `upsert()` computing `columns=` from the union of keys
+across the batch. A major could change that, and the guard would stop working
+silently while every one of its tests still passed, because they are unit tests
+over the payload that never touch postgrest.
+
+**The advisory is the reason for the window. Anything past the patched minimum
+is unpaid risk in the only tier that ships to production.** The 2.116.0
+modernisation deserves its own window with the postgrest-js major as its subject.
+
+### A4. The verification instruction below is wrong — "green" is not available
+
+Windows 1 and 2 say *"verify: typecheck stays green."* **In a tree with several
+concurrent writers there is no green baseline to return to.** The same command
+returned 0 errors, then 4, then 0 again across four minutes today — all three
+measurements correct, all three describing different moments.
+
+Use an **error-set diff**, not an exit code:
+
+```
+cd apps/web
+./node_modules/.bin/tsc --noEmit 2>&1 | sort > before.txt   # immediately before install
+# ... install ...
+./node_modules/.bin/tsc --noEmit 2>&1 | sort > after.txt
+diff before.txt after.txt
+```
+
+An empty diff means the bump introduced nothing, whatever the exit code. Any new
+error is yours to own. **Capture the baseline immediately before installing** —
+a baseline twenty minutes old is a different repo.
 
 ---
 
