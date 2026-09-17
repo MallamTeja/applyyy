@@ -1,8 +1,11 @@
 # Dependency vulnerability remediation plan
 
 **Date:** 2026-09-17
-**Status:** **W1 SHIPPED** at `99c42e8` (13:00 IST). W2–W4 open.
+**Status:** **W1 SHIPPED** at `99c42e8` (13:00 IST). **W3 SHIPPED** at `b62be33` (17:30 IST),
+out of order and re-tiered — see **A5**. **W2 and W4 open.**
 **Source:** `pnpm audit` run 2026-09-17 against the committed lockfile
+**Latest measured count:** **20** (2 crit / 2 high / 14 mod / 2 low) at `b62be33`, down from
+26 at the time of writing.
 
 ---
 
@@ -83,9 +86,51 @@ An empty diff means the bump introduced nothing, whatever the exit code. Any new
 error is yours to own. **Capture the baseline immediately before installing** —
 a baseline twenty minutes old is a different repo.
 
+### A5. `playwright` is Tier 1, and W3 shipped ahead of W2
+
+**Re-tiered by orchestrator ruling (`applyyy-94`, 2026-09-17 17:29), not by a finding
+of this document's authors.** Recorded with the reasoning attached so the next owner can
+disagree with the reasoning rather than only the conclusion:
+
+> playwright is "a production `dependencies` entry in the component that types into real
+> ATS forms and submits applications, so 'not user-reachable' is false of it."
+
+The plan half-saw this already — the Tier 2 paragraph said "integrity of its browser
+binaries is worth more than the severity implies" — and then routed it behind two
+dev-only windows anyway. **A correct description filed under the wrong heading is harder
+to catch than an omission, because everything you read about it is true.**
+
+**Tier 2 is now empty.** It contained exactly one package. A tier invented for a single
+item that turns out to belong in another tier is a classification that never earned its
+keep; see the note under the Tier 2 heading for what the axis was actually conflating.
+
+**Checked for a second instance rather than assumed** — is any other advisory-carrying
+package a production `dependencies` entry wearing a dev/CI label? Enumerated from both
+manifests: `worker` ships `@applyy/resume-template`, `@applyy/shared-types`,
+`@supabase/supabase-js`, `playwright`; `apps/web` ships `@applyy/master-ingest`,
+`@applyy/shared-types`, `@supabase/supabase-js`, `react`, `react-dom`, `react-router-dom`.
+Of those with advisories, `supabase-js` and `react-router` were already Tier 1.
+**`playwright` was the only misfiling.** Everything remaining in Tier 3 is a genuine
+devDependency, and the Vite/esbuild advisories are dev-*server* defects that `vite build`
+does not reach — that part of the original reasoning holds.
+
+**W3 SHIPPED at `b62be33`, ahead of W2**, as a consequence of the re-tier. See the Window 3
+entry for its honest status; **"shipped" there does not mean "exercised".**
+
 ---
 
-## Why nothing has been installed
+## Why the lockfile is single-owner, and installs happen only in scheduled windows
+
+> **Heading renamed 2026-09-17.** It read *"Why nothing has been installed"*, which became a
+> false statement the moment W1 shipped — and a heading is what people scan, so a stale one
+> misinforms readers who never reach the paragraph correcting it. The rule this section
+> states is still live; only its framing as a present-tense status had expired.
+>
+> **SUPERSEDED — the body below described the state on 2026-09-17 at 12:40 and is no longer
+> true.** Two windows have since installed: W1 at `99c42e8` and W3 at `b62be33`. The
+> single-owner rule below still stands and is still how windows are opened; only the
+> "nothing has been installed" claim has expired. Kept rather than deleted because the
+> rule it states is the reason the windows are scheduled at all.
 
 `pnpm-lock.yaml` is **single-owner** in this repo (`CLAUDE.md` §4: *"Do not run
 `pnpm install` without the orchestrator scheduling it. The lockfile is
@@ -116,14 +161,18 @@ and 44 as the number of *alert rows*. Fixing the six packages below closes both.
 **26 advisories, 6 packages.** The long list is mostly one package counted many
 times: `vite` alone accounts for 13.
 
-| Package | Advisories | Current | Needs |
-|---|---|---|---|
-| `vite` | 13 | 6.0.3 | >= 6.4.3 |
-| `react-router` / `@remix-run/router` | 6 | 6.28.0 | >= 6.30.4 |
-| `vitest` / `@vitest/mocker` | 4 | 2.1.8 | >= 4.1.11 |
-| `playwright` | 1 | 1.49.1 | >= 1.55.1 |
-| `esbuild` | 1 | transitive | >= 0.25.0 |
-| `@supabase/auth-js` | 1 | via supabase-js 2.47.10 | >= 2.70.0 |
+**The "Current" column below is as of 12:40 and three rows have since moved.** It is left
+unedited because the advisory counts are keyed to those versions; the live column is on the
+right.
+
+| Package | Advisories | Current (12:40) | Needs | **Now** |
+|---|---|---|---|---|
+| `vite` | 13 | 6.0.3 | >= 6.4.3 | 6.0.3 — **open, W2** |
+| `react-router` / `@remix-run/router` | 6 | 6.28.0 | >= 6.30.4 — **stale, see A1** | 6.30.6 — partly closed, **2 remain, need v7** (A2) |
+| `vitest` / `@vitest/mocker` | 4 | 2.1.8 | >= 4.1.11 | 2.1.8 — **open, W4** |
+| `playwright` | 1 | 1.49.1 | >= 1.55.1 | **1.55.1 — CLOSED, `b62be33`** |
+| `esbuild` | 1 | transitive | >= 0.25.0 | transitive — **open, rides W2/W4** |
+| `@supabase/auth-js` | 1 | via supabase-js 2.47.10 | >= 2.70.0 | **closed** via supabase-js 2.50.0 (`99c42e8`) |
 
 ---
 
@@ -140,6 +189,7 @@ first and the production open-redirect fourth.
 
 | Package | Advisory | Severity |
 |---|---|---|
+| `playwright` **(moved here from Tier 2, A5)** | downloads and installs browsers without verifying integrity | **high** — **CLOSED, `b62be33`** |
 | `@remix-run/router` | XSS via open redirect | **high** |
 | `react-router` | open redirect via untrusted input; `//` and backslash paths; constructor injection via deserialization | moderate ×4 |
 | `@supabase/auth-js` | insecure path routing from malformed user input | low |
@@ -151,15 +201,26 @@ link that bounces an authenticated operator off-site.
 
 **This tier is the actual priority**, despite containing no criticals.
 
-### Tier 2 — supply-chain / CI integrity
+### Tier 2 — supply-chain / CI integrity — **EMPTY, see A5**
 
 | Package | Advisory | Severity |
 |---|---|---|
-| `playwright` | downloads and installs browsers without verifying integrity | **high** |
+| ~~`playwright`~~ | **moved to Tier 1 by orchestrator ruling** — production `dependencies` in `worker` | ~~high~~ |
 
-Reaches the GitHub Actions runner that submits applications. Not
-user-reachable, but it is the one component that types into real ATS forms, so
-integrity of its browser binaries is worth more than the severity implies.
+Its original justification is preserved because it is the evidence that the tier was wrong:
+*"Reaches the GitHub Actions runner that submits applications. Not user-reachable, but it is
+the one component that types into real ATS forms, so integrity of its browser binaries is
+worth more than the severity implies."* Every clause after the comma argues against the
+label the sentence opens with.
+
+**What the axis was conflating.** The heading sorts by *supply-chain vs runtime*; the prose
+sorts by *reaches a user vs does not*. Those are different questions and they disagree on
+exactly this package — it is a supply-chain defect **in a production runtime dependency**.
+Tier 1's own definition is "ships to production, reachable by a real user", and the operator
+*is* a real user of the worker's output. **If this scheme is kept, the tier test should be
+"does a failure here reach something outside this laptop", asked once, rather than two tests
+sharing three buckets.** Flagged, not rewritten: re-deriving the tiers is a larger change
+than this window, and W2/W4 depend on the existing numbering.
 
 ### Tier 3 — developer machine only
 
@@ -243,6 +304,12 @@ only the worker suite is at risk.
 
 Four windows, each independently verifiable and revertible.
 
+> **THE SEQUENCE BELOW IS NO LONGER THE ORDER THIS HAPPENED IN.** Actual order: **W1
+> (`99c42e8`) → W3 (`b62be33`) → W2, W4 still open.** W3 jumped W2 because the A5 re-tier
+> made it Tier 1. The numbering is kept as written so existing references to "W2" and "W4"
+> stay meaningful — it is a set of window *names*, not a running order. Read the per-window
+> status lines, not the ordinal.
+
 **Window 1 — Tier 1, production reachable.** Bump `react-router-dom` and
 `@supabase/supabase-js`. Verify: `pnpm --filter @applyy/web run typecheck`, then
 `vite build`, then click through `/discovered` and a settings page — routing and
@@ -258,9 +325,31 @@ stays green. This is the highest advisory-count-per-unit-risk fix available.
 > carries its own exposure is **unchecked**. Re-run `pnpm audit` after W2 rather
 > than assuming the count went to zero; the 5.x copy leaves with W4, not W2.
 
-**Window 3 — Tier 2 playwright.** Bump to >= 1.55.1. Verify on a CI run, not
-locally — the advisory is about install-time integrity, and CI is where it
-installs.
+**Window 3 — ~~Tier 2~~ TIER 1 playwright. SHIPPED `b62be33`, 2026-09-17 17:30, ahead of
+W2.** Bumped `1.49.1 -> 1.55.1` in **both** manifests in one commit —
+`worker/package.json` (production dep) and `apps/web/package.json` (devDependency). It was
+declared twice; bumping either alone leaves `GHSA-7mvr-c777-76hp` open and splits the
+lockfile across two browser binary sets. Lockfile diff was 11 insertions / 11 deletions,
+`playwright` and `playwright-core` only. **`pnpm audit` 21 → 20, one high removed, nothing
+added.**
+
+> **"SHIPPED" HERE DOES NOT MEAN "EXERCISED", AND MUST NOT BE READ AS "VERIFIED".** Nothing
+> ran against 1.55.1 — not the suite, not `tsc`. The lockfile was produced with
+> `pnpm install --lockfile-only`, which resolves without linking, so the installed copy is
+> still 1.49.1 and any run would have exercised the OLD version and gone green for an
+> unrelated reason. A local run needs three browser downloads (1.55.1 pins chromium `1193`
+> and ffmpeg `1011`; the machine has `1148` and `1010` — measured from
+> `playwright-core@1.55.1`'s `browsers.json`, not assumed), which is a Teja decision and was
+> not taken. **Honest status: closed in the dependency graph, unexercised.**
+
+The original instruction below was right and still is: verify on a CI run, not locally — the
+advisory is about install-time integrity, and CI is where it installs. A local run, even a
+full one with browsers, would only ever show *no regression*. **The next CI run is the first
+real test of both the fix and the bump.**
+
+Note for whoever watches that run: `apps/web`'s playwright is a devDependency and Vercel
+installs devDependencies, so **the first Vercel build after `b62be33` will download the new
+chromium revision and be slower than usual.** Do not read a slow first build as a failed one.
 
 **Window 4 — vitest, alone.** 2.x → 4.x. Expect config churn. Verify:
 `pnpm test:workspace` green, and `pnpm test:functions` unaffected (it runs under
@@ -283,7 +372,9 @@ Do not report a window complete on a green you did not watch execute.
 
 ## What this plan does not do
 
-- **It does not install anything.** Lockfile untouched, deliberately.
+- ~~**It does not install anything.** Lockfile untouched, deliberately.~~
+  **EXPIRED.** True when written; two windows have since installed (`99c42e8`, `b62be33`).
+  The lockfile is still single-owner and still only writable inside a scheduled window.
 - **It does not bump `typescript`.** `pnpm-workspace.yaml` pins it to 5.9.3 via
   `overrides` for a documented reason; no advisory touches it.
 - **It does not touch `supabase/functions/`.** That tree is Deno with its own
@@ -303,6 +394,17 @@ Do not report a window complete on a green you did not watch execute.
    understated.
 3. **Dependabot's 44 vs audit's 26** should be reconciled once after the bumps,
    to confirm no alert class was missed rather than merely recounted.
-4. **`@supabase/supabase-js` is pinned exactly** (`2.47.10`) in both `apps/web`
-   and `worker`. Both must move together or the two trees resolve different
-   `auth-js` versions.
+4. **`@supabase/supabase-js` is pinned exactly** — now `2.50.0`, not the `2.47.10` this
+   item was written against (`99c42e8` moved both). The point stands and was borne out
+   twice: both manifests must move together or the two trees resolve different `auth-js`
+   versions. **`playwright` turned out to be a second package pinned in both trees**, and
+   W3 hit exactly this — see A5. **Before opening any window, grep every manifest for the
+   package first**; "which manifests declare this?" is a cheaper question than a split
+   lockfile.
+5. **The tier scheme needs one test, not two.** Flagged in A5 and under the Tier 2 heading:
+   the headings sort by supply-chain vs runtime, the prose sorts by reaches-a-user vs not,
+   and they disagreed on `playwright`. Not re-derived here because W2/W4 reference the
+   existing numbering.
+6. **W3 is closed in the dependency graph but unexercised.** The first CI run after
+   `b62be33` is the first execution of `playwright@1.55.1` anywhere. If it goes red, that
+   is the bump, and `git revert b62be33` is one command.
