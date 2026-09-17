@@ -1,18 +1,37 @@
-﻿/* SourceBadge — three-tier source origin pills.
+/* SourceBadge — the source-confidence ladder on a job card.
  *
- * Tier 1 (career-page)   : emerald green  — highest signal, direct ATS
- * Tier 2 (linkedin-post) : electric blue  — secondary signal, founder/recruiter post
- * Tier 3 (portal)        : indigo/slate   — lowest signal, aggregator
+ * WHY THIS FILE WAS REWRITTEN (2026-09-17). It used to state its dark colours
+ * under `[data-theme='dark']`. That selector is never present in the app's
+ * DEFAULT state: theme.ts applies `system` by REMOVING the attribute, so an
+ * operator on a dark OS with the default preference got the LIGHT palette —
+ * mid-green text on a near-white wash — painted onto a #151924 card. That is
+ * the unreadable badge in the screenshot, not a bad colour choice. Every other
+ * stylesheet in this app uses light-dark(); these two components were the only
+ * holdouts, and they were the only two that looked broken. Colours here are now
+ * derived from the semantic tokens with color-mix(), so there is one definition
+ * site per hue and a badge cannot drift away from the token it means.
  *
- * Each pill is clickable (opens source URL) and shows a tooltip with provider + URL
- * on hover. Uses the same CSS-variable token system as StatusBadge so it inherits
- * light/dark theme switching automatically.
+ * WHY ONLY ONE TIER IS COLOURED. The three tiers are a CONFIDENCE LADDER, not
+ * three unrelated statuses, and the old design gave each its own hue — so every
+ * badge shouted and the ladder read as decoration. Saturation now carries the
+ * rank: tier 1 is the only source worth a colour, and tiers 2 and 3 recede into
+ * chrome. The eye learns "more colour = more trustworthy source" in one glance.
+ *
+ *   Tier 1  career-page    — --traced green, filled, solid edge   (direct ATS)
+ *   Tier 2  linkedin-post  — neutral, DASHED edge                 (indirect)
+ *   Tier 3  portal         — neutral, hairline edge               (aggregator)
+ *
+ * tokens.css forbids any status that relies on hue alone, so the second channel
+ * is border STYLE (solid / dashed / hairline) on top of the icon and the word.
+ * A colour-blind operator still reads the ladder.
  */
 
 .source-badge-group {
+  /* Inline-flex so the group sits on the card's badge row rather than claiming
+     a block of its own, and wraps instead of overflowing a narrow card. */
   display: inline-flex;
   flex-wrap: wrap;
-  gap: 0.375rem;
+  gap: var(--gap-1);
   align-items: center;
 }
 
@@ -20,79 +39,101 @@
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
-  padding: 0.2rem 0.55rem;
-  border-radius: 9999px;
-  font-size: 0.72rem;
+  padding: 0.2rem 0.5rem;
+  /* --radius-badge, not the 9999px it used to carry. tokens.css calls oversized
+     pills out by name, and the neighbouring .job-pill row is on 3px: a fully
+     rounded badge beside square ones read as a different component. */
+  border-radius: var(--radius-badge);
+  font-family: var(--font-machine);
+  font-size: var(--size-2xs);
   font-weight: 500;
-  letter-spacing: 0.01em;
+  letter-spacing: 0.005em;
+  line-height: 1.35;
   white-space: nowrap;
-  /* Smooth transition for hover brightness */
-  transition: filter 120ms ease, box-shadow 120ms ease;
-  /* Pointer only when URL is present (role=link) */
+  /* Only the interactive affordances animate; the palette does not, so a theme
+     switch lands instantly instead of smearing. */
+  transition: background-color 120ms ease, border-color 120ms ease;
+  /* Default is inert: most badges have no URL behind them. */
   cursor: default;
 }
 
+/* ── Tier 1: direct ATS career page — the one badge that gets a hue ─────────
+   Derived from --traced (the app's "verified" green) via color-mix rather than
+   restated as literals, so retuning the token retunes the badge. */
+.source-badge--career-page {
+  color: var(--traced);
+  background: color-mix(in oklab, var(--traced) 14%, transparent);
+  border: 1px solid color-mix(in oklab, var(--traced) 38%, transparent);
+}
+
+/* ── Tier 2: LinkedIn hiring post — neutral, dashed ────────────────────────
+   Dashed is the second channel: the source is a human's post, not a board, so
+   the outline is deliberately not closed. */
+.source-badge--linkedin-post {
+  color: var(--text-secondary);
+  background: var(--panel);
+  border: 1px dashed var(--rule-strong);
+}
+
+/* ── Tier 3: portal / aggregator — the quietest thing on the card ──────────
+   Highest noise, lowest signal, so it gets a hairline and nothing else. */
+.source-badge--portal {
+  color: var(--text-muted);
+  background: var(--panel);
+  border: 1px solid var(--rule);
+}
+
+/* ── Interaction ───────────────────────────────────────────────────────────
+   Only badges with a URL behind them are interactive; the rest must not look
+   clickable, which is why every rule below is gated on [role='link']. */
 .source-badge[role='link'] {
   cursor: pointer;
 }
 
+/* Hover lifts the EDGE rather than brightening the whole chip. The old
+   `filter: brightness()` washed the text toward its background — the hover
+   state was less readable than the resting one — and a 2px currentColor ring
+   drew a saturated halo around a chip that is meant to be quiet. */
 .source-badge[role='link']:hover {
-  filter: brightness(1.12);
-  box-shadow: 0 0 0 2px currentColor;
+  border-color: currentColor;
+  background: color-mix(in oklab, currentColor 12%, transparent);
 }
 
+/* Focus uses the app's accent, not currentColor: a focus ring has to be found
+   at a glance, and a muted tier-3 badge ringed in its own muted grey cannot be.
+   The accent carries no status meaning, so borrowing it here says nothing
+   about the source. */
 .source-badge[role='link']:focus-visible {
-  outline: 2px solid currentColor;
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
-/* ── Tier 1: Career Page (emerald green) ─────────────────────────────────── */
-.source-badge--career-page {
-  background: oklch(0.92 0.08 145 / 0.18);
-  color: oklch(0.45 0.14 145);
-  border: 1px solid oklch(0.70 0.12 145 / 0.45);
+@media (prefers-reduced-motion: reduce) {
+  .source-badge {
+    transition: none;
+  }
 }
 
-[data-theme='dark'] .source-badge--career-page {
-  background: oklch(0.30 0.09 145 / 0.30);
-  color: oklch(0.78 0.14 145);
-  border-color: oklch(0.55 0.13 145 / 0.50);
-}
-
-/* ── Tier 2: LinkedIn Post (electric blue) ───────────────────────────────── */
-.source-badge--linkedin-post {
-  background: oklch(0.92 0.08 250 / 0.18);
-  color: oklch(0.42 0.18 250);
-  border: 1px solid oklch(0.65 0.16 250 / 0.45);
-}
-
-[data-theme='dark'] .source-badge--linkedin-post {
-  background: oklch(0.28 0.10 250 / 0.35);
-  color: oklch(0.76 0.17 250);
-  border-color: oklch(0.52 0.16 250 / 0.55);
-}
-
-/* ── Tier 3: Portal / Aggregator (indigo-slate) ──────────────────────────── */
-.source-badge--portal {
-  background: oklch(0.92 0.04 270 / 0.14);
-  color: oklch(0.45 0.10 270);
-  border: 1px solid oklch(0.65 0.08 270 / 0.40);
-}
-
-[data-theme='dark'] .source-badge--portal {
-  background: oklch(0.28 0.05 270 / 0.28);
-  color: oklch(0.72 0.10 270);
-  border-color: oklch(0.50 0.08 270 / 0.45);
-}
-
-/* ── Icon + label layout ─────────────────────────────────────────────────── */
+/* ── Icon + label ──────────────────────────────────────────────────────────
+   The icons are inline SVG inheriting currentColor (see SourceBadge.tsx), so
+   they tint with the tier instead of arriving as full-colour OS emoji that
+   fought this low-chroma palette and rendered differently on every machine. */
 .source-badge__icon {
-  font-size: 0.82em;
-  line-height: 1;
-  /* Prevent emoji from inheriting text colour transforms */
-  color: inherit;
+  /* A flex item that must never be squeezed when the label is long. */
+  flex: none;
+  display: inline-flex;
+  /* Optical centring: the cap-height of the label sits slightly above the
+     glyph's box centre, so the icon needs a hair of lift to look aligned. */
+  margin-top: -0.05em;
+}
+
+/* Sized in em so the glyph tracks the badge's font-size instead of needing a
+   second number kept in step by hand. */
+.source-badge__icon svg {
+  width: 0.92em;
+  height: 0.92em;
 }
 
 .source-badge__label {
-  line-height: 1;
+  line-height: inherit;
 }

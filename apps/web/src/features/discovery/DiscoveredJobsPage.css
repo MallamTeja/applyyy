@@ -139,33 +139,41 @@
   border: 1px solid var(--rule);
 }
 
+/* WHY THE TWO TINTED PILLS BELOW WERE REWRITTEN (2026-09-17).
+   They used to state their dark colours under `[data-theme='dark']`. That
+   attribute is ABSENT in this app's default state — theme.ts applies the
+   'system' preference by removing it — so an operator on a dark OS who never
+   touched the theme control got the LIGHT palette painted onto a #151924 card:
+   mid-green and dark-orange text on a wash meant for white paper. That is the
+   unreadable chip, and it was never a colour-choice problem. Both now derive
+   from the semantic tokens, which are themed with light-dark() and therefore
+   follow `color-scheme` in all three states — system, forced light, forced
+   dark. color-mix() keeps the wash and the edge tied to the same token as the
+   text, so a chip cannot drift away from the meaning it carries. */
+
+/* Salary is a fact we managed to extract, so it borrows the "verified" green
+   rather than a green of its own. */
 .job-pill--salary {
-  color: oklch(0.45 0.14 145);
-  background: oklch(0.92 0.08 145 / 0.15);
-  border-color: oklch(0.70 0.12 145 / 0.35);
+  color: var(--traced);
+  background: color-mix(in oklab, var(--traced) 12%, transparent);
+  border-color: color-mix(in oklab, var(--traced) 34%, transparent);
   font-weight: 600;
 }
 
-[data-theme='dark'] .job-pill--salary {
-  color: oklch(0.78 0.14 145);
-  background: oklch(0.30 0.09 145 / 0.25);
-  border-color: oklch(0.55 0.13 145 / 0.45);
-}
-
+/* Cooldown is a WARNING: you interviewed here recently and applying again now
+   burns the relationship. It used to be drawn at hue 35 — a red-orange within
+   a few degrees of --fabricated, this console's alarm colour — so a wait-and-
+   see chip read at a glance as a fabrication alert. --signal is the token that
+   already means "needs the human to hold off", and reusing it keeps this app's
+   rule that one hue carries exactly one meaning. */
 .job-pill--cooldown {
-  color: oklch(0.42 0.18 35);
-  background: oklch(0.94 0.08 35 / 0.18);
-  border-color: oklch(0.75 0.12 35 / 0.45);
-  font-weight: 550;
+  color: var(--signal);
+  background: color-mix(in oklab, var(--signal) 13%, transparent);
+  border-color: color-mix(in oklab, var(--signal) 36%, transparent);
+  font-weight: 600;
   /* The spelled-out label is long enough to break across two lines inside the
      chip on a narrow card; keep it on one line and let the row wrap instead */
   white-space: nowrap;
-}
-
-[data-theme='dark'] .job-pill--cooldown {
-  color: oklch(0.82 0.14 35);
-  background: oklch(0.32 0.08 35 / 0.30);
-  border-color: oklch(0.58 0.12 35 / 0.50);
 }
 
 .job-card__description {
@@ -375,26 +383,28 @@
   color: var(--text-muted);
 }
 
+/* Same rewrite, same reason as the two pills above: the dark half of this
+   banner hung off `[data-theme='dark']`, which the default 'system' preference
+   never sets, so a dropped card showed #b91c1c — a dark red chosen for white
+   paper — on a near-black surface. --fabricated is this console's alarm token
+   and is already themed with light-dark(), so it resolves correctly whether
+   the operator is on system, forced light or forced dark. */
+
 .job-card--dropped {
+  /* Dimmed, not hidden: a dropped card still has to be auditable. */
   opacity: 0.82;
-  border-color: rgba(239, 68, 68, 0.4);
+  border-color: color-mix(in oklab, var(--fabricated) 40%, transparent);
 }
 
 .job-card__drop-banner {
-  padding: 6px 10px;
-  background: rgba(239, 68, 68, 0.1);
-  border: 1px solid rgba(239, 68, 68, 0.3);
+  padding: var(--gap-1) var(--gap-2);
+  background: color-mix(in oklab, var(--fabricated) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--fabricated) 32%, transparent);
   border-radius: var(--radius-sm);
-  font-size: 0.75rem;
-  color: #b91c1c;
+  font-size: var(--size-xs);
+  color: var(--fabricated);
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--gap-1);
   line-height: 1.3;
-}
-
-[data-theme='dark'] .job-card__drop-banner {
-  background: rgba(239, 68, 68, 0.2);
-  border-color: rgba(239, 68, 68, 0.5);
-  color: #fca5a5;
 }

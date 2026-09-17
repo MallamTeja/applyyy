@@ -6,11 +6,14 @@
  * signal, highest noise).
  *
  *   Tier 1 — Direct Career Pages (ATS: greenhouse, lever, ashby)
- *             pill: emerald green   icon: 🏢
+ *             the only tier that carries a hue: filled green, solid edge
  *   Tier 2 — LinkedIn Hiring Posts (founder / recruiter posts)
- *             pill: electric blue   icon: 💬
+ *             neutral chip, DASHED edge — an indirect, human-posted source
  *   Tier 3 — Portals & Aggregators (naukri, adzuna, jooble, linkedin job board)
- *             pill: indigo/slate    icon: 🌐
+ *             neutral chip, hairline edge — the quietest thing on the card
+ *
+ * Saturation carries the rank rather than three unrelated hues, so the badge
+ * row has one loud member instead of three. See SourceBadge.css for why.
  *
  * Clicking opens the source URL in a new tab. Hovering shows provider + URL.
  * Renders nothing when discoveredVia is absent or empty.
@@ -40,11 +43,48 @@ type PillTheme = 'career-page' | 'linkedin-post' | 'portal';
 
 interface BadgeInfo {
   theme: PillTheme;
-  icon: string;
   label: string;
   url?: string | undefined;
   tooltip: string;
 }
+
+/* The tier glyphs, as inline SVG rather than the 🏢 / 💬 / 🌐 emoji this used
+   to render.
+   WHY THE SWAP: emoji are painted by the operating system in their own fixed
+   colours, so they ignored the badge's palette entirely — three saturated
+   full-colour pictograms on a console built from low-chroma tokens — and each
+   OS draws them differently, so the badge row was a different shape on every
+   machine. These inherit currentColor, which means one definition of the tier
+   colour drives the text, the border and the glyph together.
+   `stroke-width` is kept at 1.75 so the glyph reads at 0.85em without the
+   hairline dropping out on a low-DPI display. */
+const TIER_ICONS: Record<PillTheme, ReactElement> = {
+  /* An office block: the job came straight from the employer's own board. */
+  'career-page': (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.75}
+         strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2.5 14V3.2a.7.7 0 0 1 .7-.7h6.1a.7.7 0 0 1 .7.7V14" />
+      <path d="M10 6.5h2.8a.7.7 0 0 1 .7.7V14" />
+      <path d="M1 14h14M5 5.5h2M5 8h2M5 10.5h2" />
+    </svg>
+  ),
+  /* A speech bubble: a person posted this, it is not a structured listing. */
+  'linkedin-post': (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.75}
+         strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 9.2a2.3 2.3 0 0 1-2.3 2.3H6.2L2.8 14V4.3A2.3 2.3 0 0 1 5.1 2h6.6A2.3 2.3 0 0 1 14 4.3Z" />
+    </svg>
+  ),
+  /* A globe: an aggregator that republishes other people's listings. */
+  portal: (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.75}
+         strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="8" cy="8" r="6.2" />
+      <path d="M1.8 8h12.4" />
+      <path d="M8 1.8a9.6 9.6 0 0 1 0 12.4 9.6 9.6 0 0 1 0-12.4Z" />
+    </svg>
+  ),
+};
 
 function toBadgeInfo(
   source: DiscoverySource | string,
@@ -67,8 +107,7 @@ function toBadgeInfo(
         : 'Hiring Lead';
     return {
       theme: 'linkedin-post',
-      icon: '💬',
-      label: 'LinkedIn Post',
+      label: 'LinkedIn post',
       url,
       tooltip: `LinkedIn hiring post by ${author}${url ? '\n' + url : ''}`,
     };
@@ -77,13 +116,19 @@ function toBadgeInfo(
   const atsProvider =
     typeof refMeta?.ats_provider === 'string' ? refMeta.ats_provider : null;
   if (TIER1_SOURCES.has(source) || refMeta?.tier === 1) {
+    /* The ATS name when we know it, else the source id read back as words. */
     const providerLabel = atsProvider
       ? atsProvider.charAt(0).toUpperCase() + atsProvider.slice(1)
       : source.replace(/_/g, ' ');
+    /* `company_career_page` expands to "company career page", which would make
+       the chip read "company career page career page". Only append the suffix
+       when the name does not already carry it. */
+    const label = /career page/i.test(providerLabel)
+      ? providerLabel.charAt(0).toUpperCase() + providerLabel.slice(1)
+      : `${providerLabel} career page`;
     return {
       theme: 'career-page',
-      icon: '🏢',
-      label: `Career Page · ${providerLabel}`,
+      label,
       url,
       tooltip: `Direct ATS career page (${providerLabel})${url ? '\n' + url : ''}`,
     };
@@ -95,8 +140,7 @@ function toBadgeInfo(
       : source.charAt(0).toUpperCase() + source.slice(1);
   return {
     theme: 'portal',
-    icon: '🌐',
-    label: `Portal · ${portalLabel}`,
+    label: `${portalLabel} portal`,
     url,
     tooltip: `Job portal: ${portalLabel}${url ? '\n' + url : ''}`,
   };
@@ -141,7 +185,11 @@ export function SourceBadge({
               : undefined
           }
         >
-          <span className="source-badge__icon" aria-hidden="true">{b.icon}</span>
+          {/* aria-hidden because the label beside it already says the same
+              thing; announcing the glyph too would double every badge. */}
+          <span className="source-badge__icon" aria-hidden="true">
+            {TIER_ICONS[b.theme]}
+          </span>
           <span className="source-badge__label">{b.label}</span>
         </span>
       ))}
