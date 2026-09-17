@@ -218,29 +218,23 @@
   text-decoration: underline;
 }
 
-.job-card__tailor-btn {
+/* Successor to .job-card__tailor-btn, whose three rules were deleted with the button
+   they styled. Deliberately styled as TEXT, not as a control: it carries no background,
+   no border, no cursor change and no hover state, because every one of those reads as
+   "clickable, just not yet" — which is the claim the button was removed for making. */
+.job-card__pipeline-note {
+  /* Matches .job-card__link's muted treatment so the footer reads as one row rather
+     than as a link beside a disabled something. */
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
-  font-size: 0.85rem;
-  font-weight: 500;
-  padding: 0.45rem 0.85rem;
-  border-radius: var(--radius-sm);
-  background: var(--accent, #0066cc);
-  color: white;
-  border: none;
-  cursor: pointer;
-  transition: filter 120ms ease, transform 100ms ease;
-}
-
-.job-card__tailor-btn:hover:not(:disabled) {
-  filter: brightness(1.1);
-  transform: translateY(-1px);
-}
-
-.job-card__tailor-btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+  font-size: 0.82rem;
+  /* A semantic token, never a [data-theme='dark'] rule: theme.ts applies the `system`
+     preference by REMOVING the attribute, so such a rule never matches for a
+     default-setting user and ships light text on a near-black surface. */
+  color: var(--text-muted);
+  /* Italic is the only emphasis used, because it signals "status" rather than "action"
+     without borrowing any affordance from the button that used to sit here. */
+  font-style: italic;
 }
 
 /* Modal for full JD */

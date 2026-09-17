@@ -8,22 +8,23 @@
  *   - Live Filter Cascade (Experience ceiling, Senior/Staff Title Blocklist, Location allowlist)
  *   - View Tabs: Matched Tech Jobs, All Discovered, and Filtered Out
  *   - Fast client-side search across title, company, locations, and descriptions
- *   - One-click "Tailor & Queue" action to advance a discovered job into Approval Queue
+ *
+ * THIS PAGE CREATES DISCOVERED ROWS; IT NEVER ADVANCES ONE. The Scout modal upserts
+ * jobs and applications at status `discovered`, and that is the page's whole write
+ * surface. The one-click fast path that used to advance a row six statuses to the
+ * approval queue was deleted on 2026-09-17 by Teja's ruling: it named six agents and
+ * ran none of them, two of those agents have never been written, and the rows it
+ * produced were read downstream as audited and safe to batch-approve. Status
+ * transitions belong to the pipeline agents. A new affordance here needs a new ruling.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 
 import { PageHeader } from '../../app/PageHeader';
 import { SourceBadge } from '../../app/SourceBadge';
-import { useToast } from '../../app/Toast';
-import type {
-  AgentName,
-  ApplicationStatus,
-  DiscoverySource,
-  JobRow,
-} from '../../data/contract.ts';
+import type { DiscoverySource, JobRow } from '../../data/contract.ts';
 import { supabase } from '../../data/supabase.ts';
 import { DiscoveryModal } from '../pipeline/DiscoveryModal';
 import { getCompanyCooldownInfo } from '../settings/companyCatalog.ts';
@@ -50,9 +51,6 @@ interface EvaluatedDiscoveredItem extends DiscoveredItem {
 }
 
 export function DiscoveredJobsPage(): ReactElement {
-  const navigate = useNavigate();
-  const toast = useToast();
-
   const [items, setItems] = useState<readonly DiscoveredItem[]>([]);
   const [filterRules, setFilterRules] = useState<readonly FilterRuleConfig[]>([]);
   const [techOnly, setTechOnly] = useState<boolean>(() => getTechOnlyPreference());
@@ -66,7 +64,6 @@ export function DiscoveredJobsPage(): ReactElement {
   const [selectedType, setSelectedType] = useState<string>('all');
   const [selectedCompany, setSelectedCompany] = useState<string>('all');
   const [activeJdModal, setActiveJdModal] = useState<JobRow | null>(null);
-  const [tailoringId, setTailoringId] = useState<string | null>(null);
   const [discoveryModalMode, setDiscoveryModalMode] = useState<'remote' | 'watchlist' | null>(null);
 
   /* Load discovered jobs & filter rules */
@@ -224,52 +221,6 @@ export function DiscoveredJobsPage(): ReactElement {
       return true;
     });
   }, [evaluatedItems, viewTab, search, selectedProvider, selectedArrangement, selectedType, selectedCompany]);
-
-  /* One-click action: Fast Tailor & advance to approval queue */
-  async function handleFastTailor(item: DiscoveredItem) {
-    const targetId = item.applicationId;
-    if (!targetId || supabase === null) {
-      toast.error('Cannot tailor: Application ID missing');
-      return;
-    }
-
-    try {
-      setTailoringId(targetId);
-
-      const pipelineSteps: ReadonlyArray<{
-        readonly to: ApplicationStatus;
-        readonly agent: AgentName;
-      }> = [
-        { to: 'deduped', agent: 'normalizer' },
-        { to: 'passed_filters', agent: 'screener' },
-        { to: 'scored', agent: 'matcher' },
-        { to: 'tailored', agent: 'tailor' },
-        { to: 'audit_clean', agent: 'auditor' },
-        { to: 'awaiting_approval', agent: 'auditor' },
-      ];
-
-      for (const step of pipelineSteps) {
-        const { error: stepErr } = await supabase.rpc('advance_application_status', {
-          p_application_id: targetId,
-          p_to_status: step.to,
-          p_agent: step.agent,
-          p_detail: { note: 'Fast-tailored and queued from Discovered Jobs Explorer' },
-        });
-
-        if (stepErr) {
-          throw new Error(`Step ${step.to} failed: ${stepErr.message}`);
-        }
-      }
-
-      toast.success(`Tailored & queued ${item.job.title} for review!`);
-      setItems((prev) => prev.filter((i) => i.applicationId !== targetId));
-      navigate('/approvals');
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Tailoring failed');
-    } finally {
-      setTailoringId(null);
-    }
-  }
 
   return (
     <div className="page page--wide discovery">
@@ -552,15 +503,18 @@ export function DiscoveredJobsPage(): ReactElement {
                   <span>Apply Link ↗</span>
                 </a>
 
+                {/* Replaces the removed "Tailor & Queue" fast path. That button walked six
+                    status transitions naming six agents and ran none of them — including the
+                    Auditor, which does not exist as code — so it stamped rows `audit_clean`
+                    and sent the operator to the batch-approve screen holding a verdict nobody
+                    had produced. This line states what is true instead: the row is discovered,
+                    and nothing can advance it until the agents exist. Static copy, not a
+                    disabled control, because a greyed-out button still claims the capability
+                    is there and merely unavailable right now. */}
                 {applicationId && (
-                  <button
-                    type="button"
-                    className="job-card__tailor-btn"
-                    disabled={tailoringId === applicationId}
-                    onClick={() => handleFastTailor({ applicationId, job })}
-                  >
-                    {tailoringId === applicationId ? 'Tailoring…' : '⚡ Tailor & Queue'}
-                  </button>
+                  <span className="job-card__pipeline-note">
+                    Awaiting pipeline agents
+                  </span>
                 )}
               </div>
             </article>
