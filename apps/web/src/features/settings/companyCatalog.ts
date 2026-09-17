@@ -121,6 +121,19 @@ export type BoardVerification =
  * repeated sixty times would not do any better but would be easier to typo. */
 export const UNVERIFIED_TOKEN: BoardVerification = { kind: 'unverified' };
 
+/* Constructor for the `verified` arm. Both arguments are REQUIRED and
+ * positional, which is the point: there is no way to claim a verification
+ * without naming the date it happened and the posting count the probe actually
+ * returned. A row cannot quietly assert "verified" with the evidence fields
+ * left blank, and the date stays visible at the call site rather than being
+ * baked in here where a re-probe would silently backdate it. */
+export function verified(probedOn: string, liveJobCount: number): BoardVerification {
+  /* `evidence` is a literal, not a parameter: every row in this file was
+   * established the same way, and a free-text method field is how "verified"
+   * starts meaning whatever the author felt like. */
+  return { kind: 'verified', probedOn, liveJobCount, evidence: 'parsed-board-json' };
+}
+
 /* Shared value for the common not-found case: probed, absent, and no
  * replacement portal established. Declared once because inventing a portal to
  * fill the gap is exactly the failure this file exists to stop. */
@@ -360,12 +373,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsIdentifier: 'databricks',
     cooldown: { interview: '12 Months', screening: '6 Months' },
     // Token happened to be right: 879 live postings parsed on 2026-09-17.
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 879,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 879),
   },
   {
     name: 'Snowflake',
@@ -377,12 +385,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'ashby',
     atsIdentifier: 'snowflake',
     cooldown: { interview: '6–12 Months', screening: '6 Months' },
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 346,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 346),
   },
   {
     name: 'Atlassian',
@@ -415,12 +418,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'stripe',
     cooldown: { interview: '12 Months', screening: '6 Months' },
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 654,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 654),
   },
   {
     name: 'GitLab',
@@ -475,12 +473,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'figma',
     cooldown: { interview: '6–12 Months', screening: 'None' },
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 153,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 153),
   },
   {
     name: 'Notion',
@@ -512,12 +505,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'twilio',
     cooldown: { interview: '6 Months', screening: 'None' },
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 148,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 148),
   },
   {
     name: 'DoorDash',
@@ -556,12 +544,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'ashby',
     atsIdentifier: 'confluent',
     cooldown: COOLDOWN_NOT_ON_RECORD,
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 21,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 21),
   },
   {
     name: 'Okta',
@@ -571,12 +554,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'okta',
     cooldown: COOLDOWN_NOT_ON_RECORD,
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 322,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 322),
   },
   {
     name: 'Elastic',
@@ -586,12 +564,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'elastic',
     cooldown: COOLDOWN_NOT_ON_RECORD,
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 360,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 360),
   },
   {
     name: 'Palantir',
@@ -601,12 +574,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'lever',
     atsIdentifier: 'palantir',
     cooldown: COOLDOWN_NOT_ON_RECORD,
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 313,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 313),
   },
   {
     name: 'Coinbase',
@@ -616,12 +584,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'coinbase',
     cooldown: COOLDOWN_NOT_ON_RECORD,
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 220,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 220),
   },
   {
     name: 'Microsoft AI',
@@ -637,12 +600,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     // and the single clearest proof that name-guessing cannot produce a token.
     atsIdentifier: 'microsoftcorporation',
     cooldown: COOLDOWN_NOT_ON_RECORD,
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 40,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 40),
   },
   {
     name: 'Airbnb',
@@ -652,12 +610,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'airbnb',
     cooldown: COOLDOWN_NOT_ON_RECORD,
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 163,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 163),
   },
   {
     name: 'UiPath',
@@ -667,12 +620,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'ashby',
     atsIdentifier: 'uipath',
     cooldown: COOLDOWN_NOT_ON_RECORD,
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 107,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 107),
   },
   {
     name: 'Dropbox',
@@ -682,12 +630,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'dropbox',
     cooldown: COOLDOWN_NOT_ON_RECORD,
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 41,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 41),
   },
   {
     name: 'Checkout.com',
@@ -699,12 +642,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     // to `checkoutcom` would recreate the guessing this file exists to end.
     atsIdentifier: 'checkout.com',
     cooldown: COOLDOWN_NOT_ON_RECORD,
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 160,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 160),
   },
 
   // =========================================================================
@@ -733,12 +671,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     // `verification` field.
     atsIdentifier: 'razorpaysoftwareprivatelimited',
     cooldown: { interview: '3–6 Months', screening: 'None' },
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 19,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 19),
   },
   {
     name: 'BrowserStack',
@@ -760,12 +693,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'lever',
     atsIdentifier: 'cred',
     cooldown: { interview: '6 Months', screening: 'None' },
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 11,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 11),
   },
   {
     name: 'Groww',
@@ -776,12 +704,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'groww',
     cooldown: { interview: '3–6 Months', screening: 'None' },
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 8,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 8),
   },
   {
     name: 'Zepto',
@@ -836,12 +759,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'lever',
     atsIdentifier: 'meesho',
     cooldown: { interview: '3–6 Months', screening: 'None' },
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 49,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 49),
   },
   {
     // Added 2026-09-17 from the probe; Delhi NCR matches the catalog's existing
@@ -853,12 +771,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'lever',
     atsIdentifier: 'paytm',
     cooldown: COOLDOWN_NOT_ON_RECORD,
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 204,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 204),
   },
   {
     name: 'Brex',
@@ -868,12 +781,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'brex',
     cooldown: COOLDOWN_NOT_ON_RECORD,
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 261,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 261),
   },
   {
     name: 'Plaid',
@@ -883,12 +791,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'ashby',
     atsIdentifier: 'plaid',
     cooldown: COOLDOWN_NOT_ON_RECORD,
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 110,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 110),
   },
   {
     name: 'Urban Company',
@@ -981,12 +884,7 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     cooldown: { interview: '6 Months', screening: 'None' },
     // The name guess happened to match the real token here — which is why a
     // comment saying "looks fine" was never enough; only the probe settles it.
-    verification: {
-      kind: 'verified',
-      probedOn: BOARD_PROBE_DATE_2026_09_17,
-      liveJobCount: 40,
-      evidence: 'parsed-board-json',
-    },
+    verification: verified(BOARD_PROBE_DATE_2026_09_17, 40),
   },
   {
     name: 'Nagarro',
