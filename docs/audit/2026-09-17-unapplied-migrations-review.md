@@ -7,10 +7,38 @@
 type-checks SQL, Docker is off, and there is no local rehearsal. A careful read is the
 only verification step these two files get, so this document *is* the gate.
 
-**Files reviewed:**
+---
 
-- `supabase/migrations/20260917124500_fix_bootstrap_filter_rule_seed_columns.sql`
-- `supabase/migrations/20260917130000_guard_application_status_on_insert.sql`
+# THE HEADLINE
+
+> **All seven pending migrations are safe to apply, in one `supabase db push`, in
+> filename order. No file needs a SQL change. The risk is not inside any of them — it is
+> that the FIRST file is the only one that can plausibly fail, and if it does, none of
+> the other six apply, including the two that matter.**
+
+That first file is `20260910220800_create_private_storage_buckets.sql`. It writes four
+`create policy` statements against `storage.objects`, a table this project does not own,
+and it is the only file in the backlog with no re-run guard on its main statements. Its own
+comment claims re-running is safe; **that claim is false** ([§3.1](#31-20260910220800_create_private_storage_bucketssql)).
+Nothing about it is wrong — it just has the highest chance of stopping the push, and it is
+standing in front of everything else.
+
+One sentence for the decision: **run it, but run `supabase migration list` first
+([§4](#4-the-runbook)), and if the push dies, check which file it died on before retrying.**
+
+---
+
+**Files reviewed — all seven pending migrations:**
+
+| # | File | Reviewed in |
+|---|---|---|
+| 1 | `20260910220800_create_private_storage_buckets.sql` | [§3.1](#31-20260910220800_create_private_storage_bucketssql) |
+| 2 | `20260911114300_add_resume_sha256_to_applications.sql` | [§3.2](#32-20260911114300_add_resume_sha256_to_applicationssql) |
+| 3 | `20260911235500_add_linkedin_post_discovery_source.sql` | [§3.3](#33-20260911235500_add_linkedin_post_discovery_sourcesql) |
+| 4 | `20260912001500_gemini_key_pool_cycle_randomization.sql` | [§3.4](#34-20260912001500_gemini_key_pool_cycle_randomizationsql) |
+| 5 | `20260912120000_update_search_preferences_and_employment_types.sql` | [§3.5](#35-20260912120000_update_search_preferences_and_employment_typessql) |
+| 6 | `20260917124500_fix_bootstrap_filter_rule_seed_columns.sql` | [§1](#1-20260917124500_fix_bootstrap_filter_rule_seed_columnssql) |
+| 7 | `20260917130000_guard_application_status_on_insert.sql` | [§2](#2-20260917130000_guard_application_status_on_insertsql) |
 
 **Method:** every claim each migration makes about the schema was re-derived from the
 migration files in filename order, not from the commit message and not from
@@ -23,61 +51,123 @@ anything against the live database — remote authorisation is yours to exercise
 
 ## Verdicts
 
-| Migration | Verdict | Confidence |
-|---|---|---|
-| `20260917124500_fix_bootstrap_filter_rule_seed_columns.sql` | **APPLY WITH THIS CAVEAT** — the SQL is correct and safe; its *backfill may be a complete no-op*, and the repo's own record says that is the likely outcome. See [§1.3](#13-existing-rows--the-loud-part). | High on the SQL. **Low** on the effect. |
-| `20260917130000_guard_application_status_on_insert.sql` | **SAFE TO APPLY.** Allowlist verified against the real enum and all five insert sites; no bypass path found in SQL. | High. |
+| # | Migration | Verdict | Confidence |
+|---|---|---|---|
+| 1 | `20260910220800` storage buckets | **APPLY — and watch this one.** Correct SQL, but the only file in the backlog that cannot be re-run, and it gates the other six. | High on correctness. **Medium** on whether it applies cleanly. |
+| 2 | `20260911114300` resume_sha256 | **SAFE TO APPLY.** Nullable column + shape check. Not re-runnable, same caveat, much lower exposure. | High. |
+| 3 | `20260911235500` linkedin_post | **SAFE TO APPLY.** One idempotent `add value`, not consumed anywhere. | High. |
+| 4 | `20260912001500` key pool | **APPLY ONLY AS PART OF THE FULL SET.** Installs the `evaluation_order` break that file 6 repairs. Safe in a complete push; leaves you broken if the push stops here. | High. |
+| 5 | `20260912120000` search prefs | **SAFE TO APPLY.** Enum value not consumed in-file; the array default uses values committed in migration 1. | High. |
+| 6 | `20260917124500` bootstrap fix | **APPLY WITH THIS CAVEAT** — the SQL is correct and safe; its *backfill may be a complete no-op*, and the repo's own record says that is the likely outcome. See [§1.3](#13-existing-rows--the-loud-part). | High on the SQL. **Low** on the effect. |
+| 7 | `20260917130000` INSERT guard | **SAFE TO APPLY.** Allowlist verified against the real enum and all five insert sites; no bypass path found in SQL. | High. |
 
-**Order: `124500` first, then `130000`.** That is filename order and the CLI enforces it
-anyway. They are independent — see [§3](#3-interdependence).
+**Order: filename order, and the CLI enforces it.** You do not choose the order and you
+cannot easily apply a subset — `db push` applies everything pending. That is precisely why
+all seven needed reviewing rather than two.
 
-**But neither is the real decision.** Read [§0](#0-read-this-first-you-are-probably-applying-seven-migrations-not-two) before you type the command.
+**Read [§0](#0-the-whole-push-what-one-command-actually-does) before you type the command.**
 
 ---
 
-## 0. Read this first: you are probably applying SEVEN migrations, not two
+## 0. The whole push: what one command actually does
 
-The brief for this review called these "the two unapplied migrations." The repo's own
-records say the unapplied backlog is larger, and `supabase db push` applies **all** of it
-in one go.
+You will type one command. It will apply **seven** files, in order, each in its own
+transaction. This section is the view no per-file read gives you.
+
+### 0.1 How the backlog was established
 
 The last recorded observation of remote state is
 [`docs/architecture/graph-engineering.md:259-264`](../architecture/graph-engineering.md#L259-L264),
-which reports a `supabase migration list` run against live at **11:46 on 2026-09-11**
-(the file's last commit is `98b28bd`, 2026-09-11 12:09 — so "11:46" is that day, not
-today; I initially misread it as today's and it is worth stating that it is not).
+reporting a `supabase migration list` run against live at **11:46 on 2026-09-11** (the
+file's last commit is `98b28bd`, 2026-09-11 12:09 — so "11:46" is that day, not today; I
+misread it as today's on first pass and it is worth stating plainly that it is not).
 
-It found: applied through `20260910212600`, unapplied = `20260910220800` and
+It found: applied through `20260910212600`; unapplied = `20260910220800` and
 `20260911114300`. Consistent — at that moment those were the only two files past
 `20260910212600`.
 
-Since then, five more migration files were committed and **nothing in the repo records a
-`db push` after 2026-09-11 11:46**. Git first-commit dates:
+An earlier and *superseded* observation in [`docs/PROGRESS.md:243-260`](../PROGRESS.md#L243-L260)
+confirms the seven original migrations present on both sides, and separately records
+`20260910185900` and `20260910190000` as having **empty `remote` entries**. The
+graph-engineering listing is later and supersedes it — but both agree on the shape of the
+problem, and PROGRESS.md names it: *"the migration files and the live database disagree …
+Read the files for intent. Query the database for behaviour."*
 
-| Migration | First committed | Applied? |
+Since 2026-09-11 11:46, five more files were committed and **nothing in the repo records a
+`db push`**. Git first-commit dates (`git log --diff-filter=A`):
+
+| # | Migration | First committed | Applied? |
+|---|---|---|---|
+| 1 | `20260910220800_create_private_storage_buckets` | 2026-09-10 22:11 | **No** — named unapplied by the 09-11 listing |
+| 2 | `20260911114300_add_resume_sha256_to_applications` | 2026-09-11 11:59 | **No** — named unapplied by the 09-11 listing |
+| 3 | `20260911235500_add_linkedin_post_discovery_source` | 2026-09-12 00:12 | Unrecorded — committed after the listing |
+| 4 | `20260912001500_gemini_key_pool_cycle_randomization` | 2026-09-12 00:12 | Unrecorded — committed after the listing |
+| 5 | `20260912120000_update_search_preferences_and_employment_types` | 2026-09-12 11:24 | Unrecorded — committed after the listing |
+| 6 | `20260917124500_fix_bootstrap_filter_rule_seed_columns` | 2026-09-17 12:46 | No |
+| 7 | `20260917130000_guard_application_status_on_insert` | 2026-09-17 13:00 | No |
+
+**This is inference from the repo record, not an observation of the database.** Only
+`supabase migration list` settles it, and it is the first step of [§4](#4-the-runbook).
+
+### 0.2 Cross-file interactions — what a per-file read misses
+
+I looked specifically for: a type value added in one file and consumed in another, a column
+added then altered, a function replaced twice, and any file assuming an earlier file
+succeeded.
+
+| Interaction | Files | Finding |
 |---|---|---|
-| `20260910220800_create_private_storage_buckets` | 2026-09-10 22:11 | **No** (per the 09-11 listing) |
-| `20260911114300_add_resume_sha256_to_applications` | 2026-09-11 11:59 | **No** (per the 09-11 listing) |
-| `20260911235500_add_linkedin_post_discovery_source` | 2026-09-12 00:12 | Unknown — no record |
-| `20260912001500_gemini_key_pool_cycle_randomization` | 2026-09-12 00:12 | Unknown — no record |
-| `20260912120000_update_search_preferences_and_employment_types` | 2026-09-12 11:24 | Unknown — no record |
-| `20260917124500_fix_bootstrap_filter_rule_seed_columns` | 2026-09-17 12:46 | No |
-| `20260917130000_guard_application_status_on_insert` | 2026-09-17 13:00 | No |
+| **Enum value added, consumed elsewhere** | 3 → ?, 5 → ? | **None.** `linkedin_post` and `apprenticeship` appear *only* in their own files — grepped across all 17 migrations. No other file references either value. |
+| **`bootstrap_user_defaults()` replaced twice** | 4, then 6 | **Correct as ordered.** File 4 installs the broken `evaluation_order` version; file 6 replaces it with the fixed one. No migration *calls* the function, so the broken body never executes in between. Final state is file 6's. |
+| **`claim_gemini_key()` replaced** | 4 | Once only. Diffed against `20260909235100:284-355` — see [§3.4](#34-20260912001500_gemini_key_pool_cycle_randomizationsql). Nothing safety-relevant dropped. |
+| **Column added, then depended on** | 5 → 6 | **Real dependency, correctly ordered.** File 6's backfill runs a bare `insert into public.search_preferences (user_id)`. File 5 adds three columns to that table. All three are nullable or defaulted, so the bare insert still works. Had any been `not null` with no default, file 6 would fail. |
+| **Same table touched twice** | 2 and 7 both touch `public.applications` | Disjoint: file 2 adds a column, file 7 adds a trigger. No conflict. |
+| **Backfill duplicated** | 4 and 6 both seed `gemini_key_state` from `auth.users` | Both `on conflict do nothing`. File 6 is a superset. Harmless. |
 
-**Consequences you need to hold in your head:**
+**The one that could have bitten and does not:** the `alter type … add value` trap recorded
+at `20260910185900:5-19` — *"THE NEW VALUE CANNOT BE USED UNTIL THAT TRANSACTION
+COMMITS"* — only fires when a value is added and consumed **inside one transaction**.
+Neither new value is consumed anywhere at all.
 
-1. **`db push` will apply up to seven files. I reviewed two of them.** The other five
-   are unreviewed by me. Two of them (`20260911235500`, `20260912120000`) contain
-   `alter type ... add value`, which this repo has already been bitten by — see
-   `20260910185900_add_keepalive_agent_name.sql:5-19` for the recorded trap. Neither uses
-   its new value in the same file, so both look fine, but that is a glance, not a review.
-2. **`20260912001500` is the migration that *introduces* the `evaluation_order` break.**
-   If it is unapplied, then the break `124500` describes as "LIVE" is not live yet — both
-   files will apply in the same push, seconds apart, and the broken function is never
-   called in between. `124500`'s framing is stale, its SQL is not. No action needed;
-   just do not go looking for damage that was never done.
-3. **`supabase migration list` is the only thing that settles this.** Run it first. See
-   [§4](#4-the-exact-command).
+That makes the answer **independent of how the CLI draws its transaction boundary**, which
+matters: the repo records per-file wrapping (`20260910185900:7`) and that is standard CLI
+behaviour, but I could not verify it against this CLI version. I did not need to. If the
+whole push were one transaction the result here would be the same, because nothing consumes
+a newly added value.
+
+One genuine in-file case, and it is fine: file 4 adds `used_in_cycle` at `:17` and consumes
+it at `:62,77,89,97`. That is a **column**, not an enum value — a new column is usable
+immediately in the same transaction. The restriction is specific to enum values.
+
+And file 5's `work_arrangements … default '{onsite,hybrid,remote}'` reads like the trap but
+is not: `public.work_arrangement` and all three values are from
+`20260909234500_enums.sql:153-157`, committed in migration 1.
+
+### 0.3 If it dies partway — where you land
+
+Each file is its own transaction (`20260910185900:7`), so a failure rolls that file back
+completely and leaves every earlier file committed. `db push` stops at the first failure.
+
+| Dies at | You are left with | Is that a safe resting place? |
+|---|---|---|
+| **1** — buckets | Nothing applied. Same state as now. | **Yes.** Fully safe. Fix and re-push. |
+| **2** — resume_sha256 | Buckets + storage policies live. | **Yes.** Screenshots/resumes can now be uploaded; nothing else changed. |
+| **3** — linkedin_post | + `applications.resume_sha256` column. | **Yes.** Additive, nullable, no code requires it. |
+| **4** — key pool | + `linkedin_post` enum value. | **Yes.** Unused value. |
+| **5** — search prefs | + `used_in_cycle`, new `claim_gemini_key()`, **and the BROKEN `bootstrap_user_defaults()`**. | **NO — this is the bad one.** See below. |
+| **6** — bootstrap fix | + `apprenticeship`, three `search_preferences` columns, **still the broken bootstrap**. | **NO — same problem.** |
+| **7** — INSERT guard | Everything except the INSERT guard. Bootstrap repaired. | **Yes.** Status quo on the security gap. |
+
+> **The only genuinely bad resting places are "died at 5" and "died at 6", because file 4
+> installs the `evaluation_order` break and file 6 is what repairs it.** Landing between
+> them leaves `bootstrap_user_defaults()` raising `42703` on every call.
+>
+> **It is recoverable and not urgent** — nothing calls that function today
+> ([§1.3](#13-existing-rows--the-loud-part)), so a live break there breaks nothing that is
+> currently running. Fix the failing file and re-push. But do not walk away from a push
+> that stopped at 5 or 6 thinking it was a clean partial.
+
+Files 6 and 7 are both fully re-runnable, so re-pushing after a failure at 5 or 6 is safe.
 
 ---
 
@@ -412,79 +502,363 @@ via a plain INSERT. That is a real, partial improvement, correctly scoped.
 
 ---
 
-## 3. Interdependence
+## 3. The five earlier migrations
 
-**None in either direction.** They touch disjoint objects:
+Reviewed to the same standard as §1 and §2. These are files 1–5 of the push and they run
+**before** the two above.
 
-- `124500` → `public.bootstrap_user_defaults()`, plus rows in `system_settings`,
-  `search_preferences`, `filter_rules`, `gemini_key_state`.
-- `130000` → `applyy_internal.guard_status_insert()` and a trigger on
-  `public.applications`.
+### 3.1 `20260910220800_create_private_storage_buckets.sql`
 
-No shared table, no shared function, no ordering constraint between them.
+**Verdict: APPLY — and this is the one to watch.** The SQL is correct. It is the only file
+in the backlog that cannot be re-run, and it stands first in the queue.
 
-**If you apply only one:**
+**What it does.** Inserts two private buckets (`screenshots` 10 MB PNG-only, `resumes`
+5 MB PDF-only) into `storage.buckets`, then creates four owner-scoped policies on
+`storage.objects` — separate `select` / `insert` / `update` / `delete` rather than one
+`for all`.
 
-- **`124500` alone** → the insert hole stays open. Status quo; nothing gets worse.
-- **`130000` alone** → the bootstrap stays broken. Status quo; nothing gets worse. The new
-  trigger constrains only statuses no current code writes at insert, so it cannot break
-  the scouts.
+**Correctness — checked and good:**
 
-**Recommended order — filename order, `124500` then `130000`** — which is what the CLI
-does anyway. The only reason to prefer it is that `124500` has the larger blast radius
-(it writes rows), so if you are going to stop and look at something, stop after that one.
+- **The path-prefix boundary is right.** `(storage.foldername(name))[1] = auth.uid()::text`
+  matches the gateway's `${userId}/${applicationId}/${timestamp}.ext`. Postgres arrays are
+  1-indexed, and `[1]` is correct. The file flags this itself as the most likely thing to
+  get wrong, and gets it right.
+- **Splitting `for all` into four policies is the right call**, for the reason given at
+  `:76-81`: `for all` writes one predicate into both `using` and `with check`, conflating
+  "which rows you may see" with "which rows you may create". The `update` policy correctly
+  carries **both** clauses — omitting `with check` would let an owner move an object into
+  another user's prefix.
+- **`insert into storage.buckets … on conflict (id) do nothing`** is idempotent.
+- The column list (`id, name, public, file_size_limit, allowed_mime_types`) matches the
+  current Supabase storage schema.
+
+**THE DEFECT — a false idempotence claim.** The file says at `:43-45`:
+
+> *"`on conflict do nothing` so re-running is safe — … a migration that cannot be re-run is
+> a migration nobody dares re-run."*
+
+**That is true of the bucket insert and false of the file.** Lines `:86`, `:99`, `:110`,
+`:127` are four bare `create policy` statements. Postgres has no `create policy if not
+exists` and no `create or replace policy`, and there is no `drop policy if exists` ahead of
+them. **Re-running this file raises `42710` (duplicate_object).**
+
+*In fairness, this is house style, not an outlier:* `20260909235000_rls_policies.sql`
+contains 17 `create policy` and 0 `drop policy`. The whole repo's policy migrations share
+this property. The reason it matters **here and not there** is that this file is first in a
+seven-file push, so a failure in it stops everything behind it.
+
+**When does non-idempotence actually bite?** Only when the object already exists from a
+source other than this migration's own recorded application — because a *failed* file rolls
+back completely, so retrying after a failure is clean. That sounds theoretical until you
+read `docs/PROGRESS.md:250-260`, which names a **"NEW DIVERGENCE CLASS: the migration files
+and the live database disagree"** in this very project. If any of these four policies was
+ever created by hand in the dashboard under the same name, this file fails and nothing else
+applies.
+
+**Corrected SQL — reported, NOT applied** (I may not edit migrations; assign it if you want
+it). Add ahead of each `create policy`:
+
+```sql
+-- Postgres has no `create policy if not exists` and no `create or replace policy`, so a
+-- bare `create policy` raises 42710 on a second run. This file is FIRST in a seven-file
+-- push: if it cannot be re-run, a stale policy of the same name blocks every migration
+-- behind it, including the approval-gate fix. Dropping first is what makes the file
+-- match the re-runnability its own header claims.
+drop policy if exists "applyy owner reads own artifacts"   on storage.objects;
+drop policy if exists "applyy owner writes own artifacts"  on storage.objects;
+drop policy if exists "applyy owner updates own artifacts" on storage.objects;
+drop policy if exists "applyy owner deletes own artifacts" on storage.objects;
+```
+
+**My recommendation is to apply the file AS-IS and not edit it.** A pre-flight query
+([§4](#4-the-runbook)) tells you in one second whether the collision exists, and editing a
+file to solve a problem you have not confirmed you have is how the `evaluation_order` bug
+got in. Fix it only if the pre-flight says you need it.
+
+**Residual I could not settle:** `create policy on storage.objects` requires rights on a
+table owned by `supabase_storage_admin`. This is the pattern Supabase's own documentation
+prescribes, and `db push` connects as the same `postgres` role the SQL editor uses, so I
+expect it to work — but I could not verify it. If this file fails with `42501` rather than
+`42710`, that is what happened. See [§7](#7-what-i-could-not-determine).
+
+**Honest scope note the file makes itself, and it is correct:** creating a policy and having
+it *scope correctly* are different claims, and every query available here runs as a role
+with `BYPASSRLS`, so an inverted predicate would look identical in `pg_policies`. Treat
+these four as **declared, not enforced**, until `rls-proof` runs. The buckets are private
+regardless, so a wrong predicate is a broken feature, not an open door.
+
+### 3.2 `20260911114300_add_resume_sha256_to_applications.sql`
+
+**Verdict: SAFE TO APPLY.**
+
+Adds `applications.resume_sha256 text` (nullable, no default) plus a shape check
+`resume_sha256 is null or resume_sha256 ~ '^[0-9a-f]{64}$'`.
+
+- **Nullable with no default is correct and well-argued** (`:21-33`): historical rows have
+  no value, and applications that legitimately attach no resume never will. A `not null`
+  here would force a fake digest, which is worse than an absent one.
+- **The check is written `is null or …`**, so the nullable case stays legal. A bare regex
+  would have rejected every resume-less application — the file spots this.
+- **Additive and unused.** Nothing in the backlog or the codebase reads this column yet, so
+  it cannot break anything downstream.
+- Adding a nullable column with no default is catalog-only in PG11+ — no table rewrite, no
+  lock of consequence.
+- The `check` validates existing rows on creation; every existing row has `NULL` there,
+  which passes.
+
+**Same non-idempotence caveat, much lower stakes.** `:34` is `add column` **without**
+`if not exists`, and `:50` is `add constraint` with no guard — re-running raises `42701`
+then `42710`. Fix would be `add column if not exists` and wrapping the constraint in a
+`do $$ … $$` existence check. **Not worth doing.** Unlike §3.1 this file is fourth from the
+front and a collision is far less plausible.
+
+**The file's own limits statement is worth keeping:** a shape check catches truncation,
+case drift and an empty string, but **cannot catch a well-formed digest of the wrong
+bytes** — which has already happened once on this project (a sha256 of the resume HTML
+string rather than of the rendered PDF). This buys legibility, not integrity.
+
+### 3.3 `20260911235500_add_linkedin_post_discovery_source.sql`
+
+**Verdict: SAFE TO APPLY.** Eleven lines; the smallest and lowest-risk file in the backlog.
+
+```sql
+alter type public.discovery_source add value if not exists 'linkedin_post';
+```
+
+- **`if not exists` makes it idempotent.** ✅
+- **Appended, not inserted mid-enum.** `add value` with no `before`/`after` appends, leaving
+  the declaration order of the twelve existing values (`20260909234500_enums.sql:104-120`)
+  untouched. This matters because Postgres sorts enums by declaration order and
+  `packages/shared-types` mirrors it — inserting in the middle would silently change sort
+  behaviour for every existing query.
+- **The value is consumed nowhere.** Grepped all 17 migrations: `linkedin_post` appears only
+  in this file. So the in-transaction trap at `20260910185900:5-19` cannot fire.
+- **Its own file, which is the correct shape** — exactly what `20260910185900` argues for.
+
+### 3.4 `20260912001500_gemini_key_pool_cycle_randomization.sql`
+
+**Verdict: APPLY ONLY AS PART OF THE FULL SET.** The SQL is sound. The reason for the
+qualifier is ordering, not correctness: **this is the file that installs the
+`evaluation_order` break that file 6 repairs.** A push that commits this and then stops
+leaves `bootstrap_user_defaults()` raising `42703`.
+
+**What it does:** adds `gemini_key_state.used_in_cycle`, adds a covering index, rewrites
+`claim_gemini_key()` from LRU to epoch-shuffle-with-key-1-pinned, rewrites
+`bootstrap_user_defaults()` (introducing the break), and backfills 20 keys per user from
+`auth.users`.
+
+**Idempotence: clean.** `add column if not exists` (`:17`), `create index if not exists`
+(`:20`), two `create or replace function`, and a backfill with `on conflict do nothing`
+(`:169`). Fully re-runnable.
+
+**I diffed the new `claim_gemini_key()` against the version it replaces**
+(`20260909235100:284-355`), because `create or replace` swaps the *whole* body and **this
+exact file has a demonstrated history of silently dropping things that way** — it lost the
+staleness `config` seed and the cost ordering in the same change. So the question is not
+whether the new logic is good but whether anything was lost.
+
+**Nothing safety-relevant was lost.** Every control survives, in order:
+
+| Control | Old | New |
+|---|---|---|
+| `for update` row lock on `system_settings` (serialises the counter) | `:26` | `:44` ✅ |
+| Fail closed on missing/disabled settings row | `:29-31` | `:47-49` ✅ |
+| Circuit breaker, explicit `is not null` so NULL = uncapped | `:35-37` | `:52-54` ✅ |
+| Pacific date, not `current_date` | `:15` | `:34` ✅ |
+| Cooling keys ineligible | `:51` | `:63,72,98` ✅ |
+| `for update skip locked … limit 1` | `:54` | `:104` ✅ |
+| Budget charged **only after** a key was handed out | `:64-68` | `:113-117` ✅ |
+
+**What genuinely changed, and it is a deliberate design change, not a regression:**
+`order by k.last_used_at` (LRU) became `order by (case when key_index = 1 then 0 else 1
+end), random()` plus `used_in_cycle` bookkeeping. Over a full cycle each enabled key is
+still used exactly once, so load stays even; key 1 simply leads each epoch.
+
+**Two honest observations, neither blocking:**
+
+1. **`gemini_key_state_lru_idx` is now dead for this query.** It was built for
+   `order by last_used_at`; the new ordering is `case … , random()`, which no index can
+   serve. With 20 keys per user the sort is free, and the new `gemini_key_state_cycle_idx`
+   covers the `where`. Worth knowing before someone "optimises" by deleting the wrong index.
+2. **The cycle-reset branch (`:66-84`) is correct.** When every eligible key is used it
+   re-counts ignoring `used_in_cycle`, resets only if a non-cooling key exists, and
+   otherwise returns NULL. Because the `system_settings` row lock at `:44` already
+   serialises concurrent claims for a user, the bulk `update … set used_in_cycle = false`
+   cannot deadlock against a second claim.
+
+**Comment density is far below this repo's bar** — roughly 0.25 comment lines per code
+line against the ≥1.00 the codebase holds elsewhere. I mention it because it is not
+cosmetic here: **this is the one file in the whole set that silently dropped two ruled
+decisions, and it is also the one written to a visibly different standard.** The two facts
+are almost certainly the same cause.
+
+### 3.5 `20260912120000_update_search_preferences_and_employment_types.sql`
+
+**Verdict: SAFE TO APPLY.**
+
+```sql
+alter type public.employment_type add value if not exists 'apprenticeship';
+
+alter table public.search_preferences
+  add column if not exists work_arrangements public.work_arrangement[] not null default '{onsite,hybrid,remote}',
+  add column if not exists max_salary numeric(14, 2),
+  add column if not exists compensation_types text[] not null default '{paid}';
+```
+
+- **Fully idempotent** — `if not exists` on all four statements.
+- **The enum value is appended and consumed nowhere.** `apprenticeship` appears only in this
+  file across all 17 migrations, so the in-transaction trap cannot fire.
+- **`work_arrangement[]` looks like the trap and is not.** `public.work_arrangement` and all
+  three values in that default are from `20260909234500_enums.sql:153-157` — migration 1,
+  committed long ago. Evaluating the default expression is therefore safe. *This is the one
+  line in the backlog I would have expected to break, and it does not.*
+- **`not null` + constant default on an existing table** is catalog-only in PG11+; no
+  rewrite. `search_preferences` is almost certainly empty anyway.
+- **The reason file 6 depends on this one:** `20260917124500`'s backfill runs a bare
+  `insert into public.search_preferences (user_id)`. It works only because all three new
+  columns are nullable or defaulted. They are. Correctly ordered (file 5 before file 6).
+
+**Same low comment density as §3.4.** No defect; noted for consistency with the repo's
+stated calibration.
 
 ---
 
-## 4. The exact command
+## 3.6 Interdependence, all seven
+
+Object-level overlap across the whole backlog:
+
+| Object | Touched by | Conflict? |
+|---|---|---|
+| `storage.buckets` / `storage.objects` | 1 | No |
+| `public.applications` | 2 (column), 7 (trigger) | No — disjoint |
+| `public.discovery_source` | 3 | No |
+| `public.gemini_key_state` | 4 (column, index, rows), 6 (rows) | No — both `on conflict do nothing` |
+| `public.claim_gemini_key()` | 4 | Replaced once |
+| `public.bootstrap_user_defaults()` | 4, then **6** | **Replaced twice — order-critical, and the order is correct** |
+| `public.employment_type` | 5 | No |
+| `public.search_preferences` | 5 (columns), 6 (rows) | **Real dependency, correctly ordered** |
+| `public.filter_rules` | 6 | No |
+| `applyy_internal.guard_status_insert()` | 7 | New object |
+
+**Only two orderings are load-bearing, and both are satisfied by filename order:** 4 before
+6 (the break before its repair) and 5 before 6 (the columns before the insert that relies on
+their defaults). You cannot get these wrong — the CLI applies in filename order and offers
+no way to reorder.
+
+---
+
+## 4. The runbook
 
 **There is a documented, working, non-Docker path, and you have used it before.**
 `docs/PROGRESS.md:44-46` records you running `supabase db push` yourself against
 `xynqxekcqizwhtskzqrq`. `db push` connects to the remote database over the network;
 Docker is needed only for `supabase start`, `db reset` and `db diff` (which uses a local
-shadow database). Your no-Docker rule does not block this.
+shadow database). **Your no-Docker rule does not block this** — an earlier version of this
+review's brief implied it did.
 
 State confirmed on disk: project linked (`supabase/.temp/project-ref` →
 `xynqxekcqizwhtskzqrq`), CLI `2.117.0` at `/c/Users/tejam/tools/supabase/supabase`,
 remote Postgres `17.6.1.166`.
 
-### Step 1 — find out what is actually unapplied (do not skip this)
+### Step 1 — establish what is actually pending (do not skip this)
 
 ```bash
 supabase migration list
 ```
 
-This is the only thing that settles §0. Compare the **Remote** column against the
-seventeen files in `supabase/migrations/`. **If it lists more than the two `20260917…`
-files as unapplied, stop and read those files before pushing** — a push applies all of
-them.
+**This is the only thing that settles [§0.1](#01-how-the-backlog-was-established).**
+Everything this document says about *which* files are pending is inference from the repo
+record, last observed 2026-09-11. Compare the **Remote** column against the seventeen files
+in `supabase/migrations/`.
 
-### Step 2 — capture a baseline BEFORE you apply
+Expect seven pending. **If the list differs from §0.1's table, trust the list** and tell
+whoever is coordinating, because §0.3's "if it dies at file N" mapping shifts with it.
+
+### Step 2 — the one pre-flight that can save the whole push
+
+[§3.1](#31-20260910220800_create_private_storage_bucketssql) is the file most likely to
+fail, it is first, and it takes everything behind it down with it. This tells you in one
+second whether it will:
+
+```sql
+-- THE ONLY PRE-FLIGHT THAT CHANGES WHAT YOU DO. Migration 1 creates four policies with
+-- bare `create policy` -- no IF NOT EXISTS exists for policies -- so a policy already
+-- carrying one of these names makes the file raise 42710 and stops all seven migrations.
+-- Expect ZERO rows. Any row here means fix the file before pushing, per the corrected
+-- SQL in section 3.1.
+select policyname
+  from pg_policies
+ where schemaname = 'storage'
+   and tablename  = 'objects'
+   and policyname in (
+     'applyy owner reads own artifacts',
+     'applyy owner writes own artifacts',
+     'applyy owner updates own artifacts',
+     'applyy owner deletes own artifacts'
+   );
+
+-- SAME QUESTION FOR MIGRATION 2, which also has no re-run guard. Expect zero rows.
+-- A row means `alter table ... add column resume_sha256` will raise 42701.
+select column_name
+  from information_schema.columns
+ where table_schema = 'public'
+   and table_name   = 'applications'
+   and column_name  = 'resume_sha256';
+```
+
+### Step 3 — capture a baseline BEFORE you apply
 
 The `124500` bug is proof that a migration can run clean and leave you broken. A count
 taken only afterwards cannot tell "seeded 18 rows" from "was already 18". Take it first.
 
+A green push is not evidence. The `evaluation_order` bug is the proof that a migration can
+run clean and leave you broken, and a count taken only *afterwards* cannot tell "seeded 18
+rows" from "was already 18". **Take the numbers first and keep the output.**
+
 ```sql
--- BASELINE. Run this BEFORE the push and keep the output. Every number below should
--- either grow or stay 0 for a reason you can name -- "it changed" is the only evidence
--- that separates a real apply from a green no-op.
+-- BASELINE FOR THE WHOLE BACKLOG. Run BEFORE the push, keep the result, diff it after.
+-- Each row names the migration whose effect it measures, so a number that did not move
+-- points at a specific file rather than at a vague worry.
 select
-  -- THE DETERMINING NUMBER for migration 124500. Its entire backfill is
-  -- `insert ... select ... from auth.users`, so if this is 0 the backfill inserts
-  -- nothing and the migration is a no-op that reports success. docs/PROGRESS.md:70
-  -- says this is 0; if it still is, expect every count below to stay 0 too.
-  (select count(*) from auth.users)                  as auth_users,
+  -- THE DETERMINING NUMBER for migration 6 (124500). Its entire backfill is
+  -- `insert ... select ... from auth.users`, so if this is 0 the backfill inserts nothing
+  -- and that migration is a no-op that reports success. As of docs/PROGRESS.md:70 this
+  -- was 0. If it still is, expect every count below it to stay 0 too -- and that is a
+  -- PASS, not a failure. See section 1.3.
+  (select count(*) from auth.users)                     as auth_users,
+  -- MIGRATION 1. Expect 0 before, 2 after ('screenshots' and 'resumes'). This is the
+  -- number that proves the push got past its most failure-prone file.
+  (select count(*) from storage.buckets)                as storage_buckets,
+  -- MIGRATION 1's policies. Expect 0 before, 4 after. Counted separately from the buckets
+  -- because the bucket insert is idempotent and the policy creates are not -- they can
+  -- fail independently of each other.
+  (select count(*) from pg_policies
+    where schemaname = 'storage' and tablename = 'objects'
+      and policyname like 'applyy owner%')              as storage_policies,
+  -- MIGRATION 4. Expect false before, true after: the column the new key-pool cycle
+  -- logic depends on.
+  (select exists (select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'gemini_key_state'
+      and column_name = 'used_in_cycle'))               as has_used_in_cycle,
+  -- MIGRATION 5. Expect false before, true after.
+  (select exists (select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'search_preferences'
+      and column_name = 'work_arrangements'))           as has_work_arrangements,
+  -- MIGRATION 7. Expect false before, true after. The approval-gate fix.
+  (select exists (select 1 from pg_trigger
+    where tgrelid = 'public.applications'::regclass
+      and tgname  = 'guard_status_insert'))             as has_insert_guard,
   -- The kill-switch row. claim_gemini_key() fails closed without it, which is why a
   -- missing row presents as an idle pipeline rather than an error.
-  (select count(*) from public.system_settings)      as system_settings,
-  (select count(*) from public.search_preferences)   as search_preferences,
-  -- Expect 9 per user after the backfill. This is the table the whole migration is about.
-  (select count(*) from public.filter_rules)         as filter_rules,
+  (select count(*) from public.system_settings)         as system_settings,
+  (select count(*) from public.search_preferences)      as search_preferences,
+  -- Expect 9 per user after the backfill. The table migration 6 is about.
+  (select count(*) from public.filter_rules)            as filter_rules,
   -- Expect 20 per user.
-  (select count(*) from public.gemini_key_state)     as gemini_keys;
+  (select count(*) from public.gemini_key_state)        as gemini_keys;
 ```
 
-### Step 3 — apply
+### Step 4 — apply
 
 ```bash
 supabase db push
@@ -492,6 +866,15 @@ supabase db push
 
 `--dry-run` was tried on 2026-09-11 and was blocked with no local DB connection
 (`.remember/today-2026-09-11.done.md:8`), so do not count on it.
+
+**Watch which file it stops on if it stops.** The CLI prints each migration as it applies.
+That filename is what [§0.3](#03-if-it-dies-partway--where-you-land) is indexed by, and it
+is the difference between a safe resting place and one you should not walk away from.
+
+### Step 5 — verify
+
+[§5](#5-what-you-should-see-afterwards). Do not skip §5.4's red test; it is the only check
+in this document that proves a control *refuses* rather than merely *exists*.
 
 ---
 
@@ -603,35 +986,90 @@ in the revoked `applyy_internal` schema fires correctly.
 
 ---
 
+### 5.5 The five earlier migrations landed (files 1–5)
+
+Re-run the §4 Step 3 baseline and diff. Specifically:
+
+```sql
+-- ONE ROW PER MIGRATION, each asserting the object that migration exists. Written as
+-- booleans rather than counts because these are structural: a column either exists or it
+-- does not, and there is no "partially added" state to misread.
+select
+  -- MIGRATION 1. Expect 2 buckets and 4 policies. If buckets is 2 and policies is 0, the
+  -- insert succeeded and the policy creates did not -- impossible inside one transaction,
+  -- so it would mean the file did not apply as a unit and is worth reporting.
+  (select count(*) from storage.buckets
+    where id in ('screenshots','resumes'))                  as buckets_expect_2,
+  (select count(*) from pg_policies
+    where schemaname='storage' and tablename='objects'
+      and policyname like 'applyy owner%')                  as policies_expect_4,
+  -- MIGRATION 2.
+  (select count(*) from information_schema.columns
+    where table_schema='public' and table_name='applications'
+      and column_name='resume_sha256')                      as resume_sha256_expect_1,
+  -- MIGRATION 3 and 5. Enum values, checked by unnesting the enum rather than by casting
+  -- a literal -- a cast would ERROR if the value were missing, which is a worse signal
+  -- than a row that simply does not appear.
+  (select count(*) from unnest(enum_range(null::public.discovery_source)) v
+    where v::text = 'linkedin_post')                        as linkedin_post_expect_1,
+  (select count(*) from unnest(enum_range(null::public.employment_type)) v
+    where v::text = 'apprenticeship')                       as apprenticeship_expect_1,
+  -- MIGRATION 4.
+  (select count(*) from information_schema.columns
+    where table_schema='public' and table_name='gemini_key_state'
+      and column_name='used_in_cycle')                      as used_in_cycle_expect_1,
+  -- MIGRATION 5.
+  (select count(*) from information_schema.columns
+    where table_schema='public' and table_name='search_preferences'
+      and column_name in ('work_arrangements','max_salary','compensation_types'))
+                                                            as new_pref_cols_expect_3;
+```
+
+Every value should equal the number in its alias. Anything short names the file that did
+not land.
+
+---
+
 ## 6. If it half-applies
 
 **Within one file you cannot half-apply.** The CLI wraps each migration in a transaction
 (`20260910185900:5-11`), so a file either commits completely or leaves no trace and is not
 recorded in the ledger.
 
-**Across files you can.** `db push` applies them in order and stops at the first failure.
-Earlier files are committed; the failing one is rolled back; later ones never run.
+**Across files you can, and with seven files that is the likely shape of any trouble.**
+`db push` applies them in order and stops at the first failure. Earlier files are
+committed; the failing one is rolled back; later ones never run.
+
+**[§0.3](#03-if-it-dies-partway--where-you-land) maps every stopping point to the state it
+leaves you in.** Read that first — it is the part indexed by the filename the CLI prints.
 
 **Recovery:**
 
 1. **Do not re-run blindly.** `supabase migration list` first — it tells you exactly where
    it stopped.
-2. **Both of these files are safely re-runnable** (§1.2, §2.6), so a second `db push`
-   after fixing the failing file is fine. The CLI skips already-recorded ones.
+2. **Five of the seven are safely re-runnable** (files 3, 4, 5, 6, 7). **Files 1 and 2 are
+   not** ([§3.1](#31-20260910220800_create_private_storage_bucketssql),
+   [§3.2](#32-20260911114300_add_resume_sha256_to_applicationssql)) — but that only bites
+   if their objects exist *without* the ledger recording them, since a failed file rolls
+   back completely. §4 Step 2's pre-flight is what tells you.
 3. **If the ledger and reality disagree** — a file that clearly applied but is not
    recorded, or vice versa — use `supabase migration repair --status applied <version>`
    (or `--status reverted`) to correct the ledger. **Do not** hand-edit
    `supabase_migrations.schema_migrations`.
-4. **If `124500` itself fails**, nothing was written: no function replacement, no
-   backfill. The database is exactly as it was and `bootstrap_user_defaults()` is still
-   broken. No cleanup.
-5. **If `130000` fails after the function was created but before the trigger** — not
-   possible within the transaction, but if the ledger says otherwise, check §5.4's
+4. **If it stopped at file 5 or 6, do not walk away.** Those are the two bad resting
+   places: file 4 installed the `evaluation_order` break and file 6 is its repair. Nothing
+   calls `bootstrap_user_defaults()` today so nothing is actively failing, but the fix is
+   half-landed. Fix the failing file and re-push.
+5. **If `124500` (file 6) itself fails**, nothing of it was written: no function
+   replacement, no backfill. No cleanup needed — but you are in the state above.
+6. **If `130000` (file 7) fails after the function was created but before the trigger** —
+   not possible within the transaction, but if the ledger says otherwise, check §5.4's
    `pg_trigger` query. A function with no trigger is inert and harmless; just re-push.
-6. **There is no undo.** Neither file has a down migration and this repo does not write
-   them. Reversing `130000` is `drop trigger guard_status_insert on public.applications;`
-   — which reopens the hole. Reversing `124500`'s backfill would mean deleting seeded
-   rows, which you should not do; re-running the fixed function is the forward fix.
+7. **There is no undo.** No file in this backlog has a down migration and this repo does
+   not write them. Reversing `130000` is
+   `drop trigger guard_status_insert on public.applications;` — which reopens the hole.
+   Reversing `124500`'s backfill would mean deleting seeded rows, which you should not do;
+   re-running the fixed function is the forward fix.
 
 ---
 
@@ -642,34 +1080,64 @@ than an honest gap.
 
 | # | Unresolved | Why it matters | What settles it |
 |---|---|---|---|
-| 1 | **Which migrations are actually applied on remote.** Last record is 2026-09-11 11:46. | `db push` may apply seven files, five of which I did not review. | `supabase migration list` |
+| 1 | **Which migrations are actually applied on remote.** Last record is 2026-09-11 11:46, and everything in §0.1 is inference from the repo, not observation. | It sets the apply set, and §0.3's failure map is indexed by position. | `supabase migration list` |
 | 2 | **How many rows are in `auth.users`.** `docs/PROGRESS.md:70` says zero; that note is several days old. | This single number decides whether `124500`'s backfill does anything at all. | `select count(*) from auth.users;` |
 | 3 | **Whether the migration role can read `auth.users`.** I reason it can (Supabase `postgres`, plus the `20260912001500:166` precedent), but that precedent would look identical if it had returned zero rows. | A silent zero-row read makes the backfill a no-op that reports success. | §5.2 — compare against the §4 baseline. |
 | 4 | **Whether a `security invoker` trigger function in the revoked `applyy_internal` schema fires for `authenticated`.** I am confident (Postgres checks `EXECUTE` at `CREATE TRIGGER`; `set_updated_at` is a live precedent in the identical shape) but I could not execute SQL. | If wrong, **every** insert into `applications` fails — a full pipeline outage. | §5.4's red test. |
-| 5 | **The other five unapplied migrations.** Unreviewed. Two contain `alter type ... add value`; neither uses the new value in the same file, which is the documented trap, but that is a glance. | They ship in the same push. | A review, if §1 of `supabase migration list` shows them unapplied. |
+| 5 | **Whether the migration role may `create policy` on `storage.objects`**, a table owned by `supabase_storage_admin`. This is Supabase's own documented pattern and `db push` uses the same `postgres` role as the SQL editor, so I expect yes — but I did not verify it. | File 1 is first; if it cannot create policies the entire push stops before anything else applies. | Push and watch. A `42501` on file 1 is this; a `42710` is a name collision instead. |
 
-**Confidence summary.** High that neither file corrupts data, breaks an existing code path,
-or widens privilege. High that `130000`'s allowlist is correct and has no SQL-side bypass.
-**Low that `124500` will visibly change anything**, and that is a property of the
-database's current state, not of the migration.
+**Items 1–3 are unanswerable from any Claude session**, not just this one: the Supabase MCP
+server is configured but unauthenticated, this session is non-interactive so no OAuth flow
+can run, and remote authorisation is gated to you. They are **questions for you**, not
+inferences I withheld.
+
+**Confidence summary.** High that no file in the backlog corrupts data, breaks an existing
+code path, or widens privilege. High that `130000`'s allowlist is correct and has no
+SQL-side bypass. High that the cross-file interactions are clean, and that conclusion does
+not depend on the transaction-boundary question ([§0.2](#02-crossfile-interactions--what-a-perfile-read-misses)).
+**Low that `124500` will visibly change anything** — a property of the database's current
+state, not of the migration. **Medium that file 1 applies cleanly**, which is the single
+biggest unknown in the push.
+
+**On the framing, deliberately under-claimed:** this document says *"we cannot see the
+database"*, not *"your database is broken."* If `20260912001500` is itself unapplied — and
+the repo record suggests it is — then the `evaluation_order` break that `124500` describes
+as live **is not live yet**, and both files apply seconds apart in the same push with the
+broken function never executing in between. Do not go looking for damage that may never
+have been done.
 
 ---
 
 ## 8. Defects found
 
-**No blocking defects. No SQL requires correction, and I have proposed no edits to either
-file.** Both are correct, idempotent, transactional and well-commented — including the
-"why it exists" comment a migration needs to stop someone simplifying it back into the bug
-it fixed. Both carry that generously.
+**No blocking defects across all seven. Nothing must be changed before pushing.** Every
+file is correct; five of seven are fully idempotent; all are transactional.
 
-What I found is three **comment-level** issues. None changes behaviour; all three could
-mislead a later reader, which in this repo is how stale claims get trusted.
+**One real defect, in a comment that asserts a property the file does not have:**
 
 | # | File:line | Issue | Suggested action |
 |---|---|---|---|
-| 1 | `124500:177-191`, `:245-251` | The population A / B model is counterfactual — `bootstrap_user_defaults()` has never been called, so neither population exists. The SQL reaches the right action for the wrong reason, and the comment sets a false expectation of what you will see post-apply. | Amend the comment after applying, when the real state is known. **Not worth blocking on.** |
-| 2 | `124500:249-251` | Cites protecting "ordering a real user deliberately tuned on the settings page"; the Filters page cannot write (`filtersStore.ts:232` upserts `is_enabled`, column is `enabled`). | Leave the behaviour. Do not let this line be cited as evidence the settings page works. |
-| 3 | `130000:39-41` | Lists `scout-remote.ts:343` as a live insert site; `CLAUDE.md` §5 records it as having no production caller. | Harmless — it writes `'discovered'`, allowlisted regardless. Note only. |
+| **1** | `20260910220800:43-45` | **Claims re-running is safe. It is not.** Four bare `create policy` statements (`:86,99,110,127`) have no re-run guard — Postgres has no `create policy if not exists`. A second run raises `42710`. The bucket insert *is* idempotent, which is what the comment is describing; the file as a whole is not. **This is the first file in the push, so a failure here stops all seven.** | Corrected SQL in [§3.1](#31-20260910220800_create_private_storage_bucketssql) — four `drop policy if exists` lines. **Do not apply it blind.** Run §4 Step 2's pre-flight; fix only if it returns rows. This is house style (`rls_policies.sql`: 17 creates, 0 drops), so fixing it properly is a repo-wide change, not a one-file one. |
+
+**Three comment-level issues.** None changes behaviour; all could mislead a later reader,
+which in this repo is how stale claims get trusted.
+
+| # | File:line | Issue | Suggested action |
+|---|---|---|---|
+| 2 | `124500:177-191`, `:245-251` | The population A / B model is counterfactual — `bootstrap_user_defaults()` has never been called, so neither population exists. The SQL reaches the right action for the wrong reason, and the comment sets a false expectation of what you will see post-apply. | Amend the comment after applying, when the real state is known. **Not worth blocking on.** |
+| 3 | `124500:249-251` | Cites protecting "ordering a real user deliberately tuned on the settings page"; the Filters page cannot write (`filtersStore.ts:232` upserts `is_enabled`, column is `enabled`). | Leave the behaviour. Do not let this line be cited as evidence the settings page works. |
+| 4 | `130000:39-41` | Lists `scout-remote.ts:343` as a live insert site; `CLAUDE.md` §5 records it as having no production caller. | Harmless — it writes `'discovered'`, allowlisted regardless. Note only. |
+
+**Two non-idempotent files, reported as a property rather than a defect:** files 1 and 2
+cannot be re-run. That is invisible in a normal push (each migration runs once) and only
+matters where the ledger and reality can diverge — a class this repo has already met
+(`docs/PROGRESS.md:250-260`). §4 Step 2 is the cheap check.
+
+**One comment-density observation:** `20260912001500` and `20260912120000` run around 0.25
+comment lines per code line against the ≥1.00 this codebase holds elsewhere. Not a defect,
+and not worth retrofitting. Worth noticing because `20260912001500` is also the one file in
+the set that silently dropped two ruled decisions via `create or replace` — the low density
+and the silent omissions are very likely the same cause.
 
 **One operational gap, outside both files and not theirs to close:** nothing calls
 `bootstrap_user_defaults()` automatically — not the web app, not a trigger on `auth.users`.
@@ -683,14 +1151,21 @@ hand. Worth a ticket.
 Every schema claim was re-derived from the migration files in filename order. Everything
 below was read, not assumed:
 
-- all 17 files in `supabase/migrations/` (targeted reads; enums, both guard files and all
-  three prior `bootstrap_user_defaults` definitions in full)
+- **all seven pending migrations in full**, plus targeted reads across the other ten
+  (enums, both guard files, and all three prior `bootstrap_user_defaults` definitions)
 - repo-wide greps for: `insert into public.applications`, `security definer`,
   `force row level security`, `alter type`, `revoke`/`grant`, `ignoreDuplicates`,
-  `deduped`, `bootstrap_user_defaults`, every `.rpc(` call site
+  `deduped`, `bootstrap_user_defaults`, `work_arrangement`, `apprenticeship`,
+  `linkedin_post`, `used_in_cycle`, `resume_sha256`, every `.rpc(` call site
 - all five `applications` insert sites, read in context rather than trusted from the
   migration's own enumeration
+- **a diff of the replaced `claim_gemini_key()` against its predecessor**
+  (`20260909235100:284-355`), control by control — because `create or replace` swaps the
+  whole body and that is exactly how this file lost two other decisions
+- every top-level DDL statement in the backlog, classified for re-runnability
 - `git log --diff-filter=A` on every migration, to date the apply backlog
+- `20260909235000_rls_policies.sql` policy-creation style, to establish whether file 1's
+  bare `create policy` is an outlier (it is not)
 - `supabase/config.toml` (PostgREST exposes `public` only — `applyy_internal` is not
   reachable over the API), `supabase/.temp/` link state
 
