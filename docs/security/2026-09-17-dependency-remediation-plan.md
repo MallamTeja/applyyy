@@ -91,6 +91,39 @@ they are not exposed on Vercel.
 Still fix them. Just do not let two criticals reorder the queue ahead of the
 open redirect that actually ships.
 
+#### Reachability of the two criticals, verified 2026-09-17
+
+An audit finding is a claim about the **lockfile**, not about what this app
+runs. Both criticals were checked against the installed tree:
+
+**Critical 1 — Vitest UI arbitrary file read (needs >= 3.2.6): NOT REACHABLE.**
+`@vitest/ui` is an **optional peer dependency** of `vitest`
+(`pnpm-lock.yaml:1173`, `peerDependenciesMeta … optional: true`). It is declared
+in **no manifest in this workspace**, and it is **not present in
+`node_modules/.pnpm`** — the installed `@vitest/*` packages are `expect`,
+`mocker`, `pretty-format`, `runner`, `snapshot`, `spy`, `utils`. The vulnerable
+package is not installed, so there is no code path to reach. It appears in the
+audit because the advisory matches the `vitest` version range, not because the
+UI server exists here.
+
+**Critical 2 — Vitest RCE via malicious website (needs >= 2.1.9): REACHABLE,
+NARROWLY.** Requires `vitest` running in **watch mode** while a browser visits a
+hostile page. Only `worker` depends on vitest (`worker/package.json:30`), and
+only `worker`'s `test:watch` script starts watch mode. The scripts CI and
+`pnpm test` use run `vitest run` (non-watch). So exposure is: a developer who
+runs `pnpm --filter @applyy/worker run test:watch` and browses the web on the
+same machine at the same time.
+
+This is the distinction that matters for sequencing. The headline "2 criticals"
+is really **one narrowly-reachable dev-machine issue and one that cannot fire
+at all** — which is why the `vitest` bump stays last despite being the only
+critical, and why the production open redirect goes first.
+
+Note also that `@vitest/mocker` resolves against **`vite@5.4.21`**, a second
+Vite major present transitively alongside `apps/web`'s `vite@6.0.3`. The Vite
+advisories below are scoped to the 6.x range; whether any also apply to the 5.x
+copy was **not** checked and is recorded as an open item.
+
 ---
 
 ## Blast radius — the reason this is not one command
@@ -170,8 +203,13 @@ Do not report a window complete on a green you did not watch execute.
 
 1. **The Deno tree is unaudited.** `supabase/functions/deno.lock` was not
    examined. `pnpm audit` cannot see it.
-2. **Dependabot's 44 vs audit's 26** should be reconciled once after the bumps,
+2. **A second Vite major is in the tree.** `@vitest/mocker` resolves against
+   `vite@5.4.21` while `apps/web` uses `vite@6.0.3`. The 13 Vite advisories
+   above are scoped to 6.x ranges. Whether the 5.x copy carries its own
+   exposure was not checked — it is dev-only either way, but the count may be
+   understated.
+3. **Dependabot's 44 vs audit's 26** should be reconciled once after the bumps,
    to confirm no alert class was missed rather than merely recounted.
-3. **`@supabase/supabase-js` is pinned exactly** (`2.47.10`) in both `apps/web`
+4. **`@supabase/supabase-js` is pinned exactly** (`2.47.10`) in both `apps/web`
    and `worker`. Both must move together or the two trees resolve different
    `auth-js` versions.
