@@ -483,17 +483,33 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   regression", never "verified". This is §5's shape wearing a green checkmark: a guard passing for
   a reason unrelated to what it claims to check. `…dependency-remediation-plan.md:261` already said
   this and an orchestrator brief contradicted it.
-- **"CI will catch it" — ask WHICH workflow, and what that workflow DOES.** There are three
-  (`apply.yml`, `keepalive.yml`, `scout.yml`) and all three run `pnpm install --frozen-lockfile`,
-  but **only `apply.yml` installs playwright browsers** (`:126`, on a cache miss keyed to
-  `hashFiles('pnpm-lock.yaml')`). `apply.yml` is scheduled `30 2 * * *` — **02:30 UTC / 08:00 IST
-  daily — and it is the workflow that SUBMITS REAL APPLICATIONS.** So "let CI exercise the bump"
-  means *"first execution is tomorrow morning, live, mid-submission"*, which is a materially
-  different proposition from what it sounds like.
-  It also takes `workflow_dispatch` with a **`dry_run` input** (`:27`), so the same code path can
-  be exercised on demand without submitting anything. **When a plan defers verification to CI,
-  name the workflow, its trigger and its side effects** — "CI" is not one thing, and here the
-  cheapest safe answer was hiding behind the word.
+- **"CI will catch it" — name the SET of workflows an install reaches, their triggers, and their
+  side effects.** Not *the* workflow. **Singular is the trap**: an orchestrator ruling named only
+  `apply.yml` and was corrected, which is the same defect one notch finer than the one the rule
+  was written to stop. The three, all running `pnpm install --frozen-lockfile`:
+
+  | workflow | schedule (IST) | installs browsers? | submits? |
+  |---|---|---|---|
+  | `scout.yml` | 23:30 / 05:30 / 11:30 / 17:30 (`0 */6 * * *`) | no | **no** |
+  | `keepalive.yml` | 11:45 every 3rd day (`15 6 */3 * *`) | no | no |
+  | `apply.yml` | 08:00 daily (`30 2 * * *`) | **yes** — `:127`, explicit `playwright install --with-deps chromium`, gated on a cache miss keyed `hashFiles('pnpm-lock.yaml')` at `:118-119` | **YES — real applications** |
+
+  So a lockfile bump's **first clean-runner install is a `scout.yml` run that submits nothing**,
+  hours before the run that matters. **The cheapest early signal was in the workflow nobody
+  named.** `apply.yml` also takes `workflow_dispatch` with a `dry_run` input (`:26-33`) that
+  **defaults to `true`** — the safe path is the default, not something to remember (constraint
+  #15). A playwright bump invalidates the browser cache *by construction*; the workflow's own
+  comment says so.
+- **UNVERIFIED, worth an hour from someone:** `scout.yml` and `keepalive.yml` install with **no
+  browser cache and no skip-download env** — `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` and
+  `PLAYWRIGHT_BROWSERS_PATH` appear nowhere in `.github/`, `worker/` or `apps/` — while
+  `pnpm-workspace.yaml` sets `allowBuilds: playwright: true`, permitting playwright's postinstall
+  to run. **If that postinstall downloads browsers, `scout.yml` has been pulling ~130MB four times
+  a day, uncached**, against the 2,000-minute monthly Actions budget `PROJECT_PLAN.md` §2 calls
+  the binding constraint on the product. Weak counter-evidence: `apply.yml:127`'s explicit install
+  step would be redundant if the postinstall already downloaded. **Pre-existing if real** — a
+  security window would merely have made it visible. Flagged, not asserted. *A budget bug hiding
+  inside a security window is the kind nobody finds.*
 - **A LOCKFILE window and a NODE_MODULES window are different blast radii.** Use
   `pnpm install --lockfile-only`: it resolves and writes `pnpm-lock.yaml` **without linking
   `node_modules`**. In a tree shared by four sessions that distinction is the whole game — the
