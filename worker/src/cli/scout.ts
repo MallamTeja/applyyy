@@ -7,6 +7,17 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { getAdapter, supportedProviders, toJobInsert, type JobInsertContext } from '../../../supabase/functions/_shared/ats/registry.ts';
+// The blanking guard. Groups one batch into the fewest upserts that cannot let an
+// omitted field overwrite a stored one — see upsert-plan.ts for why per-row stripping
+// does not work against postgrest's union-of-keys column list.
+import { planJobUpsertGroups } from '../../../supabase/functions/_shared/screen/upsert-plan.ts';
+// The screener glue, shared with the Edge Function rather than duplicated. THIS FILE IS
+// THE ONE ON CRON (.github/workflows/scout.yml:61 -> package.json:13), so this import is
+// what actually puts the cascade in front of Teja's queue.
+import { planScreenedApplications } from '../../../supabase/functions/_shared/screen/screen-batch.ts';
+// The Screener's database context, and the adapter that fetches it.
+import { loadScreenContext } from '../../../supabase/functions/_shared/screen/context.ts';
+import { supabaseScreenQueries } from '../../../supabase/functions/_shared/screen/supabase-queries.ts';
 import type { AtsProvider, JobInsert } from '../../../packages/shared-types/src/tables.ts';
 
 function required(name: string): string {
@@ -137,6 +148,33 @@ async function main(): Promise<void> {
   let totalApplications = 0;
   const now = new Date();
 
+  // THE SCREENER'S CONTEXT, LOADED ONCE FOR THE WHOLE RUN. The rules, the blocklist, the
+  // application history and the stage-0 preferences are properties of the USER, not of
+  // the board being polled, so re-reading them per board would pay forty times for one
+  // answer. The clock is shared too, so a run spanning midnight applies the same
+  // staleness window to its last board as to its first.
+  const screenContext = await loadScreenContext(supabaseScreenQueries(client, now), now);
+
+  // A FAILED CONTEXT LOAD MUST NOT SILENTLY BECOME AN EMPTY CONTEXT. Three cascade rules
+  // read nothing but this context, so screening with an empty one would pass every job
+  // while reporting a clean screen. When it fails we do not screen at all: rows are
+  // created at 'discovered', exactly as before this change, which is a TRUE statement
+  // about them and leaves them findable by a later backfill. Marking them
+  // 'passed_filters' would be a lie that the Matcher would then act on.
+  if (!screenContext.ok) {
+    console.warn(`[applyy-scout] ⚠️ screener context unavailable, inserting unscreened: ${screenContext.reason}`);
+  } else {
+    console.log('[applyy-scout] screener active: deterministic cascade will run before any job is queued.');
+  }
+
+  // Warnings across the whole run, de-duplicated. An unconfigured rule is otherwise
+  // invisible: it passes jobs and says nothing, which reads exactly like a working rule.
+  const screenWarnings = new Set<string>();
+  // Counters. A screener that drops nothing and one that was never called leave identical
+  // databases behind, so these are the only thing that distinguishes them.
+  let totalPassed = 0;
+  let totalDropped = 0;
+
   for (const board of boards as WatchlistRow[]) {
     const adapter = getAdapter(board.ats_provider);
     if (!adapter) {
@@ -204,35 +242,74 @@ async function main(): Promise<void> {
       for (let i = 0; i < jobRows.length; i += BATCH_SIZE) {
         const batch = jobRows.slice(i, i + BATCH_SIZE);
 
-        const { data: upsertedJobs, error: jobErr } = await client
-          .from('jobs')
-          .upsert(batch, {
-            onConflict: 'user_id,fingerprint',
-            ignoreDuplicates: false,
-          })
-          .select('id, fingerprint');
+        // ONE UPSERT PER DISTINCT KEY-SET, not one per batch. postgrest-js sends the
+        // UNION of keys across the whole array as `columns=`, so a single request cannot
+        // express "this row omits description_raw but that one sets it" — the omitting
+        // row would be sent as NULL and would blank a stored description.
+        const upsertGroups = planJobUpsertGroups(batch);
 
-        let batchJobIds: string[] = [];
+        // Fingerprint -> job id. Keyed by fingerprint because that is the only identifier
+        // present both on the row the screener reads and on what the upsert returns.
+        const jobIdByFingerprint = new Map<string, string>();
 
-        if (!jobErr && upsertedJobs && upsertedJobs.length > 0) {
-          batchJobIds = upsertedJobs.map((j) => j.id);
-        } else {
-          // Fallback: fetch existing job IDs by fingerprints
-          const fps = batch.map((b) => b.fingerprint);
-          const { data: existing } = await client
+        for (const group of upsertGroups) {
+          const { data: upsertedJobs, error: jobErr } = await client
             .from('jobs')
-            .select('id')
-            .in('fingerprint', fps);
-          if (existing) {
-            batchJobIds = existing.map((j) => j.id);
+            .upsert(group, {
+              onConflict: 'user_id,fingerprint',
+              ignoreDuplicates: false,
+            })
+            .select('id, fingerprint');
+
+          if (!jobErr && upsertedJobs) {
+            for (const job of upsertedJobs) jobIdByFingerprint.set(job.fingerprint, job.id);
           }
         }
 
-        if (batchJobIds.length > 0) {
-          const appInserts = batchJobIds.map((job_id) => ({
-            job_id,
-            status: 'discovered' as const,
-          }));
+        // Fallback for anything the upsert did not return. Now selects `fingerprint` as
+        // well, because an id alone cannot be matched back to the row the screener reads.
+        const missing = batch.filter((row) => !jobIdByFingerprint.has(row.fingerprint)).map((row) => row.fingerprint);
+        if (missing.length > 0) {
+          const { data: existing } = await client
+            .from('jobs')
+            .select('id, fingerprint')
+            .in('fingerprint', missing);
+          if (existing) {
+            for (const job of existing) jobIdByFingerprint.set(job.fingerprint, job.id);
+          }
+        }
+
+        // Pair each persisted job with the row it came from. Unresolved ids are skipped
+        // rather than guessed at.
+        const entries = batch
+          .filter((row) => jobIdByFingerprint.has(row.fingerprint))
+          .map((row) => ({ jobId: jobIdByFingerprint.get(row.fingerprint)!, row }));
+
+        if (entries.length > 0) {
+          // THE SEAM. Every posting is screened before its queue row exists, so a job
+          // that fails a filter never becomes work for the Matcher — and therefore never
+          // for the Tailor or Auditor either, which is where §8's 10x saving comes from.
+          const appInserts = screenContext.ok
+            ? (() => {
+                const plan = planScreenedApplications(
+                  entries,
+                  screenContext.value.rules,
+                  screenContext.value.context,
+                  screenContext.value.preferences,
+                );
+                for (const warning of plan.warnings) screenWarnings.add(warning);
+                totalPassed += plan.passedCount;
+                totalDropped += plan.droppedCount;
+                // Logged with the prose reason: `drop_reason` on the row names the rule so
+                // it can be grouped, but only this says why THIS posting matched it.
+                for (const drop of plan.dropped) {
+                  console.log(`[applyy-scout] ✗ dropped "${drop.title}" — ${drop.ruleType}: ${drop.reason}`);
+                }
+                return plan.inserts;
+              })()
+            // The unscreened fallback: 'discovered' is the honest status for a row the
+            // screener could not evaluate, and it is what this file wrote before today.
+            : entries.map((entry) => ({ job_id: entry.jobId, status: 'discovered' as const, drop_reason: null }));
 
           const { data: insertedApps, error: appErr } = await client
             .from('applications')
@@ -248,8 +325,8 @@ async function main(): Promise<void> {
           }
         }
 
-        boardNewJobs += batchJobIds.length;
-        totalDiscovered += batchJobIds.length;
+        boardNewJobs += entries.length;
+        totalDiscovered += entries.length;
       }
 
       // Update watchlist success telemetry
@@ -282,6 +359,18 @@ async function main(): Promise<void> {
   console.log(`[applyy-scout] scan completed.`);
   console.log(`[applyy-scout] total jobs processed: ${totalDiscovered}`);
   console.log(`[applyy-scout] total new application rows created: ${totalApplications}`);
+  // THE SCREENER'S OWN COUNTERS, reported separately from the discovery counters because
+  // they answer a different question. The discovery numbers say the poll worked; these
+  // say the CASCADE worked. With filter_rules currently unseeded, `dropped: 0` is the
+  // expected reading — and printing it is what makes that visible rather than assumed.
+  if (screenContext.ok) {
+    console.log(`[applyy-scout] screener: ${totalPassed} passed, ${totalDropped} dropped.`);
+    // An unconfigured rule announces itself here. Silence means the rules are configured
+    // and nothing matched; a list means the filters are not actually protecting anything.
+    for (const warning of screenWarnings) console.log(`[applyy-scout] ⚠️ screener warning: ${warning}`);
+  } else {
+    console.log('[applyy-scout] screener: NOT RUN — rows were created unscreened at status discovered.');
+  }
   console.log('====================================================');
 
   if (runId) {
