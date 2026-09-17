@@ -471,6 +471,25 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   regression", never "verified". This is §5's shape wearing a green checkmark: a guard passing for
   a reason unrelated to what it claims to check. `…dependency-remediation-plan.md:261` already said
   this and an orchestrator brief contradicted it.
+- **A LOCKFILE window and a NODE_MODULES window are different blast radii.** Use
+  `pnpm install --lockfile-only`: it resolves and writes `pnpm-lock.yaml` **without linking
+  `node_modules`**. In a tree shared by four sessions that distinction is the whole game — the
+  lockfile is a *file* peers can avoid, `node_modules` is what their **running test processes are
+  reading right now**. A real install mid-window mutates the ground under a peer's suite.
+  Landed `b62be33` this way: 11 insertions, 11 deletions, `playwright` and `playwright-core`
+  only, every line attributable. **Read the lockfile diff line by line and attribute each one** —
+  at that size you can, and "the diff was small" is not the same claim as "I know what moved".
+- **`--lockfile-only` means the installed copy is STILL THE OLD VERSION.** So a suite run after it
+  exercises the version you just replaced and goes green for a reason unrelated to the change.
+  **That green is worse than no run.** Third instance of this family today, after `deno check`
+  over zero files and `$?` through a pipe. The honest vocabulary, and it is worth using verbatim:
+  *"closed in the dependency graph"* (measured by `pnpm audit`), *"unexercised"* (nothing ran
+  against it), and **neither "verified" nor "no regression"** anywhere near such a change.
+- **`playwright` is a devDependency of `apps/web`, and Vercel installs devDependencies** — so the
+  **Vercel build downloads chromium on every deploy**, and after `b62be33` it fetches revision
+  1193 instead of 1148. Not new breakage; it always did this. But it means a playwright bump
+  touches the **deploy path**, not only CI, and the first build after one is legitimately slower.
+  Do not read that slow build as a failure.
 - **`pnpm audit` does NOT write `pnpm-lock.yaml`** — verified 2026-09-17, `git status` clean
   immediately after (EXIT=1, 21 advisories: 2 critical, 3 high, 14 moderate, 2 low, derived
   independently by two sessions). That distinguishes it from `pnpm run typecheck`, which **does**,
