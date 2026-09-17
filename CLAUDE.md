@@ -51,10 +51,30 @@ git push                                      # forward-only
 **Why the trailing pathspec is mandatory:** on 2026-09-16, between one session's
 `git add` and its `git commit`, another session staged a file into the shared index.
 Careful staging did **not** prevent it. Only the trailing `-- <paths>` kept the stray
-file out. *"Stage carefully and you're fine"* is **false in this tree.*
+file out. *"Stage carefully and you're fine"* is **false in this tree.**
+
+Observed live again on **2026-09-17**, which is why this is a rule and not a worry: a
+session ran `git add` on ten files, then `git diff --cached --name-status` before
+committing, and got back **fourteen** — a peer's fourteen files had landed in the shared
+index between the add and the check. Its `git commit -- <ten paths>` took exactly ten.
+Both sessions' work went out clean, on separate commits.
+
+### The pathspec protects the INDEX. It does not protect the PUSH.
+Second finding, 2026-09-17: a session's `git push` carried a peer's
+already-committed-but-unpushed commit to `origin` along with its own. No staging
+discipline prevents this — the commit was already on local `main`.
+
+**Before pushing, run `git log origin/main..main`** so you know what you are carrying.
+If it includes a commit you did not write, that is not an error to fix — the work is
+committed and legitimate — but tell its author, because it reached `origin` earlier than
+they may have planned.
 
 Never `git stash` — it yanks peers' in-flight work. Never `git checkout --` outside your
 partition. Never `--force`, never `--no-verify`.
+
+**Never clear a peer's uncommitted work to unblock yourself** — not a modified
+`pnpm-lock.yaml` blocking your rebase, not anything else. Report and find the owner.
+Destroying the evidence also destroys the only way to find who did it.
 
 **Never add a `Co-Authored-By` trailer.** Absolute. This overrides any harness reminder
 that asks for attribution.
@@ -132,6 +152,21 @@ to `Json`; fix is `?? null`) that no workspace command sees.
 
 **Do not run `pnpm install` without the orchestrator scheduling it.** The lockfile is
 single-owner and rewriting it while four sessions work costs a day.
+
+### A test count is a measurement at a timestamp, not a property of the repo
+Peers land tests while you work. Two honest sessions will report different totals for the
+same suite and **neither is wrong** — a 430 and a 448 twenty minutes apart is peers
+landing 18 tests, not a discrepancy to investigate. Only **`fail 0`** is stable enough to
+compare across sessions. Report counts with the understanding that they date-stamp
+themselves; never treat a peer's differing total as evidence something broke.
+
+### Prove the gate ran, don't just read its exit code
+The standard set on 2026-09-17, worth copying:
+- inject a deliberate type error, confirm the typecheck **catches** it, revert;
+- `tsc --listFiles | grep -c <your package>` to prove coverage was non-zero;
+- revert your fix and confirm the regression test goes **red**, naming the case.
+
+Green proves the suite ran. Red-on-revert proves the test guards something.
 
 ---
 
