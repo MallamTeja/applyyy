@@ -55,6 +55,15 @@ import { supabase } from '../../data/supabase';
 
 import './ApprovalQueuePage.css';
 
+/* A queue row we refuse to render as a diff, with enough identity for the
+   operator to go and look at it. Deliberately not a ResumeDiff: making it one
+   would let it flow into the buckets, which is the bug. */
+interface UnreviewableRow {
+  readonly applicationId: string;
+  readonly jobTitle: string;
+  readonly companyName: string;
+}
+
 export function ApprovalQueuePage(): ReactElement {
   /* Feedback for the one irreversible action in the product. */
   const toast = useToast();
@@ -72,6 +81,20 @@ export function ApprovalQueuePage(): ReactElement {
      Held separately rather than folded into `queue`, because "no rows" and
      "could not ask" are opposite claims and must not share a branch. */
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  /* ROWS THAT CANNOT HONESTLY BE REVIEWED. Added 2026-09-17.
+     An application reaches awaiting_approval with `tailored_profile` null when
+     something stamped the status without a Tailor ever running - which the
+     "Tailor & Queue" button on Discovered Jobs does today, walking six
+     transitions in a loop while naming six agents that did not execute.
+     Before this, such a row fell through to a fallback resume built from the
+     master profile. That produced ZERO audit findings, so deriveBucket returned
+     'A', so it rendered under "Every line traced" in the one-click batch bucket.
+     Every line did trace - to the master, because the master was all it ever
+     was. The badge was earned by the absence of a tailored resume rather than
+     by the honesty of one.
+     Held apart so these rows can be named and refused rather than approved. */
+  const [unreviewable, setUnreviewable] = useState<readonly UnreviewableRow[]>([]);
 
   /* Rows the operator has acted on this session, so they leave the queue
      without a refetch. */
@@ -166,6 +189,8 @@ export function ApprovalQueuePage(): ReactElement {
         setLoadError(null);
 
         const diffs: ResumeDiff[] = [];
+        /* Collected alongside, never merged in. See UnreviewableRow. */
+        const refused: UnreviewableRow[] = [];
         for (const app of data) {
           const rawJob = app.jobs as unknown as JobRow | null;
           const job = rawJob ?? {
@@ -174,6 +199,26 @@ export function ApprovalQueuePage(): ReactElement {
             discovered_via: null,
             source_refs: null,
           };
+
+          /* THE GATE ON THE GATE.
+             No tailored resume means there is nothing to compare against the
+             master, so there is no honest verdict this screen can render. The
+             fallback below would build one out of the master profile itself,
+             which trivially traces to the master and therefore reports zero
+             findings and lands in the one-click batch bucket wearing "Every
+             line traced" - a verdict produced by the ABSENCE of the thing it
+             claims to have checked.
+             Refused here rather than rendered quietly, because the alternative
+             is the exact failure the approval gate exists to prevent, delivered
+             by the gate itself. Fail loud, never fail clean. */
+          if (app.tailored_profile === null || app.tailored_profile === undefined) {
+            refused.push({
+              applicationId: app.id,
+              jobTitle: job.title,
+              companyName: job.company_name,
+            });
+            continue;
+          }
 
           const rawResolved = app.tailored_profile as unknown as ResolvedResume | null;
           const resolved: ResolvedResume = rawResolved ?? {
@@ -263,6 +308,12 @@ export function ApprovalQueuePage(): ReactElement {
         }
 
         setQueue(diffs);
+
+        /* Published in the same pass, so the banner and the buckets can
+
+           never disagree about what this read found. */
+
+        setUnreviewable(refused);
       } finally {
         if (live) setLoading(false);
       }
@@ -400,7 +451,7 @@ export function ApprovalQueuePage(): ReactElement {
 
   /* Nothing left. An empty queue is the normal end state of a review session,
      so it is written as a finished-for-now statement rather than a void. */
-  if (bucketA.length === 0 && bucketB.length === 0) {
+  if (bucketA.length === 0 && bucketB.length === 0 && unreviewable.length === 0) {
     return (
       <div className="page">
         <PageHeader path="approvals" />
@@ -416,6 +467,33 @@ export function ApprovalQueuePage(): ReactElement {
        page measure would force the operator to scroll to compare them. */
     <div className="page page--wide">
       <PageHeader path="approvals" />
+
+      {/* REFUSED ROWS FIRST, above even Bucket B. They are not a third bucket
+          and carry no approve button: this screen cannot form a verdict on
+          them, and offering an action would imply it had. */}
+      {unreviewable.length > 0 ? (
+        <section className="queue__refused" aria-labelledby="refused-heading" role="alert">
+          <h2 id="refused-heading" className="queue__bucket-heading">
+            {unreviewable.length}{' '}
+            {unreviewable.length === 1 ? 'application was' : 'applications were'} queued
+            without a tailored resume
+          </h2>
+          <p className="queue__bucket-note">
+            Nothing compared these against your master profile, so this screen cannot
+            tell you whether they are honest. They are held here rather than shown as
+            verified. Re-run tailoring for them, or reject them from the pipeline.
+          </p>
+          <ul className="queue__refused-list">
+            {unreviewable.map((row) => (
+              <li key={row.applicationId} className="queue__refused-item">
+                {/* Untrusted strings from a job board, rendered as text children. */}
+                <span className="queue__refused-role">{row.jobTitle}</span>
+                <span className="queue__refused-company">{row.companyName}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       {/* BUCKET B FIRST. Deliberate ordering - see the note at the top. */}
       {bucketB.length > 0 ? (

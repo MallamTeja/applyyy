@@ -122,3 +122,60 @@
   /* Separates it from the Try again button beneath. */
   margin-bottom: var(--gap-3);
 }
+
+/* --- Rows this screen refuses to judge -----------------------------------
+   ADDED 2026-09-17. An application can reach awaiting_approval with no
+   tailored resume, because something stamped the status without a Tailor
+   running. There is then nothing to compare against the master, so there is no
+   honest verdict to render — and the previous fallback built a resume out of
+   the master itself, which trivially traced and therefore reported CLEAN.
+   Styled as an alarm rather than a bucket: it carries no approve control,
+   because offering one would imply this screen had checked something. */
+
+.queue__refused {
+  margin-bottom: var(--gap-6);
+  padding: var(--gap-4) var(--gap-5);
+  /* The alarm hue, matching the failed-read branch above — both mean "this
+     console cannot tell you what you need to know", which is one meaning. */
+  background: color-mix(in oklab, var(--fabricated) 8%, var(--sheet));
+  border: 1px solid color-mix(in oklab, var(--fabricated) 30%, transparent);
+  border-left: 3px solid var(--fabricated);
+  border-radius: var(--radius-sheet);
+}
+
+.queue__refused-list {
+  /* A real list: these are countable records, and screen readers announce the
+     count, which is the number that matters here. */
+  list-style: none;
+  margin: var(--gap-3) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-2);
+}
+
+.queue__refused-item {
+  display: flex;
+  /* Wraps rather than truncating: a job title the operator cannot read in full
+     is a job they cannot go and find. */
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--gap-2);
+  padding-top: var(--gap-2);
+  border-top: 1px solid var(--rule);
+}
+
+.queue__refused-role {
+  /* --font-paper: this is job identity, which ApprovalQueuePage.css already
+     assigns to the document side — "this is the job the resume was written
+     for, so it belongs to the document side". */
+  font-family: var(--font-paper);
+  font-size: var(--size-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.queue__refused-company {
+  font-size: var(--size-sm);
+  color: var(--text-secondary);
+}
