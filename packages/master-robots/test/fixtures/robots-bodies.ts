@@ -16,7 +16,7 @@
 // restriction, not an obstacle", which records that jobs.lever.co/robots.txt carries
 // `User-agent: ClaudeBot` -> `Disallow: /`. Also recorded independently at
 // supabase/functions/_shared/ats/lever.ts:7-18 and
-// worker/scripts/capture-fixture.ts:57-61.
+// worker/scripts/capture-fixture.ts, the "DELIBERATELY ABSENT: jobs.lever.co" note.
 //
 // WHY SYNTHETIC RATHER THAN CAPTURED: fetching it to build a fixture is the exact
 // act §19 declined to perform. applyyy-21 set that precedent on 2026-09-09 by
@@ -35,34 +35,34 @@ export const LEVER_CLAUDEBOT_SYNTHETIC = [
   '',
 ].join('\n');
 
-// SYNTHETIC — the shape recorded at worker/scripts/capture-fixture.ts:31 on
+// SYNTHETIC — the shape recorded at worker/scripts/capture-fixture.ts for job-boards.greenhouse.io on
 // 2026-09-09: "robots.txt has every rule commented out, so nothing is disallowed."
 //
 // THIS IS THE REGRESSION FIXTURE. Upstream's rule-count guard scores this
 // identically to an HTML error page, which would refuse a host our own repo lists in
-// ALLOWED_HOSTS as human-verified permitted. If a test using this body ever goes
+// HUMAN_REVIEWED_HOSTS as human-verified permitted. If a test using this body ever goes
 // red, someone has reverted the shape check to counting rules.
 export const GREENHOUSE_JOB_BOARDS_ALL_COMMENTED = [
-  '# SYNTHETIC — shape from capture-fixture.ts:31, not a capture.',
+  '# SYNTHETIC — shape from capture-fixture.ts job-boards.greenhouse.io note, not a capture.',
   '# User-agent: *',
   '# Disallow: /',
   '',
 ].join('\n');
 
-// SYNTHETIC — the shape recorded at worker/scripts/capture-fixture.ts:29:
+// SYNTHETIC — the shape recorded at worker/scripts/capture-fixture.ts for boards.greenhouse.io:
 // "robots.txt disallows only /embed/; job pages are permitted. Checked 2026-09-09."
 export const GREENHOUSE_BOARDS_EMBED_ONLY = [
-  '# SYNTHETIC — shape from capture-fixture.ts:29, not a capture.',
+  '# SYNTHETIC — shape from capture-fixture.ts boards.greenhouse.io note, not a capture.',
   'User-agent: *',
   'Disallow: /embed/',
   '',
 ].join('\n');
 
-// SYNTHETIC — the shape recorded at worker/scripts/capture-fixture.ts:34-36: Ashby
+// SYNTHETIC — the shape recorded at worker/scripts/capture-fixture.ts, the "DELIBERATELY ABSENT: jobs.ashbyhq.com" note: Ashby
 // "permits /{company}/{id} job pages and disallows /meeting/, /b/ and /api/
 // (re-checked 2026-09-10; unchanged, no ClaudeBot-specific rule)".
 export const ASHBY_API_DISALLOWED = [
-  '# SYNTHETIC — shape from capture-fixture.ts:34-36, not a capture.',
+  '# SYNTHETIC — shape from capture-fixture.ts jobs.ashbyhq.com note, not a capture.',
   'User-agent: *',
   'Disallow: /meeting/',
   'Disallow: /b/',

@@ -14,7 +14,7 @@
 //     comments only  -> False
 //     HTML error page -> False
 // Those two must not share a verdict. A robots.txt whose rules are all commented out
-// is a VALID file that permits everything, and worker/scripts/capture-fixture.ts:31
+// is a VALID file that permits everything, and worker/scripts/capture-fixture.ts
 // records exactly such a host — job-boards.greenhouse.io — as human-verified
 // permitted on 2026-09-09. Porting upstream's rule verbatim would refuse a host we
 // have already confirmed allows us. That is not caution; it is a false negative on a

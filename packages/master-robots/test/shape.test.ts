@@ -10,7 +10,7 @@
 // (reference/ai-job-search-upstream/tools/robots_check.py) on 2026-09-17: its
 // is_robots_body() scores a fully-commented robots.txt IDENTICALLY to an HTML error
 // page — both False. That would refuse job-boards.greenhouse.io, which
-// worker/scripts/capture-fixture.ts:31 records as human-verified permitted. Rule
+// worker/scripts/capture-fixture.ts records in HUMAN_REVIEWED_HOSTS as human-verified permitted. Rule
 // count cannot tell those apart; shape can.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -31,7 +31,7 @@ describe('bodies that ARE a robots.txt and must be parsed', () => {
   });
 
   test('REGRESSION job-boards.greenhouse.io: an all-comments body is a valid allow-all', () => {
-    // THE NAMED REGRESSION. This host is in capture-fixture.ts ALLOWED_HOSTS with the
+    // THE NAMED REGRESSION. This host is in capture-fixture.ts HUMAN_REVIEWED_HOSTS with the
     // note "robots.txt has every rule commented out, so nothing is disallowed.
     // Checked 2026-09-09". Porting upstream's rule-count guard verbatim turns a
     // human-verified permitted host into a refusal. If this test ever goes red,

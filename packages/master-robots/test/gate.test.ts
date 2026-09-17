@@ -101,7 +101,7 @@ describe('200 with a real policy', () => {
   });
 
   test('REGRESSION job-boards.greenhouse.io: an all-comments policy allows', async () => {
-    // The host capture-fixture.ts:31 records as human-verified permitted. A revert to
+    // The host capture-fixture.ts records in HUMAN_REVIEWED_HOSTS as human-verified permitted. A revert to
     // upstream's rule-count guard turns this green test red and names the host.
     const fetcher = respondWith(200, GREENHOUSE_JOB_BOARDS_ALL_COMMENTED);
     const verdict = await checkRobots('https://job-boards.greenhouse.io/acme/jobs/1', TOKEN, { fetcher });
