@@ -161,6 +161,16 @@ to `Json`; fix is `?? null`) that no workspace command sees.
   which trains people to ignore the check. **A guard against vacuous passes can itself
   pass vacuously** — test your guard against a known-good and a known-bad run before
   trusting it, or you have only moved the credulity one level up.
+- **`$?` after a pipeline is the LAST command's exit code, not the checker's.**
+  `tsc --noEmit 2>&1 | tail -20 ; echo "TSC_EXIT=$?"` prints `TSC_EXIT=0` **while tsc is
+  failing** — you read `tail`'s status. Found 2026-09-17 by a worker who walked into it and
+  said so. Same shape as the `deno check` trap above: a guard reporting success for a reason
+  unrelated to what it checks. **Run the checker bare and read its own exit code**; pipe only
+  after you have the status, or use `PIPESTATUS`/`set -o pipefail`.
+- **`worker/tsconfig.json` does not include `scripts/**`.** It covers `src/**`, `test/**` and
+  `*.config.ts` only, so everything in `worker/scripts/` has never been typechecked. Pulling
+  `capture-fixture.ts` into the program via a test immediately surfaced a real `TS2345`. The
+  rest of `worker/scripts/` is still unchecked — assume nothing there compiles.
 - The root `node_modules` has no top-level packages, but
   `./node_modules/.pnpm/node_modules/.bin/tsc` **does** run (5.9.3), and `node --test`
   works on `packages/*` with no install — Node 24 strips types natively. Do not assume a
@@ -168,6 +178,18 @@ to `Json`; fix is `?? null`) that no workspace command sees.
 
 **Do not run `pnpm install` without the orchestrator scheduling it.** The lockfile is
 single-owner and rewriting it while four sessions work costs a day.
+
+**Do not justify this rule with `packages/master-robots`.** It is NOT an instance: the
+lockfile already carries a full `packages/master-robots:` importers entry with both
+devDependencies resolved (`pnpm-lock.yaml:83`, landed with `99c42e8`). An orchestrator brief
+asserted otherwise on 2026-09-17 and a worker checked. The hazard below is real; this is not
+its example. A rule propped up by a false example is one correction away from being discarded
+whole.
+
+Also worth copying from that same worker: a package can often be reached by **relative path**
+(`../../packages/master-robots/src/index.ts`) instead of a bare specifier, which needs no
+`package.json` edit, no install and no lockfile write at all. `master-robots` itself reaches
+the shared Retry-After parser this way. Try that before asking for an install window.
 
 ### …but holding `install` does NOT hold lockfile writes
 Found 2026-09-17, after a modified `pnpm-lock.yaml` appeared that three sessions each
@@ -232,6 +254,18 @@ Real instances found in this repo:
 - **A convenience boolean collapses a union back into the thing it replaced.** If a
   discriminated verdict also exposes `allowed: boolean`, every caller branches on the
   boolean and the union becomes decoration.
+- **A redundant-looking control may be answering a different question.** Two controls that
+  agree on today's inputs are not duplicates. Earned 2026-09-17: a brief told a worker to
+  replace `capture-fixture.ts`'s host allowlist with the live robots gate. Doing so would have
+  made the script **more permissive** — `jobs.lever.co` disallows `ClaudeBot`, we identify as
+  `applyy-fixture-capture`, so the live gate selects the `*` group, finds no restriction and
+  returns ALLOW for a host a human deliberately excluded. And `jobs.ashbyhq.com` is excluded
+  for a reason no robots.txt can express: a raw GET is fine, but RENDERING the SPA needs
+  disallowed `/api/` paths. The worker kept both and made both mandatory — the list answers
+  *"has a human reviewed this host"*, the gate answers *"does the policy permit this path
+  right now"* — and renamed `ALLOWED_HOSTS` to `HUMAN_REVIEWED_HOSTS` because its meaning had
+  changed from enforcement point to review record. **When you delete a control, state which
+  question it was answering and who answers it now.** If you cannot, you are not simplifying.
 - **A correct citation can carry a wrong conclusion**, and that is nastier than a wrong
   citation because it arrives with its own justification. Always ask: **is this path
   actually reached?** (Cost us a retracted claim on 2026-09-17: `scout-remote.ts` was
