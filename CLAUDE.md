@@ -273,7 +273,7 @@ Found 2026-09-17; **do not obey these without re-checking:**
 | `PROJECT_PLAN.md` ~:497 | pipeline diagram shows `screened`, `screening` | Renamed to `passed_filters` / `employer_screening`; the rename is recorded at `:366`, 130 lines away |
 | `docs/PROGRESS.md:566` | *"Every status write goes through `advance_application_status()`"* | **False.** The approval queue writes nothing at all; the discovery page walks RPCs directly |
 | `core_tables.sql:471` | a bare UPDATE "passes the guard and strands the row" | **False** — it is refused with SQLSTATE `42501` |
-| `docs/harvest/briefs/brief-3` | import `../_shared/screen/screen.ts` | That directory exists and is **empty** |
+| `docs/harvest/briefs/brief-3` | import `../_shared/screen/screen.ts` | No such file. But the directory is **no longer empty** (was, until `042bc78`): it now holds `context.ts`, `screen-batch.ts`, `supabase-queries.ts`, `upsert-plan.ts` |
 | `docs/harvest/briefs/brief-2` | frames `freehire` as an `AtsAdapter` | It belongs in the **tier-3 aggregator lane** (`_shared/scout/tiers.ts`) |
 | `docs/harvest/briefs/brief-4` §7 | `RobotsDecision { allowed: boolean }` | Collapses the verdict union; ship a discriminated `kind` instead |
 
@@ -286,12 +286,16 @@ five times on 2026-09-16 and were right every time. Your recon overrides the bri
 
 Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it has tests.**
 
-- **`_shared/filter/cascade.ts` — `screenJob` has zero production callers.** Three hits
-  repo-wide: its definition and two lines in its own test.
+- ~~**`_shared/filter/cascade.ts` — `screenJob` has zero production callers.**~~ **NO LONGER
+  TRUE as of `042bc78` (2026-09-17).** `screenJob` is production-reachable: `_shared/screen/screen-batch.ts`
+  calls it, and both `scout-ats/index.ts:16` and `worker/src/cli/scout.ts:17` import that. Struck
+  rather than deleted, because a claim this file once made gets quoted back at us for weeks.
 - **All of `_shared/match/`** (`prompt`, `rubric`, `salary-gate`, `scorer`) — zero non-test
   importers. Same for `_shared/tailor/`, `_shared/gemini/`, `_shared/agent/`, `_shared/eval/`.
-- **The approval queue does not approve.** `ApprovalQueuePage.tsx:260-266` `settle()` adds
-  IDs to a React `Set`. No RPC, no update. Per-claim decisions and inline edits are discarded.
+- ~~**The approval queue does not approve.**~~ **NO LONGER TRUE as of `f9a7571` (2026-09-17).**
+  `settle()` now calls `advance_application_status` with `p_agent: 'human'`
+  (`ApprovalQueuePage.tsx:374`). Two caveats that matter more than the fix: it has **never been
+  exercised against live data**, and the queue is **empty by construction** — see the entry below.
 - **`filter_rules` is empty and unconfigurable.** Three independent reasons, and fixing any
   one alone changes nothing: (a) `bootstrap_user_defaults()` inserts `evaluation_order`, a
   column that does not exist (real name `sort_order`), so all three seeded tables roll back;
@@ -304,6 +308,64 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   manual dashboard button.
 - **`packages/master-pdf/src/extract.ts` does not exist**, though `index.ts:26` says
   "START HERE". `pdfExtractor.ts` falls through to a hardcoded placeholder profile.
+
+### Added 2026-09-17 (afternoon) — verified by repo-wide grep, orchestrator session
+
+- **The Auditor and the Normalizer do not exist as code.** There is no `_shared/audit*` directory
+  at all. Of the six agents the discovery fast-path names, exactly one (Screener) is real and
+  reachable; `_shared/match/` and `_shared/tailor/` exist with zero non-test importers; the
+  Normalizer and Auditor were never written. **The agent whose verdict the UI forges is the one
+  that does not exist.** Any plan that says "wire up the existing agents" is costed wrong by
+  three agents and a runner.
+- **Nothing in the repo writes `tailored_profile`.** Not one writer, anywhere. Every consumer
+  reads a column no producer fills.
+- **The approval queue is empty by construction.** `629dc81` refuses any row whose
+  `tailored_profile` is null; the only producer of `awaiting_approval` is the discovery fast-path
+  button, which never runs a Tailor. So 100% of what the queue receives is refused. Worth stating
+  plainly because "the approval write path works now" is true and misleading in the same breath.
+- **The `629dc81` gate is a null-check, not a shape check** (`ApprovalQueuePage.tsx:214`). A row
+  with `tailored_profile = '{}'::jsonb` **passes it**, falls into the master-profile fallback at
+  `:223`, and reproduces the exact bug the commit was written to stop. This is §5 in miniature:
+  it asks whether the value is *missing* instead of validating the shape expected.
+- **Every fast-path click writes 12 permanent, undeletable forged audit rows.**
+  `advance_application_status` inserts one `application_events` row (`queue_and_pool_functions.sql:148`)
+  and the `log_status_change` AFTER UPDATE trigger (`status_transition_guard.sql:273-314`) inserts a
+  second — six transitions x 2. `application_events` carries `forbid_update`/`forbid_delete`
+  triggers (`supporting_tables.sql:53-59`), so **the only possible correction is a compensating
+  event, never a cleanup.** And **no UI reads `application_events`** (zero `from('application_events')`
+  in `apps/web/src`); the Health page reads `agent_runs`, which this RPC never touches. The
+  falsification is permanent, complete, and invisible.
+- **There is no honest single status reachable from `discovered`.** The graph seeds exactly three
+  edges out of it (`status_transition_guard.sql:100-102`): `deduped`, `dropped_duplicate`, `failed`
+   — all naming machine agents, only `failed` admitting `'human'`. Any "just make the button stamp
+  one honest status" proposal is a migration, not a frontend change.
+- **Nothing builds `apps/web` in CI.** `.github/workflows/` holds only `apply.yml`, `keepalive.yml`,
+  `scout.yml`; `grep -i vercel` over `.github/` returns nothing. The 2026-09-16 post-mortem's own
+  action item — *"Nothing alerts on a failed deploy"*
+  (`docs/status/2026-09-16-tailor-queue-deploy-blocker.md:85`) — **was never implemented.** A
+  completed post-mortem whose action item never landed is the "past tense for future work" trap
+  applied to ourselves.
+- **The unapplied-migration backlog is SEVEN files, not two**, and `supabase db push` applies
+  all of them in one command. Verified 2026-09-17 by `applyyy-5c`. Only `20260917124500` and
+  `20260917130000` have been reviewed; `20260911235500`, `20260912001500`, `20260912120000` and
+  the rest have **not**. Two of them contain `alter type ... add value`, the documented trap at
+  `20260910185900:5-19`. **`supabase db push` is a network operation and needs no Docker** —
+  only `start`/`reset`/`diff` do — so the no-Docker rule is not what is holding this.
+- **`docs/architecture/graph-engineering.md:259-264` reads as current and is not.** It records a
+  `supabase migration list` timestamped "11:46" — that is **2026-09-11**, not today (last commit
+  `98b28bd`, 2026-09-11 12:09). A bare clock time in a doc with no date is a trap; two sessions
+  have now nearly mis-dated this one. **Nothing in the repo records a `db push` after 2026-09-11.**
+- **Nothing calls `bootstrap_user_defaults()`.** Not from `apps/web/src`, `worker/src` or
+  `supabase/functions` (the complete `.rpc(` inventory is `claim_gemini_key`,
+  `report_gemini_result`, `advance_application_status`, `claim_applications`,
+  `release_application_claim`, `sweep_stale_claims`), and there is no trigger on `auth.users`.
+  `SCHEMA_CONTRACT.md:571` confirms it is manual. So **fixing the seed columns does not make a new
+  signup get rows** — someone still has to call the RPC by hand. Repairing a function nobody
+  invokes is the §5 shape wearing a migration's clothes.
+- **No session can check the live database.** The `supabase` MCP server is configured but
+  **unauthenticated**, and the Vercel CLI is **not installed**. So "is the migration applied?",
+  "is production serving HEAD?" and "what is actually in the queue?" are *unanswerable from inside
+  a session* — they must go back to Teja. Do not let a green local build stand in for either.
 
 ### Security gaps, ruled to be fixed 2026-09-17
 - `advance_application_status` takes `p_agent` as an **unverified caller-supplied string**
