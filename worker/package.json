@@ -21,7 +21,7 @@
     "@applyy/resume-template": "workspace:*",
     "@applyy/shared-types": "workspace:*",
     "@supabase/supabase-js": "2.50.0",
-    "playwright": "1.49.1"
+    "playwright": "1.55.1"
   },
   "devDependencies": {
     "@types/node": "24.0.1",

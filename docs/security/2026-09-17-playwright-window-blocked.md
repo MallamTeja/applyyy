@@ -1,8 +1,12 @@
-# Window 3 (playwright) — blocked before any install, and why
+# Window 3 (playwright) — blocked, re-scoped, then landed without local execution
 
-**Date:** 2026-09-17 17:2x IST · **Session:** `applyyy-95` · **Repo at:** `0fe8ca5`
-**Status:** **NOTHING INSTALLED. NOTHING CHANGED.** `pnpm-lock.yaml` and every
-`package.json` are byte-identical to `0fe8ca5`.
+**Date:** 2026-09-17 · **Session:** `applyyy-95`
+**Status:** **BUMPED.** Both manifests and the lockfile moved `1.49.1 -> 1.55.1`.
+**NO REGRESSION WAS ESTABLISHED LOCALLY, AND NOTHING HERE IS "VERIFIED"** — see §5.
+
+> §1–§4 below are the record of the **first** attempt, which stopped before touching
+> anything. They are kept rather than rewritten: the blocker and the three corrections
+> are why the second attempt had the scope it did. §5 records what actually landed.
 
 This is a **delta to** [`2026-09-17-dependency-remediation-plan.md`](./2026-09-17-dependency-remediation-plan.md),
 not a second account of the same advisory. The plan already covers `playwright` at four
@@ -93,3 +97,75 @@ installing it would have *added* an advisory. `6.30.6` shipped instead.
 **`pnpm audit` does not write `pnpm-lock.yaml`** — confirmed by `git status` immediately
 after the run. That distinguishes it from `pnpm run typecheck`, which does, and makes
 `audit` safe to run inside someone else's lockfile window.
+
+---
+
+## 5. What landed (window re-opened with option (a))
+
+The orchestrator re-scoped the window to hold **both** manifests plus the lockfile
+atomically, choosing that over a `pnpm-workspace.yaml` override on the grounds that an
+override "makes the version invisible at the two places a reader looks for it, and this
+repo's dominant failure is things being true somewhere other than where you look."
+
+| | Before | After |
+|---|---|---|
+| `worker/package.json:24` (production dep) | `1.49.1` | `1.55.1` |
+| `apps/web/package.json:26` (devDependency) | `1.49.1` | `1.55.1` |
+| `pnpm audit` totals | 2 crit / **3 high** / 14 mod / 2 low = **21** | 2 crit / **2 high** / 14 mod / 2 low = **20** |
+| `GHSA-7mvr-c777-76hp` | present | **absent** |
+
+**Lockfile diff: 11 insertions, 11 deletions — `playwright` and `playwright-core` only.**
+Nothing else moved: no transitive drift, no unrelated package resolved to a new version.
+Produced with `pnpm install --lockfile-only`, which resolves and writes the lockfile
+without linking `node_modules` — chosen deliberately, because four sessions share this
+working tree and a real install would have mutated the `node_modules` a peer's test run
+was reading from.
+
+Exactly one high closed and nothing added. That is the whole intended effect.
+
+### Why this says "no regression was not established", and not "verified"
+
+**Nothing was executed against 1.55.1. Not the test suite, not even `tsc`.** With
+`--lockfile-only`, `worker/node_modules/playwright` is still `1.49.1`, so a suite run or a
+typecheck would have exercised the OLD version and reported green for a reason entirely
+unrelated to the change. That green would have been worse than no run at all — it is this
+repo's signature failure, a guard passing for a reason unconnected to its claim.
+
+Running anything meaningful locally requires a real install, and a real install requires a
+browser download. Measured rather than assumed, by unpacking `playwright-core@1.55.1`
+outside the repo and reading its `browsers.json`:
+
+| | cached on this machine | required by 1.55.1 |
+|---|---|---|
+| chromium | `1148` | **`1193`** |
+| chromium headless shell | `1148` | **`1193`** |
+| ffmpeg | `1010` | **`1011`** |
+
+None match, all three are `installByDefault`. So a local no-regression run costs three
+fresh browser downloads — a Teja decision, not one to take unasked, and the reason this
+landed with the honest label instead of a green one.
+
+### And a local run would not have verified the fix anyway
+
+Worth separating, because the two are easy to conflate. Even a full local install with
+browsers would only establish **no regression**. The advisory is that playwright
+**downloads browser binaries without verifying SSL** — an *install-time* defect. The only
+thing that exercises it is a clean install, and the place that happens is CI. The
+remediation plan already says exactly this at `:261`, and it is right.
+
+**So the honest status is: the advisory is closed in the dependency graph, and the bump is
+unexercised. The next CI run is the first real test of both.**
+
+### Orchestrator ruling recorded here, not a finding of this session
+
+`applyyy-94` **ruled playwright Tier 1 for prioritisation** — a production `dependencies`
+entry in the component that submits real applications — and moved this window ahead of W2.
+The reasoning is that Tier 2's own text ("integrity of its browser binaries is worth more
+than the severity implies") already argues for Tier 1 handling, so the label contradicted
+the paragraph beneath it.
+
+Flagged as a ruling rather than a finding so that whoever next owns
+`2026-09-17-dependency-remediation-plan.md` can disagree with the reasoning rather than
+just the conclusion. **The plan file itself still says Tier 2** — it was in nobody's write
+partition during this window, so the ruling and the document currently disagree, and the
+document is the one people will read.
