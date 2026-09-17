@@ -442,11 +442,39 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   `SCHEMA_CONTRACT.md:571` confirms it is manual. So **fixing the seed columns does not make a new
   signup get rows** — someone still has to call the RPC by hand. Repairing a function nobody
   invokes is the §5 shape wearing a migration's clothes.
-- **`playwright@1.49.1` is a HIGH, production-reachable in `worker`** (GHSA-7mvr-c777-76hp —
-  installs browsers without verifying SSL) and appears in **no security doc**. `99c42e8`, titled
-  "close the production-reachable advisories", did not close it. `1.49.1 -> 1.55.1` is
-  **same-major** — the cheapest real security win currently on the board, and unowned. Measured
-  2026-09-17 by `pnpm audit --json`, **which runs with no install** (EXIT=1, 21 advisories).
+- **`playwright@1.49.1` is MIS-TIERED, not undocumented.** An earlier version of this entry said
+  it "appears in no security doc" and that `99c42e8` "did not close it". **Both false**, corrected
+  2026-09-17 after a worker read the plan I had not.
+  `docs/security/2026-09-17-dependency-remediation-plan.md` names it at `:124`, `:158`, `:226` and
+  `:261`, with the correct target already worked out, scheduled as **Window 3** of four. And
+  `99c42e8` deferred it **deliberately, saying so in its own commit message** ("Dev-only and CI
+  advisories are W2-W4 and are deliberately not touched here"). Not an oversight.
+  **The real defect is a tiering one.** The plan files it under *"Tier 2 — supply-chain / CI
+  integrity, not user-reachable"* — but in `worker` it is a **production `dependencies` entry**
+  (`worker/package.json:24`), and the worker is the component that types into real ATS forms and
+  submits applications. The plan half-sees this at `:158` ("integrity of its browser binaries is
+  worth more than the severity implies") and still routes it behind two dev-only windows.
+  **Tier 2's own text argues for Tier 1 treatment.**
+  **The lesson, which is the durable part: a correct description filed under the wrong heading is
+  harder to catch than an omission, because everything you read about it is true.** An omission
+  trips the next reader; a misfiling reassures them.
+  `GHSA-7mvr-c777-76hp` is scoped `<1.55.1`, and **playwright is declared TWICE** —
+  `worker/package.json:24` (dependencies) and `apps/web/package.json:26` (devDependencies). Both
+  are vulnerable, so bumping one alone leaves the advisory open *and* splits the lockfile across
+  two playwright versions, i.e. two sets of browser binaries on every machine and runner. **Any
+  playwright window must hold both manifests plus the lockfile, atomically**, or use a
+  `pnpm-workspace.yaml` override the way `typescript: "5.9.3"` already is.
+- **Verify a supply-chain advisory on CI, never locally.** The playwright defect is that it
+  downloads browser binaries **without verifying SSL** — an *install-time* integrity failure. A
+  green local suite exercises browsers **already on disk, fetched by the old version**. It proves
+  no regression; it proves nothing about what was fixed. Locally the honest claim is "no
+  regression", never "verified". This is §5's shape wearing a green checkmark: a guard passing for
+  a reason unrelated to what it claims to check. `…dependency-remediation-plan.md:261` already said
+  this and an orchestrator brief contradicted it.
+- **`pnpm audit` does NOT write `pnpm-lock.yaml`** — verified 2026-09-17, `git status` clean
+  immediately after (EXIT=1, 21 advisories: 2 critical, 3 high, 14 moderate, 2 low, derived
+  independently by two sessions). That distinguishes it from `pnpm run typecheck`, which **does**,
+  and makes `audit` safe to run inside someone else's lockfile window.
   Also from that run: `@supabase/supabase-js` is now CLEAN, and `react-router` is at **6.30.6**,
   not the 6.30.4 some docs still name — both its advisories stand regardless, because the fix
   lands only in `7.18.0`, a **v6->v7 major migration**, not a bump. Anyone scheduling it as a
