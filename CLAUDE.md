@@ -118,8 +118,29 @@ No test file in the repo reaches 1:1. Aim for the observed band on tests; do not
 other people's files. **Write comments as you go** — retro-commenting is a second pass
 nobody budgets for.
 
+**The test band is a DESCRIPTION, NOT A CEILING.** Ruled 2026-09-17 after a worker wrote a
+test at 1.32 and flagged it rather than trimming to fit. Going above it is fine and needs no
+justification; the numbers record what the repo currently looks like, not a budget to spend.
+**Never delete an explanation to hit a number** — a metric that makes people remove reasoning
+has inverted the thing it was measuring. The only figure that is a genuine requirement is the
+**≥ 1.00 floor on source**.
+
 A migration especially needs a comment recording *why it exists*, because that is the only
 thing stopping someone "simplifying" it back into the bug it fixed.
+
+**When you delete a feature, grep the file's own header.** A page's docstring advertises its
+capabilities and no compiler checks it. `DiscoveredJobsPage.tsx:11` still listed the
+*"One-click Tailor & Queue action"* as a feature of the page after the handler was cut; it was
+caught only because a revert-proof put the old file back in front of the worker. **Deleting a
+feature and leaving its docstring is how a file starts lying about itself** — and a lying
+header is worse than a stale doc, because it sits inside the thing it misdescribes.
+
+**Assert on code SHAPE, never on a bare substring.** Earned 2026-09-17: a test forbidding the
+string `audit_clean` went red against the page's own *comment explaining why the fast path was
+removed*. The worker fixed the TEST, not the comment — every assertion now matches a code form
+(`rpc('advance_application_status'`, the quoted `'audit_clean'`, `navigate('/approvals')`).
+**A guard that forbids describing the bug it guards against gets deleted by the first person it
+inconveniences**, and at a deletion site the explanation is the most valuable thing left.
 
 ---
 
