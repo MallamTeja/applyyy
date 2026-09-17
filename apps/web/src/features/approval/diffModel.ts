@@ -127,6 +127,21 @@ export interface ResumeDiff {
   readonly salaryMin?: number | null | undefined;
   readonly salaryMax?: number | null | undefined;
   readonly salaryCurrency?: string | null | undefined;
+  /* WHERE THE POSTING LIVES. Added 2026-09-17.
+   * This screen asks the operator to confirm a resume was tailored honestly
+   * FOR A PARTICULAR JOB, and until now it showed them the resume and withheld
+   * the job: no link, no description, nothing to check the claim against. The
+   * question "is this bullet really about what they asked for" was unanswerable
+   * without leaving the page and searching for the posting by hand.
+   * UNTRUSTED - this URL came from an ATS board. It is rendered as an href with
+   * rel="noopener noreferrer" and validated for scheme before use; never
+   * interpolated anywhere a javascript: or data: URL could execute. */
+  readonly applyUrl?: string | null | undefined;
+  /* The posting's own text, as discovered. UNTRUSTED and HTML-bearing, so it is
+   * stripped of tags and rendered as a React text child - never
+   * dangerouslySetInnerHTML. This is the ground truth the tailored copy is
+   * supposed to be answering. */
+  readonly jobDescription?: string | null | undefined;
 }
 
 /* A single flagged claim, flattened out of the line structure so the alert band

@@ -62,6 +62,12 @@ export interface DiffAdapterInput {
     readonly salary_min?: number | null;
     readonly salary_max?: number | null;
     readonly salary_currency?: string | null;
+    /* Both UNTRUSTED, both from an ATS board, and both handled at the render
+       site rather than sanitised here: the adapter's job is shape, not safety,
+       and a "cleaned" string passed downstream invites the next caller to
+       assume it is safe. */
+    readonly apply_url?: string | null;
+    readonly description_raw?: string | null;
   };
   /* The immutable snapshot the worker will render to PDF. What was approved is
    * byte-for-byte what gets sent, so this is the correct thing to review. */
@@ -341,6 +347,10 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
     salaryMin: job.salary_min,
     salaryMax: job.salary_max,
     salaryCurrency: job.salary_currency,
+    /* Passed through untouched. The screen needs the posting itself to be worth
+       anything: see the note on ResumeDiff.applyUrl. */
+    applyUrl: job.apply_url,
+    jobDescription: job.description_raw,
   };
 }
 

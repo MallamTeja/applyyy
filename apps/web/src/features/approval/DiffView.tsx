@@ -53,6 +53,119 @@ export interface DiffViewProps {
   readonly onReject: (reason: string) => void;
 }
 
+/* --- The job being approved against ------------------------------------- */
+
+/* Only ever produce an href for a URL we have proved is http(s).
+ *
+ * WHY A HELPER AND NOT A REGEX AT THE CALL SITE: `apply_url` is attacker-
+ * influenced. It reaches us from a job board, and commit 2921bca already had to
+ * validate apply URLs coming out of untrusted LinkedIn post text. A string
+ * beginning `javascript:` in an href executes on click, and `data:` can carry a
+ * whole document; both defeat rel="noopener" entirely, because the navigation
+ * never leaves the page. Parsing with the URL constructor and allowlisting the
+ * two schemes we want is the check that cannot be fooled by casing, whitespace
+ * or percent-encoding the way a substring test can.
+ * Returns null rather than a sanitised string, so the caller has to handle
+ * "no safe link" explicitly instead of rendering a dead anchor. */
+function safeHttpUrl(raw: string | null | undefined): string | null {
+  /* Nothing to validate. Not an error - most rows have a URL, some do not. */
+  if (typeof raw !== 'string' || raw.trim().length === 0) return null;
+  try {
+    const parsed = new URL(raw.trim());
+    /* The allowlist. Anything else - javascript:, data:, file:, blob: - is
+       refused rather than escaped, because there is no safe rendering of a
+       scheme this screen has no reason to open. */
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:'
+      ? parsed.href
+      : null;
+  } catch {
+    /* Unparseable. Treated exactly like an unsafe scheme: no link. */
+    return null;
+  }
+}
+
+/* The posting itself, beside the resume that claims to answer it.
+ *
+ * WHY THIS EXISTS AT ALL: this screen asks the operator to confirm a resume was
+ * tailored honestly FOR A PARTICULAR JOB, and until 2026-09-17 it showed them
+ * the resume and withheld the job. "Is this bullet really about what they asked
+ * for?" could not be answered without leaving the page to find the posting by
+ * hand - so in practice it was answered by assuming yes, which is the habit the
+ * whole gate exists to prevent.
+ *
+ * The description is COLLAPSED by default. Expanded, it would push the
+ * fabrication alert below the fold, and nothing may outrank that band. */
+function JobPosting({ diff }: { readonly diff: ResumeDiff }): ReactElement | null {
+  /* Local, because whether one operator expanded one posting is not state any
+     other part of the app has a reason to know about. */
+  const [expanded, setExpanded] = useState(false);
+
+  /* Validated once per render rather than at each use site. */
+  const href = safeHttpUrl(diff.applyUrl);
+
+  /* Tags stripped rather than rendered: this text came from a job board and is
+     UNTRUSTED. Stripping here and passing a plain string to a React text child
+     means there is no path by which markup in a posting reaches the DOM. */
+  const description =
+    typeof diff.jobDescription === 'string'
+      ? diff.jobDescription.replace(/<[^>]*>?/gm, ' ').replace(/\s+/g, ' ').trim()
+      : '';
+
+  /* Render nothing at all rather than an empty panel: a box saying "no job
+     details" is noise on a screen where everything visible must be worth
+     reading. */
+  if (href === null && description.length === 0) return null;
+
+  return (
+    <section className="job-posting" aria-labelledby={`posting-${diff.applicationId}`}>
+      <div className="job-posting__head">
+        <h3 id={`posting-${diff.applicationId}`} className="job-posting__title">
+          The posting this was written for
+        </h3>
+        {/* The link is the more valuable of the two, so it sits in the header
+            where it is reachable without expanding anything. */}
+        {href !== null && (
+          <a
+            className="button button--secondary button--small"
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Open the original posting
+          </a>
+        )}
+      </div>
+
+      {description.length > 0 && (
+        <>
+          {/* A real button, not a div with onClick: this has to be reachable by
+              keyboard, and aria-expanded is what tells a screen reader whether
+              the text below is currently showing. */}
+          <button
+            type="button"
+            className="button button--ghost button--small job-posting__toggle"
+            aria-expanded={expanded}
+            aria-controls={`posting-body-${diff.applicationId}`}
+            onClick={() => setExpanded((open) => !open)}
+          >
+            {expanded ? 'Hide the job description' : 'Read the job description'}
+          </button>
+
+          {/* `hidden` rather than unmounting, so an operator who expands, reads,
+              collapses and expands again does not lose their scroll position. */}
+          <p
+            id={`posting-body-${diff.applicationId}`}
+            className="job-posting__body"
+            hidden={!expanded}
+          >
+            {description}
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
 /* --- Coverage ---------------------------------------------------------- */
 
 /* Two-segment bar: honest coverage vs coverage purchased by fabrication. */
@@ -500,6 +613,11 @@ export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactEle
 
         <CoverageBar diff={diff} />
       </header>
+
+      {/* The job, before the verdict on the resume. Reading order is the
+          argument: you cannot judge whether a claim is honest about a posting
+          you have not been shown. */}
+      <JobPosting diff={diff} />
 
       {bucket === 'B' ? (
         <FabricationAlert

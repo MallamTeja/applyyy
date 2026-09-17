@@ -28,9 +28,10 @@ import type { ReactElement } from 'react';
 import { PageHeader } from '../../app/PageHeader';
 import { StatusBadge } from '../../app/StatusBadge';
 import { SourceBadge } from '../../app/SourceBadge';
-// `useToast` import removed with the unused binding below it. Left in place it is
-// still TS6133 — removing a symbol's only consumer makes its import dead in the same
-// pass, which is the second half of the same error rather than a new one.
+// useToast is back, and now has a consumer: settle() reports every approve and
+// every reject. It was removed in a build-unblocking pass when the handler wrote
+// nothing, which was the honest state then and is not the state now.
+import { useToast } from '../../app/Toast';
 import type {
   ApplicationRow,
   DiscoverySource,
@@ -39,13 +40,14 @@ import type {
   ResolvedResume,
 } from '../../data/contract';
 import { DiffView } from './DiffView';
-// `ClaimDecision` was imported here but never used, which is a symptom, not litter:
-// DiffViewProps.onApprove hands back a ReadonlyMap<string, ClaimDecision> carrying the
-// operator's per-claim keep/remove choices, and this page's handler at the call site
-// ignores that argument entirely. The import is removed to unblock the build; the
-// discarded decisions are recorded in docs/audit/2026-09-16-pending-task-claims-verified.md
-// rather than silently patched, because consuming them is a product decision about what
-// "approve with one claim removed" should actually do.
+// ClaimDecision is imported again because the decisions are no longer discarded.
+// DiffViewProps.onApprove hands back a ReadonlyMap<string, ClaimDecision> of the
+// operator's per-claim keep/remove choices; the handler now forwards it into the
+// RPC's p_detail, so the audit log records WHAT WAS DECIDED rather than only that
+// someone approved. Previously the button could read "Approve without 2 claims"
+// while the page recorded a plain approval - the string described an action the
+// handler did not perform.
+import type { ClaimDecision } from './DiffView';
 import { buildResumeDiff } from './diffAdapter';
 import { deriveBucket } from './diffModel';
 import type { ResumeDiff } from './diffModel';
@@ -54,14 +56,22 @@ import { supabase } from '../../data/supabase';
 import './ApprovalQueuePage.css';
 
 export function ApprovalQueuePage(): ReactElement {
-  // The `const toast = useToast()` binding that stood here was never read. Removed
-  // rather than suppressed: an unused hook result on the page that performs the single
-  // irreversible action in the product reads as "the operator gets feedback on approve"
-  // to anyone skimming, and nothing here delivered that. Wiring real toasts into
-  // settle() is feature work outside this build-unblocking change, and is reported.
+  /* Feedback for the one irreversible action in the product. */
+  const toast = useToast();
+
   /* Live queue state. Defaults to empty array (NO mock data). */
   const [queue, setQueue] = useState<readonly ResumeDiff[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+
+  /* THE THIRD STATE. Until 2026-09-17 a failed read was indistinguishable from
+     an empty queue: the catch swallowed the error, `queue` stayed [], and the
+     page rendered "Queue is empty" inside a box whose green --traced left
+     border is commented "it is a statement that the work is done". So a
+     database outage rendered as a green all-clear on the screen that gates
+     irreversible submissions - fail-loud inverted into fail-reassuring.
+     Held separately rather than folded into `queue`, because "no rows" and
+     "could not ask" are opposite claims and must not share a branch. */
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   /* Rows the operator has acted on this session, so they leave the queue
      without a refetch. */
@@ -124,13 +134,36 @@ export function ApprovalQueuePage(): ReactElement {
         // 2. Fetch applications at awaiting_approval
         const { data, error } = await supabase!
           .from('applications')
-          .select('*, jobs:job_id(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs)')
+          /* apply_url and description_raw added 2026-09-17: the diff could not
+             show the operator the job they were approving against, because the
+             query never asked for it. Everything here is an explicit column
+             list rather than jobs:job_id(*) so that adding a column to the
+             jobs table does not silently start shipping it to the browser. */
+          .select('*, jobs:job_id(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, description_raw)')
           .eq('status', 'awaiting_approval')
           .order('created_at', { ascending: false });
 
-        if (error || !data || !live) {
+        /* `live` is a cancelled render, not a failure - a component that
+           unmounted mid-fetch has nothing to report. Separated from the two
+           real failures below so that leaving the page cannot paint an error. */
+        if (!live) {
           return;
         }
+
+        /* A refused or unreachable read. Recorded rather than swallowed: the
+           whole point of the third state. The operator gets the console's own
+           sentence; error.message is kept out of the UI because it is
+           Postgres's words, not something anyone can act on. */
+        if (error || !data) {
+          setLoadError(
+            'Could not reach the application queue. This screen cannot tell you what is waiting until the connection is back.',
+          );
+          return;
+        }
+
+        /* A read that succeeded clears any error from a previous attempt, so a
+           recovered connection does not leave a stale alarm on screen. */
+        setLoadError(null);
 
         const diffs: ResumeDiff[] = [];
         for (const app of data) {
@@ -251,18 +284,82 @@ export function ApprovalQueuePage(): ReactElement {
     };
   }, [queue, settled]);
 
-  /* Mark rows as handled. In the live version this is where
-     `advance_application_status` is called - `awaiting_approval -> approved` is
-     the only edge into `approved`, and `approved -> applying` the only edge
-     into `applying`, so this function is the single door to submission in the
-     whole system. Constraint #15 is unreachable-by-construction rather than
-     enforced by review. */
-  function settle(ids: readonly string[]): void {
-    setSettled((previous) => {
-      const next = new Set(previous);
-      for (const id of ids) next.add(id);
-      return next;
-    });
+  /* THE DOOR. Wired to the database on 2026-09-17; until then this function
+     added ids to a React Set and wrote nothing, so the row vanished from the
+     screen and stayed at `awaiting_approval` in Postgres. The operator was
+     told, by the row disappearing, that something had happened. Nothing had.
+
+     `advance_application_status` rather than a bare UPDATE, because
+     core_tables.sql:471 says a bare update "passes the guard but skips the
+     claim release and strands the row". The RPC sets `applyy.acting_agent`
+     inside the transaction, which is what lets the transition guard prove a
+     HUMAN made this move - `awaiting_approval -> approved` is
+     allowedAgents:['human'] and is the only edge into `approved`, so this call
+     is the single door to submission in the whole system. Constraint #15 is
+     unreachable-by-construction rather than enforced by review.
+
+     Rows are advanced ONE AT A TIME rather than in a single bulk call. Bucket A
+     is a batch to the operator, not to the database: if the ninth of thirty
+     fails, the eight that succeeded must stay succeeded, and the failure has to
+     name which row. A bulk RPC would give us one error for thirty rows. */
+  async function settle(
+    ids: readonly string[],
+    to: 'approved' | 'dropped_filter',
+    detail: Readonly<Record<string, unknown>> = {},
+  ): Promise<void> {
+    /* No client means no database. Say so instead of optimistically clearing
+       rows the operator would then believe were submitted. */
+    if (supabase === null) {
+      toast.error('Not connected to the database. Nothing was recorded.');
+      return;
+    }
+
+    const moved: string[] = [];
+    const failed: string[] = [];
+
+    for (const id of ids) {
+      /* `human` is not decoration: the guard reads it to decide whether this
+         edge is legal at all, and no other agent value opens this one. */
+      const { error } = await supabase.rpc('advance_application_status', {
+        p_application_id: id,
+        p_to_status: to,
+        p_agent: 'human',
+        p_detail: detail,
+      });
+      if (error) {
+        failed.push(id);
+      } else {
+        moved.push(id);
+      }
+    }
+
+    /* Only rows the DATABASE accepted leave the queue. Removing a failed row
+       would hide it from the one person who can fix it, which is the same
+       fail-clean behaviour this whole screen exists to prevent. */
+    if (moved.length > 0) {
+      setSettled((previous) => {
+        const next = new Set(previous);
+        for (const id of moved) next.add(id);
+        return next;
+      });
+    }
+
+    /* Say what happened, in the verb the button used. An irreversible action
+       with no confirmation trains the operator to distrust the screen. */
+    if (moved.length > 0) {
+      const noun = moved.length === 1 ? 'application' : 'applications';
+      toast.success(
+        to === 'approved'
+          ? `Approved ${moved.length} ${noun} and queued for submission.`
+          : `Rejected ${moved.length} ${noun}.`,
+      );
+    }
+    if (failed.length > 0) {
+      const noun = failed.length === 1 ? 'application' : 'applications';
+      toast.error(
+        `${failed.length} ${noun} could not be recorded and ${failed.length === 1 ? 'is' : 'are'} still waiting. Check you are signed in, then try again.`,
+      );
+    }
   }
 
   /* Loading state while checking database */
@@ -270,7 +367,33 @@ export function ApprovalQueuePage(): ReactElement {
     return (
       <div className="page">
         <PageHeader path="approvals" />
-        <p className="queue__empty">Loading applications awaiting approval from Supabase...</p>
+        {/* Names what the operator is waiting for, not which vendor we ask. */}
+        <p className="queue__empty">Loading the applications waiting for you…</p>
+      </div>
+    );
+  }
+
+  /* THE FAILED READ, and it must be tested BEFORE the empty branch below.
+     Order is the fix: both conditions are true when a read fails - the queue is
+     empty precisely BECAUSE we could not fill it - so whichever branch is
+     reached first decides what the operator is told. Put the empty branch
+     first and the outage renders as a green all-clear.
+     This is a third branch, not a repaint: the green --traced framing on
+     .queue__empty stays correct for a genuinely empty queue and is untouched. */
+  if (loadError !== null) {
+    return (
+      <div className="page">
+        <PageHeader path="approvals" />
+        <p className="queue__failed" role="alert">
+          {loadError}
+        </p>
+        <button
+          type="button"
+          className="button button--secondary"
+          onClick={() => window.location.reload()}
+        >
+          Try again
+        </button>
       </div>
     );
   }
@@ -312,11 +435,32 @@ export function ApprovalQueuePage(): ReactElement {
               <li key={diff.applicationId} className="queue__item">
                 <DiffView
                   diff={diff}
-                  /* The decisions map arrives here; the live version writes it
-                     to the row so the audit log records what the operator
-                     chose per claim, not just that they approved. */
-                  onApprove={() => settle([diff.applicationId])}
-                  onReject={() => settle([diff.applicationId])}
+                  /* The decisions map is now FORWARDED, not dropped. Each entry
+                     is one flagged claim the operator explicitly chose to keep
+                     or remove, and it travels into the RPC's p_detail so the
+                     audit log records the reasoning rather than a bare verdict.
+                     Serialised as an object because p_detail is jsonb and a Map
+                     has no JSON representation - it would have arrived as {}. */
+                  onApprove={(decisions) =>
+                    void settle([diff.applicationId], 'approved', {
+                      claim_decisions: Object.fromEntries(decisions),
+                      /* Counted here rather than derived later: this is the
+                         number the button showed the operator, so it is the
+                         number the record should be able to reproduce. */
+                      claims_removed: [...decisions.values()].filter(
+                        (d: ClaimDecision) => d === 'remove',
+                      ).length,
+                    })
+                  }
+                  /* A rejection is a modelled edge, not an ad-hoc state write:
+                     `awaiting_approval -> dropped_filter` is human-only, noted
+                     in the graph as "a human is the last filter in the
+                     cascade". drop_reason carries why. */
+                  onReject={(reason) =>
+                    void settle([diff.applicationId], 'dropped_filter', {
+                      drop_reason: reason,
+                    })
+                  }
                 />
               </li>
             ))}
@@ -363,7 +507,16 @@ export function ApprovalQueuePage(): ReactElement {
           <button
             type="button"
             className="button button--approve"
-            onClick={() => settle(bucketA.map((diff) => diff.applicationId))}
+            /* Bucket A carries no flagged claims by definition, so there are no
+               per-claim decisions to record - only the fact that this was the
+               batch path rather than an individual review. */
+            onClick={() =>
+              void settle(
+                bucketA.map((diff) => diff.applicationId),
+                'approved',
+                { review_path: 'bucket_a_batch' },
+              )
+            }
           >
             {/* The verb keeps the same name through the flow: approve produces
                 approved. And it states the count, so the button says exactly

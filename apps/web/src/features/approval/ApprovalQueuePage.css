@@ -96,3 +96,29 @@
   border-radius: var(--radius-sheet);
   font-size: var(--size-base);
 }
+
+/* A FAILED READ, which is not an empty queue. Added 2026-09-17.
+   The rule above is correct and is deliberately left alone: sage green IS the
+   right treatment for "you are finished". The defect was that a failed read
+   shared that branch, so an outage rendered as a green all-clear on the screen
+   that gates irreversible submissions. Same geometry, opposite claim, so the
+   only thing that changes is the channel carrying the meaning - and it changes
+   on three channels at once, not just hue, because a status that relies on
+   colour alone is the thing tokens.css forbids. */
+.queue__failed {
+  margin-top: var(--gap-6);
+  padding: var(--gap-5);
+  max-width: 52ch;
+  background: color-mix(in oklab, var(--fabricated) 8%, var(--sheet));
+  border: 1px solid color-mix(in oklab, var(--fabricated) 30%, transparent);
+  /* The alarm hue, in the same 3px left rule the empty state uses, so the two
+     read as the same component in two states rather than two components. */
+  border-left: 3px solid var(--fabricated);
+  border-radius: var(--radius-sheet);
+  font-size: var(--size-base);
+  /* Second channel: weight. Third: the wording itself says what is unknown. */
+  font-weight: 550;
+  color: var(--text-primary);
+  /* Separates it from the Try again button beneath. */
+  margin-bottom: var(--gap-3);
+}

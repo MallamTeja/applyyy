@@ -674,3 +674,69 @@
   font-weight: 550;
 }
 
+
+/* --- The posting this resume was written for -----------------------------
+   ADDED 2026-09-17. The diff used to show the tailored resume and withhold the
+   job, so "is this claim honest about what they asked for" could not be checked
+   without leaving the page. This panel is deliberately QUIET: it is reference
+   material the operator consults, not a verdict competing with the fabrication
+   band, which must stay the loudest thing on the screen. */
+
+.job-posting {
+  /* --panel, one step below the sheet the diff sits on, so the posting reads as
+     the source material underneath rather than another finding on top. */
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+  padding: var(--gap-3) var(--gap-4);
+  /* Separated from the header above and the alert below; the alert supplies its
+     own top margin, so only the gap above is stated here. */
+  margin-top: var(--gap-4);
+}
+
+.job-posting__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* Wraps rather than crushing the link when the panel is narrow — the diff
+     stacks to one column under 62rem and this row goes with it. */
+  flex-wrap: wrap;
+  gap: var(--gap-2);
+}
+
+.job-posting__title {
+  /* Sized as a card header, not a section header: this sits INSIDE a diff card
+     and must not compete with the job title in the header above it. */
+  font-size: var(--size-card-head);
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.job-posting__toggle {
+  margin-top: var(--gap-2);
+}
+
+.job-posting__body {
+  /* --font-paper: a job description is a DOCUMENT, not console chrome, and this
+     app's type system splits the two. It is also the text being read closely
+     against resume prose set in the same face, so matching them is what lets
+     the operator compare wording rather than typefaces. */
+  font-family: var(--font-paper);
+  font-size: var(--size-base);
+  /* Serif needs slightly more leading than the sans this app otherwise uses. */
+  line-height: 1.65;
+  color: var(--text-primary);
+  /* Under 80 characters. The rest of this file caps its prose at 46ch for the
+     same reason; a JD is longer, so it gets the wide measure rather than the
+     tight one, but it still gets one. */
+  max-width: 68ch;
+  margin: var(--gap-3) 0 0;
+  /* A long posting must not push the fabrication alert an entire screen down.
+     Scrolling the description keeps the alert reachable. */
+  max-height: 22rem;
+  overflow-y: auto;
+  /* Preserves the paragraph breaks that survived tag-stripping, without
+     re-introducing markup. */
+  white-space: pre-wrap;
+}
