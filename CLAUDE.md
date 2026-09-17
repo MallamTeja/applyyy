@@ -143,8 +143,24 @@ to `Json`; fix is `?? null`) that no workspace command sees.
 - **`pnpm --filter web` matches NOTHING.** The package is `@applyy/web`. It silently runs
   zero tests and exits 0.
 - **`deno check` over a path resolving to zero files** prints `No matching files found`
-  and **exits 0**. Assert it ran:
-  `deno check <paths> 2>&1 | grep -c "^Check"` must be `> 0`.
+  and **exits 0**. You must assert it ran — but the obvious assertion is itself broken:
+
+  ```sh
+  # WRONG. Returns 0 on a HEALTHY run, for two independent reasons:
+  #   1. deno emits ANSI colour codes, so the line does not literally start with "Check"
+  #   2. deno check is INCREMENTAL — a second run over unchanged files prints nothing
+  deno check <paths> 2>&1 | grep -c "^Check"
+
+  # RIGHT — --reload defeats the cache, sed strips the colour codes:
+  deno check --reload <paths> 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -c "^Check"
+  # must equal the number of files you passed
+  ```
+
+  The wrong form was issued to three sessions on 2026-09-17 before a worker tested it.
+  It failed in the **worst** direction: reporting "did not run" on a run that worked,
+  which trains people to ignore the check. **A guard against vacuous passes can itself
+  pass vacuously** — test your guard against a known-good and a known-bad run before
+  trusting it, or you have only moved the credulity one level up.
 - The root `node_modules` has no top-level packages, but
   `./node_modules/.pnpm/node_modules/.bin/tsc` **does** run (5.9.3), and `node --test`
   works on `packages/*` with no install — Node 24 strips types natively. Do not assume a
@@ -152,6 +168,22 @@ to `Json`; fix is `?? null`) that no workspace command sees.
 
 **Do not run `pnpm install` without the orchestrator scheduling it.** The lockfile is
 single-owner and rewriting it while four sessions work costs a day.
+
+### …but holding `install` does NOT hold lockfile writes
+Found 2026-09-17, after a modified `pnpm-lock.yaml` appeared that three sessions each
+truthfully denied causing. **`pnpm run typecheck` rewrites the lockfile** — the root
+script is `pnpm -r --if-present run typecheck`, and a recursive pnpm command over a
+workspace containing a package the lockfile does not yet know about writes it as a side
+effect (the root `preinstall` hook fires; you can see `resolved 2, reused 2` in the output).
+
+So the moment an unlinked workspace package exists in the tree, **the standard
+verification command becomes a lockfile writer.** No briefing discipline fixes that.
+Either land the install deliberately, or have sessions typecheck per-package
+(`pnpm --filter <pkg> run typecheck`) rather than recursively.
+
+Corollary worth keeping: when several honest sessions all deny causing a change, stop
+hunting for the liar and look for the **side effect**. The question "who ran an install"
+had no true answer; "what else writes this file" did.
 
 ### A test count is a measurement at a timestamp, not a property of the repo
 Peers land tests while you work. Two honest sessions will report different totals for the
