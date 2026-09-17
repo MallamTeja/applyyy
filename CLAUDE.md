@@ -135,9 +135,22 @@ Workspace:   pnpm run typecheck
 **`pnpm run typecheck` does NOT cover `supabase/functions`.** Verified: the root script is
 `pnpm -r --if-present run typecheck`; `pnpm-workspace.yaml` lists only `packages/*`,
 `apps/*`, `worker`; `supabase/functions` has no `package.json` and is a separate Deno
-project. Edge-function changes are invisible to it. There is a known pre-existing
-**TS2322 at `_shared/scout/tiers.ts:384`** (`portalJobId` may be `undefined`, not assignable
-to `Json`; fix is `?? null`) that no workspace command sees.
+project. Edge-function changes are invisible to it. **The Deno tree does not typecheck clean: run the
+command, do not trust a list.**
+
+    cd supabase/functions && deno check --reload <paths>   # -> "Found 4 errors.", EXIT=1
+
+Measured 2026-09-17: 4 errors, not 1 — `_shared/scout/tiers.ts:384` (TS2322, `portalJobId` may
+be `undefined`, not assignable to `Json`; fix is `?? null`) **plus three in
+`_shared/gemini/client.ts`** (`:156`, `:213` TS2322 and `:280` TS2379, all
+`exactOptionalPropertyTypes`), dating from `0ff3c98` on 2026-09-12 and invisible for five days
+because no workspace command reaches that tree.
+
+**This file previously named only the first one, and that is the more dangerous kind of wrong
+than a stale claim.** A reader who checks `tiers.ts:384` finds it exactly as described and
+concludes the inventory is exhaustive. **An accurate-but-partial list validates itself.** Hence
+the rule: any inventory in this file that can drift must point at the COMMAND that regenerates
+it, never at the list alone.
 
 ### Traps that report success while doing nothing
 - **`pnpm --filter web` matches NOTHING.** The package is `@applyy/web`. It silently runs
@@ -345,12 +358,17 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
 
 ### Added 2026-09-17 (afternoon) — verified by repo-wide grep, orchestrator session
 
-- **The Auditor and the Normalizer do not exist as code.** There is no `_shared/audit*` directory
-  at all. Of the six agents the discovery fast-path names, exactly one (Screener) is real and
-  reachable; `_shared/match/` and `_shared/tailor/` exist with zero non-test importers; the
-  Normalizer and Auditor were never written. **The agent whose verdict the UI forges is the one
-  that does not exist.** Any plan that says "wire up the existing agents" is costed wrong by
-  three agents and a runner.
+- **The Auditor does not exist as code** — there is no `_shared/audit*` directory at all.
+  **The agent whose verdict the UI forges is the one that was never written.**
+  Of the six agents the discovery fast-path names: Screener is real and production-reachable;
+  `_shared/match/` and `_shared/tailor/` exist with zero non-test importers; Auditor is absent.
+  **Correction (2026-09-17, by `applyyy-92`): the Normalizer is NOT absent in the same way.**
+  `_shared/normalize/` exists and is production-reachable — `fingerprint.ts` and `posted-at.ts`,
+  imported by `ats/registry.ts:25,27` and `scout/tiers.ts:20,21`. What is missing is a *runner*
+  that writes the `deduped` status around those tested helpers. An earlier version of this entry
+  said "the Normalizer was never written", which **inflates the job**: "write an agent" and
+  "wire a runner around existing tested helpers" are very different sizes. Cost the two limbs
+  separately.
 - **Nothing in the repo writes `tailored_profile`.** Not one writer, anywhere. Every consumer
   reads a column no producer fills.
 - **The approval queue is empty by construction.** `629dc81` refuses any row whose
@@ -358,9 +376,16 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   button, which never runs a Tailor. So 100% of what the queue receives is refused. Worth stating
   plainly because "the approval write path works now" is true and misleading in the same breath.
 - **The `629dc81` gate is a null-check, not a shape check** (`ApprovalQueuePage.tsx:214`). A row
-  with `tailored_profile = '{}'::jsonb` **passes it**, falls into the master-profile fallback at
-  `:223`, and reproduces the exact bug the commit was written to stop. This is §5 in miniature:
-  it asks whether the value is *missing* instead of validating the shape expected.
+  with `tailored_profile = '{}'::jsonb` **passes it**. This is §5 in miniature: it asks whether
+  the value is *missing* instead of validating the shape expected.
+  **Mechanism, corrected 2026-09-17 — an earlier version of this entry got it wrong and the truth
+  is worse.** It does NOT fall into the master-profile fallback. Past the `continue` at `:214`,
+  `app.tailored_profile` is non-null by construction, so `rawResolved ?? {…}` at `:223` **always
+  takes the left side** and that fallback is now **unreachable dead code**. A `'{}'` row therefore
+  renders as a resume with *no fields at all*. Verified first-hand.
+  Two consequences for whoever fixes this: the fix is a shape check at `:214`, **and** the dead
+  fallback at `:223-245` should go with it — dead code that looks like a safety net is worse than
+  no safety net, because the next reader budgets for protection that cannot fire.
 - **Every fast-path click writes 12 permanent, undeletable forged audit rows.**
   `advance_application_status` inserts one `application_events` row (`queue_and_pool_functions.sql:148`)
   and the `log_status_change` AFTER UPDATE trigger (`status_transition_guard.sql:273-314`) inserts a
@@ -396,6 +421,34 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   `SCHEMA_CONTRACT.md:571` confirms it is manual. So **fixing the seed columns does not make a new
   signup get rows** — someone still has to call the RPC by hand. Repairing a function nobody
   invokes is the §5 shape wearing a migration's clothes.
+- **`playwright@1.49.1` is a HIGH, production-reachable in `worker`** (GHSA-7mvr-c777-76hp —
+  installs browsers without verifying SSL) and appears in **no security doc**. `99c42e8`, titled
+  "close the production-reachable advisories", did not close it. `1.49.1 -> 1.55.1` is
+  **same-major** — the cheapest real security win currently on the board, and unowned. Measured
+  2026-09-17 by `pnpm audit --json`, **which runs with no install** (EXIT=1, 21 advisories).
+  Also from that run: `@supabase/supabase-js` is now CLEAN, and `react-router` is at **6.30.6**,
+  not the 6.30.4 some docs still name — both its advisories stand regardless, because the fix
+  lands only in `7.18.0`, a **v6->v7 major migration**, not a bump. Anyone scheduling it as a
+  version nudge has mis-sized it.
+- **The PDF path is broken THREE ways, not one, and all of them are unconditional.**
+  `CLAUDE.md` elsewhere says `packages/master-pdf/src/extract.ts` is missing; writing it would
+  change **nothing**. `apps/web/src/features/settings/pdfExtractor.ts:14` dynamically imports
+  `@applyy/master-pdf` probing for `mod.extractPdf` — a symbol that **exists nowhere** in that
+  package (only `extractProfile`, and only inside a comment) — **and** `@applyy/master-pdf` is
+  **not a dependency of `apps/web/package.json`**, so the specifier cannot resolve in principle.
+  Both failures are swallowed by a bare `catch {}` at `:23` whose comment calls it a concurrency
+  race. **Every master-resume upload therefore returns the hardcoded 'Extracted Candidate' /
+  'candidate@example.com' profile.** If `master_profiles` has ever been written against live, it
+  holds junk. A comment that frames a permanent structural break as a transient race is its own
+  entry in §5.
+- **There is no `discovered -> passed_filters` edge, so the existing backlog can never be
+  screened.** `status_transition_guard.sql:101-103` seeds three edges out of `discovered`
+  (`deduped`, `dropped_duplicate`, `failed`); the Screener's only legal source is `deduped`,
+  which nothing writes. Both call sites already work around it by inserting rows *at* their
+  verdict (`screen-batch.ts:148`, `scout-ats/index.ts:375`) — and `ignoreDuplicates:true` on the
+  upsert never touches an existing row. **Rows already sitting at `discovered` are stranded
+  permanently.** This is a hole in the graph, not a missing agent: any plan to "wire the Matcher"
+  needs an answer for the stranded inventory first.
 - **No session can check the live database.** The `supabase` MCP server is configured but
   **unauthenticated**, and the Vercel CLI is **not installed**. So "is the migration applied?",
   "is production serving HEAD?" and "what is actually in the queue?" are *unanswerable from inside
