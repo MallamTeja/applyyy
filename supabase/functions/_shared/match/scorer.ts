@@ -25,6 +25,7 @@
 import type { EvalCase, MatchScore, Scorer } from "../eval/gate.ts";
 // The prompt assembly that keeps untrusted posting text out of the instruction region.
 import { buildScorerPrompt, type ScorerPrompt } from "./prompt.ts";
+export type { ScorerPrompt } from "./prompt.ts";
 // The weighting, banding and validation.
 import { weightedTotal, type DimensionScores } from "./rubric.ts";
 
