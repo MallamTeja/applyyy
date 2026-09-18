@@ -7,10 +7,17 @@
 // inputs, returning a function over one posting.
 //
 // PURE OF EVERYTHING EXCEPT THE MODEL. No database, no clock, no Gemini import. The
-// `callLlm` seam is what keeps this unit testable with no key pool and no network — and
-// it also keeps this module clear of `../gemini/client.ts`, which currently carries
-// three `exactOptionalPropertyTypes` errors this work has no business inheriting.
-// Persisting the verdict is `persist.ts`'s job; deciding it is this file's.
+// `callLlm` seam is what keeps this unit testable with no key pool and no network, and
+// it is also what lets this module run under `node --test` at all: `../gemini/` is
+// Deno-only (`jsr:` imports, `Deno.env`), so importing it here would make these tests
+// unrunnable outside Deno. Persisting the verdict is `persist.ts`'s job; deciding it is
+// this file's.
+//
+// An earlier version of this comment also cited three open `exactOptionalPropertyTypes`
+// errors in `../gemini/client.ts` as a reason to stay clear. Those were closed by
+// `db98d6e` on 2026-09-18, mid-build. The seam is not why they mattered and the reason
+// above stands on its own — recorded rather than silently deleted, because a rationale
+// that quietly loses one of its two legs is worth knowing about.
 //
 // THE DISTINCTION THIS MODULE EXISTS TO HOLD: a model that DID NOT ANSWER and a model
 // that answered DISHONESTLY are different events.
