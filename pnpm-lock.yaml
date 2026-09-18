@@ -16,6 +16,9 @@ importers:
       '@applyy/master-ingest':
         specifier: workspace:*
         version: link:../../packages/master-ingest
+      '@applyy/master-pdf':
+        specifier: workspace:*
+        version: link:../../packages/master-pdf
       '@applyy/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types

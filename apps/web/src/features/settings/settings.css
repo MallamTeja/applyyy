@@ -1117,6 +1117,34 @@
   padding: var(--gap-4) var(--gap-5);
   border-bottom: 1px solid var(--rule);
   background: var(--panel);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--gap-3);
+}
+
+.suggestions-close-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-control);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--ink-muted);
+  font-size: 1.1rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 120ms ease;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.suggestions-close-btn:hover {
+  background: var(--surface-hover);
+  border-color: var(--rule);
+  color: var(--ink);
 }
 
 .suggestions-header__title {
@@ -1216,20 +1244,28 @@
 }
 
 .button--search {
-  padding: 6px 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 15px;
   font-size: var(--size-xs);
   font-weight: 600;
-  background: var(--accent);
-  color: var(--ink-on-fill);
-  border: none;
+  background: var(--accent) !important;
+  color: #ffffff !important;
+  border: 1px solid var(--accent) !important;
   border-radius: var(--radius-control);
   cursor: pointer;
   white-space: nowrap;
-  transition: background 120ms ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  transition: all 120ms ease;
 }
 
 .button--search:hover {
-  background: var(--accent-strong);
+  background: var(--accent-strong) !important;
+  border-color: var(--accent-strong) !important;
+  color: #ffffff !important;
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.3);
+  transform: translateY(-1px);
 }
 
 .button--refresh-batch {
@@ -1481,20 +1517,24 @@
 
 /* --- Company Card --------------------------------------------------- */
 
+/* --- Company Card --------------------------------------------------- */
+
 .company-card {
   background: var(--sheet);
   border: 1px solid var(--rule);
-  border-radius: var(--radius-sheet);
+  border-radius: 10px;
   padding: var(--gap-3) var(--gap-4);
   display: flex;
   flex-direction: column;
-  gap: var(--gap-2);
-  transition: border-color 140ms ease, box-shadow 140ms ease;
+  gap: var(--gap-3);
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
 .company-card:hover {
   border-color: var(--rule-strong);
-  box-shadow: var(--lift);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  transform: translateY(-1px);
 }
 
 .company-card__header {
@@ -1504,35 +1544,66 @@
   gap: var(--gap-2);
 }
 
+.company-card__title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+
+.company-card__title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .company-card__name {
-  font-size: var(--size-base);
-  font-weight: 600;
+  font-size: 0.95rem;
+  font-weight: 700;
   color: var(--ink);
   margin: 0;
+  line-height: 1.3;
+}
+
+.badge-location {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--ink-muted);
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  padding: 2px 8px;
+  border-radius: 9999px;
+  white-space: nowrap;
 }
 
 .company-card__domain {
   font-size: var(--size-xs);
   color: var(--ink-muted);
-  margin-top: 2px;
+  line-height: 1.35;
 }
 
 .company-card__badges {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 4px;
+  gap: 5px;
+  flex-shrink: 0;
 }
 
 /* Category Badges */
 .badge-cat {
   display: inline-block;
-  padding: 1px 7px;
+  padding: 2px 8px;
   font-size: 0.72rem;
   font-weight: 600;
-  border-radius: 10px;
+  border-radius: 9999px;
   text-transform: uppercase;
   letter-spacing: 0.03em;
+  white-space: nowrap;
 }
 
 .badge-cat--gcc {
@@ -1553,26 +1624,64 @@
   border: 1px solid light-dark(#86efac, #16a34a);
 }
 
+.badge-cat--servicebased {
+  background: light-dark(#fef3c7, #3d2c00);
+  color: light-dark(#b45309, #fde68a);
+  border: 1px solid light-dark(#fde68a, #92400e);
+}
+
+.badge-ats {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  font-size: 0.72rem;
+  font-family: var(--font-id);
+  border-radius: 6px;
+  background: light-dark(rgba(2, 132, 199, 0.08), rgba(56, 189, 248, 0.12));
+  border: 1px solid light-dark(rgba(2, 132, 199, 0.25), rgba(56, 189, 248, 0.25));
+  color: light-dark(#0284c7, #38bdf8);
+  font-weight: 550;
+  white-space: nowrap;
+  max-width: 170px;
+}
+
+.badge-ats__provider {
+  text-transform: lowercase;
+}
+
+.badge-ats__sep {
+  opacity: 0.7;
+}
+
+.badge-ats__id {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Cooldown Box */
 .company-card__cooldown {
   background: var(--panel);
   border: 1px solid var(--rule);
-  border-radius: 6px;
-  padding: 6px 10px;
+  border-radius: 7px;
+  padding: 7px 11px;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
 }
 
 .cooldown-item {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   font-size: 0.75rem;
 }
 
 .cooldown-icon {
   font-size: 0.8rem;
+  display: inline-flex;
+  align-items: center;
 }
 
 .cooldown-label {
@@ -1584,6 +1693,7 @@
   color: var(--ink);
   font-weight: 600;
   font-family: var(--font-id);
+  margin-left: auto;
 }
 
 .cooldown-notes {
@@ -1591,7 +1701,7 @@
   color: var(--ink-muted);
   font-style: italic;
   margin-top: 2px;
-  padding-top: 2px;
+  padding-top: 3px;
   border-top: 1px dashed var(--rule);
 }
 
@@ -1600,37 +1710,153 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: var(--gap-2);
   margin-top: auto;
-  padding-top: 6px;
+  padding-top: 8px;
   border-top: 1px solid var(--rule);
 }
 
-.button--company-add {
-  padding: 5px 12px;
-  font-size: var(--size-xs);
-  font-weight: 600;
-  background: var(--traced-strong);
-  color: var(--ink-on-fill);
-  border: none;
-  border-radius: var(--radius-control);
-  cursor: pointer;
-  transition: all 120ms ease;
-}
-
-.button--company-add:hover {
-  filter: brightness(1.1);
-  transform: translateY(-1px);
-}
-
-.button--company-added {
-  padding: 5px 12px;
-  font-size: var(--size-xs);
-  font-weight: 600;
+.company-card__slug-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.72rem;
   background: var(--panel);
-  color: var(--traced);
-  border: 1px solid var(--traced);
-  border-radius: var(--radius-control);
-  cursor: default;
+  border: 1px solid var(--rule);
+  padding: 2px 7px;
+  border-radius: 4px;
+  max-width: 170px;
+  overflow: hidden;
+}
+
+.company-card__slug-label {
+  color: var(--ink-muted);
+  font-weight: 500;
+}
+
+.company-card__slug-code {
+  color: var(--ink);
+  font-family: var(--font-id);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- THE NEW VIBRANT GREEN ADD BUTTON & CONFIRMED BUTTON ------------- */
+
+.company-card__btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  padding: 6px 14px !important;
+  font-size: 0.775rem !important;
+  font-weight: 600 !important;
+  line-height: 1.3 !important;
+  border-radius: 6px !important;
+  cursor: pointer !important;
+  letter-spacing: -0.01em !important;
+  transition: all 140ms ease !important;
+  white-space: nowrap !important;
+  box-sizing: border-box !important;
+}
+
+/* Active / Ready "+ Add to Watchlist" Button */
+.company-card__btn--add,
+.button.button--company-add,
+.button--company-add {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%) !important;
+  color: #ffffff !important;
+  border: 1px solid #059669 !important;
+  border-radius: 6px !important;
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.25) !important;
+  font-weight: 600 !important;
+  font-size: 0.775rem !important;
+  padding: 6px 14px !important;
+  cursor: pointer !important;
+}
+
+.company-card__btn--add:hover:not(:disabled),
+.button.button--company-add:hover:not(:disabled),
+.button--company-add:hover:not(:disabled) {
+  background: linear-gradient(135deg, #34d399 0%, #10b981 100%) !important;
+  border-color: #10b981 !important;
+  color: #ffffff !important;
+  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.35) !important;
+  transform: translateY(-1px) !important;
+}
+
+.company-card__btn--add:active:not(:disabled),
+.button.button--company-add:active:not(:disabled),
+.button--company-add:active:not(:disabled) {
+  transform: translateY(0) !important;
+  box-shadow: 0 1px 4px rgba(16, 185, 129, 0.3) !important;
+}
+
+.company-card__btn--add:disabled,
+.button.button--company-add:disabled,
+.button--company-add:disabled {
+  background: linear-gradient(135deg, #059669 0%, #047857 100%) !important;
+  color: rgba(255, 255, 255, 0.85) !important;
+  border-color: #047857 !important;
+  cursor: wait !important;
+  opacity: 0.85 !important;
+}
+
+/* Already in Watchlist ("Added") State */
+.company-card__btn--added,
+.button.button--company-added,
+.button--company-added {
+  background: light-dark(rgba(16, 185, 129, 0.1), rgba(16, 185, 129, 0.16)) !important;
+  color: light-dark(#047857, #34d399) !important;
+  border: 1px solid light-dark(rgba(16, 185, 129, 0.35), rgba(52, 211, 153, 0.4)) !important;
+  border-radius: 6px !important;
+  font-weight: 600 !important;
+  font-size: 0.775rem !important;
+  padding: 6px 12px !important;
+  box-shadow: none !important;
+  cursor: default !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+}
+
+.company-card__btn--added:hover,
+.button.button--company-added:hover,
+.button--company-added:hover {
+  background: light-dark(rgba(16, 185, 129, 0.14), rgba(16, 185, 129, 0.22)) !important;
+  border-color: light-dark(rgba(16, 185, 129, 0.5), rgba(52, 211, 153, 0.55)) !important;
+  color: light-dark(#047857, #34d399) !important;
+}
+
+/* Icons and Spinners */
+.btn-add-plus {
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.btn-added-check {
+  font-size: 0.85rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.btn-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  display: inline-block;
+  animation: btnSpinnerRotate 0.6s linear infinite;
+}
+
+@keyframes btnSpinnerRotate {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* --- Modal Footer --------------------------------------------------- */

@@ -31,6 +31,7 @@ import type {
   CompanyCategory,
   SuggestedCompany,
 } from './companyCatalog';
+import './settings.css';
 
 export interface CompanySuggestionsModalProps {
   readonly isOpen: boolean;
@@ -187,7 +188,7 @@ export function CompanySuggestionsModal({
         aria-labelledby="suggestions-modal-title"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Modal Header without ✕ button */}
+        {/* Modal Header with close ✕ button */}
         <div className="suggestions-header">
           <div className="suggestions-header__info">
             <h2 id="suggestions-modal-title" className="suggestions-header__title">
@@ -198,6 +199,15 @@ export function CompanySuggestionsModal({
               Click &quot;+ Add to Watchlist&quot; to auto-register any careers board with the Scout.
             </p>
           </div>
+          <button
+            type="button"
+            className="suggestions-close-btn"
+            onClick={onClose}
+            aria-label="Close dialog"
+            title="Close dialog (Esc)"
+          >
+            ✕
+          </button>
         </div>
 
         {/* Action Controls: Location Selector + Search + Refresh */}
@@ -395,7 +405,7 @@ export function CompanySuggestionsModal({
           <span className="suggestions-footer__note">
             The Scout directly polls public JSON API endpoints for each added board token.
           </span>
-          <button type="button" className="button button--done" onClick={onClose}>
+          <button type="button" className="button button--primary button--done" onClick={onClose}>
             Done
           </button>
         </div>
@@ -420,11 +430,13 @@ function CompanyCard({ company, isAdded, isAdding, onAdd }: CompanyCardProps): R
   return (
     <article className="company-card">
       <div className="company-card__header">
-        <div>
+        <div className="company-card__title-group">
           <div className="company-card__title-row">
             <h3 className="company-card__name">{company.name}</h3>
             {company.location && (
-              <span className="badge-location">📍 {company.location}</span>
+              <span className="badge-location" title={`Tech Hub: ${company.location}`}>
+                📍 {company.location}
+              </span>
             )}
           </div>
           <div className="company-card__domain">{company.domain}</div>
@@ -434,8 +446,13 @@ function CompanyCard({ company, isAdded, isAdding, onAdd }: CompanyCardProps): R
           <span className={`badge-cat badge-cat--${catClass}`}>
             {company.category}
           </span>
-          <span className="badge-ats">
-            {company.atsProvider}: {company.atsIdentifier}
+          <span
+            className="badge-ats"
+            title={`ATS Provider: ${company.atsProvider} | Board Token: ${company.atsIdentifier}`}
+          >
+            <span className="badge-ats__provider">{company.atsProvider}</span>
+            <span className="badge-ats__sep">:</span>
+            <span className="badge-ats__id">{company.atsIdentifier}</span>
           </span>
         </div>
       </div>
@@ -443,10 +460,12 @@ function CompanyCard({ company, isAdded, isAdding, onAdd }: CompanyCardProps): R
       {/* Cooldown Section */}
       <div className="company-card__cooldown">
         <div className="cooldown-item">
+          <span className="cooldown-icon" aria-hidden="true">⏱️</span>
           <span className="cooldown-label">Interview Cooldown:</span>
           <span className="cooldown-val">{company.cooldown.interview}</span>
         </div>
         <div className="cooldown-item">
+          <span className="cooldown-icon" aria-hidden="true">🛡️</span>
           <span className="cooldown-label">Screening Cooldown:</span>
           <span className="cooldown-val">{company.cooldown.screening}</span>
         </div>
@@ -457,27 +476,40 @@ function CompanyCard({ company, isAdded, isAdding, onAdd }: CompanyCardProps): R
 
       {/* Action Footer */}
       <div className="company-card__footer">
-        <span className="identifier" style={{ fontSize: '0.75rem', color: 'var(--ink-muted)' }}>
-          slug: {company.atsIdentifier}
-        </span>
+        <div className="company-card__slug-badge" title={`Scout identifier: ${company.atsIdentifier}`}>
+          <span className="company-card__slug-label">slug:</span>
+          <code className="company-card__slug-code">{company.atsIdentifier}</code>
+        </div>
 
         {isAdded ? (
           <button
             type="button"
-            className="button button--company-added"
+            className="company-card__btn company-card__btn--added button button--company-added"
             disabled
-            title="Already in your Scout watchlist"
+            title="Already added to your Scout watchlist"
           >
-            Added ✓
+            <span className="btn-added-check" aria-hidden="true">✓</span>
+            <span>Added</span>
           </button>
         ) : (
           <button
             type="button"
-            className="button button--company-add"
+            className="company-card__btn company-card__btn--add button button--company-add"
             onClick={() => onAdd(company)}
             disabled={isAdding}
+            title={`Add ${company.name} (${company.atsIdentifier}) to your Scout watchlist`}
           >
-            {isAdding ? 'Adding...' : '+ Add to Watchlist'}
+            {isAdding ? (
+              <>
+                <span className="btn-spinner" aria-hidden="true" />
+                <span>Adding...</span>
+              </>
+            ) : (
+              <>
+                <span className="btn-add-plus" aria-hidden="true">+</span>
+                <span>Add to Watchlist</span>
+              </>
+            )}
           </button>
         )}
       </div>

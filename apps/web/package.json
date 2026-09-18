@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@applyy/master-ingest": "workspace:*",
+    "@applyy/master-pdf": "workspace:*",
     "@applyy/shared-types": "workspace:*",
     "@supabase/supabase-js": "2.50.0",
     "react": "18.3.1",
