@@ -381,7 +381,16 @@ export async function buildTier3AggregatorJob(
     raw_payload: {
       tier: 3,
       portal: input.portal,
-      portal_job_id: input.portalJobId,
+      // `portalJobId` is optional on the tier-3 input because aggregators are inconsistent:
+      // Adzuna and Jooble return an id, LinkedIn and Naukri listings often do not. `Json` has
+      // no `undefined` member, so coercing to an explicit `null` is what makes the absence
+      // storable rather than a type error. `null` beats dropping the key: a stored `null`
+      // records "this portal gave us no id", where a missing key is indistinguishable from
+      // a payload written before this field existed — and archival payloads are read years
+      // later by people who cannot re-derive which it was.
+      // Same value, same coercion as `ats_job_id` on :376 and on the source ref at :355, so
+      // the three representations of one id agree instead of disagreeing about its absence.
+      portal_job_id: input.portalJobId ?? null,
       url: input.applyUrl,
     },
   };

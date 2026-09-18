@@ -156,7 +156,16 @@ export async function callGeminiWithFailover<T>(
       return {
         ok: false,
         reason: claim.reason,
-        detail: "detail" in claim ? claim.detail : undefined,
+        // Only the `claim_failed` variant of `KeyClaim` carries a `detail`; the other three
+        // omit it *on purpose* — `pool.ts` says so in the type's own comment, because
+        // `all_keys_cooling` is normal quota exhaustion and logging error text for it would
+        // train us to ignore the log. Spreading the key in only when it exists preserves that
+        // intent through the boundary: under `exactOptionalPropertyTypes` a literal
+        // `detail: undefined` is a DIFFERENT type from an absent key, and it is the absent
+        // key that means "this failure has nothing to say".
+        // Not `?? ""`: an empty string is a detail that reads as present to `'detail' in x`
+        // and to `Object.keys`, so it would turn "deliberately silent" into "failed silently".
+        ...("detail" in claim ? { detail: claim.detail } : {}),
         attempts: attempt,
       };
     }
@@ -214,7 +223,17 @@ export async function callGeminiWithFailover<T>(
       ok: false,
       reason: "http_error",
       status: execResult.status,
-      detail: execResult.statusText,
+      // `statusText` is optional on `GeminiExecutionResult` and genuinely goes missing: a test
+      // double built through the `execute` seam can leave the field off entirely. Same rule as
+      // the claim branch above — omit the key rather than forwarding a literal `undefined`, so
+      // "no field was supplied" survives the boundary instead of being flattened into one.
+      // Precise about what this does NOT do: the guard is `!== undefined`, so an empty
+      // `statusText` — which is what HTTP/2 yields, having no reason phrase at all — still
+      // forwards as `detail: ""`. A present-but-blank detail is left alone deliberately: it is
+      // the transport's honest answer, and rewriting it here would be this file inventing a
+      // story about a response it did not receive. `status` is always present and is the field
+      // to branch on; `detail` is prose for a human reading a log.
+      ...(execResult.statusText !== undefined ? { detail: execResult.statusText } : {}),
       errorBody: execResult.errorBody,
       attempts: attempt,
     };
@@ -278,9 +297,19 @@ export async function generateGeminiContent(
   };
 
   return await callGeminiWithFailover<GeminiResponseBody>(db, {
-    maxRetries: options.maxRetries,
-    readKey: options.readKey,
-    pacer: options.pacer,
+    // All three of these are optional on BOTH sides: `GenerateGeminiOptions` lets a caller
+    // leave them off, and `callGeminiWithFailover` supplies its own defaults for them
+    // (`?? 3`, `?? denoKeyReader`, `?? defaultGeminiPacer`). Forwarding them unconditionally
+    // says "I am passing a value, and that value is undefined", which under
+    // `exactOptionalPropertyTypes` is a distinct type from passing nothing — hence TS2379.
+    // Be explicit about what this is NOT: `??` collapses absent and present-and-undefined
+    // identically, so behaviour is unchanged by this edit and there is no bug here to hunt
+    // for. What changes is that the type now records the same thing the runtime does, which
+    // is the whole point of the flag — a pass-through should not invent a value the caller
+    // never gave, because the next optional we add here may not have a `??` waiting for it.
+    ...(options.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
+    ...(options.readKey !== undefined ? { readKey: options.readKey } : {}),
+    ...(options.pacer !== undefined ? { pacer: options.pacer } : {}),
     execute: async (apiKey: string) => {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
       try {
