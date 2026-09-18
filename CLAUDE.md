@@ -480,7 +480,14 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
 - **The Auditor does not exist as code** — there is no `_shared/audit*` directory at all.
   **The agent whose verdict the UI forges is the one that was never written.**
   Of the six agents the discovery fast-path names: Screener is real and production-reachable;
-  `_shared/match/` and `_shared/tailor/` exist with zero non-test importers; Auditor is absent.
+  `_shared/match/` ~~and `_shared/tailor/`~~ exist with zero non-test importers; Auditor is absent.
+  **`_shared/tailor/` struck 2026-09-18** — it has three, via `supabase/functions/tailor/index.ts`
+  (`ed09810`/`3f49965`); see the fuller entry in §8 above. Struck here rather than only corrected
+  there, because **this file contained both readings at once for a few hours** and a reader who
+  found this line first had no reason to keep looking. A stale claim gets re-checked; a claim with
+  a live twin thirty lines away gets believed by whoever reads the wrong one. **When you correct an
+  inventory, grep the file for its other instances** — the same rule §7 already records for the
+  `screened`/`screening` rename, earned a second time on a different fact.
   **Correction (2026-09-17, by `applyyy-92`): the Normalizer is NOT absent in the same way.**
   `_shared/normalize/` exists and is production-reachable — `fingerprint.ts` and `posted-at.ts`,
   imported by `ats/registry.ts:25,27` and `scout/tiers.ts:20,21`. What is missing is a *runner*
