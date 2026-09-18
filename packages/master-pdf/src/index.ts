@@ -63,3 +63,7 @@ export type {
   ReviewableRow,
   UnanchoredLinkRow,
 } from './report.ts';
+
+/* Extraction and parser entry points. */
+export { extractPdf, extractPdfWithReport, extractProfile } from './extract.ts';
+
