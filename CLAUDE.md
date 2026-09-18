@@ -481,6 +481,11 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   **The agent whose verdict the UI forged was the one that was never written.** (Past tense
   since `75a75a0` deleted the button; the Auditor is still absent — `find supabase/functions
   -iname "*audit*"` returns nothing, re-checked 2026-09-18.)
+  **Its position changed on 2026-09-18 even though its code did not.** Now that the Tailor
+  exists and writes `tailored`, the Auditor is **the single agent standing between a tailored
+  row and a human** — `tailored` has no edge to `awaiting_approval` except through
+  `audit_clean`/`audit_flagged`, both `['auditor']` (`status_transition_guard.sql:121-127`).
+  **Every other missing piece has a workaround; this one is a closed door in the graph.**
   Of the six agents the discovery fast-path names: Screener is real and production-reachable;
   `_shared/match/` ~~and `_shared/tailor/`~~ exist with zero non-test importers; Auditor is absent.
   **`_shared/tailor/` struck 2026-09-18** — it has three, via `supabase/functions/tailor/index.ts`
@@ -506,9 +511,24 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   "the column gets written" are different claims and only the first is true. **State the
   distinction when you restate this entry; it IS the content.**
 
-  Still, the approval-queue gate at `ApprovalQueuePage.tsx:214` was decorative while the column
-  had no producer and becomes **load-bearing** the moment one row lands — it is still a null
-  check, not a shape check, with unreachable dead code behind it.
+  ~~The approval-queue gate at `ApprovalQueuePage.tsx:214` becomes load-bearing the moment one
+  tailored row lands.~~ **FALSE — retracted 2026-09-18 within the hour, by the session that
+  built the Tailor.** `persist.ts` writes status **`tailored`**, and the queue selects
+  `.eq('status','awaiting_approval')` (`ApprovalQueuePage.tsx:166`). **Every edge out of
+  `tailored` names the `auditor`** — `tailored -> audit_clean|audit_flagged|failed`
+  (`status_transition_guard.sql:121-123`), and `awaiting_approval` is reachable only from
+  `audit_clean`/`audit_flagged` (`:126-127`). There is **no route from `tailored` to
+  `awaiting_approval` that does not pass through the Auditor, and the Auditor does not exist.**
+  So a real `ResolvedResume` leaves the queue at **3 shown, 0 reviewable** — the row sits at
+  `tailored` and is never selected.
+
+  **`:214` is still a real defect on a path that still cannot be reached**, exactly as urgent as
+  yesterday. The event that starts its clock is an **Auditor**, one hop further out than the
+  Tailor. **This is §5's "a correct citation carrying a wrong conclusion" in its purest form:**
+  every cited line was true — `:214` is a null check, `:223-245` is unreachable,
+  `tailored_profile` has a producer — and the conclusion still did not follow, because nobody
+  asked *is this path actually reached?* The `scout-remote.ts` entry exists to force that
+  question and it was not asked.
 - **The approval queue is empty by construction — and it is now MEASURABLY so, not
   theoretically.** Live, 2026-09-18: **3 rows at `awaiting_approval`, all 3 with
   `tailored_profile IS NULL`, 0 with `'{}'`.** So the gate refuses every one: **the queue
