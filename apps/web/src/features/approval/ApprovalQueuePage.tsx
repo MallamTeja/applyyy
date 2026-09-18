@@ -64,6 +64,26 @@ interface UnreviewableRow {
   readonly companyName: string;
 }
 
+/**
+ * Structural shape validation for tailored profile snapshots.
+ * Ensures the profile has required sections (identity/contact, experience, skills)
+ * and is not an empty object `{}` or malformed JSON.
+ */
+function isValidTailoredProfile(profile: unknown): profile is ResolvedResume {
+  if (typeof profile !== 'object' || profile === null) {
+    return false;
+  }
+  const p = profile as Record<string, unknown>;
+
+  return (
+    typeof p.identity === 'object' &&
+    p.identity !== null &&
+    Array.isArray(p.experience) &&
+    Array.isArray(p.skills)
+  );
+}
+
+
 export function ApprovalQueuePage(): ReactElement {
   /* Feedback for the one irreversible action in the product. */
   const toast = useToast();
@@ -211,7 +231,7 @@ export function ApprovalQueuePage(): ReactElement {
              Refused here rather than rendered quietly, because the alternative
              is the exact failure the approval gate exists to prevent, delivered
              by the gate itself. Fail loud, never fail clean. */
-          if (app.tailored_profile === null || app.tailored_profile === undefined) {
+          if (!isValidTailoredProfile(app.tailored_profile)) {
             refused.push({
               applicationId: app.id,
               jobTitle: job.title,
@@ -220,78 +240,7 @@ export function ApprovalQueuePage(): ReactElement {
             continue;
           }
 
-          const rawResolved = app.tailored_profile as unknown as ResolvedResume | null;
-          const resolved: ResolvedResume = rawResolved ?? {
-            schema_version: 1,
-            master_version: masterVersion,
-            identity: masterProfile.identity,
-            section_order: ['summary', 'skills', 'experience', 'projects', 'education', 'achievements', 'certifications'],
-            summary: masterProfile.summary?.text ?? null,
-            experience: (masterProfile.experience || []).map((exp) => ({
-              ref: exp.id,
-              company: exp.company,
-              role: exp.role,
-              location: exp.location,
-              start_display: exp.start_display,
-              end_display: exp.end_display,
-              bullets: (exp.bullets || []).map((b) => ({
-                ref: b.id,
-                text: b.text,
-                master_text: b.text,
-              })),
-            })),
-            skills: (masterProfile.skills || []).map((s) => ({
-              ref: s.id,
-              category: s.category,
-              name: s.name,
-            })),
-            projects: (masterProfile.projects || []).map((p) => ({
-              ref: p.id,
-              name: p.name,
-              links: p.links,
-              start_display: p.start_display,
-              end_display: p.end_display,
-              bullets: (p.bullets || []).map((b) => ({
-                ref: b.id,
-                text: b.text,
-                master_text: b.text,
-              })),
-            })),
-            education: (masterProfile.education || []).map((edu) => ({
-              ref: edu.id,
-              institution: edu.institution,
-              degree: edu.degree,
-              field: edu.field,
-              start_display: edu.start_display,
-              end_display: edu.end_display,
-              grade_display: edu.grade_display,
-              bullets: (edu.bullets || []).map((b) => ({
-                ref: b.id,
-                text: b.text,
-                master_text: b.text,
-              })),
-            })),
-            achievements: (masterProfile.achievements || []).map((a) => ({
-              ref: a.id,
-              label: a.label,
-              description: a.description,
-              bullets: (a.bullets || []).map((b) => ({
-                ref: b.id,
-                text: b.text,
-                master_text: b.text,
-              })),
-            })),
-            certifications: (masterProfile.certifications || []).map((c) => ({
-              ref: c.id,
-              label: c.label,
-              description: c.description,
-              bullets: (c.bullets || []).map((b) => ({
-                ref: b.id,
-                text: b.text,
-                master_text: b.text,
-              })),
-            })),
-          };
+          const resolved = app.tailored_profile;
 
           const diff = buildResumeDiff({
             application: {
