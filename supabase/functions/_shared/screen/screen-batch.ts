@@ -23,7 +23,7 @@ import { screenJob, type ScreenableJob, type ScreenContext } from "../filter/cas
 // the cascade not change, and a title comparison is cheaper than any rule in it.
 import { screenTechRole, type TechGatePreferences } from "./tech-gate.ts";
 // Row shapes from the schema owner. Never redefined — a redefined type drifts.
-import type { FilterRuleRow, JobInsert } from "../contracts/shared-types.ts";
+import type { FilterRuleRow, JobInsert, JobRow } from "../contracts/shared-types.ts";
 
 // The ONLY statuses this module may create an `applications` row at.
 //
@@ -59,7 +59,7 @@ export interface ScreenedApplicationInsert {
 // The row is what the cascade reads; the id is what the application links to.
 export interface ScreenableEntry {
   readonly jobId: string;
-  readonly row: JobInsert;
+  readonly row: JobInsert | JobRow;
 }
 
 // One dropped posting, kept for the run summary.
@@ -91,50 +91,40 @@ export interface ScreenedBatchPlan {
   readonly droppedCount: number;
 }
 
-// Adapt a row the Scout just built into the narrow shape the cascade reads.
+// Adapt a row the Scout or Screener runner reads into the narrow shape the cascade reads.
 //
 // A NARROW INTERFACE IS WHY THIS FUNCTION EXISTS AT ALL: `ScreenableJob` documents the
 // Screener's real dependency surface, so the bridge has to be explicit. Getting a field
 // name wrong here would not throw — it would hand a rule `undefined` and quietly make it
 // pass everything, which is the failure mode this whole parcel is cleaning up.
-export function toScreenableJob(row: JobInsert): ScreenableJob {
+export function toScreenableJob(row: JobInsert | JobRow): ScreenableJob {
+  // Read min_experience_years if available (numeric or null), formatted as string for cascade.
+  const minExp = row.min_experience_years !== undefined && row.min_experience_years !== null
+    ? String(row.min_experience_years)
+    : null;
+  // Read requires_advanced_degree if available (boolean or null).
+  const reqAdvDeg = row.requires_advanced_degree ?? null;
+
   return {
     // UNTRUSTED, straight from the board. What the title blocklist matches on.
     title: row.title,
     // The normalised join key for the blocklist and the weekly cap.
     companySlug: row.company_slug,
     // Always `[]` from `toJobInsert` today — splitting locations is the Normalizer's
-    // job, and the Normalizer does not exist. `?? []` because the column is NOT NULL
-    // with a `'{}'` default, so a row built elsewhere could legitimately omit it.
+    // job. `?? []` because the column is NOT NULL with a `'{}'` default.
     locations: row.locations ?? [],
     // THE FALLBACK THAT CARRIES THE LOCATION RULE TODAY. With `locations` empty, the
-    // allowlist matches against this raw string instead — cascade.ts:227-230 keeps it
-    // precisely so a parser gap presents as a parser gap and not as thin supply.
+    // allowlist matches against this raw string instead.
     locationRaw: row.location_raw ?? null,
-    // Internship / full_time / unknown. The column is NOT NULL defaulting to 'unknown',
-    // and the property is optional on `JobInsert`, so an omitting producer means the row
-    // will BE 'unknown' once stored — falling back to it here keeps this adapter telling
-    // the same story the database will. Not a placeholder: 'unknown' is a real member the
-    // employment_type rule explicitly declines to drop on (cascade.ts:249), because a
-    // board that reports nothing is not a board with worse jobs.
+    // Internship / full_time / unknown.
     employmentType: row.employment_type ?? "unknown",
-    // NULL FOR EVERY ATS-SOURCED JOB, and deliberately so rather than by oversight:
-    // `toJobInsert` does not populate `min_experience_years`, and nothing in this repo
-    // parses years-of-experience out of a JD. The experience_ceiling rule therefore
-    // returns drop:false for everything — silently, with no warning, so it reads as a
-    // working rule. Recorded here because that is PROJECT_PLAN §8's headline example.
-    minExperienceYears: null,
-    // Same gap, same silence: nothing sets `requires_advanced_degree`, so
-    // degree_mismatch is inert too. Null means "the parser could not tell", which the
-    // rule correctly declines to treat as a requirement.
-    requiresAdvancedDegree: null,
+    // Experience years requirement parsed from job record, or null when absent/unknown.
+    minExperienceYears: minExp,
+    // Advanced degree requirement flag from job record, or null when absent/unknown.
+    requiresAdvancedDegree: reqAdvDeg,
     // NOT NULL by schema, so no fallback is needed or wanted.
     postedAt: row.posted_at,
-    // How much to believe that date. 'unknown' has exactly one cause in the extractor —
-    // the cold-start guard — and the staleness rule treats it as untrusted rather than
-    // fresh. Falling back to it when the producer omitted the field is the conservative
-    // direction: an unknown-provenance date is excluded rather than waved through, which
-    // matches what the column's own default would store anyway.
+    // How much to believe that date.
     postedAtSource: row.posted_at_source ?? "unknown",
     // The dedupe key, checked against what has already been applied to.
     fingerprint: row.fingerprint,

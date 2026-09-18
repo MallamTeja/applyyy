@@ -181,14 +181,20 @@ test("experience ceiling admits a JD exactly at the limit", () => {
 // discard every job whose JD the parser could not read.
 test("experience ceiling does not drop a job whose requirement is unknown", () => {
   // The parser found nothing.
-  assert.equal(screen([rule("experience_ceiling", { max_years: 1 })], { minExperienceYears: null }).passed, true);
+  const result = screen([rule("experience_ceiling", { max_years: 1 })], { minExperienceYears: null });
+  assert.equal(result.passed, true);
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0] ?? "", /min_experience_years/);
 });
 
 // `Number("abc")` is NaN and every NaN comparison is false, so this would pass
 // anyway — asserted so the behaviour is intended rather than accidental.
 test("experience ceiling does not drop a job with an unparseable requirement", () => {
   // Junk in the column.
-  assert.equal(screen([rule("experience_ceiling", { max_years: 1 })], { minExperienceYears: "not a number" }).passed, true);
+  const result = screen([rule("experience_ceiling", { max_years: 1 })], { minExperienceYears: "not a number" });
+  assert.equal(result.passed, true);
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0] ?? "", /unparseable/);
 });
 
 // --- title blocklist -------------------------------------------------------------
@@ -388,7 +394,10 @@ test("degree mismatch drops a JD requiring an advanced degree", () => {
 // NULL means the parser could not tell, and declining to guess beats dropping.
 test("degree mismatch does not drop when the requirement is unknown", () => {
   // Parser found nothing either way.
-  assert.equal(screen([rule("degree_mismatch", {})], { requiresAdvancedDegree: null }).passed, true);
+  const result = screen([rule("degree_mismatch", {})], { requiresAdvancedDegree: null });
+  assert.equal(result.passed, true);
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0] ?? "", /requires_advanced_degree/);
 });
 
 // Whether Teja holds an advanced degree is a setting, so the same code stays correct

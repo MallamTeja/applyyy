@@ -153,14 +153,14 @@ function experienceCeiling(job: ScreenableJob, config: Json): RuleVerdict {
   const maxYears = configNumber(config, "max_years");
   // No threshold configured: report rather than invent one.
   if (maxYears === null) return { drop: false, warning: "experience_ceiling has no max_years configured" };
-  // The JD's demand. Absent means the parser could not find one.
-  if (job.minExperienceYears === null) return { drop: false };
+  // The JD's demand. Absent means the parser could not find one — warn transparently.
+  if (job.minExperienceYears === null) return { drop: false, warning: "experience_ceiling skipped: min_experience_years is missing/null in JD" };
   // Numeric columns arrive as strings from PostgREST.
   const required = Number(job.minExperienceYears);
   // AN UNPARSEABLE VALUE MUST NOT DROP THE JOB. `Number("")` is 0 and `Number("abc")`
   // is NaN, and a NaN comparison is always false — which would pass silently anyway.
   // Making it explicit means the intent is readable rather than accidental.
-  if (!Number.isFinite(required)) return { drop: false };
+  if (!Number.isFinite(required)) return { drop: false, warning: "experience_ceiling skipped: min_experience_years is unparseable" };
   // Drop only when the JD genuinely demands more than the ceiling.
   return required > maxYears ? { drop: true, reason: `JD requires ${required} years, ceiling is ${maxYears}` } : { drop: false };
 }
@@ -311,7 +311,9 @@ function degreeMismatch(job: ScreenableJob, config: Json): RuleVerdict {
   // Nothing to enforce if he does.
   if (hasAdvancedDegree) return { drop: false };
   // NULL means the parser could not tell, and declining to guess beats dropping on a
-  // non-answer — the same rule the employment-type filter follows.
+  // non-answer — report a warning so configured rules are transparently evaluated.
+  if (job.requiresAdvancedDegree === null) return { drop: false, warning: "degree_mismatch skipped: requires_advanced_degree is missing/null in JD" };
+  // When explicitly false or not true, no advanced degree is required.
   if (job.requiresAdvancedDegree !== true) return { drop: false };
   // A genuine requirement he does not meet.
   return { drop: true, reason: "JD requires an advanced degree" };
