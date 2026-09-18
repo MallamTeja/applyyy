@@ -15,6 +15,47 @@ the repo calls *"THE SAFETY CASE FOR THE WHOLE SYSTEM"*, and
 
 ---
 
+## ⚠ STATUS UPDATE 2026-09-18 — THE FAST-PATH BUTTON WAS DELETED
+
+**Commit `75a75a0`, "feat(discovery): delete the audit_clean fast path", removed the
+"Fast-tailor & queue" handler from `apps/web/src/features/discovery/DiscoveredJobsPage.tsx`.**
+That is **option 1 of the three** this document listed as the deferred product decision
+([Option B in detail](#option-b-in-detail--what-it-would-actually-take)). It was taken.
+
+Every passage below written in the present tense about that button — *"this is shipped and
+working"*, *"the dashboard already depends on it"*, *"the gap is not dormant, it is
+load-bearing"* — **describes 2026-09-17 and is no longer true.** The passages stay, struck
+and annotated in place, because the reasoning they carry is what justified the ruling.
+
+Four things changed, and the third is the one that changes what happens next:
+
+1. **No code impersonates an agent any more.** Re-grepped 2026-09-18: the only remaining
+   caller of `advance_application_status` in `apps/web/src` is
+   `ApprovalQueuePage.tsx:374`, which passes `p_agent: 'human'` — an identity a browser
+   is entitled to claim. The other callers are `worker/src/supabase-gateway.ts:195` and
+   `supabase/functions/_shared/agent/port.ts:157`, both service-role.
+2. **The `audit_clean`-without-audit finding is closed at the source**, and a migration
+   was written to retract the rows it already forged:
+   `20260917174600_retract_forged_fast_path_agent_events.sql`. **Written, not applied** —
+   it is one of the three still pending as of 2026-09-18.
+3. **Option B's blocker is GONE.** This document's coordination note said B *"cannot land
+   as one commit by one session … if B proceeds, the frontend goes first."* **The frontend
+   went first.** Landing the SQL half of B today breaks nothing, because nothing is left
+   that would start returning `42501`. The expensive half of the two-partition
+   negotiation has already been paid.
+4. **Gap 2's SQL exists:** `20260917130000_guard_application_status_on_insert.sql`.
+   **Written, not applied** — verified 2026-09-18 against live, no `guard_status_insert`
+   trigger on `public.applications`. Ruling A shipped the file; the hole is still open on
+   the database until someone pushes.
+
+**The durable lesson, and it is this repo's own:** the argument that a security fix could
+not land was built on a dependency — *"the dashboard already depends on it"* — and the
+dependency was deleted for unrelated reasons a day later. **Re-check the premise of a
+deferral before you re-quote the deferral.** A blocker is a fact about a moment, not a
+property of the fix.
+
+---
+
 ## The claim under examination
 
 The guard's header states the safety case in one sentence:
@@ -211,10 +252,25 @@ Constraint 15 rests on precisely that distinction, and the distinction does not 
 the schema. The threat model is XSS, a malicious browser extension, or a compromised npm
 dependency inside a bundle that already holds the anon key — not an external attacker.
 
-### Why this cannot be fixed in a migration alone: **the dashboard already depends on it**
+### ~~Why this cannot be fixed in a migration alone: **the dashboard already depends on it**~~ — SUPERSEDED 2026-09-18
 
-`apps/web/src/features/discovery/DiscoveredJobsPage.tsx:242-262`. The "Fast-tailor &
-queue" button, from the browser, holding the anon key:
+> **This heading's claim is FALSE as of `75a75a0`.** The dashboard no longer depends on it;
+> the button was deleted. The code block below is a **historical record of what
+> `DiscoveredJobsPage.tsx:242-262` contained on 2026-09-17** — those line numbers do not
+> resolve to this today, and the `{ to: 'deduped', agent: 'normalizer' }` step in particular
+> exists nowhere in the repo. **Nothing writes the status `deduped` at all now**; the only
+> `deduped` left under `apps/web/src/features/` is a display-list entry at
+> `PipelinePage.tsx:58`. `supabase/functions/_shared/normalize/` does exist and is
+> production-reachable (`fingerprint.ts`, `posted-at.ts`, imported by
+> `_shared/ats/registry.ts:25,27` and `_shared/scout/tiers.ts:20,21`) — **what is missing
+> is a runner that writes the status around those tested helpers, not an agent that was
+> never written.**
+>
+> Kept rather than deleted because it is the evidence for the ruling, and because a
+> superseded claim that vanishes cannot be traced when someone quotes it back.
+
+Historic — `apps/web/src/features/discovery/DiscoveredJobsPage.tsx:242-262` **as of
+2026-09-17**. The "Fast-tailor & queue" button, from the browser, holding the anon key:
 
 ```ts
 const pipelineSteps = [
@@ -230,13 +286,28 @@ for (const step of pipelineSteps) {
 }
 ```
 
-**A browser impersonates six agents in sequence.** This is shipped and working, and it
+~~**A browser impersonates six agents in sequence.** This is shipped and working, and it
 works *only because* `p_agent` is unauthenticated. Any fix that authenticates identity
-returns `42501` six times and breaks this button.
+returns `42501` six times and breaks this button.~~
 
-> The gap is not dormant. It is load-bearing.
+> ~~The gap is not dormant. It is load-bearing.~~
+>
+> **2026-09-18: no longer load-bearing.** `75a75a0` deleted the button, so there is nothing
+> left for an identity fix to break. **Gap 1 itself is still open** — `p_agent` is still an
+> unverified caller-supplied string and a browser holding the anon key can still name any
+> agent it likes. What changed is that *our own code* stopped exercising it. **A hole with
+> no current user is still a hole**; do not read this strikethrough as a fix.
 
 ### A separate and more serious problem on that same code path
+
+> **RESOLVED AT THE SOURCE 2026-09-18.** `75a75a0` deleted the whole handler, so no new
+> row can be labelled `audit_clean` without an audit. The rows it already forged are a
+> separate problem and have their own migration:
+> `20260917174600_retract_forged_fast_path_agent_events.sql`, which appends a retraction
+> event rather than deleting anything — `application_events` carries `forbid_update` and
+> `forbid_delete` triggers, so a compensating event is the only correction possible.
+> **That migration is written, not applied**; it is one of the three still pending.
+> The analysis below stands as the reason both the deletion and the retraction happened.
 
 Steps 5 and 6 claim `auditor` and write `audit_clean`, then `awaiting_approval` —
 **without the Auditor having run.** No tracing, no fabrication check.
@@ -319,8 +390,16 @@ The guard trigger itself does not change. It already checks the GUC against
 whole point — **the check was never the weak part.**
 
 **The `apps/web` half (the expensive one).**
-`apps/web/src/features/discovery/DiscoveredJobsPage.tsx:242-262` must stop impersonating
-six agents. Under B, every one of its six calls would be attributed to `'human'`, and
+
+> **DONE 2026-09-18, by deletion.** `75a75a0` removed the handler entirely — answer 1 of
+> the three below. The six-row table that follows is now a description of code that no
+> longer exists, and **the SQL half of option B can land on its own.** Re-verified today:
+> the only browser-side caller left, `ApprovalQueuePage.tsx:374`, already passes
+> `p_agent: 'human'`, so forcing `anon`/`authenticated` to `'human'` would change nothing
+> it does.
+
+~~`apps/web/src/features/discovery/DiscoveredJobsPage.tsx:242-262` must stop impersonating
+six agents.~~ Under B, every one of its six calls would be attributed to `'human'`, and
 **not one of the six edges it needs exists for `'human'`.** Verified against the seed at
 `20260909234900_status_transition_guard.sql:101-126` — every one names exactly one
 machine agent and none includes `'human'`:
@@ -345,11 +424,17 @@ this document's to pick:
 3. **Make it honest.** Keep it, but let it write only statuses a human can truthfully
    claim — which means *not* `audit_clean`, and probably not `scored` either.
 
-> **Naming the coordination cost rather than hiding it:** B cannot land as one commit
+> **Naming the coordination cost rather than hiding it:** ~~B cannot land as one commit
 > by one session. It needs a DB migration and a `DiscoveredJobsPage.tsx` change to land
 > **together**, owned by two different partitions, plus a product ruling on the three
 > options above. Landing the SQL first breaks the button; landing the frontend first
-> leaves the hole open but harms nothing. **If B proceeds, the frontend goes first.**
+> leaves the hole open but harms nothing.~~ **If B proceeds, the frontend goes first.**
+>
+> **2026-09-18 — the frontend went first, and the coordination cost is already paid.**
+> `75a75a0` landed the `apps/web` half as a deletion. **B is now a single-session,
+> single-partition SQL change**, which is a materially different proposal from the one
+> this document declined to make. Whoever picks it up should re-price it before
+> re-quoting the paragraph above.
 
 **This is also why Gap 1 and the `audit_clean` finding are the same work.** Gap 1 is the
 *mechanism* that lets the browser write `audit_clean` without auditing; the finding is
@@ -363,14 +448,22 @@ merely corrected.**
 
 ## Outstanding decisions
 
-1. **Gap 1 stays open** until option B lands, which needs a product ruling on what the
+1. ~~**Gap 1 stays open** until option B lands, which needs a product ruling on what the
    fast-path button should do, and a coordinated DB + `apps/web` landing. **Frontend
-   first** — see the coordination note above.
-2. **The `audit_clean`-without-audit finding is with Teja.** It is neither gap, it is
-   outside this partition, and it is arguably more consequential than either: it is a
-   correctness defect in the product's central safety claim rather than a security
-   hole. Escalated 2026-09-17.
-3. **Gap 2 proceeds now** under ruling A.
+   first** — see the coordination note above.~~
+   **Revised 2026-09-18: Gap 1 stays open, but its stated prerequisites are met.** The
+   product ruling was made by deletion (`75a75a0`) and the frontend landed first. What
+   remains is the SQL half of option B, which no longer needs a coordinated landing.
+2. ~~**The `audit_clean`-without-audit finding is with Teja.**~~ **Closed at the source
+   2026-09-18** by `75a75a0`; the already-forged rows are handled by
+   `20260917174600_retract_forged_fast_path_agent_events.sql`, **written and still
+   pending apply**. It was neither gap, it was outside this partition, and it was
+   arguably more consequential than either: a correctness defect in the product's central
+   safety claim rather than a security hole. Escalated 2026-09-17, acted on 2026-09-17/18.
+3. **Gap 2 proceeds now** under ruling A. — **2026-09-18: the SQL is written
+   (`20260917130000_guard_application_status_on_insert.sql`) and NOT APPLIED.** Verified
+   against live today: no `guard_status_insert` trigger on `public.applications`. Ruling A
+   is half-delivered, and the half that matters is the push.
 
 ## Verification available for whatever is approved
 

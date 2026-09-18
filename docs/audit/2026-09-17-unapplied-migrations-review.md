@@ -35,6 +35,53 @@ One sentence for the decision: **run it, but run `supabase migration list` first
 
 ---
 
+## ⚠ STATUS UPDATE 2026-09-18 — READ BEFORE THE HEADLINE ABOVE
+
+Measured 2026-09-18 ≈ 13:00 IST, `supabase migration list --linked` (CLI `2.117.0`,
+project `xynqxekcqizwhtskzqrq`; the **CLI** is authenticated and linked — only the
+Supabase **MCP connector** is unauthenticated, which is a different thing with a
+confusingly similar name):
+
+**18 local migrations, 15 applied, THREE pending.**
+
+| Still pending | Reviewed in |
+|---|---|
+| `20260917124500_fix_bootstrap_filter_rule_seed_columns.sql` | [§1](#1-20260917124500_fix_bootstrap_filter_rule_seed_columnssql) |
+| `20260917130000_guard_application_status_on_insert.sql` | [§2](#2-20260917130000_guard_application_status_on_insertsql) |
+| `20260917174600_retract_forged_fast_path_agent_events.sql` | [§9](#9-the-eighth-migration-added-after-this-review) |
+
+**Files 1–5 of this review — `20260910220800`, `20260911114300`, `20260911235500`,
+`20260912001500`, `20260912120000` — are ALL ALREADY ON THE REMOTE.** Their reviews stay
+below as the record of what was checked; they are no longer decisions anyone has to make.
+
+**Three consequences, and the middle one inverts an instruction in this document:**
+
+1. **The apply set is three, not seven or eight.** Every "seven"/"eight" below is a
+   2026-09-17 count. Do not re-derive it from prose — run
+   `supabase migration list --linked`.
+2. **[§3.1](#31-20260910220800_create_private_storage_bucketssql)'s re-run hazard cannot
+   fire in the current backlog, and [§4](#4-the-runbook) Step 2's pre-flight is now
+   ACTIVELY MISLEADING.** `20260910220800` is applied, so `db push` will never re-run it.
+   The pre-flight query returns **four rows today** — verified 2026-09-18, all four
+   `applyy owner%` policies exist on `storage.objects` — and Step 2 instructs the reader
+   that *"any row here means fix the file before pushing."* Following that now means
+   editing an already-applied migration to solve a problem that no longer exists. See the
+   dated note in each of those sections. **The hazard itself is real and stays on record
+   as a latent defect** for whoever ever edits, replays or rebuilds that file.
+3. **§0.3's "if it dies at file N" mapping is void** — it was indexed by a seven-file
+   order that no longer exists. The old files 6 and 7 are now files 1 and 2 of the push,
+   which also **deletes the one genuinely bad resting place**: §0.3 called "died at 5 or 6"
+   dangerous because file 4 installed the `evaluation_order` break and file 6 repaired it.
+   File 4 is applied and file 6 is still pending, **so the live database is sitting in that
+   bad resting place right now** — `bootstrap_user_defaults()` raises `42703` on every
+   call today. **Verified against live, not inferred:** `pg_get_functiondef()` on the
+   deployed function contains `evaluation_order` and does **not** contain `sort_order`.
+   Recoverable and not urgent for the reason §1.3 gives (nothing calls it), but it is
+   the current state, not a hypothetical — and it is the strongest argument for pushing
+   `20260917124500` rather than leaving the backlog where it is.
+
+---
+
 **Files reviewed — all seven pending migrations:**
 
 | # | File | Reviewed in |
@@ -89,9 +136,19 @@ reporting a `supabase migration list` run against live at **11:46 on 2026-09-11*
 file's last commit is `98b28bd`, 2026-09-11 12:09 — so "11:46" is that day, not today; I
 misread it as today's on first pass and it is worth stating plainly that it is not).
 
-It found: applied through `20260910212600`; unapplied = `20260910220800` and
-`20260911114300`. Consistent — at that moment those were the only two files past
+~~It found: applied through `20260910212600`; unapplied = `20260910220800` and
+`20260911114300`.~~ Consistent — at that moment those were the only two files past
 `20260910212600`.
+
+> **SUPERSEDED 2026-09-18.** Both of those files are now applied, and so are
+> `20260911235500`, `20260912001500` and `20260912120000`. Measured with
+> `supabase migration list --linked`: 18 local, 15 applied, **three pending**
+> (`20260917124500`, `20260917130000`, `20260917174600`). The paragraph above is kept
+> because it is the *provenance* of the seven-file figure this whole document is sized
+> by — but it is a 2026-09-11 observation, not a current one, and the entire premise of
+> §0.1 ("the last recorded observation of remote state") stopped being true the moment
+> somebody ran the command. **The fix is not a fresher list: it is that this section
+> should always have cited the COMMAND, not a transcribed result.**
 
 An earlier and *superseded* observation in [`docs/PROGRESS.md:243-260`](../PROGRESS.md#L243-L260)
 confirms the seven original migrations present on both sides, and separately records
@@ -115,6 +172,13 @@ Since 2026-09-11 11:46, five more files were committed and **nothing in the repo
 
 **This is inference from the repo record, not an observation of the database.** Only
 `supabase migration list` settles it, and it is the first step of [§4](#4-the-runbook).
+
+> **SETTLED 2026-09-18 — the command was run, and the table above was wrong in the
+> direction it warned about.** Rows 1–5 all read **applied**; only rows 6 and 7 (plus the
+> eighth file, §9) are still pending. The three "Unrecorded" rows were the honest part of
+> the inference and all three had in fact landed. **An inference that flags its own
+> uncertainty is still an inference** — it took three minutes to replace with a
+> measurement and nobody did it for a week.
 
 ### 0.2 Cross-file interactions — what a per-file read misses
 
@@ -239,11 +303,50 @@ The backfill is four statements of the shape
 number of rows in `auth.users`.** If that table is empty, all four insert zero rows and
 the migration is a pure no-op on data.
 
-`docs/PROGRESS.md:70` states plainly: **"There is no Supabase Auth user yet."**
+~~`docs/PROGRESS.md:70` states plainly: **"There is no Supabase Auth user yet."**~~
 
-If that is still true, applying `124500` fixes the *function* (real, necessary, latent)
+~~If that is still true, applying `124500` fixes the *function* (real, necessary, latent)
 and backfills *nobody*. You will see "Finished supabase db push", and
-`select count(*) from public.filter_rules` will still be `0`.
+`select count(*) from public.filter_rules` will still be `0`.~~
+
+> ### ⚠ MEASURED AGAINST LIVE 2026-09-18 — THE PREMISE OF THIS SECTION IS FALSE
+>
+> **`auth.users` holds TWO rows, not zero**, and `public.filter_rules` already holds
+> **nine**. The section above is built entirely on `docs/PROGRESS.md:70`, which is stale.
+>
+> | | user `0f4b24da…` | user `31e899ad…` |
+> |---|---|---|
+> | `filter_rules` | 9 | **0** |
+> | `search_preferences` | 1 | **0** |
+> | `system_settings` | 1 | **0** |
+> | `gemini_key_state` | 20 | 20 |
+> | `applications` | 1492 | 0 |
+>
+> **So `20260917124500`'s backfill is NOT a no-op.** Applying it should insert
+> **9 `filter_rules` + 1 `search_preferences` + 1 `system_settings` for the second user**,
+> and nothing for the first (every insert is `on conflict do nothing`). That is a concrete,
+> checkable expectation — use it as the §5.2 assertion instead of "expect zero".
+>
+> The second user's profile is also **exactly the migration's "population A"** —
+> bootstrapped after the break, therefore no rows — which §1.3 below calls counterfactual.
+> **It is not counterfactual; it is sitting in the database.** `gemini_key_state` has 20
+> rows for that user because migrations `20260912001500` and `20260917124500` backfill that
+> table directly in SQL, not through the broken function — which is exactly the fingerprint
+> of a `bootstrap_user_defaults()` call that aborted on `filter_rules`.
+>
+> **This is the document's own warning turned on itself.** §1.3 is titled "the loud part"
+> and its whole point is that a migration can report success and change nothing. It reached
+> that conclusion by **citing a document instead of querying the database** — the precise
+> failure `docs/architecture/graph-engineering.md` §3.3 records for the migration count, on
+> the same day, in the same repo. *A section warning against trusting a stale claim can be
+> built on one.*
+>
+> **The verdict upgrade:** "Low confidence that `124500` will visibly change anything" in
+> §7 should now read **high confidence that it will**, and that makes it the most valuable
+> file in the backlog rather than a latent-only fix. It remains safe: `system_enabled`
+> still defaults to `false`, so seeding turns nothing on.
+>
+> Measured with `supabase db query --linked`. Re-run it; do not quote these numbers.
 
 **Second, compounding fact: the migration's population model is counterfactual.**
 `124500:177-191` describes "population A" (bootstrapped after the break, no rows) and
@@ -396,10 +499,26 @@ and writes only `dropped_filter` and `passed_filters`, matching the
 `ScreenedInsertStatus` union at `:44`.
 
 **`deduped` is correctly excluded.** I checked specifically, because it is the one
-pre-gate status *not* in the allowlist. Nothing inserts it — the only writer is a
+pre-gate status *not* in the allowlist. Nothing inserts it — ~~the only writer is a
 transition (`DiscoveredJobsPage.tsx:243`, `{ to: 'deduped', agent: 'normalizer' }`), which
-goes through `advance_application_status` and therefore the UPDATE guard. Confirms the
+goes through `advance_application_status` and therefore the UPDATE guard.~~ Confirms the
 repo's standing note that nothing ever writes `deduped`.
+
+> **CITATION CORRECTED 2026-09-18.** `DiscoveredJobsPage.tsx:243` **no longer exists**; the
+> `{ to: 'deduped', agent: 'normalizer' }` step went out with the fast-path button in commit
+> `75a75a0` ("delete the audit_clean fast path"). Re-grepped today: the only `deduped` left
+> anywhere under `apps/web/src/features/` is a display-list entry at `PipelinePage.tsx:58`.
+>
+> **The conclusion strengthens rather than weakens — there is now no writer of `deduped`
+> at all, by INSERT or by UPDATE.** Excluding it from the allowlist is still correct.
+>
+> **What is missing is a runner, not an agent.** `supabase/functions/_shared/normalize/`
+> exists and is production-reachable — `fingerprint.ts` and `posted-at.ts`, imported by
+> `_shared/ats/registry.ts:25,27` and `_shared/scout/tiers.ts:20,21`. The tested helpers are
+> there; nothing wraps them in something that writes the status. **Do not describe the
+> Normalizer as "never written"** — "write an agent" and "wire a runner around existing
+> tested helpers" are very different sizes, and the inflated phrasing has had to be
+> retracted once already.
 
 **The migration's defence of `'discovered'` is correct and load-bearing.** Refusing it
 would break both screened scouts on their transient-failure fallback path — a guard that
@@ -516,8 +635,24 @@ Reviewed to the same standard as §1 and §2. These are files 1–5 of the push 
 
 ### 3.1 `20260910220800_create_private_storage_buckets.sql`
 
-**Verdict: APPLY — and this is the one to watch.** The SQL is correct. It is the only file
-in the backlog that cannot be re-run, and it stands first in the queue.
+> **APPLIED — dated note 2026-09-18.** This file is **on the remote**
+> (`supabase migration list --linked`), and all four of its policies exist live. It is no
+> longer in the backlog, no longer first in any queue, and `db push` will never re-run it.
+>
+> **So the re-run hazard below CANNOT FIRE in the current backlog.** It stays on record
+> because it is real and it is *latent*: it will bite whoever ever edits this file, replays
+> it into a fresh project, or rebuilds the database from migrations. **Read it as a defect
+> report on the file, not as a blocker on the push.**
+>
+> Its knock-on: the "one pre-flight that can save the whole push" in
+> [§4](#4-the-runbook) Step 2 has **inverted** — it now returns four rows on a healthy
+> database, and Step 2 tells the reader that any row means edit the file. See the dated
+> note there. *A pre-flight whose expected result flipped from zero rows to four now
+> argues for exactly the edit §3.1 spends a paragraph warning against.*
+
+~~**Verdict: APPLY — and this is the one to watch.**~~ **Verdict as of 2026-09-18:
+APPLIED; nothing left to decide.** The SQL is correct. It **was** the only file in the
+backlog that cannot be re-run, and it **stood** first in the queue.
 
 **What it does.** Inserts two private buckets (`screenshots` 10 MB PNG-only, `resumes`
 5 MB PDF-only) into `storage.buckets`, then creates four owner-scoped policies on
@@ -781,11 +916,28 @@ in `supabase/migrations/`.
 Expect seven pending. **If the list differs from §0.1's table, trust the list** and tell
 whoever is coordinating, because §0.3's "if it dies at file N" mapping shifts with it.
 
-### Step 2 — the one pre-flight that can save the whole push
+### Step 2 — ~~the one pre-flight that can save the whole push~~ OFF THE CRITICAL PATH
 
-[§3.1](#31-20260910220800_create_private_storage_bucketssql) is the file most likely to
+> **DATED NOTE 2026-09-18 — DO NOT RUN THIS STEP AS WRITTEN.** Both files it guards,
+> `20260910220800` and `20260911114300`, are **already applied**. `db push` will not
+> re-run either, so neither `42710` nor `42701` can be raised by the current backlog.
+>
+> Worse than merely redundant: **both queries now return rows on a healthy database, and
+> this step tells you a row means fix the file.** Verified 2026-09-18 — all four
+> `applyy owner%` policies exist on `storage.objects`, so query one returns **four rows**;
+> `applications.resume_sha256` exists, so query two returns **one**. A reader following the
+> instruction as written would edit two already-applied migrations to fix a collision that
+> is not a collision — it is those migrations' own successful output.
+>
+> **This is the document's own §5 pattern turned on its author:** an expected-zero
+> assertion is a guard only while zero is the healthy answer. When the world moves, the
+> guard does not announce that it has flipped — it just starts firing, confidently, in the
+> wrong direction. Keep the queries; they are the right *shape* if either migration is ever
+> replayed into a fresh project. **Re-read their expected results before trusting them.**
+
+~~[§3.1](#31-20260910220800_create_private_storage_bucketssql) is the file most likely to
 fail, it is first, and it takes everything behind it down with it. This tells you in one
-second whether it will:
+second whether it will:~~ (Historic — true while the backlog started at `20260910220800`.)
 
 ```sql
 -- THE ONLY PRE-FLIGHT THAT CHANGES WHAT YOU DO. Migration 1 creates four policies with
@@ -895,7 +1047,9 @@ in this document that proves a control *refuses* rather than merely *exists*.
 supabase migration list
 ```
 
-`20260917124500` and `20260917130000` must now show in the **Remote** column.
+`20260917124500` and `20260917130000` **and `20260917174600`** must now show in the
+**Remote** column. (Third file added 2026-09-18: it is the eighth migration of §9, and
+these three are the whole of the current backlog.)
 
 ### 5.2 Did the backfill do anything? (migration 124500)
 
@@ -1047,6 +1201,15 @@ recorded in the ledger.
 `db push` applies them in order and stops at the first failure. Earlier files are
 committed; the failing one is rolled back; later ones never run.
 
+> **DATED NOTE 2026-09-18 — the file numbering in this section is void.** It is indexed by
+> a seven-file backlog that no longer exists. **Three files are pending**: old file 6
+> (`20260917124500`) is now first, old file 7 (`20260917130000`) second, and
+> `20260917174600` (§9) third. Consequently: recovery item 2's "files 1 and 2 are not
+> re-runnable" no longer applies to anything in the backlog — all three pending files are
+> re-runnable — and recovery item 4's "if it stopped at file 5 or 6" describes a state the
+> database is **already in**, reached without any push stopping anywhere. See the status
+> banner at the top.
+
 **[§0.3](#03-if-it-dies-partway--where-you-land) maps every stopping point to the state it
 leaves you in.** Read that first — it is the part indexed by the filename the CLI prints.
 
@@ -1093,10 +1256,37 @@ than an honest gap.
 | 4 | **Whether a `security invoker` trigger function in the revoked `applyy_internal` schema fires for `authenticated`.** I am confident (Postgres checks `EXECUTE` at `CREATE TRIGGER`; `set_updated_at` is a live precedent in the identical shape) but I could not execute SQL. | If wrong, **every** insert into `applications` fails — a full pipeline outage. | §5.4's red test. |
 | 5 | **Whether the migration role may `create policy` on `storage.objects`**, a table owned by `supabase_storage_admin`. This is Supabase's own documented pattern and `db push` uses the same `postgres` role as the SQL editor, so I expect yes — but I did not verify it. | File 1 is first; if it cannot create policies the entire push stops before anything else applies. | Push and watch. A `42501` on file 1 is this; a `42710` is a name collision instead. |
 
-**Items 1–3 are unanswerable from any Claude session**, not just this one: the Supabase MCP
+~~**Items 1–3 are unanswerable from any Claude session**, not just this one: the Supabase MCP
 server is configured but unauthenticated, this session is non-interactive so no OAuth flow
 can run, and remote authorisation is gated to you. They are **questions for you**, not
-inferences I withheld.
+inferences I withheld.~~
+
+> ### CORRECTED 2026-09-18 — items 1–3 were answerable all along, and are now answered
+>
+> **The blocker was a name collision, not a permission.** The Supabase **MCP connector** is
+> unauthenticated — true, and unchanged. The Supabase **CLI** is a different thing with a
+> confusingly similar name: `2.117.0`, authenticated, linked to `xynqxekcqizwhtskzqrq`, and
+> it runs non-interactively. `supabase db query --linked "<sql>"` goes over the Management
+> API, needs no Docker, and is **read-only when the SQL is a `select`**. This document's own
+> §4 already said the network path works for `db push`; the read path was never tried.
+>
+> | # | Question | Answer, measured 2026-09-18 |
+> |---|---|---|
+> | 1 | Which migrations are applied | **18 local, 15 applied, 3 pending** — `20260917124500`, `20260917130000`, `20260917174600`. `supabase migration list --linked` |
+> | 2 | Rows in `auth.users` | **2**, not zero. `docs/PROGRESS.md:70` is stale. See the boxed note in [§1.3](#13-existing-rows--the-loud-part) for the per-user breakdown — the backfill has real work to do. |
+> | 3 | Can the migration role read `auth.users` | Not settled by a read, but **item 2 is now known independently**, so §5.2 can assert a specific number (11 new rows) instead of comparing against an unknown baseline. A zero-row read would now be visible as a failure rather than indistinguishable from an empty table. |
+> | 5 | Can it `create policy` on `storage.objects` | **Yes — settled by observation.** All four `applyy owner%` policies exist live and `storage.buckets` holds 2 rows, so `20260910220800` applied successfully. |
+>
+> Item 4 (does the `applyy_internal` trigger function fire for `authenticated`) is still
+> open, because only executing an insert settles it — that is §5.4's red test and it is a
+> write. **Correctly left to you.**
+>
+> **The lesson is the expensive one:** "unanswerable from any Claude session" was stated in
+> the strongest available form, it was wrong, and it was wrong for a week because the claim
+> was about *capability* and nobody re-tested it. **A limit you asserted rather than
+> measured is the kind that quietly outlives its cause.** Two tools shared a product name;
+> the reasoning never distinguished them — which is the same naming defect this repo
+> already documents for `1on1` / `1on1_sb`.
 
 **Confidence summary.** High that no file in the backlog corrupts data, breaks an existing
 code path, or widens privilege. High that `130000`'s allowlist is correct and has no
@@ -1106,16 +1296,41 @@ not depend on the transaction-boundary question ([§0.2](#02-crossfile-interacti
 state, not of the migration. **Medium that file 1 applies cleanly**, which is the single
 biggest unknown in the push.
 
-**On the framing, deliberately under-claimed:** this document says *"we cannot see the
+~~**On the framing, deliberately under-claimed:** this document says *"we cannot see the
 database"*, not *"your database is broken."* If `20260912001500` is itself unapplied — and
 the repo record suggests it is — then the `evaluation_order` break that `124500` describes
 as live **is not live yet**, and both files apply seconds apart in the same push with the
 broken function never executing in between. Do not go looking for damage that may never
-have been done.
+have been done.~~
+
+> ### RETRACTED 2026-09-18 — and this is the paragraph that mattered most
+>
+> **`20260912001500` IS applied, and the `evaluation_order` break IS live.** Verified
+> first-hand: `pg_get_functiondef()` on the deployed `public.bootstrap_user_defaults()`
+> contains `evaluation_order` and does **not** contain `sort_order`. Every call raises
+> `42703` today. `124500` is its repair and is still pending, so the database has been
+> sitting between the break and its fix since 2026-09-12.
+>
+> The damage is bounded and matches what §1.3 predicts: the second `auth.users` row has
+> **zero** `filter_rules`, `search_preferences` and `system_settings`, while holding 20
+> `gemini_key_state` rows seeded by SQL that bypasses the function. **That is the break's
+> footprint, visible in the data.**
+>
+> The under-claim was right in spirit and wrong in effect. *"Do not go looking for damage
+> that may never have been done"* is a **conclusion stated in advance of the measurement**,
+> and it told the reader not to run the one query that would have contradicted it. Modesty
+> that discourages checking is not modesty. **Under-claim the finding; never under-claim the
+> need to look.**
 
 ---
 
 ## 8. Defects found
+
+> **DATED NOTE 2026-09-18.** Defect 1 below is on `20260910220800`, which is **applied**.
+> It is now a **latent** defect — real, unfixed, and unable to fire until somebody edits,
+> replays or rebuilds from that file. **Its remediation instruction is also stale**: it
+> sends you to §4 Step 2's pre-flight and says fix if it returns rows. That pre-flight
+> returns four rows today *because the migration succeeded*. Do not act on it.
 
 **No blocking defects across all seven. Nothing must be changed before pushing.** Every
 file is correct; five of seven are fully idempotent; all are transactional.

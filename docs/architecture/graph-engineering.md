@@ -256,15 +256,39 @@ answered three different ways within one hour:
 |---|---|---|
 | `applyyy-d8` (orchestrator) | 4 unapplied | `docs/audit/2026-09-10-schema-invariants-verified.md:265` |
 | `applyyy-ff` | 4 unapplied | same audit doc, reached independently |
-| `applyyy-76` | **2 unapplied** | `supabase migration list` run against live at 11:46 |
+| `applyyy-76` | **2 unapplied** | `supabase migration list` run against live at **11:46 on 2026-09-11** |
 
-`applyyy-76` is right, and the other two were reading a document that had aged.
-Applied now: everything through `20260910212600`. **Genuinely unapplied: exactly
-two** — `20260910220800_create_private_storage_buckets.sql` and
-`20260911114300_add_resume_sha256_to_applications.sql`. Per `76`, this makes
+`applyyy-76` was right **on 2026-09-11**, and the other two were reading a document
+that had aged. ~~Applied now: everything through `20260910212600`. **Genuinely
+unapplied: exactly two** — `20260910220800_create_private_storage_buckets.sql` and
+`20260911114300_add_resume_sha256_to_applications.sql`.~~ Per `76`, this makes
 Instance 11 of [verification-traps.md](../verification-traps.md) **stale in its
 specifics** while its rule — *read files for intent, query the database for
 behaviour* — just proved itself again.
+
+> **SUPERSEDED 2026-09-18 — and this section had become an instance of the very trap
+> it documents.** The measurement above was written with a bare clock time, *"11:46"*,
+> and no date. Two later sessions read it as current. It is **2026-09-11 11:46** (this
+> file's commit `98b28bd` is 2026-09-11 12:09). **A time without a date is a claim
+> without an expiry.**
+>
+> Re-measured 2026-09-18 ≈ 13:00 IST with `supabase migration list --linked`
+> (CLI `2.117.0`, linked to `xynqxekcqizwhtskzqrq`): **18 local migrations, 15 applied,
+> THREE pending** — `20260917124500`, `20260917130000`, `20260917174600`. **Both files
+> named as unapplied above are now on the remote**, as are `20260911235500`,
+> `20260912001500` and `20260912120000`. Confirmed independently for the first of them:
+> all four `applyy owner%` policies on `storage.objects` exist live.
+>
+> **Do not quote a number from this page — run the command.** Any inventory here can
+> drift, so it must point at what regenerates it rather than at the list alone:
+>
+> ```bash
+> supabase migration list --linked     # authoritative; network only, no Docker
+> ```
+>
+> The *lesson* of the table above survives intact and is the reason the section stays:
+> two sessions agreeing from one document is one observation counted twice. The lesson
+> aged well; the number did not. **Date-stamp every measurement, including this one.**
 
 Two agreeing sessions were still wrong, because they shared a source rather than
 a measurement. Agreement between readers of the same document is not

@@ -4,6 +4,14 @@
 (Stream 0 — `supabase/migrations/**`, `supabase/config.toml`, root config,
 `docs/**`, `PROJECT_PLAN.md`)
 
+> **Corrections appended 2026-09-18.** The body below is a dated log and is left
+> as written; where a claim has since become false it carries a strikethrough and
+> a dated note **in place**, never a silent edit. Corrected today: the migration
+> counts (§"Migrations are now immutable", §"NEW DIVERGENCE CLASS") and the
+> *"every status write goes through `advance_application_status()`"* absolute
+> (§"The batched run may outlive its own access token"). **Counts in this file
+> date-stamp themselves — re-measure, do not quote.**
+
 Evidence rule for this document: a row says **VERIFIED** only where there is a
 measurement behind it — a captured error string, an exit code, a row count, a
 catalogue query. Where the evidence is a peer's own report rather than my
@@ -77,6 +85,15 @@ is the §14 silent death arriving through *configuration* rather than through co
 — and configuration has no test suite.
 
 ### Migrations are now immutable
+
+> **Count re-measured 2026-09-18: 18 local, 15 applied, 3 pending.** The pending
+> three are `20260917124500`, `20260917130000`, `20260917174600`. Measured with
+> `supabase migration list --linked`, which **is** available and authenticated —
+> only the Supabase *MCP connector* is unauthenticated, and the two get confused.
+> The "7" below is left as written because it was true on 2026-09-10 and this is a
+> dated log; **the number is a measurement at a timestamp, not a property of the
+> repo.** Re-run the command rather than quoting any figure in this file — an
+> inventory that can drift must point at the command that regenerates it.
 
 `supabase_migrations.schema_migrations` on the remote records all 7 versions as
 applied, so Supabase will never re-run those files. **Editing an applied
@@ -260,11 +277,21 @@ picks it up **without the value ever entering a transcript.**
 `20260910190000_fix_sweep_count_bootstrap_seed_and_blocked_edge.sql` — with
 **empty `remote` entries**.
 
-So right now the live database does **not** have the `keepalive` agent value,
+~~So right now the live database does **not** have the `keepalive` agent value,
 does **not** have the `approved → blocked_needs_human` edge, and still runs the
-**un-fixed** `bootstrap_user_defaults` and `sweep_stale_claims`. **Nothing
+**un-fixed** `bootstrap_user_defaults` and `sweep_stale_claims`.~~ **Nothing
 errors.** A peer reading the files gets one answer; the same peer querying the
 database gets another.
+
+> **Superseded 2026-09-18.** Both migrations named above —
+> `20260910185900` and `20260910190000` — **are now applied** (verified by
+> `supabase migration list --linked`; non-empty `remote` entries). The specific
+> divergence described here is closed. **The standing rule below is not** — it
+> simply points at a different set of files now: the three still carrying empty
+> `remote` entries are `20260917124500`, `20260917130000` and `20260917174600`.
+> Struck rather than deleted because *"right now"* in an undated paragraph is the
+> trap itself: this text read as current for eight days after it stopped being
+> true, and a reader had no way to tell from the sentence which "now" it meant.
 
 > **Read the files for intent. Query the database for behaviour. Never assume they
 > agree while any migration has an empty `remote` entry.**
@@ -274,12 +301,20 @@ than an incident. Third member of a family this project keeps producing — two
 artifacts disagreeing with no error anywhere — alongside CRLF and the
 applied-migration edit.
 
-**AND THE SHARPEST REMAINING RISK: neither new migration has ever been parsed by
-Postgres.** Docker is gone, so the first execution will be **against the live
+~~**AND THE SHARPEST REMAINING RISK: neither new migration has ever been parsed by
+Postgres.**~~ Docker is gone, so the first execution will be **against the live
 database** — exactly the condition this whole day was spent escaping. Stated at
 the top of both files. If Docker is restarted for one thing, it should be a
 single `supabase db reset` before that push; that is a stronger reason than the
 RLS proof was.
+
+> **Resolved for these two, 2026-09-18** — both were parsed and applied
+> successfully. **The risk itself is unchanged and now sits on the three pending
+> files**, two of which contain `alter type ... add value` (the trap documented at
+> `20260910185900:5-19`). The shape to carry forward is the *condition*, not the
+> filenames: **any migration with an empty `remote` entry will meet Postgres for
+> the first time on the production database.** That the last two survived it is
+> not evidence the next three will.
 
 The push is escalated to Teja framed as **"align the database with the files
 before the first sign-in"** — deliberately *not* as a production hotfix, because
@@ -563,10 +598,43 @@ trades a bounded, testable refresh path for a longer-lived credential in a runne
 
 **Also resolved structurally**, by ef: the guard's `applyy.acting_agent` is
 per-connection state, which I flagged as droppable by a pool, retry or re-auth.
-Every status write goes through `advance_application_status()`, which calls
+~~Every status write goes through `advance_application_status()`, which calls
 `set_config('applyy.acting_agent', p_agent, true)` — transaction-scoped, so it is
 re-established on **every call** rather than assumed from setup. The re-auth case
-is structurally safe, not merely unlikely.
+is structurally safe, not merely unlikely.~~
+
+**Corrected 2026-09-18 — the absolute was false, and the word "every" was the
+whole error.** What is true:
+
+- Every status **UPDATE** is *supposed* to go through
+  `advance_application_status()`, which calls
+  `set_config('applyy.acting_agent', p_agent, true)` — transaction-scoped, so it
+  is re-established on **every call** rather than assumed from setup. For the
+  re-auth case this still holds, and that part of the finding stands.
+- **INSERTs do not go through it, and cannot.** The transition guard is declared
+  `before update on public.applications`, so **an INSERT bypasses it by
+  construction** — not by oversight. `_shared/screen/screen-batch.ts:188,202,207`
+  creates `applications` rows directly at `dropped_filter` and `passed_filters`,
+  never touching the RPC. The module says so in its own header (`:31`) and
+  defends itself with a **closed union** of the only two statuses it may insert
+  at, precisely because a full-`application_status` insert helper would be a way
+  to manufacture a row already sitting at `approved` or `applying`.
+- So the discipline is enforced **by convention and by types, not by the
+  database**: `_shared/agent/port.ts:128` omits `status` from `ApplicationPatch`
+  entirely, making a bare `.update({status})` unrepresentable rather than
+  merely discouraged, and `:159` routes movement through `advanceStatus`.
+
+**Why this correction matters more than the fact it fixes.** The original
+sentence was load-bearing for a *security* argument — "the re-auth case is
+structurally safe" — and an over-broad "every" in a security claim is how an
+unguarded path gets budgeted for as if it were guarded. The guard's own header
+makes the narrow claim correctly (it holds for UPDATEs); this document widened it.
+
+**Related, and deliberately not repeated here:** `core_tables.sql:471` says a bare
+UPDATE *"passes the guard and strands the row"*. `CLAUDE.md` §7 records that as
+**false** — such an UPDATE is refused outright with SQLSTATE `42501`. The SQL
+comment is another session's file and is left untouched; it is flagged so the
+claim does not get laundered into this document by someone citing it.
 
 Related, and easy to miss: the guard requires **session-local** state.
 `set applyy.acting_agent = 'applier'` is **per-connection**, not one-time setup —

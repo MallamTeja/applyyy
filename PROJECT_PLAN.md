@@ -436,16 +436,38 @@ The pattern is a **cascade** (short-circuit / cheap-test-first): order tests by 
 
 | Filter | Drops |
 |---|---|
-| Experience ceiling | JD says "5+ years", you want ≤ 1 |
+| Experience ceiling | ~~JD says "5+ years", you want ≤ 1~~ — **INERT, see below** |
 | Title blocklist | Senior, Staff, Principal, Lead, Manager, Architect |
 | Location allowlist | Hyderabad, Bangalore, Remote — nothing else |
 | Employment type | intern / full-time / both |
 | Already applied | fingerprint already in history |
 | Company blocklist | consultancies, staffing firms, companies that ghosted you |
 | Staleness | **posted more than 3 days ago** |
-| Degree mismatch | requires a Master's or PhD |
+| Degree mismatch | ~~requires a Master's or PhD~~ — **INERT, see below** |
+| Per-company weekly cap | more than N applications to one company in a week (**added to this table 2026-09-18** — the rule has been implemented all along at `_shared/filter/cascade.ts:348`; this table simply never listed it) |
 
-**Every row is a settings field you control.** That is what the settings pages are for.
+~~**Every row is a settings field you control.**~~ **Corrected 2026-09-18.** Seven
+of the nine rows are. **Two — `experience_ceiling` and `degree_mismatch` — cannot
+fire at all**, and the reason is structural rather than a missing setting:
+`toJobInsert` (`_shared/ats/registry.ts`) never populates `min_experience_years`
+or `requires_advanced_degree`, and **nothing in this repo parses either out of a
+job description.** Exposing them as settings fields does not change that; there
+is no producer for the columns the rules read.
+
+**What makes this worse than a plain gap is that both rules read as working.**
+`_shared/filter/cascade.ts:157` returns `{drop: false}` on a null
+`minExperienceYears`, and `:315` does the same on `requiresAdvancedDegree` —
+**neither emits a warning**, so a null input is indistinguishable from a
+genuine pass. Compare the line immediately above `:157`: when the *threshold* is
+unconfigured the rule returns `drop: false` **with** a warning. The configured-but-
+unusable case is the silent one. Evidence and the per-rule breakdown:
+[`docs/screener/2026-09-17-screener-wiring.md:220-240`](docs/screener/2026-09-17-screener-wiring.md).
+
+**The worked example above is unaffected** — it drops on the **title blocklist**,
+which genuinely works. Stated explicitly because an earlier handoff said §8's
+example "is built on `experience_ceiling`", and it is not; only this table's first
+row and the settings claim were wrong. **Correcting one over-broad claim with
+another over-broad claim is not a correction.**
 
 ---
 
@@ -527,15 +549,25 @@ automatically better.
 ### Status flow
 
 ```
-discovered → deduped → screened → scored → tailored
+discovered → deduped → passed_filters → scored → tailored
    → audit_clean  ─┐
    → audit_flagged ┴→ awaiting_approval → approved
-   → applying → applied → screening → oa_pending
+   → applying → applied → employer_screening → oa_pending
    → interview → offer | rejected
 
 off-ramps: dropped_filter · dropped_duplicate
            blocked_needs_human · needs_verification · failed
 ```
+
+**Corrected 2026-09-18.** This diagram read ~~`screened`~~ and ~~`screening`~~
+until today — the pre-rename names, still sitting here **130 lines below §7:399,
+which recorded the rename on 2026-09-09.** The live enum is `passed_filters` and
+`employer_screening` (§7's agent table, `deduped → passed_filters /
+dropped_filter`). Kept visible rather than silently swapped, because the *shape*
+of the failure is the lesson: a rename was recorded correctly in one section and
+a second copy of the same fact, far enough away that no reader holds both on
+screen at once, went on contradicting it for nine days. **A fact stored twice
+drifts; distance is what hides the drift.**
 
 ---
 
@@ -689,7 +721,7 @@ Neither errors. They just stop. The health page must be able to say "Scout hasn'
 | **Company Watchlist** | Greenhouse/Lever/Ashby board tokens to poll |
 | **Blocklist** | Companies never to apply to |
 | **Approval Queue** | The diff view — master vs tailored, side by side, changes highlighted. Approve / edit / reject |
-| **Pipeline** | Kanban: discovered → approved → applied → screening → interview → offer/rejected, auto-advanced by the email Tracker |
+| **Pipeline** | Kanban: discovered → approved → applied → `employer_screening` → interview → offer/rejected, auto-advanced by the email Tracker (was ~~`screening`~~; **third copy of the 2026-09-09 rename, found 2026-09-18** — see §9) |
 | **System Health** | Gemini pool status, last successful run per agent, keepalive status, `blocked_needs_human` queue with screenshots |
 
 ---
