@@ -185,14 +185,25 @@ Workspace:   pnpm run typecheck
 project. Edge-function changes are invisible to it. **The Deno tree does not typecheck clean: run the
 command, do not trust a list.**
 
-    cd supabase/functions && deno check --reload <paths>   # -> "Found 4 errors.", EXIT=1
+    cd supabase/functions && deno check --reload <paths>   # run it; do not trust this line
 
-Re-measured 2026-09-18, still 4 errors — `_shared/scout/tiers.ts:381` (TS2322, `portalJobId` may
-be `undefined`, not assignable to `Json`; fix is `?? null`, and `ats_job_id` at `:376` already
-does exactly that) **plus three in
-`_shared/gemini/client.ts`** (`:156`, `:213` TS2322 and `:280` TS2379, all
-`exactOptionalPropertyTypes`), dating from `0ff3c98` on 2026-09-12 and invisible for five days
-because no workspace command reaches that tree.
+~~The Deno tree does not typecheck clean.~~ **It does, as of `db98d6e` (2026-09-18):
+`deno check --reload` over `_shared/ email-tracker-intake/ rls-proof/ scout-ats/` gives
+**EXIT=0, 45 files checked, zero errors** — first clean run since 2026-09-12. Verified twice,
+independently, by two sessions.
+
+The four that were there — `_shared/scout/tiers.ts:381` and `_shared/gemini/client.ts:156`,
+`:213`, `:280`, all `exactOptionalPropertyTypes` — survived for six days because no workspace
+command reaches this tree. **That part has not changed and is the reason to keep reading.**
+
+**How this entry itself went stale is the lesson, not a footnote.** On 2026-09-18 a session
+edited this very paragraph to correct `tiers.ts:384` → `:381` **and left the headline
+"Found 4 errors, EXIT=1" standing.** A citation inside a measurement was fixed while the
+measurement stayed wrong — and the paragraph's own rule is *"an accurate-but-partial list
+validates itself."* It was caught by a peer whose new code imported `gemini/client.ts`,
+**expected to inherit red, and didn't.** Hence, unchanged and now twice-earned: any inventory
+here that can drift must point at the COMMAND that regenerates it, never at the list alone —
+and **when you update a measured claim, update the measurement, not just its citations.**
 
 **The line number moved and that matters too.** This file said `:384` until 2026-09-18; the
 diagnostic is reported at **`:381`** (the `raw_payload:` property key) while `:384` is the
@@ -227,6 +238,19 @@ it, never at the list alone.
   which trains people to ignore the check. **A guard against vacuous passes can itself
   pass vacuously** — test your guard against a known-good and a known-bad run before
   trusting it, or you have only moved the credulity one level up.
+- **`fail 0` is only meaningful beside a NON-ZERO `tests`.** Found 2026-09-18, and it cost a
+  session two runs:
+
+  ```
+  node --test "supabase/functions/**/*.test.ts"   # from the wrong cwd
+  # -> tests 0 / pass 0 / fail 0
+  ```
+
+  **`fail 0` next to `tests 0` reads as a clean run and is a glob that matched nothing.** The
+  carrier: a `cd`-ing command and a root-relative command batched together, so the first moved
+  the working directory out from under the second. Node prints the two numbers on separate lines
+  precisely so nobody has to notice the second one. Same family as `deno check` over zero files
+  and `$?` through a pipe — **assert the work happened, never just that nothing complained.**
 - **`$?` after a pipeline is the LAST command's exit code, not the checker's.**
   `tsc --noEmit 2>&1 | tail -20 ; echo "TSC_EXIT=$?"` prints `TSC_EXIT=0` **while tsc is
   failing** — you read `tail`'s status. Found 2026-09-17 by a worker who walked into it and
@@ -408,7 +432,10 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   calls it, and both `scout-ats/index.ts:16` and `worker/src/cli/scout.ts:17` import that. Struck
   rather than deleted, because a claim this file once made gets quoted back at us for weeks.
 - **All of `_shared/match/`** (`prompt`, `rubric`, `salary-gate`, `scorer`) — zero non-test
-  importers. Same for `_shared/tailor/`, `_shared/gemini/`, `_shared/agent/`.
+  importers. Same for `_shared/gemini/` and `_shared/agent/`.
+  ~~Same for `_shared/tailor/`.~~ **FALSE as of `ed09810`/`3f49965` (2026-09-18):** it has **3**
+  non-test importers — `supabase/functions/tailor/index.ts:29,31,33` pulling `tailor-batch`,
+  `tailorer` and `persist`. **But reachable is not fed** — see the `tailored_profile` entry.
   **`_shared/eval/` is the exception — corrected 2026-09-18.** It HAS a non-test importer:
   `_shared/match/scorer.ts:25` (type-only). It is dead **transitively, not directly**, and the
   difference is operational: deleting `match/` removes `eval`'s only caller, but deleting `eval/`
@@ -464,11 +491,15 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
 - ~~**Nothing in the repo writes `tailored_profile`.**~~ **NO LONGER TRUE as of `ed09810`
   (2026-09-18).** `_shared/tailor/persist.ts:83` is the first real writer
   (`.update({ tailored_profile: outcome.resume })`), reached via `supabase/functions/tailor/`.
-  **Two things follow that matter more than the fix**: the approval-queue gate at
-  `ApprovalQueuePage.tsx:214` was decorative while the column had no producer and is now
-  **load-bearing** — it is still a null check, not a shape check; and the queue stops being
-  empty-by-construction, so its write path is about to be exercised against live data for the
-  first time.
+  **But the producer is fed nothing.** `tailor/index.ts:168` selects `.eq("status", "scored")`,
+  and **nothing anywhere writes `scored`** — that line is the only occurrence of the status in
+  non-test code. Measured live 2026-09-18: **0 rows at `scored`**. So "a producer exists" and
+  "the column gets written" are different claims and only the first is true. **State the
+  distinction when you restate this entry; it IS the content.**
+
+  Still, the approval-queue gate at `ApprovalQueuePage.tsx:214` was decorative while the column
+  had no producer and becomes **load-bearing** the moment one row lands — it is still a null
+  check, not a shape check, with unreachable dead code behind it.
 - **The approval queue is empty by construction.** `629dc81` refuses any row whose
   `tailored_profile` is null; the only producer of `awaiting_approval` is the discovery fast-path
   button, which never runs a Tailor. So 100% of what the queue receives is refused. Worth stating
@@ -652,12 +683,28 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   upsert never touches an existing row. **Rows already sitting at `discovered` are stranded
   permanently.** This is a hole in the graph, not a missing agent: any plan to "wire the Matcher"
   needs an answer for the stranded inventory first.
-  **Narrowed 2026-09-18 — the hole is real, the blast radius was overstated.** Rows reach
-  `discovered` **only on the screener-unavailable fallback path**; both scouts normally insert
-  straight at `passed_filters` (`worker/src/cli/scout.ts:314`, `scout-ats/index.ts:402`, with the
-  fallbacks at `:312` and `:400`). So the stranded set is fallback-path rows, **not the discovery
-  stream**. Left in place because the graph defect still needs fixing — but "the existing backlog
-  can never be screened" would have had someone sizing a migration against the wrong inventory.
+  **Narrowed 2026-09-18 from the code — then CORRECTED THE SAME DAY from the database.** The
+  narrowing said rows reach `discovered` *only on the screener-unavailable fallback path* (true:
+  both scouts normally insert at `passed_filters` — `worker/src/cli/scout.ts:314`,
+  `scout-ats/index.ts:402`, fallbacks at `:312`/`:400`) and concluded the stranded set is
+  therefore small, **"not the discovery stream". That conclusion is wrong by an order of
+  magnitude.** Live counts:
+
+  | status | rows |
+  |---|---|
+  | **`discovered`** | **1,405** |
+  | `passed_filters` | 121 |
+  | `dropped_filter` | 22 |
+  | `awaiting_approval` | 3 |
+
+  **91% of all applications are stranded at `discovered`** and cannot move: the only edges out
+  are `deduped`/`dropped_duplicate`/`failed`, and nothing writes `deduped`. The fallback path is
+  where almost everything went.
+
+  **The lesson is about the narrowing, not the hole.** Reading the code correctly established
+  *which path* produces these rows and said nothing about *how often that path is taken* —
+  then the word "only" did the rest of the work unearned. **A mechanism is not a magnitude.**
+  One `group by status` would have caught it, and the database had been reachable all along.
 - ~~**No session can check the live database.**~~ **FALSE, and it cost a day.** Corrected
   2026-09-18. Two different things are called "Supabase" here and this entry collapsed them:
   - the **MCP connector** is configured but **unauthenticated** — still true;
