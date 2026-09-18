@@ -1,18 +1,27 @@
 // ============================================================================
-// AUDITOR UNIT TESTS
+// AUDITOR UNIT TESTS & ANTI-FABRICATION VALIDATOR SUITE
 // ============================================================================
 //
-// Unit tests for the Auditor agent anti-fabrication validator.
-// Run with: node --test "supabase/functions/_shared/audit/*.test.ts"
+// Unit tests for the Auditor agent anti-fabrication validator module.
+// Executes under Node.js native test runner via: node --test "supabase/functions/_shared/audit/*.test.ts"
 //
-// Test Scenarios Covered:
-//   1. Clean Grounded Profile -> Accepts profile, assigns 'audit_clean'.
-//   2. Unresolved Skill Ref -> Flags profile, assigns 'audit_flagged'.
-//   3. Unresolved Bullet Ref -> Flags profile, assigns 'audit_flagged'.
-//   4. Misattributed Bullet -> Flags profile with misattributed_bullet finding.
-//   5. Invented Metric -> Flags profile with unfaithful_rewording finding for metrics.
-//   6. Ungrounded Technology Token -> Flags profile with unfaithful_rewording finding for terms.
-//   7. Summary Reference to Missing Node -> Flags profile with summary_unsupported finding.
+// Architecture & Validation Rules Tested:
+//   1. Grounded Profile Acceptance: A valid resume derived strictly from master profile nodes
+//      must be assigned status 'audit_clean' with zero findings.
+//   2. Unresolved Ref Detection: References to non-existent skills or bullets must generate
+//      'unresolved_ref' findings and result in status 'audit_flagged'.
+//   3. Parent Node Misattribution: Rendering a bullet under an incorrect parent section or entry
+//      must produce a 'misattributed_bullet' finding specifying claimed and actual parent IDs.
+//   4. Metric Inflation Guard: Modifying numbers or quantities in reworded bullet claims must generate
+//      'unfaithful_rewording' findings identifying the ungrounded metric.
+//   5. Technology Token Guard: Introducing ungrounded tech keywords (e.g. Docker, K8s) not present
+//      in master bullet text or master skills list must generate 'unfaithful_rewording' findings.
+//   6. Summary Node Resolution: Declaring summary citations to non-existent master node IDs must generate
+//      'summary_unsupported' findings.
+//
+// Grounding Constraints:
+//   - Zero tolerance for hallucinated metrics, ungrounded skills, or missing node citations.
+//   - Discriminates between benign rhetorical rewordings and ungrounded factual additions.
 // ============================================================================
 
 // Import node:test testing framework runner module
@@ -231,6 +240,13 @@ const TEST_MASTER: MasterProfile = {
 /**
  * Factory helper function to construct a baseline clean ResolvedResume object.
  *
+ * Grounding Guarantee:
+ * - Every skill reference ('s-node', 's-express') resolves to a master skill node in TEST_MASTER.
+ * - Every experience bullet reference ('b-exp-1') resolves to a master bullet under 'exp-1'.
+ * - Every project bullet reference ('b-proj-1') resolves to a master bullet under 'proj-1'.
+ * - Every education bullet reference ('b-edu-1') resolves to a master bullet under 'edu-1'.
+ * - All metrics (500) and technology terms match TEST_MASTER text exactly without hallucinated additions.
+ *
  * @returns Clean ResolvedResume object matching TEST_MASTER nodes.
  */
 function createCleanResume(): ResolvedResume {
@@ -393,6 +409,11 @@ function createCleanResume(): ResolvedResume {
 /**
  * Factory helper function to construct raw TailoredProfile refs corresponding to clean resume.
  *
+ * Grounding Guarantee:
+ * - Summary citations ('sum-1', 'b-exp-1') resolve to existing node IDs in TEST_MASTER.
+ * - Section ordering matches the standard document layout ('skills', 'experience', 'projects', 'education').
+ * - All selected item refs map 1:1 to legitimate master profile nodes without fabricated identifiers.
+ *
  * @returns Clean TailoredProfile object matching TEST_MASTER node IDs.
  */
 function createCleanTailorRefs(): TailoredProfile {
@@ -543,8 +564,15 @@ test("auditApplication accepts clean grounded profile", () => {
   assert.equal(outcome.findings.length, 0);
 });
 
+// ============================================================================
 // Test Case 2: Unresolved Skill Reference Detection
+// ============================================================================
 // Description: Verify that a tailored skill ref not present in master profile triggers unresolved_ref finding.
+// Verification Logic:
+//   - Skill reference "s-fake-docker" is injected into resume skills list.
+//   - Auditor checks master.skills map and finds no matching entry for "s-fake-docker".
+//   - Auditor flags application as 'audit_flagged' and adds an 'unresolved_ref' finding.
+// ============================================================================
 test("auditApplication flags unresolved skill reference", () => {
   // Construct clean resume fixture object
   const resume = createCleanResume();
@@ -578,8 +606,15 @@ test("auditApplication flags unresolved skill reference", () => {
   assert.ok(hasUnresolved);
 });
 
+// ============================================================================
 // Test Case 3: Unresolved Bullet Reference Detection
+// ============================================================================
 // Description: Verify that a bullet ref absent from master profile triggers unresolved_ref finding.
+// Verification Logic:
+//   - Bullet reference "b-fake-k8s" is injected into experience entry bullets.
+//   - Auditor checks master bullets index and finds no matching bullet ID.
+//   - Auditor flags application as 'audit_flagged' and adds an 'unresolved_ref' finding.
+// ============================================================================
 test("auditApplication flags unresolved bullet reference", () => {
   // Construct clean resume fixture object
   const resume = createCleanResume();
@@ -613,8 +648,15 @@ test("auditApplication flags unresolved bullet reference", () => {
   assert.ok(hasUnresolvedBullet);
 });
 
+// ============================================================================
 // Test Case 4: Misattributed Bullet Detection
+// ============================================================================
 // Description: Verify that rendering a valid bullet under a different parent ID triggers misattributed_bullet.
+// Verification Logic:
+//   - Project bullet "b-proj-1" (belonging to "proj-1") is reparented under experience entry "exp-1".
+//   - Auditor compares expected parent ID against actual parent ID in master profile index.
+//   - Auditor flags application as 'audit_flagged' and adds a 'misattributed_bullet' finding.
+// ============================================================================
 test("auditApplication flags misattributed bullet", () => {
   // Construct clean resume fixture object
   const resume = createCleanResume();
@@ -663,8 +705,15 @@ test("auditApplication flags misattributed bullet", () => {
   }
 });
 
+// ============================================================================
 // Test Case 5: Invented Metric Detection
+// ============================================================================
 // Description: Verify that inflating numbers in bullet text triggers unfaithful_rewording finding.
+// Verification Logic:
+//   - Bullet metric "500" is altered to "5000" in bullet text.
+//   - Auditor extracts metrics from reworded text and checks against master bullet text.
+//   - Auditor flags metric "5000" as ungrounded and adds an 'unfaithful_rewording' finding.
+// ============================================================================
 test("auditApplication flags invented metric", () => {
   // Construct clean resume fixture object
   const resume = createCleanResume();
@@ -691,8 +740,15 @@ test("auditApplication flags invented metric", () => {
   assert.ok(hasMetricFinding);
 });
 
+// ============================================================================
 // Test Case 6: Ungrounded Technology Token Detection
+// ============================================================================
 // Description: Verify that introducing ungrounded technology tokens triggers unfaithful_rewording finding.
+// Verification Logic:
+//   - Term "Docker" is inserted into bullet text when "Docker" is not in master bullet or master skills.
+//   - Auditor checks tokens against allowable rhetorical words and master profile tokens.
+//   - Auditor flags "docker" as ungrounded technology token and adds an 'unfaithful_rewording' finding.
+// ============================================================================
 test("auditApplication flags ungrounded technology token", () => {
   // Construct clean resume fixture object
   const resume = createCleanResume();
@@ -719,8 +775,15 @@ test("auditApplication flags ungrounded technology token", () => {
   assert.ok(hasDockerFinding);
 });
 
+// ============================================================================
 // Test Case 7: Summary Reference to Missing Node ID Detection
+// ============================================================================
 // Description: Verify that summary declaring non-existent node ID references triggers summary_unsupported finding.
+// Verification Logic:
+//   - Non-existent node ID "nonexistent-node-id" is added to summary.refs in TailoredProfile.
+//   - Auditor checks summary refs against master index node IDs.
+//   - Auditor flags summary reference as ungrounded and adds a 'summary_unsupported' finding.
+// ============================================================================
 test("auditApplication flags summary referencing missing node ID", () => {
   // Construct clean resume fixture object
   const resume = createCleanResume();
