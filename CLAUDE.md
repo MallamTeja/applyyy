@@ -478,7 +478,9 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
 ### Added 2026-09-17 (afternoon) — verified by repo-wide grep, orchestrator session
 
 - **The Auditor does not exist as code** — there is no `_shared/audit*` directory at all.
-  **The agent whose verdict the UI forges is the one that was never written.**
+  **The agent whose verdict the UI forged was the one that was never written.** (Past tense
+  since `75a75a0` deleted the button; the Auditor is still absent — `find supabase/functions
+  -iname "*audit*"` returns nothing, re-checked 2026-09-18.)
   Of the six agents the discovery fast-path names: Screener is real and production-reachable;
   `_shared/match/` ~~and `_shared/tailor/`~~ exist with zero non-test importers; Auditor is absent.
   **`_shared/tailor/` struck 2026-09-18** — it has three, via `supabase/functions/tailor/index.ts`
@@ -507,7 +509,13 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   Still, the approval-queue gate at `ApprovalQueuePage.tsx:214` was decorative while the column
   had no producer and becomes **load-bearing** the moment one row lands — it is still a null
   check, not a shape check, with unreachable dead code behind it.
-- **The approval queue is empty by construction.** `629dc81` refuses any row whose
+- **The approval queue is empty by construction — and it is now MEASURABLY so, not
+  theoretically.** Live, 2026-09-18: **3 rows at `awaiting_approval`, all 3 with
+  `tailored_profile IS NULL`, 0 with `'{}'`.** So the gate refuses every one: **the queue
+  displays 3 and offers 0.** Those three are **orphans of the deleted fast-path button**
+  (`75a75a0`) — which matters for the sentence below, written while that button still existed:
+  it is no longer "the only producer", it is a producer that no longer exists, and these are
+  the rows it left behind. `629dc81` refuses any row whose
   `tailored_profile` is null; the only producer of `awaiting_approval` is the discovery fast-path
   button, which never runs a Tailor. So 100% of what the queue receives is refused. Worth stating
   plainly because "the approval write path works now" is true and misleading in the same breath.
