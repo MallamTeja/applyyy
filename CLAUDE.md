@@ -672,9 +672,23 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   **not a dependency of `apps/web/package.json`**, so the specifier cannot resolve in principle.
   Both failures are swallowed by a bare `catch {}` at `:23` whose comment calls it a concurrency
   race. **Every master-resume upload therefore returns the hardcoded 'Extracted Candidate' /
-  'candidate@example.com' profile.** If `master_profiles` has ever been written against live, it
-  holds junk. A comment that frames a permanent structural break as a transient race is its own
-  entry in §5.
+  'candidate@example.com' profile.** ~~If `master_profiles` has ever been written against live,
+  it holds junk.~~ **MEASURED 2026-09-18 — it did, and the junk is now SUPERSEDED, not active:**
+
+  | version | full_name | email | experience | skills |
+  |---|---|---|---|---|
+  | **2** | Mallam Teja | tejamallam1233@gmail.com | 2 | 20 |
+  | 1 | **Extracted Candidate** | **candidate@example.com** | 0 | 0 |
+
+  Version 1 **is** the hardcoded placeholder — the broken PDF path's output, sitting in the live
+  database, confirmed rather than predicted. But **highest version wins** and consumers order
+  `version desc limit 1` (e.g. `supabase/functions/tailor/index.ts`), so nothing reads it.
+  **"It holds junk" would tell the next reader the master is unusable; it is usable, and the junk
+  is one row of history.** A tailoring pinned to `master_version = 1` would resolve zero
+  experience and zero skills, and the validator's substantive-selection check **refuses** it — so
+  even that path **fails closed** rather than shipping an empty resume. The PDF break is still
+  three unconditional defects and still worth fixing; it is not a live data hazard.
+  A comment that frames a permanent structural break as a transient race is its own entry in §5.
 - **There is no `discovered -> passed_filters` edge, so the existing backlog can never be
   screened.** `status_transition_guard.sql:101-103` seeds three edges out of `discovered`
   (`deduped`, `dropped_duplicate`, `failed`); the Screener's only legal source is `deduped`,
@@ -705,6 +719,21 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   *which path* produces these rows and said nothing about *how often that path is taken* —
   then the word "only" did the rest of the work unearned. **A mechanism is not a magnitude.**
   One `group by status` would have caught it, and the database had been reachable all along.
+
+  **THESE ARE TWO INVENTORIES AT TWO DISTANCES — do not quote one number.** Corrected
+  2026-09-18 by `applyyy-a5` after this entry had merged them:
+  - the **1,405 at `discovered`** are **two hops** away — they need a Normalizer *runner*
+    (wrapping the already-production-reachable `_shared/normalize/` helpers) to write `deduped`,
+    and then the Screener;
+  - the **121 at `passed_filters`** are **one hop** away. The Matcher's edge is
+    `passed_filters -> scored` (`status_transition_guard.sql:111`, agent `matcher`), so they need
+    **only the Matcher** — no Normalizer, no migration, no graph change.
+
+  And the 121 are **all live-ready**: a join against `jobs` measured 0 missing titles, 0 missing
+  companies, 0 missing descriptions, **121 tailorable, zero skips.** So "wire the Matcher" is a
+  single move that puts 121 real rows in front of the Tailor, which now exists.
+  **Collapsing the two inventories oversizes the nearest one** and would talk somebody out of the
+  cheapest useful step in the repo.
 - ~~**No session can check the live database.**~~ **FALSE, and it cost a day.** Corrected
   2026-09-18. Two different things are called "Supabase" here and this entry collapsed them:
   - the **MCP connector** is configured but **unauthenticated** — still true;
