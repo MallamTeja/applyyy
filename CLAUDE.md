@@ -158,6 +158,16 @@ removed*. The worker fixed the TEST, not the comment — every assertion now mat
 **A guard that forbids describing the bug it guards against gets deleted by the first person it
 inconveniences**, and at a deletion site the explanation is the most valuable thing left.
 
+**Second instance, 2026-09-18, and it was a VERIFICATION query — the rule is not test-only.**
+Checking whether the `evaluation_order` seed bug was fixed on the live database with
+`position('evaluation_order' in pg_get_functiondef(...)) > 0` returned **true after a wholly
+successful migration**, and a failed push was nearly reported. The string survives inside the
+deployed function's own **comment explaining the bug** (`-- `sort_order`, NOT `evaluation_order`.
+The latter has never existed…`) while the insert correctly names `sort_order`.
+**Assert the POSITIVE shape — "does the insert name `sort_order`?" — not the absence of a word.**
+Generalised: **a check that forbids naming a bug will fire on the documentation of that bug**, and
+at a fix site the documentation is the most valuable thing there.
+
 ---
 
 ## 4. Verification — and the traps
@@ -407,21 +417,24 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   `settle()` now calls `advance_application_status` with `p_agent: 'human'`
   (`ApprovalQueuePage.tsx:374`). Two caveats that matter more than the fix: it has **never been
   exercised against live data**, and the queue is **empty by construction** — see the entry below.
-- ~~**`filter_rules` is empty and unconfigurable.**~~ **"Empty" is FALSE — measured live
-  2026-09-18: `filter_rules` holds 9 rows.** "Unconfigurable" still needs care. What is actually
-  true, from `supabase db query --linked`: there are **2 `auth.users`**, and the seeded set
-  belongs to **one of them** (9 filter_rules / 1 search_preference / 1 system_setting); the
-  **second user has 0/0/0** and is unseeded. The original reasons, re-checked:
-  (a) `bootstrap_user_defaults()` inserts `evaluation_order`, a
-  column that does not exist (real name `sort_order`), so all three seeded tables roll back.
-  **This break is LIVE — confirmed 2026-09-18** by `pg_get_functiondef()` on the deployed
-  function: it contains `evaluation_order` and **not** `sort_order`. `20260917124500` fixes it
-  and **is one of the three pending migrations**, so it is broken on the remote right now;
-  ~~(b) `filtersStore.ts:232` upserts `is_enabled`, the column is `enabled`~~ **(b) is FIXED —
-  corrected 2026-09-18.** `filtersStore.ts:245` now writes `enabled`, and `:240-244` carries a
-  comment saying why; the read path at `:199-204` matches. **Two reasons remain, not three**, and
-  the count mattered: a reader budgeting "three independent fixes" sizes this wrong;
-  (c) every seeded rule config is `{}`.
+- ~~**`filter_rules` is empty and unconfigurable.**~~ **ALL THREE REASONS ARE NOW CLOSED.**
+  Measured live after the 2026-09-18 push: **both** `auth.users` hold 9 filter_rules / 1
+  search_preference / 1 system_setting. History, because each reason failed differently:
+  ~~(a) `bootstrap_user_defaults()` inserts `evaluation_order`, a column that does not exist~~ —
+  the break **was** live (confirmed on the deployed function, not inferred); `20260917124500`
+  **applied 2026-09-18** and the function now inserts `sort_order`. Its backfill took the second
+  user from **0/0/0 to 9/1/1**, having been reviewed as *"LOW on effect"* on the false premise
+  that no auth user existed;
+  ~~(b) `filtersStore.ts:232` upserts `is_enabled`, the column is `enabled`~~ — fixed;
+  `filtersStore.ts:245` now writes `enabled`, `:240-244` says why, read path `:199-204` matches;
+  ~~(c) every seeded rule config is `{}`~~ — **it is 8 of 9**, not all: `staleness` carries
+  `{"treat_unknown_posted_at_as_fresh": false}`. Near enough to be quoted as "every", which is
+  exactly how a nearly-true claim becomes a false one.
+
+  **But do not read "seeded" as "working".** `experience_ceiling` and `degree_mismatch` are now
+  rows with `enabled: true` and `config: {}` — **seeding made the two dead rules more convincing,
+  not more functional** (see the next entry). And **nothing calls `bootstrap_user_defaults()`**,
+  so a *third* signup still gets nothing; the migration seeded the two existing users by hand.
 - **`experience_ceiling` and `degree_mismatch` can never fire** — `toJobInsert` never
   populates `min_experience_years` or `requires_advanced_degree`, and both rules return
   `drop:false` on null **without a warning**, so they read as working. Exact lines, verified
@@ -448,8 +461,14 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   said "the Normalizer was never written", which **inflates the job**: "write an agent" and
   "wire a runner around existing tested helpers" are very different sizes. Cost the two limbs
   separately.
-- **Nothing in the repo writes `tailored_profile`.** Not one writer, anywhere. Every consumer
-  reads a column no producer fills.
+- ~~**Nothing in the repo writes `tailored_profile`.**~~ **NO LONGER TRUE as of `ed09810`
+  (2026-09-18).** `_shared/tailor/persist.ts:83` is the first real writer
+  (`.update({ tailored_profile: outcome.resume })`), reached via `supabase/functions/tailor/`.
+  **Two things follow that matter more than the fix**: the approval-queue gate at
+  `ApprovalQueuePage.tsx:214` was decorative while the column had no producer and is now
+  **load-bearing** — it is still a null check, not a shape check; and the queue stops being
+  empty-by-construction, so its write path is about to be exercised against live data for the
+  first time.
 - **The approval queue is empty by construction.** `629dc81` refuses any row whose
   `tailored_profile` is null; the only producer of `awaiting_approval` is the discovery fast-path
   button, which never runs a Tailor. So 100% of what the queue receives is refused. Worth stating
@@ -510,17 +529,16 @@ Verified 2026-09-17 by repo-wide grep. **Do not assume a module runs because it 
   correct" turns good news into an outage. Report **both** the matched count and the written count:
   their **difference** is the information (written=matched → first run; written=0, matched>0 →
   correct re-run; anything between → a partial earlier run).
-- ~~**The unapplied-migration backlog is SEVEN files, not two.**~~ **FALSE — measured 2026-09-18:
-  18 local, 15 applied, THREE pending**, and all three are the reviewed 09-17 files
-  (`20260917124500`, `20260917130000`, `20260917174600`). `20260911235500`, `20260912001500` and
-  `20260912120000` are **already on the remote**, so their `alter type ... add value` trap is
-  already discharged. Struck rather than deleted because this count was quoted for a day.
-  **Never inherit this number — regenerate it:** `supabase migration list --linked`. It was wrong
-  in FOUR places at once (here, `RESUME-HERE.md:49` said eight, `graph-engineering.md:262` and a
-  user memory each said two) because two sources *counted files after a date cutoff* and two
-  quoted a real measurement *without its timestamp*. **`supabase db push` is a network operation
+- ~~**The unapplied-migration backlog is SEVEN files, not two.**~~ **THE BACKLOG IS NOW ZERO —
+  pushed 2026-09-18 ~15:55 IST, `PUSH_EXIT=0`, 18 of 18 applied.** Result and before/after
+  measurements: `docs/audit/2026-09-18-migration-push-result.md`.
+  The count was wrong in four places before it was settled (here SEVEN, `RESUME-HERE.md:49` EIGHT,
+  `graph-engineering.md:262` and a user memory TWO) — two sources *counted files after a date
+  cutoff*, two quoted a real measurement *without its timestamp*. **Never inherit this number —
+  regenerate it:** `supabase migration list --linked`. **`supabase db push` is a network operation
   and needs no Docker** — only `start`/`reset`/`diff` do — so the no-Docker rule never held this.
-  Evidence: `docs/audit/2026-09-18-pending-work-reverified.md` §1.
+  Struck rather than deleted because this count was quoted for a day.
+  Prior evidence: `docs/audit/2026-09-18-pending-work-reverified.md` §1.
 - **`docs/architecture/graph-engineering.md:259-264` reads as current and is not.** It records a
   `supabase migration list` timestamped "11:46" — that is **2026-09-11**, not today (last commit
   `98b28bd`, 2026-09-11 12:09). A bare clock time in a doc with no date is a trap; two sessions
