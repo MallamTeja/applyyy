@@ -1,0 +1,109 @@
+/* This is the main stylesheet for the Follow-Up Nudges page. */
+/* We style the main container. */
+.followup-container {
+    /* We add padding. */
+    padding: 20px;
+    /* We set a max width. */
+    max-width: 800px;
+    /* We center the container. */
+    margin: 0 auto;
+    /* We set the font family. */
+    font-family: sans-serif;
+/* We close the block. */
+}
+
+/* We style the nudge card. */
+.nudge-card {
+    /* We add a border. */
+    border: 1px solid #ccc;
+    /* We add border radius. */
+    border-radius: 8px;
+    /* We add padding. */
+    padding: 16px;
+    /* We add margin at the bottom. */
+    margin-bottom: 20px;
+    /* We set a background color. */
+    background-color: #f9f9f9;
+/* We close the block. */
+}
+
+/* We style the heading. */
+.nudge-card h2 {
+    /* We remove margin top. */
+    margin-top: 0;
+/* We close the block. */
+}
+
+/* We style the applied date text. */
+.applied-date {
+    /* We make it italic. */
+    font-style: italic;
+    /* We change the color. */
+    color: #666;
+/* We close the block. */
+}
+
+/* We style the draft subject input. */
+.draft-subject {
+    /* We make it take full width. */
+    width: 100%;
+    /* We add padding. */
+    padding: 8px;
+    /* We add margin below. */
+    margin-bottom: 12px;
+    /* We add border. */
+    border: 1px solid #ccc;
+    /* We set border radius. */
+    border-radius: 4px;
+/* We close the block. */
+}
+
+/* We style the draft body textarea. */
+.draft-body {
+    /* We make it full width. */
+    width: 100%;
+    /* We set a minimum height. */
+    min-height: 100px;
+    /* We add padding. */
+    padding: 8px;
+    /* We add margin below. */
+    margin-bottom: 12px;
+    /* We add border. */
+    border: 1px solid #ccc;
+    /* We set border radius. */
+    border-radius: 4px;
+/* We close the block. */
+}
+
+/* We style the actions container. */
+.actions {
+    /* We use flexbox. */
+    display: flex;
+    /* We add a gap between buttons. */
+    gap: 10px;
+    /* We wrap buttons if needed. */
+    flex-wrap: wrap;
+/* We close the block. */
+}
+
+/* We style the buttons. */
+.actions button {
+    /* We add padding. */
+    padding: 8px 12px;
+    /* We add border. */
+    border: 1px solid #ccc;
+    /* We add border radius. */
+    border-radius: 4px;
+    /* We set cursor to pointer. */
+    cursor: pointer;
+    /* We set a background color. */
+    background-color: #fff;
+/* We close the block. */
+}
+
+/* We style the button on hover. */
+.actions button:hover {
+    /* We darken the background. */
+    background-color: #eee;
+/* We close the block. */
+}
