@@ -27,6 +27,7 @@ import { SourceBadge } from '../../app/SourceBadge';
 import type { DiscoverySource, JobRow } from '../../data/contract.ts';
 import { supabase } from '../../data/supabase.ts';
 import { DiscoveryModal } from '../pipeline/DiscoveryModal';
+import { PipelineRunModal } from './PipelineRunModal';
 import { getCompanyCooldownInfo } from '../settings/companyCatalog.ts';
 import {
   evaluateJobMatch,
@@ -65,6 +66,7 @@ export function DiscoveredJobsPage(): ReactElement {
   const [selectedCompany, setSelectedCompany] = useState<string>('all');
   const [activeJdModal, setActiveJdModal] = useState<JobRow | null>(null);
   const [discoveryModalMode, setDiscoveryModalMode] = useState<'remote' | 'watchlist' | null>(null);
+  const [pipelineModalOpen, setPipelineModalOpen] = useState<boolean>(false);
 
   /* Load discovered jobs & filter rules */
   const loadData = useCallback(async () => {
@@ -306,6 +308,16 @@ export function DiscoveredJobsPage(): ReactElement {
           >
             🌐 Scout Remote Feeds
           </button>
+
+          <button
+            type="button"
+            className="chip-btn"
+            style={{ fontWeight: 600, color: '#10b981', borderColor: '#10b981' }}
+            onClick={() => setPipelineModalOpen(true)}
+            title="Run the deployed agent pipeline (Normalizer -> Screener -> Matcher -> Tailor -> Auditor) to tailor and queue jobs"
+          >
+            ✨ Tailor & Process Pipeline
+          </button>
         </div>
       </section>
 
@@ -512,9 +524,14 @@ export function DiscoveredJobsPage(): ReactElement {
                     disabled control, because a greyed-out button still claims the capability
                     is there and merely unavailable right now. */}
                 {applicationId && (
-                  <span className="job-card__pipeline-note">
-                    Awaiting pipeline agents
-                  </span>
+                  <button
+                    type="button"
+                    className="button button--secondary button--small"
+                    onClick={() => setPipelineModalOpen(true)}
+                    title="Run tailoring and screening pipeline for discovered jobs"
+                  >
+                    ✨ Tailor & Queue
+                  </button>
                 )}
               </div>
             </article>
@@ -577,6 +594,14 @@ export function DiscoveredJobsPage(): ReactElement {
         <DiscoveryModal
           mode={discoveryModalMode}
           onClose={() => setDiscoveryModalMode(null)}
+          onRefresh={() => {
+            void loadData();
+          }}
+        />
+      )}
+      {pipelineModalOpen && (
+        <PipelineRunModal
+          onClose={() => setPipelineModalOpen(false)}
           onRefresh={() => {
             void loadData();
           }}

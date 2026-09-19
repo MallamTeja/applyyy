@@ -107,12 +107,12 @@ describe('what the page must still do', () => {
     assert.ok(source.includes('setTechOnlyPreference'), 'the tech-only toggle must survive the deletion');
   });
 
-  it('tells the operator why no advance action exists', async () => {
-    // A truthful absence beats a silent one: the affordance vanished, and the page says
-    // why rather than leaving an unexplained gap where a button used to be.
+  it('allows the operator to trigger the deployed pipeline modal', async () => {
+    // Discovered rows trigger the real deployed agent pipeline modal (PipelineRunModal)
+    // rather than performing local status mutation.
     assert.ok(
-      source.includes('Awaiting pipeline agents'),
-      'the card footer should state that rows wait on agents that do not exist yet',
+      source.includes('PipelineRunModal') && source.includes('setPipelineModalOpen'),
+      'the card footer triggers the deployed agent pipeline modal to process discovered jobs',
     );
   });
 });

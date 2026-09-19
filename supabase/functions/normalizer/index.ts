@@ -138,10 +138,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
         .update({
           // Set status to skipped_disabled.
           status: "skipped_disabled",
-          // Set completed timestamp.
-          completed_at: new Date().toISOString(),
-          // Attach detail reason.
-          error_detail: "system_enabled is false",
+          // Set finished timestamp.
+          finished_at: new Date().toISOString(),
         })
         // Match current run UUID.
         .eq("id", runId);
@@ -187,10 +185,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
         .update({
           // Set failed status.
           status: "failed",
-          // Set completion timestamp.
-          completed_at: new Date().toISOString(),
-          // Record database error message.
-          error_detail: fetchError.message,
+          // Set finished timestamp.
+          finished_at: new Date().toISOString(),
+          // Record error count.
+          error_count: 1,
         })
         // Filter by run ID.
         .eq("id", runId);
@@ -211,8 +209,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
         .update({
           // Set status to succeeded.
           status: "succeeded",
-          // Set completion timestamp.
-          completed_at: new Date().toISOString(),
+          // Set finished timestamp.
+          finished_at: new Date().toISOString(),
           // Set rows_in to 0.
           rows_in: 0,
           // Set rows_out to 0.
@@ -403,7 +401,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         // Set status to succeeded.
         status: "succeeded",
         // Set completion timestamp string.
-        completed_at: new Date().toISOString(),
+        finished_at: new Date().toISOString(),
         // Record input rows count.
         rows_in: items.length,
         // Record total output rows count.
