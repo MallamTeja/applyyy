@@ -6,7 +6,9 @@
 -- Gap Fix G3: Seed gemini_key_state
 -- Why: We need initial rows in the state table so the rotation logic can cycle through the keys.
 -- Why: The system relies on exactly keys 1-6 being present in order to query their usage/rate limits.
-INSERT INTO public.gemini_key_state (key_index) VALUES (1),(2),(3),(4),(5),(6) ON CONFLICT DO NOTHING;
+INSERT INTO public.gemini_key_state (user_id, key_index)
+SELECT id, k FROM auth.users CROSS JOIN generate_series(1, 6) AS k
+ON CONFLICT DO NOTHING;
 
 -- Gap Fix G4: Add email_events columns
 -- Why: We need to correlate email events back to specific threads in the user's inbox.
@@ -18,6 +20,8 @@ ALTER TABLE public.email_events ADD COLUMN IF NOT EXISTS label_ids text[];
 
 -- Gap Fix G5: Fix sweep_stale_claims double-count
 -- Why: The previous implementation double-counted stale claims, causing inconsistencies in worker stats.
+-- Why: Drop function if exists to prevent return type mismatch error (42P13) when replacing the function return signature.
+DROP FUNCTION IF EXISTS public.sweep_stale_claims();
 -- Why: We replace it with a fixed version that properly isolates 'applying' claims from other claims.
 CREATE OR REPLACE FUNCTION public.sweep_stale_claims()
 -- Why: We return a table containing both released_count and reset_applying_count to provide metrics to the worker.
