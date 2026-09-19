@@ -99,7 +99,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Target agent_runs table.
     .from("agent_runs")
     // Insert run start telemetry row.
-    .insert({ agent: "auditor" as AgentName, status: "running", started_at: new Date().toISOString() })
+    .insert({ agent: "interview_prep" as AgentName, status: "running", started_at: new Date().toISOString() })
     // Return inserted row ID.
     .select("id")
     // Select single row.
@@ -305,8 +305,23 @@ Deno.serve(async (req: Request): Promise<Response> => {
       // Record warning message.
       warnings.push(`Failed to insert interview_prep_pack for ${app.id}: ${insertError.message}`);
     } else {
-      // Increment successful generation count.
-      generatedCount++;
+      // Advance the application status to indicate prep pack is ready.
+      // WHY: Enforces status graph and prevents re-processing.
+      const { error: rpcError } = await db.rpc("advance_application_status", {
+        target_application_id: app.id,
+        new_status: "interview_prepped",
+        acting_agent: "interview_prep" as AgentName,
+      });
+
+      // Handle RPC failure.
+      // WHY: Log warning if status graph transition fails.
+      if (rpcError) {
+        // Record warning message.
+        warnings.push(`Failed to advance status for ${app.id}: ${rpcError.message}`);
+      } else {
+        // Increment successful generation count.
+        generatedCount++;
+      }
     }
   }
 
