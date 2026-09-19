@@ -58,6 +58,24 @@ export const OPERATIONS_SECTION: ConsoleSection = {
       label: 'Email monitoring',
       lede: 'Recruiter communication feed, interview detection, and application stages.',
     },
+    /* Added referral queue route so users can review cold outreach drafts. */
+    {
+      path: 'referrals',
+      label: 'Referral queue',
+      lede: 'Review and send cold referral outreach drafts to company contacts.',
+    },
+    /* Added follow-up nudges route to manage day-7 emails. */
+    {
+      path: 'nudges',
+      label: 'Follow-up nudges',
+      lede: 'Manage Day-7 post-application follow-up email drafts.',
+    },
+    /* Added skill gap analytics route to review missing technologies. */
+    {
+      path: 'skill-gap',
+      label: 'Skill gap analytics',
+      lede: 'Ranked missing technologies across scored and rejected applications.',
+    },
   ],
 };
 

@@ -13,6 +13,9 @@ import { supabase, supabaseStatus } from '../../data/supabase';
    the conflation readState.ts exists to prevent. */
 import { classifyRead, describeEmptyState, isConclusive } from '../../data/readState.ts';
 
+/* Import the prep panel to display when the user is viewing the 'interview' stage applications. */
+import { InterviewPrepPanel } from './InterviewPrepPanel';
+
 import './PipelineDrawer.css';
 
 interface DrawerAppItem {
@@ -39,6 +42,8 @@ export function PipelineDrawer({
      defensible default here, because it asserts a result nobody obtained. */
   const [rows, setRows] = useState<readonly DrawerAppItem[] | null>(null);
   const [loading, setLoading] = useState(true);
+  /* State to manage whether to show applications list or interview prep section. */
+  const [activeTab, setActiveTab] = useState<'applications' | 'prep'>('applications');
   /* The query's own error, kept apart from the row array so the two facts cannot
      overwrite each other. */
   const [error, setError] = useState<string | null>(null);
@@ -203,9 +208,28 @@ export function PipelineDrawer({
         </header>
 
         <div className="drawer__content">
-          <p className="drawer__summary">
-            Active application records currently in <span className="identifier">{status}</span> status.
-          </p>
+          {/* We render a tab group when the status is interview so the user can switch views. */}
+          {status === 'interview' && (
+            <div className="drawer__tabs" style={{ display: 'flex', gap: '16px', marginBottom: '16px', borderBottom: '1px solid #e2e8f0', paddingBottom: '8px' }}>
+              {/* Button to view the raw list of applications. */}
+              <button type="button" onClick={() => setActiveTab('applications')} style={{ fontWeight: activeTab === 'applications' ? 'bold' : 'normal', background: 'none', border: 'none', cursor: 'pointer' }}>
+                {/* Text for the applications tab. */}
+                Applications
+              </button>
+              {/* Button to view the interview prep panel. */}
+              <button type="button" onClick={() => setActiveTab('prep')} style={{ fontWeight: activeTab === 'prep' ? 'bold' : 'normal', background: 'none', border: 'none', cursor: 'pointer' }}>
+                {/* Text for the prep tab. */}
+                Interview Prep
+              </button>
+            </div>
+          )}
+
+          {/* Render the core application list if the applications tab is active or if we aren't in interview mode. */}
+          {(status !== 'interview' || activeTab === 'applications') && (
+            <>
+              <p className="drawer__summary">
+                Active application records currently in <span className="identifier">{status}</span> status.
+              </p>
 
           {/* ORDER IS THE FIX, and it is the whole bug. On a failed read BOTH
               conditions are true — the list is empty precisely BECAUSE we could
@@ -258,6 +282,23 @@ export function PipelineDrawer({
                 </div>
               </article>
             ))
+          )}
+            </>
+          )}
+
+          {/* Render the interview prep panel if the prep tab is active and we are in interview mode. */}
+          {status === 'interview' && activeTab === 'prep' && state.kind === 'rows' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+              {/* Map over all applications to render a prep panel for each. */}
+              {state.rows.map(app => (
+                <div key={app.id}>
+                  {/* Title for the individual application prep section. */}
+                  <h4 style={{ margin: '0 0 8px 0' }}>{app.role} at {app.company}</h4>
+                  {/* Provide the application ID to the prep panel component. */}
+                  <InterviewPrepPanel applicationId={app.id} />
+                </div>
+              ))}
+            </div>
           )}
         </div>
       </div>

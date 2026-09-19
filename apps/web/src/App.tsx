@@ -15,6 +15,13 @@ import { DiscoveredJobsPage } from './features/discovery/DiscoveredJobsPage';
 import { HealthPage } from './features/health/HealthPage';
 import { EmailMonitoringPage } from './features/emails/EmailMonitoringPage';
 
+/* Import the ReferralOutreachPage for cold outreach routing. */
+import { ReferralOutreachPage } from './features/referral/ReferralOutreachPage';
+/* Import the FollowUpNudgesPage for day-7 nudges routing. */
+import { FollowUpNudgesPage } from './features/followup/FollowUpNudgesPage';
+/* Import the SkillGapPage for analytics routing. */
+import { SkillGapPage } from './features/analytics/SkillGapPage';
+
 /* The six configuration screens. */
 import { SearchPreferencesPage } from './features/settings/SearchPreferencesPage';
 import { MasterProfilePage } from './features/settings/MasterProfilePage';
@@ -45,6 +52,13 @@ export function App(): ReactElement {
           <Route path="discovered" element={<DiscoveredJobsPage />} />
           <Route path="health" element={<HealthPage />} />
           <Route path="emails" element={<EmailMonitoringPage />} />
+
+          {/* Add route for referrals so users can review outreach drafts. */}
+          <Route path="referrals" element={<ReferralOutreachPage />} />
+          {/* Add route for nudges to manage follow-up emails. */}
+          <Route path="nudges" element={<FollowUpNudgesPage />} />
+          {/* Add route for skill gap to view analytics on missing skills. */}
+          <Route path="skill-gap" element={<SkillGapPage />} />
 
           <Route path="search-preferences" element={<SearchPreferencesPage />} />
           <Route path="master-profile" element={<MasterProfilePage />} />
