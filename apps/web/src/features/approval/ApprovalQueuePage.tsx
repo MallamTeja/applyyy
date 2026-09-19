@@ -276,13 +276,14 @@ export function ApprovalQueuePage(): ReactElement {
   /* Partition by bucket. Derived from the findings on each row, never stored -
      a row carrying a stored bucket alongside its findings will eventually
      disagree with them, and the badge is what the operator would trust. */
-  const { bucketA, bucketB } = useMemo(() => {
+  const { bucketA, bucketB, pendingRefused } = useMemo(() => {
     const pending = queue.filter((diff) => !settled.has(diff.applicationId));
     return {
       bucketA: pending.filter((diff) => deriveBucket(diff) === 'A'),
       bucketB: pending.filter((diff) => deriveBucket(diff) === 'B'),
+      pendingRefused: unreviewable.filter((row) => !settled.has(row.applicationId)),
     };
-  }, [queue, settled]);
+  }, [queue, unreviewable, settled]);
 
   /* THE DOOR. Wired to the database on 2026-09-17; until then this function
      added ids to a React Set and wrote nothing, so the row vanished from the
@@ -400,7 +401,7 @@ export function ApprovalQueuePage(): ReactElement {
 
   /* Nothing left. An empty queue is the normal end state of a review session,
      so it is written as a finished-for-now statement rather than a void. */
-  if (bucketA.length === 0 && bucketB.length === 0 && unreviewable.length === 0) {
+  if (bucketA.length === 0 && bucketB.length === 0 && pendingRefused.length === 0) {
     return (
       <div className="page">
         <PageHeader path="approvals" />
@@ -419,25 +420,54 @@ export function ApprovalQueuePage(): ReactElement {
 
       {/* REFUSED ROWS FIRST, above even Bucket B. They are not a third bucket
           and carry no approve button: this screen cannot form a verdict on
-          them, and offering an action would imply it had. */}
-      {unreviewable.length > 0 ? (
+          them, and offering an action would imply it had.
+          They DO carry a reject button so the operator can drop them from the
+          pipeline instead of being permanently stranded by them. */}
+      {pendingRefused.length > 0 ? (
         <section className="queue__refused" aria-labelledby="refused-heading" role="alert">
-          <h2 id="refused-heading" className="queue__bucket-heading">
-            {unreviewable.length}{' '}
-            {unreviewable.length === 1 ? 'application was' : 'applications were'} queued
-            without a tailored resume
-          </h2>
+          <div className="queue__refused-header">
+            <h2 id="refused-heading" className="queue__bucket-heading">
+              {pendingRefused.length}{' '}
+              {pendingRefused.length === 1 ? 'application was' : 'applications were'} queued
+              without a tailored resume
+            </h2>
+            <button
+              type="button"
+              className="button button--secondary button--small"
+              onClick={() =>
+                void settle(
+                  pendingRefused.map((r) => r.applicationId),
+                  'dropped_filter',
+                  { reason: 'refused_unreviewed_tailoring' },
+                )
+              }
+            >
+              Reject all {pendingRefused.length} from pipeline
+            </button>
+          </div>
           <p className="queue__bucket-note">
             Nothing compared these against your master profile, so this screen cannot
             tell you whether they are honest. They are held here rather than shown as
             verified. Re-run tailoring for them, or reject them from the pipeline.
           </p>
           <ul className="queue__refused-list">
-            {unreviewable.map((row) => (
+            {pendingRefused.map((row) => (
               <li key={row.applicationId} className="queue__refused-item">
-                {/* Untrusted strings from a job board, rendered as text children. */}
-                <span className="queue__refused-role">{row.jobTitle}</span>
-                <span className="queue__refused-company">{row.companyName}</span>
+                <div className="queue__refused-info">
+                  <span className="queue__refused-role">{row.jobTitle}</span>
+                  <span className="queue__refused-company">{row.companyName}</span>
+                </div>
+                <button
+                  type="button"
+                  className="button button--secondary button--small"
+                  onClick={() =>
+                    void settle([row.applicationId], 'dropped_filter', {
+                      reason: 'refused_unreviewed_tailoring',
+                    })
+                  }
+                >
+                  Reject from pipeline
+                </button>
               </li>
             ))}
           </ul>

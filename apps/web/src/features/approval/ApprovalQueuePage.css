@@ -143,6 +143,14 @@
   border-radius: var(--radius-sheet);
 }
 
+.queue__refused-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--gap-3);
+}
+
 .queue__refused-list {
   /* A real list: these are countable records, and screen readers announce the
      count, which is the number that matters here. */
@@ -156,13 +164,20 @@
 
 .queue__refused-item {
   display: flex;
-  /* Wraps rather than truncating: a job title the operator cannot read in full
-     is a job they cannot go and find. */
+  justify-content: space-between;
+  align-items: center;
   flex-wrap: wrap;
-  align-items: baseline;
-  gap: var(--gap-2);
+  gap: var(--gap-3);
   padding-top: var(--gap-2);
+  padding-bottom: var(--gap-2);
   border-top: 1px solid var(--rule);
+}
+
+.queue__refused-info {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--gap-2);
 }
 
 .queue__refused-role {
