@@ -1,0 +1,240 @@
+/* Container for the entire referral queue page */
+/* This element holds all the referral cards */
+.referral-container {
+    /* Set max width for the page to prevent stretching */
+    max-width: 1200px;
+    /* Center the container horizontally on the page */
+    margin: 0 auto;
+    /* Add padding to the sides so it doesn't touch the edge */
+    padding: 20px;
+    /* Use flexbox for layout of children */
+    display: flex;
+    /* Stack children vertically in a column */
+    flex-direction: column;
+    /* Add gap between children elements */
+    gap: 20px;
+}
+
+/* Card for each referral draft */
+/* This encapsulates all data for a single draft */
+.referral-card {
+    /* Add border to card for definition */
+    border: 1px solid #e2e8f0;
+    /* Add rounded corners for a modern look */
+    border-radius: 8px;
+    /* Add internal padding to space out content */
+    padding: 20px;
+    /* White background to stand out from any background */
+    background: #ffffff;
+    /* Add subtle shadow for depth perception */
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+/* Header section of the card */
+/* Contains the title, company, and badges */
+.card-header {
+    /* Use flexbox for horizontal layout */
+    display: flex;
+    /* Space between left and right elements */
+    justify-content: space-between;
+    /* Align items vertically to the center */
+    align-items: center;
+    /* Add margin bottom to separate from body */
+    margin-bottom: 15px;
+}
+
+/* Job title text styling */
+/* Ensures the job title stands out */
+.job-title {
+    /* Bold text for emphasis */
+    font-weight: 700;
+    /* Larger font size for visual hierarchy */
+    font-size: 1.25rem;
+    /* Dark color for readability */
+    color: #1a202c;
+    /* Remove default margin to control spacing */
+    margin: 0;
+}
+
+/* Company text styling */
+/* Subtitle text under the job title */
+.company-name {
+    /* Medium text size, smaller than title */
+    font-size: 1rem;
+    /* Gray color to deprioritize slightly */
+    color: #4a5568;
+    /* Remove default margin to control spacing */
+    margin: 0;
+}
+
+/* Badge for target recipient */
+/* Indicates who the message is intended for */
+.badge {
+    /* Inline block display for badge sizing */
+    display: inline-block;
+    /* Add horizontal and vertical padding */
+    padding: 4px 12px;
+    /* Fully rounded corners for pill shape */
+    border-radius: 9999px;
+    /* Small text size for compact display */
+    font-size: 0.875rem;
+    /* Bold text for readability */
+    font-weight: 600;
+    /* Light blue background for visual pop */
+    background-color: #ebf8ff;
+    /* Darker blue text for contrast */
+    color: #3182ce;
+}
+
+/* Pill for location */
+/* Shown next to the job title */
+.location-pill {
+    /* Small text size */
+    font-size: 0.875rem;
+    /* Light gray background */
+    background-color: #edf2f7;
+    /* Gray text color */
+    color: #4a5568;
+    /* Padding for spacing */
+    padding: 2px 8px;
+    /* Rounded corners for pill appearance */
+    border-radius: 9999px;
+    /* Add margin left to separate from title */
+    margin-left: 8px;
+    /* Set display to inline block */
+    display: inline-block;
+    /* Set font weight normal */
+    font-weight: 400;
+}
+
+/* Input group container */
+/* Wraps label and input element */
+.input-group {
+    /* Add margin bottom to space out groups */
+    margin-bottom: 15px;
+    /* Use flexbox for inner layout */
+    display: flex;
+    /* Stack vertically */
+    flex-direction: column;
+    /* Add small gap between label and input */
+    gap: 5px;
+}
+
+/* Labels for inputs */
+/* Styling for the text above inputs */
+.label {
+    /* Small text size */
+    font-size: 0.875rem;
+    /* Bold text */
+    font-weight: 600;
+    /* Gray color */
+    color: #4a5568;
+}
+
+/* Input and textarea common styles */
+/* Shared text field appearance */
+.input-field {
+    /* Full width to fill container */
+    width: 100%;
+    /* Add padding for text breathing room */
+    padding: 8px 12px;
+    /* Add subtle border */
+    border: 1px solid #cbd5e0;
+    /* Add rounded corners */
+    border-radius: 4px;
+    /* Inherit font family from body */
+    font-family: inherit;
+    /* Set base font size */
+    font-size: 1rem;
+    /* Allow vertical resizing for textareas */
+    resize: vertical;
+}
+
+/* Action buttons container */
+/* Wraps all the action buttons at the bottom */
+.actions {
+    /* Use flexbox for layout */
+    display: flex;
+    /* Wrap items if they overflow horizontally */
+    flex-wrap: wrap;
+    /* Add gap between buttons */
+    gap: 10px;
+    /* Add margin top to separate from content above */
+    margin-top: 20px;
+}
+
+/* Base button styles */
+/* Shared properties across all buttons */
+.btn {
+    /* Add padding */
+    padding: 8px 16px;
+    /* Rounded corners */
+    border-radius: 4px;
+    /* Bold text */
+    font-weight: 600;
+    /* Pointer cursor on hover */
+    cursor: pointer;
+    /* Remove default borders */
+    border: none;
+    /* Standardized font size */
+    font-size: 0.875rem;
+    /* Smooth background color transition */
+    transition: background-color 0.2s ease-in-out;
+}
+
+/* Primary button styling */
+/* Used for primary actions like Mark as sent */
+.btn-primary {
+    /* Green background color */
+    background-color: #48bb78;
+    /* White text color */
+    color: white;
+}
+
+/* Primary button hover state */
+/* Darkens on hover */
+.btn-primary:hover {
+    /* Darker green background */
+    background-color: #38a169;
+}
+
+/* Secondary button styling */
+/* Used for secondary actions like Copy or Regenerate */
+.btn-secondary {
+    /* Light gray background color */
+    background-color: #edf2f7;
+    /* Dark gray text color */
+    color: #2d3748;
+}
+
+/* Secondary button hover state */
+/* Darkens on hover */
+.btn-secondary:hover {
+    /* Darker gray background */
+    background-color: #e2e8f0;
+}
+
+/* Link button styling */
+/* Used for external links like LinkedIn */
+.btn-link {
+    /* Blue background color */
+    background-color: #3182ce;
+    /* White text color */
+    color: white;
+}
+
+/* Link button hover state */
+/* Darkens on hover */
+.btn-link:hover {
+    /* Darker blue background */
+    background-color: #2b6cb0;
+}
+
+/* Disabled button state */
+/* Styling when button is disabled */
+.btn:disabled {
+    /* Reduce opacity */
+    opacity: 0.6;
+    /* Change cursor to indicate it's not clickable */
+    cursor: not-allowed;
+}
