@@ -59,6 +59,9 @@ function fakePage(overrides: Partial<ApplicationPage> = {}) {
     // No captcha by default; the blocking tests override this.
     detectBlocker: async () => null,
     submit,
+    // True so the submit-path tests below exercise a page that CAN send; the
+    // unimplemented case overrides it and asserts nothing moves.
+    submissionImplemented: true,
     ...overrides,
   };
   return { page, submit };
@@ -169,6 +172,25 @@ describe('applyToOne', () => {
     expect(submit).toHaveBeenCalledTimes(1);
     // The full legal path: into `applying`, then to `applied`.
     expect(transitions).toEqual(['applying', 'applied']);
+  });
+
+  it('takes the dry-run exit when DRY_RUN=false but the page cannot submit', async () => {
+    // The live bug: the real page's submit always throws, but the row was moved
+    // to `applying` first and then reported as an UNKNOWN outcome — parked for
+    // a human to verify something that provably never went out.
+    const { page, submit } = fakePage({ submissionImplemented: false });
+    const { gateway, transitions, released } = fakeGateway();
+
+    const outcome = await applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+
+    // Never reached, so it can never throw inside the non-idempotent window.
+    expect(submit).not.toHaveBeenCalled();
+    // The structural half: no `approved -> applying`, so nothing to strand.
+    expect(transitions).toEqual([]);
+    // Lease handed back, row still `approved` for the run that can send.
+    expect(released).toEqual(['app-1']);
+    // Reported as a dry run, and the reason says the opt-in was overridden.
+    expect(outcome).toMatchObject({ kind: 'dry_run_complete', reason: expect.stringMatching(/no submit implementation/) });
   });
 
   it('enters `applying` before submitting and marks `applied` only after', async () => {

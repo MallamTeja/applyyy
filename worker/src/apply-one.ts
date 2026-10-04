@@ -70,6 +70,12 @@ export interface ApplicationPage {
   // THE IRREVERSIBLE OPERATION. Called from exactly one place, behind
   // resolveSubmissionMode, and never in dry-run.
   submit(): Promise<void>;
+  // Whether `submit` can send anything at all. Asked BEFORE `approved ->
+  // applying`, because a submit that throws "not implemented" after that edge
+  // is indistinguishable from one that died mid-request: the row is parked at
+  // `applying` as an unknown outcome although it provably never went out.
+  // Required, not optional, so a page that forgets it does not compile.
+  readonly submissionImplemented: boolean;
 }
 
 /** One document handed to a file input, as the employer's page will receive it. */
@@ -116,10 +122,9 @@ export interface ArtifactPaths {
   // the screenshot is taken unconditionally, but typed nullable so the gateway's
   // one skip-nulls rule covers both fields rather than special-casing one.
   readonly screenshotPath: string | null;
-  // The digest of the bytes that were attached. Accepted and threaded THROUGH
-  // this type even though no column exists to hold it yet — dropping it at the
-  // call site would make the gap invisible, and the gap is the whole reason it
-  // cannot be written. The gateway names the missing column at the exact spot.
+  // `applications.resume_sha256` (migration 20260911114300). The digest of the
+  // bytes that were attached: the path says where a file is, only this says
+  // whether it is the file that was approved.
   readonly resumeSha256: string | null;
 }
 
@@ -226,7 +231,21 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
   // THE GATE, consulted before anything else so its verdict is available at
   // every branch below. A pre-deploy audit found this function had no callers
   // at all; this line is the wiring that finally gives it authority.
-  const mode = resolveSubmissionMode(env);
+  const requested = resolveSubmissionMode(env);
+  // The effective verdict. Can only NARROW the gate's answer, never widen it:
+  // `submits` is true only when the operator opted in AND the page can actually
+  // send. A page without a working submit therefore takes the dry-run exit —
+  // lease released, row untouched at `approved` — instead of walking into the
+  // non-idempotent window and being stranded there as "outcome unknown".
+  const mode =
+    requested.submits && !page.submissionImplemented
+      ? {
+          submits: false,
+          // Names both facts, so the release event says the opt-in was SEEN
+          // and overridden rather than reading like an ordinary dry run.
+          reason: `${requested.reason} Overridden: this page has no submit implementation, so nothing can be sent.`,
+        }
+      : requested;
 
   // ---- Everything below happens while the row is still `approved` ----------
 
@@ -363,10 +382,10 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
     await gateway.setArtifactPaths(row.id, {
       resumePath,
       screenshotPath,
-      // Threaded rather than dropped even though the gateway cannot persist it
-      // yet: `applications` has no `resume_sha256` column. Passing it keeps the
-      // gap visible at both ends instead of turning a schema problem into a
-      // silently missing argument. See the gateway for the exact spot.
+      // Persisted to `applications.resume_sha256` (added in
+      // 20260911114300_add_resume_sha256_to_applications.sql; the gateway's
+      // setArtifactPaths writes it). The digest is what proves WHICH bytes the
+      // stored path holds, so the dry-run review can check it against approval.
       resumeSha256: resume?.sha256 ?? null,
     });
 

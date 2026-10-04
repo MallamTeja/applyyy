@@ -126,6 +126,15 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: pnpm --filter '@applyy/worker' exec playwright install --with-deps chromium
 
+      # The system libraries, on EVERY run. The cache above restores only
+      # ~/.cache/ms-playwright — the browser binary — while --with-deps installs
+      # apt packages into the runner image, which is fresh each job. So on a
+      # cache HIT the step above is skipped and Chromium launches without its
+      # shared libraries. Unconditional on purpose; on a miss it is a no-op
+      # repeat of what --with-deps just did.
+      - name: Install Chromium system dependencies
+        run: pnpm --filter '@applyy/worker' exec playwright install-deps chromium
+
       # The run itself. The worker checks the `system_enabled` kill switch FIRST
       # (§18.1) and exits immediately if it is off, so stopping everything never
       # requires deleting this cron or revoking a key at 2am.

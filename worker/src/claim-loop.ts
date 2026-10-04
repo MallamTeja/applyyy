@@ -108,6 +108,51 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
   let stoppedReason = 'queue drained';
   // Distinguishes a deliberate no-op from a failure when the run is closed.
   let disabled = false;
+  // Every application id this run has claimed, so a row it already processed
+  // (and a dry run released) is never processed twice in one run.
+  const seen = new Set<string>();
+  // Re-claimed rows whose lease we keep until the end; see the re-claim guard.
+  const held: string[] = [];
+
+  /**
+   * Both gates, in one place so the before-claim and before-each-application
+   * checks cannot drift apart. Returns why to stop, or null to proceed.
+   *
+   * `checkKillSwitch` is false before a claim because `claim_applications`
+   * already returns nothing when the switch is off; before an application the
+   * row is already ours, so only an explicit read can notice the switch.
+   */
+  async function gateBeforeNextApplication(checkKillSwitch: boolean): Promise<string | null> {
+    // The run-window gate: wall-clock budget and token lifetime.
+    const decision = canStartAnotherApplication(
+      {
+        nowEpochSeconds: clock(),
+        tokenExpiresAtEpochSeconds: gateway.sessionExpiresAtEpochSeconds(),
+        runStartedAtEpochSeconds,
+      },
+      input.limits,
+    );
+
+    // Out of budget or out of token: stop, with the gate's own explanation.
+    if (decision.action === 'stop') return decision.reason;
+
+    // Re-authenticate HERE, before any row enters `applying`. Doing it
+    // reactively on a 401 would mean discovering the problem inside the
+    // non-idempotent window, where a failure is indistinguishable from the
+    // dangerous case and no clean recovery exists.
+    if (decision.action === 'refresh_then_proceed') {
+      await gateway.refreshSession();
+    }
+
+    // THE KILL SWITCH between applications. Fails closed with the gateway: a
+    // missing settings row reads as off.
+    if (checkKillSwitch && !(await gateway.isSystemEnabled())) {
+      return 'kill switch turned off mid-run (system_enabled = false); stopped between applications';
+    }
+
+    // Both gates passed.
+    return null;
+  }
 
   try {
     // THE KILL SWITCH (§18.1), read here for OBSERVABILITY rather than safety.
@@ -134,29 +179,17 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
     const answers = await gateway.fetchAnswers();
 
     // The claim loop proper. Keeps going until the queue empties or a gate says
-    // stop; it never drains in one query, so a lease stays short.
-    for (;;) {
-      // BOTH GATES, checked before claiming and again before each application.
-      const decision = canStartAnotherApplication(
-        {
-          nowEpochSeconds: clock(),
-          tokenExpiresAtEpochSeconds: gateway.sessionExpiresAtEpochSeconds(),
-          runStartedAtEpochSeconds,
-        },
-        input.limits,
-      );
-
-      if (decision.action === 'stop') {
-        stoppedReason = decision.reason;
+    // stop; it never drains in one query, so a lease stays short. Labelled so a
+    // gate tripping between two applications can end the whole run, not just
+    // the current batch.
+    claiming: for (;;) {
+      // The run-window gate before claiming, so an exhausted budget claims
+      // nothing it would only have to hand back.
+      const beforeClaim = await gateBeforeNextApplication(false);
+      // A string is the reason to stop; null means carry on.
+      if (beforeClaim !== null) {
+        stoppedReason = beforeClaim;
         break;
-      }
-
-      // Re-authenticate HERE, before any row enters `applying`. Doing it
-      // reactively on a 401 would mean discovering the problem inside the
-      // non-idempotent window, where a failure is indistinguishable from the
-      // dangerous case and no clean recovery exists.
-      if (decision.action === 'refresh_then_proceed') {
-        await gateway.refreshSession();
       }
 
       // Claim marker names the run, so a stranded row can be traced to the run
@@ -166,7 +199,34 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
       // An empty page means the queue is drained. Not an error.
       if (rows.length === 0) break;
 
+      // THE RE-CLAIM GUARD. A dry run releases each row it finishes, and the
+      // claim takes the oldest unclaimed `approved` rows — so without this the
+      // SAME rows come straight back and the run refills the same real employer
+      // forms until the 55-minute budget runs out, every day. A row seen
+      // earlier in this run is HELD (its fresh lease is kept, so the next claim
+      // skips it and reaches new work) and released once, at the end.
+      const fresh = rows.filter((row) => !seen.has(row.id));
+      // Recorded before any work, so a row that throws is never retried either.
       for (const row of rows) {
+        if (seen.has(row.id)) held.push(row.id);
+        else seen.add(row.id);
+      }
+
+      for (const [index, row] of fresh.entries()) {
+        // BOTH GATES, checked again before EACH application rather than once
+        // per batch: the kill switch must stop the run between two employers'
+        // forms, not after up to four more of them.
+        const beforeRow = await gateBeforeNextApplication(true);
+        if (beforeRow !== null) {
+          stoppedReason = beforeRow;
+          // The rest of this batch is leased to us and untouched; hand it back
+          // so it is not stranded until the lease expires.
+          for (const unstarted of fresh.slice(index)) {
+            await gateway.releaseClaim(unstarted.id, `not started: ${beforeRow}`);
+          }
+          break claiming;
+        }
+
         claimed += 1;
         // Opened per application so one poisoned page cannot corrupt the next.
         const page = await openPage();
@@ -194,6 +254,13 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
           await page.close();
         }
       }
+    }
+
+    // Give back every re-claimed row exactly once. Held rather than released
+    // on sight, because releasing would make it the oldest unclaimed row again
+    // and the very next claim would return it instead of new work.
+    for (const id of held) {
+      await gateway.releaseClaim(id, 'already processed earlier in this run');
     }
 
     return summarise();

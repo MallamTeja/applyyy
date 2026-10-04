@@ -64,7 +64,7 @@ async function main(): Promise<void> {
   console.log(`[applyy-scout] authenticated as operator ${email} (${userId})`);
 
   // 1. Record run start in agent_runs
-  const { data: runRow } = await client
+  const { data: runRow, error: runErr } = await client
     .from('agent_runs')
     .insert({
       agent: 'scout_ats',
@@ -74,29 +74,72 @@ async function main(): Promise<void> {
     .select('id')
     .single();
 
-  const runId = runRow?.id;
+  // FATAL, not skipped. A scout that cannot open its run row would do all its
+  // work invisibly — the health page reads "no row" exactly like "cron is dead".
+  // supabase-js returns errors as values, so without this check a refused
+  // insert was silently a run with no record at all.
+  if (runErr || !runRow) {
+    throw new Error(`[applyy-scout] could not open agent_runs row: ${runErr?.message ?? 'no row returned'}`);
+  }
 
-  // Check system kill switch
-  const { data: settingsData } = await client
+  // Non-null from here on, so every close below writes to a row that exists.
+  const runId: string = runRow.id;
+
+  // Every DB write that failed this run, as "where: message". Counted rather
+  // than thrown, so one refused upsert does not abandon the other boards — but
+  // the run is closed `failed` with this list, never `succeeded` over it. Same
+  // rule as worker/src/claim-loop.ts: any error means the run is not a success.
+  const dbErrors: string[] = [];
+  // Records one supabase-js error value, if there is one. Takes the error
+  // rather than the whole result so every call site reads `noteError(..., x.error)`.
+  function noteError(where: string, error: { message: string } | null): void {
+    // No error means nothing to record; the common case.
+    if (!error) return;
+    // Logged as it happens, so the Actions log shows WHICH board it was.
+    console.error(`[applyy-scout] ✗ ${where}: ${error.message}`);
+    dbErrors.push(`${where}: ${error.message}`);
+  }
+
+  // Closes the run row and CHECKS that the close landed. An unchecked close
+  // that fails leaves the row `running` forever — the signature of a crash —
+  // so a failure here is thrown and the process exits non-zero.
+  async function closeRun(update: Record<string, unknown>): Promise<void> {
+    const { error } = await client.from('agent_runs').update(update).eq('id', runId);
+    // Thrown rather than noted: there is no later write that could report it.
+    if (error) throw new Error(`[applyy-scout] could not close agent_runs ${runId}: ${error.message}`);
+  }
+
+  // Check system kill switch. `maybeSingle` so a missing settings row is
+  // `data: null` (read below as disabled — fail closed), while a real read
+  // failure is an `error` that is no longer mistaken for "switch off".
+  const { data: settingsData, error: settingsErr } = await client
     .from('system_settings')
     .select('system_enabled')
     .limit(1)
-    .single();
+    .maybeSingle();
+
+  // Unknown kill-switch state is a failed run, not a skipped one: "skipped"
+  // would claim the switch was read as off, and nobody read it.
+  if (settingsErr) {
+    await closeRun({
+      status: 'failed',
+      finished_at: new Date().toISOString(),
+      error_count: 1,
+      error_detail: `system_settings read failed: ${settingsErr.message}`,
+    });
+    throw new Error(`[applyy-scout] system_settings read failed: ${settingsErr.message}`);
+  }
 
   const systemEnabled = settingsData?.system_enabled ?? false;
   if (!systemEnabled && !force) {
     console.log('[applyy-scout] ⏸️ system_settings.system_enabled is false (kill switch active).');
     console.log('[applyy-scout] Pass --force or SCOUT_FORCE=true to discover jobs while submissions are paused.');
-    if (runId) {
-      await client
-        .from('agent_runs')
-        .update({
-          status: 'skipped_disabled',
-          finished_at: new Date().toISOString(),
-          error_detail: 'system_settings.system_enabled is false',
-        })
-        .eq('id', runId);
-    }
+    // Checked close: a skip that fails to record itself would read as a crash.
+    await closeRun({
+      status: 'skipped_disabled',
+      finished_at: new Date().toISOString(),
+      error_detail: 'system_settings.system_enabled is false',
+    });
     return;
   }
 
@@ -113,6 +156,14 @@ async function main(): Promise<void> {
     .order('last_polled_at', { ascending: true, nullsFirst: true });
 
   if (boardsErr) {
+    // Closed `failed` before throwing, so the health page shows a failed run
+    // with its reason instead of a row stuck at `running`.
+    await closeRun({
+      status: 'failed',
+      finished_at: new Date().toISOString(),
+      error_count: 1,
+      error_detail: `company_watchlist read failed: ${boardsErr.message}`,
+    });
     throw new Error(`[applyy-scout] failed to query company_watchlist: ${boardsErr.message}`);
   }
 
@@ -125,20 +176,15 @@ async function main(): Promise<void> {
     // is not a death: it is a successful no-op, and it has to be recorded as one or
     // the one table that exists to tell "working" from "silently dead" starts lying
     // in the dangerous direction — reporting failure for a healthy scheduled run.
-    if (runId) {
-      await client
-        .from('agent_runs')
-        .update({
-          status: 'succeeded',
-          finished_at: new Date().toISOString(),
-          // Explicit zeros rather than leaving the defaults implicit: "polled nothing
-          // because nothing was configured" and "polled boards and found nothing" are
-          // different operational stories, and only the row's counters distinguish them.
-          rows_in: 0,
-          rows_out: 0,
-        })
-        .eq('id', runId);
-    }
+    await closeRun({
+      status: 'succeeded',
+      finished_at: new Date().toISOString(),
+      // Explicit zeros rather than leaving the defaults implicit: "polled nothing
+      // because nothing was configured" and "polled boards and found nothing" are
+      // different operational stories, and only the row's counters distinguish them.
+      rows_in: 0,
+      rows_out: 0,
+    });
     return;
   }
 
@@ -195,13 +241,16 @@ async function main(): Promise<void> {
 
       if (!res.ok) {
         console.warn(`[applyy-scout] ⚠️ ${board.company_name} returned HTTP ${res.status}: ${res.statusText}`);
-        await client
+        // Checked: an unrecorded failure leaves `consecutive_failures` low, so a
+        // dead board never looks dead enough to disable.
+        const { error: failMarkErr } = await client
           .from('company_watchlist')
           .update({
             consecutive_failures: (board.consecutive_failures || 0) + 1,
             last_polled_at: now.toISOString(),
           })
           .eq('id', board.id);
+        noteError(`${board.company_name}: record poll failure`, failMarkErr);
         continue;
       }
 
@@ -210,13 +259,16 @@ async function main(): Promise<void> {
 
       if (!parseResult.ok) {
         console.warn(`[applyy-scout] ⚠️ ${board.company_name} parse failed: ${parseResult.reason}`);
-        await client
+        // Checked: an unrecorded failure leaves `consecutive_failures` low, so a
+        // dead board never looks dead enough to disable.
+        const { error: failMarkErr } = await client
           .from('company_watchlist')
           .update({
             consecutive_failures: (board.consecutive_failures || 0) + 1,
             last_polled_at: now.toISOString(),
           })
           .eq('id', board.id);
+        noteError(`${board.company_name}: record poll failure`, failMarkErr);
         continue;
       }
 
@@ -261,6 +313,10 @@ async function main(): Promise<void> {
             })
             .select('id, fingerprint');
 
+          // A refused upsert used to fall through silently and the run still
+          // closed `succeeded`. Counted now; the fallback select below may
+          // still resolve the ids if the rows already existed.
+          noteError(`${board.company_name}: upsert jobs`, jobErr);
           if (!jobErr && upsertedJobs) {
             for (const job of upsertedJobs) jobIdByFingerprint.set(job.fingerprint, job.id);
           }
@@ -270,10 +326,12 @@ async function main(): Promise<void> {
         // well, because an id alone cannot be matched back to the row the screener reads.
         const missing = batch.filter((row) => !jobIdByFingerprint.has(row.fingerprint)).map((row) => row.fingerprint);
         if (missing.length > 0) {
-          const { data: existing } = await client
+          const { data: existing, error: existingErr } = await client
             .from('jobs')
             .select('id, fingerprint')
             .in('fingerprint', missing);
+          // Counted: a failed lookup silently drops these postings from the queue.
+          noteError(`${board.company_name}: look up existing jobs`, existingErr);
           if (existing) {
             for (const job of existing) jobIdByFingerprint.set(job.fingerprint, job.id);
           }
@@ -319,6 +377,9 @@ async function main(): Promise<void> {
             })
             .select('id');
 
+          // Counted: a refused insert means screened jobs never reached the queue,
+          // and the old code still reported the run as a success.
+          noteError(`${board.company_name}: upsert applications`, appErr);
           if (!appErr && insertedApps) {
             boardNewApps += insertedApps.length;
             totalApplications += insertedApps.length;
@@ -329,8 +390,9 @@ async function main(): Promise<void> {
         totalDiscovered += entries.length;
       }
 
-      // Update watchlist success telemetry
-      await client
+      // Update watchlist success telemetry. Checked, because a lost write here
+      // keeps the board at the front of `order by last_polled_at` forever.
+      const { error: successMarkErr } = await client
         .from('company_watchlist')
         .update({
           poll_count: (board.poll_count || 0) + 1,
@@ -340,18 +402,22 @@ async function main(): Promise<void> {
           consecutive_failures: 0,
         })
         .eq('id', board.id);
+      // Counted with the rest, so the run cannot close `succeeded` over it.
+      noteError(`${board.company_name}: record poll success`, successMarkErr);
 
       console.log(`[applyy-scout] ✓ ${board.company_name}: processed ${boardNewJobs} jobs (${boardNewApps} new applications created).`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[applyy-scout] error polling ${board.company_name}: ${msg}`);
-      await client
+      // Checked like the other two failure marks, for the same reason.
+      const { error: crashMarkErr } = await client
         .from('company_watchlist')
         .update({
           consecutive_failures: (board.consecutive_failures || 0) + 1,
           last_polled_at: now.toISOString(),
         })
         .eq('id', board.id);
+      noteError(`${board.company_name}: record poll failure`, crashMarkErr);
     }
   }
 
@@ -373,17 +439,27 @@ async function main(): Promise<void> {
   }
   console.log('====================================================');
 
-  if (runId) {
-    await client
-      .from('agent_runs')
-      .update({
-        status: 'succeeded',
-        finished_at: new Date().toISOString(),
-        rows_in: totalDiscovered,
-        rows_out: totalApplications,
-      })
-      .eq('id', runId);
-  }
+  // Printed beside the counters, so the log and the run row tell one story.
+  if (dbErrors.length > 0) console.error(`[applyy-scout] ${dbErrors.length} database write(s) failed this run.`);
+
+  // HONEST CLOSE, mirroring worker/src/claim-loop.ts: any error makes the run
+  // `failed` (agent_run_status has no `partial`), with the count and the list.
+  // Board HTTP/parse failures are NOT counted here — a 404 board token is the
+  // board's state, already tracked in `consecutive_failures`, and counting it
+  // would mark nearly every run failed and teach everyone to ignore the colour.
+  await closeRun({
+    status: dbErrors.length > 0 ? 'failed' : 'succeeded',
+    finished_at: new Date().toISOString(),
+    rows_in: totalDiscovered,
+    rows_out: totalApplications,
+    error_count: dbErrors.length,
+    // Capped so one bad night cannot write an unbounded text blob into the row.
+    error_detail: dbErrors.length > 0 ? dbErrors.slice(0, 20).join('\n') : null,
+  });
+
+  // Non-zero exit too, so the Actions tick is red — the run row alone is only
+  // seen by someone who already suspects a problem.
+  if (dbErrors.length > 0) process.exitCode = 1;
 }
 
 // Deliberately NOT async. An earlier edit marked this handler `async` without adding

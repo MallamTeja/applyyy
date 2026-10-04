@@ -26,6 +26,8 @@ function stubPage(): ApplicationPage & { close(): Promise<void> } {
     screenshot: async () => new Uint8Array([1]),
     detectBlocker: async () => null,
     submit: async () => {},
+    // True so the loop's submit-mode tests model a page that can send.
+    submissionImplemented: true,
     close: async () => {},
   };
 }
@@ -267,5 +269,93 @@ describe('runApplierBatch', () => {
     expect(summary.dryRun).toBe(1);
     // rows_out counts work genuinely completed, which in dry-run is nothing.
     expect(closed[0]?.rows_out).toBe(0);
+  });
+
+  it('processes each row once per run even though a dry run releases it', async () => {
+    // The live loop: a dry run releases every row it finishes, the claim takes
+    // the oldest UNCLAIMED rows, so the same rows came straight back and the run
+    // refilled the same employer forms until the budget ran out. This fake
+    // models the real RPC — oldest first, leased rows skipped — so the bug is
+    // reproducible here rather than hidden by a scripted list of batches.
+    const queue = ['app-1', 'app-2', 'app-3'];
+    // Rows currently leased; release removes from it, exactly as the RPC does.
+    const leased = new Set<string>();
+    // Every id released, to assert nothing stays leased.
+    const releases: string[] = [];
+    // How many claims ran, so an endless loop fails on a bound, not a timeout.
+    let claims = 0;
+    const { gateway } = fakeGateway({
+      claimApplications: async (_by, limit) => {
+        claims += 1;
+        // A hard ceiling: the bug this test guards is an unbounded loop.
+        if (claims > 20) throw new Error('claim loop did not terminate');
+        // FIFO over unleased rows, like `claimed_by is null order by created_at`.
+        const picked = queue.filter((id) => !leased.has(id)).slice(0, limit);
+        for (const id of picked) leased.add(id);
+        return picked.map((id) => ({
+          id,
+          status: 'approved' as const,
+          applyUrl: 'http://127.0.0.1:1/a.html',
+          tailoredProfile: null,
+        }));
+      },
+      releaseClaim: async (id) => {
+        leased.delete(id);
+        releases.push(id);
+      },
+    });
+
+    const summary = await runApplierBatch({
+      gateway,
+      openPage: async () => stubPage(),
+      renderResume,
+      env: {},
+      clock: frozenClock,
+      batchSize: 2,
+    });
+
+    // Three rows, three applications — not three per claim until the budget ends.
+    expect(summary.dryRun).toBe(3);
+    expect(summary.claimed).toBe(3);
+    // And nothing is left leased when the run ends, so tomorrow can claim it.
+    expect(leased.size).toBe(0);
+    // Every row was released, the re-claimed ones included.
+    expect(new Set(releases)).toEqual(new Set(queue));
+  });
+
+  it('stops between applications when the kill switch is turned off mid-batch', async () => {
+    // The gate used to run once per BATCH, so flipping the switch still let up
+    // to four more employers' forms be filled. Read per application now.
+    let reads = 0;
+    // Records release reasons so the untouched row is shown to be handed back.
+    const releases: Array<{ id: string; reason: string }> = [];
+    const { gateway } = fakeGateway({
+      // On at run start and for the first row; off before the second.
+      isSystemEnabled: async () => {
+        reads += 1;
+        return reads <= 2;
+      },
+      claimApplications: async () => [
+        { id: 'app-1', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null },
+        { id: 'app-2', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null },
+      ],
+      releaseClaim: async (id, reason) => {
+        releases.push({ id, reason });
+      },
+    });
+
+    const summary = await runApplierBatch({
+      gateway,
+      openPage: async () => stubPage(),
+      renderResume,
+      env: {},
+      clock: frozenClock,
+    });
+
+    // Only the first application ran.
+    expect(summary.claimed).toBe(1);
+    expect(summary.stoppedReason).toMatch(/kill switch/i);
+    // The second was released untouched, with the reason it never started.
+    expect(releases).toContainEqual({ id: 'app-2', reason: expect.stringMatching(/^not started: kill switch/) });
   });
 });

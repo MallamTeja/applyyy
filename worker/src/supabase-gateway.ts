@@ -91,6 +91,23 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
   const bucket = config.screenshotBucket ?? 'screenshots';
   const resumeBucket = config.resumeBucket ?? 'resumes';
 
+  // A local function rather than a method reached through `this`, because the
+  // claim needs it too and `this` inside an object literal breaks the moment a
+  // caller destructures the gateway.
+  async function releaseApplierClaim(applicationId: string, reason: string): Promise<void> {
+    // Drops the lease WITHOUT touching status. That is the whole point: a
+    // dry run must be incapable of moving a row, and the function has no
+    // status assignment anywhere in it.
+    unwrap(
+      await client.rpc('release_application_claim', {
+        p_application_id: applicationId,
+        p_agent: 'applier',
+        p_reason: reason,
+      }),
+      'releaseClaim',
+    );
+  }
+
   return {
     async openRun(agent: AgentName) {
       // Opened before any work, so a crash leaves a visible stuck row.
@@ -128,11 +145,13 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
       // empty array is the normal case on a healthy day.
       const rows = Array.isArray(data) ? data : [];
       const summary = rows[0] as { released_count?: number } | undefined;
-      // Deliberately not returned or recorded as a health metric yet: the
-      // function's `released_count` currently DOUBLE-COUNTS, because the second
-      // statement's predicate re-catches the rows the first just moved to
-      // `needs_verification` while their lease is still set. Reading it is fine;
-      // publishing it would put a wrong number on the health page.
+      // Read but not yet published as a health metric. The double-count this
+      // comment used to warn about was fixed in
+      // 20260910190000_fix_sweep_count_bootstrap_seed_and_blocked_edge.sql;
+      // 20260918213000 then replaced the function and a later migration is
+      // restoring it, so the RETURN SHAPE is in flux. Publishing a field name
+      // from a signature that is still moving would put a blank on the health
+      // page the day it changes — wire it once the restored sweep has landed.
       void summary;
     },
 
@@ -150,7 +169,11 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
       // Zero rows is the kill switch or an empty queue, and neither is an error.
       const rows = (Array.isArray(data) ? data : []) as Array<{
         id: string;
-        apply_url?: string;
+        // The link to `jobs`, which is where the apply URL actually lives. An
+        // `apply_url` field was once read off this row; the RPC returns
+        // `applications.*` and that table has no such column, so it was always
+        // '' and every claimed row died on `page.goto('')`.
+        job_id: string;
         // `claim_applications` is declared `returns setof public.applications`
         // and returns `a.*`, so the pinned snapshot arrives with the claim and
         // needs no second query. That matters beyond round trips: a separate
@@ -159,14 +182,53 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
         // rendered from data this run never validated.
         tailored_profile?: ResolvedResume | null;
       }>;
-      return rows.map(
-        (row): ClaimedApplication => ({
+
+      // Nothing claimed means nothing to look up; skipping the read also keeps
+      // PostgREST from being sent an empty `in.()` filter.
+      if (rows.length === 0) return [];
+
+      // THE MISSING JOIN, as a second read. `jobs.apply_url` is the canonical
+      // submit target decided at normalize time, which is what keeps a LinkedIn
+      // sighting from ever becoming a submit path. De-duplicated because two
+      // applications can share a job, and one id per job is all the read needs.
+      const jobIds = [...new Set(rows.map((row) => row.job_id))];
+      // Through `unwrap`, so a failed read THROWS rather than reading as "no URL"
+      // — releasing every row on a transient error would disguise an outage as
+      // an empty queue, and the rows keep their leases for the sweeper instead.
+      const jobs = unwrap(
+        await client.from('jobs').select('id, apply_url').in('id', jobIds),
+        'claimApplications: read jobs.apply_url',
+      ) as Array<{ id: string; apply_url: string | null }> | null;
+      // Keyed by job id so each claimed row finds its URL in one lookup.
+      const urlByJobId = new Map((jobs ?? []).map((job) => [job.id, job.apply_url]));
+
+      // Rows that can actually be navigated to, each paired with its URL. Built
+      // in a loop rather than one filter, because the rejected rows need an
+      // awaited release and a filter callback cannot await.
+      const usable: Array<{ row: (typeof rows)[number]; url: string }> = [];
+      for (const row of rows) {
+        // Trimmed so a whitespace-only URL counts as missing, not as a target.
+        const url = urlByJobId.get(row.job_id)?.trim();
+        // FAIL CLOSED: no URL means there is nowhere honest to go. Released, not
+        // failed — a status write needs a legal edge, and this is a data gap a
+        // human can fix, not a verdict on the application. The reason lands in
+        // `application_events` so "why was this never attempted" has an answer.
+        if (!url) {
+          await releaseApplierClaim(row.id, `no apply_url on job ${row.job_id}; not attempted`);
+          continue;
+        }
+        // Kept with its row so the mapping below needs no second lookup.
+        usable.push({ row, url });
+      }
+
+      return usable.map(
+        ({ row, url }): ClaimedApplication => ({
           id: row.id,
           status: 'approved',
-          // `jobs.apply_url` is the canonical submit target decided at
-          // normalize time, which is what keeps a LinkedIn sighting from ever
-          // becoming a submit path.
-          applyUrl: row.apply_url ?? '',
+          // Present and non-empty by construction: the loop above dropped
+          // every row without one, so no `?? ''` fallback can reintroduce the
+          // empty string that `page.goto` throws on.
+          applyUrl: url,
           // Passed through UNVALIDATED and un-defaulted on purpose. Coercing a
           // missing snapshot to an empty resume here would produce a blank PDF
           // that renders, uploads and attaches without complaint; leaving the
@@ -202,19 +264,8 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
       );
     },
 
-    async releaseClaim(applicationId, reason) {
-      // Drops the lease WITHOUT touching status. That is the whole point: a
-      // dry run must be incapable of moving a row, and the function has no
-      // status assignment anywhere in it.
-      unwrap(
-        await client.rpc('release_application_claim', {
-          p_application_id: applicationId,
-          p_agent: 'applier',
-          p_reason: reason,
-        }),
-        'releaseClaim',
-      );
-    },
+    // Delegates to the one local implementation, which the claim also uses.
+    releaseClaim: releaseApplierClaim,
 
     async fetchAnswers() {
       const data = unwrap(await client.from('answer_bank').select('*').limit(1000), 'fetchAnswers');

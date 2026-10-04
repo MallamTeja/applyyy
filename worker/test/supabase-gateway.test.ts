@@ -355,3 +355,96 @@ describe('createSupabaseGateway — setArtifactPaths', () => {
     );
   });
 });
+
+// The claim's apply URL. `claim_applications` returns `setof applications`, and
+// `apply_url` lives on `jobs` — so reading it off the claimed row always gave ''
+// and every application died on `page.goto('')`. The existing loop tests could
+// not see this because their fake gateway hands over a URL directly; only a fake
+// at the CLIENT seam reproduces the missing join.
+describe('createSupabaseGateway.claimApplications', () => {
+  /** A client whose claim returns `rows` and whose jobs table returns `jobs`. */
+  function claimClient(
+    rows: Array<Record<string, unknown>>,
+    jobs: { data: unknown; error: { message: string } | null },
+  ) {
+    // Reuse the shared fake for every other call, so only the two legs under test differ.
+    const base = fakeClient();
+    // Recorded so a test can assert which job ids the follow-up read asked for.
+    const jobQueries: Array<{ columns: string; column: string; ids: unknown }> = [];
+    const client: SupabaseLike = {
+      ...base.client,
+      // The claim returns application rows ONLY — no apply_url, exactly as the
+      // real RPC does. Every other RPC falls through to the shared fake.
+      rpc: async (fn, args) => {
+        base.rpcCalls.push({ fn, args });
+        if (fn === 'claim_applications') return { data: rows, error: null };
+        return { data: null, error: null };
+      },
+      // `jobs` is answered here; any other table goes to the shared fake.
+      from: (table: string) =>
+        table === 'jobs'
+          ? {
+              select: (columns: string) => ({
+                in: async (column: string, ids: unknown) => {
+                  jobQueries.push({ columns, column, ids });
+                  return jobs;
+                },
+              }),
+            }
+          : base.client.from(table),
+    };
+    return { client, rpcCalls: base.rpcCalls, jobQueries };
+  }
+
+  it('takes applyUrl from jobs.apply_url, because the claimed row has none', async () => {
+    // The claimed row carries `job_id` and no `apply_url` — the real wire shape.
+    const { client, jobQueries } = claimClient(
+      [{ id: 'app-1', job_id: 'job-1', tailored_profile: null }],
+      { data: [{ id: 'job-1', apply_url: 'https://boards.example/apply/1' }], error: null },
+    );
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    const claimed = await gateway.claimApplications('applier:run-1', 5);
+
+    // The URL must come from the join; '' here is the bug.
+    expect(claimed).toEqual([
+      { id: 'app-1', status: 'approved', applyUrl: 'https://boards.example/apply/1', tailoredProfile: null },
+    ]);
+    // Asked for by id, for exactly the claimed rows' jobs.
+    expect(jobQueries).toEqual([{ columns: 'id, apply_url', column: 'id', ids: ['job-1'] }]);
+  });
+
+  it('releases, and never returns, a row whose job has no apply_url', async () => {
+    // A row with nowhere to go must not reach `page.goto`. Released with a reason
+    // so the row stays `approved` and a human can see why it was not attempted.
+    const { client, rpcCalls } = claimClient(
+      [
+        { id: 'app-1', job_id: 'job-1', tailored_profile: null },
+        { id: 'app-2', job_id: 'job-2', tailored_profile: null },
+      ],
+      { data: [{ id: 'job-1', apply_url: '' }, { id: 'job-2', apply_url: 'https://boards.example/2' }], error: null },
+    );
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    const claimed = await gateway.claimApplications('applier:run-1', 5);
+
+    // Only the row with a real URL survives.
+    expect(claimed.map((row) => row.id)).toEqual(['app-2']);
+    // The empty-URL row got its lease back, with the reason naming the column.
+    const release = rpcCalls.find((call) => call.fn === 'release_application_claim');
+    expect(release?.args).toMatchObject({ p_application_id: 'app-1', p_agent: 'applier' });
+    expect((release?.args as { p_reason: string }).p_reason).toMatch(/apply_url/);
+  });
+
+  it('throws when the jobs read fails, rather than treating every URL as missing', async () => {
+    // A failed read is not "no URL": releasing every row on a transient error
+    // would hide the outage behind a run that looks like an empty queue.
+    const { client } = claimClient(
+      [{ id: 'app-1', job_id: 'job-1', tailored_profile: null }],
+      { data: null, error: { message: 'permission denied for table jobs' } },
+    );
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    await expect(gateway.claimApplications('applier:run-1', 5)).rejects.toThrow(/permission denied for table jobs/);
+  });
+});

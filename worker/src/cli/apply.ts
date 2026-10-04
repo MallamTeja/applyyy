@@ -8,7 +8,9 @@
 import { chromium } from 'playwright';
 import { runApplierBatch } from '../claim-loop.ts';
 import { createSupabaseGateway, type SupabaseLike } from '../supabase-gateway.ts';
-import { createPlaywrightPage } from '../playwright-page.ts';
+// The constant is read at startup so an operator opt-in this build cannot honour
+// is announced, not discovered row by row.
+import { createPlaywrightPage, SUBMISSION_IMPLEMENTED } from '../playwright-page.ts';
 // The resume renderer, which owns a page of its own — see resume-renderer.ts for
 // why it must never be handed one of the form pages.
 import { createResumeRenderer } from '../resume-renderer.ts';
@@ -36,19 +38,29 @@ async function main(): Promise<void> {
   // log even if the run dies later.
   const mode = resolveSubmissionMode(process.env);
   console.log(`[applyy] submission mode: ${mode.submits ? 'LIVE' : 'DRY RUN'} — ${mode.reason}`);
+  // DRY_RUN=false on a build that cannot submit: say so up front. applyToOne
+  // degrades every row to the dry-run exit, and without this line the log
+  // would read "LIVE" while nothing could possibly be sent.
+  if (mode.submits && !SUBMISSION_IMPLEMENTED) {
+    console.warn(
+      '[applyy] DRY_RUN=false was requested, but this worker has no submit implementation. ' +
+        'Every application will be filled, screenshotted and released at `approved`; nothing will be sent.',
+    );
+  }
 
   const supabaseUrl = required('SUPABASE_URL');
   const anonKey = required('SUPABASE_ANON_KEY');
   const email = required('APPLYY_APP_USER_EMAIL');
   const password = required('APPLYY_APP_USER_PASSWORD');
 
-  // THE ONLY LOAD OF THE SUPABASE SDK IN THE WORKER, and it is deliberately a
-  // dynamic import through a variable specifier. Two reasons: it keeps the
-  // package's `tsc --noEmit` green while the dependency is added but not yet
-  // installed (the lockfile belongs to the root-config stream, and a workspace
-  // that cannot typecheck blocks five peers at once); and this is the
-  // composition root, which is the one place where late binding is appropriate.
-  // Convert it to a static import once `pnpm install` has run.
+  // THE ONLY LOAD OF THE SUPABASE SDK IN THE APPLIER, still a dynamic import
+  // through a variable specifier. The original reason (the package was declared
+  // but not installed) no longer holds — worker/package.json declares
+  // @supabase/supabase-js and scout.ts imports it statically. It stays dynamic
+  // because a static import does NOT typecheck against SupabaseLike: the SDK's
+  // `rpc()` returns a PostgrestFilterBuilder, a thenable rather than a Promise
+  // (tsc TS2322, checked 2026-10-04). Converting means a double cast or
+  // widening SupabaseLike to PromiseLike — a decision for whoever owns the port.
   const specifier = '@supabase/supabase-js';
   const sdk = (await import(specifier)) as {
     createClient: (url: string, key: string, options?: unknown) => SupabaseLike;

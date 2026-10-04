@@ -26,6 +26,11 @@ export class SubmissionNotEnabledError extends Error {
   }
 }
 
+// Exported so the composition root can warn at startup when an operator opts
+// in to submission that this build cannot perform. One constant, so the page and
+// the warning can never disagree about it.
+export const SUBMISSION_IMPLEMENTED = false;
+
 /**
  * Selectors that indicate a wall we must not try to get past.
  *
@@ -153,6 +158,12 @@ export function createPlaywrightPage(page: Page): ClosableApplicationPage {
       // the §18.6 trust period, not a peer's.
       throw new SubmissionNotEnabledError();
     },
+
+    // Declared false alongside the throw above, so applyToOne learns BEFORE
+    // `approved -> applying` that nothing can be sent and takes the dry-run
+    // exit. Without it, DRY_RUN=false parked every viable row at `applying`
+    // as an unknown outcome. Flip both together, never one alone.
+    submissionImplemented: SUBMISSION_IMPLEMENTED,
 
     async close() {
       // A leaked page keeps Chromium alive and the Actions job billing until
