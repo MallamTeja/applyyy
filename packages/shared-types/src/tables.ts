@@ -573,6 +573,14 @@ export interface ApplicationRow {
   approved_at: string | null;
   /** When submission was confirmed. */
   applied_at: string | null;
+  /**
+   * The generated cover letter (migration 20261004210000). Its own column because the
+   * cover-letter agent used to overwrite `block_detail` with it, erasing a blocked row's
+   * explanation. NULL means "not generated yet" and is the agent's queue predicate.
+   */
+  cover_letter: string | null;
+  /** When `cover_letter` was written. A CHECK keeps it null exactly when the letter is. */
+  cover_letter_generated_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -619,6 +627,10 @@ export type ApplicationUpdate = Partial<
     | 'failure_reason'
     | 'block_reason'
     | 'block_detail'
+    // The cover-letter agent's only write, so the type permits it. Always together:
+    // the database CHECK refuses one without the other.
+    | 'cover_letter'
+    | 'cover_letter_generated_at'
   >
 >;
 

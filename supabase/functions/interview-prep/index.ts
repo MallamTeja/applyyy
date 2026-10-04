@@ -15,12 +15,16 @@
 //   stored placeholder was permanent and Gemini was never asked again. On any failure the
 //   function stores nothing and the next run retries. The table has no column to mark a
 //   row as a fallback, so "store nothing" is the only honest option without a migration.
-// - It writes no `agent_runs` row. The `agent_name` enum has no value for this function,
-//   and the old insert's error was ignored, so it never recorded a run anyway. Telemetry
-//   needs an `alter type public.agent_name add value` migration first.
+//
+// TELEMETRY RESTORED 2026-10-04 as agent 'interview_prep' (migration 20261004210000).
+// It was dropped while no enum value existed; borrowing another agent's name would
+// have credited that agent on the health page. A failed agent_runs write is logged and
+// never blocks pack generation.
 
 // Authenticated database client. WHY: every query runs under RLS as the app user.
 import { createAppUserClient } from "../_shared/db/client.ts";
+// Caller auth and the fail-closed kill switch. WHY: shared with every agent that spends quota.
+import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 // Gemini transport with key-pool failover. WHY: handles 429 rotation for us.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
 // Prompt builder. WHY: fences the untrusted job text and carries the response schema.
@@ -98,31 +102,57 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // WHY: the handle every query below uses.
   const db = connection.db;
 
-  // WHY: respect the global pause flag. `.maybeSingle()` errors and nulls both read as
-  // "off" below, so this fails closed.
-  const { data: settingsData } = await db
-    // Target system_settings table.
-    .from("system_settings")
-    // Only the flag is needed.
-    .select("system_enabled")
-    // One row per user.
-    .limit(1)
-    // Row or null.
-    .maybeSingle();
+  // WHY: refuse anyone but the app user BEFORE any write or Gemini spend. The sign-in
+  // above never looks at the caller, so the public anon key alone used to suffice.
+  const caller = await authorizeCaller(req, db, connection.userId);
+  // WHY: 401 for no/invalid session, 403 for someone else's; a refused call is not a run.
+  if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });
 
-  // WHY: strict `=== true`, so a missing row or null column halts.
-  const systemEnabled = settingsData?.system_enabled === true;
+  // WHY: opened before any work, so a crash leaves a visible stuck run rather than nothing.
+  const { data: runRow, error: runError } = await db
+    .from("agent_runs")
+    // WHY: its own identity; never borrowed.
+    .insert({ agent: "interview_prep", status: "running", started_at: new Date().toISOString() })
+    // WHY: only the id is needed to close it.
+    .select("id")
+    // WHY: exactly one row was inserted.
+    .single();
+  // WHY: telemetry must not block the agent — a failed insert (e.g. the enum migration not
+  // pushed yet) is logged and generation still runs.
+  if (runError) console.error("[interview-prep] agent_runs insert failed; continuing without telemetry:", runError.message);
+  // WHY: undefined when the insert failed; closeRun then does nothing.
+  const runId: string | undefined = runRow?.id;
+  // WHY: one close path for every exit. Never throws: a failed close is logged instead.
+  async function closeRun(patch: Record<string, unknown>): Promise<void> {
+    // WHY: no row to close.
+    if (!runId) return;
+    // WHY: finish time plus the caller's verdict and counters.
+    const { error } = await db.from("agent_runs").update({ finished_at: new Date().toISOString(), ...patch }).eq("id", runId);
+    // WHY: explains a row stuck at `running`.
+    if (error) console.error("[interview-prep] agent_runs close failed:", error.message);
+  }
 
-  // WHY: query parameters drive both the override and the batch size.
-  const url = new URL(req.url);
-  // WHY: permits a manual test run while the system is paused.
-  const force = url.searchParams.get("force") === "true";
-
-  // WHY: halt immediately when the system is disabled.
-  if (!systemEnabled && !force) {
+  // WHY: the shared fail-closed switch, same as every pipeline agent. The `?force=true`
+  // override was removed 2026-10-04: a URL parameter any caller can type must not
+  // outrank the switch the user flipped to stop Gemini spend.
+  const killSwitch = await readKillSwitch(db);
+  // WHY: an unreadable switch is an error, not a decision — and never "on".
+  if (killSwitch.kind === "unreadable") {
+    // WHY: shown on the health page as a failure.
+    await closeRun({ status: "failed", error_detail: killSwitch.detail });
+    // WHY: retryable.
+    return jsonResponse(503, { success: false, error: "kill_switch_read_failed" });
+  }
+  // WHY: off is a deliberate halt.
+  if (killSwitch.kind === "disabled") {
+    // WHY: recorded so the health page can tell a deliberate halt from a dead cron.
+    await closeRun({ status: "skipped_disabled", error_detail: killSwitch.detail });
     // WHY: 200, because halting on the switch is the system doing what it was told.
     return jsonResponse(200, { status: "halted_by_kill_switch", processed: 0 });
   }
+
+  // WHY: the batch size comes from the query string.
+  const url = new URL(req.url);
 
   // WHY: bound the batch; validated so NaN and fractions cannot reach `.limit()`.
   const batchSize = resolveBatchSize(url.searchParams.get("limit"));
@@ -142,12 +172,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (appsError) {
     // WHY: the detail can name tables; keep it in the log.
     console.error("[interview-prep] applications query failed:", appsError.message);
+    // WHY: a failed read is a failed run on the health page, not an idle one.
+    await closeRun({ status: "failed", error_detail: appsError.message.slice(0, 500) });
     // WHY: a fixed code to the caller.
     return jsonResponse(500, { success: false, error: "query_applications_failed" });
   }
 
   // WHY: early exit when nothing is pending.
   if (!apps || apps.length === 0) {
+    // WHY: idle is a successful run with zero rows, so the health page still sees it ran.
+    await closeRun({ status: "succeeded", rows_in: 0, rows_out: 0, error_count: 0, gemini_calls: 0 });
     // WHY: an empty queue is success.
     return jsonResponse(200, { status: "no_eligible_applications", processed: 0, generated: 0 });
   }
@@ -262,10 +296,34 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
   }
 
+  // WHY: matcher's honest rule — `failed` only when there was work, none of it landed and
+  // errors explain why. Mixed stays `succeeded` (agent_run_status has no `partial`), and a
+  // batch of rows that all already had packs is idle, not broken: warnings stays empty.
+  const runStatus = apps.length > 0 && generatedCount === 0 && warnings.length > 0 ? "failed" : "succeeded";
+  // WHY: first three DISTINCT reasons, capped; null on a clean run so no stale reason lingers.
+  const errorDetail = warnings.length > 0 ? [...new Set(warnings)].slice(0, 3).join(" | ").slice(0, 500) : null;
+  // WHY: the counters the health page reads; warnings are exactly the per-row failures.
+  await closeRun({
+    // WHY: derived from the counters, never hard-coded.
+    status: runStatus,
+    // WHY: the reason, not just the count.
+    error_detail: errorDetail,
+    // WHY: rows read, including those skipped because a pack exists.
+    rows_in: apps.length,
+    // WHY: packs actually stored.
+    rows_out: generatedCount,
+    // WHY: rows that stored nothing for a reason.
+    error_count: warnings.length,
+    // WHY: quota spent.
+    gemini_calls: geminiCalls,
+  });
+
   // WHY: report processing metrics to the caller.
   return jsonResponse(200, {
     // The run completed; per-row failures are in `warnings`.
     success: true,
+    // WHY: the same verdict agent_runs holds, so the two never disagree.
+    status: runStatus,
     // Rows considered.
     processed: apps.length,
     // Packs stored.

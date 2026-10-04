@@ -1,92 +1,58 @@
-// Import the generateGeminiContent function for calling the LLM API
-// This is the standard way to interface with Gemini in this project
+// Generate one follow-up nudge draft through Gemini — or report why there is none.
+//
+// NO FALLBACK (2026-10-04). This used to return a generic template on every failure.
+// follow-up/index.ts skips any application that already has a nudge, so a stored template
+// was PERMANENT: one Gemini hiccup and that application never got a real draft. Now a
+// failure is returned as an error, the caller stores nothing and counts it, and the next
+// run retries — the same rule as referral and interview-prep.
+//
+// Transport shape (fixed earlier the same day): `(db, { prompt: { systemInstruction,
+// userContent, responseSchema } })`, returning `{ ok: true, data }` or `{ ok: false,
+// reason, detail? }`, exactly as the matcher and tailor call it.
+
+// The Gemini key-pool transport.
 import { generateGeminiContent } from "../gemini/client.ts";
-
-// Import the prompt builder and interfaces from the local prompt file
-// This keeps the logic separated and testable
+// The fenced prompt builder and its types.
 import { buildFollowUpNudgePrompt, type BuildPromptParams, type FollowUpNudgeDraft } from "./prompt.ts";
+// The pure shape check, kept where `node --test` can pin it.
+import { parseNudgeReply } from "./nudge-row.ts";
 
-// The database client the Gemini transport claims pool keys through. Derived from the
-// transport's own signature rather than importing `SupabaseClient` from jsr, so this file
-// names no second copy of a type that could drift from what the transport actually takes.
+// The database client the transport claims pool keys through. Derived from the
+// transport's own signature so this file names no second copy of a type that could drift.
 type GeminiDb = Parameters<typeof generateGeminiContent>[0];
 
-// Generate one follow-up nudge draft.
-//
-// FIXED 2026-10-04: this used to call `generateGeminiContent({ systemInstruction, prompt,
-// schema, responseFormat })` — ONE argument in a shape the transport never had — and read
-// `.text`/`.error`, which do not exist on its result. Four TS errors, and at runtime every
-// call threw into the catch below, so every nudge was the generic fallback. The transport
-// takes `(db, { prompt: { systemInstruction, userContent, responseSchema } })` and returns
-// `{ ok: true, data: GeminiResponseBody }` or `{ ok: false, reason, detail? }`, exactly as
-// the matcher and tailor call it.
-export async function generateFollowUpNudge(db: GeminiDb, params: BuildPromptParams): Promise<FollowUpNudgeDraft> {
+// A draft, or the reason there is none. A union rather than a nullable draft so the
+// caller can report WHY, and so no code path can mistake "nothing" for a draft.
+export type NudgeOutcome =
+  // A validated draft, safe to store.
+  | { readonly ok: true; readonly draft: FollowUpNudgeDraft }
+  // Nothing to store; `error` is a short code for the run's failure list.
+  | { readonly ok: false; readonly error: string };
+
+// One model call per invocation; never throws.
+export async function generateFollowUpNudge(db: GeminiDb, params: BuildPromptParams): Promise<NudgeOutcome> {
   // The fenced prompt pieces, built by the pure, separately testable builder.
   const { systemInstruction, userContent, responseSchema } = buildFollowUpNudgePrompt(params);
-
-  // Any throw (network, malformed JSON) degrades to the fallback rather than failing the run.
   try {
     // Two arguments: the db for key-pool claims, then the prompt in the transport's shape.
-    const result = await generateGeminiContent(db, {
-      // Passed through unchanged — the builder already shaped it for the transport.
-      prompt: { systemInstruction, userContent, responseSchema },
-    });
-
-    // A pool or transport failure is not a draft: log the reason and fall back.
+    const result = await generateGeminiContent(db, { prompt: { systemInstruction, userContent, responseSchema } });
+    // A pool or transport failure is not a draft.
     if (!result.ok) {
-      // `reason` is the closed failure kind; `detail` is optional free text.
-      console.error("Gemini failed to generate nudge:", result.reason, result.detail ?? "");
-      // The user still gets something to send.
-      return buildFallbackNudge(params.companyName, params.jobTitle);
+      // `detail` can carry upstream bodies, so it stays in the log.
+      console.error("[follow-up] gemini failed:", result.reason, result.detail ?? "");
+      // The closed reason code is safe to report.
+      return { ok: false, error: `gemini_call_failed: ${result.reason}` };
     }
-
-    // Same extraction as matcher/tailor: optional at every hop, because a safety-blocked
-    // response can omit any of them.
-    const text = result.data.candidates?.[0]?.content?.parts?.[0]?.text;
-    // No text means the model did not answer.
-    if (typeof text !== "string") return buildFallbackNudge(params.companyName, params.jobTitle);
-
-    // Parsed as unknown, then shape-checked — a cast would let `{}` through as a draft
-    // with an undefined subject that only fails at the NOT NULL insert.
-    const parsed: unknown = JSON.parse(text);
-    // Both fields must be non-empty strings to count as a draft.
-    if (
-      typeof parsed === "object" && parsed !== null &&
-      typeof (parsed as { subject?: unknown }).subject === "string" &&
-      typeof (parsed as { body?: unknown }).body === "string" &&
-      (parsed as { subject: string }).subject.trim() !== "" &&
-      (parsed as { body: string }).body.trim() !== ""
-    ) {
-      // Only the two fields the table stores, nothing else the model may have added.
-      return { subject: (parsed as { subject: string }).subject, body: (parsed as { body: string }).body };
-    }
-    // Wrong shape: treat like no answer.
-    return buildFallbackNudge(params.companyName, params.jobTitle);
-  } catch (error) {
-    // If an exception was thrown during the API call or parse, log it
-    console.error("Error generating follow-up nudge:", error);
-    // Again, fallback to the generic nudge to ensure the user gets something
-    return buildFallbackNudge(params.companyName, params.jobTitle);
+    // Optional at every hop: a safety-blocked response can omit any of them.
+    const draft = parseNudgeReply(result.data.candidates?.[0]?.content?.parts?.[0]?.text);
+    // Off-schema: store nothing, retry next run.
+    if (draft === null) return { ok: false, error: "reply_not_a_nudge" };
+    // Exactly the shape the insert needs.
+    return { ok: true, draft };
+  } catch (err) {
+    // A thrown transport error is logged in full…
+    console.error("[follow-up] gemini threw:", err);
+    // …and reported as a failure like any other, never a draft.
+    return { ok: false, error: `gemini_threw: ${err instanceof Error ? err.message : String(err)}` };
   }
-}
-
-// Define a fallback function for when the LLM is unavailable
-// This ensures the system remains robust
-// It provides a deterministic, generic email draft
-export function buildFallbackNudge(companyName: string, jobTitle: string): FollowUpNudgeDraft {
-  // Construct a standard subject line
-  // It includes the job title and company name
-  const subject = `Following up on my application for ${jobTitle}`;
-  
-  // Construct a standard body
-  // It is polite and asks for a status update
-  const body = `Hi Hiring Team,\n\nI hope you're doing well.\n\nI recently applied for the ${jobTitle} position at ${companyName} and wanted to express my continued interest in the role. I would love to know if there are any updates regarding my application.\n\nThank you for your time and consideration.\n\nBest regards,`;
-  
-  // Return the constructed fallback draft
-  return {
-    // Return the fallback subject
-    subject,
-    // Return the fallback body
-    body,
-  };
 }

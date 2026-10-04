@@ -67,6 +67,9 @@ export function makeApplicationRow(overrides: Partial<ApplicationRow> = {}): App
     // Not yet approved or applied.
     approved_at: null,
     applied_at: null,
+    // No letter yet: the CHECK keeps these two null together, and null is the queue predicate.
+    cover_letter: null,
+    cover_letter_generated_at: null,
     created_at: FIXTURE_NOW,
     updated_at: FIXTURE_NOW,
     // The caller's overrides win, so a test changes exactly the field it is about.

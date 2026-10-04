@@ -8,9 +8,11 @@
 // 2. Checks and validates company name presence for each candidate application row.
 // 3. Loads candidate master profile context from `master_profiles` table.
 // 4. Generates a personalized referral outreach message draft (subject + body + networking strategy notes)
-//    using Gemini LLM when available, or a structured deterministic fallback template.
+//    using Gemini. On any model failure or off-schema reply it stores NOTHING and the
+//    next run retries (the template fallback was removed 2026-10-04: see NO FALLBACK).
 // 5. Logs the generated referral outreach draft as an audit event into `application_events` table.
-// 6. Records execution telemetry in `agent_runs` table for system health monitoring.
+// 6. Records execution telemetry in `agent_runs` as agent 'referral' (it borrowed
+//    'screener' until migration 20261004210000 gave it an identity).
 //
 // INVARIANTS & CONSTRAINTS:
 // - Executes inside Deno Edge runtime under authenticated Supabase client using App RLS policies.
@@ -24,9 +26,13 @@ import { createAppUserClient } from "../_shared/db/client.ts";
 // Import Gemini API transport helper with multi-key pool failover and token pacing.
 // Handles rate limits, transparent 429 key rotations, and token pacing automatically.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
+// Caller auth and the fail-closed kill switch, shared with every agent that spends quota.
+import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 // Import shared contracts type re-exports for system schema stability.
 // Re-exports core schema types so deep imports are avoided across the workspace.
-import type { AgentName, MasterProfile } from "../_shared/contracts/shared-types.ts";
+import type { MasterProfile } from "../_shared/contracts/shared-types.ts";
+// Strict reply-shape check; null means "store nothing, retry next run".
+import { parseReferralReply } from "./parse-reply.ts";
 
 // Define the default batch processing size constant for queue lookups.
 // Limits the number of candidate application rows fetched per single Edge Function execution.
@@ -125,62 +131,6 @@ function resolveBatchSize(
   return Math.min(parsed, MAX_BATCH_SIZE);
 }
 
-// Generates a structured fallback referral outreach draft when LLM service is unavailable or rate limited.
-// Ensures reliable fallback message generation without throwing errors or breaking runs.
-function buildFallbackReferralDraft(
-  // Target company name string.
-  // Identifies employer company name for template substitution.
-  companyName: string,
-  // Target job title string.
-  // Identifies job position title for template substitution.
-  jobTitle: string,
-  // Candidate background highlights or top skills summary string.
-  // Provides brief summary of candidate background for outreach text.
-  candidateHighlights: string,
-): ReferralOutreachDraft {
-  // Construct professional email subject line string using template string.
-  // Combines job title and company name into subject header.
-  const subject = `Referral Inquiry — ${jobTitle} role at ${companyName}`;
-
-  // Construct structured cold referral message body text string using template literal.
-  // Formats polite, professional cold outreach message for candidate.
-  const body = `Hi [Name],
-
-I noticed you are working at ${companyName} and wanted to reach out regarding the ${jobTitle} position.
-
-I have strong experience in software engineering (${candidateHighlights}) and I am really excited about the work ${companyName} is doing.
-
-If you have a few minutes, I would love to connect and learn more about your experience on the team. If you feel comfortable, I would be deeply grateful for a referral or introduction to the hiring team.
-
-Thanks so much for your time!
-
-Best regards,
-[Your Name]`;
-
-  // Construct strategic networking advice notes string for the candidate.
-  // Provides actionable advice on identifying and approaching potential referrers.
-  const notes = `Search LinkedIn for current team members or 2nd-degree connections at ${companyName} in relevant engineering/product roles. Personalize the intro line before sending.`;
-
-  // Return formatted ReferralOutreachDraft object adhering to interface contract.
-  // Delivers completed fallback draft structure.
-  return {
-    // Assign company name property.
-    companyName,
-    // Assign job title property.
-    jobTitle,
-    // Assign default target recipient role description string.
-    recipientRole: "Software Engineer / Team Member / Recruiter",
-    // Assign constructed subject line string.
-    subject,
-    // Assign constructed message body text string.
-    body,
-    // Assign constructed strategic notes string.
-    notes,
-    // Assign ISO timestamp string recording generation time.
-    generatedAt: new Date().toISOString(),
-  };
-}
-
 // Register main Deno HTTP server request handler callback.
 // Listens for incoming HTTP requests dispatched to the referral edge function.
 Deno.serve(async (req: Request): Promise<Response> => {
@@ -211,17 +161,27 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // Obtains ready-to-use database client instance.
   const db = connection.db;
 
+  // Refuse anyone but the app user BEFORE any write or Gemini spend. The sign-in above
+  // never looks at the caller, so the public anon key alone used to suffice.
+  const caller = await authorizeCaller(req, db, connection.userId);
+  // 401 for no/invalid session, 403 for someone else's; a refused call is not a run.
+  if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });
+
   // Insert agent run tracking record into agent_runs table for execution telemetry.
   // Records run start event before performing queue work.
-  const { data: runRow } = await db
+  const { data: runRow, error: runError } = await db
     // Target agent_runs table for telemetry registration.
     .from("agent_runs")
-    // Insert initial telemetry row with agent identity 'screener' and start timestamp.
-    .insert({ agent: "screener" as AgentName, status: "running", started_at: new Date().toISOString() })
+    // Its own identity. It logged as 'screener' until 2026-10-04, which made a referral
+    // run show the Screener as alive on the health page.
+    .insert({ agent: "referral", status: "running", started_at: new Date().toISOString() })
     // Select generated unique identifier column from inserted row.
     .select("id")
     // Execute query expecting single row result.
     .single();
+  // Telemetry must not block the agent: a failed insert (e.g. the enum migration not
+  // pushed yet) is logged and drafting still runs, just without a run row.
+  if (runError) console.error("[referral] agent_runs insert failed; continuing without telemetry:", runError.message);
 
   // Extract unique run identifier string from inserted telemetry row object if present.
   // Stores run ID for status update upon run completion.
@@ -256,57 +216,26 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // Reads incoming request URL parameters.
   const url = new URL(req.url);
 
-  // Parse optional force query parameter flag string to override kill switch.
-  // Evaluates whether caller requested force override.
-  const force = url.searchParams.get("force") === "true";
-
-  // Query system_settings table for kill switch system_enabled boolean flag state.
-  // Reads global kill switch setting before executing application processing.
-  const { data: settingsData, error: settingsError } = await db
-    // Target system_settings configuration table.
-    .from("system_settings")
-    // Select system_enabled boolean configuration column.
-    .select("system_enabled")
-    // Limit query to single configuration row.
-    .limit(1)
-    // Execute query returning single row or null.
-    .single();
-
-  // Handle system_settings query error if database read encountered failure.
-  // Checks for query failure other than missing row code PGRST116.
-  if (settingsError && settingsError.code !== "PGRST116") {
-    // Fail run with 500 error response if system settings read failed.
-    return await failRun(500, "kill_switch_read_failed", settingsError.message);
-  }
-
-  // Determine effective system enabled boolean status flag.
-  // Defaults to false if settings data row is missing.
-  const systemEnabled = settingsData?.system_enabled ?? false;
-
-  // Check if system is disabled and force override parameter is not enabled.
-  // Enforces system kill switch check to halt processing when system is disabled.
-  if (!systemEnabled && !force) {
-    // Check if telemetry run identifier exists for this execution.
+  // The shared fail-closed switch, same as every pipeline agent. The `?force=true`
+  // override was removed 2026-10-04: a URL parameter any caller can type must not
+  // outrank the switch the user flipped to stop Gemini spend. This also replaces a
+  // `.single()` read whose `?? false` let a non-boolean truthy value count as "on".
+  const killSwitch = await readKillSwitch(db);
+  // An unreadable switch is an error, not a decision — and never "on".
+  if (killSwitch.kind === "unreadable") return await failRun(503, "kill_switch_read_failed", killSwitch.detail);
+  // Off: a deliberate halt, recorded so the health page can tell it from a dead cron.
+  if (killSwitch.kind === "disabled") {
+    // Close the run row as a skip rather than leave it `running`.
     if (runId) {
-      // Update agent_runs telemetry row status to 'skipped_disabled'.
+      // Status, finish time and the switch's own reason.
       await db
-        // Target agent_runs table for status update.
         .from("agent_runs")
-        // Update status to skipped_disabled and set detail explanation.
-        .update({
-          status: "skipped_disabled",
-          finished_at: new Date().toISOString(),
-          error_detail: "system_settings.system_enabled is false",
-        })
-        // Match specific run ID.
+        .update({ status: "skipped_disabled", finished_at: new Date().toISOString(), error_detail: killSwitch.detail })
+        // This run only.
         .eq("id", runId);
     }
-    // Return HTTP 200 response acknowledging halted execution by kill switch.
-    return jsonResponse(200, {
-      status: "halted_by_kill_switch",
-      message: "system_settings.system_enabled is false. Pass ?force=true to override.",
-      processed: 0,
-    });
+    // 200: the system did what it was told.
+    return jsonResponse(200, { status: "halted_by_kill_switch", message: killSwitch.detail, processed: 0 });
   }
 
   // Resolve target processing batch size integer limit from request query parameters.
@@ -471,9 +400,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
       continue;
     }
 
-    // Declare variable to hold generated ReferralOutreachDraft object instance.
-    // Container variable assigned by Gemini response or fallback generator.
-    let referralDraft: ReferralOutreachDraft;
+    // Assigned only by a validated Gemini reply. Stays null on every failure, and null
+    // stores nothing — see the NO FALLBACK note below.
+    let referralDraft: ReferralOutreachDraft | null = null;
 
     // Construct system instruction prompt text string for Gemini LLM referral generator.
     // Sets AI persona, task context, and strict JSON output formatting instructions.
@@ -521,48 +450,34 @@ Job Description Context: ${job.description_raw ? job.description_raw.slice(0, 10
         prompt: { systemInstruction, userContent, responseSchema },
       });
 
-      // Check if Gemini API call execution succeeded.
-      if (outcome.ok) {
-        // Extract generated JSON text string from candidate response part.
-        const text = outcome.data.candidates?.[0]?.content?.parts?.[0]?.text;
-
-        // Check if generated text string is present.
-        if (text) {
-          // Parse generated JSON text string into dictionary object.
-          const parsed = JSON.parse(text) as Record<string, string>;
-
-          // Construct ReferralOutreachDraft object from parsed model output values.
-          referralDraft = {
-            // Assign target company name string.
-            companyName,
-            // Assign target job title string.
-            jobTitle,
-            // Assign parsed recipient role string or fallback.
-            recipientRole: parsed.recipientRole ?? "Employee / Recruiter",
-            // Assign parsed subject line string or fallback.
-            subject: parsed.subject ?? `Referral Request — ${jobTitle} at ${companyName}`,
-            // Assign parsed message body string or empty string.
-            body: parsed.body ?? "",
-            // Assign parsed strategic notes string or default advice string.
-            notes: parsed.notes ?? "Connect with employees on LinkedIn.",
-            // Assign ISO generation timestamp string.
-            generatedAt: new Date().toISOString(),
-          };
-        } else {
-          // Use deterministic fallback template generator if Gemini text was empty.
-          referralDraft = buildFallbackReferralDraft(companyName, jobTitle, candidateSkills);
-        }
+      // A transport failure stores nothing; the reason code is safe to report.
+      if (!outcome.ok) {
+        warnings.push(`Gemini call failed for ${app.id} (${outcome.reason}); nothing stored, will retry.`);
       } else {
-        // Record warning for unfulfilled Gemini call.
-        warnings.push(`Gemini call unfulfilled for ${app.id} (${outcome.reason}); using fallback template.`);
-        // Construct deterministic fallback referral draft.
-        referralDraft = buildFallbackReferralDraft(companyName, jobTitle, candidateSkills);
+        // Shape-validated; null for anything that is not all four non-blank strings.
+        const parsed = parseReferralReply(outcome.data.candidates?.[0]?.content?.parts?.[0]?.text);
+        // Off-schema: reported and retried, never patched up with defaults.
+        if (parsed === null) {
+          warnings.push(`Gemini reply for ${app.id} did not match the referral schema; nothing stored, will retry.`);
+        } else {
+          // The validated fields plus the context this run already knows.
+          referralDraft = { companyName, jobTitle, ...parsed, generatedAt: new Date().toISOString() };
+        }
       }
     } catch (err) {
-      // Catch exceptions thrown during Gemini generation and record error message string.
+      // A thrown transport error is a failure like any other: store nothing.
       warnings.push(`Error generating referral for ${app.id}: ${err instanceof Error ? err.message : String(err)}`);
-      // Construct deterministic fallback referral draft on exception.
-      referralDraft = buildFallbackReferralDraft(companyName, jobTitle, candidateSkills);
+    }
+
+    // NO FALLBACK (2026-10-04). A template draft used to be stored on every failure, and
+    // the ALREADY-DRAFTED exclusion above then hid the row from every later run — so one
+    // Gemini hiccup made a "[Name]"/"[Your Name]" template permanent in an append-only
+    // log. Storing nothing keeps the row in the queue and the next run retries it.
+    if (referralDraft === null) {
+      // Counted, so a run where everything failed reports `failed`, not `succeeded`.
+      failedCount++;
+      // Next application.
+      continue;
     }
 
     // Log the generated referral outreach draft as an append-only audit event into application_events table.
@@ -578,9 +493,11 @@ Job Description Context: ${job.description_raw ? job.description_raw.slice(0, 10
         user_id: app.user_id,
         // Assign event_type string constant 'note'.
         event_type: "note",
-        // NULL, deliberately: the `agent_name` enum has no referral value and the column is
-        // nullable. The old 'screener' attributed every draft to an agent that did not
-        // write it, in a log that can never be corrected.
+        // Still NULL, deliberately, though migration 20261004210000 now adds 'referral':
+        // agent_runs tolerates a missing enum value (logged, not fatal), but a failed
+        // INSERT here loses the draft, so naming the agent would make every draft depend
+        // on the migration landing before the deploy. Unattributed is honest; the old
+        // 'screener' was not, in a log that can never be corrected.
         agent: null,
         // Assign structured detail JSONB payload object.
         detail: {
@@ -607,16 +524,28 @@ Job Description Context: ${job.description_raw ? job.description_raw.slice(0, 10
     }
   }
 
+  // HONEST FINAL STATUS (matcher's rule): `failed` only when there was work, none of it
+  // landed and errors explain why. Before this every run was `succeeded`, including one
+  // where every Gemini call failed. Mixed stays `succeeded` with error_count set, since
+  // agent_run_status has no `partial`.
+  const runStatus = apps.length > 0 && generatedCount === 0 && failedCount > 0 ? "failed" : "succeeded";
+  // First three DISTINCT reasons, capped; null on a clean run so no stale reason lingers.
+  const errorDetail = warnings.length > 0 ? [...new Set(warnings)].slice(0, 3).join(" | ").slice(0, 500) : null;
+
   // Check if valid telemetry run identifier exists for this invocation.
   // Updates agent_runs table with completed execution metrics.
   if (runId) {
-    // Update agent_runs table record status to 'succeeded' and record execution metrics.
-    await db
+    // Close the run with the derived verdict; a failed close is logged, not thrown,
+    // because telemetry must not turn a finished batch into an error response.
+    const { error: closeError } = await db
       // Target agent_runs table for status update.
       .from("agent_runs")
-      // Update status to succeeded and attach row counts and Gemini call metrics.
+      // Derived status, the reason, row counts and Gemini call metrics.
       .update({
-        status: "succeeded",
+        // Never hard-coded: see runStatus above.
+        status: runStatus,
+        // Why, not just how many.
+        error_detail: errorDetail,
         finished_at: new Date().toISOString(),
         rows_in: apps.length,
         rows_out: generatedCount,
@@ -625,6 +554,8 @@ Job Description Context: ${job.description_raw ? job.description_raw.slice(0, 10
       })
       // Match specific run identifier.
       .eq("id", runId);
+    // Explains a run row left at `running` in the function log.
+    if (closeError) console.error("[referral] agent_runs close failed:", closeError.message);
   }
 
   // Return HTTP 200 OK JSON response summarizing referral outreach runner execution metrics.
@@ -632,6 +563,8 @@ Job Description Context: ${job.description_raw ? job.description_raw.slice(0, 10
   return jsonResponse(200, {
     // Set execution success flag boolean to true.
     success: true,
+    // The same verdict agent_runs holds, so dashboard and health page agree.
+    status: runStatus,
     // Count of input application queue items fetched.
     processed: apps.length,
     // Count of successfully generated referral outreach drafts.

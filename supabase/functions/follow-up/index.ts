@@ -1,7 +1,9 @@
 // Follow-up — Edge Function that drafts follow-up nudge emails for stale applications.
 //
 // Reads applications at status `applied` older than seven days, drafts one nudge each
-// through Gemini (falling back to a template), and inserts it into `follow_up_nudges`
+// through Gemini (no template fallback: a failure stores nothing and the next run
+// retries, because the already-nudged exclusion made a stored template permanent),
+// and inserts it into `follow_up_nudges`
 // for the user to review.
 //
 // REWRITTEN 2026-10-04. Before this, every insert failed: it wrote `subject`/`body`/
@@ -10,10 +12,10 @@
 // `applications`, which has neither; and it logged agent runs under a column
 // (`agent_name`) that does not exist. All three errors were logged and swallowed.
 //
-// NO agent_runs ROW, DELIBERATELY: `agent_runs.agent` is the `agent_name` enum and no
-// member names this function (enums.sql:165 + keepalive). Borrowing `tracker` would make
-// the health page report the email tracker alive when it is not. Telemetry returns when
-// a migration adds an enum value; the old insert never landed anyway.
+// TELEMETRY RESTORED 2026-10-04 as agent 'follow_up' (migration 20261004210000). It was
+// dropped while no enum value existed, because borrowing `tracker` would have made the
+// health page report the email tracker alive when it was not. A failed agent_runs write
+// is logged and never blocks drafting.
 
 // Signs in as the app user, so every query runs under RLS.
 import { createAppUserClient } from "../_shared/db/client.ts";
@@ -60,19 +62,59 @@ Deno.serve(withErrorBoundary("applyy-follow-up", async (req: Request): Promise<R
   // 401 or 403, as the verdict says.
   if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });
 
+  // Open the run row after auth (a refused caller is not a run) and before any work,
+  // so a crash leaves a visible stuck run rather than nothing.
+  const { data: runRow, error: runError } = await db
+    .from("agent_runs")
+    // Its own identity; never borrowed.
+    .insert({ agent: "follow_up", status: "running", started_at: new Date().toISOString() })
+    // Only the id is needed to close it.
+    .select("id")
+    // Exactly one row.
+    .single();
+  // Telemetry must not block the agent: a failed insert (e.g. the enum migration not
+  // pushed yet) is logged and drafting still runs.
+  if (runError) console.error("[applyy-follow-up] agent_runs insert failed; continuing without telemetry:", runError.message);
+  // Undefined when the insert failed; closeRun then does nothing.
+  const runId: string | undefined = runRow?.id;
+  // Closes the run row. Never throws: a failed close is logged for the same reason.
+  async function closeRun(patch: Record<string, unknown>): Promise<void> {
+    // No row to close.
+    if (!runId) return;
+    // Finish time plus the caller's verdict and counters.
+    const { error } = await db.from("agent_runs").update({ finished_at: new Date().toISOString(), ...patch }).eq("id", runId);
+    // Explains a row stuck at `running`.
+    if (error) console.error("[applyy-follow-up] agent_runs close failed:", error.message);
+  }
+
   // Same fail-closed switch as the pipeline agents.
   const killSwitch = await readKillSwitch(db);
-  // A broken read is retryable, so 503.
-  if (killSwitch.kind === "unreadable") return jsonResponse(503, { success: false, error: "kill_switch_read_failed" });
-  // Off: a deliberate halt, not an error.
-  if (killSwitch.kind === "disabled") return jsonResponse(200, { success: true, status: "skipped_disabled" });
+  // A broken read is retryable, so 503 — and a failure on the health page.
+  if (killSwitch.kind === "unreadable") {
+    // Recorded with the reason.
+    await closeRun({ status: "failed", error_detail: killSwitch.detail });
+    // Retryable.
+    return jsonResponse(503, { success: false, error: "kill_switch_read_failed" });
+  }
+  // Off: a deliberate halt, recorded so the health page can say why nothing ran.
+  if (killSwitch.kind === "disabled") {
+    // Distinct from a dead cron.
+    await closeRun({ status: "skipped_disabled", error_detail: killSwitch.detail });
+    // 200: the system did what it was told.
+    return jsonResponse(200, { success: true, status: "skipped_disabled" });
+  }
 
   // Applications that already have a nudge. Excluded up front, because now that
   // inserts succeed, re-running would otherwise draft a duplicate every invocation —
   // and filtering after the `limit` would starve the queue on the same five rows.
   const { data: existing, error: existingError } = await db.from("follow_up_nudges").select("application_id");
   // Without this list we cannot avoid duplicates, so stop rather than guess.
-  if (existingError) return jsonResponse(503, { success: false, error: "nudges_unreadable" });
+  if (existingError) {
+    // A failed read is a failed run, not an idle one.
+    await closeRun({ status: "failed", error_detail: existingError.message.slice(0, 500) });
+    // Retryable.
+    return jsonResponse(503, { success: false, error: "nudges_unreadable" });
+  }
   // The ids to skip, as strings for the postgrest `in` list.
   const nudgedIds = (existing ?? []).map((r) => String((r as { application_id: unknown }).application_id));
 
@@ -92,10 +134,17 @@ Deno.serve(withErrorBoundary("applyy-follow-up", async (req: Request): Promise<R
   // Run it.
   const { data: applications, error: appsError } = await query;
   // A failed read is reported, not mistaken for "nothing to do".
-  if (appsError) return jsonResponse(503, { success: false, error: "applications_unreadable" });
+  if (appsError) {
+    // A failed read is a failed run, not an empty queue.
+    await closeRun({ status: "failed", error_detail: appsError.message.slice(0, 500) });
+    // Retryable.
+    return jsonResponse(503, { success: false, error: "applications_unreadable" });
+  }
 
   // Counters reported back so a run that wrote nothing is visible as such.
   let drafted = 0;
+  // Every generate call is exactly one model call, so quota spend is reportable.
+  let geminiCalls = 0;
   // Per-row failures with their reason.
   const failures: Array<{ applicationId: string; error: string }> = [];
 
@@ -109,21 +158,44 @@ Deno.serve(withErrorBoundary("applyy-follow-up", async (req: Request): Promise<R
       continue;
     }
 
-    // Draft; never throws — falls back to a template on any model failure.
-    const draft = await generateFollowUpNudge(db, {
+    // Counted before the call: a failed attempt still spends quota.
+    geminiCalls += 1;
+    // Draft or a reason; never throws.
+    const outcome = await generateFollowUpNudge(db, {
       companyName: source.companyName,
       jobTitle: source.jobTitle,
       applicationDate: source.appliedAt,
     });
+    // No validated draft: store nothing, count it, and the next run retries this row.
+    if (!outcome.ok) {
+      // Reported with the generator's reason code.
+      failures.push({ applicationId: source.applicationId, error: outcome.error });
+      // Next application.
+      continue;
+    }
 
     // Insert with the migration's real column names, and CHECK the error.
-    const { error: insertError } = await db.from("follow_up_nudges").insert(toNudgeInsert(source, draft));
+    const { error: insertError } = await db.from("follow_up_nudges").insert(toNudgeInsert(source, outcome.draft));
     // A failed insert is counted and reported, not just logged.
     if (insertError) failures.push({ applicationId: source.applicationId, error: insertError.message });
     // Landed.
     else drafted += 1;
   }
 
-  // The summary a caller can act on.
-  return jsonResponse(200, { success: true, drafted, failures });
+  // Rows the queue returned; the denominator for the honest status.
+  const rowsIn = (applications ?? []).length;
+  // HONEST FINAL STATUS (matcher's rule): `failed` only when there was work, none of it
+  // landed, and errors explain why; mixed stays `succeeded` with error_count set, since
+  // agent_run_status has no `partial`, and an empty queue is idle, not broken.
+  const runStatus = rowsIn > 0 && drafted === 0 && failures.length > 0 ? "failed" : "succeeded";
+  // First three DISTINCT reasons, capped; null on a clean run so no stale reason lingers.
+  const errorDetail = failures.length > 0
+    ? [...new Set(failures.map((f) => f.error))].slice(0, 3).join(" | ").slice(0, 500)
+    : null;
+  // The counters the health page reads, gemini_calls included now that there is no
+  // template path to blur it.
+  await closeRun({ status: runStatus, error_detail: errorDetail, rows_in: rowsIn, rows_out: drafted, error_count: failures.length, gemini_calls: geminiCalls });
+
+  // The summary a caller can act on, with the same verdict as agent_runs.
+  return jsonResponse(200, { success: true, status: runStatus, drafted, gemini_calls: geminiCalls, failures });
 }));

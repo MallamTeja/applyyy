@@ -6,11 +6,10 @@
 // `applications.candidate_profile`, `last_calculated_at`, `agent_runs.agent_name`), so
 // the function had never produced a single row.
 //
-// NO `agent_runs` TELEMETRY, DELIBERATELY. The `agent_name` enum
-// (20260909234500_enums.sql) has no value for this aggregator, and borrowing another
-// agent's name would make the health page attribute these runs to that agent. The old
-// insert named a missing column and so never wrote anything either; removing it changes
-// no live behaviour. Restoring it needs an `alter type ... add value` migration first.
+// TELEMETRY RESTORED 2026-10-04 as agent 'skill_gap', the enum value migration
+// 20261004210000 adds. It was removed earlier because no value existed and borrowing
+// another agent's name would make the health page credit that agent with these runs.
+// A failed agent_runs write is logged and never blocks the aggregation.
 
 // CORS headers, so a browser-side caller can read failures as well as successes.
 import { corsHeaders } from "../_shared/cors.ts";
@@ -73,12 +72,38 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // The authenticated client used for the rest of the run.
   const db = connection.db;
 
+  // Open the run row FIRST, so a crash leaves a visible stuck run rather than nothing.
+  const { data: runRow, error: runError } = await db
+    .from("agent_runs")
+    // Its own identity; never borrowed.
+    .insert({ agent: "skill_gap", status: "running", started_at: new Date().toISOString() })
+    // Only the id is needed to close it.
+    .select("id")
+    // Exactly one row.
+    .single();
+  // Telemetry must not block the agent: a failed insert (e.g. the enum migration not
+  // pushed yet) is logged and the aggregation still runs.
+  if (runError) console.error("[skill-gap] agent_runs insert failed; continuing without telemetry:", runError.message);
+  // Undefined when the insert failed; closeRun then does nothing.
+  const runId: string | undefined = runRow?.id;
+  // Closes the run row. Never throws: a failed close is logged for the same reason.
+  async function closeRun(patch: Record<string, unknown>): Promise<void> {
+    // No row to close.
+    if (!runId) return;
+    // Finish time plus the caller's verdict and counters.
+    const { error } = await db.from("agent_runs").update({ finished_at: new Date().toISOString(), ...patch }).eq("id", runId);
+    // Explains a row stuck at `running`.
+    if (error) console.error("[skill-gap] agent_runs close failed:", error.message);
+  }
+
   // Fail closed: only an explicit, readable "on" lets the run proceed.
   const killSwitch = await readKillSwitch(db);
   // Disabled and unreadable both halt, with different codes so the caller can tell.
   if (killSwitch.kind !== "enabled") {
     // The detail is operational, not secret, but still belongs in the log.
     console.warn("[skill-gap] kill switch:", killSwitch.kind, killSwitch.detail);
+    // Off is a deliberate skip; an unreadable switch is a failure the health page must show.
+    await closeRun({ status: killSwitch.kind === "disabled" ? "skipped_disabled" : "failed", error_detail: killSwitch.detail });
     // 503 either way: the run did not happen.
     return jsonResponse(503, { error: killSwitch.kind === "unreadable" ? "settings_unreadable" : "system_disabled" });
   }
@@ -100,7 +125,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // A failed read must not be mistaken for "no profile".
     if (masterError) throw new Error(`master_profiles read failed: ${masterError.message}`);
     // No profile: every required skill would count as a gap, which is noise, not a report.
-    if (!masterRow) return jsonResponse(409, { error: "no_master_profile" });
+    if (!masterRow) {
+      // Recorded so the health page names the missing prerequisite instead of "idle".
+      await closeRun({ status: "failed", error_detail: "master_profiles is empty" });
+      // A state the user must fix, not a transient fault.
+      return jsonResponse(409, { error: "no_master_profile" });
+    }
     // The stored JSON, typed for the diff helper.
     const candidateProfile = masterRow.profile as MasterProfile;
 
@@ -163,11 +193,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
       if (upsertError) throw new Error(`skill_gap_reports upsert failed: ${upsertError.message}`);
     }
 
+    // No per-row errors exist here — any failure throws to the catch — so the honest
+    // pattern reduces to `succeeded` with the counters. rows_out is skills written, the
+    // unit this aggregator produces.
+    await closeRun({ status: "succeeded", error_detail: null, rows_in: (applications ?? []).length, rows_out: upsertRecords.length, error_count: 0 });
     // Success: report how many skills were written.
     return jsonResponse(200, { success: true, aggregatedSkills: upsertRecords.length });
   } catch (err) {
     // Full detail to the server log only; it can carry table and constraint names.
     console.error("[skill-gap] run failed:", err);
+    // The health page's detail, capped like every agent's error_detail.
+    await closeRun({ status: "failed", error_count: 1, error_detail: (err instanceof Error ? err.message : String(err)).slice(0, 500) });
     // A fixed code to the caller.
     return jsonResponse(500, { error: "skill_gap_failed" });
   }

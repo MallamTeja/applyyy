@@ -73,3 +73,35 @@ export function toNudgeInsert(source: NudgeSource, draft: FollowUpNudgeDraft): R
     status: "pending",
   };
 }
+
+// Shape-check the model's reply. Null for anything that is not exactly two non-blank
+// strings, and null means STORE NOTHING.
+//
+// WHY HERE and not in nudge.ts: nudge.ts imports the Gemini transport, which cannot load
+// under `node --test`; this file is pure, so the rule that decides "draft or nothing" is
+// pinned by nudge-row.test.ts. It replaced a template fallback that the function's
+// already-nudged exclusion then made permanent: one Gemini hiccup and that application
+// could never get a real draft.
+export function parseNudgeReply(text: unknown): FollowUpNudgeDraft | null {
+  // A missing text part (e.g. a safety-blocked response) is not a reply.
+  if (typeof text !== "string") return null;
+  // `unknown`, so both fields are checked rather than assumed.
+  let parsed: unknown;
+  try {
+    // The schema-constrained reply is a JSON object.
+    parsed = JSON.parse(text);
+  } catch {
+    // Prose is a schema violation, not a draft.
+    return null;
+  }
+  // `null` and `[]` parse too; neither is the object the schema demands.
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  // Read once for both checks.
+  const { subject, body } = parsed as { subject?: unknown; body?: unknown };
+  // Both must be non-blank strings — no defaults, ever.
+  if (typeof subject !== "string" || subject.trim() === "") return null;
+  // Same rule for the body.
+  if (typeof body !== "string" || body.trim() === "") return null;
+  // Only the two stored fields, trimmed; anything else the model added is dropped.
+  return { subject: subject.trim(), body: body.trim() };
+}

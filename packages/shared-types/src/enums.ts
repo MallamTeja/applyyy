@@ -242,6 +242,21 @@ export const AGENT_NAMES = [
    * this value will fail against the remote database until that migration is pushed.
    */
   'keepalive',
+  // The five phase-3 side agents, added by migration 20261004210000 so each gets its OWN
+  // health-page row instead of borrowing one (referral used to log as 'screener',
+  // cover-letter as 'tailor'). Appended in the migration's order, because the parity
+  // test compares sequences. None of them may move `applications.status`: no
+  // STATUS_TRANSITIONS edge names them, and that absence is the control.
+  /** Aggregates missing skills into skill_gap_reports. */
+  'skill_gap',
+  /** Drafts interview_prep_packs. */
+  'interview_prep',
+  /** Drafts follow_up_nudges. */
+  'follow_up',
+  /** Drafts referral outreach notes into application_events. */
+  'referral',
+  /** Writes applications.cover_letter. */
+  'cover_letter',
 ] as const;
 /** Union of every legal agent identity. */
 export type AgentName = (typeof AGENT_NAMES)[number];
