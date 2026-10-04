@@ -313,6 +313,25 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // Calculates clamped batch limit for application query.
   const batchSize = resolveBatchSize(url.searchParams.get("limit"));
 
+  // ALREADY-DRAFTED EXCLUSION (2026-10-04). Without it every run re-drafted the same
+  // oldest rows, spending Gemini quota and appending a duplicate draft event each time —
+  // and `application_events` is append-only, so duplicates can never be cleaned up.
+  // Read BEFORE the queue query so the exclusion happens in the database: filtering after
+  // `.limit()` would let the oldest N drafted rows fill every batch forever.
+  const { data: draftedRows, error: draftedError } = await db
+    // The append-only log the drafts are written to.
+    .from("application_events")
+    // Only the application id is needed.
+    .select("application_id")
+    // Drafts are written as notes…
+    .eq("event_type", "note")
+    // …tagged with this action (see the insert below).
+    .eq("detail->>action", "referral_outreach_drafted");
+  // An unreadable exclusion list must not read as "nothing drafted yet".
+  if (draftedError) return await failRun(500, "query_drafted_failed", draftedError.message);
+  // Distinct ids; one application may carry old duplicate drafts.
+  const draftedIds = [...new Set((draftedRows ?? []).map((r: { application_id: string }) => r.application_id))];
+
   // Query applications table for applications sitting at status 'passed_filters' or 'scored'.
   // Fetches eligible candidate applications ready for referral outreach drafting.
   const { data: apps, error: appsError } = await db
@@ -322,6 +341,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .select("id, job_id, user_id, status, match_score, match_reasoning, jobs ( id, title, company_name, company_slug, location_raw, locations, employment_type, description_raw )")
     // Filter applications where status is either 'passed_filters' or 'scored'.
     .in("status", ["passed_filters", "scored"])
+    // Skip applications that already have a draft. ponytail: the id list travels in the
+    // URL, so this ceiling is a few thousand drafts; a `not exists` RPC removes it.
+    .not("id", "in", `(${draftedIds.length > 0 ? draftedIds.join(",") : "00000000-0000-0000-0000-000000000000"})`)
     // Order applications by creation timestamp ascending for FIFO queue processing order.
     .order("created_at", { ascending: true })
     // Limit returned application rows to resolved batch size ceiling.
@@ -377,9 +399,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   // Extract top candidate skills array keys or fallback summary string for prompt personalization.
   // Prepares candidate background highlights text.
-  const candidateSkills = masterProfile?.skills
-    ? Object.keys(masterProfile.skills).slice(0, 5).join(", ")
-    : "full-stack development and system design";
+  // `skills` is an ARRAY of `{ name, category }` nodes; the old `Object.keys` sent the
+  // indices "0, 1, 2, 3, 4" to the prompt. Read by shape, since stored JSON is unchecked.
+  const skillNames = (Array.isArray(masterProfile?.skills) ? masterProfile.skills : [])
+    // Only entries that really carry a name.
+    .map((skill: unknown) => (typeof skill === "object" && skill !== null ? (skill as { name?: unknown }).name : undefined))
+    // Non-blank strings only.
+    .filter((name): name is string => typeof name === "string" && name.trim().length > 0)
+    // Top five, in the profile's own order.
+    .slice(0, 5);
+  // The generic phrase only when the profile has no usable skills at all.
+  const candidateSkills = skillNames.length > 0 ? skillNames.join(", ") : "full-stack development and system design";
 
   // Initialize successful referral generation count accumulator variable.
   // Tracks count of successfully generated referral outreach drafts.
@@ -548,8 +578,10 @@ Job Description Context: ${job.description_raw ? job.description_raw.slice(0, 10
         user_id: app.user_id,
         // Assign event_type string constant 'note'.
         event_type: "note",
-        // Assign acting agent identity 'screener'.
-        agent: "screener" as AgentName,
+        // NULL, deliberately: the `agent_name` enum has no referral value and the column is
+        // nullable. The old 'screener' attributed every draft to an agent that did not
+        // write it, in a log that can never be corrected.
+        agent: null,
         // Assign structured detail JSONB payload object.
         detail: {
           // Action identifier label string.

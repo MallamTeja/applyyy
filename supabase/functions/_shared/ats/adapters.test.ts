@@ -522,3 +522,29 @@ test("stripHtml returns null for markup that contains no text", () => {
   // And genuine absence stays absence.
   assert.equal(stripHtml(null), null);
 });
+
+// THE CONTRACT scout-ats relies on to keep a re-sighted job's dates write-once (2026-10-04).
+// scout-ats used to pass `firstSeenAt: now` for EVERY posting, so an undated job's
+// `posted_at` and its source_refs `first_seen_at` were reset to "now" on every poll and the
+// staleness rule never saw it age. It now passes the stored `jobs.first_seen_at` for rows
+// that already exist; this pins that toJobInsert honours it in both places.
+test("a re-sighted posting keeps its stored first_seen_at in posted_at and source_refs", async () => {
+  // A dateless posting, so posted_at falls back to first_seen_at.
+  const dateless = greenhouseAdapter.parse({
+    jobs: [{ id: 12, title: "Intern", absolute_url: "https://example.com/12" }],
+  });
+  // Parse must succeed for the case to mean anything.
+  assert.equal(dateless.ok, true);
+  // Narrow for the type checker.
+  if (!dateless.ok) return;
+  // First sighted five days before this poll.
+  const stored = new Date("2026-09-05T12:00:00.000Z");
+  // The context scout-ats builds for an existing row.
+  const row = await toJobInsert(dateless.postings[0]!, greenhouseAdapter, { ...ESTABLISHED, firstSeenAt: stored });
+  // The derived date is the original sighting, not the poll time.
+  assert.equal(row.posted_at, stored.toISOString());
+  // The per-source record keeps the original sighting too…
+  assert.equal(row.source_refs?.[0]?.first_seen_at, stored.toISOString());
+  // …while recording this poll as the latest one.
+  assert.equal(row.source_refs?.[0]?.last_seen_at, NOW.toISOString());
+});

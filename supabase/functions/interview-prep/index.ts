@@ -2,36 +2,38 @@
 //
 // WHAT THIS EDGE FUNCTION DOES:
 // 1. Queries applications sitting at status `interview`.
-// 2. Checks if an `interview_prep_packs` record already exists for that application_id — skips if so.
-// 3. Loads candidate master profile context from `master_profiles` table.
-// 4. Loads linked job posting record details from `jobs` table.
-// 5. Generates a personalized interview prep pack using Gemini LLM when available.
-// 6. Uses deterministic fallback template if Gemini is rate limited or unavailable.
-// 7. Inserts the prep pack into `interview_prep_packs` table.
-// 8. Logs execution telemetry in `agent_runs` table for system health monitoring.
+// 2. Skips any application that already has an `interview_prep_packs` row.
+// 3. Generates a prep pack with Gemini, validated against the prompt's schema.
+// 4. Inserts the pack into `interview_prep_packs`.
+//
+// WHAT IT DELIBERATELY DOES NOT DO (changed 2026-10-04):
+// - It never changes `applications.status`. A prep pack is a side artifact of an
+//   interview, not a pipeline stage. The old call named a status (`interview_prepped`) and
+//   an agent (`interview_prep`) that do not exist and used the wrong RPC parameter names,
+//   so it failed on every row; the existence check in step 2 is the real idempotency key.
+// - It never stores the fallback template. Step 2 skips any application with a pack, so a
+//   stored placeholder was permanent and Gemini was never asked again. On any failure the
+//   function stores nothing and the next run retries. The table has no column to mark a
+//   row as a fallback, so "store nothing" is the only honest option without a migration.
+// - It writes no `agent_runs` row. The `agent_name` enum has no value for this function,
+//   and the old insert's error was ignored, so it never recorded a run anyway. Telemetry
+//   needs an `alter type public.agent_name add value` migration first.
 
-// Import authenticated database client helper.
-// WHY: Ensures every query runs under RLS as the app user.
+// Authenticated database client. WHY: every query runs under RLS as the app user.
 import { createAppUserClient } from "../_shared/db/client.ts";
-// Import Gemini API transport helper with key pool failover.
-// WHY: Manages rate limits and 429 key rotations automatically.
+// Gemini transport with key-pool failover. WHY: handles 429 rotation for us.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
-// Import prompt builder for interview prep packs.
-// WHY: Constructs fenced instruction and response schema.
+// Prompt builder. WHY: fences the untrusted job text and carries the response schema.
 import { buildInterviewPrepPrompt } from "../_shared/interview-prep/prompt.ts";
-// Import fallback generator and prep pack interface.
-// WHY: Provides fallback prep pack when Gemini is unavailable.
-import { buildFallbackPrepPack, type InterviewPrepPack } from "../_shared/interview-prep/prep-generator.ts";
-// Import contract types.
-// WHY: Type safety across shared domain modules.
-import type { AgentName } from "../_shared/contracts/shared-types.ts";
+// The stored pack's type. WHY: the validated parse result must match it structurally.
+import type { InterviewPrepPack } from "../_shared/interview-prep/prep-generator.ts";
+// Shape validator. WHY: a malformed reply must become "nothing stored", never an empty pack.
+import { parsePrepPack } from "./parse-pack.ts";
 
-// Default batch size constant.
-// WHY: Limits how many applications to process per run.
+// Default batch size. WHY: bounds LLM calls per run when the caller gives no limit.
 const DEFAULT_BATCH_SIZE = 5;
 
-// Maximum batch size ceiling constant.
-// WHY: Prevents excessive LLM quota burn in a single execution.
+// Batch ceiling. WHY: prevents excessive LLM quota burn in a single execution.
 const MAX_BATCH_SIZE = 10;
 
 // Standard CORS headers object.
@@ -51,300 +53,226 @@ const corsHeaders = {
 // Formats JSON HTTP responses with status code and CORS headers.
 // WHY: Encapsulates response creation with standard content type and CORS.
 function jsonResponse(status: number, data: Record<string, unknown>): Response {
-  // Return formatted Response object.
-  // WHY: Standard HTTP response constructor.
+  // WHY: one constructor so every exit carries the same headers.
   return new Response(JSON.stringify(data, null, 2), {
-    // HTTP status code.
-    // WHY: Signals success or specific failure status.
+    // WHY: signals success or the specific failure.
     status,
-    // Response headers.
-    // WHY: Attaches JSON content-type and CORS headers.
+    // WHY: JSON content type plus CORS, or a browser hides the status.
     headers: { "content-type": "application/json; charset=utf-8", ...corsHeaders },
   });
+}
+
+// Parses `?limit`. WHY: the same shape check as the pipeline agents — `Number("abc")` is
+// NaN and `Number("2.5")` is a fraction, and both used to slip through `|| DEFAULT`.
+function resolveBatchSize(raw: string | null): number {
+  // Absent parameter: the default.
+  if (raw === null) return DEFAULT_BATCH_SIZE;
+  // `Number("")` is 0, rejected below along with NaN and fractions.
+  const parsed = Number(raw);
+  // Only a positive whole number is a batch size.
+  if (!Number.isInteger(parsed) || parsed < 1) return DEFAULT_BATCH_SIZE;
+  // Clamp to the ceiling.
+  return Math.min(parsed, MAX_BATCH_SIZE);
 }
 
 // Register Deno HTTP server request handler.
 // WHY: Entrypoint for edge function execution.
 Deno.serve(async (req: Request): Promise<Response> => {
-  // Check if request is OPTIONS CORS preflight.
-  // WHY: Browser CORS preflight requests must return 200 OK fast.
+  // WHY: browser CORS preflight must be answered before any work.
   if (req.method === "OPTIONS") {
-    // Return OK with CORS headers.
-    // WHY: Completes preflight request.
+    // WHY: completes the preflight.
     return new Response("ok", { headers: corsHeaders });
   }
 
-  // Authenticate DB client under app user RLS.
-  // WHY: Grants database access bound by tenant security policies.
+  // WHY: grants database access bound by tenant security policies.
   const connection = await createAppUserClient();
 
-  // Handle DB connection failure.
-  // WHY: Prevents unauthenticated queries and returns 503 error.
+  // WHY: without a session no query is safe.
   if (!connection.ok) {
-    // Log failure reason.
-    // WHY: Operational diagnostics in function log.
+    // WHY: operational diagnostics stay in the function log.
     console.error("[interview-prep] DB connection failed:", connection.reason);
-    // Return 503 error response.
-    // WHY: Informs caller that database is unavailable.
+    // WHY: tells the caller the database is unavailable.
     return jsonResponse(503, { success: false, error: "database_unavailable" });
   }
 
-  // Extract client instance.
-  // WHY: Database query execution handle.
+  // WHY: the handle every query below uses.
   const db = connection.db;
 
-  // Register execution run in agent_runs table.
-  // WHY: Health page telemetry monitoring.
-  const { data: runRow } = await db
-    // Target agent_runs table.
-    .from("agent_runs")
-    // Insert run start telemetry row.
-    .insert({ agent: "interview_prep" as AgentName, status: "running", started_at: new Date().toISOString() })
-    // Return inserted row ID.
-    .select("id")
-    // Select single row.
-    .single();
-
-  // Extract telemetry run ID.
-  // WHY: Used to update run status upon completion or failure.
-  const runId: string | undefined = runRow?.id;
-
-  // Query kill switch state from system_settings.
-  // WHY: Respect global system pause flag.
+  // WHY: respect the global pause flag. `.maybeSingle()` errors and nulls both read as
+  // "off" below, so this fails closed.
   const { data: settingsData } = await db
     // Target system_settings table.
     .from("system_settings")
-    // Select system_enabled boolean flag.
+    // Only the flag is needed.
     .select("system_enabled")
-    // Limit to single row.
+    // One row per user.
     .limit(1)
-    // Return single row or null.
-    .single();
+    // Row or null.
+    .maybeSingle();
 
-  // Determine system enabled state.
-  // WHY: Default to false if unconfigured.
-  const systemEnabled = settingsData?.system_enabled ?? false;
+  // WHY: strict `=== true`, so a missing row or null column halts.
+  const systemEnabled = settingsData?.system_enabled === true;
 
-  // Check if caller forced execution via query parameter.
-  // WHY: Permits manual testing override.
+  // WHY: query parameters drive both the override and the batch size.
   const url = new URL(req.url);
-  // Read force parameter.
+  // WHY: permits a manual test run while the system is paused.
   const force = url.searchParams.get("force") === "true";
 
-  // Check kill switch constraint.
-  // WHY: Halt processing immediately when system is disabled.
+  // WHY: halt immediately when the system is disabled.
   if (!systemEnabled && !force) {
-    // Check if run telemetry row exists.
-    if (runId) {
-      // Update telemetry status to skipped_disabled.
-      await db.from("agent_runs").update({
-        status: "skipped_disabled",
-        finished_at: new Date().toISOString(),
-        error_detail: "system_settings.system_enabled is false",
-      }).eq("id", runId);
-    }
-    // Return 200 response acknowledging kill switch.
+    // WHY: 200, because halting on the switch is the system doing what it was told.
     return jsonResponse(200, { status: "halted_by_kill_switch", processed: 0 });
   }
 
-  // Parse limit parameter.
-  // WHY: Bound processing batch size.
-  const rawLimit = url.searchParams.get("limit");
-  // Calculate clamped batch size.
-  const batchSize = rawLimit ? Math.min(Math.max(1, Number(rawLimit) || DEFAULT_BATCH_SIZE), MAX_BATCH_SIZE) : DEFAULT_BATCH_SIZE;
+  // WHY: bound the batch; validated so NaN and fractions cannot reach `.limit()`.
+  const batchSize = resolveBatchSize(url.searchParams.get("limit"));
 
-  // Query applications sitting at status 'interview'.
-  // WHY: Identify candidates that reached interview stage needing prep packs.
+  // WHY: applications at the interview stage are the ones that need a prep pack.
   const { data: apps, error: appsError } = await db
     // Target applications table.
     .from("applications")
-    // Select application columns and joined job fields.
+    // Application keys plus the joined job fields the prompt needs.
     .select("id, user_id, job_id, jobs ( company_name, title, description_raw )")
-    // Filter status = interview.
+    // Only interview-stage rows.
     .eq("status", "interview")
-    // Limit batch size.
+    // Bounded batch.
     .limit(batchSize);
 
-  // Handle application query failure.
-  // WHY: Log error and update telemetry run status.
+  // WHY: a failed read is a failed run, not an empty queue.
   if (appsError) {
-    // Check if telemetry row exists.
-    if (runId) {
-      // Update telemetry run status to failed.
-      await db.from("agent_runs").update({
-        status: "failed",
-        finished_at: new Date().toISOString(),
-        error_detail: appsError.message,
-      }).eq("id", runId);
-    }
-    // Return 500 response.
-    return jsonResponse(500, { success: false, error: "query_applications_failed", detail: appsError.message });
+    // WHY: the detail can name tables; keep it in the log.
+    console.error("[interview-prep] applications query failed:", appsError.message);
+    // WHY: a fixed code to the caller.
+    return jsonResponse(500, { success: false, error: "query_applications_failed" });
   }
 
-  // Handle empty queue.
-  // WHY: Early exit when no interview-stage applications are pending.
+  // WHY: early exit when nothing is pending.
   if (!apps || apps.length === 0) {
-    // Check if telemetry row exists.
-    if (runId) {
-      // Update telemetry run status to succeeded.
-      await db.from("agent_runs").update({ status: "succeeded", finished_at: new Date().toISOString(), rows_in: 0, rows_out: 0 }).eq("id", runId);
-    }
-    // Return 200 response.
+    // WHY: an empty queue is success.
     return jsonResponse(200, { status: "no_eligible_applications", processed: 0, generated: 0 });
   }
 
-  // Initialize accumulators.
-  // WHY: Metric tracking for response payload and telemetry.
+  // WHY: metrics for the response payload.
   let generatedCount = 0;
-  // Gemini calls counter.
+  // WHY: LLM spend per run is worth reporting.
   let geminiCalls = 0;
-  // Warnings list.
+  // WHY: per-row problems are reported, not thrown, so one bad row does not stop the batch.
   const warnings: string[] = [];
 
-  // Process each interview application sequentially.
-  // WHY: Controlled LLM execution per candidate.
+  // WHY: sequential, so LLM calls stay paced per candidate.
   for (const app of apps) {
-    // Check if prep pack already exists for this application.
-    // WHY: Prevent duplicate generation and Gemini quota burn.
-    const { data: existingPrep } = await db
+    // WHY: the existence check is the idempotency key; regenerating burns quota.
+    const { data: existingPrep, error: existingError } = await db
       // Target interview_prep_packs table.
       .from("interview_prep_packs")
-      // Select ID.
+      // Existence only.
       .select("id")
-      // Filter by application_id.
+      // For this application.
       .eq("application_id", app.id)
-      // Limit 1.
+      // One is enough.
       .limit(1)
-      // Maybe single.
+      // Row or null.
       .maybeSingle();
 
-    // Skip if prep pack already exists.
-    // WHY: Idempotent execution.
-    if (existingPrep) {
-      // Record info warning.
-      warnings.push(`Application ${app.id} already has an interview prep pack.`);
-      // Continue to next application.
+    // WHY: an unreadable check must not read as "no pack yet" — that would duplicate.
+    if (existingError) {
+      // WHY: surfaced to the caller; the row is retried next run.
+      warnings.push(`Could not check existing prep pack for ${app.id}; skipped.`);
+      // WHY: skip this row only.
       continue;
     }
 
-    // Extract joined job data.
-    // WHY: Obtain target company and role details.
+    // WHY: idempotent execution.
+    if (existingPrep) continue;
+
+    // WHY: the embed is untyped; narrow it once.
     const job = app.jobs as unknown as { company_name?: string; title?: string; description_raw?: string } | null;
-    // Extract company name.
+    // WHY: prompt context; a placeholder beats an empty fence.
     const companyName = job?.company_name?.trim() ?? "Company";
-    // Extract job title.
+    // WHY: prompt context.
     const jobTitle = job?.title?.trim() ?? "Position";
-    // Extract description.
+    // WHY: prompt context; may legitimately be empty.
     const jobDescription = job?.description_raw?.trim() ?? "";
 
-    // Build prompt payload.
-    // WHY: Format fenced prompt for Gemini.
+    // WHY: fenced prompt plus response schema.
     const promptPayload = buildInterviewPrepPrompt({ jobTitle, companyName, jobDescription });
-    // Declare prep pack container.
-    let prepPack: InterviewPrepPack;
 
-    // Try generating via Gemini.
-    // WHY: LLM provides tailored research and interview questions.
+    // WHY: count every attempt, successful or not, because each one spends quota.
+    geminiCalls++;
+    // WHY: a thrown transport error is treated like any other failure: store nothing.
+    let prepPack: InterviewPrepPack | null = null;
     try {
-      // Increment call counter.
-      geminiCalls++;
-      // Execute Gemini API call.
+      // WHY: the LLM call itself.
       const outcome = await generateGeminiContent(db, { prompt: promptPayload });
-
-      // Handle Gemini success outcome.
-      if (outcome.ok) {
-        // Extract text response.
-        const text = outcome.data.candidates?.[0]?.content?.parts?.[0]?.text;
-        // Parse JSON response.
-        if (text) {
-          // Parse response text.
-          const parsed = JSON.parse(text) as Record<string, unknown>;
-          // Construct prep pack.
-          prepPack = {
-            companyResearchOverview: String(parsed.companyResearchOverview ?? ""),
-            roleSpecificQuestions: Array.isArray(parsed.roleSpecificQuestions) ? parsed.roleSpecificQuestions.map(String) : [],
-            experienceHighlights: Array.isArray(parsed.experienceHighlights) ? parsed.experienceHighlights.map(String) : [],
-            talkingPoints: Array.isArray(parsed.talkingPoints) ? parsed.talkingPoints.map(String) : [],
-          };
-        } else {
-          // Use fallback if text empty.
-          prepPack = buildFallbackPrepPack(companyName, jobTitle);
-        }
+      // WHY: a failed call stores nothing; the next run retries.
+      if (!outcome.ok) {
+        // WHY: the reason code is safe to report; `detail` stays in the log.
+        warnings.push(`Gemini call failed for ${app.id} (${outcome.reason}); nothing stored, will retry.`);
+        // WHY: the detail can carry upstream error bodies.
+        console.warn("[interview-prep] gemini failure:", outcome.reason, outcome.detail);
       } else {
-        // Log Gemini failure reason.
-        warnings.push(`Gemini call unfulfilled for ${app.id} (${outcome.reason}); using fallback template.`);
-        // Use fallback template.
-        prepPack = buildFallbackPrepPack(companyName, jobTitle);
+        // WHY: the schema-constrained reply is in the first candidate's first part.
+        const text = outcome.data.candidates?.[0]?.content?.parts?.[0]?.text;
+        // WHY: shape-validated; null means off-schema, never an empty pack.
+        prepPack = typeof text === "string" ? parsePrepPack(text) : null;
+        // WHY: an off-schema reply is reported and retried, not stored.
+        if (prepPack === null) warnings.push(`Gemini reply for ${app.id} did not match the prep pack schema; nothing stored.`);
       }
     } catch (err) {
-      // Catch exceptions and log warning.
-      warnings.push(`Error generating prep pack for ${app.id}: ${err instanceof Error ? err.message : String(err)}`);
-      // Use fallback template on exception.
-      prepPack = buildFallbackPrepPack(companyName, jobTitle);
+      // WHY: transport exceptions are logged, not stored as a pack.
+      console.warn("[interview-prep] gemini threw:", err);
+      // WHY: the caller sees which row failed.
+      warnings.push(`Error generating prep pack for ${app.id}; nothing stored, will retry.`);
     }
 
-    // Insert prep pack into interview_prep_packs table.
-    // WHY: Persist prep pack for user review on dashboard.
+    // WHY: no validated pack, nothing to write.
+    if (prepPack === null) continue;
+
+    // WHY: persist the pack for the dashboard.
     const { error: insertError } = await db
       // Target interview_prep_packs table.
       .from("interview_prep_packs")
-      // Insert row properties.
+      // Explicit columns from the validated pack.
       .insert({
+        // WHY: tenant column, required by RLS `with check`.
         user_id: app.user_id,
+        // WHY: the idempotency key checked above.
         application_id: app.id,
+        // WHY: lets the UI join the job without going through applications.
         job_id: app.job_id,
+        // WHY: validated non-blank text.
         company_overview: prepPack.companyResearchOverview,
+        // WHY: validated non-empty lists.
         role_specific_questions: prepPack.roleSpecificQuestions,
+        // WHY: validated non-empty lists.
         experience_highlights: prepPack.experienceHighlights,
+        // WHY: validated non-empty lists.
         talking_points: prepPack.talkingPoints,
       });
 
-    // Handle insertion error.
-    // WHY: Log warning if database write fails.
+    // WHY: a failed write is reported per row.
     if (insertError) {
-      // Record warning message.
-      warnings.push(`Failed to insert interview_prep_pack for ${app.id}: ${insertError.message}`);
+      // WHY: detail to the log.
+      console.error("[interview-prep] insert failed:", app.id, insertError.message);
+      // WHY: the caller sees which row failed.
+      warnings.push(`Failed to insert interview_prep_pack for ${app.id}.`);
     } else {
-      // Advance the application status to indicate prep pack is ready.
-      // WHY: Enforces status graph and prevents re-processing.
-      const { error: rpcError } = await db.rpc("advance_application_status", {
-        target_application_id: app.id,
-        new_status: "interview_prepped",
-        acting_agent: "interview_prep" as AgentName,
-      });
-
-      // Handle RPC failure.
-      // WHY: Log warning if status graph transition fails.
-      if (rpcError) {
-        // Record warning message.
-        warnings.push(`Failed to advance status for ${app.id}: ${rpcError.message}`);
-      } else {
-        // Increment successful generation count.
-        generatedCount++;
-      }
+      // WHY: success is a stored pack; there is no status transition to wait for.
+      generatedCount++;
     }
   }
 
-  // Update telemetry run status to succeeded.
-  // WHY: Complete agent_runs record.
-  if (runId) {
-    // Update agent_runs row.
-    await db.from("agent_runs").update({
-      status: "succeeded",
-      finished_at: new Date().toISOString(),
-      rows_in: apps.length,
-      rows_out: generatedCount,
-      gemini_calls: geminiCalls,
-    }).eq("id", runId);
-  }
-
-  // Return success JSON response.
-  // WHY: Report processing metrics to caller.
+  // WHY: report processing metrics to the caller.
   return jsonResponse(200, {
+    // The run completed; per-row failures are in `warnings`.
     success: true,
+    // Rows considered.
     processed: apps.length,
+    // Packs stored.
     generated: generatedCount,
+    // LLM calls spent.
     gemini_calls: geminiCalls,
+    // Per-row problems.
     warnings,
   });
 });

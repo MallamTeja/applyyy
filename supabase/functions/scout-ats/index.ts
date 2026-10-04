@@ -6,6 +6,8 @@
 // `public.applications` records at status `discovered`, and updates polling telemetry.
 
 import { createAppUserClient } from "../_shared/db/client.ts";
+// Caller authentication shared with the pipeline agents; this function is browser-invoked.
+import { authorizeCaller } from "../_shared/db/gates.ts";
 import { getAdapter, supportedProviders, toJobInsert, type JobInsertContext } from "../_shared/ats/registry.ts";
 // The blanking guard. Splits one batch into the fewest upserts that cannot let an
 // omitted field overwrite a stored one — see _shared/screen/upsert-plan.ts for why
@@ -46,6 +48,23 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
 };
 
+// Default and ceiling for boards polled per run.
+const DEFAULT_BOARD_LIMIT = 10;
+// Each board is a network fetch plus several writes; this bounds wall-clock time.
+const MAX_BOARD_LIMIT = 50;
+
+// Parses `?limit` the same way the pipeline agents parse their batch size.
+function resolveBoardLimit(raw: string | null): number {
+  // Absent parameter: the default.
+  if (raw === null) return DEFAULT_BOARD_LIMIT;
+  // `Number("")` is 0 and is rejected below with NaN and fractions.
+  const parsed = Number(raw);
+  // Only a positive whole number is a limit.
+  if (!Number.isInteger(parsed) || parsed < 1) return DEFAULT_BOARD_LIMIT;
+  // Clamp to the ceiling.
+  return Math.min(parsed, MAX_BOARD_LIMIT);
+}
+
 function jsonResponse(status: number, data: Record<string, unknown>): Response {
   return new Response(JSON.stringify(data, null, 2), {
     status,
@@ -63,18 +82,25 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const url = new URL(req.url);
   const force = url.searchParams.get("force") === "true";
-  const limitBoards = parseInt(url.searchParams.get("limit") || "10", 10);
+  // Validated: `parseInt("abc")` is NaN and `parseInt("2.5")` silently truncates.
+  const limitBoards = resolveBoardLimit(url.searchParams.get("limit"));
   const specificBoard = url.searchParams.get("board");
 
   const clientResult = await createAppUserClient();
   if (!clientResult.ok) {
-    return jsonResponse(500, {
-      error: "db_client_failed",
-      detail: clientResult.reason,
-    });
+    // The reason can name env vars; it belongs in the log, not the response.
+    console.error("[scout-ats] database connection failed:", clientResult.reason);
+    return jsonResponse(500, { error: "db_client_failed" });
   }
 
   const { db } = clientResult;
+
+  // GATE 1 — WHO IS CALLING. The browser invokes this function (discoveryService.ts), and
+  // the platform's verify_jwt accepts the public anon key, so without this anyone holding
+  // the bundle's key could trigger polls — including `?force=true` past the kill switch.
+  const caller = await authorizeCaller(req, db, clientResult.userId);
+  // 401 for no/invalid session, 403 for someone else's; the verdict carries which.
+  if (!caller.ok) return jsonResponse(caller.status, { error: caller.error });
 
   // 1. Record run start in agent_runs
   const { data: runRow } = await db
@@ -306,56 +332,97 @@ Deno.serve(async (req: Request): Promise<Response> => {
       };
 
       const BATCH_SIZE = 50;
-      const jobRows: JobInsert[] = await Promise.all(
-        parseResult.postings.map((p) => toJobInsert(p, adapter, context))
+      // Postings stay paired with their rows: a re-sighted posting is rebuilt below with
+      // its STORED first_seen_at, which needs the posting, not just the row.
+      const prepared = await Promise.all(
+        parseResult.postings.map(async (posting) => ({ posting, row: await toJobInsert(posting, adapter, context) })),
       );
 
       let boardInserted = 0;
       let boardNewApps = 0;
 
-      for (let i = 0; i < jobRows.length; i += BATCH_SIZE) {
-        const batch = jobRows.slice(i, i + BATCH_SIZE);
+      for (let i = 0; i < prepared.length; i += BATCH_SIZE) {
+        // This slice of postings and the rows built for them.
+        const slice = prepared.slice(i, i + BATCH_SIZE);
+        // Rows alone, for the planner and the fallback lookup.
+        const batch: JobInsert[] = slice.map((p) => p.row);
 
-        // ONE UPSERT PER DISTINCT KEY-SET, not one per batch. postgrest-js sends the
-        // UNION of keys across the whole array as `columns=`, so a single request cannot
-        // express "this row omits description_raw but that one sets it" — the omitting
-        // row would be sent as NULL and would blank a stored description. Grouping is
-        // what makes the omission real. See _shared/screen/upsert-plan.ts.
-        const upsertGroups = planJobUpsertGroups(batch);
+        // WHICH OF THESE ALREADY EXIST, and when were they first seen? Read BEFORE writing
+        // so `first_seen_at` is write-once. The old single upsert built every row with
+        // `firstSeenAt: now`, so on every poll an undated job's `posted_at` and its
+        // source_refs `first_seen_at` were reset to the poll time — the staleness rule
+        // never saw it age — and `seen_count` never moved off 1.
+        const { data: storedRows, error: storedError } = await db
+          .from("jobs")
+          .select("id, fingerprint, first_seen_at, seen_count")
+          .in("fingerprint", batch.map((row) => row.fingerprint));
+        // An unreadable lookup would make every job look new; fail the board instead.
+        if (storedError) throw new Error(`jobs lookup failed: ${storedError.message}`);
+        // fingerprint -> stored sighting facts.
+        const storedByFingerprint = new Map(
+          (storedRows ?? []).map((r: { id: string; fingerprint: string; first_seen_at: string; seen_count: number }) => [r.fingerprint, r]),
+        );
 
         // Fingerprint -> job id, because the applications rows have to link to the job
-        // AND the screener needs the row the id came from. Keyed by fingerprint since
-        // that is the only identifier present on both sides of the upsert.
+        // AND the screener needs the row the id came from.
         const jobIdByFingerprint = new Map<string, string>();
+        // Existing rows already have their id.
+        for (const stored of storedByFingerprint.values()) jobIdByFingerprint.set(stored.fingerprint, stored.id);
 
-        // Issue each group, collecting ids as they come back.
-        for (const group of upsertGroups) {
-          const { data: upsertedJobs, error: jobError } = await db
+        // NEW ROWS: insert-only. `ignoreDuplicates` means a row that appeared between the
+        // lookup and this write (a concurrent run) is left alone rather than overwritten
+        // with a fresh first sighting. `first_seen_at` takes its column default.
+        const newRows = slice.filter((p) => !storedByFingerprint.has(p.row.fingerprint)).map((p) => p.row);
+        // ONE UPSERT PER DISTINCT KEY-SET, not one per batch. postgrest-js sends the
+        // UNION of keys across the whole array as `columns=`, so a single request cannot
+        // express "this row omits description_raw but that one sets it". See
+        // _shared/screen/upsert-plan.ts.
+        for (const group of planJobUpsertGroups(newRows)) {
+          const { data: insertedJobs, error: insertError } = await db
             .from("jobs")
-            .upsert(group, {
-              onConflict: "user_id,fingerprint",
-              ignoreDuplicates: false,
-            })
+            .upsert(group, { onConflict: "user_id,fingerprint", ignoreDuplicates: true })
             .select("id, fingerprint");
-
-          // The happy path: postgrest returns the rows it wrote.
-          if (!jobError && upsertedJobs) {
-            for (const job of upsertedJobs) jobIdByFingerprint.set(job.fingerprint, job.id);
-          }
+          // A failed write is a failed board, never a healthy one.
+          if (insertError) throw new Error(`jobs insert failed: ${insertError.message}`);
+          // Only rows actually inserted come back.
+          for (const job of insertedJobs ?? []) jobIdByFingerprint.set(job.fingerprint, job.id);
         }
 
-        // Fallback for anything the upsert did not return — unchanged in intent from the
-        // original, but now selecting `fingerprint` too, because an id alone cannot be
-        // matched back to the row the screener has to read.
+        // EXISTING ROWS: rebuilt with their stored first sighting, so the derived
+        // `posted_at` and the source_refs `first_seen_at` keep their original value.
+        // `first_seen_at` itself is never in the payload, so the upsert cannot touch it.
+        const resighted = await Promise.all(
+          slice
+            .filter((p) => storedByFingerprint.has(p.row.fingerprint))
+            .map(async (p) => {
+              // Narrowed by the filter.
+              const stored = storedByFingerprint.get(p.row.fingerprint)!;
+              // Same posting, same board, original first sighting.
+              const row = await toJobInsert(p.posting, adapter, { ...context, firstSeenAt: new Date(stored.first_seen_at) });
+              // ponytail: read-then-write increment; two concurrent polls of one board can
+              // lose a count. An RPC doing `seen_count = seen_count + 1` fixes it.
+              return { ...row, seen_count: stored.seen_count + 1, last_seen_at: now.toISOString() };
+            }),
+        );
+        // Same blanking guard as the insert path.
+        for (const group of planJobUpsertGroups(resighted)) {
+          const { error: updateError } = await db
+            .from("jobs")
+            .upsert(group, { onConflict: "user_id,fingerprint", ignoreDuplicates: false });
+          // A failed refresh is a failed board.
+          if (updateError) throw new Error(`jobs refresh failed: ${updateError.message}`);
+        }
+
+        // Fallback for rows inserted by a concurrent run between our lookup and insert.
         const missing = batch.filter((row) => !jobIdByFingerprint.has(row.fingerprint)).map((row) => row.fingerprint);
         if (missing.length > 0) {
-          const { data: existingJobs } = await db
+          const { data: existingJobs, error: existingError } = await db
             .from("jobs")
             .select("id, fingerprint")
             .in("fingerprint", missing);
-          if (existingJobs) {
-            for (const job of existingJobs) jobIdByFingerprint.set(job.fingerprint, job.id);
-          }
+          // Unresolvable ids would silently drop applications; fail the board.
+          if (existingError) throw new Error(`jobs fallback lookup failed: ${existingError.message}`);
+          for (const job of existingJobs ?? []) jobIdByFingerprint.set(job.fingerprint, job.id);
         }
 
         // Pair each persisted job with the row it was built from. Rows whose id could not
@@ -407,18 +474,22 @@ Deno.serve(async (req: Request): Promise<Response> => {
             })
             .select("id");
 
-          if (!appErr && insertedApps) {
-            boardNewApps += insertedApps.length;
-            totalApplicationsCreated += insertedApps.length;
-          }
+          // A failed queue write means jobs exist with no application row; the board
+          // failed, and the catch below records it so the next poll retries.
+          if (appErr) throw new Error(`applications upsert failed: ${appErr.message}`);
+          // Only rows actually inserted come back (ignoreDuplicates).
+          boardNewApps += (insertedApps ?? []).length;
+          // Run-level total.
+          totalApplicationsCreated += (insertedApps ?? []).length;
         }
 
         boardInserted += entries.length;
         totalJobsDiscovered += entries.length;
       }
 
-      // Update watchlist success telemetry
-      await db
+      // Update watchlist success telemetry. Checked: a board whose success record did
+      // not land would be re-polled as "never polled" and its cold-start guard re-armed.
+      const { error: watchlistError } = await db
         .from("company_watchlist")
         .update({
           poll_count: (board.poll_count || 0) + 1,
@@ -428,6 +499,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
           consecutive_failures: 0,
         })
         .eq("id", board.id);
+      // Reported as a failed board by the catch below.
+      if (watchlistError) throw new Error(`watchlist update failed: ${watchlistError.message}`);
 
       summaries.push({
         board: board.board_token,
@@ -465,11 +538,26 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // already captured in `summaries` and does not make the RUN a failure; the run
   // succeeded in doing its job of polling, so the row says so and the counters carry
   // the detail.
+  //
+  // HONEST CLOSE (2026-10-04): per-board failures are now COUNTED on the run row, and a
+  // run in which every attempted board failed is `failed` — "succeeded, 0 errors" over a
+  // run that wrote nothing was the old reading whenever every jobs upsert errored.
+  const failedBoards = summaries.filter((s) => s.status === "failed");
+  // Boards actually attempted; skipped ones (no adapter) are neither success nor failure.
+  const attemptedBoards = summaries.filter((s) => s.status !== "skipped").length;
+  // All attempted boards failed: the run did not do its job.
+  const runFailed = attemptedBoards > 0 && failedBoards.length === attemptedBoards;
   if (runId) {
     await db
       .from("agent_runs")
       .update({
-        status: "succeeded",
+        status: runFailed ? "failed" : "succeeded",
+        // How many boards failed, so a partial failure is visible on the health page.
+        error_count: failedBoards.length,
+        // The first few reasons; enough to diagnose without unbounded text.
+        error_detail: failedBoards.length > 0
+          ? failedBoards.slice(0, 5).map((s) => `${s.provider}/${s.board}: ${s.error ?? "unknown"}`).join("; ")
+          : null,
         finished_at: new Date().toISOString(),
         // rows_in is what we looked at, rows_out is what we created. Kept as two
         // numbers because "polled 40 boards, created 0 applications" is the early

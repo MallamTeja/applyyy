@@ -1,269 +1,174 @@
-// Import Deno standard HTTP server
-// This is required for Edge Functions
-import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
-// Import standard CORS headers
-// We will return these with every response
+// SKILL-GAP AGGREGATOR — counts which required skills the candidate's master profile lacks,
+// across the jobs the pipeline has scored or applied to, into `skill_gap_reports`.
+//
+// Rewritten 2026-10-04 after an audit found every query and write in the old version
+// named a column that does not exist (`applications.job_description`,
+// `applications.candidate_profile`, `last_calculated_at`, `agent_runs.agent_name`), so
+// the function had never produced a single row.
+//
+// NO `agent_runs` TELEMETRY, DELIBERATELY. The `agent_name` enum
+// (20260909234500_enums.sql) has no value for this aggregator, and borrowing another
+// agent's name would make the health page attribute these runs to that agent. The old
+// insert named a missing column and so never wrote anything either; removing it changes
+// no live behaviour. Restoring it needs an `alter type ... add value` migration first.
+
+// CORS headers, so a browser-side caller can read failures as well as successes.
 import { corsHeaders } from "../_shared/cors.ts";
-// Import the database client factory
-// This connects to Supabase using the user's token
+// The app-user client: every read and write below runs under RLS as that user.
 import { createAppUserClient } from "../_shared/db/client.ts";
-// Import the skill extractor module
-// This finds skills in job descriptions
+// Kill switch read through the shared helper, so this function fails closed the same way
+// every pipeline agent does instead of with its own `.single()` variant.
+import { readKillSwitch } from "../_shared/db/gates.ts";
+// Finds the skills a job description asks for.
 import { extractRequiredSkills } from "../_shared/analytics/skill-extractor.ts";
-// Import the skill gap logic
-// This diffs candidate skills against required skills
+// Diffs those skills against the candidate's profile.
 import { computeSkillGaps } from "../_shared/analytics/skill-gap.ts";
+// The profile type `computeSkillGaps` expects.
+import type { MasterProfile } from "../_shared/contracts/shared-types.ts";
 
-// Serve the HTTP request
-// This is the entrypoint for the Edge Function
+// Ceiling on applications read per run: extraction is pure CPU, so this bounds memory
+// rather than LLM spend.
+const APPLICATION_SCAN_LIMIT = 200;
+
+// One JSON response shape for every exit, so callers parse a single format.
+function jsonResponse(status: number, body: Record<string, unknown>): Response {
+  // CORS on every response, or a browser hides the status behind a CORS error.
+  return new Response(JSON.stringify(body), {
+    // JSON content type plus the shared CORS headers.
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    // The caller-chosen HTTP status.
+    status,
+  });
+}
+
+// Pulls `jobs.description_raw` out of the embedded relation by SHAPE. PostgREST returns a
+// to-one embed as an object, but an untyped client cannot promise that, so anything else
+// reads as "no description" rather than as a crash or a stringified object.
+function descriptionOf(embedded: unknown): string | null {
+  // Not an object: no usable embed.
+  if (typeof embedded !== "object" || embedded === null) return null;
+  // The one field this function needs.
+  const raw = (embedded as { description_raw?: unknown }).description_raw;
+  // Only a non-blank string is a description; "" would extract zero skills silently.
+  return typeof raw === "string" && raw.trim().length > 0 ? raw : null;
+}
+
+// Entry point. Errors inside are caught below so the caller always gets JSON.
 Deno.serve(async (req: Request): Promise<Response> => {
-    // Handle CORS preflight requests
-    // Browser sends OPTIONS before the actual request
-    if (req.method === "OPTIONS") {
-        // Return 204 No Content with CORS headers
-        // This allows the browser to proceed
-        return new Response(null, { headers: corsHeaders, status: 204 });
+  // Preflight: answer before touching the database.
+  if (req.method === "OPTIONS") {
+    // 204 with CORS headers lets the browser send the real request.
+    return new Response(null, { headers: corsHeaders, status: 204 });
+  }
+
+  // Sign in as the app user so RLS scopes every row to them.
+  const connection = await createAppUserClient();
+  // Without a session there is nothing safe to do.
+  if (!connection.ok) {
+    // The reason stays in the server log; it may name env vars.
+    console.error("[skill-gap] database connection failed:", connection.reason);
+    // 503: a configuration fault, retryable once fixed.
+    return jsonResponse(503, { error: "database_unavailable" });
+  }
+  // The authenticated client used for the rest of the run.
+  const db = connection.db;
+
+  // Fail closed: only an explicit, readable "on" lets the run proceed.
+  const killSwitch = await readKillSwitch(db);
+  // Disabled and unreadable both halt, with different codes so the caller can tell.
+  if (killSwitch.kind !== "enabled") {
+    // The detail is operational, not secret, but still belongs in the log.
+    console.warn("[skill-gap] kill switch:", killSwitch.kind, killSwitch.detail);
+    // 503 either way: the run did not happen.
+    return jsonResponse(503, { error: killSwitch.kind === "unreadable" ? "settings_unreadable" : "system_disabled" });
+  }
+
+  try {
+    // The candidate side of the diff: the newest master profile. Versions are immutable
+    // and append-only, so the highest version is the current one.
+    const { data: masterRow, error: masterError } = await db
+      // Versioned profile table (core_tables.sql).
+      .from("master_profiles")
+      // Only the profile JSON is needed.
+      .select("profile")
+      // Newest first.
+      .order("version", { ascending: false })
+      // Just the current version.
+      .limit(1)
+      // Zero rows is a state, not an error.
+      .maybeSingle();
+    // A failed read must not be mistaken for "no profile".
+    if (masterError) throw new Error(`master_profiles read failed: ${masterError.message}`);
+    // No profile: every required skill would count as a gap, which is noise, not a report.
+    if (!masterRow) return jsonResponse(409, { error: "no_master_profile" });
+    // The stored JSON, typed for the diff helper.
+    const candidateProfile = masterRow.profile as MasterProfile;
+
+    // The job side: description text lives on `jobs`, reached through `applications.job_id`.
+    const { data: applications, error: appsError } = await db
+      // Applications carry the status filter.
+      .from("applications")
+      // Embed the parent job's raw description; applications has no description column.
+      .select("id, jobs(description_raw)")
+      // Jobs the pipeline judged worth pursuing, i.e. real demand signals.
+      .in("status", ["scored", "applied"])
+      // Bound memory per run.
+      .limit(APPLICATION_SCAN_LIMIT);
+    // A failed read aborts; an empty report would look like "no gaps".
+    if (appsError) throw new Error(`applications read failed: ${appsError.message}`);
+
+    // skill -> number of jobs that need it and the candidate lacks.
+    const skillDemandMap = new Map<string, number>();
+    // One pass over the applications.
+    for (const app of applications ?? []) {
+      // The job description, or null when the embed is missing or blank.
+      const description = descriptionOf((app as { jobs?: unknown }).jobs);
+      // Nothing to extract from; skipping beats counting an empty job.
+      if (description === null) continue;
+      // Skills the job asks for.
+      const requiredSkills = extractRequiredSkills(description);
+      // Those the profile does not cover.
+      const gaps = computeSkillGaps({ requiredSkills, candidateProfile });
+      // Tally each missing skill once per job.
+      for (const gap of gaps) skillDemandMap.set(gap.skill, (skillDemandMap.get(gap.skill) ?? 0) + 1);
     }
 
-    // Connect to the database using the client wrapper
-    // This ensures RLS is respected
-    const connection = await createAppUserClient();
-    
-    // Check if the connection was successful
-    // If not, return a 503 error
-    if (!connection.ok) {
-        // Database is unavailable
-        // Return JSON error response
-        return new Response(JSON.stringify({ error: "database_unavailable" }), {
-            // Include standard headers
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-            // Service Unavailable status code
-            status: 503
-        });
+    // One timestamp for the whole batch, so rows written together read as one report.
+    const now = new Date().toISOString();
+    // Rows for the upsert. `user_id` is explicit: the conflict target includes it, and the
+    // table has no default for it.
+    const upsertRecords = Array.from(skillDemandMap.entries()).map(([skill, count]) => ({
+      // Tenant column, half of the unique key.
+      user_id: connection.userId,
+      // The other half of the unique key.
+      skill_name: skill,
+      // Demand within this scan.
+      demand_count: count,
+      // The real column name (phase3 migration); `last_calculated_at` never existed.
+      last_seen_at: now,
+      // No trigger maintains this column, so the writer must.
+      updated_at: now,
+    }));
+
+    // Skip the round trip when there is nothing to write.
+    if (upsertRecords.length > 0) {
+      // Insert-or-update keyed on the table's actual unique constraint.
+      const { error: upsertError } = await db
+        // The report table.
+        .from("skill_gap_reports")
+        // `UNIQUE(user_id, skill_name)` — `skill_name` alone matches no constraint and
+        // PostgREST rejects the upsert.
+        .upsert(upsertRecords, { onConflict: "user_id,skill_name" });
+      // A failed write is a failed run.
+      if (upsertError) throw new Error(`skill_gap_reports upsert failed: ${upsertError.message}`);
     }
 
-    // Extract the database client from the connection
-    // We will use this to run queries
-    const db = connection.db;
-
-    // Check the global kill switch to ensure system is enabled
-    // This prevents background jobs from running if disabled
-    const { data: settings, error: settingsError } = await db
-        // Query the system_settings table
-        // We only care about the system_enabled flag
-        .from('system_settings')
-        // Select just the enabled column
-        // We only need the first row
-        .select('system_enabled')
-        // Get single row
-        // Limit 1
-        .single();
-
-    // If the system is disabled or we couldn't fetch settings
-    // Return early to prevent processing
-    if (settingsError || !settings?.system_enabled) {
-        // Return a 503 error
-        // System is currently disabled
-        return new Response(JSON.stringify({ error: "system_disabled" }), {
-            // Include CORS headers
-            // Content type JSON
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-            // Status code 503
-            // Service Unavailable
-            status: 503
-        });
-    }
-
-    // Create a new agent run record for telemetry
-    // This tracks the execution of this job
-    const runId = crypto.randomUUID();
-    // Insert the start record
-    // Status is running initially
-    await db.from('agent_runs').insert({
-        // The unique run ID
-        id: runId,
-        // The name of the agent
-        agent_name: 'skill_gap_aggregator',
-        // The current status
-        status: 'running',
-        // Start time
-        started_at: new Date().toISOString()
-    });
-
-    try {
-        // Fetch applications that have been scored or applied
-        // We need the job description and candidate profile to compute gaps
-        const { data: applications, error: appsError } = await db
-            // Query the applications table
-            // We need jobs with descriptions
-            .from('applications')
-            // Select required fields
-            // We need job_description and candidate_profile
-            .select(`
-                id,
-                status,
-                job_description,
-                candidate_profile
-            `)
-            // Filter by relevant statuses
-            // We only care about scored or applied
-            .in('status', ['scored', 'applied'])
-            // Limit batch size to avoid memory issues
-            // CPU operations are deterministic here, so 200 is fine
-            .limit(200);
-
-        // Check for query errors
-        // If we fail to fetch, throw to catch block
-        if (appsError) {
-            // Throwing sends it to the error handler
-            // Which logs it and updates the run status
-            throw new Error(`Failed to fetch applications: ${appsError.message}`);
-        }
-
-        // Initialize a map to aggregate demand counts
-        // Key is the skill name, value is the demand count
-        const skillDemandMap = new Map<string, number>();
-
-        // Iterate over each fetched application
-        // To compute gaps and aggregate
-        for (const app of (applications || [])) {
-            // If the job description is missing
-            // We cannot extract skills, so skip
-            if (!app.job_description) {
-                // Continue to the next application
-                // Nothing to do here
-                continue;
-            }
-
-            // Extract required skills from the job description
-            // This returns an array of skill strings
-            const requiredSkills = extractRequiredSkills(app.job_description);
-            
-            // Compute the skill gaps for this application
-            // This compares required against candidate skills
-            const gaps = computeSkillGaps({
-                // Pass in the required skills
-                // We just extracted them
-                requiredSkills,
-                // Pass in the candidate profile
-                // This might be null
-                candidateProfile: app.candidate_profile
-            });
-
-            // Iterate over each computed gap
-            // To aggregate the demand
-            for (const gap of gaps) {
-                // Get the current demand count for this skill
-                // Default to 0 if not seen yet
-                const currentCount = skillDemandMap.get(gap.skill) || 0;
-                // Increment the demand count
-                // And store it back in the map
-                skillDemandMap.set(gap.skill, currentCount + 1);
-            }
-        }
-
-        // Prepare records for upserting into the database
-        // Convert the map to an array of objects
-        const upsertRecords = Array.from(skillDemandMap.entries()).map(([skill, count]) => ({
-            // The skill name
-            skill_name: skill,
-            // The aggregated demand count
-            demand_count: count,
-            // Update the last_calculated timestamp
-            last_calculated_at: new Date().toISOString()
-        }));
-
-        // If we have records to upsert
-        // Proceed with database operation
-        if (upsertRecords.length > 0) {
-            // Upsert into skill_gap_reports
-            // This inserts or updates based on the skill name
-            const { error: upsertError } = await db
-                // Target the skill_gap_reports table
-                // This stores aggregated data
-                .from('skill_gap_reports')
-                // Perform the upsert
-                // On conflict with skill_name
-                .upsert(upsertRecords, { onConflict: 'skill_name' });
-
-            // Check for upsert errors
-            // Throw to error handler if failed
-            if (upsertError) {
-                // Log and update status
-                // By throwing an error
-                throw new Error(`Failed to upsert skill gaps: ${upsertError.message}`);
-            }
-        }
-
-        // Update the agent run status to completed
-        // Job finished successfully
-        await db.from('agent_runs')
-            // Target this specific run
-            // By ID
-            .update({
-                // Set status to completed
-                // This indicates success
-                status: 'completed',
-                // Record the finish time
-                // For telemetry
-                finished_at: new Date().toISOString()
-            })
-            // Match the run ID
-            // That we generated earlier
-            .eq('id', runId);
-
-        // Return a successful response
-        // Indicate how many skills were aggregated
-        return new Response(JSON.stringify({ 
-            // Success flag
-            // Job done
-            success: true, 
-            // Number of aggregated skills
-            // For logging purposes
-            aggregatedSkills: upsertRecords.length 
-        }), {
-            // Include CORS headers
-            // Content type JSON
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-            // Status code 200 OK
-            // Success
-            status: 200
-        });
-
-    } catch (err: any) {
-        // Handle any errors that occurred during processing
-        // Update the agent run status to failed
-        await db.from('agent_runs')
-            // Target this specific run
-            // By ID
-            .update({
-                // Set status to failed
-                // This indicates an error
-                status: 'failed',
-                // Record the finish time
-                // Even on failure
-                finished_at: new Date().toISOString(),
-                // Store the error message
-                // For debugging
-                error_message: err.message
-            })
-            // Match the run ID
-            // That we generated earlier
-            .eq('id', runId);
-
-        // Return a 500 error response
-        // Internal Server Error
-        return new Response(JSON.stringify({ 
-            // Error key
-            // The message
-            error: err.message 
-        }), {
-            // Include CORS headers
-            // Content type JSON
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-            // Status code 500
-            // Internal Server Error
-            status: 500
-        });
-    }
+    // Success: report how many skills were written.
+    return jsonResponse(200, { success: true, aggregatedSkills: upsertRecords.length });
+  } catch (err) {
+    // Full detail to the server log only; it can carry table and constraint names.
+    console.error("[skill-gap] run failed:", err);
+    // A fixed code to the caller.
+    return jsonResponse(500, { error: "skill_gap_failed" });
+  }
 });

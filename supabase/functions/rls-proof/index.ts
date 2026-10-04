@@ -216,145 +216,172 @@ Deno.serve(async (request: Request): Promise<Response> => {
     return null;
   };
 
-  // Seed A.
-  const seedAError = await seed(clientA, "rls-proof-tenant-a", createdByA);
-  // Seed B.
-  const seedBError = seedAError === null ? await seed(clientB, "rls-proof-tenant-b", createdByB) : null;
-  // Either failure aborts before any assertion, because an unseeded test would pass
-  // trivially — both tenants would see zero rows and "isolation" would look perfect.
-  if (seedAError !== null || seedBError !== null) {
-    return json(500, { error: "seeding failed", detail: seedAError ?? seedBError });
-  }
-
-  // STEP 2 & 3 — READ ISOLATION, IN BOTH DIRECTIONS.
-  //
-  // THE MIRROR IS NOT OPTIONAL AND IS THE HALF A CASUAL TEST DROPS. A policy that
-  // accidentally compares against a constant, or against the wrong side of a join,
-  // can pass for one user and fail for the other. Checking only A would ratify it.
-  for (const [label, client, ownToken, otherToken] of [
-    ["A", clientA, "rls-proof-tenant-a", "rls-proof-tenant-b"] as const,
-    ["B", clientB, "rls-proof-tenant-b", "rls-proof-tenant-a"] as const,
-  ]) {
-    // What this tenant can see in the seeded table.
-    const { data, error } = await client.from("company_watchlist").select("board_token");
-    // An error here is a failure, not an absence.
-    if (error !== null) {
-      results.push({ step: `read isolation as ${label}`, passed: false, detail: `query failed: ${error.message}` });
-      continue;
-    }
-    // The tokens visible to this tenant.
-    const visible = (data ?? []).map((row) => row.board_token as string);
-    // Its own row must be visible, or the policy is too restrictive — which would
-    // present as the silent stop rather than as a leak.
-    const seesOwn = visible.includes(ownToken);
-    // The other tenant's row must NOT be visible. This is the leak test.
-    const seesOther = visible.includes(otherToken);
-    // Both halves must hold.
-    results.push({
-      step: `read isolation as ${label}`,
-      passed: seesOwn && !seesOther,
-      detail: `sees own=${seesOwn}, sees other tenant=${seesOther}, visible=[${visible.join(", ")}]`,
-    });
-  }
-
-  // Whole-catalogue sweep as A: no user-scoped table may expose B's row count.
-  for (const table of USER_SCOPED_TABLES) {
-    // Count as A.
-    const asA = await countVisible(clientA, table);
-    // Count as B.
-    const asB = await countVisible(clientB, table);
-    // An error on either side is reported rather than treated as zero.
-    if (typeof asA === "string" || typeof asB === "string") {
-      results.push({ step: `catalogue sweep ${table}`, passed: false, detail: `${asA} / ${asB}` });
-      continue;
-    }
-    // Only `company_watchlist` was seeded, so it is the only table where a non-zero
-    // count is expected — and it must be exactly one each, never two.
-    const expected = table === "company_watchlist" ? 1 : 0;
-    // Both tenants must see exactly their own.
-    results.push({
-      step: `catalogue sweep ${table}`,
-      passed: asA === expected && asB === expected,
-      detail: `A sees ${asA}, B sees ${asB}, expected ${expected} each`,
-    });
-  }
-
-  // STEP 4 — THE CROSS-TENANT WRITE. The one most likely to break.
-  //
-  // `with check` IS A SEPARATE MECHANISM FROM `using`. `using` filters what you can
-  // SEE; `with check` validates what you WRITE. A policy carrying only `using` reads
-  // rows correctly — passing every check made so far — while permitting writes into
-  // another tenancy. That combination is invisible to the catalogue and to any
-  // read-only test.
-
-  // 4a: A attempts to UPDATE B's row.
-  const { data: updated, error: updateError } = await clientA
-    .from("company_watchlist")
-    .update({ company_name: "HIJACKED BY TENANT A" })
-    .eq("board_token", "rls-proof-tenant-b")
-    .select("id");
-  // Under correct RLS, `using` hides B's row so the update matches nothing: no error,
-  // zero rows affected. Rows affected means a genuine cross-tenant write happened.
-  results.push({
-    step: "cross-tenant UPDATE is refused",
-    passed: (updated ?? []).length === 0,
-    detail: updateError === null ? `${(updated ?? []).length} rows updated (expected 0)` : `rejected with: ${updateError.message}`,
-  });
-
-  // 4b: A attempts to INSERT a row explicitly owned by B.
-  //
-  // NAMING `user_id` EXPLICITLY IS LOAD-BEARING AND IS THE TRAP IN THIS STEP.
-  // `company_watchlist.user_id` DEFAULTS to `auth.uid()`, so an insert that omits it
-  // is silently rewritten to A's own id — and the test then passes because the write
-  // was never cross-tenant at all. That is a test that cannot fail, the same shape as
-  // a type-only bundling probe.
-  const { data: inserted, error: insertError } = await clientA
-    .from("company_watchlist")
-    .insert({ user_id: bId, ats_provider: "greenhouse", board_token: "rls-proof-forged", company_name: "forged", company_slug: "forged" })
-    .select("id");
-  // A correct `with check` rejects this outright.
-  const insertRefused = insertError !== null || (inserted ?? []).length === 0;
-  // Record the verdict.
-  results.push({
-    step: "cross-tenant INSERT naming another user_id is refused",
-    passed: insertRefused,
-    detail: insertError === null ? `insert SUCCEEDED — with check is missing or wrong (${(inserted ?? []).length} rows)` : `rejected with: ${insertError.message}`,
-  });
-  // If it somehow succeeded, the row must still be cleaned up — track it as B's,
-  // since that is who now owns it.
-  for (const row of inserted ?? []) createdByB.push(row.id as string);
-
-  // STEP 5 — NEGATIVE CONTROL. With no session at all, `auth.uid()` is null and every
-  // policy predicate must fail closed. If this returns rows, the tables are readable
-  // by the world and nothing above matters.
-  const anonClient = createClient(url, anonKey, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
-  // Count as nobody.
-  const anonCount = await countVisible(anonClient, "company_watchlist");
-  // Zero is the only acceptable answer; an error is also acceptable and is recorded.
-  results.push({
-    step: "unauthenticated session sees nothing",
-    passed: anonCount === 0 || typeof anonCount === "string",
-    detail: typeof anonCount === "string" ? `rejected with: ${anonCount}` : `anon sees ${anonCount} rows (expected 0)`,
-  });
-
-  // SAFEGUARD 2 — CLEANUP, WITH LOUD FAILURE.
-  //
-  // Each tenant deletes its own rows, because under correct RLS neither can delete
-  // the other's — and using a privileged path to clean up would undermine the very
-  // isolation being tested.
+  // Filled in by the `finally` below, read when building the response.
   const cleanupErrors: string[] = [];
-  // Delete A's rows as A.
-  for (const [client, ids, label] of [[clientA, createdByA, "A"] as const, [clientB, createdByB, "B"] as const]) {
-    // Nothing to remove.
-    if (ids.length === 0) continue;
-    // Delete by explicit id, never by a blanket predicate — a broad delete against a
-    // live database is exactly the mistake this whole function is being careful about.
-    const { error } = await client.from("company_watchlist").delete().in("id", ids);
-    // Record rather than ignore.
-    if (error !== null) cleanupErrors.push(`tenant ${label}: ${error.message}`);
+  // Rows still visible to A after cleanup; a string when that count itself failed.
+  let remaining: number | string = -1;
+  // Set when seeding fails, so the response can say so after cleanup has run.
+  let seedFailure: string | null = null;
+
+  // EVERYTHING FROM THE FIRST SEED ON RUNS INSIDE try/finally (2026-10-04). Before, a
+  // failed seed of B returned early and A's seeded row was never deleted — and the next
+  // run then hit SAFEGUARD 1's sibling problem: a leftover test row that looks like data.
+  // The same applied to any exception thrown mid-assertion.
+  try {
+    // Seed A.
+    const seedAError = await seed(clientA, "rls-proof-tenant-a", createdByA);
+    // Seed B.
+    const seedBError = seedAError === null ? await seed(clientB, "rls-proof-tenant-b", createdByB) : null;
+    // Either failure aborts before any assertion, because an unseeded test would pass
+    // trivially — both tenants would see zero rows and "isolation" would look perfect.
+    if (seedAError !== null || seedBError !== null) {
+      // Recorded; the `finally` still removes whatever WAS seeded.
+      seedFailure = seedAError ?? seedBError;
+      // No assertions on a half-seeded database.
+      return json(500, { error: "seeding failed", detail: seedFailure });
+    }
+
+    // STEP 2 & 3 — READ ISOLATION, IN BOTH DIRECTIONS.
+    //
+    // THE MIRROR IS NOT OPTIONAL AND IS THE HALF A CASUAL TEST DROPS. A policy that
+    // accidentally compares against a constant, or against the wrong side of a join,
+    // can pass for one user and fail for the other. Checking only A would ratify it.
+    for (const [label, client, ownToken, otherToken] of [
+      ["A", clientA, "rls-proof-tenant-a", "rls-proof-tenant-b"] as const,
+      ["B", clientB, "rls-proof-tenant-b", "rls-proof-tenant-a"] as const,
+    ]) {
+      // What this tenant can see in the seeded table.
+      const { data, error } = await client.from("company_watchlist").select("board_token");
+      // An error here is a failure, not an absence.
+      if (error !== null) {
+        results.push({ step: `read isolation as ${label}`, passed: false, detail: `query failed: ${error.message}` });
+        continue;
+      }
+      // The tokens visible to this tenant.
+      const visible = (data ?? []).map((row) => row.board_token as string);
+      // Its own row must be visible, or the policy is too restrictive — which would
+      // present as the silent stop rather than as a leak.
+      const seesOwn = visible.includes(ownToken);
+      // The other tenant's row must NOT be visible. This is the leak test.
+      const seesOther = visible.includes(otherToken);
+      // Both halves must hold.
+      results.push({
+        step: `read isolation as ${label}`,
+        passed: seesOwn && !seesOther,
+        detail: `sees own=${seesOwn}, sees other tenant=${seesOther}, visible=[${visible.join(", ")}]`,
+      });
+    }
+
+    // Whole-catalogue sweep as A: no user-scoped table may expose B's row count.
+    for (const table of USER_SCOPED_TABLES) {
+      // Count as A.
+      const asA = await countVisible(clientA, table);
+      // Count as B.
+      const asB = await countVisible(clientB, table);
+      // An error on either side is reported rather than treated as zero.
+      if (typeof asA === "string" || typeof asB === "string") {
+        results.push({ step: `catalogue sweep ${table}`, passed: false, detail: `${asA} / ${asB}` });
+        continue;
+      }
+      // Only `company_watchlist` was seeded, so it is the only table where a non-zero
+      // count is expected — and it must be exactly one each, never two.
+      const expected = table === "company_watchlist" ? 1 : 0;
+      // Both tenants must see exactly their own.
+      results.push({
+        step: `catalogue sweep ${table}`,
+        passed: asA === expected && asB === expected,
+        detail: `A sees ${asA}, B sees ${asB}, expected ${expected} each`,
+      });
+    }
+
+    // STEP 4 — THE CROSS-TENANT WRITE. The one most likely to break.
+    //
+    // `with check` IS A SEPARATE MECHANISM FROM `using`. `using` filters what you can
+    // SEE; `with check` validates what you WRITE. A policy carrying only `using` reads
+    // rows correctly — passing every check made so far — while permitting writes into
+    // another tenancy. That combination is invisible to the catalogue and to any
+    // read-only test.
+
+    // 4a: A attempts to UPDATE B's row.
+    const { data: updated, error: updateError } = await clientA
+      .from("company_watchlist")
+      .update({ company_name: "HIJACKED BY TENANT A" })
+      .eq("board_token", "rls-proof-tenant-b")
+      .select("id");
+    // Under correct RLS, `using` hides B's row so the update matches nothing: no error,
+    // zero rows affected. Rows affected means a genuine cross-tenant write happened.
+    results.push({
+      step: "cross-tenant UPDATE is refused",
+      passed: (updated ?? []).length === 0,
+      detail: updateError === null ? `${(updated ?? []).length} rows updated (expected 0)` : `rejected with: ${updateError.message}`,
+    });
+
+    // 4b: A attempts to INSERT a row explicitly owned by B.
+    //
+    // NAMING `user_id` EXPLICITLY IS LOAD-BEARING AND IS THE TRAP IN THIS STEP.
+    // `company_watchlist.user_id` DEFAULTS to `auth.uid()`, so an insert that omits it
+    // is silently rewritten to A's own id — and the test then passes because the write
+    // was never cross-tenant at all. That is a test that cannot fail, the same shape as
+    // a type-only bundling probe.
+    const { data: inserted, error: insertError } = await clientA
+      .from("company_watchlist")
+      .insert({ user_id: bId, ats_provider: "greenhouse", board_token: "rls-proof-forged", company_name: "forged", company_slug: "forged" })
+      .select("id");
+    // A correct `with check` rejects this outright.
+    const insertRefused = insertError !== null || (inserted ?? []).length === 0;
+    // Record the verdict.
+    results.push({
+      step: "cross-tenant INSERT naming another user_id is refused",
+      passed: insertRefused,
+      detail: insertError === null ? `insert SUCCEEDED — with check is missing or wrong (${(inserted ?? []).length} rows)` : `rejected with: ${insertError.message}`,
+    });
+    // If it somehow succeeded, the row must still be cleaned up — track it as B's,
+    // since that is who now owns it.
+    for (const row of inserted ?? []) createdByB.push(row.id as string);
+
+    // STEP 5 — NEGATIVE CONTROL. With no session at all, `auth.uid()` is null and every
+    // policy predicate must fail closed. If this returns rows, the tables are readable
+    // by the world and nothing above matters.
+    const anonClient = createClient(url, anonKey, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
+    // A plain select, not `countVisible`: a HEAD request carries no error body, so the
+    // SQLSTATE that distinguishes "blocked" from "broken" would be lost.
+    const { data: anonRows, error: anonError } = await anonClient.from("company_watchlist").select("id").limit(1);
+    // ONLY two outcomes prove anon is blocked: zero rows (RLS filtered everything), or
+    // SQLSTATE 42501 insufficient_privilege (no table grant to anon). The old check passed
+    // on ANY error — a network failure, a renamed table, a 500 — so a broken probe read as
+    // proof of isolation. §5: an error is not an answer.
+    const anonBlocked = anonError === null ? (anonRows ?? []).length === 0 : anonError.code === "42501";
+    // Record the verdict with the evidence.
+    results.push({
+      step: "unauthenticated session sees nothing",
+      passed: anonBlocked,
+      detail: anonError === null
+        ? `anon sees ${(anonRows ?? []).length} rows (expected 0)`
+        : `rejected with ${anonError.code ?? "no code"}: ${anonError.message} (only 42501 proves a block)`,
+    });
+  } finally {
+
+    // SAFEGUARD 2 — CLEANUP, WITH LOUD FAILURE.
+    //
+    // Each tenant deletes its own rows, because under correct RLS neither can delete
+    // the other's — and using a privileged path to clean up would undermine the very
+    // isolation being tested.
+    // Delete A's rows as A.
+    for (const [client, ids, label] of [[clientA, createdByA, "A"] as const, [clientB, createdByB, "B"] as const]) {
+      // Nothing to remove.
+      if (ids.length === 0) continue;
+      // Delete by explicit id, never by a blanket predicate — a broad delete against a
+      // live database is exactly the mistake this whole function is being careful about.
+      const { error } = await client.from("company_watchlist").delete().in("id", ids);
+      // Record rather than ignore.
+      if (error !== null) cleanupErrors.push(`tenant ${label}: ${error.message}`);
+    }
+    // Verify the cleanup actually happened rather than trusting the absence of an error.
+    remaining = await countVisible(clientA, "company_watchlist");
+    // The seed-failure path returns before the response below can report cleanup, so a
+    // dirty database is at least logged on every path.
+    if (cleanupErrors.length > 0 || remaining !== 0) console.error("[rls-proof] cleanup incomplete:", cleanupErrors, remaining);
   }
-  // Verify the cleanup actually happened rather than trusting the absence of an error.
-  const remaining = await countVisible(clientA, "company_watchlist");
   // A leftover row is a loud failure: test tenancies left behind will later look
   // exactly like real data, which is worse than never having run this.
   const cleanupClean = cleanupErrors.length === 0 && remaining === 0;
