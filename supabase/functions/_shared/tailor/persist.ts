@@ -80,7 +80,10 @@ export async function persistTailorOutcome(
   // THE PAYLOAD, FIRST. See the header: the status that follows is a claim this line
   // succeeded, so it must actually have succeeded before the claim is made.
   const write = await client.from("applications")
-    .update({ tailored_profile: outcome.resume })
+    // `tailor_refs` rides in the SAME statement as the profile: a second write could fail
+    // alone and leave a `tailored` row whose refs the Auditor never sees. The column is
+    // `tailor_refs jsonb` (core_tables.sql:351), read by audit/detector.ts:503.
+    .update({ tailored_profile: outcome.resume, tailor_refs: outcome.refs })
     // Scoped to one row. Without this predicate the update would rewrite every
     // application the caller's RLS context can see.
     .eq("id", applicationId);

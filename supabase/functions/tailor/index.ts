@@ -33,6 +33,10 @@ import { createTailorer } from "../_shared/tailor/tailorer.ts";
 import { persistTailorOutcome } from "../_shared/tailor/persist.ts";
 // The master shape, so the stored JSON is cast against the contract rather than inferred.
 import type { MasterProfile } from "../_shared/contracts/shared-types.ts";
+// Caller auth and the fail-closed kill switch, shared by every pipeline agent.
+import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
+// Shared CORS headers, plus the boundary that keeps them on an uncaught 500.
+import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 
 // How many rows one invocation will attempt. Bounded because each row is a Gemini call
 // against a shared key pool, and an unbounded batch would drain the quota that every
@@ -40,20 +44,6 @@ import type { MasterProfile } from "../_shared/contracts/shared-types.ts";
 const DEFAULT_BATCH_SIZE = 10;
 // Hard ceiling, so a caller-supplied value cannot turn one request into a quota outage.
 const MAX_BATCH_SIZE = 25;
-
-// Copied from scout-ats rather than shared, matching this repo's existing habit for
-// per-function CORS. A wildcard origin is safe here only because the function grants
-// nothing on its own: every query runs under the caller's RLS session, so an origin that
-// cannot authenticate cannot read a row.
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  // `authorization` and `apikey` are the two Supabase actually needs; the other two are
-  // what the JS client sends unprompted, and omitting them fails the preflight.
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  // GET as well as POST, so this is drivable from a browser address bar while it has no
-  // scheduled caller — which is the whole point of it being manually invokable today.
-  "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-};
 
 // One JSON response shape for every exit, so a caller never has to branch on content type.
 function jsonResponse(status: number, data: Record<string, unknown>): Response {
@@ -79,7 +69,8 @@ function resolveBatchSize(raw: string | null): number {
   return Math.min(parsed, MAX_BATCH_SIZE);
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+// Wrapped so a throw anywhere below still answers with CORS headers the browser can read.
+Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Response> => {
   // Preflight, before any work or any database connection.
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
@@ -97,6 +88,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // Unpacked once so the rest of the handler reads as ordinary queries rather than
   // threading the result union through every call.
   const db = connection.db;
+
+  // Refuse anyone but the app user BEFORE any write or Gemini spend. The sign-in above
+  // never looks at the caller, so the public anon key alone used to suffice.
+  const caller = await authorizeCaller(req, db, connection.userId);
+  // 401 for no/invalid session, 403 for someone else's — the verdict carries which.
+  if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });
 
   // Open the run row BEFORE the work, so an uncatchable death leaves a visible stuck
   // run rather than no trace at all — the documented design in supporting_tables.sql.
@@ -122,6 +119,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
         .eq("id", runId);
     }
     return jsonResponse(status, { success: false, error });
+  }
+
+  // The shared fail-closed kill switch. The tailor never checked it before, so it spent
+  // Gemini quota with the system turned off.
+  const killSwitch = await readKillSwitch(db);
+  // A failed read is an error, not a decision.
+  if (killSwitch.kind === "unreadable") return await failRun(503, "kill_switch_read_failed", killSwitch.detail);
+  // Off, or no settings row: a deliberate skip, recorded so the health page says why.
+  if (killSwitch.kind === "disabled") {
+    // Closed as skipped rather than left `running`.
+    if (runId) {
+      await db
+        .from("agent_runs")
+        .update({ status: "skipped_disabled", finished_at: new Date().toISOString(), error_detail: killSwitch.detail })
+        .eq("id", runId);
+    }
+    // 200: the system did what it was told.
+    return jsonResponse(200, { success: true, status: "skipped_disabled", detail: killSwitch.detail });
   }
 
   // THE PINNED MASTER. Highest version wins; the trigger assigns version as max+1.
@@ -213,6 +228,26 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // Per-row outcomes, so one failure is legible without reading the logs.
   const failures: Array<{ applicationId: string; error: string }> = [];
 
+  // SKIPPED ROWS ARE FAILED, NOT LEFT. A row with no posting, title, company or
+  // description will be just as untailorable next run — and because the queue is oldest
+  // first, a handful of them would sit at the head forever and starve every row behind
+  // them. These reasons are all properties of the stored data, never transient, so
+  // `scored -> failed` (allowed for `tailor`, status_transition_guard.sql:118) is honest.
+  for (const skip of plan.skipped) {
+    // `malformed_row` has no id to fail; it cannot be moved and is only reported.
+    if (skip.applicationId === null) continue;
+    // Through the RPC — a bare status update is refused by the guard with 42501.
+    const { error } = await db.rpc("advance_application_status", {
+      p_application_id: skip.applicationId,
+      p_to_status: "failed",
+      p_agent: "tailor",
+      // The named skip reason, so the dashboard can say what was missing.
+      p_detail: { reason: "tailor_input_unusable", skip_reason: skip.reason },
+    });
+    // A refused move leaves the row at `scored`; recorded so it is not invisible.
+    if (error) failures.push({ applicationId: skip.applicationId, error: error.message });
+  }
+
   // Sequential on purpose. The key pool paces itself, and firing ten concurrent calls
   // would race every one of them into the same 429 the pacer exists to avoid.
   for (const job of plan.tailorable) {
@@ -235,24 +270,50 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
   }
 
-  // Close the run. The run SUCCEEDED at doing its job even when individual rows failed —
-  // those are carried in the counters, the same split scout-ats uses.
+  // HONEST FINAL STATUS. `failed` when there was work, none of it moved, and errors
+  // explain why: the live matcher run seen 2026-10-04 (rows_in 10, rows_out 0,
+  // error_count 10) was stamped `succeeded`, the silent stop agent_runs exists to catch.
+  // Mixed results stay `succeeded` with error_count set: `agent_run_status` has no
+  // `partial` (enums.sql:190), and an empty queue (rows_in 0) is idle, not broken.
+  const runStatus = plan.tailorable.length > 0 && tailored === 0 && failures.length > 0 ? "failed" : "succeeded";
+  // The first few DISTINCT reasons, capped: ten rows failing the same way is one fact,
+  // and error_detail is a health-page line, not a log. Null on a clean run so a stale
+  // reason never sits beside error_count 0.
+  const errorDetail = failures.length > 0
+    // Set dedupes, slice(0, 3) keeps it short, slice(0, 500) bounds a pathological message.
+    ? [...new Set(failures.map((f) => f.error))].slice(0, 3).join(" | ").slice(0, 500)
+    : null;
+
+  // Close the run. Partial failures stay `succeeded` with their count; a run that
+  // tailored nothing because every row errored is `failed`.
   if (runId) {
     await db
       .from("agent_runs")
       .update({
-        status: "succeeded",
+        // Derived from the counters, never hard-coded: see runStatus above.
+        status: runStatus,
+        // The failure summary, so the health page says WHY and not just how many.
+        error_detail: errorDetail,
+        // When the run closed.
         finished_at: new Date().toISOString(),
         // What we looked at, and what we wrote. Two numbers because "read 10, wrote 0"
         // is the early warning that the pipeline is dry, and one total would hide it.
         rows_in: plan.tailorable.length,
         rows_out: tailored,
+        // Transport, quota and write failures, so a run that wrote nothing because every
+        // call failed does not read as a clean, idle success.
+        error_count: failures.length,
       })
       .eq("id", runId);
   }
 
   return jsonResponse(200, {
+    // The function ran to completion; per-row failures are in `failures` below.
     success: true,
+    // The same status written to agent_runs, so the dashboard and health page agree.
+    status: runStatus,
+    // The same failure summary, so the operator sees it without a DB query.
+    error_detail: errorDetail,
     // Which master every verdict in this run was judged against, so a later dispute
     // about a tailoring does not have to guess.
     master_version: masterVersion,
@@ -261,9 +322,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Reached the model and were honestly refused by the validator. NOT an error —
     // this number being zero forever is the suspicious reading, not a high one.
     refused,
-    // Never reached the model, with the reason each was skipped.
+    // Never reached the model, with the reason each was skipped. Each one with an id has
+    // now been moved to `failed` (unless listed in `failures`).
     skipped: plan.skipped,
     // Transport, quota or write failures. These rows are still at `scored`.
     failures,
   });
-});
+}));

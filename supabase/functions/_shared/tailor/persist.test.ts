@@ -18,7 +18,7 @@ import { persistTailorOutcome, type TailorPersistClient } from "./persist.ts";
 // The verdict shape produced by the runner this module persists.
 import type { TailorOutcome } from "./tailorer.ts";
 // The render input, so the fixture below is typed against the contract, not inferred.
-import type { ResolvedResume } from "../contracts/shared-types.ts";
+import type { ResolvedResume, TailoredProfile } from "../contracts/shared-types.ts";
 
 // The row being written. A literal rather than a generated id, so a failed assertion
 // names something searchable.
@@ -48,8 +48,12 @@ const RESUME: ResolvedResume = {
   certifications: [],
 };
 
+// The raw ref-based output the resume was resolved from. Content is irrelevant here;
+// identity is what the test checks, so a cast keeps the fixture small.
+const REFS = { master_version: 7, summary: null } as unknown as TailoredProfile;
+
 // A clean verdict, ready to persist.
-const TAILORED: TailorOutcome = { kind: "tailored", resume: RESUME };
+const TAILORED: TailorOutcome = { kind: "tailored", resume: RESUME, refs: REFS };
 
 // One recorded call against the database seam, in the order it was made.
 interface RecordedCall {
@@ -108,6 +112,18 @@ test("the profile write targets the right row and column", async () => {
   // Scoped to one row. A missing predicate here would rewrite every application.
   assert.equal(calls[0].payload.column, "id");
   assert.equal(calls[0].payload.value, APPLICATION_ID);
+});
+
+test("the raw tailor refs are written in the SAME update as the profile", async () => {
+  const { client, calls } = recordingClient();
+
+  await persistTailorOutcome(client, APPLICATION_ID, TAILORED);
+
+  // Same statement, not a second write: a row at `tailored` with a profile but no refs
+  // would silently disable the Auditor's ref check for that row.
+  assert.equal((calls[0].payload.values as Record<string, unknown>).tailor_refs, REFS);
+  // Still one update and one rpc — the refs did not add a write that could half-fail.
+  assert.deepEqual(calls.map((c) => c.kind), ["update", "rpc"]);
 });
 
 test("the status advance names the tailor agent and the tailored status", async () => {

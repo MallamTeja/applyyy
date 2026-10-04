@@ -1,212 +1,129 @@
-// Import the standard web server function from Deno
-// We will use Deno.serve to handle incoming HTTP requests
-// Import the database client factory
-// This gives us access to Supabase with the correct permissions
+// Follow-up — Edge Function that drafts follow-up nudge emails for stale applications.
+//
+// Reads applications at status `applied` older than seven days, drafts one nudge each
+// through Gemini (falling back to a template), and inserts it into `follow_up_nudges`
+// for the user to review.
+//
+// REWRITTEN 2026-10-04. Before this, every insert failed: it wrote `subject`/`body`/
+// `status:'draft'` into a table whose NOT NULL columns are `user_id`, `job_id`,
+// `draft_subject` and `draft_body`; it selected `company_name`/`job_title` from
+// `applications`, which has neither; and it logged agent runs under a column
+// (`agent_name`) that does not exist. All three errors were logged and swallowed.
+//
+// NO agent_runs ROW, DELIBERATELY: `agent_runs.agent` is the `agent_name` enum and no
+// member names this function (enums.sql:165 + keepalive). Borrowing `tracker` would make
+// the health page report the email tracker alive when it is not. Telemetry returns when
+// a migration adds an enum value; the old insert never landed anyway.
+
+// Signs in as the app user, so every query runs under RLS.
 import { createAppUserClient } from "../_shared/db/client.ts";
-
-// Import CORS headers for browser compatibility
-// This is required for requests coming from the web dashboard
-export const corsHeaders = {
-  // Allow all origins for now
-  "Access-Control-Allow-Origin": "*",
-  // Allow specific authorization and content headers
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
-
-// Import the nudge generation logic
-// This shared module handles creating the prompt and calling Gemini
+// Caller auth and the fail-closed kill switch, shared with the pipeline agents.
+import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
+// Shared CORS headers, plus the boundary that keeps them on an uncaught 500.
+import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
+// Draft generation (Gemini with template fallback).
 import { generateFollowUpNudge } from "../_shared/follow-up/nudge.ts";
+// Row validation and the insert's exact column names, pinned by nudge-row.test.ts.
+import { readNudgeSource, toNudgeInsert } from "../_shared/follow-up/nudge-row.ts";
 
-// Start the Edge Function HTTP server
-// Deno.serve automatically listens for requests
-Deno.serve(async (req: Request): Promise<Response> => {
-  // Handle CORS preflight requests
-  // Browsers send OPTIONS requests before POST/GET requests
-  if (req.method === "OPTIONS") {
-    // Return a 204 No Content response
-    // Include the standard CORS headers
-    return new Response("ok", { headers: corsHeaders });
-  }
+// How many nudges one invocation drafts. Small: each one may be a Gemini call.
+const BATCH_SIZE = 5;
+// An application must have gone quiet this long before nudging is polite.
+const FOLLOW_UP_AFTER_DAYS = 7;
 
-  // Create a new database client connection
-  // This uses the createAppUserClient helper
+// One JSON response shape for every exit.
+function jsonResponse(status: number, data: Record<string, unknown>): Response {
+  // CORS on every response, or the browser hides the status from the page.
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8", ...corsHeaders },
+  });
+}
+
+// Wrapped so a throw anywhere below still answers with CORS headers.
+Deno.serve(withErrorBoundary("applyy-follow-up", async (req: Request): Promise<Response> => {
+  // Preflight, before any work.
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  // Sign in; a missing credential is an operational 503, not a bug.
   const connection = await createAppUserClient();
-  
-  // Check if the database connection was successfully established
-  // If not, we cannot proceed with the operation
   if (!connection.ok) {
-    // Return a 503 Service Unavailable response
-    // Include the error message and CORS headers
-    return new Response(JSON.stringify({ error: "database_unavailable" }), {
-      // Set status code 503
-      status: 503,
-      // Set headers indicating JSON content
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    // `reason` stays in the log — it distinguishes "no user" from "wrong password".
+    console.error("[applyy-follow-up] could not sign in:", connection.reason);
+    return jsonResponse(503, { success: false, error: "database_unavailable" });
   }
-
-  // Extract the database client instance
-  // We will use this to query and mutate data
+  // Unpacked once for readability.
   const db = connection.db;
 
-  // Attempt to read the system settings from the database
-  // This helps us implement a kill switch
-  const { data: settingsData, error: settingsError } = await db
-    // Query the system_settings table
-    .from("system_settings")
-    // Select the system_enabled flag
-    .select("system_enabled")
-    // Get a single row
-    .single();
+  // Only the app user may trigger drafting under the app user's session.
+  const caller = await authorizeCaller(req, db, connection.userId);
+  // 401 or 403, as the verdict says.
+  if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });
 
-  // If there was an error reading settings, or the system is disabled
-  // We abort the operation to respect the kill switch
-  if (settingsError || !settingsData?.system_enabled) {
-    // Return a 403 Forbidden response
-    // This indicates the system is currently disabled
-    return new Response(JSON.stringify({ error: "system_disabled" }), {
-      // Set status code 403
-      status: 403,
-      // Set headers indicating JSON content
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  }
+  // Same fail-closed switch as the pipeline agents.
+  const killSwitch = await readKillSwitch(db);
+  // A broken read is retryable, so 503.
+  if (killSwitch.kind === "unreadable") return jsonResponse(503, { success: false, error: "kill_switch_read_failed" });
+  // Off: a deliberate halt, not an error.
+  if (killSwitch.kind === "disabled") return jsonResponse(200, { success: true, status: "skipped_disabled" });
 
-  // Create a unique identifier for this agent run
-  // We use the crypto API to generate a random UUID
-  const runId = crypto.randomUUID();
+  // Applications that already have a nudge. Excluded up front, because now that
+  // inserts succeed, re-running would otherwise draft a duplicate every invocation —
+  // and filtering after the `limit` would starve the queue on the same five rows.
+  const { data: existing, error: existingError } = await db.from("follow_up_nudges").select("application_id");
+  // Without this list we cannot avoid duplicates, so stop rather than guess.
+  if (existingError) return jsonResponse(503, { success: false, error: "nudges_unreadable" });
+  // The ids to skip, as strings for the postgrest `in` list.
+  const nudgedIds = (existing ?? []).map((r) => String((r as { application_id: unknown }).application_id));
 
-  // Insert a record into the agent_runs telemetry table
-  // This tracks the start of our follow-up generation job
-  await db.from("agent_runs").insert({
-    // Store the generated run ID
-    id: runId,
-    // Specify the agent name
-    agent_name: "follow_up_nudge_agent",
-    // Set the initial status to running
-    status: "running",
-  });
+  // The cut-off: applied at least FOLLOW_UP_AFTER_DAYS ago.
+  const cutoff = new Date(Date.now() - FOLLOW_UP_AFTER_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  // Company and title live on `jobs` (core_tables.sql:190-192), so they come via the join.
+  let query = db
+    .from("applications")
+    .select("id, user_id, job_id, applied_at, jobs ( title, company_name )")
+    .eq("status", "applied")
+    .lte("applied_at", cutoff)
+    // Oldest first: the longest-silent application is the one most worth a nudge.
+    .order("applied_at", { ascending: true })
+    .limit(BATCH_SIZE);
+  // Skip already-nudged rows. Only applied when non-empty: `not in ()` is a syntax error.
+  if (nudgedIds.length > 0) query = query.not("id", "in", `(${nudgedIds.join(",")})`);
+  // Run it.
+  const { data: applications, error: appsError } = await query;
+  // A failed read is reported, not mistaken for "nothing to do".
+  if (appsError) return jsonResponse(503, { success: false, error: "applications_unreadable" });
 
-  // Wrap the main logic in a try-catch-finally block
-  // This ensures we always update the agent_run status
-  try {
-    // Calculate the date 7 days ago
-    // We only want to follow up on applications older than this
-    const sevenDaysAgo = new Date();
-    // Subtract 7 days from the current date
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    // Convert the date to an ISO string for database querying
-    const cutoffDate = sevenDaysAgo.toISOString();
+  // Counters reported back so a run that wrote nothing is visible as such.
+  let drafted = 0;
+  // Per-row failures with their reason.
+  const failures: Array<{ applicationId: string; error: string }> = [];
 
-    // Query the database for applications that need follow-ups
-    // We look for applications in the 'applied' status
-    const { data: applications, error: appsError } = await db
-      // Query the applications table
-      .from("applications")
-      // Select the ID, company, job title, and applied date
-      .select("id, company_name, job_title, applied_at")
-      // Filter for applications with status 'applied'
-      .eq("status", "applied")
-      // Filter for applications submitted before our cutoff date
-      .lte("applied_at", cutoffDate)
-      // Limit to 5 records to respect CPU time limits
-      // This batching prevents the edge function from timing out
-      .limit(5);
-
-    // If there was an error querying the applications
-    // We throw an error to be caught by the catch block
-    if (appsError) {
-      // Throw a standard error with the database error message
-      throw new Error(`Failed to fetch applications: ${appsError.message}`);
+  // Sequential: each may be a Gemini call against the shared key pool.
+  for (const row of applications ?? []) {
+    // Validate the row's shape before anything reaches the prompt or the insert.
+    const source = readNudgeSource(row);
+    // Incomplete row (no posting joined, missing id): reported, never half-written.
+    if (!source) {
+      failures.push({ applicationId: String((row as { id?: unknown }).id), error: "incomplete_application_row" });
+      continue;
     }
 
-    // Process each application in the batch
-    // We use a for-of loop to process them sequentially or concurrently
-    // For simplicity and safety, we iterate sequentially here
-    let processedCount = 0;
-    
-    // Check if we found any applications to process
-    // If we have applications, we loop over them
-    if (applications && applications.length > 0) {
-      // Iterate over each application found
-      for (const app of applications) {
-        // Generate the follow-up nudge draft
-        // We pass the application details to our shared module
-        const draft = await generateFollowUpNudge({
-          // Pass the company name from the db
-          companyName: app.company_name,
-          // Pass the job title from the db
-          jobTitle: app.job_title,
-          // Pass the application date
-          applicationDate: app.applied_at,
-        });
-
-        // Insert the generated draft into the follow_up_nudges table
-        // This makes it available in the web dashboard for the user to review
-        const { error: insertError } = await db.from("follow_up_nudges").insert({
-          // Link the nudge to the specific application ID
-          application_id: app.id,
-          // Store the generated subject line
-          subject: draft.subject,
-          // Store the generated email body
-          body: draft.body,
-          // Set the initial status of the nudge to 'draft'
-          status: "draft",
-        });
-
-        // If the insert was successful, increment our counter
-        // Otherwise, log the error but continue processing others
-        if (!insertError) {
-          // Increment the counter of successfully processed nudges
-          processedCount++;
-        } else {
-          // Log the failure to insert the nudge
-          console.error(`Failed to insert nudge for app ${app.id}:`, insertError);
-        }
-      }
-    }
-
-    // After processing all applications, return a success response
-    // We include the number of processed applications in the JSON
-    return new Response(JSON.stringify({ success: true, processed: processedCount }), {
-      // Set the status code to 200 OK
-      status: 200,
-      // Include CORS and Content-Type headers
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    // Draft; never throws — falls back to a template on any model failure.
+    const draft = await generateFollowUpNudge(db, {
+      companyName: source.companyName,
+      jobTitle: source.jobTitle,
+      applicationDate: source.appliedAt,
     });
 
-  } catch (error: any) {
-    // If an error occurred during processing, log it
-    // We cast error to any to safely access message
-    console.error("Error in follow-up nudge job:", error);
-    
-    // Update the agent_run telemetry with the error status
-    // This helps in debugging issues
-    await db.from("agent_runs").update({
-      // Set status to failed
-      status: "failed",
-      // Store the error message
-      error_message: error.message || "Unknown error",
-    // Match the specific run ID
-    }).eq("id", runId);
-
-    // Return a 500 Internal Server Error response
-    // Let the client know something went wrong
-    return new Response(JSON.stringify({ error: "internal_error" }), {
-      // Set status code to 500
-      status: 500,
-      // Include CORS and Content-Type headers
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  } finally {
-    // Finally block always runs, even on success or failure
-    // We update the agent run status to completed if it hasn't failed
-    // First we check if it didn't fail (we assume success if we reach here without throwing)
-    // Actually, it's better to unconditionally set to completed if we didn't throw
-    await db.from("agent_runs").update({
-      // Set the status to completed
-      status: "completed",
-    // Match the specific run ID
-    }).eq("id", runId).eq("status", "running"); // Only update if still running
+    // Insert with the migration's real column names, and CHECK the error.
+    const { error: insertError } = await db.from("follow_up_nudges").insert(toNudgeInsert(source, draft));
+    // A failed insert is counted and reported, not just logged.
+    if (insertError) failures.push({ applicationId: source.applicationId, error: insertError.message });
+    // Landed.
+    else drafted += 1;
   }
-});
+
+  // The summary a caller can act on.
+  return jsonResponse(200, { success: true, drafted, failures });
+}));

@@ -56,6 +56,12 @@ import type { EvalCase } from "../_shared/eval/gate.ts";
 // Import MasterProfile contract type for casting master profile JSONB.
 // Guarantees type safety for candidate background structure.
 import type { MasterProfile } from "../_shared/contracts/shared-types.ts";
+// Caller auth and the fail-closed kill switch, shared by every pipeline agent.
+// The matcher never checked the switch at all before this, so it spent Gemini quota
+// with the system turned off.
+import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
+// Shared CORS headers, plus the boundary that keeps them on an uncaught 500.
+import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 
 // Default batch limit for one invocation to preserve key pool quota.
 // Controls how many application rows are processed per function call.
@@ -63,20 +69,6 @@ const DEFAULT_BATCH_SIZE = 10;
 // Maximum batch limit allowed per invocation to prevent quota exhaustion.
 // Hard upper bound preventing callers from requesting unsustainable batch sizes.
 const MAX_BATCH_SIZE = 25;
-
-// Standard CORS headers object for Supabase Edge Functions HTTP responses.
-// Permits cross-origin requests while preserving security constraints.
-const corsHeaders = {
-  // Access control allow origin wildcard header for browser requests.
-  // Safe because authorization relies on RLS-enforced user sessions.
-  "Access-Control-Allow-Origin": "*",
-  // Access control allow headers listing required client and auth headers.
-  // Includes Supabase platform headers and standard content type header.
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  // Access control allow methods header listing permitted HTTP verbs.
-  // Supports POST for execution, GET for manual testing, and OPTIONS for preflight.
-  "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-};
 
 // Helper function to construct structured JSON HTTP responses.
 // Encapsulates response creation with consistent headers and formatting.
@@ -125,7 +117,8 @@ function resolveBatchSize(
 
 // Register primary Deno HTTP server request listener callback.
 // Serves incoming requests dispatched to the matcher edge function.
-Deno.serve(async (req: Request): Promise<Response> => {
+// Wrapped so a throw anywhere below still answers with CORS headers the browser can read.
+Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Response> => {
   // Check if incoming request method is OPTIONS preflight request.
   // Handled early before authenticating or touching database resources.
   if (req.method === "OPTIONS") {
@@ -149,6 +142,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // Extract authenticated Supabase client instance from connection result object.
   // Ready to perform queries under active user session.
   const db = connection.db;
+
+  // Refuse anyone but the app user BEFORE any write or any Gemini spend: the sign-in
+  // above never looks at the caller, so the public anon key alone used to suffice.
+  const caller = await authorizeCaller(req, db, connection.userId);
+  // 401 for no/invalid session, 403 for someone else's — the verdict carries which.
+  if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });
 
   // Open an agent run tracking row in agent_runs table before executing work.
   // Ensures telemetry presence even if execution encounters unhandled crash.
@@ -188,6 +187,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
     // Return formatted JSON response with error code and false success flag.
     return jsonResponse(status, { success: false, error });
+  }
+
+  // The shared fail-closed kill switch, checked before the master read and before any
+  // model call — this agent is the first one that spends quota.
+  const killSwitch = await readKillSwitch(db);
+  // A failed read is an error, not a decision.
+  if (killSwitch.kind === "unreadable") return await failRun(503, "kill_switch_read_failed", killSwitch.detail);
+  // Off, or no settings row: record the skip so the health page can say why.
+  if (killSwitch.kind === "disabled") {
+    // Close the run row as a deliberate skip rather than leave it `running`.
+    if (runId) {
+      await db
+        .from("agent_runs")
+        .update({ status: "skipped_disabled", finished_at: new Date().toISOString(), error_detail: killSwitch.detail })
+        .eq("id", runId);
+    }
+    // 200: the system did what it was told.
+    return jsonResponse(200, { success: true, status: "skipped_disabled", detail: killSwitch.detail });
   }
 
   // Retrieve latest master profile snapshot row from master_profiles table.
@@ -404,16 +421,32 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
   }
 
+  // HONEST FINAL STATUS. `failed` when there was work, none of it moved, and errors
+  // explain why: the live matcher run seen 2026-10-04 (rows_in 10, rows_out 0,
+  // error_count 10) was stamped `succeeded`, the silent stop agent_runs exists to catch.
+  // Mixed results stay `succeeded` with error_count set: `agent_run_status` has no
+  // `partial` (enums.sql:190), and an empty queue (rows_in 0) is idle, not broken.
+  const runStatus = (rows ?? []).length > 0 && scoredCount === 0 && failures.length > 0 ? "failed" : "succeeded";
+  // The first few DISTINCT reasons, capped: ten rows failing the same way is one fact,
+  // and error_detail is a health-page line, not a log. Null on a clean run so a stale
+  // reason never sits beside error_count 0.
+  const errorDetail = failures.length > 0
+    // Set dedupes, slice(0, 3) keeps it short, slice(0, 500) bounds a pathological message.
+    ? [...new Set(failures.map((f) => f.error))].slice(0, 3).join(" | ").slice(0, 500)
+    : null;
+
   // Check if valid agent run identifier exists for this execution.
   if (runId) {
-    // Update agent_runs table row status to 'succeeded' and record execution telemetry.
-    // Completes telemetry record with actual throughput numbers.
+    // Close the run with the honest status computed above and its throughput numbers.
     await db
       // Target agent_runs table for run status update.
       .from("agent_runs")
-      // Update status to 'succeeded' and record finished timestamp and counters.
+      // Status, finished timestamp, counters and the failure summary.
       .update({
-        status: "succeeded",
+        // Derived from the counters, never hard-coded: see runStatus above.
+        status: runStatus,
+        // The failure summary, so the health page says WHY and not just how many.
+        error_detail: errorDetail,
         finished_at: new Date().toISOString(),
         rows_in: (rows ?? []).length,
         rows_out: scoredCount,
@@ -427,8 +460,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // Return HTTP 200 OK JSON response containing run outcome summary metrics.
   // Summarizes processed applications, scores, and any errors.
   return jsonResponse(200, {
-    // Success flag set to true.
+    // The function ran to completion. Kept true so pipelineRunner still classifies from
+    // the counters below instead of a bare "success: false" message.
     success: true,
+    // The same status written to agent_runs, so the dashboard and health page agree.
+    status: runStatus,
+    // The same failure summary, so the operator sees it without a DB query.
+    error_detail: errorDetail,
     // Master profile version pinned for this run.
     master_version: masterVersion,
     // Count of input application rows fetched from queue.
@@ -440,4 +478,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Array of individual application row failure objects.
     failures,
   });
-});
+}));

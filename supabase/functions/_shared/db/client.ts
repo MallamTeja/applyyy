@@ -57,7 +57,9 @@ export const APP_USER_PASSWORD_ENV_VAR = "APPLYY_APP_USER_PASSWORD";
 // HTTP status, and an exception would flatten it into an unhelpful 500.
 export type DbClientResult =
   // Signed in and ready. Every query through this client runs under the user's RLS.
-  | { readonly ok: true; readonly db: SupabaseClient }
+  // `userId` is the app user's own id, returned so `gates.ts#authorizeCaller` can check
+  // the CALLER is this same user — the sign-in alone never looks at who is calling.
+  | { readonly ok: true; readonly db: SupabaseClient; readonly userId: string }
   // Could not sign in. `reason` is for the server log only — it must never reach a
   // response body, because it distinguishes "no such user" from "wrong password".
   | { readonly ok: false; readonly reason: string };
@@ -121,12 +123,17 @@ export async function createAppUserClient(): Promise<DbClientResult> {
   });
   // Sign in. From here the client carries an `authenticated` JWT and every subsequent
   // query is filtered by the same RLS policies the dashboard runs under.
-  const { error } = await db.auth.signInWithPassword({ email, password });
+  const { data, error } = await db.auth.signInWithPassword({ email, password });
   // A failure here is almost always a wrong password or a user that was never created
   // (SCHEMA_CONTRACT §8.3 lists that as a pending manual setup step).
   if (error !== null) {
     return { ok: false, reason: `sign-in failed: ${error.message}` };
   }
-  // Authenticated and RLS-bound.
-  return { ok: true, db };
+  // A success with no user cannot be compared against a caller, so the caller gate would
+  // have nothing to check — refuse rather than hand it an empty id.
+  if (data.user === null) {
+    return { ok: false, reason: "sign-in returned no user" };
+  }
+  // Authenticated and RLS-bound, with the id the caller gate compares against.
+  return { ok: true, db, userId: data.user.id };
 }

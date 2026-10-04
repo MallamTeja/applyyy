@@ -13,6 +13,11 @@
 //   3. Write `audit_findings` array to `applications` row.
 //   4. Advance status `tailored` -> `audit_clean` or `audit_flagged` (agent: 'auditor').
 //   5. Advance status `audit_clean`/`audit_flagged` -> `awaiting_approval` (agent: 'auditor').
+//
+// SELF-HEALING: steps 4 and 5 are two RPCs, so a failure between them strands a row at
+// `audit_clean`/`audit_flagged`. The queue therefore also selects those two statuses and
+// retries only step 5 for them — the audit itself already ran and its findings are
+// written. Without this, a stranded row never reached the human queue at all.
 // ============================================================================
 
 // Import database client factory helper for authenticated Supabase connection
@@ -24,21 +29,17 @@ import { auditApplication } from "../_shared/audit/audit.ts";
 // Import shared contract interfaces for MasterProfile, ResolvedResume, and TailoredProfile
 import type { MasterProfile, ResolvedResume, TailoredProfile } from "../_shared/contracts/shared-types.ts";
 
+// Caller auth and the fail-closed kill switch, shared by every pipeline agent
+import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
+
+// Shared CORS headers, plus the boundary that keeps them on an uncaught 500
+import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
+
 // Default batch processing limit size for Auditor invocation
 const DEFAULT_BATCH_SIZE = 10;
 
 // Maximum allowed batch processing limit ceiling
 const MAX_BATCH_SIZE = 25;
-
-// Standard CORS headers configuration for HTTP responses
-const corsHeaders = {
-  // Allow all origins for API access
-  "Access-Control-Allow-Origin": "*",
-  // Allowed request headers
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  // Allowed HTTP request methods
-  "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-};
 
 /**
  * Format and construct a standardized JSON HTTP response object with CORS headers.
@@ -89,7 +90,8 @@ function resolveBatchSize(raw: string | null): number {
 }
 
 // Register Deno HTTP serve request handler
-Deno.serve(async (req: Request): Promise<Response> => {
+// Wrapped so a throw anywhere below still answers with CORS headers the browser can read
+Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Response> => {
   // Check if HTTP request method is OPTIONS
   if (req.method === "OPTIONS") {
     // Handle OPTIONS CORS preflight request with 200 OK
@@ -110,6 +112,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   // Unpack connected database client
   const db = connection.db;
+
+  // Refuse anyone but the app user BEFORE any write: the sign-in above never looks at
+  // the caller, so the public anon key alone used to be enough to advance rows
+  const caller = await authorizeCaller(req, db, connection.userId);
+
+  // 401 for no/invalid session, 403 for someone else's — the verdict carries which
+  if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });
 
   // Insert initial agent run record into agent_runs telemetry table
   const { data: runRow } = await db
@@ -143,6 +152,26 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return jsonResponse(status, { success: false, error });
   }
 
+  // The shared fail-closed kill switch; the auditor never checked it before
+  const killSwitch = await readKillSwitch(db);
+
+  // A failed read is an error, not a decision
+  if (killSwitch.kind === "unreadable") return await failRun(503, "kill_switch_read_failed", killSwitch.detail);
+
+  // Off, or no settings row: a deliberate skip, recorded so the health page says why
+  if (killSwitch.kind === "disabled") {
+    // Close the run row as skipped rather than leave it `running`
+    if (runId) {
+      await db
+        .from("agent_runs")
+        .update({ status: "skipped_disabled", finished_at: new Date().toISOString(), error_detail: killSwitch.detail })
+        .eq("id", runId);
+    }
+
+    // 200: the system did what it was told
+    return jsonResponse(200, { success: true, status: "skipped_disabled", detail: killSwitch.detail });
+  }
+
   // Query highest-version pinned MasterProfile record from master_profiles table
   const { data: masterRow, error: masterError } = await db
     // Target master_profiles table
@@ -174,14 +203,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // Determine batch size limit from request URL parameter
   const batchSize = resolveBatchSize(limitParam);
 
-  // Query applications queue sitting at status 'tailored'
+  // Query the queue: fresh `tailored` rows, plus rows stranded between the two RPCs
   const { data: rows, error: rowsError } = await db
     // Target applications table
     .from("applications")
-    // Select application ID, tailored_profile, tailor_refs, and master_version
-    .select("id, tailored_profile, tailor_refs, master_version")
-    // Filter for status = 'tailored'
-    .eq("status", "tailored")
+    // `status` is selected so the loop can tell a fresh row from a stranded one
+    .select("id, status, tailored_profile, tailor_refs, master_version")
+    // `audit_clean`/`audit_flagged` are only ever left behind by a failed second hop
+    .in("status", ["tailored", "audit_clean", "audit_flagged"])
     // Order by created_at ascending
     .order("created_at", { ascending: true })
     // Limit batch size
@@ -192,6 +221,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   // Initialize total audited counter
   let auditedCount = 0;
+
+  // Stranded rows moved on to awaiting_approval this run — reported separately because
+  // they were audited by an EARLIER run, and counting them as audited would overstate
+  let resumedCount = 0;
+
+  // Rows failed for a permanent reason, so they stop blocking the head of the queue
+  let failedCount = 0;
 
   // Initialize clean applications counter
   let cleanCount = 0;
@@ -209,16 +245,58 @@ Deno.serve(async (req: Request): Promise<Response> => {
   for (const row of applicationRows) {
     // Try auditing row
     try {
+      // A stranded row: the audit already ran and wrote its findings, only the hop into
+      // the human queue failed. Retry that hop alone — re-auditing would rewrite findings
+      // a run already committed and could flip the verdict under a newer master.
+      if (row.status === "audit_clean" || row.status === "audit_flagged") {
+        // `audit_clean|audit_flagged -> awaiting_approval` is the auditor's edge (:126-127)
+        const resumed = await db.rpc("advance_application_status", {
+          // Application ID
+          p_application_id: row.id,
+          // The human queue
+          p_to_status: "awaiting_approval",
+          // Acting agent identity
+          p_agent: "auditor",
+          // The verdict is the status it was stranded at; flagged as a resumed hop
+          p_detail: { audit_verdict: row.status, resumed_after_stranding: true },
+        });
+
+        // Still stranded: reported, and retried again next run
+        if (resumed.error) failures.push({ applicationId: row.id, error: resumed.error.message });
+        // Moved on
+        else resumedCount += 1;
+
+        // Nothing else to do for an already-audited row
+        continue;
+      }
+
       // Extract resolved tailored resume JSON
       const resume = row.tailored_profile as ResolvedResume | null;
 
       // Extract raw tailor refs JSON
       const tailorRefs = row.tailor_refs as TailoredProfile | null;
 
-      // Fail row processing if tailored_profile is missing
+      // A `tailored` row with no profile is permanently unauditable — the tailor writes
+      // the profile BEFORE the status (persist.ts), so this is damaged data, not a race.
+      // Fail it (`tailored -> failed` is allowed for the auditor, :123) rather than leave
+      // it at the head of an oldest-first queue blocking every row behind it forever
       if (!resume) {
-        // Record failure
-        failures.push({ applicationId: row.id, error: "missing_tailored_profile" });
+        // Through the RPC — a bare status update is refused by the guard with 42501
+        const failMove = await db.rpc("advance_application_status", {
+          // Application ID
+          p_application_id: row.id,
+          // Off the queue for good
+          p_to_status: "failed",
+          // Acting agent identity
+          p_agent: "auditor",
+          // The reason, for the dashboard
+          p_detail: { reason: "missing_tailored_profile" },
+        });
+
+        // A refused move leaves the row in place; report it rather than count it
+        if (failMove.error) failures.push({ applicationId: row.id, error: failMove.error.message });
+        // Counted as failed, separately from transient errors
+        else failedCount += 1;
 
         // Skip to next application row
         continue;
@@ -312,7 +390,21 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
   }
 
-  // Update agent_runs telemetry record status to succeeded
+  // HONEST FINAL STATUS. `failed` when there was work, none of it moved, and errors
+  // explain why: the live matcher run seen 2026-10-04 (rows_in 10, rows_out 0,
+  // error_count 10) was stamped `succeeded`, the silent stop agent_runs exists to catch.
+  // Mixed results stay `succeeded` with error_count set: `agent_run_status` has no
+  // `partial` (enums.sql:190), and an empty queue (rows_in 0) is idle, not broken.
+  const runStatus = applicationRows.length > 0 && auditedCount + resumedCount === 0 && failures.length > 0 ? "failed" : "succeeded";
+  // The first few DISTINCT reasons, capped: ten rows failing the same way is one fact,
+  // and error_detail is a health-page line, not a log. Null on a clean run so a stale
+  // reason never sits beside error_count 0.
+  const errorDetail = failures.length > 0
+    // Set dedupes, slice(0, 3) keeps it short, slice(0, 500) bounds a pathological message.
+    ? [...new Set(failures.map((f) => f.error))].slice(0, 3).join(" | ").slice(0, 500)
+    : null;
+
+  // Close the agent_runs telemetry record with the honest status
   if (runId) {
     // Update agent run record
     await db
@@ -320,14 +412,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .from("agent_runs")
       // Update fields
       .update({
-        // Status succeeded
-        status: "succeeded",
+        // Derived from the counters, never hard-coded: see runStatus above.
+        status: runStatus,
+        // The failure summary, so the health page says WHY and not just how many.
+        error_detail: errorDetail,
         // Finished timestamp
         finished_at: new Date().toISOString(),
         // Rows in count
         rows_in: applicationRows.length,
-        // Rows out count
-        rows_out: auditedCount,
+        // Rows out: freshly audited plus stranded rows moved on
+        rows_out: auditedCount + resumedCount,
+        // Per-row errors, so a run that moved nothing reads as a problem, not as idle
+        error_count: failures.length,
       })
       // Scoped by runId
       .eq("id", runId);
@@ -335,8 +431,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   // Return successful execution JSON response
   return jsonResponse(200, {
-    // Success flag
+    // The function ran to completion; per-row failures are in `failures` below
     success: true,
+    // The same status written to agent_runs, so the dashboard and health page agree.
+    status: runStatus,
+    // The same failure summary, so the operator sees it without a DB query.
+    error_detail: errorDetail,
     // Master version
     master_version: masterVersion,
     // Audited count
@@ -345,7 +445,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
     clean: cleanCount,
     // Flagged count
     flagged: flaggedCount,
+    // Stranded rows moved on to awaiting_approval
+    resumed: resumedCount,
+    // Rows failed for a permanent reason
+    failed: failedCount,
     // Failures array
     failures,
   });
-});
+}));

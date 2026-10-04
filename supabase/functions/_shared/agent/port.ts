@@ -79,9 +79,10 @@ export interface SettingsSnapshot {
 // row. `data.released_count` is `undefined`; `data[0].released_count` is the number.
 // The unpacking happens once, in the adapter, so no agent can get it wrong.
 export interface SweepCounts {
-  // Leases dropped. DO NOT BUILD A METRIC ON THIS — the SQL double-counts rows its own
-  // first statement just moved to `needs_verification`, and the fix is a migration
-  // this stream does not own.
+  // Leases dropped. Disjoint from `needsVerificationCount` since migration
+  // `20260910190000_fix_sweep_count_bootstrap_seed_and_blocked_edge.sql` (FIX 1, :27):
+  // before 2026-09-10 the SQL double-counted rows its own first statement had just
+  // moved to `needs_verification`. Safe to build a metric on now.
   readonly releasedCount: number;
   // Stale `applying` rows routed to `needs_verification`. Safety-critical: a blind
   // retry of a possibly-submitted application is how constraint #7 gets violated.

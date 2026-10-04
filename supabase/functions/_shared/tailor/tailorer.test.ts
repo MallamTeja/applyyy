@@ -147,6 +147,19 @@ test("an honest tailoring resolves to a ResolvedResume", async () => {
   assert.equal(outcome.resume.experience[0].bullets[0].master_text, MASTER.experience[0].bullets[0].text);
 });
 
+test("an honest tailoring carries its raw refs for the Auditor", async () => {
+  const tailor = tailorerReturning(JSON.stringify(HONEST_TAILORING));
+
+  const outcome = await tailor(POSTING);
+
+  // Narrow for the compiler; the kind itself is asserted by the test above.
+  assert.equal(outcome.kind, "tailored");
+  if (outcome.kind !== "tailored") return;
+  // The raw ref-based output, before resolution. The Auditor's summary-ref check
+  // (detector.ts:503) reads `tailor_refs` and could never fire while nothing kept these.
+  assert.deepEqual(outcome.refs, HONEST_TAILORING);
+});
+
 test("a tailoring citing a ref absent from the master is refused, not thrown", async () => {
   // One fabricated skill ref. Everything else is honest, so a refusal here can only be
   // about the fake ref — the test names one cause, not a soup of them.

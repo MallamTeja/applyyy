@@ -74,7 +74,10 @@ export interface TailorJobInput {
 // violations have somewhere to live other than a thrown stack.
 export type TailorOutcome =
   // Safe to persist and hand onward to the Auditor.
-  | { readonly kind: "tailored"; readonly resume: ResolvedResume }
+  // `refs` is the raw ref-based output the resume was resolved from. Carried so it can
+  // be persisted to `tailor_refs`: the Auditor's summary-ref check (audit/detector.ts:503)
+  // reads that column, and nothing wrote it, so the check could never fire.
+  | { readonly kind: "tailored"; readonly resume: ResolvedResume; readonly refs: TailoredProfile }
   // Never persisted as a profile; the reasons go to the dashboard and the row fails.
   | { readonly kind: "refused"; readonly violations: readonly TailorViolation[] };
 
@@ -186,6 +189,7 @@ export function createTailorer(deps: TailorDeps): Tailorer {
     if (!validation.ok) return { kind: "refused", violations: validation.violations };
 
     // Clean. The resume is safe to persist and to hand to the Auditor, when one exists.
-    return { kind: "tailored", resume: validation.resume };
+    // `tailored` is the parsed model output that passed validation — the refs, unresolved.
+    return { kind: "tailored", resume: validation.resume, refs: tailored };
   };
 }

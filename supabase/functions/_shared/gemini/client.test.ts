@@ -5,6 +5,7 @@ import {
   GeminiPacer,
   callGeminiWithFailover,
   generateGeminiContent,
+  GEMINI_DEFAULT_MODEL,
   type PacerClock,
   type GeminiExecutionResult,
 } from "./client.ts";
@@ -335,4 +336,115 @@ test("generateGeminiContent packages payload and calls fetchSeam", async () => {
   assert.equal(parsedBody.contents[0].parts[0].text, "<untrusted_job_posting>Job description</untrusted_job_posting>");
   assert.equal(parsedBody.systemInstruction.parts[0].text, "<system_policy>Tailor resume</system_policy>");
   assert.deepEqual(parsedBody.generationConfig.responseSchema, { type: "object" });
+});
+
+// --- 404 = CONFIGURATION ERROR, NOT A KEY ERROR -----------------------------------
+// Earned 2026-10-04: `gemini-1.5-flash` was retired, every call 404'd, and the old generic
+// branch blamed a different key each call until all 40 rows read "HTTP 404".
+
+test("callGeminiWithFailover treats 404 as model_not_found: one call, no retry, no key blamed", async () => {
+  // Captures every RPC so we can prove report_gemini_result was never sent.
+  const rpcCalls: Array<{ fn: string; args: unknown }> = [];
+  // Two keys available, so a rotating implementation WOULD have somewhere to go.
+  const db = fakeClient({ claimSequence: [{ data: 1, error: null }, { data: 2, error: null }], reportCalls: rpcCalls });
+  // Zero-spacing pacer keeps the test instant.
+  const pacer = new GeminiPacer({ minIntervalMs: 0, clock: createVirtualClock(1000) });
+  // Counts executions so a retry-across-keys regression is visible.
+  let callCount = 0;
+
+  const outcome = await callGeminiWithFailover(db, {
+    readKey: keysFrom({ 1: "k1", 2: "k2" }),
+    pacer,
+    maxRetries: 3,
+    // Exactly what Google sends for a retired model id.
+    execute: async () => {
+      callCount += 1;
+      return { ok: false, status: 404, statusText: "Not Found", errorBody: { error: { code: 404, status: "NOT_FOUND" } } };
+    },
+  });
+
+  // Narrow first so the reason field is typed.
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  // The named configuration reason, not the generic http_error.
+  assert.equal(outcome.reason, "model_not_found");
+  assert.equal(outcome.status, 404);
+  // Fail fast: one attempt, one execution.
+  assert.equal(outcome.attempts, 1);
+  assert.equal(callCount, 1);
+  // The key's failure streak and last_error must be untouched — no report RPC at all.
+  assert.deepEqual(rpcCalls.map((c) => c.fn), ["claim_gemini_key"]);
+});
+
+test("generateGeminiContent defaults to GEMINI_DEFAULT_MODEL in the request URL", async () => {
+  // Shared fixture; one healthy key.
+  const db = fakeClient({ claimSequence: [{ data: 1, error: null }] });
+  // Records the URL so the model path segment can be inspected.
+  let capturedUrl = "";
+  await generateGeminiContent(db, {
+    readKey: keysFrom({ 1: "k1" }),
+    pacer: new GeminiPacer({ minIntervalMs: 0, clock: createVirtualClock(1000) }),
+    // Minimal 200 so the call completes.
+    fetchSeam: async (input) => {
+      capturedUrl = String(input);
+      return new Response("{}", { status: 200 });
+    },
+    prompt: { systemInstruction: "s", userContent: "u" },
+  });
+  // Shape check on the path segment, not a substring: the model must be exactly the constant.
+  assert.equal(new URL(capturedUrl).pathname, `/v1beta/models/${GEMINI_DEFAULT_MODEL}:generateContent`);
+  // Guard the regression itself: the retired id must never come back as the default.
+  assert.notEqual(GEMINI_DEFAULT_MODEL, "gemini-1.5-flash");
+});
+
+// --- GROUNDING TOOLS ----------------------------------------------------------------
+
+test("generateGeminiContent forwards tools verbatim and exposes groundingMetadata", async () => {
+  // One healthy key.
+  const db = fakeClient({ claimSequence: [{ data: 1, error: null }] });
+  // Captures the outgoing body for inspection.
+  let capturedBody = "";
+  // A grounded response carries groundingMetadata on the candidate.
+  const grounding = { webSearchQueries: ["q"] };
+  const outcome = await generateGeminiContent(db, {
+    readKey: keysFrom({ 1: "k1" }),
+    pacer: new GeminiPacer({ minIntervalMs: 0, clock: createVirtualClock(1000) }),
+    fetchSeam: async (_input, init) => {
+      capturedBody = String(init?.body);
+      return new Response(JSON.stringify({ candidates: [{ groundingMetadata: grounding }] }), { status: 200 });
+    },
+    tools: [{ google_search: {} }],
+    prompt: { systemInstruction: "s", userContent: "u" },
+  });
+  // The tools array reaches the wire unchanged.
+  assert.deepEqual(JSON.parse(capturedBody).tools, [{ google_search: {} }]);
+  // And the grounding metadata survives the typed return.
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.deepEqual(outcome.data.candidates?.[0]?.groundingMetadata, grounding);
+});
+
+test("generateGeminiContent refuses tools + responseSchema before claiming a key", async () => {
+  // Records RPCs: a refusal must not claim (and so not spend) a key.
+  const rpcCalls: Array<{ fn: string; args: unknown }> = [];
+  const db = fakeClient({ claimSequence: [{ data: 1, error: null }], reportCalls: rpcCalls });
+  // Any fetch at all is a failure of the refusal.
+  let fetched = false;
+  const outcome = await generateGeminiContent(db, {
+    readKey: keysFrom({ 1: "k1" }),
+    pacer: new GeminiPacer({ minIntervalMs: 0, clock: createVirtualClock(1000) }),
+    fetchSeam: async () => {
+      fetched = true;
+      return new Response("{}", { status: 200 });
+    },
+    tools: [{ google_search: {} }],
+    prompt: { systemInstruction: "s", userContent: "u", responseSchema: { type: "object" } },
+  });
+  // Typed failure with the named reason.
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "invalid_request");
+  // Nothing sent, nothing claimed.
+  assert.equal(fetched, false);
+  assert.deepEqual(rpcCalls, []);
 });

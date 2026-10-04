@@ -15,21 +15,15 @@ import {
   // Input item type contract representing discovered application data.
   type DiscoveredApplicationItem,
 } from "../_shared/normalize/normalize-batch.ts";
+// Caller auth and the fail-closed kill switch, shared by every pipeline agent.
+import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
+// Shared CORS headers, plus the boundary that keeps them on an uncaught 500.
+import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 
 // Default batch processing size when limit parameter is omitted.
 const DEFAULT_BATCH_SIZE = 50;
 // Upper bound ceiling on batch size to avoid long execution timeouts.
 const MAX_BATCH_SIZE = 200;
-
-// Standard CORS response headers for browser preflight and API invocations.
-const corsHeaders = {
-  // Allow all origins since endpoint is secured by Supabase RLS authentication.
-  "Access-Control-Allow-Origin": "*",
-  // Allowed request headers matching standard Supabase JS client requests.
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  // Allowed HTTP verbs for options preflight and invocation.
-  "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-};
 
 // Formats a JSON response with status code and standard CORS headers.
 function jsonResponse(
@@ -73,7 +67,8 @@ function resolveBatchSize(
 }
 
 // Deno Edge Function request handler entry point.
-Deno.serve(async (req: Request): Promise<Response> => {
+// Wrapped so a throw anywhere below still answers with CORS headers the browser can read.
+Deno.serve(withErrorBoundary("applyy-normalizer", async (req: Request): Promise<Response> => {
   // Return HTTP 200 ok for CORS OPTIONS preflight requests.
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
@@ -89,6 +84,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   // Extract authenticated Supabase DB client instance.
   const db = connection.db;
+  // Refuse anyone but the app user BEFORE any write: the sign-in above never looks at
+  // the caller, so without this the public anon key alone could drive the pipeline.
+  const caller = await authorizeCaller(req, db, connection.userId);
+  // 401 for no/invalid session, 403 for someone else's — the verdict carries which.
+  if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });
   // Extract URL parameters from incoming request.
   const reqUrl = new URL(req.url);
   // Resolve batch size limit from query parameter.
@@ -115,20 +115,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // Extract generated agent run UUID if insert succeeded.
   const runId = runRow?.id ?? null;
 
-  // Check system settings kill switch before running normalization.
-  const { data: settings } = await db
-    // Target system_settings table.
-    .from("system_settings")
-    // Select system_enabled boolean flag.
-    .select("system_enabled")
-    // Limit to single configuration row.
-    .limit(1)
-    // Return single row.
-    .single();
-
-  // Check if system kill switch is explicitly disabled.
-  if (settings && settings.system_enabled === false) {
-    // Update agent_runs row to record skipped status due to kill switch.
+  // The shared fail-closed kill switch. This used to run when no settings row existed
+  // and ignore read errors entirely — the opposite of the screener's rule.
+  const killSwitch = await readKillSwitch(db);
+  // Anything but an explicit "on" halts the run.
+  if (killSwitch.kind !== "enabled") {
+    // Unreadable is a failure; disabled is a deliberate skip. Both are recorded.
+    const unreadable = killSwitch.kind === "unreadable";
+    // Close the telemetry row so the health page can say why nothing ran.
     if (runId) {
       // Perform update query.
       await db
@@ -136,16 +130,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
         .from("agent_runs")
         // Update fields.
         .update({
-          // Set status to skipped_disabled.
-          status: "skipped_disabled",
+          // `failed` for a broken read, `skipped_disabled` for an off switch.
+          status: unreadable ? "failed" : "skipped_disabled",
           // Set finished timestamp.
           finished_at: new Date().toISOString(),
+          // The reason, which is the only thing the health page has to go on.
+          error_detail: killSwitch.detail,
         })
         // Match current run UUID.
         .eq("id", runId);
     }
-    // Return HTTP 200 response informing caller that normalizer is disabled.
-    return jsonResponse(200, { success: true, status: "skipped_disabled" });
+    // 503 for an unreadable switch (retry later); 200 for a deliberate halt.
+    return unreadable
+      ? jsonResponse(503, { success: false, error: "kill_switch_read_failed" })
+      : jsonResponse(200, { success: true, status: "skipped_disabled" });
   }
 
   // Query applications sitting at status 'discovered' along with joined job details.
@@ -390,6 +388,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
   }
 
+  // HONEST FINAL STATUS. `failed` when there was work, none of it moved, and errors
+  // explain why: the live matcher run seen 2026-10-04 (rows_in 10, rows_out 0,
+  // error_count 10) was stamped `succeeded`, the silent stop agent_runs exists to catch.
+  // Mixed results stay `succeeded` with error_count set: `agent_run_status` has no
+  // `partial` (enums.sql:190), and an empty queue (rows_in 0) is idle, not broken.
+  const runStatus = items.length > 0 && dedupedCount + droppedDuplicateCount === 0 && errorCount > 0 ? "failed" : "succeeded";
+  // This agent counts failures but does not collect their messages (each is written to
+  // the function log at the failing row), so the summary says how many and where to
+  // look rather than inventing a reason. Null on a clean run.
+  const errorDetail = errorCount > 0 ? `${errorCount} of ${items.length} rows errored; per-row reasons are in the normalizer function log` : null;
+
   // Finalize agent run bookkeeping in agent_runs table.
   if (runId) {
     // Execute update on agent_runs.
@@ -398,14 +407,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .from("agent_runs")
       // Update completion fields and counters.
       .update({
-        // Set status to succeeded.
-        status: "succeeded",
+        // Derived from the counters, never hard-coded: see runStatus above.
+        status: runStatus,
+        // The failure summary, so the health page says WHY and not just how many.
+        error_detail: errorDetail,
         // Set completion timestamp string.
         finished_at: new Date().toISOString(),
         // Record input rows count.
         rows_in: items.length,
         // Record total output rows count.
         rows_out: dedupedCount + droppedDuplicateCount,
+        // The refused transitions, so the health page can see them.
+        error_count: errorCount,
       })
       // Match run ID.
       .eq("id", runId);
@@ -413,8 +426,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   // Return final summary HTTP response to caller.
   return jsonResponse(200, {
-    // Success flag.
+    // The function ran to completion; per-row failures are in `errors` below.
     success: true,
+    // The same status written to agent_runs, so the dashboard and health page agree.
+    status: runStatus,
+    // The same failure summary, so the operator sees it without a DB query.
+    error_detail: errorDetail,
     // Total processed applications count.
     processed: items.length,
     // Successfully deduped count.
@@ -424,4 +441,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Total error count encountered.
     errors: errorCount,
   });
-});
+}));

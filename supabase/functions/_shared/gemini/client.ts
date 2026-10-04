@@ -110,6 +110,14 @@ export type GeminiCallOutcome<T> =
         | "key_env_missing"
         | "claim_failed"
         | "rate_limited_all_retries_exhausted"
+        // A 404 from generateContent: the MODEL ID or endpoint does not exist. A
+        // configuration error, never a key problem, so it is named separately from
+        // `http_error` and no key is blamed for it (see the 404 branch below).
+        | "model_not_found"
+        // The caller asked for something the client refuses to send (e.g. grounding tools
+        // combined with a JSON response schema). Returned BEFORE a key is claimed, so a
+        // malformed request costs no quota and touches no key's failure streak.
+        | "invalid_request"
         | "http_error";
       readonly status?: number;
       readonly detail?: string;
@@ -209,6 +217,26 @@ export async function callGeminiWithFailover<T>(
       continue;
     }
 
+    // 4b. On 404: the model id (or endpoint path) does not exist. Checked BEFORE the
+    // generic branch below because that branch calls `reportResult(…, false)`, which bumps
+    // the claimed key's `consecutive_failures` and overwrites its `last_error`. Every key
+    // is innocent here: a retired model 404s identically on all 40, so blaming one per
+    // call walks the LRU through the whole pool and leaves 40 keys reading "HTTP 404" on
+    // the health page — which is what happened live with `gemini-1.5-flash`, and sent the
+    // investigation to the keys instead of the model id.
+    if (execResult.status === 404) {
+      // Fail fast without retrying: rotating keys cannot fix a model that does not exist.
+      return {
+        ok: false,
+        reason: "model_not_found",
+        status: 404,
+        // A human-readable pointer to the fix, so a log line names the knob to turn.
+        detail: "Gemini returned 404 for generateContent: the model id is retired or wrong; set GEMINI_MODEL or update GEMINI_DEFAULT_MODEL",
+        errorBody: execResult.errorBody,
+        attempts: attempt,
+      };
+    }
+
     // 5. On other non-429 HTTP errors (e.g. 400 Bad Request, 500 Internal Error):
     // Record error against key and fail closed — rotating keys won't fix a malformed payload.
     await reportResult(
@@ -247,8 +275,39 @@ export async function callGeminiWithFailover<T>(
 }
 
 // Standard helper to invoke Google Gemini REST API directly with failover.
+// THE ONE PLACE THE DEFAULT MODEL ID LIVES. Every Gemini caller in the repo inherits it
+// (none passes `model`), so a retired id here 404s the whole pipeline at once — the
+// previous value, `gemini-1.5-flash`, was shut down 2025-09-29 and every call 404'd.
+// `gemini-3.8-flash` is the current stable (GA) Flash text model as of 2026-10-04:
+//   https://ai.google.dev/gemini-api/docs/models     (listed "Stable")
+//   https://ai.google.dev/gemini-api/docs/changelog  (2026-09-02: "Released gemini-3.8-flash")
+// Overridable per deployment with the GEMINI_MODEL secret, so the NEXT retirement is an
+// env change and not a code deploy.
+export const GEMINI_DEFAULT_MODEL = "gemini-3.8-flash";
+
+// Resolve the model for one call: explicit option, then env, then the constant.
+// A function rather than a module-level read because `Deno` does not exist under
+// `node --test`, and the tests import this module.
+function resolveModel(explicit: string | undefined): string {
+  // An explicit per-call choice always wins — it is the most specific statement of intent.
+  if (explicit !== undefined && explicit.trim().length > 0) return explicit.trim();
+  // `globalThis.Deno` is absent under node, so probe it rather than reference it bare.
+  const env = (globalThis as { Deno?: { env: { get(k: string): string | undefined } } }).Deno?.env.get("GEMINI_MODEL");
+  // A blank secret must not become `models/:generateContent`, which would 404 as "model_not_found" for a reason nobody would guess.
+  if (env !== undefined && env.trim().length > 0) return env.trim();
+  // Nothing configured: the documented current default.
+  return GEMINI_DEFAULT_MODEL;
+}
+
 export interface GenerateGeminiOptions {
   readonly model?: string;
+  // Gemini `Tool` objects, forwarded VERBATIM as the request body's `tools` field —
+  // e.g. `[{ google_search: {} }]` for Grounding with Google Search. Verbatim because the
+  // Tool union is wide (googleSearch, urlContext, codeExecution, …) and a typed subset
+  // here would be one more thing to fall out of date. REST field per
+  // https://ai.google.dev/api/generate-content (Tool.googleSearch; the grounding guide's
+  // curl spells it `google_search`, and the proto-JSON endpoint accepts both).
+  readonly tools?: ReadonlyArray<Record<string, unknown>>;
   readonly prompt: {
     readonly systemInstruction: string;
     readonly userContent: string;
@@ -268,6 +327,10 @@ export interface GeminiResponseBody {
       }>;
     };
     readonly finishReason?: string;
+    // Populated only on grounded calls (`tools: [{ google_search: {} }]`): the search
+    // queries, sources and citation spans. Typed `unknown` on purpose — it is untrusted
+    // API output, and the consumer must shape-check it rather than inherit a guess here.
+    readonly groundingMetadata?: unknown;
   }>;
 }
 
@@ -275,8 +338,26 @@ export async function generateGeminiContent(
   db: SupabaseClient,
   options: GenerateGeminiOptions,
 ): Promise<GeminiCallOutcome<GeminiResponseBody>> {
-  const model = options.model ?? "gemini-1.5-flash";
+  // Explicit option, then GEMINI_MODEL, then GEMINI_DEFAULT_MODEL — see resolveModel.
+  const model = resolveModel(options.model);
+  // Network seam, so tests never reach Google.
   const fetchFn = options.fetchSeam ?? fetch;
+
+  // REFUSE grounding + JSON schema rather than silently dropping one. Gemini 2.x rejects
+  // the combination outright; the structured-output guide
+  // (https://ai.google.dev/gemini-api/docs/structured-output) lists it for Gemini 3 only
+  // as a PREVIEW feature. Fail closed until that is GA: dropping the schema would hand the
+  // caller free text it will try to JSON.parse, and dropping the tools would return
+  // ungrounded "facts" that look grounded. Checked before claiming a key, so it is free.
+  if (options.tools !== undefined && options.tools.length > 0 && options.prompt.responseSchema !== undefined) {
+    // A typed failure, not a throw: every caller already branches on `outcome.ok`.
+    return {
+      ok: false,
+      reason: "invalid_request",
+      detail: "tools (e.g. google_search grounding) cannot be combined with responseSchema / JSON mode; send one or the other",
+      attempts: 0,
+    };
+  }
 
   const requestBody = {
     contents: [
@@ -294,6 +375,9 @@ export async function generateGeminiContent(
           responseSchema: options.prompt.responseSchema,
         }
       : undefined,
+    // Forwarded only when given: an empty or absent `tools` key is an ungrounded call, and
+    // omitting the key keeps every existing caller's request byte-identical.
+    ...(options.tools !== undefined && options.tools.length > 0 ? { tools: options.tools } : {}),
   };
 
   return await callGeminiWithFailover<GeminiResponseBody>(db, {
