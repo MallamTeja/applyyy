@@ -9,6 +9,7 @@
   },
   "scripts": {
     "apply": "node src/cli/apply.ts",
+    "assist": "node src/cli/assist.ts",
     "keepalive": "node src/cli/keepalive.ts",
     "scout": "node src/cli/scout.ts",
     "scout:remote": "node src/cli/scout-remote.ts",
