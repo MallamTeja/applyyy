@@ -1,0 +1,200 @@
+/* Tokens only, all defined in styles/tokens.css; no hex fallbacks (see PipelineRunModal.css). */
+
+/* Card surface matching the page's other panels. */
+.web-scout {
+  /* Raised surface token; themes via light-dark(). */
+  background: var(--sheet);
+  /* Hairline edge separates it from the page ground. */
+  border: 1px solid var(--rule);
+  /* House sheet radius. */
+  border-radius: var(--radius-sheet);
+  /* Room around content. */
+  padding: var(--gap-4);
+  /* Space below so the next block does not touch. */
+  margin-bottom: var(--gap-4);
+  /* Readable text colour in both themes. */
+  color: var(--text-primary);
+  /* Lets long URLs shrink instead of widening the page at 360px. */
+  min-width: 0;
+}
+
+/* Panel heading. */
+.web-scout__title {
+  /* Section-header scale token. */
+  font-size: var(--font-size-section-header);
+  /* Matching weight token. */
+  font-weight: var(--font-weight-section-header);
+  /* Tight bottom margin: the form is the heading's content. */
+  margin: 0 0 var(--gap-3);
+}
+
+/* Label, input and button: wrapping row so phones stack without a media query. */
+.web-scout__form {
+  /* Flex so wrapping handles narrow screens. */
+  display: flex;
+  /* Wrap so the button drops under the input at 360px. */
+  flex-wrap: wrap;
+  /* Consistent spacing. */
+  gap: var(--gap-2);
+  /* Aligns the button with the input row. */
+  align-items: center;
+}
+
+/* Label takes a full row so the input never sits beside it awkwardly. */
+.web-scout__label {
+  /* Forces its own line. */
+  flex: 0 0 100%;
+  /* Small scale; it is secondary. */
+  font-size: var(--size-sm);
+  /* De-emphasised but still readable via the secondary token. */
+  color: var(--text-secondary);
+}
+
+/* Query input grows to fill the row. */
+.web-scout__input {
+  /* Takes spare width; basis 12rem wraps the button below on narrow screens. */
+  flex: 1 1 12rem;
+  /* Needed so a flex item can shrink below its content width. */
+  min-width: 0;
+  /* Comfortable touch height. */
+  padding: 0.4rem 0.6rem;
+  /* Control surface follows the theme. */
+  background: var(--ground);
+  /* Readable text colour. */
+  color: var(--text-primary);
+  /* Visible edge. */
+  border: 1px solid var(--rule-strong);
+  /* House control radius. */
+  border-radius: var(--radius-control);
+  /* Body size token. */
+  font-size: var(--size-base);
+}
+
+/* Focus ring for keyboard users; base.css has a global rule, this makes the intent local. */
+.web-scout__input:focus-visible,
+.web-scout__link:focus-visible,
+.web-scout__rejected summary:focus-visible {
+  /* Accent outline is visible on both surfaces. */
+  outline: 2px solid var(--accent);
+  /* Offset keeps it off the border. */
+  outline-offset: 2px;
+}
+
+/* Status line; empty text collapses it so the layout does not jump. */
+.web-scout__status {
+  /* Small, quiet text. */
+  font-size: var(--size-sm);
+  /* Secondary colour. */
+  color: var(--text-secondary);
+  /* No margin so an empty line takes no space. */
+  margin: 0;
+}
+
+/* Non-error notice (kill switch off). */
+.web-scout__notice {
+  /* Signal wash marks "attention, not failure". */
+  background: var(--signal-wash);
+  /* Strong signal text for contrast on the wash. */
+  color: var(--signal-strong);
+  /* Padding for a tinted box. */
+  padding: var(--gap-2) var(--gap-3);
+  /* House radius. */
+  border-radius: var(--radius-control);
+  /* Top spacing from the form. */
+  margin: var(--gap-3) 0 0;
+}
+
+/* Error and unauthorized message. */
+.web-scout__error {
+  /* Fabricated wash is the repo's "something is wrong" tint. */
+  background: var(--fabricated-wash);
+  /* Strong variant for text contrast. */
+  color: var(--fabricated-strong);
+  /* Same box as the notice. */
+  padding: var(--gap-2) var(--gap-3);
+  /* House radius. */
+  border-radius: var(--radius-control);
+  /* Top spacing. */
+  margin: var(--gap-3) 0 0;
+}
+
+/* Result block. */
+.web-scout__result {
+  /* Separates results from the form. */
+  margin-top: var(--gap-3);
+}
+
+/* Counts line. */
+.web-scout__summary {
+  /* Slightly emphasised. */
+  font-weight: 600;
+  /* Spacing under it. */
+  margin: 0 0 var(--gap-2);
+}
+
+/* Both lists share a reset. */
+.web-scout__jobs,
+.web-scout__rejected-list {
+  /* Bullets add noise in a card list. */
+  list-style: none;
+  /* Removes the default indent. */
+  padding: 0;
+  /* Spacing handled by items. */
+  margin: 0;
+}
+
+/* One job row. */
+.web-scout__job {
+  /* Stacked title over meta. */
+  display: flex;
+  /* Column direction. */
+  flex-direction: column;
+  /* Tight gap. */
+  gap: var(--gap-1);
+  /* Row padding. */
+  padding: var(--gap-2) 0;
+  /* Divider between rows. */
+  border-top: 1px solid var(--rule);
+}
+
+/* Job title link. */
+.web-scout__link {
+  /* Accent marks it as clickable. */
+  color: var(--accent-strong);
+  /* Long titles break instead of overflowing. */
+  overflow-wrap: anywhere;
+}
+
+/* Secondary text for company, location, reasons. */
+.web-scout__meta {
+  /* Muted token. */
+  color: var(--text-muted);
+  /* Small. */
+  font-size: var(--size-sm);
+  /* Breaks long strings at 360px. */
+  overflow-wrap: anywhere;
+}
+
+/* Rejected disclosure. */
+.web-scout__rejected {
+  /* Space above it. */
+  margin-top: var(--gap-3);
+  /* Small text. */
+  font-size: var(--size-sm);
+}
+
+/* Rejected summary is clickable. */
+.web-scout__rejected summary {
+  /* Pointer signals it expands. */
+  cursor: pointer;
+  /* Secondary colour. */
+  color: var(--text-secondary);
+}
+
+/* Rejected URL in machine font so it reads as an identifier. */
+.web-scout__rejected-url {
+  /* Id font token. */
+  font-family: var(--font-id);
+  /* Long URLs wrap rather than scroll the page. */
+  overflow-wrap: anywhere;
+}
