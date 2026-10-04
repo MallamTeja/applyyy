@@ -268,7 +268,7 @@ export function AnswerBankPage(): ReactElement {
                 type="button"
                 className={`chip-btn ${activeCategory === 'needs_attention' ? 'chip-btn--active' : ''}`}
                 onClick={() => setActiveCategory('needs_attention')}
-                style={{ color: '#b45309', borderColor: '#f59e0b' }}
+                style={{ /* Warning token: #b45309 was the light-mode amber and too dark on a dark chip. */ color: 'var(--signal)', borderColor: 'var(--signal)' }}
               >
                 ⚠️ Needs Attention ({needsAttentionCount})
               </button>

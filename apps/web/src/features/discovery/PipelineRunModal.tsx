@@ -3,7 +3,8 @@ import type { ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { runFullPipeline } from '../../data/pipelineRunner';
-import type { PipelineStepProgress } from '../../data/pipelineRunner';
+// The whole result, not just the steps: `ok` is what decides success vs failure framing.
+import type { PipelineRunResult } from '../../data/pipelineRunner';
 
 import './PipelineRunModal.css';
 
@@ -16,26 +17,36 @@ export function PipelineRunModal({ onClose, onRefresh }: PipelineRunModalProps):
   const navigate = useNavigate();
   const [running, setRunning] = useState<boolean>(false);
   const [currentStatus, setCurrentStatus] = useState<string>('Ready to process discovered jobs through the AI tailoring pipeline.');
-  const [steps, setSteps] = useState<readonly PipelineStepProgress[]>([]);
-  const [done, setDone] = useState<boolean>(false);
+  // The last run's result, or null before any run. Replaces a bare `done` flag, which
+  // could not tell a run that advanced rows from one where every step failed.
+  const [result, setResult] = useState<PipelineRunResult | null>(null);
+  // Steps of the last run, read off the result so there is one source of truth.
+  const steps = result?.steps ?? [];
 
   const handleStart = async (): Promise<void> => {
     setRunning(true);
-    setDone(false);
-    setSteps([]);
+    // Clear the previous outcome so a Retry does not show stale success/failure framing.
+    setResult(null);
     setCurrentStatus('Initializing pipeline agents on Supabase...');
 
     try {
       const res = await runFullPipeline((agentName, statusText) => {
         setCurrentStatus(`[${agentName}] ${statusText}`);
       });
-      setSteps(res.steps);
+      // Keep the classified result; the footer branches on its `ok`.
+      setResult(res);
+      // The summary states what actually moved, including "0 row(s) advanced".
       setCurrentStatus(res.summary);
-      setDone(true);
-      onRefresh();
     } catch (err) {
-      setCurrentStatus(err instanceof Error ? err.message : 'Pipeline execution encountered an error.');
+      // An unexpected throw is a failed run, so it gets the failure footer (Retry/Close).
+      const message = err instanceof Error ? err.message : 'Pipeline execution encountered an error.';
+      // Recorded as a result so the footer leaves the "Run" state and offers Retry.
+      setResult({ ok: false, summary: message, steps: [] });
+      // Show the same message in the status box.
+      setCurrentStatus(message);
     } finally {
+      // Refresh even on failure: earlier steps may have moved rows before a later one failed.
+      onRefresh();
       setRunning(false);
     }
   };
@@ -107,8 +118,16 @@ export function PipelineRunModal({ onClose, onRefresh }: PipelineRunModalProps):
             </div>
           </div>
 
-          <div className="pipeline-modal__status-box">
-            <div className="pipeline-modal__status-label">Pipeline Status</div>
+          {/* Failure gets role=alert so a screen reader announces it; the --error modifier is
+              a hook for styling (no rule exists yet — CSS is outside this change's partition). */}
+          <div
+            className={`pipeline-modal__status-box${result !== null && !result.ok ? ' pipeline-modal__status-box--error' : ''}`}
+            role={result !== null && !result.ok ? 'alert' : undefined}
+          >
+            {/* Label changes with the outcome so failure is not read as a neutral status. */}
+            <div className="pipeline-modal__status-label">
+              {result === null ? 'Pipeline Status' : result.ok ? 'Pipeline Finished' : 'Pipeline Did Not Complete'}
+            </div>
             <div className="pipeline-modal__status-text">{currentStatus}</div>
             {steps.length > 0 && (
               // Class, not inline style: the inline version carried a light-theme hex fallback.
@@ -124,7 +143,8 @@ export function PipelineRunModal({ onClose, onRefresh }: PipelineRunModalProps):
         </div>
 
         <footer className="pipeline-modal__footer">
-          {done ? (
+          {/* Success framing and the Approval Queue link only when the run is ok. */}
+          {result?.ok === true ? (
             <>
               <button
                 type="button"
@@ -142,6 +162,27 @@ export function PipelineRunModal({ onClose, onRefresh }: PipelineRunModalProps):
                 }}
               >
                 Go to Approval Queue ↗
+              </button>
+            </>
+          ) : result !== null ? (
+            <>
+              {/* Failed or halted run: no queue link, since nothing reliable reached it. */}
+              <button
+                type="button"
+                className="button button--secondary"
+                onClick={onClose}
+                disabled={running}
+              >
+                Close
+              </button>
+              {/* Retry re-runs the whole pipeline; each agent only picks up rows still at its source status. */}
+              <button
+                type="button"
+                className="button button--primary"
+                onClick={() => void handleStart()}
+                disabled={running}
+              >
+                {running ? 'Processing Pipeline...' : 'Retry'}
               </button>
             </>
           ) : (

@@ -62,32 +62,32 @@
 
 /* Styling for high demand tier */
 .tier-high {
-  /* Red background for high demand */
-  background-color: #ffebee;
-  /* Red text color */
-  color: #c62828;
+  /* Danger wash token: #ffebee was a light-only pink that glared on a dark page. */
+  background-color: var(--fabricated-wash);
+  /* Strong danger ink keeps contrast on the wash in both themes. */
+  color: var(--fabricated-strong);
 }
 
 /* Styling for medium demand tier */
 .tier-medium {
-  /* Orange/Yellow background */
-  background-color: #fff8e1;
-  /* Orange/Yellow text color */
-  color: #f57f17;
+  /* Warning wash token: medium demand is a caution, and #fff8e1 was light-only. */
+  background-color: var(--signal-wash);
+  /* Strong warning ink; #f57f17 on a pale wash was low-contrast even in light mode. */
+  color: var(--signal-strong);
 }
 
 /* Styling for low demand tier */
 .tier-low {
-  /* Green background */
-  background-color: #e8f5e9;
-  /* Green text color */
-  color: #2e7d32;
+  /* Success wash token: low demand is the safe state, and #e8f5e9 was light-only. */
+  background-color: var(--traced-wash);
+  /* Strong success ink keeps contrast on the wash in both themes. */
+  color: var(--traced-strong);
 }
 
 /* Wrapper for the bar to provide background */
 .skill-gap-bar-wrapper {
-  /* Light grey background for the unfilled portion */
-  background-color: #f5f5f5;
+  /* Recessed track token: #f5f5f5 drew a bright bar across a dark page. */
+  background-color: var(--panel);
   /* Round the corners */
   border-radius: 4px;
   /* Hide overflowing fill content */
@@ -98,8 +98,8 @@
 
 /* The filled portion of the bar */
 .skill-gap-bar-fill {
-  /* Blue background color */
-  background-color: #1976d2;
+  /* Accent fill so the bar matches the app's one data colour in both themes. */
+  background-color: var(--accent);
   /* Full height of the wrapper */
   height: 100%;
   /* Use flexbox to position the text */
@@ -116,8 +116,8 @@
 
 /* Text inside the filled bar showing the count */
 .frequency-count {
-  /* White text for contrast against blue background */
-  color: white;
+  /* Ink-on-fill flips with --accent, so the count stays legible in both themes. */
+  color: var(--ink-on-fill);
   /* Small font size */
   font-size: 12px;
   /* Bold font weight */
@@ -130,8 +130,8 @@
   text-align: center;
   /* Add top margin */
   margin-top: 50px;
-  /* Grey text color */
-  color: #666;
+  /* Secondary ink: #666 was near-invisible on a dark ground. */
+  color: var(--text-secondary);
 }
 
 /* Styling for error state */
@@ -140,6 +140,6 @@
   text-align: center;
   /* Add top margin */
   margin-top: 50px;
-  /* Red text color */
-  color: #d32f2f;
+  /* Danger token, lightened in dark mode so the error stays readable. */
+  color: var(--fabricated);
 }

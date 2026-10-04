@@ -1,109 +1,138 @@
 /* This is the main stylesheet for the Follow-Up Nudges page. */
+/* Every colour is a token from styles/tokens.css. The previous version hardcoded
+   light hex (#f9f9f9 card, #fff buttons) while text inherited --text-primary, which
+   resolves near-white in dark mode: white text on a white card. Tokens theme via
+   light-dark(), so surface and ink always flip together. No hex fallbacks in var(). */
 /* We style the main container. */
 .followup-container {
-    /* We add padding. */
-    padding: 20px;
-    /* We set a max width. */
+    /* Gutter from the app shell; token keeps spacing on the house scale. */
+    padding: var(--gap-5);
+    /* Caps line length so drafts stay readable on wide screens. */
     max-width: 800px;
-    /* We center the container. */
+    /* Centres the column inside the main pane. */
     margin: 0 auto;
-    /* We set the font family. */
-    font-family: sans-serif;
+    /* App UI sans (same as base.css body) instead of the UA's generic sans-serif. */
+    font-family: var(--font-machine);
+    /* Explicit ink so nothing below inherits a colour from an unthemed ancestor. */
+    color: var(--text-primary);
 /* We close the block. */
 }
 
 /* We style the nudge card. */
 .nudge-card {
-    /* We add a border. */
-    border: 1px solid #ccc;
-    /* We add border radius. */
-    border-radius: 8px;
-    /* We add padding. */
-    padding: 16px;
-    /* We add margin at the bottom. */
-    margin-bottom: 20px;
-    /* We set a background color. */
-    background-color: #f9f9f9;
+    /* Rule token so the edge stays faint in both themes instead of light-grey on black. */
+    border: 1px solid var(--rule);
+    /* House sheet radius, so cards match the rest of the app. */
+    border-radius: var(--radius-sheet);
+    /* Breathing room between edge and draft fields. */
+    padding: var(--gap-4);
+    /* Separates stacked cards. */
+    margin-bottom: var(--gap-5);
+    /* Raised surface token: was #f9f9f9, which caused white-on-white in dark mode. */
+    background-color: var(--sheet);
 /* We close the block. */
 }
 
 /* We style the heading. */
 .nudge-card h2 {
-    /* We remove margin top. */
+    /* Card padding already provides the top space; UA margin would double it. */
     margin-top: 0;
 /* We close the block. */
 }
 
 /* We style the applied date text. */
 .applied-date {
-    /* We make it italic. */
+    /* Italic marks it as metadata, not content. */
     font-style: italic;
-    /* We change the color. */
-    color: #666;
+    /* Secondary ink de-emphasises it; #666 was too dark to read on a dark sheet. */
+    color: var(--text-secondary);
 /* We close the block. */
 }
 
 /* We style the draft subject input. */
 .draft-subject {
-    /* We make it take full width. */
+    /* Subject line can be long; use the whole card width. */
     width: 100%;
-    /* We add padding. */
-    padding: 8px;
-    /* We add margin below. */
-    margin-bottom: 12px;
-    /* We add border. */
-    border: 1px solid #ccc;
-    /* We set border radius. */
-    border-radius: 4px;
+    /* Comfortable click target and text inset. */
+    padding: var(--gap-2);
+    /* Separates it from the body textarea. */
+    margin-bottom: var(--gap-3);
+    /* Stronger rule so the field boundary is visible against the sheet. */
+    border: 1px solid var(--rule-strong);
+    /* House control radius, shared with every input in the app. */
+    border-radius: var(--radius-control);
+    /* Recessed surface reads as "editable" against the raised card. */
+    background-color: var(--panel);
+    /* Explicit ink so the typed text never inherits a UA colour that ignores the theme. */
+    color: var(--text-primary);
+    /* Inputs do not inherit font by default; keep them in the page typeface. */
+    font: inherit;
+    /* Padding counts inside the 100% width so the field does not overflow the card. */
+    box-sizing: border-box;
 /* We close the block. */
 }
 
 /* We style the draft body textarea. */
 .draft-body {
-    /* We make it full width. */
+    /* Draft body uses the full card width. */
     width: 100%;
-    /* We set a minimum height. */
+    /* Enough room to show a short email without scrolling. */
     min-height: 100px;
-    /* We add padding. */
-    padding: 8px;
-    /* We add margin below. */
-    margin-bottom: 12px;
-    /* We add border. */
-    border: 1px solid #ccc;
-    /* We set border radius. */
-    border-radius: 4px;
+    /* Text inset from the border. */
+    padding: var(--gap-2);
+    /* Separates it from the action row. */
+    margin-bottom: var(--gap-3);
+    /* Same field boundary as the subject input, for consistency. */
+    border: 1px solid var(--rule-strong);
+    /* House control radius. */
+    border-radius: var(--radius-control);
+    /* Recessed surface marks it as editable. */
+    background-color: var(--panel);
+    /* Explicit ink so typed text themes with the surface. */
+    color: var(--text-primary);
+    /* Textareas default to monospace in some UAs; keep the page typeface. */
+    font: inherit;
+    /* Padding inside the width so it does not overflow the card. */
+    box-sizing: border-box;
 /* We close the block. */
 }
 
 /* We style the actions container. */
+/* NOTE: referral.css also defines a global .actions; both files load into one
+   bundle, so the later rule's margin-top leaks here. Scope the class name when the
+   TSX owner next touches FollowUpNudgesPage.tsx. */
 .actions {
-    /* We use flexbox. */
+    /* Lays buttons out in a row. */
     display: flex;
-    /* We add a gap between buttons. */
-    gap: 10px;
-    /* We wrap buttons if needed. */
+    /* Keeps buttons from touching. */
+    gap: var(--gap-2);
+    /* Lets buttons wrap on phone widths instead of overflowing. */
     flex-wrap: wrap;
 /* We close the block. */
 }
 
 /* We style the buttons. */
 .actions button {
-    /* We add padding. */
-    padding: 8px 12px;
-    /* We add border. */
-    border: 1px solid #ccc;
-    /* We add border radius. */
-    border-radius: 4px;
-    /* We set cursor to pointer. */
+    /* Comfortable click target. */
+    padding: var(--gap-2) var(--gap-3);
+    /* Visible edge against the sheet in both themes. */
+    border: 1px solid var(--rule-strong);
+    /* House control radius. */
+    border-radius: var(--radius-control);
+    /* Signals the button is clickable. */
     cursor: pointer;
-    /* We set a background color. */
-    background-color: #fff;
+    /* Raised surface: was #fff, which glared against a dark page. */
+    background-color: var(--sheet);
+    /* Explicit ink: the old rule set no colour, so button text took the UA default. */
+    color: var(--text-primary);
+    /* Buttons do not inherit font by default. */
+    font: inherit;
 /* We close the block. */
 }
 
 /* We style the button on hover. */
 .actions button:hover {
-    /* We darken the background. */
-    background-color: #eee;
+    /* Translucent hover token works on any surface; #eee was a light-only grey. */
+    background-color: var(--surface-hover);
 /* We close the block. */
 }

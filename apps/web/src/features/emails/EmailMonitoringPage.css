@@ -168,7 +168,8 @@
 
 .email-card__gmail-button:hover {
   background: var(--accent);
-  color: #ffffff;
+  /* --ink-on-fill flips dark when --accent turns light in dark mode; fixed white failed contrast there. */
+  color: var(--ink-on-fill);
   border-color: var(--accent);
 }
 
@@ -285,8 +286,10 @@
 
 .store-notice--info {
   /* Info notice styling matching dark token elevations */
-  background: rgba(99, 102, 241, 0.1);
-  color: #a5b4fc;
+  /* Accent wash token tracks the theme's accent instead of a fixed indigo. */
+  background: var(--accent-subtle);
+  /* Strong accent ink: #a5b4fc was pale lavender, unreadable on a light sheet. */
+  color: var(--accent-strong);
   border-left: 3px solid var(--accent);
   padding: var(--gap-2) var(--gap-3);
   border-radius: var(--radius-sm);

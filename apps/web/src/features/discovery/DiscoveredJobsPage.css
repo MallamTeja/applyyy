@@ -350,8 +350,10 @@
 
 .discovery__tab-btn--active-dropped {
   background: rgba(239, 68, 68, 0.08);
-  border-color: #ef4444;
-  color: #dc2626;
+  /* Danger token lightens in dark mode; #ef4444 was a single shade. */
+  border-color: var(--fabricated);
+  /* Danger ink token; #dc2626 was dim on a dark ground. */
+  color: var(--fabricated);
   font-weight: 600;
 }
 
@@ -376,8 +378,10 @@
 
 .discovery__toggle-pill--active {
   background: rgba(16, 185, 129, 0.12);
-  border-color: #10b981;
-  color: #059669;
+  /* Success token themes via light-dark(); #10b981 was one shade for both modes. */
+  border-color: var(--traced);
+  /* Success ink token; #059669 was dim on a dark ground. */
+  color: var(--traced);
   font-weight: 600;
 }
 

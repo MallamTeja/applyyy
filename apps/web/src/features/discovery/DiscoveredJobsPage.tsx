@@ -292,7 +292,7 @@ export function DiscoveredJobsPage(): ReactElement {
           <button
             type="button"
             className="chip-btn"
-            style={{ fontWeight: 600, color: 'var(--accent, #6366f1)', borderColor: 'var(--accent, #6366f1)' }}
+            style={{ fontWeight: 600, /* --accent is always defined; a hex fallback would only mask a typo'd token. */ color: 'var(--accent)', borderColor: 'var(--accent)' }}
             onClick={() => setDiscoveryModalMode('watchlist')}
             title="Scan Greenhouse, Lever, and Ashby boards on your Company Watchlist"
           >
@@ -302,7 +302,7 @@ export function DiscoveredJobsPage(): ReactElement {
           <button
             type="button"
             className="chip-btn"
-            style={{ fontWeight: 600, color: 'var(--accent, #6366f1)', borderColor: 'var(--accent, #6366f1)' }}
+            style={{ fontWeight: 600, /* --accent is always defined; a hex fallback would only mask a typo'd token. */ color: 'var(--accent)', borderColor: 'var(--accent)' }}
             onClick={() => setDiscoveryModalMode('remote')}
             title="Discover international remote jobs from open tech feeds"
           >
@@ -312,7 +312,7 @@ export function DiscoveredJobsPage(): ReactElement {
           <button
             type="button"
             className="chip-btn"
-            style={{ fontWeight: 600, color: '#10b981', borderColor: '#10b981' }}
+            style={{ fontWeight: 600, /* Success token themes via light-dark(); #10b981 was a single shade for both modes. */ color: 'var(--traced)', borderColor: 'var(--traced)' }}
             onClick={() => setPipelineModalOpen(true)}
             title="Run the deployed agent pipeline (Normalizer -> Screener -> Matcher -> Tailor -> Auditor) to tailor and queue jobs"
           >
@@ -397,7 +397,7 @@ export function DiscoveredJobsPage(): ReactElement {
                 Showing <strong>{filteredItems.length}</strong> clean tech jobs ({droppedCount} dropped by filters)
               </span>
             ) : viewTab === 'dropped' ? (
-              <span style={{ color: '#dc2626' }}>
+              <span style={{ /* Danger token lightens in dark mode; #dc2626 was dim on a near-black ground. */ color: 'var(--fabricated)' }}>
                 Showing <strong>{filteredItems.length}</strong> dropped/irrelevant jobs
               </span>
             ) : (

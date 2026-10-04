@@ -202,6 +202,21 @@
   color: var(--text-muted);
 }
 
+/* Failed run: the box turns danger-tinted so a failure can't pass for a neutral status. */
+/* Placed after the base box rule: same specificity, so source order makes this one win. */
+.pipeline-modal__status-box--error {
+  /* Danger wash is translucent, so it tints whichever theme's surface sits behind it. */
+  background: var(--fabricated-wash);
+  /* Full-strength danger edge makes the failure state visible before anyone reads the text. */
+  border-color: var(--fabricated);
+}
+
+/* Eyebrow inside a failed box. Two classes beat the base label rule on specificity, so order doesn't matter. */
+.pipeline-modal__status-box--error .pipeline-modal__status-label {
+  /* Strong danger ink holds contrast on the wash; --text-muted would read as "nothing wrong". */
+  color: var(--fabricated-strong);
+}
+
 /* The status message itself. */
 .pipeline-modal__status-text {
   /* Gap below the label. */

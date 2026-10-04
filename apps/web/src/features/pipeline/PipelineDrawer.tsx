@@ -210,7 +210,7 @@ export function PipelineDrawer({
         <div className="drawer__content">
           {/* We render a tab group when the status is interview so the user can switch views. */}
           {status === 'interview' && (
-            <div className="drawer__tabs" style={{ display: 'flex', gap: '16px', marginBottom: '16px', borderBottom: '1px solid #e2e8f0', paddingBottom: '8px' }}>
+            <div className="drawer__tabs" style={{ display: 'flex', gap: '16px', marginBottom: '16px', /* Rule token: #e2e8f0 drew a bright line across the dark drawer. */ borderBottom: '1px solid var(--rule)', paddingBottom: '8px' }}>
               {/* Button to view the raw list of applications. */}
               <button type="button" onClick={() => setActiveTab('applications')} style={{ fontWeight: activeTab === 'applications' ? 'bold' : 'normal', background: 'none', border: 'none', cursor: 'pointer' }}>
                 {/* Text for the applications tab. */}

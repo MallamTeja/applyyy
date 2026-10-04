@@ -9,9 +9,11 @@
  *   - Database status updates for sent, snoozed, and dismissed nudges
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { PageHeader } from '../../app/PageHeader';
+// Write failures must be visible; the app's toast is the existing channel for that.
+import { useToast } from '../../app/Toast';
 import { supabase } from '../../data/supabase.ts';
 import './followup.css';
 
@@ -36,11 +38,25 @@ export function FollowUpNudgesPage(): ReactElement {
   const [loading, setLoading] = useState<boolean>(true);
   // State holding copy toast confirmation string
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  // Load failure message, kept apart from "no rows" so a broken query never reads as an empty queue.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Pending "Copied!" reset timer, held so unmount can cancel it instead of setting state on a dead component.
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Error toasts for failed status writes.
+  const toast = useToast();
+
+  // Cancel the copy-feedback timer on unmount.
+  useEffect(() => () => {
+    // Nothing to clear if no copy happened.
+    if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+  }, []);
 
   // Fetch pending follow-up nudges from database
   const loadNudges = useCallback(async () => {
     try {
       setLoading(true);
+      // A retry starts from a clean slate, not the previous failure.
+      setLoadError(null);
       if (supabase === null) {
         setLoading(false);
         return;
@@ -53,8 +69,10 @@ export function FollowUpNudgesPage(): ReactElement {
         .eq('status', 'pending')
         .order('created_at', { ascending: false });
 
+      // A failed query is shown as an error, never as the friendly "no nudges" state.
       if (error || !data) {
-        setLoading(false);
+        // The database's own message, so the cause is diagnosable.
+        setLoadError(error?.message ?? 'No data returned.');
         return;
       }
 
@@ -77,7 +95,8 @@ export function FollowUpNudgesPage(): ReactElement {
 
       setNudges(mapped);
     } catch (err) {
-      console.error('Failed to load follow-up nudges:', err);
+      // A thrown error (network) is also a load failure, not an empty queue.
+      setLoadError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
@@ -92,8 +111,13 @@ export function FollowUpNudgesPage(): ReactElement {
     try {
       await navigator.clipboard.writeText(`Subject: ${nudge.draft_subject}\n\n${nudge.draft_body}`);
       setCopiedId(nudge.id);
-      setTimeout(() => setCopiedId(null), 2500);
+      // Replace any earlier timer so two quick copies do not cut each other's feedback short.
+      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+      // Held in the ref so the unmount cleanup can cancel it.
+      copyTimerRef.current = setTimeout(() => setCopiedId(null), 2500);
 
+      // No `to=`: neither follow_up_nudges nor the joined applications/jobs rows store a
+      // recruiter address, so the operator fills the recipient in Gmail.
       const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&su=${encodeURIComponent(nudge.draft_subject)}&body=${encodeURIComponent(nudge.draft_body)}`;
       window.open(gmailUrl, '_blank', 'noopener,noreferrer');
     } catch (err) {
@@ -101,29 +125,37 @@ export function FollowUpNudgesPage(): ReactElement {
     }
   };
 
-  // Mark follow-up nudge as sent in database
-  const handleMarkSent = async (id: string) => {
+  // Writes a nudge's new status and removes it from the list ONLY once the row changed.
+  // Shared by Mark-as-Sent and Dismiss, which differ only in the patch and the wording.
+  const updateNudge = async (id: string, patch: Record<string, string>, verb: string) => {
+    // Without a client nothing is saved, so the card must stay put.
+    if (supabase === null) {
+      // Tell the operator why the click did nothing.
+      toast.error(`Not connected to Supabase — nudge was not ${verb}.`);
+      return;
+    }
     try {
-      if (supabase !== null) {
-        await supabase!.from('follow_up_nudges').update({ status: 'sent', sent_at: new Date().toISOString() }).eq('id', id);
+      // supabase-js returns errors rather than throwing; the old code ignored this and
+      // removed the card anyway, so it came back on the next reload.
+      const { error } = await supabase.from('follow_up_nudges').update(patch).eq('id', id);
+      if (error) {
+        // Visible failure; the card stays so the operator can retry.
+        toast.error(`Could not mark nudge ${verb}: ${error.message}`);
+        return;
       }
+      // Remove only after the database agrees the nudge is no longer pending.
       setNudges((prev) => prev.filter((n) => n.id !== id));
     } catch (err) {
-      console.error('Failed to mark nudge as sent:', err);
+      // Network-level failure, same treatment as a returned error.
+      toast.error(`Could not mark nudge ${verb}: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
-  // Dismiss nudge from list
-  const handleDismiss = async (id: string) => {
-    try {
-      if (supabase !== null) {
-        await supabase!.from('follow_up_nudges').update({ status: 'dismissed' }).eq('id', id);
-      }
-      setNudges((prev) => prev.filter((n) => n.id !== id));
-    } catch (err) {
-      console.error('Failed to dismiss nudge:', err);
-    }
-  };
+  // Mark follow-up nudge as sent, stamping when so reporting can measure response time.
+  const handleMarkSent = (id: string) => updateNudge(id, { status: 'sent', sent_at: new Date().toISOString() }, 'sent');
+
+  // Dismiss: the operator decided not to follow up on this one.
+  const handleDismiss = (id: string) => updateNudge(id, { status: 'dismissed' }, 'dismissed');
 
   return (
     <div className="page page--wide followup-page">
@@ -134,7 +166,7 @@ export function FollowUpNudgesPage(): ReactElement {
         <div>
           <h2>📬 Day-7 Follow-Up Nudges Queue</h2>
           <p>
-            Review polite follow-up email drafts generated for applications sitting for $\ge 7$ days without a recruiter response.
+            Review polite follow-up email drafts generated for applications sitting for ≥ 7 days without a recruiter response.
           </p>
         </div>
         <div className="followup-page__meta-badge">
@@ -146,6 +178,16 @@ export function FollowUpNudgesPage(): ReactElement {
       {loading ? (
         <div className="followup-page__empty">
           <p>Loading follow-up nudges from database...</p>
+        </div>
+      ) : loadError !== null ? (
+        // Distinct from the empty state: a failed query must not read as "nothing to follow up".
+        <div className="followup-page__empty" role="alert">
+          {/* The database's own message, so the cause is diagnosable. */}
+          <p>Could not load follow-up nudges: {loadError}</p>
+          {/* Retry without a full page reload. */}
+          <button type="button" className="button button--secondary button--small" onClick={() => void loadNudges()}>
+            Retry
+          </button>
         </div>
       ) : nudges.length === 0 ? (
         <div className="followup-page__empty">

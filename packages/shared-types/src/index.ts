@@ -23,5 +23,7 @@ export * from './status-flow.ts';
 // The anti-fabrication defence lives here: it is a type, not a checker.
 export * from './profile-nodes.ts';
 
-// Row / Insert / Update shapes for all fifteen tables, and the RPC signatures.
+// Row / Insert / Update shapes for every table, and the RPC signatures. No count here:
+// "fifteen" went stale when the Phase 3 migration added three, and table parity is
+// asserted by test/enum-parity.test.ts, which is the place that can actually notice.
 export * from './tables.ts';

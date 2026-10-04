@@ -1,240 +1,259 @@
+/* Every colour here is a token from styles/tokens.css. The previous version
+   hardcoded a white card (#ffffff), light pills and dark text (#1a202c, #4a5568),
+   so dark mode got a white card on a black page, and any text that inherited
+   --text-primary went near-white on that white card. Tokens theme via light-dark().
+   No hex fallbacks inside var(): a fallback hides a typo'd token instead of failing. */
+/* NOTE: .actions, .badge, .label and .btn-secondary are global names also used by
+   followup.css / DiscoveryModal.css; whichever loads last wins. Scope them when the
+   TSX owner next touches ReferralOutreachPage.tsx. */
+
 /* Container for the entire referral queue page */
 /* This element holds all the referral cards */
 .referral-container {
-    /* Set max width for the page to prevent stretching */
+    /* Caps line length so drafts stay readable on wide screens. */
     max-width: 1200px;
-    /* Center the container horizontally on the page */
+    /* Centres the column inside the main pane. */
     margin: 0 auto;
-    /* Add padding to the sides so it doesn't touch the edge */
-    padding: 20px;
-    /* Use flexbox for layout of children */
+    /* Gutter from the app shell, on the house spacing scale. */
+    padding: var(--gap-5);
+    /* Flex column so cards stack with a uniform gap. */
     display: flex;
-    /* Stack children vertically in a column */
+    /* Cards stack vertically. */
     flex-direction: column;
-    /* Add gap between children elements */
-    gap: 20px;
+    /* Uniform space between cards without per-card margins. */
+    gap: var(--gap-5);
+    /* Explicit ink so nothing below inherits from an unthemed ancestor. */
+    color: var(--text-primary);
 }
 
 /* Card for each referral draft */
 /* This encapsulates all data for a single draft */
 .referral-card {
-    /* Add border to card for definition */
-    border: 1px solid #e2e8f0;
-    /* Add rounded corners for a modern look */
-    border-radius: 8px;
-    /* Add internal padding to space out content */
-    padding: 20px;
-    /* White background to stand out from any background */
-    background: #ffffff;
-    /* Add subtle shadow for depth perception */
+    /* Faint edge that stays faint in both themes; #e2e8f0 glared on dark. */
+    border: 1px solid var(--rule);
+    /* House sheet radius so cards match the rest of the app. */
+    border-radius: var(--radius-sheet);
+    /* Breathing room between edge and content. */
+    padding: var(--gap-5);
+    /* Raised surface token; #ffffff rendered a white card on a black page. */
+    background: var(--sheet);
+    /* Depth cue; black only darkens, so it is safe in both themes. */
     box-shadow: 0 1px 3px rgba(0,0,0,0.1);
 }
 
 /* Header section of the card */
 /* Contains the title, company, and badges */
 .card-header {
-    /* Use flexbox for horizontal layout */
+    /* Title block and badge share one row. */
     display: flex;
-    /* Space between left and right elements */
+    /* Pushes the badge to the far edge. */
     justify-content: space-between;
-    /* Align items vertically to the center */
+    /* Badge centres against a two-line title block. */
     align-items: center;
-    /* Add margin bottom to separate from body */
-    margin-bottom: 15px;
+    /* Separates header from the draft fields. */
+    margin-bottom: var(--gap-4);
 }
 
 /* Job title text styling */
 /* Ensures the job title stands out */
 .job-title {
-    /* Bold text for emphasis */
+    /* Weight makes it the card's primary anchor. */
     font-weight: 700;
-    /* Larger font size for visual hierarchy */
+    /* Larger than body text to set hierarchy. */
     font-size: 1.25rem;
-    /* Dark color for readability */
-    color: #1a202c;
-    /* Remove default margin to control spacing */
+    /* Primary ink token; #1a202c was invisible on a dark sheet. */
+    color: var(--text-primary);
+    /* Header layout controls spacing, not UA margins. */
     margin: 0;
 }
 
 /* Company text styling */
 /* Subtitle text under the job title */
 .company-name {
-    /* Medium text size, smaller than title */
+    /* Smaller than the title, establishing hierarchy. */
     font-size: 1rem;
-    /* Gray color to deprioritize slightly */
-    color: #4a5568;
-    /* Remove default margin to control spacing */
+    /* Secondary ink de-emphasises without vanishing in dark mode. */
+    color: var(--text-secondary);
+    /* Header layout controls spacing. */
     margin: 0;
 }
 
 /* Badge for target recipient */
 /* Indicates who the message is intended for */
 .badge {
-    /* Inline block display for badge sizing */
+    /* Lets padding size the pill around its text. */
     display: inline-block;
-    /* Add horizontal and vertical padding */
+    /* Pill inset. */
     padding: 4px 12px;
-    /* Fully rounded corners for pill shape */
+    /* Full rounding gives the pill shape. */
     border-radius: 9999px;
-    /* Small text size for compact display */
+    /* Compact so it does not compete with the title. */
     font-size: 0.875rem;
-    /* Bold text for readability */
+    /* Weight keeps small text legible. */
     font-weight: 600;
-    /* Light blue background for visual pop */
-    background-color: #ebf8ff;
-    /* Darker blue text for contrast */
-    color: #3182ce;
+    /* Accent wash reads as a tag in both themes; #ebf8ff was a light-only blue. */
+    background-color: var(--accent-subtle);
+    /* Strong accent ink keeps contrast on the wash in both themes. */
+    color: var(--accent-strong);
 }
 
 /* Pill for location */
 /* Shown next to the job title */
 .location-pill {
-    /* Small text size */
+    /* Smaller than the title it sits beside. */
     font-size: 0.875rem;
-    /* Light gray background */
-    background-color: #edf2f7;
-    /* Gray text color */
-    color: #4a5568;
-    /* Padding for spacing */
+    /* Recessed surface marks it as metadata; #edf2f7 was light-only. */
+    background-color: var(--panel);
+    /* Secondary ink matches the company line's voice. */
+    color: var(--text-secondary);
+    /* Pill inset. */
     padding: 2px 8px;
-    /* Rounded corners for pill appearance */
+    /* Full rounding gives the pill shape. */
     border-radius: 9999px;
-    /* Add margin left to separate from title */
-    margin-left: 8px;
-    /* Set display to inline block */
+    /* Separates the pill from the title text. */
+    margin-left: var(--gap-2);
+    /* Lets padding apply vertically inside an inline run. */
     display: inline-block;
-    /* Set font weight normal */
+    /* Overrides the bold title it is nested in. */
     font-weight: 400;
 }
 
 /* Input group container */
 /* Wraps label and input element */
 .input-group {
-    /* Add margin bottom to space out groups */
-    margin-bottom: 15px;
-    /* Use flexbox for inner layout */
+    /* Separates consecutive fields. */
+    margin-bottom: var(--gap-4);
+    /* Flex column so label sits above its field. */
     display: flex;
-    /* Stack vertically */
+    /* Label above field. */
     flex-direction: column;
-    /* Add small gap between label and input */
+    /* Small fixed space between label and field. */
     gap: 5px;
 }
 
 /* Labels for inputs */
 /* Styling for the text above inputs */
 .label {
-    /* Small text size */
+    /* Smaller than field text: labels are scaffolding. */
     font-size: 0.875rem;
-    /* Bold text */
+    /* Weight keeps the small label scannable. */
     font-weight: 600;
-    /* Gray color */
-    color: #4a5568;
+    /* Secondary ink; #4a5568 was too dark for a dark sheet. */
+    color: var(--text-secondary);
 }
 
 /* Input and textarea common styles */
 /* Shared text field appearance */
 .input-field {
-    /* Full width to fill container */
+    /* Fields span the card. */
     width: 100%;
-    /* Add padding for text breathing room */
+    /* Text inset from the border. */
     padding: 8px 12px;
-    /* Add subtle border */
-    border: 1px solid #cbd5e0;
-    /* Add rounded corners */
-    border-radius: 4px;
-    /* Inherit font family from body */
+    /* Visible field boundary in both themes; #cbd5e0 was light-only. */
+    border: 1px solid var(--rule-strong);
+    /* House control radius. */
+    border-radius: var(--radius-control);
+    /* Fields do not inherit font by default. */
     font-family: inherit;
-    /* Set base font size */
+    /* Readable draft text. */
     font-size: 1rem;
-    /* Allow vertical resizing for textareas */
+    /* Lets the user enlarge a long draft. */
     resize: vertical;
+    /* Recessed surface marks it as editable against the raised card. */
+    background-color: var(--panel);
+    /* Explicit ink so typed text themes with its surface. */
+    color: var(--text-primary);
+    /* Padding inside the width so the field does not overflow the card. */
+    box-sizing: border-box;
 }
 
 /* Action buttons container */
 /* Wraps all the action buttons at the bottom */
 .actions {
-    /* Use flexbox for layout */
+    /* Buttons in a row. */
     display: flex;
-    /* Wrap items if they overflow horizontally */
+    /* Wrap on phone widths instead of overflowing. */
     flex-wrap: wrap;
-    /* Add gap between buttons */
-    gap: 10px;
-    /* Add margin top to separate from content above */
-    margin-top: 20px;
+    /* Keeps buttons from touching. */
+    gap: var(--gap-2);
+    /* Separates actions from the last field. */
+    margin-top: var(--gap-5);
 }
 
 /* Base button styles */
 /* Shared properties across all buttons */
 .btn {
-    /* Add padding */
+    /* Comfortable click target. */
     padding: 8px 16px;
-    /* Rounded corners */
-    border-radius: 4px;
-    /* Bold text */
+    /* House control radius. */
+    border-radius: var(--radius-control);
+    /* Weight keeps button labels scannable. */
     font-weight: 600;
-    /* Pointer cursor on hover */
+    /* Signals clickability. */
     cursor: pointer;
-    /* Remove default borders */
+    /* Fill alone defines the button; variants add a border where needed. */
     border: none;
-    /* Standardized font size */
+    /* Compact label size. */
     font-size: 0.875rem;
-    /* Smooth background color transition */
+    /* Softens hover changes. */
     transition: background-color 0.2s ease-in-out;
 }
 
 /* Primary button styling */
 /* Used for primary actions like Mark as sent */
 .btn-primary {
-    /* Green background color */
-    background-color: #48bb78;
-    /* White text color */
-    color: white;
+    /* Success-green token: "mark as sent" is a completion action. */
+    background-color: var(--traced);
+    /* Ink-on-fill flips dark in dark mode, where --traced turns light green; white would fail contrast. */
+    color: var(--ink-on-fill);
 }
 
 /* Primary button hover state */
 /* Darkens on hover */
 .btn-primary:hover {
-    /* Darker green background */
-    background-color: #38a169;
+    /* Strong variant shifts the fill in the theme-correct direction. */
+    background-color: var(--traced-strong);
 }
 
 /* Secondary button styling */
 /* Used for secondary actions like Copy or Regenerate */
 .btn-secondary {
-    /* Light gray background color */
-    background-color: #edf2f7;
-    /* Dark gray text color */
-    color: #2d3748;
+    /* Recessed surface: quieter than the primary fill; #edf2f7 was light-only. */
+    background-color: var(--panel);
+    /* Primary ink keeps the label readable on the panel in both themes. */
+    color: var(--text-primary);
+    /* Edge so the button does not dissolve into a panel-coloured context. */
+    border: 1px solid var(--rule-strong);
 }
 
 /* Secondary button hover state */
 /* Darkens on hover */
 .btn-secondary:hover {
-    /* Darker gray background */
-    background-color: #e2e8f0;
+    /* Translucent hover token works on any base surface. */
+    background-color: var(--surface-hover);
 }
 
 /* Link button styling */
 /* Used for external links like LinkedIn */
 .btn-link {
-    /* Blue background color */
-    background-color: #3182ce;
-    /* White text color */
-    color: white;
+    /* Accent fill marks the outbound link. */
+    background-color: var(--accent);
+    /* Ink-on-fill guarantees contrast on the accent in both themes. */
+    color: var(--ink-on-fill);
 }
 
 /* Link button hover state */
 /* Darkens on hover */
 .btn-link:hover {
-    /* Darker blue background */
-    background-color: #2b6cb0;
+    /* Strong accent shifts the fill in the theme-correct direction. */
+    background-color: var(--accent-strong);
 }
 
 /* Disabled button state */
 /* Styling when button is disabled */
 .btn:disabled {
-    /* Reduce opacity */
+    /* Dims the button so the disabled state is visible at a glance. */
     opacity: 0.6;
-    /* Change cursor to indicate it's not clickable */
+    /* Signals the click will do nothing. */
     cursor: not-allowed;
 }

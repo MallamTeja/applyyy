@@ -1069,6 +1069,96 @@ export type MatcherEvalCaseInsert = {
 export type MatcherEvalCaseUpdate = Partial<Pick<MatcherEvalCaseRow, 'label' | 'rationale' | 'master_version'>>;
 
 // ---------------------------------------------------------------------------
+// Phase 3 tables — `20260918213000_phase3_tables_and_gap_fixes.sql`
+//
+// ADDED 2026-10-04. The migration created three tables and this file declared none of
+// them, so `test/enum-parity.test.ts` "table parity" went red and every consumer was
+// left to invent its own shape. Row types only: no Insert/Update yet, because no
+// writer in the repo needs a typed insert and an unused shape is one more thing to
+// drift. Add them beside the first real writer.
+//
+// Column types follow the conventions in the file header (`string` for timestamptz,
+// `number` for int). `nudge_type` and `status` are plain `text` with string defaults
+// and NO check constraint in SQL, so they are `string` here — narrowing them to a
+// union the database does not enforce would make the type promise more than the
+// column does. That is the shape to fix in a migration first, then here.
+// ---------------------------------------------------------------------------
+
+/** A pre-drafted follow-up email for an application that has gone quiet. */
+export interface FollowUpNudgesRow {
+  /** Surrogate key; the page addresses a nudge by it when marking it sent. */
+  id: string;
+  /** Owner; the FOR ALL RLS policy filters on it, so a client only ever sees its own. */
+  user_id: string;
+  /** The application being chased; NOT NULL, a nudge without one has nothing to follow up. */
+  application_id: string;
+  /** Denormalised job link so the page can show company/title without a second hop. */
+  job_id: string;
+  /** Which cadence produced it. SQL default `'day_7'`; free text, not an enum (see section note). */
+  nudge_type: string;
+  /** Subject the human reviews and may edit before sending. */
+  draft_subject: string;
+  /** Body the human reviews and may edit before sending. */
+  draft_body: string;
+  /** When the draft was generated; lets the UI flag a stale draft. */
+  generated_at: string;
+  /** Null until the human sends it — the only record that a follow-up actually went out. */
+  sent_at: string | null;
+  /** Review state. SQL default `'pending'`; free text with no constraint (see section note). */
+  status: string;
+  /** Row creation time, kept for audit; distinct from `generated_at` on a regenerated draft. */
+  created_at: string;
+}
+
+/** One missing skill and how often the market asked for it. UNIQUE (user_id, skill_name). */
+export interface SkillGapReportsRow {
+  /** Surrogate key. */
+  id: string;
+  /** Owner; RLS filters on it. */
+  user_id: string;
+  /** The skill the master profile lacks; unique per user so demand aggregates onto one row. */
+  skill_name: string;
+  /** How many jobs in the window required it — the number the tier pills are cut from. `int`, so `number`. */
+  demand_count: number;
+  /** Last sighting; lets a reader age out skills the market stopped asking for. */
+  last_seen_at: string;
+  /** The aggregation window `demand_count` covers. SQL default 90; without it the count has no unit. */
+  report_window_days: number;
+  /** Row creation time. */
+  created_at: string;
+  /** Bumped when `demand_count` changes, so a reader can tell a fresh count from a stale one. */
+  updated_at: string;
+}
+
+/** Generated interview prep material for one application that reached interview. */
+export interface InterviewPrepPacksRow {
+  /** Surrogate key. */
+  id: string;
+  /** Owner; RLS filters on it. */
+  user_id: string;
+  /** The application whose interview this prepares for. */
+  application_id: string;
+  /** Denormalised job link for title/company context. */
+  job_id: string;
+  /** Nullable: generation may not find enough about the company to say anything honest. */
+  company_overview: string | null;
+  /**
+   * jsonb, SQL default `'[]'`. Typed `Json`, not a structured array, because the
+   * migration fixes no element shape and no writer exists yet to define one — a
+   * guessed element type would be a promise nothing keeps.
+   */
+  role_specific_questions: Json;
+  /** jsonb, default `'[]'`; same reasoning as `role_specific_questions`. */
+  experience_highlights: Json;
+  /** jsonb, default `'[]'`; same reasoning as `role_specific_questions`. */
+  talking_points: Json;
+  /** When generation finished; tells the user how fresh the prep is. */
+  generated_at: string;
+  /** Row creation time. */
+  created_at: string;
+}
+
+// ---------------------------------------------------------------------------
 // RPC signatures — the SQL functions every agent calls
 // ---------------------------------------------------------------------------
 

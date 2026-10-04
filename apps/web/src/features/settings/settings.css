@@ -651,7 +651,8 @@
   align-items: center;
   gap: var(--gap-2);
   background: var(--accent);
-  color: #ffffff;
+  /* --ink-on-fill flips dark when --accent turns light in dark mode; fixed white failed contrast there. */
+  color: var(--ink-on-fill);
   padding: var(--gap-2) var(--gap-4);
   border-radius: var(--radius-control);
   font-weight: 600;
@@ -742,7 +743,8 @@
 
 .profile-link-badge:hover {
   background: var(--accent);
-  color: #ffffff;
+  /* --ink-on-fill flips dark when --accent turns light in dark mode; fixed white failed contrast there. */
+  color: var(--ink-on-fill);
   border-color: var(--accent);
 }
 
@@ -1251,7 +1253,8 @@
   font-size: var(--size-xs);
   font-weight: 600;
   background: var(--accent) !important;
-  color: #ffffff !important;
+  /* --ink-on-fill flips dark when --accent turns light in dark mode; fixed white failed contrast there. */
+  color: var(--ink-on-fill) !important;
   border: 1px solid var(--accent) !important;
   border-radius: var(--radius-control);
   cursor: pointer;
@@ -1263,7 +1266,8 @@
 .button--search:hover {
   background: var(--accent-strong) !important;
   border-color: var(--accent-strong) !important;
-  color: #ffffff !important;
+  /* --accent-strong is light indigo in dark mode; white on it was unreadable, ink-on-fill flips with it. */
+  color: var(--ink-on-fill) !important;
   box-shadow: 0 2px 8px rgba(79, 70, 229, 0.3);
   transform: translateY(-1px);
 }
@@ -1766,9 +1770,12 @@
 .company-card__btn--add,
 .button.button--company-add,
 .button--company-add {
-  background: linear-gradient(135deg, #10b981 0%, #059669 100%) !important;
-  color: #ffffff !important;
-  border: 1px solid #059669 !important;
+  /* Success token fill: the fixed #10b981 gradient put white text at ~2.5:1 in both themes. */
+  background: var(--traced) !important;
+  /* Ink-on-fill flips with --traced (dark green -> light green) so the label keeps contrast. */
+  color: var(--ink-on-fill) !important;
+  /* Edge in the strong shade so the fill reads as a solid control. */
+  border: 1px solid var(--traced-strong) !important;
   border-radius: 6px !important;
   box-shadow: 0 2px 8px rgba(16, 185, 129, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.25) !important;
   font-weight: 600 !important;
@@ -1780,9 +1787,12 @@
 .company-card__btn--add:hover:not(:disabled),
 .button.button--company-add:hover:not(:disabled),
 .button--company-add:hover:not(:disabled) {
-  background: linear-gradient(135deg, #34d399 0%, #10b981 100%) !important;
-  border-color: #10b981 !important;
-  color: #ffffff !important;
+  /* Strong success shade shifts the fill in the theme-correct direction on hover. */
+  background: var(--traced-strong) !important;
+  /* Border matches the fill so hover does not draw a second edge. */
+  border-color: var(--traced-strong) !important;
+  /* Same flip-with-fill ink as the resting state. */
+  color: var(--ink-on-fill) !important;
   box-shadow: 0 4px 14px rgba(16, 185, 129, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.35) !important;
   transform: translateY(-1px) !important;
 }
@@ -1797,9 +1807,12 @@
 .company-card__btn--add:disabled,
 .button.button--company-add:disabled,
 .button--company-add:disabled {
-  background: linear-gradient(135deg, #059669 0%, #047857 100%) !important;
-  color: rgba(255, 255, 255, 0.85) !important;
-  border-color: #047857 !important;
+  /* Pending state keeps the success fill; the opacity below carries the "busy" cue. */
+  background: var(--traced) !important;
+  /* Same ink as resting so the spinner (currentColor) stays visible on the fill. */
+  color: var(--ink-on-fill) !important;
+  /* Strong shade edge, consistent with the resting button. */
+  border-color: var(--traced-strong) !important;
   cursor: wait !important;
   opacity: 0.85 !important;
 }
@@ -1847,7 +1860,8 @@
   width: 12px;
   height: 12px;
   border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: #ffffff;
+  /* currentColor follows the button's ink-on-fill, so the moving arc shows in both themes. */
+  border-top-color: currentColor;
   border-radius: 50%;
   display: inline-block;
   animation: btnSpinnerRotate 0.6s linear infinite;
@@ -2076,11 +2090,13 @@
 .answer-bank__stat-pill--alert {
   background: rgba(245, 158, 11, 0.12);
   border-color: rgba(245, 158, 11, 0.4);
-  color: #b45309;
+  /* Warning token lightens to amber in dark mode; #b45309 was dim on the dark wash. */
+  color: var(--signal);
 }
 
 .answer-bank__stat-pill--alert strong {
-  color: #b45309;
+  /* Same warning ink as the pill body. */
+  color: var(--signal);
 }
 
 .answer-bank__top-actions {
@@ -2098,7 +2114,8 @@
   text-transform: uppercase;
   background: rgba(245, 158, 11, 0.15);
   border: 1px solid rgba(245, 158, 11, 0.5);
-  color: #d97706;
+  /* Warning token: #d97706 was a single shade, low-contrast on a light wash. */
+  color: var(--signal);
   border-radius: 4px;
 }
 
@@ -2194,14 +2211,18 @@
 
 .answer-bank__bool-btn--active-yes {
   background: rgba(16, 185, 129, 0.15);
-  border-color: #10b981;
-  color: #059669;
+  /* Success token themes via light-dark(); #10b981 was one shade for both modes. */
+  border-color: var(--traced);
+  /* Success ink token; #059669 was dim on a dark ground. */
+  color: var(--traced);
 }
 
 .answer-bank__bool-btn--active-no {
   background: rgba(239, 68, 68, 0.12);
-  border-color: #ef4444;
-  color: #dc2626;
+  /* Danger token lightens in dark mode. */
+  border-color: var(--fabricated);
+  /* Danger ink token; #dc2626 was dim on a dark ground. */
+  color: var(--fabricated);
 }
 
 .answer-bank__edit-actions {
@@ -2291,10 +2312,12 @@
 }
 
 .answer-bank__action-btn--delete {
-  color: #dc2626;
+  /* Danger ink token; #dc2626 was dim on a dark ground. */
+  color: var(--fabricated);
 }
 
 .answer-bank__action-btn--delete:hover {
   background: rgba(239, 68, 68, 0.1);
-  border-color: #ef4444;
+  /* Danger token so the hover edge themes with the text. */
+  border-color: var(--fabricated);
 }

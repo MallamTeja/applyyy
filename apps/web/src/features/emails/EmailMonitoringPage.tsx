@@ -203,7 +203,7 @@ export function EmailMonitoringPage(): ReactElement {
       <div className="email-monitor__stats">
         <div className="email-stat-card">
           <span className="email-stat-card__label">Interview Invitations</span>
-          <span className="email-stat-card__value" style={{ color: '#4ade80' }}>
+          <span className="email-stat-card__value" style={{ /* Success token: #4ade80 is the dark-mode green and only 1.6:1 on a light sheet. */ color: 'var(--traced)' }}>
             {metrics.totalInterviews}
           </span>
         </div>
@@ -307,7 +307,7 @@ export function EmailMonitoringPage(): ReactElement {
             const formattedDate = new Date(event.received_at).toLocaleString();
 
             return (
-              <li key={event.id} className="email-card" style={{ borderLeft: '3px solid #4ade80' }}>
+              <li key={event.id} className="email-card" style={{ /* Success token so the interview stripe reads in both themes, not just dark. */ borderLeft: '3px solid var(--traced)' }}>
                 <div className="email-card__top">
                   <span className="email-card__sender">{event.from_address}</span>
                   <div style={{ display: 'flex', gap: 'var(--gap-2)', alignItems: 'center' }}>

@@ -612,7 +612,8 @@
 
 .line__edit-trigger:hover {
   background: var(--accent);
-  color: white;
+  /* --ink-on-fill flips dark when --accent turns light in dark mode; fixed white failed contrast there. */
+  color: var(--ink-on-fill);
   border-color: var(--accent);
 }
 
@@ -653,7 +654,8 @@
   font-size: 0.8rem;
   font-weight: 550;
   background: var(--accent);
-  color: white;
+  /* --ink-on-fill flips dark when --accent turns light in dark mode; fixed white failed contrast there. */
+  color: var(--ink-on-fill);
   border: none;
   border-radius: var(--radius-control);
   cursor: pointer;

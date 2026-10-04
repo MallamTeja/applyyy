@@ -10,9 +10,11 @@
  *   - Mark as Sent database event logger
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { PageHeader } from '../../app/PageHeader';
+// Write failures must be visible; the app's toast is the existing channel for that.
+import { useToast } from '../../app/Toast';
 import { supabase } from '../../data/supabase.ts';
 import './referral.css';
 
@@ -46,36 +48,86 @@ export function ReferralOutreachPage(): ReactElement {
   const [loading, setLoading] = useState<boolean>(true);
   // State holding copy toast confirmation string
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  // State holding set of sent item IDs
+  // Draft event ids already marked sent. Derived from `referral_outreach_sent` rows on load,
+  // not only kept in memory — application_events is append-only, so a reload that forgot
+  // "sent" would let a second click write a second permanent row.
   const [sentIds, setSentIds] = useState<Set<string>>(new Set());
+  // Load failure message, kept apart from "no rows" so a broken query never reads as an empty queue.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Ids with an insert in flight, so a double-click cannot write two permanent sent markers.
+  const [savingIds, setSavingIds] = useState<Set<string>>(new Set());
+  // Pending "Copied!" reset timer, held so unmount can cancel it instead of setting state on a dead component.
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Error toasts for failed writes.
+  const toast = useToast();
+
+  // Cancel the copy-feedback timer on unmount.
+  useEffect(() => () => {
+    // Nothing to clear if no copy happened.
+    if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+  }, []);
 
   // Fetch drafted referral outreach items from application_events table
   const loadReferrals = useCallback(async () => {
     try {
       setLoading(true);
+      // A retry starts from a clean slate, not the previous failure.
+      setLoadError(null);
       if (supabase === null) {
         setLoading(false);
         return;
       }
 
-      // Query application_events for referral outreach drafted events
-      const { data, error } = await supabase!
-        .from('application_events')
-        .select('id, application_id, created_at, detail, applications(jobs(title, company_name, location_raw))')
-        .eq('event_type', 'note')
-        .order('created_at', { ascending: false })
-        .limit(100);
+      // Drafts and sent markers fetched in parallel; they are independent reads.
+      const [drafts, sent] = await Promise.all([
+        supabase
+          .from('application_events')
+          .select('id, application_id, created_at, detail, applications(jobs(title, company_name, location_raw))')
+          .eq('event_type', 'note')
+          // Filtered in the query, not client-side: otherwise sent markers and other notes
+          // fill the 100-row window and push real drafts out of it.
+          .eq('detail->>action', 'referral_outreach_drafted')
+          .order('created_at', { ascending: false })
+          .limit(100),
+        supabase
+          .from('application_events')
+          // Only the keys needed to match a marker back to its draft.
+          .select('application_id, detail')
+          .eq('event_type', 'note')
+          // The sent markers are what make "sent" survive a reload.
+          .eq('detail->>action', 'referral_outreach_sent'),
+      ]);
 
-      if (error || !data) {
-        setLoading(false);
+      // Either query failing means we cannot honestly show the list or its sent state.
+      const queryError = drafts.error ?? sent.error;
+      if (queryError || !drafts.data || !sent.data) {
+        // Shown as an error state, distinct from the friendly empty state.
+        setLoadError(queryError?.message ?? 'No data returned.');
         return;
+      }
+      // Named for the mapping loop below.
+      const data = drafts.data;
+
+      // Markers written since this fix carry the draft's event id; older ones only the application id.
+      const sentDraftIds = new Set<string>();
+      // Legacy markers predate draft_event_id, so they can only be matched per application.
+      const sentAppIds = new Set<string>();
+      for (const row of sent.data) {
+        // detail is jsonb; read it as an untyped record.
+        const detail = row.detail as Record<string, unknown> | null;
+        // The exact draft link, when the marker has one.
+        const draftEventId = detail?.['draft_event_id'];
+        // Prefer the exact link; fall back to the application the marker was written against.
+        if (typeof draftEventId === 'string') sentDraftIds.add(draftEventId);
+        else sentAppIds.add(row.application_id);
       }
 
       // Filter and map database records into ReferralEventItem shapes
       const mapped: ReferralEventItem[] = [];
       for (const row of data) {
         const detailObj = row.detail as Record<string, unknown> | null;
-        if (detailObj && detailObj.action === 'referral_outreach_drafted' && detailObj.draft) {
+        // The action filter now runs in the query; this only guards a draft row with no payload.
+        if (detailObj && detailObj.draft) {
           const draft = detailObj.draft as ReferralDraftDetail;
           const app = row.applications as unknown as { jobs?: { title?: string; company_name?: string; location_raw?: string } } | null;
 
@@ -92,8 +144,11 @@ export function ReferralOutreachPage(): ReactElement {
       }
 
       setItems(mapped);
+      // Sent state comes from the database, so it is the same after a reload.
+      setSentIds(new Set(mapped.filter((m) => sentDraftIds.has(m.id) || sentAppIds.has(m.applicationId)).map((m) => m.id)));
     } catch (err) {
-      console.error('Failed to load referral outreach items:', err);
+      // A thrown error (network) is also a load failure, not an empty queue.
+      setLoadError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
@@ -109,7 +164,10 @@ export function ReferralOutreachPage(): ReactElement {
     try {
       await navigator.clipboard.writeText(textToCopy);
       setCopiedId(item.id);
-      setTimeout(() => setCopiedId(null), 2500);
+      // Replace any earlier timer so two quick copies do not cut each other's feedback short.
+      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+      // Held in the ref so the unmount cleanup can cancel it.
+      copyTimerRef.current = setTimeout(() => setCopiedId(null), 2500);
     } catch (err) {
       console.error('Failed to copy referral draft:', err);
     }
@@ -124,25 +182,53 @@ export function ReferralOutreachPage(): ReactElement {
 
   // Mark referral outreach as sent in database
   const handleMarkSent = async (item: ReferralEventItem) => {
+    // Without a client nothing can be recorded, so the UI must not claim it was.
+    if (supabase === null) {
+      // Tell the operator why the click did nothing.
+      toast.error('Not connected to Supabase — sent state was not recorded.');
+      return;
+    }
+    // Ignore repeat clicks while the first insert is in flight; each would be a permanent row.
+    if (savingIds.has(item.id)) return;
+    // Mark in flight so the button disables.
+    setSavingIds((prev) => new Set(prev).add(item.id));
     try {
-      if (supabase !== null) {
-        // Log referral sent audit event into application_events
-        await supabase!.from('application_events').insert({
-          application_id: item.applicationId,
-          event_type: 'note',
-          agent: 'screener',
-          detail: {
-            action: 'referral_outreach_sent',
-            company_name: item.companyName,
-            job_title: item.jobTitle,
-            sent_at: new Date().toISOString(),
-          },
-        });
+      // application_events is append-only, so this row is permanent — written once, by a human.
+      const { error } = await supabase.from('application_events').insert({
+        application_id: item.applicationId,
+        event_type: 'note',
+        // 'human': the operator clicked this, no agent did. The old 'screener' value
+        // attributed a human action to an agent in a log nobody can correct.
+        agent: 'human',
+        detail: {
+          action: 'referral_outreach_sent',
+          // Exact link back to the draft, so a reload can tell which draft was sent.
+          draft_event_id: item.id,
+          company_name: item.companyName,
+          job_title: item.jobTitle,
+          sent_at: new Date().toISOString(),
+        },
+      });
+      // supabase-js returns errors rather than throwing; unchecked, a refused insert looked like success.
+      if (error) {
+        // Visible failure; the card stays unsent so the operator can retry.
+        toast.error(`Could not record referral as sent: ${error.message}`);
+        return;
       }
-
+      // Only flip the UI after the row exists.
       setSentIds((prev) => new Set(prev).add(item.id));
     } catch (err) {
-      console.error('Failed to mark referral as sent:', err);
+      // Network-level failure, same treatment as a returned error.
+      toast.error(`Could not record referral as sent: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      // Clear the in-flight marker whatever happened.
+      setSavingIds((prev) => {
+        // Copy so React sees a new Set.
+        const next = new Set(prev);
+        // Remove only this item.
+        next.delete(item.id);
+        return next;
+      });
     }
   };
 
@@ -168,6 +254,16 @@ export function ReferralOutreachPage(): ReactElement {
         <div className="referral-page__empty">
           <p>Loading referral outreach drafts from database...</p>
         </div>
+      ) : loadError !== null ? (
+        // Distinct from the empty state: a failed query must not read as "nothing drafted yet".
+        <div className="referral-page__empty" role="alert">
+          {/* The database's own message, so the cause is diagnosable. */}
+          <p>Could not load referral drafts: {loadError}</p>
+          {/* Retry without a full page reload. */}
+          <button type="button" className="button button--secondary button--small" onClick={() => void loadReferrals()}>
+            Retry
+          </button>
+        </div>
       ) : items.length === 0 ? (
         <div className="referral-page__empty">
           <p>No drafted referral requests found. As applications pass screening, referral drafts will appear here.</p>
@@ -176,6 +272,8 @@ export function ReferralOutreachPage(): ReactElement {
         <div className="referral-page__grid">
           {items.map((item) => {
             const isSent = sentIds.has(item.id);
+            // Disabled while the insert is in flight as well as after it lands.
+            const isSaving = savingIds.has(item.id);
 
             return (
               <article key={item.id} className={`referral-card ${isSent ? 'referral-card--sent' : ''}`}>
@@ -228,9 +326,9 @@ export function ReferralOutreachPage(): ReactElement {
                       type="button"
                       className={`button button--small ${isSent ? 'button--disabled' : 'button--secondary'}`}
                       onClick={() => void handleMarkSent(item)}
-                      disabled={isSent}
+                      disabled={isSent || isSaving}
                     >
-                      {isSent ? '✓ Sent Recorded' : '✅ Mark as Sent'}
+                      {isSent ? '✓ Sent Recorded' : isSaving ? 'Recording…' : '✅ Mark as Sent'}
                     </button>
                   </div>
                 </footer>
