@@ -1,124 +1,243 @@
+/* Every colour here is a real token from styles/tokens.css. The previous version
+   named --subtle-bg / --code-bg / --radius-card / --font-mono, none of which exist,
+   so they fell back to hardcoded LIGHT hex while --text-primary (which does exist)
+   resolved to near-white in dark mode: white text on a white header. Do not add
+   hex fallbacks to var() here; a fallback hides a typo'd token instead of failing. */
+
+/* Fixed overlay so the modal floats above the page regardless of scroll position. */
 .pipeline-modal-backdrop {
+  /* Pins the overlay to the viewport, not the scrolled document. */
   position: fixed;
+  /* Covers the whole viewport in one declaration. */
   inset: 0;
+  /* Scrim dims the page in both themes; black works because it only darkens. */
   background: rgba(0, 0, 0, 0.6);
+  /* Blur separates the modal from busy cards underneath. */
   backdrop-filter: blur(4px);
+  /* Flex centring keeps the dialog in the middle at any viewport size. */
   display: flex;
+  /* Vertical centring. */
   align-items: center;
+  /* Horizontal centring. */
   justify-content: center;
+  /* Above the app shell and command palette. */
   z-index: 1000;
-  padding: var(--gap-4, 1rem);
+  /* Keeps a gutter on phone widths so the dialog never touches the edge. */
+  padding: var(--gap-4);
 }
 
+/* The dialog itself: one surface colour throughout so no band can drift to the wrong theme. */
 .pipeline-modal {
-  background: var(--sheet, #ffffff);
-  border: 1px solid var(--rule, #e2e8f0);
-  border-radius: var(--radius-card, 12px);
+  /* Sheet is the raised surface token; themes via light-dark(). */
+  background: var(--sheet);
+  /* Stronger rule than the page so the edge reads against the scrim. */
+  border: 1px solid var(--rule-strong);
+  /* House radius for sheets, not an invented card radius. */
+  border-radius: var(--radius-sheet);
+  /* Fills narrow viewports... */
   width: 100%;
+  /* ...but stays readable-width on desktop. */
   max-width: 620px;
-  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.2);
+  /* Never taller than the viewport; the body scrolls instead. */
+  max-height: calc(100vh - 2 * var(--gap-4));
+  /* Depth cue so the dialog lifts off the scrim. */
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.35);
+  /* Column so header/footer stay put and body flexes. */
   display: flex;
+  /* Stack header, body, footer. */
   flex-direction: column;
+  /* Clips child backgrounds to the rounded corners. */
   overflow: hidden;
+  /* Body text colour inherited by everything without its own rule. */
+  color: var(--text-primary);
 }
 
+/* Header: title + subtitle on the left, close button on the right. */
 .pipeline-modal__header {
+  /* Puts the close button on the same row as the title block. */
   display: flex;
+  /* Pushes close button to the far edge. */
   justify-content: space-between;
+  /* Close button aligns to the title, not the middle of a two-line subtitle. */
   align-items: flex-start;
-  padding: 1.25rem 1.5rem;
-  border-bottom: 1px solid var(--rule, #e2e8f0);
-  background: var(--subtle-bg, #f8fafc);
+  /* Gap so a long subtitle never collides with the close button. */
+  gap: var(--gap-4);
+  /* Matches body padding so content columns line up. */
+  padding: var(--gap-5) var(--gap-5) var(--gap-4);
+  /* Separates header from the step list. */
+  border-bottom: 1px solid var(--rule);
 }
 
+/* Dialog title. */
 .pipeline-modal__title {
+  /* Reset UA heading margin. */
   margin: 0;
-  font-size: 1.15rem;
-  font-weight: 700;
-  color: var(--text-primary, #0f172a);
+  /* Section-header scale from the type system. */
+  font-size: var(--font-size-section-header);
+  /* Matching weight token. */
+  font-weight: var(--font-weight-section-header);
+  /* Explicit so it can never inherit a wrong-theme colour. */
+  color: var(--text-primary);
 }
 
+/* One-line explanation under the title. */
 .pipeline-modal__subtitle {
-  margin: 0.35rem 0 0;
-  font-size: 0.85rem;
-  color: var(--text-secondary, #64748b);
-  line-height: 1.4;
+  /* Small gap from the title only. */
+  margin: var(--gap-1) 0 0;
+  /* Secondary text size. */
+  font-size: var(--size-sm);
+  /* Quieter than the title. */
+  color: var(--text-secondary);
+  /* Comfortable wrap on two lines. */
+  line-height: 1.45;
 }
 
+/* Scrollable middle: steps + status. */
 .pipeline-modal__body {
-  padding: 1.25rem 1.5rem;
+  /* Same horizontal padding as header/footer. */
+  padding: var(--gap-4) var(--gap-5);
+  /* Stack the list and the status box. */
   display: flex;
+  /* Vertical stack. */
   flex-direction: column;
-  gap: 1.25rem;
+  /* Space between list and status box. */
+  gap: var(--gap-4);
+  /* Scrolls inside the dialog when the viewport is short. */
+  overflow-y: auto;
 }
 
+/* Ordered list of the five agents. */
 .pipeline-steps-list {
+  /* Vertical stack. */
   display: flex;
+  /* One step per row. */
   flex-direction: column;
-  gap: 0.75rem;
+  /* Breathing room between steps. */
+  gap: var(--gap-3);
 }
 
+/* One agent row: number badge + text. */
 .pipeline-step-item {
+  /* Badge beside text. */
   display: flex;
+  /* Badge aligns with the step name, not the description. */
   align-items: flex-start;
-  gap: 0.75rem;
-  font-size: 0.85rem;
+  /* Space between badge and text. */
+  gap: var(--gap-3);
+  /* Body scale. */
+  font-size: var(--size-base);
 }
 
+/* Circular step number. */
 .pipeline-step-item__num {
+  /* Fixed size so all five badges match. */
   width: 24px;
+  /* Square before rounding. */
   height: 24px;
-  background: var(--accent-subtle, #e0e7ff);
-  color: var(--accent, #4f46e5);
+  /* Tinted accent wash, themed. */
+  background: var(--accent-subtle);
+  /* accent-strong keeps contrast on the wash in both themes. */
+  color: var(--accent-strong);
+  /* Numbers read as labels. */
   font-weight: 700;
+  /* Circle. */
   border-radius: 50%;
+  /* Centre the digit. */
   display: flex;
+  /* Vertical centre. */
   align-items: center;
+  /* Horizontal centre. */
   justify-content: center;
+  /* Never squashed by long descriptions. */
   flex-shrink: 0;
-  font-size: 0.75rem;
+  /* Smaller than step text. */
+  font-size: var(--size-xs);
 }
 
+/* Agent name. */
 .pipeline-step-item strong {
+  /* Own line above the description. */
   display: block;
-  color: var(--text-primary, #0f172a);
-  font-size: 0.9rem;
+  /* Primary text. */
+  color: var(--text-primary);
+  /* Card-head scale. */
+  font-size: var(--size-card-head);
+  /* Semi-bold rather than the UA bold. */
+  font-weight: 600;
 }
 
+/* Agent description. */
 .pipeline-step-item p {
+  /* Tight under the name. */
   margin: 0.15rem 0 0;
-  color: var(--text-secondary, #64748b);
-  font-size: 0.8rem;
+  /* Quieter than the name. */
+  color: var(--text-secondary);
+  /* Secondary scale. */
+  font-size: var(--size-sm);
 }
 
+/* Live status readout. */
 .pipeline-modal__status-box {
-  background: var(--code-bg, #f1f5f9);
-  border: 1px solid var(--rule, #e2e8f0);
-  border-radius: 8px;
-  padding: 0.75rem 1rem;
+  /* Panel is the recessed surface token: darker than the sheet in dark, greyer in light. */
+  background: var(--panel);
+  /* Faint outline. */
+  border: 1px solid var(--rule);
+  /* House radius. */
+  border-radius: var(--radius-sheet);
+  /* Inner padding. */
+  padding: var(--gap-3) var(--gap-4);
 }
 
+/* "PIPELINE STATUS" eyebrow label. */
 .pipeline-modal__status-label {
-  font-size: 0.75rem;
+  /* Helper scale. */
+  font-size: var(--size-xs);
+  /* Eyebrow style. */
   text-transform: uppercase;
+  /* Uppercase needs tracking to stay legible. */
   letter-spacing: 0.05em;
+  /* Label weight. */
   font-weight: 700;
-  color: var(--text-secondary, #64748b);
+  /* Muted so the status text below is the focus. */
+  color: var(--text-muted);
 }
 
+/* The status message itself. */
 .pipeline-modal__status-text {
-  margin-top: 0.25rem;
-  font-size: 0.9rem;
-  font-weight: 500;
-  color: var(--text-primary, #0f172a);
-  font-family: var(--font-mono, monospace);
+  /* Gap below the label. */
+  margin-top: var(--gap-1);
+  /* Slightly below body: mono runs wide. */
+  font-size: var(--size-sm);
+  /* Mono reads as machine output. */
+  font-family: var(--font-id);
+  /* Full contrast: this is the line the user is watching. */
+  color: var(--text-primary);
+  /* Long agent messages wrap instead of overflowing. */
+  overflow-wrap: anywhere;
 }
 
+/* Per-agent results list, shown after a run. */
+.pipeline-modal__status-steps {
+  /* Separation from the summary line. */
+  margin-top: var(--gap-2);
+  /* Helper scale. */
+  font-size: var(--size-xs);
+  /* Secondary contrast. */
+  color: var(--text-secondary);
+  /* Mono to match the summary line. */
+  font-family: var(--font-id);
+}
+
+/* Actions row. */
 .pipeline-modal__footer {
-  padding: 1rem 1.5rem;
-  border-top: 1px solid var(--rule, #e2e8f0);
+  /* Matches header/body horizontal padding. */
+  padding: var(--gap-4) var(--gap-5);
+  /* Separates actions from content. */
+  border-top: 1px solid var(--rule);
+  /* Buttons in a row. */
   display: flex;
+  /* Right-aligned, primary action last. */
   justify-content: flex-end;
-  gap: 0.75rem;
-  background: var(--subtle-bg, #f8fafc);
+  /* Space between buttons. */
+  gap: var(--gap-3);
 }

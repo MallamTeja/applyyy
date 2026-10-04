@@ -42,10 +42,17 @@ export function PipelineRunModal({ onClose, onRefresh }: PipelineRunModalProps):
 
   return (
     <div className="pipeline-modal-backdrop" onClick={running ? undefined : onClose}>
-      <div className="pipeline-modal" onClick={(e) => e.stopPropagation()}>
+      {/* role/aria-modal so screen readers announce it as a dialog, labelled by its title. */}
+      <div
+        className="pipeline-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="pipeline-modal-title"
+        onClick={(e) => e.stopPropagation()}
+      >
         <header className="pipeline-modal__header">
           <div>
-            <h2 className="pipeline-modal__title">✨ Tailor & Process Discovered Jobs</h2>
+            <h2 id="pipeline-modal-title" className="pipeline-modal__title">✨ Tailor & Process Discovered Jobs</h2>
             <p className="pipeline-modal__subtitle">
               Runs your deployed agents on Supabase in sequence to advance discovered jobs into your Approval Queue.
             </p>
@@ -104,7 +111,8 @@ export function PipelineRunModal({ onClose, onRefresh }: PipelineRunModalProps):
             <div className="pipeline-modal__status-label">Pipeline Status</div>
             <div className="pipeline-modal__status-text">{currentStatus}</div>
             {steps.length > 0 && (
-              <div style={{ marginTop: '0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary, #64748b)' }}>
+              // Class, not inline style: the inline version carried a light-theme hex fallback.
+              <div className="pipeline-modal__status-steps">
                 {steps.map((s) => (
                   <div key={s.agent}>
                     • {s.agent.toUpperCase()}: {s.status} {s.message ? `— ${s.message}` : ''}
