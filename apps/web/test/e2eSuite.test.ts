@@ -100,7 +100,7 @@ describe('Playwright E2E Operator Console Suite', () => {
             id: '0f4b24da-e85b-40bb-8606-c81824493b45',
             aud: 'authenticated',
             role: 'authenticated',
-            email: 'tejamallam00@gmail.com',
+            email: 'operator@example.test',
             app_metadata: { provider: 'email' },
             user_metadata: {},
             created_at: '2026-01-01T00:00:00Z',
@@ -122,7 +122,7 @@ describe('Playwright E2E Operator Console Suite', () => {
               id: '0f4b24da-e85b-40bb-8606-c81824493b45',
               aud: 'authenticated',
               role: 'authenticated',
-              email: 'tejamallam00@gmail.com',
+              email: 'operator@example.test',
             },
           }),
         });
@@ -197,7 +197,7 @@ describe('Playwright E2E Operator Console Suite', () => {
             id: '0f4b24da-e85b-40bb-8606-c81824493b45',
             aud: 'authenticated',
             role: 'authenticated',
-            email: 'tejamallam00@gmail.com',
+            email: 'operator@example.test',
           },
         }),
       );
@@ -215,23 +215,46 @@ describe('Playwright E2E Operator Console Suite', () => {
     }
   });
 
-  it('1. verifies unauthenticated login gatekeeper & operator auto-fill', async () => {
+  it('1. verifies unauthenticated login gatekeeper reveals no operator identity', async () => {
+    // A fresh context carries no injected session, so this is what an anonymous visitor sees.
     const anonContext = await browser.newContext();
+    // One page is enough: the login gate is the only thing an unauthenticated route renders.
     const anonPage = await anonContext.newPage();
 
+    // The root route must fall through to the gate rather than the console.
     await anonPage.goto(`${serverUrl}/`, { waitUntil: 'domcontentloaded' });
+    // Waiting on the card proves the gate mounted before any assertion reads it.
     await anonPage.waitForSelector('.login-card');
 
+    // The tagline confirms we are on the auth screen, not an error boundary.
     const tagline = await anonPage.locator('.login-card__tagline').textContent();
+    // Matching the rendered copy guards against the gate silently swapping screens.
     assert.match(tagline ?? '', /operator authentication/i);
 
+    // The submit label shows the form opened in sign-in mode, its default.
     const submitBtn = await anonPage.locator('.login-form__submit-btn').textContent();
+    // Sign-in mode is the default an anonymous visitor must land on.
     assert.match(submitBtn ?? '', /Sign In to Console/i);
 
-    // Operator email must be pre-populated for Teja
-    const emailVal = await anonPage.locator('input[type="email"]').inputValue();
-    assert.equal(emailVal, 'tejamallam00@gmail.com');
+    // Security fix: a pre-filled address told anonymous visitors which account exists.
+    const emailVal = await anonPage.locator('#operator-email').inputValue();
+    // Empty is the only safe starting value; any address here is a leak.
+    assert.equal(emailVal, '');
 
+    // The deleted quick-fill row was the other leak path, so its element must be gone.
+    const quickfillCount = await anonPage.locator('[class*="login-card__quickfill"]').count();
+    // Zero elements, asserted on the DOM rather than on text, so a comment can never trip it.
+    assert.equal(quickfillCount, 0);
+
+    // Scan every text input's value: no field may carry an address before sign-in.
+    const prefilledValues = await anonPage
+      .locator('.login-card input')
+      // Collect values in-page so we test what the browser actually holds.
+      .evaluateAll((inputs) => inputs.map((el) => (el as HTMLInputElement).value));
+    // An @ in any value would mean some field shipped an identity to an anonymous visitor.
+    assert.deepEqual(prefilledValues.filter((v) => v.includes('@')), []);
+
+    // Closing the context keeps the anonymous session from bleeding into later tests.
     await anonContext.close();
   });
 

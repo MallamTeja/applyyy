@@ -9,6 +9,8 @@
 
 import type { FilterRuleType, JobRow } from '../../data/contract.ts';
 import { supabase } from '../../data/supabase.ts';
+// Type-only: lets tests inject a client whose read fails, without a network.
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 export interface FilterRuleConfig {
   readonly ruleType: FilterRuleType;
@@ -175,24 +177,63 @@ export function writeCachedFilterRules(rules: readonly FilterRuleConfig[]): void
   }
 }
 
-/** Load filter rules from Supabase with fallback to local cache */
-export async function loadFilterRules(): Promise<FilterRuleConfig[]> {
+/* The last remote read's failure, or null after a successful (or no-backend) read.
+ * Module state rather than a return field so `saveFilterRules` can refuse on its own:
+ * the guard lives in the one function every save path crosses, not in each page. */
+let lastReadError: string | null = null;
+
+/** Why the last remote read failed, or null. Pages show it; the save path enforces it. */
+export function getFilterRulesReadError(): string | null {
+  // A getter, so callers cannot clear the guard by assignment.
+  return lastReadError;
+}
+
+/** Load filter rules from Supabase. Defaults fill in ONLY after a successful read.
+ *
+ * Until 2026-10-04 a read error fell through to local cache + seed defaults, so after
+ * an outage the page showed seed values as if they were the user's, and Save wrote
+ * them over the real remote rows. Now a failed read returns NO rules and records the
+ * error, and `saveFilterRules` refuses while it stands. */
+export async function loadFilterRules(
+  // Injectable for tests; production callers pass nothing and get the app client.
+  client: SupabaseClient | null = supabase,
+): Promise<FilterRuleConfig[]> {
+  // Local cache seeds the map; remote rows (when the read succeeds) override it.
   const localRules = readCachedFilterRules();
+  // Keyed by rule type so remote and default rows replace rather than duplicate.
   const ruleMap = new Map<FilterRuleType, FilterRuleConfig>();
 
+  // Cache first; it is this browser's last save.
   for (const r of localRules) {
+    // One entry per rule type.
     ruleMap.set(r.ruleType, r);
   }
 
-  if (supabase !== null) {
+  // No backend configured: local-only mode is a real mode, not a failed read.
+  if (client === null) {
+    // Nothing failed, so saving locally is allowed.
+    lastReadError = null;
+  } else {
+    // Captures either a returned error or a thrown one, so both take the same path.
+    let failure: string | null = null;
+    // The read itself; a thrown network error is caught below.
     try {
-      const { data, error } = await supabase
+      const { data, error } = await client
         .from('filter_rules')
         .select('*')
         .order('sort_order', { ascending: true });
 
-      if (!error && Array.isArray(data) && data.length > 0) {
+      // Check the error FIRST and on its own: "errored" and "no rows" are opposite claims.
+      if (error) {
+        // Keep Postgres's words for the banner.
+        failure = error.message;
+      } else if (!Array.isArray(data)) {
+        // A success with no array is not a shape we can trust as "no rows".
+        failure = 'filter_rules read returned no data';
+      } else {
+        // Overlay each stored rule on the cache/defaults.
         for (const row of data) {
+          // The stored enum value.
           const rType = row.rule_type as FilterRuleType;
           ruleMap.set(rType, {
             ruleType: rType,
@@ -202,34 +243,58 @@ export async function loadFilterRules(): Promise<FilterRuleConfig[]> {
             // and EVERY rule renders as on regardless of what the user saved — a
             // disabled filter silently displaying as enabled.
             isEnabled: row.enabled ?? true,
+            // An absent config is an empty one.
             config: (row.config as Record<string, unknown>) || {},
           });
         }
       }
-    } catch {
-      // Supabase fetch failure fallback
+    } catch (err) {
+      // Thrown failures (network, CORS) are read failures too.
+      failure = err instanceof Error ? err.message : String(err);
     }
+    // Record the outcome either way, so a recovered read clears an old failure.
+    lastReadError = failure;
+    // Failed read: return nothing rather than seed values dressed as the user's.
+    if (failure !== null) return [];
   }
 
-  // Ensure all standard rules exist
+  // Read succeeded (or no backend): any rule never stored gets its default.
   for (const def of DEFAULT_FILTER_RULES) {
+    // Only fill gaps; never overwrite a stored rule.
     if (!ruleMap.has(def.ruleType)) {
       ruleMap.set(def.ruleType, def);
     }
   }
 
+  // Map order is insertion order: cache, then remote, then defaults.
   return Array.from(ruleMap.values());
 }
 
 /** Save filter rules to Supabase and update local cache */
 export async function saveFilterRules(
   rules: readonly FilterRuleConfig[],
+  // Injectable for tests, same as loadFilterRules.
+  client: SupabaseClient | null = supabase,
 ): Promise<{ ok: boolean; error?: string }> {
+  // THE BLOCK. Whatever is on screen after a failed read is not the user's stored
+  // configuration, so writing it would overwrite real rows with placeholders.
+  // Refused before the local cache write too, so nothing at all changes.
+  if (lastReadError !== null) {
+    // Say why, and what fixes it.
+    return {
+      ok: false,
+      // Includes the original read error so the cause is diagnosable from the toast.
+      error: `Not saved: your filter rules failed to load (${lastReadError}), so saving would overwrite them. Reload and try again.`,
+    };
+  }
+
+  // Cache first so the Discovered page sees the change even if the remote write fails.
   writeCachedFilterRules(rules);
 
-  if (supabase !== null) {
+  // Remote sync only when a backend exists.
+  if (client !== null) {
     try {
-      const { data: userData } = await supabase.auth.getUser();
+      const { data: userData } = await client.auth.getUser();
       const userId = userData?.user?.id;
 
       let sortOrder = 0;
@@ -249,7 +314,7 @@ export async function saveFilterRules(
           ...(userId ? { user_id: userId } : {}),
         };
 
-        const { error } = await supabase
+        const { error } = await client
           .from('filter_rules')
           .upsert(payload, { onConflict: 'user_id,rule_type' });
 

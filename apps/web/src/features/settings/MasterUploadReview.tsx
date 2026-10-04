@@ -275,15 +275,16 @@ export function MasterUploadReview({
       const bytes = new Uint8Array(buffer);
       // Browser-side parse: PDF bytes never leave the local environment
       const extracted = await extractPdf(bytes);
+      // Extraction ONLY feeds the review below. It used to store here, before the
+      // reconcile/acknowledge gate — and it stored the RAW extract, not the reconciled
+      // profile, so an unreviewed version with fresh node ids became the newest master
+      // (highest version wins in the Tailor). The single store path is `accept`.
       setUploadedProfile(extracted);
-
-      // Populate masterStore directly when Supabase connection exists
-      if (supabase !== null) {
-        setStoring(true);
-        const result = await storeMasterProfile(supabase, extracted);
-        setOutcome(result);
-        setStoring(false);
-      }
+      // A new file is a new review: ticks given to the previous file's rows must not
+      // carry over and pre-unlock Accept for rows the operator has not read.
+      setAcknowledged(new Set());
+      // Clear the last file's banner so its "Stored as version N" is not read as this file's.
+      setOutcome(null);
     } catch (err) {
       setExtractError(err instanceof Error ? err.message : 'Failed to extract resume PDF');
     } finally {
@@ -345,14 +346,22 @@ export function MasterUploadReview({
     }
 
     setStoring(true);
-    /* THE RECONCILED PROFILE, NOT THE INCOMING ONE. This is the single most
-       important line in the file: `reconciled.profile` carries the ids that
-       were carried forward, and `incoming` carries the throwaway ids the paste
-       happened to have. Storing `incoming` would re-identify every node and
-       silently break every pinned application, with nothing erroring anywhere -
-       which is the entire failure the reconciler exists to prevent. */
-    setOutcome(await storeMasterProfile(supabase, reconciled.profile));
-    setStoring(false);
+    // try/finally: a thrown network error must not leave the button stuck on "Storing...".
+    try {
+      /* THE RECONCILED PROFILE, NOT THE INCOMING ONE. This is the single most
+         important line in the file: `reconciled.profile` carries the ids that
+         were carried forward, and `incoming` carries the throwaway ids the paste
+         happened to have. Storing `incoming` would re-identify every node and
+         silently break every pinned application, with nothing erroring anywhere -
+         which is the entire failure the reconciler exists to prevent. */
+      setOutcome(await storeMasterProfile(supabase, reconciled.profile));
+    } catch (err) {
+      // A throw is still an outcome; render it rather than leaking an unhandled rejection.
+      setOutcome({ kind: 'failed', message: err instanceof Error ? err.message : String(err) });
+    } finally {
+      // Always release the in-flight guard, success or failure.
+      setStoring(false);
+    }
   }, [reconciled]);
 
   return (

@@ -12,11 +12,13 @@
  * is displayed in the rail footer alongside a sign-out control.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
-import { NavLink, Outlet } from 'react-router-dom';
+import { NavLink, Outlet, useLocation } from 'react-router-dom';
 
-import { CONSOLE_SECTIONS } from './routes';
+/* The title mapping lives beside the route table so the tab title and the rail
+   label cannot name the same page two different ways. */
+import { CONSOLE_SECTIONS, documentTitleFor } from './routes';
 import { CommandPalette } from './CommandPalette';
 import { ThemeToggle } from './ThemeToggle';
 import {
@@ -31,6 +33,45 @@ import './AppShell.css';
 export function AppShell(): ReactElement {
   const auth = useAuth();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  /* Whether the collapsed phone menu is showing. Starts closed so a phone lands
+     on content, not on fourteen links (~500px of nav at 390px wide). Ignored
+     above the breakpoint, where CSS always shows the rail. */
+  const [menuOpen, setMenuOpen] = useState(false);
+  /* Focus returns here on Escape, so a keyboard user is not dropped onto
+     <body> when the menu that held focus disappears. */
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  /* The route drives both the tab title and closing the menu after a tap. */
+  const { pathname } = useLocation();
+
+  /* Per-route tab title. Applied here rather than in each page because the
+     shell is the one component every route renders through, so no page can
+     forget it; and here rather than App.tsx, which another fixer owns. */
+  useEffect(() => {
+    /* Fourteen tabs all reading "application console" were indistinguishable. */
+    document.title = documentTitleFor(pathname);
+    /* Choosing a destination is the end of the menu's job; leaving it open
+       would cover the page the operator just asked for. */
+    setMenuOpen(false);
+  }, [pathname]);
+
+  /* Escape closes the open menu - the standard disclosure contract, and the
+     only exit a keyboard user has without tabbing through every link. */
+  useEffect(() => {
+    /* No listener while closed, so Escape keeps its meaning elsewhere. */
+    if (!menuOpen) return;
+    /* Named so the cleanup below removes this exact handler. */
+    const handleEscape = (e: KeyboardEvent) => {
+      /* Only Escape; every other key belongs to the page or the palette. */
+      if (e.key !== 'Escape') return;
+      /* Close first, then hand focus back to the control that opened it. */
+      setMenuOpen(false);
+      menuButtonRef.current?.focus();
+    };
+    /* Window-level so Escape works wherever focus sits inside the menu. */
+    window.addEventListener('keydown', handleEscape);
+    /* Removed on close or unmount so stale handlers never stack. */
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [menuOpen]);
 
   // Global Cmd + K / Ctrl + K shortcut
   useEffect(() => {
@@ -65,10 +106,38 @@ export function AppShell(): ReactElement {
     <div className="shell">
       <CommandPalette isOpen={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <nav className="rail" aria-label="Console sections">
-        <div className="rail__brand">
-          <span className="rail__name">applyy</span>
-          <span className="rail__role">application console</span>
+        {/* Brand and the phone menu toggle share one row, so on a narrow
+            screen the only nav chrome above the content is this single line. */}
+        <div className="rail__top">
+          <div className="rail__brand">
+            <span className="rail__name">applyy</span>
+            <span className="rail__role">application console</span>
+          </div>
+
+          {/* Disclosure button, shown only below the breakpoint by CSS.
+              aria-expanded tells assistive tech the menu's state; aria-controls
+              ties the button to the region it shows and hides. */}
+          <button
+            type="button"
+            ref={menuButtonRef}
+            className="rail__menu-toggle"
+            aria-expanded={menuOpen}
+            aria-controls="rail-menu"
+            onClick={() => setMenuOpen((open) => !open)}
+          >
+            {/* A word, not a bare hamburger glyph: the label is the accessible
+                name and reads unambiguously to everyone. */}
+            {menuOpen ? 'Close menu' : 'Menu'}
+          </button>
         </div>
+
+        {/* Everything collapsible. On wide screens CSS gives this
+            `display: contents`, so the rail lays out exactly as before; below
+            the breakpoint it is hidden until the toggle opens it. */}
+        <div
+          id="rail-menu"
+          className={menuOpen ? 'rail__menu rail__menu--open' : 'rail__menu'}
+        >
 
         {/* Quick Search / Command Palette Trigger */}
         <button
@@ -141,7 +210,9 @@ export function AppShell(): ReactElement {
           <div className="rail__auth-user">
             <span className="rail__auth-indicator" aria-hidden="true" />
             <span className="rail__auth-email" title={auth.user.email ?? ''}>
-              {auth.user.email ?? 'tejamallam00@gmail.com'}
+              {/* Generic fallback, never a hard-coded address: an account with
+                  no email (phone auth) must not be shown as someone else's. */}
+              {auth.user.email ?? 'Signed in'}
             </span>
           </div>
           <button
@@ -152,6 +223,7 @@ export function AppShell(): ReactElement {
           >
             Sign Out
           </button>
+        </div>
         </div>
       </nav>
 

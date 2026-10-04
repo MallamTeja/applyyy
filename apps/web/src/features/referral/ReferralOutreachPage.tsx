@@ -245,7 +245,9 @@ export function ReferralOutreachPage(): ReactElement {
           </p>
         </div>
         <div className="referral-page__meta-badge">
-          <span>{items.length} Drafted Messages</span>
+          {/* Singular at exactly one, for the same reason as the nudge badge:
+              a grammatically wrong count reads as a wrong count. */}
+          <span>{items.length} Drafted {items.length === 1 ? 'Message' : 'Messages'}</span>
         </div>
       </section>
 

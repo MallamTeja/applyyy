@@ -132,47 +132,36 @@ export function ApprovalQueuePage(): ReactElement {
         setLoading(true);
 
         // 1. Fetch latest master profile
-        const { data: masterData } = await supabase!
+        const { data: masterData, error: masterError } = await supabase!
           .from('master_profiles')
           .select('*')
           .order('version', { ascending: false })
           .limit(1)
           .maybeSingle();
 
-        const masterVersion: number = masterData?.version ?? 1;
-        const masterProfile: MasterProfile = (masterData?.profile as MasterProfile | undefined) ?? {
-          schema_version: 1,
-          identity: {
-            full_name: 'Teja Mallam',
-            headline: 'Software Engineer',
-            email: 'tejamallam00@gmail.com',
-            phone: '+91 9999999999',
-            location: 'India',
-            links: [],
-          },
-          summary: {
-            id: 'summary_node',
-            text: 'Software Engineer specializing in scalable full-stack web applications and backend systems.',
-          },
-          experience: [],
-          skills: [
-            { id: 'skills_primary', name: 'TypeScript, React, Node.js, Python, PostgreSQL, REST APIs', category: 'General' },
-          ],
-          education: [],
-          projects: [],
-          achievements: [],
-          certifications: [],
-          // Top-level `links`, distinct from identity.links above — MasterProfile requires
-          // BOTH (profile-nodes.ts:143 on the identity, :353 on the profile). The literal
-          // had the inner one and was missing the outer, which is the entire TS2322.
-          // `[]` is the honest value, not a compiler-silencer: profile-nodes.ts:342-350
-          // states these arrays are "REQUIRED ARRAYS, POSSIBLY EMPTY - never optional",
-          // the stated purpose being to make the compiler name every construction site
-          // that has not been updated. This fallback literal is exactly such a site, so
-          // the error was the design working, and an empty list is what a profile with
-          // no links actually has.
-          links: [],
-        };
+        // A cancelled render has nothing to report (same rule as the queue read below).
+        if (!live) return;
+
+        /* NO MASTER, NO AUDIT. Until 2026-10-04 this read never checked `error`, and
+           on failure (or no row) diffed every tailored resume against a HARDCODED
+           profile — a literal name, email and skills line. Audit findings computed
+           against invented data are worse than none: they look like a verdict.
+           So a failed read and a missing row both stop here, before any diff exists. */
+        if (masterError || masterData === null || typeof masterData.profile !== 'object' || masterData.profile === null) {
+          // Distinguish "could not ask" from "nothing stored" so the operator knows which fix applies.
+          setLoadError(
+            masterError
+              ? 'Could not load your master profile, so no tailored resume can be audited against it. Nothing here was checked.'
+              : 'No master profile is stored, so there is nothing to audit tailored resumes against. Upload one in Master profile.',
+          );
+          // Nothing below may run without a real master.
+          return;
+        }
+
+        // Real values only: the version and profile of the row that actually loaded.
+        const masterVersion: number = masterData.version;
+        // Shape-checked above as a non-null object; the contract type is the stored profile.
+        const masterProfile: MasterProfile = masterData.profile as MasterProfile;
 
         // 2. Fetch applications at awaiting_approval
         const { data, error } = await supabase!
@@ -212,13 +201,23 @@ export function ApprovalQueuePage(): ReactElement {
         /* Collected alongside, never merged in. See UnreviewableRow. */
         const refused: UnreviewableRow[] = [];
         for (const app of data) {
-          const rawJob = app.jobs as unknown as JobRow | null;
-          const job = rawJob ?? {
-            title: 'Software Engineer',
-            company_name: 'Target Company',
-            discovered_via: null,
-            source_refs: null,
-          };
+          const job = app.jobs as unknown as JobRow | null;
+          /* A missing job row used to fall back to an invented "Software Engineer at
+             Target Company", so the operator approved against a job that was never
+             shown. No job, no honest review: refuse the row and say why in its label. */
+          if (job === null) {
+            // Refused rows are named, not hidden, so the operator can reject them.
+            refused.push({
+              // The id is real even when the join came back empty.
+              applicationId: app.id,
+              // States the reason in place of the title we cannot show.
+              jobTitle: 'Job record missing',
+              // No company is known; say so rather than invent one.
+              companyName: 'unknown company',
+            });
+            // Skip diffing: there is nothing to compare against.
+            continue;
+          }
 
           /* THE GATE ON THE GATE.
              No tailored resume means there is nothing to compare against the

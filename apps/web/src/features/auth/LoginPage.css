@@ -57,41 +57,6 @@
   margin: 0;
 }
 
-.login-card__quickfill-row {
-  display: flex;
-  align-items: center;
-  gap: var(--gap-2);
-  padding: var(--gap-2) var(--gap-3);
-  background: var(--panel);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-control);
-  font-size: var(--size-xs);
-}
-
-.login-card__quickfill-label {
-  color: var(--ink-muted);
-  font-weight: 500;
-}
-
-.login-card__quickfill-btn {
-  background: none;
-  border: none;
-  padding: 0;
-  color: var(--accent);
-  font-family: var(--font-id);
-  font-size: var(--size-xs);
-  cursor: pointer;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.login-card__quickfill-btn:hover {
-  color: var(--accent-strong);
-}
-
 .login-card__alert {
   display: flex;
   align-items: flex-start;

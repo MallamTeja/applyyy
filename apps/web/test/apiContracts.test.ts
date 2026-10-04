@@ -20,8 +20,8 @@ import {
   triggerGmailSync,
   type EmailEventRow,
 } from '../src/features/emails/emailSync.ts';
+import * as authModule from '../src/data/useAuth.ts';
 import {
-  DEFAULT_OPERATOR_EMAIL,
   formatAuthError,
   isSessionValid,
 } from '../src/data/useAuth.ts';
@@ -32,9 +32,10 @@ import {
 } from '../src/data/contract.ts';
 
 describe('Supabase Auth API Contracts', () => {
-  it('enforces operator default identity tejamallam00@gmail.com', () => {
-    // Assert operator default identity is permanently locked to Teja
-    assert.equal(DEFAULT_OPERATOR_EMAIL, 'tejamallam00@gmail.com');
+  it('ships no default operator identity in the public bundle', () => {
+    // The auth contract no longer carries an account address: identity is known
+    // only after sign-in, so nothing pre-login can reveal which account exists.
+    assert.equal('DEFAULT_OPERATOR_EMAIL' in authModule, false);
   });
 
   it('validates active JWT bearer sessions', () => {
@@ -50,7 +51,7 @@ describe('Supabase Auth API Contracts', () => {
         id: '0f4b24da-e85b-40bb-8606-c81824493b45',
         aud: 'authenticated',
         role: 'authenticated',
-        email: 'tejamallam00@gmail.com',
+        email: 'operator@example.test',
       },
     } as any;
 

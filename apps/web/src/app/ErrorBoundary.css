@@ -1,0 +1,37 @@
+/* Fallback shown when one page's render throws. Danger tokens only, so it themes
+   through light-dark() like every other failure state in the console. */
+.error-boundary {
+  /* Room to read the message without crowding. */
+  padding: var(--gap-4);
+  /* Danger wash: the same colour language as .store-notice--bad. */
+  background: var(--fabricated-wash);
+  /* Second channel, so the state is not carried by hue alone. */
+  border-left: 3px solid var(--fabricated);
+  /* Body ink stays readable on the wash in both themes. */
+  color: var(--ink);
+}
+
+/* The headline: what happened, before the technical detail. */
+.error-boundary__title {
+  /* Tight to the message below it. */
+  margin: 0 0 var(--gap-2);
+}
+
+/* The thrown message; long ones must wrap rather than widen the page on a phone. */
+.error-boundary__message {
+  /* Break long identifiers so there is no horizontal scroll. */
+  overflow-wrap: anywhere;
+  /* Quieter than the title: detail, not headline. */
+  color: var(--text-muted);
+}
+
+/* The two recovery buttons, side by side, wrapping at narrow widths. */
+.error-boundary__actions {
+  /* Row layout with wrapping for 390px viewports. */
+  display: flex;
+  flex-wrap: wrap;
+  /* Space between the buttons. */
+  gap: var(--gap-2);
+  /* Separation from the message. */
+  margin-top: var(--gap-3);
+}

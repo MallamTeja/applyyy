@@ -12,16 +12,17 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { Session } from '@supabase/supabase-js';
 
+import * as authModule from '../src/data/useAuth.ts';
 import {
-  DEFAULT_OPERATOR_EMAIL,
   formatAuthError,
   isSessionValid,
 } from '../src/data/useAuth.ts';
 
 describe('operator authentication helpers', () => {
-  it('configures the operator default email to tejamallam00@gmail.com', () => {
-    // Assert that the default operator email matches Teja's required identity
-    assert.equal(DEFAULT_OPERATOR_EMAIL, 'tejamallam00@gmail.com');
+  it('exports no default operator email for the login page to pre-fill', () => {
+    // Regression guard: a hard-coded address here was pre-filled and displayed on
+    // the public login page, naming the account to attack before anyone signed in.
+    assert.equal('DEFAULT_OPERATOR_EMAIL' in authModule, false);
   });
 
   it('formats null or undefined errors into a safe fallback message', () => {

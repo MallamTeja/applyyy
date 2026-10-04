@@ -170,7 +170,9 @@ export function FollowUpNudgesPage(): ReactElement {
           </p>
         </div>
         <div className="followup-page__meta-badge">
-          <span>{nudges.length} Pending Nudges</span>
+          {/* Singular at exactly one: "1 Pending Nudges" read as a bug and made
+              the operator doubt the count itself. */}
+          <span>{nudges.length} Pending {nudges.length === 1 ? 'Nudge' : 'Nudges'}</span>
         </div>
       </section>
 

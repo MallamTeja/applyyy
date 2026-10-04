@@ -131,3 +131,23 @@ export const ALL_ROUTES: readonly ConsoleRoute[] = CONSOLE_SECTIONS.flatMap(
  * is time-sensitive in a way that a settings page never is - and because at 35
  * applications a day, something is usually waiting. */
 export const DEFAULT_ROUTE = 'approvals';
+
+/* The tab title when no route matches, kept identical to index.html's <title>
+ * so a 404 or the bare `/` redirect reads the same as the first paint. */
+export const DEFAULT_DOCUMENT_TITLE = 'applyy — application console';
+
+/* The browser-tab title for a pathname, e.g. "/approvals" -> "Approval queue · applyy".
+ * Derived from ALL_ROUTES rather than a second table, for the same reason the
+ * rail and router share this file: a title map kept by hand drifts from the
+ * routes it names. Pure, so the mapping is testable without a DOM. */
+export function documentTitleFor(pathname: string): string {
+  /* First segment only, so a nested path (a detail view under a page) keeps
+     its parent page's title instead of falling back to the generic one. */
+  const segment = pathname.replace(/^\/+/, '').split('/')[0] ?? '';
+  /* Exact match against the declared paths: a prefix match would let a future
+     "filters-archive" borrow the "Filters" title. */
+  const route = ALL_ROUTES.find((candidate) => candidate.path === segment);
+  /* Label first, product second: the tab strip truncates from the right, and
+     with fourteen screens open the page name is the part that must survive. */
+  return route === undefined ? DEFAULT_DOCUMENT_TITLE : `${route.label} · applyy`;
+}

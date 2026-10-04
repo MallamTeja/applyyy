@@ -331,33 +331,47 @@ export async function runRemoteDiscovery(
 
   onProgress?.(`Saving ${candidateRows.length} jobs to database...`);
 
+  // Every failed write, by batch, so the run can be closed honestly. Until
+  // 2026-10-04 upsert errors were skipped silently and agent_runs said 'succeeded'
+  // regardless, so a run that wrote nothing looked identical to a healthy one.
+  const failures: string[] = [];
+
   // Batch insert into Supabase
   const BATCH = 25;
   for (let i = 0; i < candidateRows.length; i += BATCH) {
+    // One batch keeps each request under PostgREST's comfortable payload size.
     const batch = candidateRows.slice(i, i + BATCH);
+    // Human-readable batch label for the failure list.
+    const label = `batch ${i / BATCH + 1}`;
 
     const { data: upsertedJobs, error: jobErr } = await supabase
       .from('jobs')
       .upsert(batch, { onConflict: 'user_id,fingerprint', ignoreDuplicates: false })
       .select('id, fingerprint');
 
-    let batchJobIds: string[] = [];
-    if (!jobErr && upsertedJobs && upsertedJobs.length > 0) {
-      batchJobIds = upsertedJobs.map((j) => j.id);
-    } else {
-      const fps = batch.map((b) => b.fingerprint);
-      const { data: existing } = await supabase
-        .from('jobs')
-        .select('id')
-        .in('fingerprint', fps);
-      if (existing) {
-        batchJobIds = existing.map((j) => j.id);
-      }
+    // A failed jobs upsert is a failure of this batch. No fallback lookup: the old
+    // one re-read EXISTING jobs and counted them as inserted, hiding the error.
+    if (jobErr) {
+      // Record and move on; later batches may still succeed.
+      failures.push(`${label} jobs upsert: ${jobErr.message}`);
+      // Nothing to attach applications to.
+      continue;
     }
 
+    // Ids of the rows the upsert actually wrote or updated.
+    const batchJobIds: string[] = (upsertedJobs ?? []).map((j) => j.id);
+    // Only those count as processed.
+    jobsInserted += batchJobIds.length;
+
+    // An empty batch result needs no application insert.
     if (batchJobIds.length > 0) {
+      // NOTE: rows land at `discovered` with no Screener pass. Nothing writes
+      // `deduped`, so these rows cannot advance (CLAUDE.md §8). Recorded, not fixed
+      // here: changing the insert status is a pipeline decision, not a UI one.
       const appInserts = batchJobIds.map((job_id) => ({
+        // The job this application is for.
         job_id,
+        // The only pre-gate status the insert guard admits for a fresh scout row.
         status: 'discovered',
       }));
 
@@ -366,24 +380,66 @@ export async function runRemoteDiscovery(
         .upsert(appInserts, { onConflict: 'user_id,job_id', ignoreDuplicates: true })
         .select('id');
 
-      if (!appErr && insertedApps) {
-        appsCreated += insertedApps.length;
+      // Checked, not skipped: a refused insert means jobs exist with no application.
+      if (appErr) {
+        // Record it against this batch.
+        failures.push(`${label} applications upsert: ${appErr.message}`);
+      } else {
+        // ignoreDuplicates returns only NEW rows, so this is the real "created" count.
+        appsCreated += (insertedApps ?? []).length;
       }
     }
-
-    jobsInserted += batchJobIds.length;
   }
 
-  // Log in agent_runs
+  // Close the run with the status the work earned. agent_run_status has no
+  // 'partial' (20260909234500_enums.sql:190), so any failure is 'failed', with the
+  // error count and detail saying how partial it was.
+  const runStatus = failures.length === 0 ? 'succeeded' : 'failed';
+  // A telemetry write that fails must not fail the scan, but it must not vanish either.
   try {
-    await supabase.from('agent_runs').insert({
+    const { error: runErr } = await supabase.from('agent_runs').insert({
+      // The aggregator lane, a real agent_name value.
       agent: 'scout_aggregator',
-      status: 'succeeded',
+      // Earned status, not a constant.
+      status: runStatus,
+      // Without finished_at the run reads as still running and duration_ms stays null.
+      finished_at: new Date().toISOString(),
+      // Everything fetched from the feeds.
       rows_in: rawJobs.length,
+      // Applications actually created.
       rows_out: appsCreated,
+      // How many writes failed.
+      error_count: failures.length,
+      // The failures themselves, or null on a clean run.
+      error_detail: failures.length > 0 ? failures.join('; ') : null,
     });
-  } catch {
-    // optional telemetry
+    // Visible in the console for whoever is debugging the health page.
+    if (runErr) console.warn('agent_runs insert failed:', runErr.message);
+  } catch (err) {
+    // Same: logged, not swallowed.
+    console.warn('agent_runs insert threw:', err);
+  }
+
+  // A run with failures is reported as one, with the count, to the modal.
+  if (failures.length > 0) {
+    // Partial progress is still stated, so the user knows what did land.
+    onProgress?.(`Finished with ${failures.length} failed write(s). ${jobsInserted} jobs saved, ${appsCreated} new applications.`);
+    return {
+      // Not ok: the user asked for all of these and some were refused.
+      ok: false,
+      // The first failure is usually the cause of the rest (RLS, schema).
+      message: `${failures.length} database write(s) failed (${failures[0]}). ${jobsInserted} jobs saved, ${appsCreated} new applications.`,
+      // Totals still reported, so the partial work is visible.
+      totalFetched: rawJobs.length,
+      // How many passed the browser-side relevance filter.
+      matchedCount: matchingJobs.length,
+      // Jobs that really landed.
+      jobsInserted,
+      // Applications that really landed.
+      appsCreated,
+      // Machine-readable reason for callers that branch on it.
+      error: 'partial_write_failure',
+    };
   }
 
   onProgress?.(`Completed! ${jobsInserted} jobs processed, ${appsCreated} new applications queued.`);
@@ -395,6 +451,91 @@ export async function runRemoteDiscovery(
     matchedCount: matchingJobs.length,
     jobsInserted,
     appsCreated,
+  };
+}
+
+/* HTTP status of a functions.invoke error, or null. FunctionsHttpError carries the
+ * raw Response as `context`; other error kinds (relay, fetch) do not. */
+function httpStatusOf(error: unknown): number | null {
+  // Only an object can carry a context.
+  if (typeof error !== 'object' || error === null) return null;
+  // The Response, when present.
+  const context = (error as { context?: unknown }).context;
+  // Must itself be an object with a numeric status.
+  if (typeof context !== 'object' || context === null) return null;
+  // Read the status without trusting its type.
+  const status = (context as { status?: unknown }).status;
+  // Numeric statuses only.
+  return typeof status === 'number' ? status : null;
+}
+
+/* A count field must be a real non-negative integer. `Number(undefined ?? 0)` made a
+ * missing field read as a confident 0; this makes it a parse failure instead. */
+function isCount(value: unknown): value is number {
+  // Integers only; NaN, strings and negatives are not counts.
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+
+/** Validates a scout-ats 200 body (supabase/functions/scout-ats/index.ts) and maps it
+ *  to a scan result. Returns null for ANY shape it does not recognise. Three 200 shapes
+ *  exist: the full run (`success: true`), `halted_by_kill_switch` and `no_boards_due`. */
+export function parseScoutAtsResponse(body: unknown): WatchlistScanResult | null {
+  // A non-object is not any of the three shapes.
+  if (typeof body !== 'object' || body === null) return null;
+  // Index without widening to any.
+  const b = body as Record<string, unknown>;
+  // Read once into locals so the type guards narrow them.
+  const boards = b['boards_polled'];
+  // Same.
+  const jobs = b['jobs_discovered'];
+  // The two short-circuit answers: nothing ran, for a stated reason.
+  if (b['status'] === 'halted_by_kill_switch' || b['status'] === 'no_boards_due') {
+    // Both send boards_polled and jobs_discovered; require them so a rename is caught.
+    if (!isCount(boards) || !isCount(jobs)) return null;
+    // A halt is not a success: the user asked for a scan and none happened.
+    const halted = b['status'] === 'halted_by_kill_switch';
+    return {
+      // The kill switch is a failure to scan; "no boards due" is a correct, empty answer.
+      ok: !halted,
+      // The function's own sentence when it sent one.
+      message: typeof b['message'] === 'string' ? b['message'] : String(b['status']),
+      // From the response, not assumed.
+      boardsScanned: boards,
+      // Same.
+      jobsInserted: jobs,
+      // Neither shape creates applications.
+      appsCreated: 0,
+      // Machine-readable reason only for the halt.
+      ...(halted ? { error: 'halted_by_kill_switch' } : {}),
+    };
+  }
+  // Read into locals for narrowing.
+  const apps = b['applications_created'];
+  // Same.
+  const results = b['results'];
+  // The full run must say success:true and carry all three counts plus the results array.
+  if (b['success'] !== true || !isCount(boards) || !isCount(jobs) || !isCount(apps) || !Array.isArray(results)) {
+    // Anything else is unrecognised.
+    return null;
+  }
+  // Boards whose own poll failed, so a run with failures is not reported as clean.
+  const failedBoards = results.filter(
+    // Each summary carries status "ok" | "skipped" | "failed".
+    (r: unknown) => typeof r === 'object' && r !== null && (r as { status?: unknown }).status === 'failed',
+  ).length;
+  return {
+    // Every board failing is a failed scan; some failing is reported in the message.
+    ok: !(failedBoards > 0 && failedBoards === results.length),
+    // States the numbers, and failed boards when there were any.
+    message:
+      `Scanned ${boards} company boards: ${jobs} jobs discovered, ${apps} new applications.` +
+      (failedBoards > 0 ? ` ${failedBoards} board(s) failed to poll.` : ''),
+    // Real field boards_polled, not the never-sent `summaries`.
+    boardsScanned: boards,
+    // Real field jobs_discovered, not `total_jobs_discovered`.
+    jobsInserted: jobs,
+    // Real field applications_created, not `total_applications_created`.
+    appsCreated: apps,
   };
 }
 
@@ -418,25 +559,64 @@ export async function runWatchlistScan(
   onProgress?.('Contacting Scout-ATS Edge Function...');
 
   try {
-    // Attempt invoking the Edge Function first
+    // Attempt invoking the Edge Function first. invoke() attaches the session JWT,
+    // which scout-ats now requires.
     const { data, error } = await supabase.functions.invoke('scout-ats', {
       body: {},
     });
 
-    if (!error && data) {
-      const boardsScanned = Array.isArray(data.summaries) ? data.summaries.length : 1;
-      const jobsInserted = Number(data.total_jobs_discovered ?? 0);
-      const appsCreated = Number(data.total_applications_created ?? 0);
-
-      onProgress?.(`Scan complete! ${boardsScanned} boards checked, ${appsCreated} new applications added.`);
-
-      return {
-        ok: true,
-        message: `Scanned ${boardsScanned} company boards. ${appsCreated} new applications queued.`,
-        boardsScanned,
-        jobsInserted,
-        appsCreated,
-      };
+    // Non-2xx responses arrive as an error carrying the raw Response in `context`.
+    if (error) {
+      // Read the HTTP status defensively; not every invoke error carries a Response.
+      const status = httpStatusOf(error);
+      // Auth failures are not "busy": the browser fallback would hit the same wall,
+      // and the fix is the user's (sign in again), so say so instead of falling back.
+      if (status === 401 || status === 403) {
+        return {
+          // A refused call scanned nothing.
+          ok: false,
+          // 401 = no/expired session; 403 = authenticated but not allowed.
+          message:
+            status === 401
+              ? 'Scout-ATS refused the request: your session is missing or expired. Sign in again and retry.'
+              : 'Scout-ATS refused the request (403): this account is not allowed to run it.',
+          // Nothing ran, so every count is zero by fact, not by default.
+          boardsScanned: 0,
+          // Same: nothing was inserted.
+          jobsInserted: 0,
+          // Same: nothing was created.
+          appsCreated: 0,
+          // Machine-readable reason.
+          error: status === 401 ? 'unauthenticated' : 'forbidden',
+        };
+      }
+      // Any other failure falls through to the direct-scan fallback below, as before.
+    } else {
+      // A 2xx body is validated, never defaulted: the old code read fields scout-ats
+      // never sends (summaries / total_*), defaulted them to 0, and reported a
+      // successful "0 new applications" for every run.
+      const parsed = parseScoutAtsResponse(data);
+      // An unrecognised body is a failure to report, not zeros to display.
+      if (parsed === null) {
+        return {
+          // We cannot say what happened, so it did not demonstrably succeed.
+          ok: false,
+          // Include the body so the mismatch is diagnosable.
+          message: `Scout-ATS returned an unrecognised response: ${JSON.stringify(data).slice(0, 200)}`,
+          // Unknown, reported as zero alongside ok:false so nothing reads it as success.
+          boardsScanned: 0,
+          // Same.
+          jobsInserted: 0,
+          // Same.
+          appsCreated: 0,
+          // Machine-readable reason.
+          error: 'unrecognised_response',
+        };
+      }
+      // Recognised: report it in the modal's progress line too.
+      onProgress?.(parsed.message);
+      // The validated result, success or a stated halt.
+      return parsed;
     }
   } catch {
     // Fall back to scanning public Ashby boards directly from browser

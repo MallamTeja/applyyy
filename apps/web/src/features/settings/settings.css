@@ -76,6 +76,35 @@
   border-bottom: none;
 }
 
+/* Narrow windows (a 390px phone): three columns do not fit. The `auto` third column
+   sized itself to the threshold input's inline width (up to 18rem), crushing the
+   rule text to one word per line, overlapping it, and overflowing the page by 12px.
+   Below 40rem the threshold drops to its own row under the rule text instead. */
+@media (max-width: 40rem) {
+  .cascade__row {
+    /* Toggle + text only; the field takes the next row. */
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  /* The threshold field sits under the rule text, aligned with it, not under the toggle. */
+  .cascade__row > .field {
+    /* Span from the text column to the end. */
+    grid-column: 2 / -1;
+    /* Let the grid shrink it; a flex column defaults to its content's min width. */
+    min-width: 0;
+  }
+
+  /* FiltersPage.tsx sets `style={{ width: '7rem' | '18rem' }}` inline. !important is the
+     only stylesheet rule that can beat an inline style, and it is scoped to this
+     narrow-width query so the wide layout keeps its intended input sizes. */
+  .cascade__row .field__control {
+    /* Fill the row instead of overflowing it. */
+    width: 100% !important;
+    /* Belt for padding + border so 100% means the row width, not more. */
+    box-sizing: border-box;
+  }
+}
+
 /* A rule the operator has switched off. Dimmed rather than hidden, so the
    cascade still reads as a complete pipeline with a gap in it - hiding a
    disabled rule would make "why did this job get through" unanswerable. */

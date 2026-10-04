@@ -28,10 +28,13 @@ import type { DiscoverySource, JobRow } from '../../data/contract.ts';
 import { supabase } from '../../data/supabase.ts';
 import { DiscoveryModal } from '../pipeline/DiscoveryModal';
 import { PipelineRunModal } from './PipelineRunModal';
+// Internet job search via the scout-web Edge Function; inserts land in this page's inventory.
+import { WebScoutPanel } from './WebScoutPanel';
 import { getCompanyCooldownInfo } from '../settings/companyCatalog.ts';
 import {
   evaluateJobMatch,
   getTechOnlyPreference,
+  getFilterRulesReadError,
   isTechRole,
   loadFilterRules,
   setTechOnlyPreference,
@@ -39,6 +42,10 @@ import {
 import type { FilterRuleConfig } from '../settings/filtersStore.ts';
 
 import './DiscoveredJobsPage.css';
+
+/* Rows fetched for browser-side cascade evaluation. Totals come from a count query,
+   never from this list's length. */
+const LIST_CAP = 300;
 
 interface DiscoveredItem {
   readonly applicationId?: string;
@@ -68,57 +75,89 @@ export function DiscoveredJobsPage(): ReactElement {
   const [discoveryModalMode, setDiscoveryModalMode] = useState<'remote' | 'watchlist' | null>(null);
   const [pipelineModalOpen, setPipelineModalOpen] = useState<boolean>(false);
 
+  /* Why the last load failed, or null. A THIRD state beside "loading" and "rows":
+     an outage must not render as an empty list or as somebody else's rows. */
+  const [loadError, setLoadError] = useState<string | null>(null);
+  /* The exact number of rows at `discovered`, from a count query. The list below is
+     capped at LIST_CAP rows, so its length undercounts; this is the honest total. */
+  const [discoveredTotal, setDiscoveredTotal] = useState<number | null>(null);
+
   /* Load discovered jobs & filter rules */
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
+      // A retry starts clean; a stale banner over fresh rows would be its own lie.
+      setLoadError(null);
 
       // Load filter rules
       const rules = await loadFilterRules();
       setFilterRules(rules);
+      // A failed rules read returns NO rules, so every job would read as "matched".
+      // Say so instead of presenting an unfiltered list as a filtered one.
+      const rulesError = getFilterRulesReadError();
 
       if (supabase === null) {
-        setLoading(false);
+        // No backend: state it rather than render an empty explorer as "no jobs".
+        setLoadError('Supabase is not configured, so no discovered jobs can be loaded.');
         return;
       }
 
-      // Query applications in 'discovered' or raw jobs
-      const { data: appsData, error: appsErr } = await supabase!
-        .from('applications')
-        .select('id, status, job:job_id(*)')
-        .eq('status', 'discovered')
-        .order('created_at', { ascending: false })
-        .limit(300);
-
-      if (!appsErr && appsData && appsData.length > 0) {
-        const mapped: DiscoveredItem[] = [];
-        for (const app of appsData) {
-          if (app.job) {
-            mapped.push({
-              applicationId: app.id,
-              job: app.job as unknown as JobRow,
-            });
-          }
-        }
-        setItems(mapped);
-      } else {
-        // Fallback: Query directly from jobs if applications were not joined
-        const { data: jobsData, error: jobsErr } = await supabase!
-          .from('jobs')
-          .select('*')
+      // Both reads in parallel: the capped list and the exact total are independent.
+      const [listResult, countResult] = await Promise.all([
+        supabase
+          .from('applications')
+          // The job is joined because the cards render job fields, not application fields.
+          .select('id, status, job:job_id(*)')
+          // This page is the discovered inventory, and only that.
+          .eq('status', 'discovered')
+          // Newest first, so the cap drops the oldest.
           .order('created_at', { ascending: false })
-          .limit(300);
+          // Browser-side cascade evaluation needs the rows; the cap bounds payload size.
+          .limit(LIST_CAP),
+        supabase
+          .from('applications')
+          // head:true returns only the count, so the total costs no row payload.
+          .select('id', { count: 'exact', head: true })
+          // Same predicate as the list, so the two numbers describe the same set.
+          .eq('status', 'discovered'),
+      ]);
 
-        if (jobsErr || !jobsData) return;
+      // A failed read is an error state. The old code fell back to EVERY jobs row
+      // regardless of status (and on a second failure, returned silently), so an
+      // outage rendered as a full, wrong list.
+      if (listResult.error) {
+        // The database's words, for diagnosis.
+        setLoadError(`Could not load discovered jobs: ${listResult.error.message}`);
+        // Never show the previous load's rows under an error.
+        setItems([]);
+        return;
+      }
 
-        setItems(
-          jobsData.map((j) => ({
-            job: j as unknown as JobRow,
-          })),
-        );
+      // Keep only rows whose job join resolved; a card needs a job to render.
+      const mapped: DiscoveredItem[] = [];
+      // An empty array is a real "nothing discovered", rendered as empty.
+      for (const app of listResult.data ?? []) {
+        // A missing job row cannot be rendered as a card.
+        if (app.job) {
+          mapped.push({
+            // Real application id, so downstream actions address the real row.
+            applicationId: app.id,
+            // The joined job row.
+            job: app.job as unknown as JobRow,
+          });
+        }
+      }
+      setItems(mapped);
+      // A failed count is not fatal to the list; fall back to "unknown" rather than the capped length.
+      setDiscoveredTotal(countResult.error ? null : countResult.count);
+      // Surface the rules failure after the list loaded, so the reason is visible beside the rows.
+      if (rulesError !== null) {
+        // States the consequence: the Matched/Filtered split is not trustworthy.
+        setLoadError(`Filter rules failed to load (${rulesError}); the Matched / Filtered Out split below ignores your rules.`);
       }
     } catch (e) {
-      console.error('Failed to load discovered jobs:', e);
+      // A thrown failure is the same error state as a returned one.
+      setLoadError(e instanceof Error ? e.message : 'Failed to load discovered jobs.');
     } finally {
       setLoading(false);
     }
@@ -238,7 +277,10 @@ export function DiscoveredJobsPage(): ReactElement {
             role="tab"
             aria-selected={viewTab === 'matched'}
           >
-            🎯 Matched Tech Jobs (<strong>{matchedCount}</strong>)
+            {/* The tab is inline-flex with a gap, so "(", <strong> and ")" as separate
+                children each got a 6px gap: "( 0 )". One span keeps the count a single
+                flex item; all three tabs use this exact shape so they match. */}
+            🎯 Matched Tech Jobs <span>(<strong>{matchedCount}</strong>)</span>
           </button>
           <button
             type="button"
@@ -247,7 +289,8 @@ export function DiscoveredJobsPage(): ReactElement {
             role="tab"
             aria-selected={viewTab === 'all'}
           >
-            📋 All Discovered ({items.length})
+            {/* The exact total from the count query; the capped list length is only a fallback. */}
+            📋 All Discovered <span>(<strong>{discoveredTotal ?? items.length}</strong>)</span>
           </button>
           <button
             type="button"
@@ -257,7 +300,8 @@ export function DiscoveredJobsPage(): ReactElement {
             aria-selected={viewTab === 'dropped'}
             title="Jobs dropped due to non-tech title, senior experience, or location mismatch"
           >
-            🚫 Filtered Out (<strong>{droppedCount}</strong>)
+            {/* Same single-span count shape as the other two tabs. */}
+            🚫 Filtered Out <span>(<strong>{droppedCount}</strong>)</span>
           </button>
         </div>
 
@@ -316,10 +360,24 @@ export function DiscoveredJobsPage(): ReactElement {
             onClick={() => setPipelineModalOpen(true)}
             title="Run the deployed agent pipeline (Normalizer -> Screener -> Matcher -> Tailor -> Auditor) to tailor and queue jobs"
           >
-            ✨ Tailor & Process Pipeline
+            {/* Page-level on purpose: the modal runs every eligible row, not one job. */}
+            ✨ Run pipeline (all eligible rows)…
           </button>
         </div>
       </section>
+
+      {/* Beside the header's scout/run buttons because it is another discovery source.
+          Only mounted with a real client: the panel cannot do anything without one.
+          onInserted reloads so newly scouted rows appear without a manual refresh. */}
+      {supabase !== null && (
+        <WebScoutPanel
+          client={supabase}
+          onInserted={() => {
+            // Same reload the scout modals use, so counts and list stay in step.
+            void loadData();
+          }}
+        />
+      )}
 
       {/* Search and Metadata Filters Bar */}
       <section className="discovery__controls" aria-label="Job search and filters">
@@ -327,6 +385,8 @@ export function DiscoveredJobsPage(): ReactElement {
           <input
             type="search"
             className="discovery__search-input"
+            /* A placeholder is not a label; screen readers need this. */
+            aria-label="Search discovered jobs"
             placeholder="Search discovered jobs by title, company, skills, or location..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -402,12 +462,21 @@ export function DiscoveredJobsPage(): ReactElement {
               </span>
             ) : (
               <span>
-                Showing <strong>{filteredItems.length}</strong> of {items.length} total jobs
+                Showing <strong>{filteredItems.length}</strong> of {discoveredTotal ?? items.length} total jobs
+                {/* Says when the cap is hiding rows, so the counts are not read as complete. */}
+                {discoveredTotal !== null && discoveredTotal > items.length && ` (newest ${items.length} loaded)`}
               </span>
             )}
           </span>
         </div>
       </section>
+
+      {/* Error banner: loud, and above the grid, because an empty grid beneath it is not "no jobs". */}
+      {loadError !== null && (
+        <p className="discovery__error" role="alert">
+          {loadError}
+        </p>
+      )}
 
       {/* Grid of Job Cards */}
       {loading ? (
@@ -424,7 +493,7 @@ export function DiscoveredJobsPage(): ReactElement {
         </div>
       ) : (
         <div className="discovery__grid">
-          {filteredItems.map(({ applicationId, job, passed, dropReason }) => (
+          {filteredItems.map(({ job, passed, dropReason }) => (
             <article key={job.id} className={`job-card ${!passed ? 'job-card--dropped' : ''}`}>
               {/* If dropped, display clear reason banner */}
               {!passed && dropReason && (
@@ -515,24 +584,13 @@ export function DiscoveredJobsPage(): ReactElement {
                   <span>Apply Link ↗</span>
                 </a>
 
-                {/* Replaces the removed "Tailor & Queue" fast path. That button walked six
-                    status transitions naming six agents and ran none of them — including the
-                    Auditor, which does not exist as code — so it stamped rows `audit_clean`
-                    and sent the operator to the batch-approve screen holding a verdict nobody
-                    had produced. This line states what is true instead: the row is discovered,
-                    and nothing can advance it until the agents exist. Static copy, not a
-                    disabled control, because a greyed-out button still claims the capability
-                    is there and merely unavailable right now. */}
-                {applicationId && (
-                  <button
-                    type="button"
-                    className="button button--secondary button--small"
-                    onClick={() => setPipelineModalOpen(true)}
-                    title="Run tailoring and screening pipeline for discovered jobs"
-                  >
-                    ✨ Tailor & Queue
-                  </button>
-                )}
+                {/* NO per-card pipeline button, deliberately. The one that sat here was
+                    labelled "Tailor & Queue" but opened the generic PipelineRunModal, which
+                    takes no job id — so it ran the whole pipeline over every eligible row,
+                    not this card. A button on a card claims to act on that card. The
+                    honest single entry point is the "Run pipeline" button in the page
+                    header. (Before that, this slot held the deleted fast path that forged
+                    six agent transitions; see the file header.) */}
               </div>
             </article>
           ))}

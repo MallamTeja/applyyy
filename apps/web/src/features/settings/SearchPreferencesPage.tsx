@@ -107,15 +107,59 @@ export function SearchPreferencesPage(): ReactElement {
   const [maxSalary, setMaxSalary] = useState<string>('');
   const [currency, setCurrency] = useState<string>('INR');
 
-  // Rate Limits / System Controls
-  const [killSwitchActive, setKillSwitchActive] = useState<boolean>(true);
-  const [backoffSeconds, setBackoffSeconds] = useState<number>(60);
+  // Rate Limits / System Controls — backed by public.system_settings (core_tables.sql:26).
+  // Starts FALSE to mirror the column default: until the real row loads, the page must
+  // never imply the pipeline is running, because "on" is the dangerous direction.
+  const [systemEnabled, setSystemEnabled] = useState<boolean>(false);
+  // Mirrors max_applications_per_day's column default (35) so a user with no row yet
+  // sees the number the database would actually apply.
   const [dailyCap, setDailyCap] = useState<number>(35);
+  // True only once the system_settings read SUCCEEDED (row or no row). A failed read
+  // leaves the controls at placeholder values, and saving those would overwrite the
+  // user's real kill switch — so the controls and their save stay locked until then.
+  const [settingsLoaded, setSettingsLoaded] = useState<boolean>(false);
+  // Same guard for search_preferences: after a failed read the fields hold the
+  // hardcoded examples, and Save would write them over the user's real row.
+  const [prefsLoaded, setPrefsLoaded] = useState<boolean>(false);
 
   const loadPreferences = useCallback(async () => {
     if (supabase === null) {
       setLoading(false);
       return;
+    }
+
+    // Read the control-panel row separately from search_preferences so one table's
+    // outage cannot be mistaken for the other's emptiness.
+    try {
+      // maybeSingle: zero rows is a legitimate "never configured" state, not an error.
+      const { data: settings, error: settingsError } = await supabase
+        .from('system_settings')
+        // Only the two columns this page edits; the rest belong to agents.
+        .select('system_enabled, max_applications_per_day')
+        .maybeSingle();
+      // A failed read must be visible and must keep the controls locked.
+      if (settingsError) {
+        // Say which table failed, so the user knows the search fields are unaffected.
+        setStatusMessage({ text: `Failed to load pipeline controls: ${settingsError.message}`, type: 'error' });
+      } else {
+        // Row present: show the user's real values instead of the placeholders.
+        if (settings) {
+          // Coerce strictly: only a literal true means "running".
+          setSystemEnabled(settings.system_enabled === true);
+          // Keep the default when the column somehow comes back non-numeric.
+          if (typeof settings.max_applications_per_day === 'number') setDailyCap(settings.max_applications_per_day);
+        }
+        // Read succeeded (with or without a row), so saving is now safe.
+        setSettingsLoaded(true);
+      }
+    } catch (err) {
+      // A thrown network error is the same failure as a returned one.
+      setStatusMessage({
+        // Prefer the real message; fall back to naming the table.
+        text: err instanceof Error ? err.message : 'Error loading pipeline controls',
+        // Red, because the controls are now locked.
+        type: 'error',
+      });
     }
 
     try {
@@ -125,8 +169,19 @@ export function SearchPreferencesPage(): ReactElement {
         .maybeSingle();
 
       if (error) {
-        setStatusMessage({ text: `Failed to load preferences: ${error.message}`, type: 'error' });
-      } else if (data) {
+        // Appended, not replacing: if the controls read also failed, both causes stay visible.
+        setStatusMessage((prev) => ({
+          // Keep an earlier failure's text in front of this one.
+          text: (prev?.type === 'error' ? `${prev.text} ` : '') + `Failed to load preferences: ${error.message}. Saving is blocked until a reload succeeds.`,
+          // Red: the page is not showing the user's data.
+          type: 'error',
+        }));
+      } else {
+        // Read succeeded (row or no row), so saving cannot clobber unseen data.
+        setPrefsLoaded(true);
+      }
+      // Only a real row overrides the example values.
+      if (!error && data) {
         if (Array.isArray(data.titles) && data.titles.length > 0) setTitles(data.titles.join(', '));
         if (Array.isArray(data.keywords) && data.keywords.length > 0) setKeywords(data.keywords.join(', '));
         if (Array.isArray(data.excluded_keywords) && data.excluded_keywords.length > 0) {
@@ -165,6 +220,7 @@ export function SearchPreferencesPage(): ReactElement {
         }
       }
     } catch (err) {
+      // A thrown read is a failed read: prefsLoaded stays false and Save stays blocked.
       setStatusMessage({
         text: err instanceof Error ? err.message : 'Error loading search preferences',
         type: 'error',
@@ -267,18 +323,30 @@ export function SearchPreferencesPage(): ReactElement {
     };
 
     if (supabase === null) {
-      // Offline / demo environment fallback
-      setStatusMessage({ text: 'Preferences saved in local session (Supabase unconfigured).', type: 'success' });
+      // Nothing persists without a backend. Saying "saved" here was a lie the user
+      // would discover only after a reload wiped every field.
+      setStatusMessage({ text: 'Supabase is not configured, so nothing was saved.', type: 'error' });
+      // Release the button; there is no request in flight.
       setSaving(false);
-      return true;
+      // False so "Save & Find" does not go on to scout with unsaved preferences.
+      return false;
     }
 
     try {
       const { data: userData } = await supabase.auth.getUser();
       const userId = userData?.user?.id;
 
+      // Refuse to save over a row we never managed to read.
+      if (!prefsLoaded) {
+        // Says why nothing happened and how to fix it.
+        setStatusMessage({ text: 'Not saved: your saved preferences failed to load, so saving would overwrite them. Reload and try again.', type: 'error' });
+        // Nothing was written.
+        return false;
+      }
+
       if (!userId) {
-        setStatusMessage({ text: 'Not signed in. Changes saved in session memory.', type: 'error' });
+        // No session means RLS refuses every write — there is no "session memory" to fall back to.
+        setStatusMessage({ text: 'Not signed in, so nothing was saved.', type: 'error' });
         setSaving(false);
         return false;
       }
@@ -290,10 +358,50 @@ export function SearchPreferencesPage(): ReactElement {
       if (upsertError) {
         setStatusMessage({ text: `Failed to save: ${upsertError.message}`, type: 'error' });
         return false;
-      } else {
-        setStatusMessage({ text: 'Search preferences saved successfully.', type: 'success' });
+      }
+
+      // The pipeline controls were placeholders if their read failed; writing them
+      // then would silently flip the user's real kill switch. Report what did save.
+      if (!settingsLoaded) {
+        // Partial success stated as partial, in red, because something the user sees did not persist.
+        setStatusMessage({
+          // Name both halves so the user knows which one to retry.
+          text: 'Search preferences saved. Pipeline controls were NOT saved because they failed to load — reload and retry.',
+          // Error styling: the page is not fully saved.
+          type: 'error',
+        });
+        // The search half did persist, so the discovery follow-up may still run.
         return true;
       }
+
+      // Upsert so a user with no settings row yet gets one; the other columns take
+      // their safe defaults (dry_run true, etc.) from the table.
+      const { error: settingsError } = await supabase
+        .from('system_settings')
+        // Only the two columns this page owns; agent-owned counters stay untouched.
+        .upsert(
+          // user_id is the primary key, which is also the conflict target.
+          { user_id: userId, system_enabled: systemEnabled, max_applications_per_day: dailyCap },
+          // Same conflict target as the table's primary key.
+          { onConflict: 'user_id' },
+        );
+
+      // A failed kill-switch write is the most important failure on this page to surface.
+      if (settingsError) {
+        // Say precisely which half failed; the search preferences did persist.
+        setStatusMessage({
+          // Include the database's own message so RLS/check-constraint failures are diagnosable.
+          text: `Search preferences saved, but pipeline controls failed to save: ${settingsError.message}`,
+          // Red, because the kill switch on screen may not match the database.
+          type: 'error',
+        });
+        // Search half persisted; let the caller proceed.
+        return true;
+      }
+
+      // Both writes returned no error, so this claim is now true.
+      setStatusMessage({ text: 'Search preferences and pipeline controls saved.', type: 'success' });
+      return true;
     } catch (err) {
       setStatusMessage({
         text: err instanceof Error ? err.message : 'Error updating preferences',
@@ -644,40 +752,46 @@ export function SearchPreferencesPage(): ReactElement {
           </p>
 
           <div className="settings-group__fields">
+            {/* Persisted to system_settings.system_enabled — the column every agent checks first. */}
             <label className="field field--wide">
+              {/* Names the real mechanism so the label cannot drift from the column. */}
               <span className="field__label">Emergency Kill Switch</span>
+              {/* Explains the locked state, so a disabled control is not mistaken for a broken one. */}
               <span className="field__help">
-                Halts autonomous agent dispatch across Scout, Tailor, and Applier immediately.
+                {settingsLoaded
+                  ? 'Halts every agent on its next tick. A fresh account starts halted.'
+                  : 'Locked: the current setting could not be loaded, so it cannot be changed safely.'}
               </span>
+              {/* Disabled until the real value loads, so a placeholder can never be saved over it. */}
               <select
                 className="field__control"
-                value={killSwitchActive ? 'active' : 'disabled'}
-                onChange={(e) => setKillSwitchActive(e.target.value === 'active')}
+                value={systemEnabled ? 'running' : 'halted'}
+                onChange={(e) => setSystemEnabled(e.target.value === 'running')}
+                disabled={!settingsLoaded}
               >
-                <option value="active">Active (normal autonomous pipeline execution)</option>
-                <option value="disabled">Paused (emergency halt engaged)</option>
+                {/* system_enabled = true. */}
+                <option value="running">Running (agents may act)</option>
+                {/* system_enabled = false, the column default. */}
+                <option value="halted">Halted (kill switch engaged)</option>
               </select>
             </label>
 
-            <label className="field">
-              <span className="field__label">Rate-Limit Backoff (Seconds)</span>
-              <span className="field__help">
-                Cooldown window when HTTP 429 rate limit is encountered.
-              </span>
-              <input
-                type="number"
-                className="field__control"
-                min={10}
-                value={backoffSeconds}
-                onChange={(e) => setBackoffSeconds(Number(e.target.value))}
-              />
-            </label>
+            {/* Backoff is deliberately NOT a setting: no column exists, and agents honour
+                the server's Retry-After instead of inventing one. The old input saved nowhere. */}
+            <p className="field__help">
+              Rate-limit backoff is not configurable: agents wait as long as the provider&apos;s
+              Retry-After header says.
+            </p>
 
+            {/* Persisted to system_settings.max_applications_per_day. */}
             <label className="field">
-              <span className="field__label">Daily Submission Cap</span>
+              {/* Named after the column (per day); the old "rolling 24 hours" wording was unverified. */}
+              <span className="field__label">Daily Application Cap</span>
+              {/* States the budget reasoning from the column comment. */}
               <span className="field__help">
-                Maximum submissions per rolling 24 hours.
+                Maximum applications per day (sized to the GitHub Actions minutes budget).
               </span>
+              {/* min 1 mirrors the column's CHECK (> 0) so the browser refuses what Postgres would. */}
               <input
                 type="number"
                 className="field__control"
@@ -685,6 +799,7 @@ export function SearchPreferencesPage(): ReactElement {
                 max={100}
                 value={dailyCap}
                 onChange={(e) => setDailyCap(Number(e.target.value))}
+                disabled={!settingsLoaded}
               />
             </label>
           </div>

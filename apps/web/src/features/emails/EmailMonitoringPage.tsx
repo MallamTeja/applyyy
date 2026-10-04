@@ -19,7 +19,7 @@
  * Only the authenticated operator's emails are returned by the query.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import { supabase } from '../../data/supabase.ts';
@@ -147,8 +147,21 @@ export function EmailMonitoringPage(): ReactElement {
     [activeSyncUrl, fetchEvents, lastSyncedAt, syncing],
   );
 
-  /* Initial on-demand sync and fetch on page mount (Page Open) */
+  /* Set once the mount-time sync has been attempted. A ref, not state, so flipping it
+     does not re-render — and it survives StrictMode's dev double-invoke of effects. */
+  const autoSyncAttempted = useRef(false);
+
+  /* Initial on-demand sync and fetch on page mount (Page Open) — EXACTLY ONCE.
+     `performSync` is rebuilt whenever `syncing` or `lastSyncedAt` changes. A failed
+     sync leaves `lastSyncedAt` null, so keying the effect on `performSync` refired it
+     after every failure, and `fetchEvents` cleared the error each time: an invisible
+     infinite retry loop. Later syncs come only from the explicit Refresh button. */
   useEffect(() => {
+    // Already tried on this mount: never auto-retry, so a failure stays on screen.
+    if (autoSyncAttempted.current) return;
+    // Mark before awaiting, so a re-run of this effect mid-flight cannot start a second sync.
+    autoSyncAttempted.current = true;
+    // Fire-and-forget: performSync records its own errors in state.
     void performSync(false);
   }, [performSync]);
 

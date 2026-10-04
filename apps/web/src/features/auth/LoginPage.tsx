@@ -13,13 +13,13 @@
  * - Surfaces: `--ground` desk with elevated `--sheet` card and `--panel` controls
  * - Ink: `--ink` high contrast text and `--ink-muted` secondary labels
  * - Accent: `--accent` interactive slate-blue focus rings and primary action button
- * - Security: quick-fill operator button pre-populating `tejamallam00@gmail.com`
+ * - Security: no account identity is pre-filled or displayed before sign-in; an
+ *   earlier quick-fill button leaked the operator's address to anonymous visitors.
  */
 
 import { useState } from 'react';
 import type { FormEvent, ReactElement } from 'react';
 
-import { DEFAULT_OPERATOR_EMAIL } from '../../data/useAuth';
 import type { AuthState } from '../../data/useAuth';
 
 import './LoginPage.css';
@@ -34,8 +34,8 @@ export interface LoginPageProps {
 export type AuthMode = 'sign_in' | 'sign_up';
 
 export function LoginPage({ auth }: LoginPageProps): ReactElement {
-  /* State for the email input field, initialized with the default operator email. */
-  const [email, setEmail] = useState<string>(DEFAULT_OPERATOR_EMAIL);
+  /* Starts empty so the page never reveals which account exists to an anonymous visitor. */
+  const [email, setEmail] = useState<string>('');
   /* State for the secret password input field. */
   const [password, setPassword] = useState<string>('');
   /* Tracks submission in flight to disable buttons and prevent duplicate clicks. */
@@ -46,14 +46,6 @@ export function LoginPage({ auth }: LoginPageProps): ReactElement {
   const [mode, setMode] = useState<AuthMode>('sign_in');
   /* Feedback banner for sign up confirmation or instructions. */
   const [notice, setNotice] = useState<string | null>(null);
-
-  /* Quick-fill helper to immediately restore the operator email if modified. */
-  const handleQuickFill = () => {
-    /* Set operator email */
-    setEmail(DEFAULT_OPERATOR_EMAIL);
-    /* Clear local errors */
-    setLocalError(null);
-  };
 
   /* Form submission handler executing sign in or sign up against Supabase Auth. */
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -122,19 +114,6 @@ export function LoginPage({ auth }: LoginPageProps): ReactElement {
         <p className="login-card__desc">
           Sign in to access your operator console and application pipeline.
         </p>
-
-        {/* Quick-fill shortcut for known operator account */}
-        <div className="login-card__quickfill-row">
-          <span className="login-card__quickfill-label">Operator:</span>
-          <button
-            type="button"
-            className="login-card__quickfill-btn"
-            onClick={handleQuickFill}
-            title="Populate operator email"
-          >
-            {DEFAULT_OPERATOR_EMAIL}
-          </button>
-        </div>
 
         {/* Error notification banner */}
         {displayError ? (

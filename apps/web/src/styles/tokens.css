@@ -120,7 +120,17 @@
 
   /* --- The interactive accent ------------------------------------------ */
 
-  --accent: light-dark(#4f46e5, #6366f1);
+  /* One token, two jobs, and in dark mode both jobs want the SAME direction:
+     it is a FILL under --ink-on-fill (#0d0f11) on primary buttons, and TEXT
+     on --sheet/--panel for selected toggles, chips and links. Lightening it
+     raises both ratios, so no separate --accent-fill token is needed.
+     RETUNED 2026-10-04 (dark half only, same indigo hue). MEASURED:
+       was #6366f1: 4.30 under ink-on-fill, 3.93 on --sheet, 4.19 on --panel;
+       now #787cf5: 5.49 under ink-on-fill, 5.02 on --sheet, 5.35 on --panel.
+     Light half unchanged: 6.29 under white, 6.29 on --sheet, 5.65 on --panel.
+     Re-measure before tuning; white text on the dark half is NOT supported
+     (3.50), which is why every fill pairs it with --ink-on-fill. */
+  --accent: light-dark(#4f46e5, #787cf5);
   --accent-strong: light-dark(#4338ca, #818cf8);
   --accent-subtle: light-dark(rgba(79, 70, 229, 0.12), rgba(99, 102, 241, 0.18));
 

@@ -24,6 +24,7 @@ import { FILTER_RULE_TYPES } from '../../data/contract.ts';
 import type { FilterRuleType } from '../../data/contract.ts';
 import {
   DEFAULT_FILTER_RULES,
+  getFilterRulesReadError,
   getTechOnlyPreference,
   loadFilterRules,
   saveFilterRules,
@@ -107,12 +108,17 @@ export function FiltersPage(): ReactElement {
   const [loading, setLoading] = useState<boolean>(true);
   const [saving, setSaving] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+  // Mirrors the store's read failure so the page can say why Save will refuse, instead of
+  // showing an empty cascade that looks like "no rules configured".
+  const [readError, setReadError] = useState<string | null>(null);
 
   const fetchRules = useCallback(async () => {
     try {
       setLoading(true);
       const loaded = await loadFilterRules();
       setRules(loaded);
+      // Read the getter only after load settles: the store records the outcome inside loadFilterRules.
+      setReadError(getFilterRulesReadError());
       setTechOnly(getTechOnlyPreference());
     } catch {
       // Fallback
@@ -287,11 +293,21 @@ export function FiltersPage(): ReactElement {
             type="button"
             className="btn-primary"
             onClick={() => void handleSave()}
-            disabled={saving}
+            // The store would refuse anyway after a failed read; disabling makes the banner's claim visible.
+            disabled={saving || readError !== null}
           >
             {saving ? 'Saving...' : '💾 Save Filter Cascade'}
           </button>
         </div>
+
+        {/* Persistent, because saveFilterRules refuses every save until a later read succeeds. */}
+        {readError !== null && (
+          <p className="store-notice store-notice--bad" role="alert" style={{ marginTop: 'var(--gap-3)' }}>
+            {/* Names the failure and the block, so a refused Save is not mistaken for a bug. */}
+            Could not load your filter rules ({readError}). The rules below are not your
+            saved settings, and saving is disabled so they cannot overwrite them. Reload to retry.
+          </p>
+        )}
 
         {statusMessage && (
           <div
@@ -400,7 +416,8 @@ export function FiltersPage(): ReactElement {
             type="button"
             className="btn-primary"
             onClick={() => void handleSave()}
-            disabled={saving}
+            // The store would refuse anyway after a failed read; disabling makes the banner's claim visible.
+            disabled={saving || readError !== null}
           >
             {saving ? 'Saving...' : '💾 Save Filter Cascade'}
           </button>

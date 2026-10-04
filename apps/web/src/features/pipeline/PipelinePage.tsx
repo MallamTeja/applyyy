@@ -158,7 +158,10 @@ function StatusColumn({
               }
             >
               <button type="button" className="move__button" disabled>
-                Move to {target}
+                {/* Same humanising rule as StatusBadge.tsx:23 (underscores to
+                    spaces), so the button names a status in the exact words the
+                    badge above it uses instead of the raw enum. */}
+                Move to {target.replace(/_/g, ' ')}
               </button>
             </li>
           ))}

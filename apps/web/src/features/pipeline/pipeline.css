@@ -150,7 +150,10 @@
   padding: var(--gap-1) var(--gap-2);
   border: 1px solid var(--rule);
   border-radius: var(--radius-control);
-  font-family: var(--font-id);
+  /* The machine sans, not the mono: the label is now a humanised status
+     ("dropped filter"), the same words the badges show, and --font-id is
+     reserved for literal identifiers an operator might paste into SQL. */
+  font-family: var(--font-machine);
   font-size: var(--size-xs);
   cursor: pointer;
 }

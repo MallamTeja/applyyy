@@ -290,19 +290,54 @@ function AgentFreshnessPanel({
  * to remove.
  *
  * Note what is NOT possible here: a "connected" state with a service-role key.
- * That case throws at import time in `supabase.ts`, so this panel can only ever
- * report connected-with-an-anon-key or not-configured. */
-function ConnectionPanel(): ReactElement {
+ * That case throws at import time in `supabase.ts`.
+ *
+ * REACHABILITY, NOT CONFIGURATION. `supabaseStatus.connected` only means the
+ * URL and anon key are SET - it is decided at import time, before any request.
+ * This panel used to print "Connected" in green from that flag alone, and the
+ * sweep caught it staying green while every read below it failed. So green is
+ * now earned by the page's own read of `agent_runs` succeeding; a configured
+ * client whose read failed says so, and one whose read has not settled says
+ * only "Configured". */
+function ConnectionPanel({
+  read,
+}: {
+  /* The same read the freshness panels use, so this panel cannot claim a
+     connection the tables below it just failed to use. */
+  readonly read: AgentRunsRead;
+}): ReactElement {
+  /* The read's own outcome is the only evidence of reachability on this page. */
+  const kind = read.state.kind;
+
   return (
     <section className="panel">
       <h2 className="panel__title">Database connection</h2>
 
       {supabaseStatus.connected ? (
-        <>
+        kind === 'rows' || kind === 'empty' ? (
+          /* Green only here: a query went out and an answer came back, empty
+             or not. That is a positive, measured claim of reachability. */
           <p className="panel__clear">
-            Connected with an anon key. Row access is decided by RLS.
+            Reachable: the agent_runs read succeeded with the anon key. Row
+            access is decided by RLS.
           </p>
-        </>
+        ) : kind === 'failed' ? (
+          /* Degraded, in the alarm palette, with the database's own message -
+             the operator needs to know the reads below are failing, and why. */
+          <p className="panel__degraded" role="alert">
+            Configured, but unreachable: the agent_runs read failed (
+            {read.state.kind === 'failed' ? read.state.message : ''}). Every
+            panel below that reads the database is showing no data for this
+            reason.
+          </p>
+        ) : (
+          /* Loading or signed-out: a key exists but nothing has proved it
+             works, so the label claims only what is known. */
+          <p className="panel__note">
+            Configured (URL and anon key are set). Reachability not yet
+            confirmed: {describeEmptyState(read.state) ?? 'read has not completed'}.
+          </p>
+        )
       ) : (
         <>
           {/* Not a failure, and deliberately not styled as one - this is the
@@ -868,7 +903,7 @@ export function HealthPage(): ReactElement {
       {/* Connection first: several panels below can only report why they have
           no data, and this is what says whether that is because the query is
           unwritten or because there is nothing to query. */}
-      <ConnectionPanel />
+      <ConnectionPanel read={agentRuns} />
       {/* The two panels that read real rows, both from the same read. */}
       <AgentFreshnessPanel read={agentRuns} />
       <KeepalivePanel read={agentRuns} />

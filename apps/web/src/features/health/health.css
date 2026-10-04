@@ -72,6 +72,23 @@
   color: var(--ink);
 }
 
+/* The opposite of .panel__clear: a check that ran and FAILED. Same shape as
+   the all-clear so the two read as the two answers to one question, but in the
+   fabrication red, because a configured database that cannot be reached makes
+   every other panel on this page silently empty. */
+.panel__degraded {
+  /* Matches .panel__clear's box so the swap is the colour, not the layout. */
+  padding: var(--gap-2) var(--gap-3);
+  /* The alarm wash: tokenised, so it themes with light-dark(). */
+  background: var(--fabricated-wash);
+  /* Second channel besides hue, for colour-blind operators: a heavy edge. */
+  border-left: 3px solid var(--fabricated);
+  /* Same reading size as the all-clear. */
+  font-size: var(--size-sm);
+  /* Body ink on the faint wash keeps the error message itself readable. */
+  color: var(--ink);
+}
+
 /* --- Tables ----------------------------------------------------------- */
 
 /* Scroll the table, never the page. The agent table has four columns and will

@@ -24,9 +24,9 @@ import type { AuthError, Session, SupabaseClient, User } from '@supabase/supabas
 
 import { supabase } from './supabase.ts';
 
-/* The default operator email configured for rapid console verification.
- * Stored as a constant so the login form and tests share the exact same address. */
-export const DEFAULT_OPERATOR_EMAIL = 'tejamallam00@gmail.com';
+/* No default operator email lives here, deliberately. A hard-coded address shipped in
+ * the public bundle and was pre-filled on the production login page, telling every
+ * unauthenticated visitor which account to attack. Identity is known only after sign-in. */
 
 /* State contract exposed by useAuth hook to callers across the console. */
 export interface AuthState {

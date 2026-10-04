@@ -30,6 +30,42 @@
   overflow-y: auto;
 }
 
+/* Wide screens: both wrappers dissolve so brand, links, toggle group and
+   session footer stay direct flex children of the rail, and the existing
+   column layout (including the `margin-top: auto` pushes) is untouched. */
+.rail__top,
+.rail__menu {
+  /* No box of their own above the breakpoint; they exist for the phone. */
+  display: contents;
+}
+
+/* The phone-only disclosure button. Hidden on wide screens, where the whole
+   rail is always visible and a toggle would hide nothing. */
+.rail__menu-toggle {
+  /* Revealed by the narrow-screen block below. */
+  display: none;
+  /* Same quiet chrome as Sign Out, so it reads as console furniture. */
+  background: var(--panel);
+  /* A visible edge so the control is findable as a control. */
+  border: 1px solid var(--rule-strong);
+  /* Matches every other control's corner. */
+  border-radius: var(--radius-control);
+  /* Full-strength ink: this is the primary way to navigate on a phone. */
+  color: var(--ink);
+  /* Readable but not shouting; the page title below is the headline. */
+  font-size: var(--size-sm);
+  /* Tall enough for a thumb (~36px) without dominating the header row. */
+  padding: var(--gap-2) var(--gap-3);
+  /* Signals the whole box is tappable. */
+  cursor: pointer;
+}
+
+/* Hover feedback, the shared wash used by every rail control. */
+.rail__menu-toggle:hover {
+  /* Same wash as rail links so hover means one thing everywhere. */
+  background: var(--surface-hover);
+}
+
 .rail__brand {
   display: flex;
   flex-direction: column;
@@ -312,9 +348,10 @@
 /* --- Narrow screens --------------------------------------------------- */
 
 /* Below this the rail and a resume pane cannot share the width. The rail
-   becomes a horizontal strip above the page rather than a hamburger: fifteen
-   destinations behind a menu button costs a tap on every navigation, and this
-   console is worked, not browsed. */
+   becomes a header row with a Menu button. REVERSED 2026-10-04: this block
+   used to argue against a menu button (a tap per navigation), but at 390px the
+   always-open strip cost ~500px of links before any content, so every page
+   started below the fold. A tap to navigate is cheaper than a scroll to read. */
 @media (max-width: 52rem) {
   .shell {
     grid-template-columns: 1fr;
@@ -328,6 +365,48 @@
     align-items: baseline;
     border-right: none;
     border-bottom: 1px solid var(--rule);
+    /* Tighter than the desktop gap: collapsed, the rail is one header row and
+       the large gap would only push content down. */
+    gap: var(--gap-3);
+  }
+
+  /* Brand left, menu button right, on one line: this row is all the nav a
+     phone shows until the operator asks for more. */
+  .rail__top {
+    /* A real box here, unlike on wide screens, so it can be a row. */
+    display: flex;
+    /* Pushes the toggle to the far edge, where a right thumb reaches it. */
+    justify-content: space-between;
+    /* Vertically centres the button against the two-line brand. */
+    align-items: center;
+    /* Its own full line, so the opened menu always starts below it. */
+    flex-basis: 100%;
+  }
+
+  /* The toggle appears only where the menu is collapsible. */
+  .rail__menu-toggle {
+    /* Shown; inline-flex keeps its label centred in the padded box. */
+    display: inline-flex;
+  }
+
+  /* Collapsed by default: the content is the point of opening the page. */
+  .rail__menu {
+    /* Removed from layout AND the accessibility tree while closed, matching
+       aria-expanded="false" on the button that controls it. */
+    display: none;
+  }
+
+  /* Opened: the links, theme control and session footer stack under the
+     header row and wrap within it, using the narrow-screen rules below. */
+  .rail__menu--open {
+    /* Flex so the existing wrap rules for its children still apply. */
+    display: flex;
+    /* Same wrapped-row model the rail used before it was collapsible. */
+    flex-wrap: wrap;
+    /* Keeps sections, toggle and footer visibly separate. */
+    gap: var(--gap-3);
+    /* Its own full-width line below the header row. */
+    flex-basis: 100%;
   }
 
   /* The section headings go: horizontally they would separate the links from

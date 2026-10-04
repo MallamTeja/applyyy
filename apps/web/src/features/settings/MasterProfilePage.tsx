@@ -103,13 +103,38 @@ export function MasterProfilePage(): ReactElement {
   const [text, setText] = useState('');
   const [result, setResult] = useState<IngestResult | null>(null);
 
+  /* Whether the stored-profile read has finished, and how. `stored === null` alone
+     cannot tell "no profile yet" from "the read failed" — and the reconciler treats
+     null as a FIRST upload, minting fresh ids for every node and orphaning every
+     application pinned to the old ones. So uploads are gated on 'ready', never on null. */
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'failed'>(
+    // No client means no read to wait for; the store step reports "not connected" itself.
+    supabase === null ? 'ready' : 'loading',
+  );
+  /* The database's own words for a failed read, shown so the block is explainable. */
+  const [loadError, setLoadError] = useState<string | null>(null);
+  /* Every intake path needs the same gate, so compute it once. */
+  const canReconcile = loadState === 'ready';
+
   /* Read the stored profile once on mount */
   useEffect(() => {
     if (supabase === null) return;
     let live = true;
     void loadCurrentMasterProfile(supabase).then((outcome) => {
       if (!live) return;
+      // A failed read used to be dropped here, leaving `stored` null so the next upload
+      // reconciled as a first upload. Record it and keep uploads blocked instead.
+      if (outcome.kind === 'failed') {
+        // Keep the message for the banner below.
+        setLoadError(outcome.message);
+        // 'failed' keeps every reconcile path locked.
+        setLoadState('failed');
+        return;
+      }
+      // 'none' is a genuine first upload, so `stored` correctly stays null.
       if (outcome.kind === 'loaded') setStored(outcome.profile);
+      // Either answer is trustworthy, so reconciling may proceed.
+      setLoadState('ready');
     });
     return () => {
       live = false;
@@ -137,6 +162,22 @@ export function MasterProfilePage(): ReactElement {
     <div className="page">
       <PageHeader path="master-profile" />
 
+      {/* Loud, and above both intake paths, because it is the reason both are locked. */}
+      {loadState === 'failed' && (
+        <p className="store-notice store-notice--bad" role="alert">
+          {/* Says what failed and why uploading is blocked, so a disabled input is not read as a bug. */}
+          Could not load your stored master profile, so uploads are blocked: reconciling
+          without it would treat this as a first upload and re-identify every node your
+          applications point at. Reload to retry.{' '}
+          {/* The database's own message, for diagnosis. */}
+          <span className="identifier">{loadError}</span>
+        </p>
+      )}
+      {/* Tells the user why the input is briefly disabled on mount. */}
+      {loadState === 'loading' && (
+        <p className="store-notice store-notice--ok">Loading your stored master profile...</p>
+      )}
+
       {/* Prominent Master Resume PDF Upload Section */}
       <section className="settings-group">
         <h2 className="settings-group__title">Upload Master Resume (.pdf)</h2>
@@ -153,6 +194,8 @@ export function MasterProfilePage(): ReactElement {
               accept=".pdf"
               className="pdf-upload-card__input"
               aria-label="Upload master resume PDF"
+              /* Locked until the stored profile is known, so nothing reconciles against a false "first upload". */
+              disabled={!canReconcile}
               onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (file) void handlePdfUpload(file);
@@ -171,7 +214,7 @@ export function MasterProfilePage(): ReactElement {
         </div>
 
         {/* Once extracted from PDF, immediately display review and accept gate */}
-        {pdfProfile !== null && (
+        {pdfProfile !== null && canReconcile && (
           <div style={{ marginTop: 'var(--gap-4)' }}>
             <MasterUploadReview previous={stored} incoming={pdfProfile} />
           </div>
@@ -202,7 +245,8 @@ export function MasterProfilePage(): ReactElement {
           <button
             type="button"
             className="ingest__button"
-            disabled={text.trim().length === 0}
+            /* Same gate as the PDF path: a checked paste goes straight into reconciliation. */
+            disabled={text.trim().length === 0 || !canReconcile}
             onClick={() => setResult(ingestMasterProfileText(text))}
           >
             Check this profile
@@ -211,7 +255,7 @@ export function MasterProfilePage(): ReactElement {
 
         {result !== null && <Findings result={result} />}
 
-        {result !== null && result.ok && (
+        {result !== null && result.ok && canReconcile && (
           <div style={{ marginTop: 'var(--gap-4)' }}>
             <MasterUploadReview previous={stored} incoming={result.profile} />
           </div>

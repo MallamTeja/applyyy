@@ -55,13 +55,22 @@ export function AnswerBankPage(): ReactElement {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [draftValue, setDraftValue] = useState<unknown>('');
   const [savingKey, setSavingKey] = useState<string | null>(null);
+  // The failed read's message. Held apart from `questions` so an outage renders as
+  // an outage, not as an empty (or seed-filled) bank the user might then save over.
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const fetchBank = useCallback(async () => {
     try {
       setLoading(true);
       const items = await loadAnswerBank();
       setQuestions(items);
+      // A successful read clears any banner from an earlier failed attempt.
+      setLoadError(null);
     } catch (err) {
+      // Nothing trustworthy loaded: show none, rather than stale rows from a previous read.
+      setQuestions([]);
+      // Persistent banner, because a toast disappears and the block on saving does not.
+      setLoadError(err instanceof Error ? err.message : String(err));
       toast.error(`Failed to load answer bank: ${String(err)}`);
     } finally {
       setLoading(false);
@@ -192,6 +201,14 @@ export function AnswerBankPage(): ReactElement {
           values below to prevent the bot from pausing or guessing.
         </p>
 
+        {/* Persistent, because saving stays blocked (in the store) until a reload succeeds. */}
+        {loadError !== null && (
+          <p className="store-notice store-notice--bad" role="alert">
+            {loadError}. Your stored answers are not shown and saving is blocked so they are not
+            overwritten. Use Refresh to retry.
+          </p>
+        )}
+
         {/* Top Summary Bar & Add Button */}
         <div className="answer-bank__top-bar">
           <div className="answer-bank__stats-bar">
@@ -235,6 +252,8 @@ export function AnswerBankPage(): ReactElement {
             <input
               type="text"
               className="answer-bank__search-input"
+              /* Placeholder text vanishes on input and is not a label; screen readers need this. */
+              aria-label="Search answer bank questions"
               placeholder="Search questions, prompts, or values..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}

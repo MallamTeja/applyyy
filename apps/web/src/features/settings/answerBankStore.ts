@@ -9,6 +9,8 @@
 
 import type { AnswerType } from '../../data/contract.ts';
 import { supabase } from '../../data/supabase.ts';
+// Type-only: lets tests inject a client whose read fails, without a network.
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 export type QuestionCategory = 'all' | 'compensation' | 'auth' | 'eeo' | 'written' | 'general';
 
@@ -223,8 +225,37 @@ export function formatAnswerPreview(type: AnswerType, value: unknown, key?: stri
   return str;
 }
 
-/** Load all answer bank questions (seed + custom, with remote and local values merged) */
-export async function loadAnswerBank(): Promise<BankQuestion[]> {
+/* The last remote read's failure, or null after a successful (or no-backend) read.
+ * Module state so the WRITE functions can refuse on their own: the guard lives in
+ * the functions every save crosses, not in each page that calls them. */
+let lastReadError: string | null = null;
+
+/** Why the last remote read failed, or null. */
+export function getAnswerBankReadError(): string | null {
+  // A getter, so callers cannot clear the guard by assignment.
+  return lastReadError;
+}
+
+/* Shared refusal for every write while the read is failed. */
+function blockedWrite(): { ok: false; error: string } {
+  // Names the cause and the fix, so the toast is actionable.
+  return {
+    ok: false,
+    // The read error is included verbatim for diagnosis.
+    error: `Not saved: your answer bank failed to load (${lastReadError ?? 'unknown error'}), so saving could overwrite your stored answers. Reload and try again.`,
+  };
+}
+
+/** Load all answer bank questions (seed + custom, with remote and local values merged).
+ *
+ * THROWS when the remote read fails. Until 2026-10-04 a failed read was swallowed
+ * and the seed values rendered as if they were the user's answers, and the next
+ * Save wrote them over the real remote rows. Seeds now apply only beneath a read
+ * that SUCCEEDED; a failure records itself and blocks every write. */
+export async function loadAnswerBank(
+  // Injectable for tests; production callers pass nothing and get the app client.
+  client: SupabaseClient | null = supabase,
+): Promise<BankQuestion[]> {
   const localMap = readLocalOverrides();
   const resultMap = new Map<string, BankQuestion>();
 
@@ -260,46 +291,66 @@ export async function loadAnswerBank(): Promise<BankQuestion[]> {
   }
 
   // 3. If Supabase is available, sync and merge remote rows
-  if (supabase !== null) {
+  if (client === null) {
+    // Local-only mode is a real mode, not a failed read.
+    lastReadError = null;
+  } else {
+    // Captures a returned or thrown failure so both take one path.
+    let failure: string | null = null;
+    // Holds the rows only when the read succeeded.
+    let rows: unknown[] = [];
+    // The read itself; a thrown network error is caught below.
     try {
-      const { data, error } = await supabase
+      const { data, error } = await client
         .from('answer_bank')
         .select('*')
         .order('question_key', { ascending: true });
+      // Error checked on its own: "errored" and "no rows" are opposite claims.
+      if (error) failure = error.message;
+      // A success without an array is not trustworthy as "no rows".
+      else if (!Array.isArray(data)) failure = 'answer_bank read returned no data';
+      // Success: keep the rows for the merge below.
+      else rows = data;
+    } catch (err) {
+      // Thrown failures (network, CORS) are read failures too.
+      failure = err instanceof Error ? err.message : String(err);
+    }
+    // Record the outcome either way, so a recovered read clears an old failure.
+    lastReadError = failure;
+    // Refuse to return seeds dressed as the user's answers.
+    if (failure !== null) throw new Error(`Failed to load answer bank: ${failure}`);
+    // Typed loosely on purpose: the row shape is the remote table's, read field by field.
+    const data = rows as Array<Record<string, any>>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-      if (!error && Array.isArray(data)) {
-        for (const row of data) {
-          const existing = resultMap.get(row.question_key);
-          const val = row.answer_value;
+    // Overlay each remote row on the seeds and local values.
+    for (const row of data) {
+      const existing = resultMap.get(row.question_key);
+      const val = row.answer_value;
 
-          if (existing) {
-            resultMap.set(row.question_key, {
-              ...existing,
-              value: val !== null && val !== undefined ? val : existing.value,
-              needsHuman: row.needs_human,
-              timesUsed: row.times_used ?? existing.timesUsed,
-              lastUsedAt: row.last_used_at ?? existing.lastUsedAt,
-            });
-          } else {
-            // New question dynamically discovered by Applier on an ATS!
-            resultMap.set(row.question_key, {
-              key: row.question_key,
-              asks: row.question_text || row.question_key,
-              type: row.answer_type || 'text',
-              category: 'general',
-              value: val,
-              defaultValue: val,
-              why: 'Discovered from ATS application portal.',
-              needsHuman: row.needs_human,
-              timesUsed: row.times_used ?? 0,
-              lastUsedAt: row.last_used_at ?? null,
-              isCustom: true,
-            });
-          }
-        }
+      if (existing) {
+        resultMap.set(row.question_key, {
+          ...existing,
+          value: val !== null && val !== undefined ? val : existing.value,
+          needsHuman: row.needs_human,
+          timesUsed: row.times_used ?? existing.timesUsed,
+          lastUsedAt: row.last_used_at ?? existing.lastUsedAt,
+        });
+      } else {
+        // New question dynamically discovered by Applier on an ATS!
+        resultMap.set(row.question_key, {
+          key: row.question_key,
+          asks: row.question_text || row.question_key,
+          type: row.answer_type || 'text',
+          category: 'general',
+          value: val,
+          defaultValue: val,
+          why: 'Discovered from ATS application portal.',
+          needsHuman: row.needs_human,
+          timesUsed: row.times_used ?? 0,
+          lastUsedAt: row.last_used_at ?? null,
+          isCustom: true,
+        });
       }
-    } catch {
-      // Supabase fetch failure falls back smoothly to local map
     }
   }
 
@@ -310,7 +361,11 @@ export async function loadAnswerBank(): Promise<BankQuestion[]> {
 export async function saveBankAnswer(
   question: BankQuestion,
   newValue: unknown,
+  // Injectable for tests, same as loadAnswerBank.
+  client: SupabaseClient | null = supabase,
 ): Promise<{ ok: boolean; error?: string }> {
+  // Refuse before ANY write, local included, while the last read stands failed.
+  if (lastReadError !== null) return blockedWrite();
   // Update local storage first
   const localMap = readLocalOverrides();
   localMap[question.key] = {
@@ -328,9 +383,9 @@ export async function saveBankAnswer(
   writeLocalOverrides(localMap);
 
   // Sync to Supabase
-  if (supabase !== null) {
+  if (client !== null) {
     try {
-      const { data: userData } = await supabase.auth.getUser();
+      const { data: userData } = await client.auth.getUser();
       const userId = userData?.user?.id;
 
       const payload = {
@@ -343,7 +398,7 @@ export async function saveBankAnswer(
         ...(userId ? { user_id: userId } : {}),
       };
 
-      const { error } = await supabase
+      const { error } = await client
         .from('answer_bank')
         .upsert(payload, { onConflict: 'user_id,question_key' });
 
@@ -362,6 +417,8 @@ export async function saveBankAnswer(
 export async function deleteCustomBankQuestion(
   questionKey: string,
 ): Promise<{ ok: boolean; error?: string }> {
+  // A delete is a write too; same refusal while the read stands failed.
+  if (lastReadError !== null) return blockedWrite();
   // Remove from local storage
   const localMap = readLocalOverrides();
   delete localMap[questionKey];
