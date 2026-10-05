@@ -448,3 +448,181 @@ test("generateGeminiContent refuses tools + responseSchema before claiming a key
   assert.equal(fetched, false);
   assert.deepEqual(rpcCalls, []);
 });
+
+// --- TRANSIENT UPSTREAM FAILURES (5xx / network) RETRY ON THE NEXT KEY ----------------
+// Earned 2026-10-05: gemini-3.8-flash intermittently answered 503 and one call ended the run.
+
+// Shared rig: recorded sleeps (never really waits), fixed jitter, zero-spacing pacer.
+function transientRig(keyCount = 4) {
+  // Records every RPC so report calls and claims can be inspected.
+  const rpcCalls: Array<{ fn: string; args: unknown }> = [];
+  // One distinct key per attempt, so rotation is visible.
+  const claimSequence = Array.from({ length: keyCount }, (_, i) => ({ data: i + 1, error: null }));
+  const db = fakeClient({ claimSequence, reportCalls: rpcCalls });
+  // Sleep recorder: resolves immediately.
+  const sleeps: number[] = [];
+  return {
+    rpcCalls,
+    sleeps,
+    db,
+    base: {
+      readKey: keysFrom({ 1: "k1", 2: "k2", 3: "k3", 4: "k4" }),
+      pacer: new GeminiPacer({ minIntervalMs: 0, clock: createVirtualClock(1000) }),
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+      },
+      // Constant 1 -> maximum jitter (+25%), making the upper bound exact.
+      random: () => 1,
+    },
+  };
+}
+
+const fail = (status: number, statusText: string): GeminiExecutionResult<{ ok: 1 }> => ({ ok: false, status, statusText });
+
+test("transient: 503, 503, 200 succeeds on the third key with null-cooldown reports and backoff", async () => {
+  const rig = transientRig();
+  const claimed: number[] = [];
+  const outcome = await callGeminiWithFailover(rig.db, {
+    ...rig.base,
+    execute: async (_k, keyIndex) => {
+      claimed.push(keyIndex);
+      return claimed.length < 3 ? fail(503, "Service Unavailable") : { ok: true, data: { ok: 1 as const } };
+    },
+  });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.attempts, 3);
+  // Three different keys.
+  assert.deepEqual(claimed, [1, 2, 3]);
+  // Two failure reports, both with NULL retry_after (the model is down, not the key).
+  const failures = rig.rpcCalls.filter((c) => c.fn === "report_gemini_result").map((c) => c.args as { p_success: boolean; p_retry_after_seconds: unknown; p_error: string });
+  assert.equal(failures.filter((a) => !a.p_success).length, 2);
+  assert.ok(failures.filter((a) => !a.p_success).every((a) => a.p_retry_after_seconds === null));
+  assert.equal(failures[0]!.p_error, "HTTP 503: Service Unavailable");
+  // Backoff 1s then 3s, each with 0-25% jitter.
+  assert.equal(rig.sleeps.length, 2);
+  assert.ok(rig.sleeps[0]! >= 1000 && rig.sleeps[0]! <= 1250);
+  assert.ok(rig.sleeps[1]! >= 3000 && rig.sleeps[1]! <= 3750);
+});
+
+test("transient: 503 on every attempt returns upstream_unavailable and does not sleep after the last attempt", async () => {
+  const rig = transientRig();
+  const outcome = await callGeminiWithFailover(rig.db, { ...rig.base, maxRetries: 3, execute: async () => fail(503, "Service Unavailable") });
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "upstream_unavailable");
+  assert.equal(outcome.status, 503);
+  // maxRetries + 1 attempts.
+  assert.equal(outcome.attempts, 4);
+  // Sleeps between attempts only: 3, not 4.
+  assert.equal(rig.sleeps.length, 3);
+});
+
+test("transient: 400 stays terminal http_error with one call and no sleep", async () => {
+  const rig = transientRig();
+  let calls = 0;
+  const outcome = await callGeminiWithFailover(rig.db, {
+    ...rig.base,
+    execute: async () => {
+      calls += 1;
+      return fail(400, "Bad Request");
+    },
+  });
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "http_error");
+  assert.equal(calls, 1);
+  assert.deepEqual(rig.sleeps, []);
+});
+
+test("transient: a network error (fetch throws) then 200 succeeds after two attempts", async () => {
+  const rig = transientRig();
+  let fetches = 0;
+  const outcome = await generateGeminiContent(rig.db, {
+    ...rig.base,
+    prompt: { systemInstruction: "s", userContent: "u" },
+    // First fetch throws like a dropped connection; second answers normally.
+    fetchSeam: async () => {
+      fetches += 1;
+      if (fetches === 1) throw new Error("connection reset");
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "hi" }] } }] }), { status: 200 });
+    },
+  });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.attempts, 2);
+  // The failure was reported with the explicit network-error wording.
+  const failure = rig.rpcCalls.filter((c) => c.fn === "report_gemini_result").map((c) => c.args as { p_error: string | null })[0]!;
+  assert.equal(failure.p_error, "network error: connection reset");
+});
+
+test("transient: 429 then 503 x3 ends as upstream_unavailable (last failure was transient)", async () => {
+  const rig = transientRig();
+  let calls = 0;
+  const outcome = await callGeminiWithFailover(rig.db, {
+    ...rig.base,
+    maxRetries: 3,
+    execute: async () => {
+      calls += 1;
+      return calls === 1 ? fail(429, "Too Many Requests") : fail(503, "Service Unavailable");
+    },
+  });
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "upstream_unavailable");
+  assert.equal(outcome.attempts, 4);
+});
+
+test("transient: 503 then final 429 keeps the rate_limited reason", async () => {
+  const rig = transientRig();
+  let calls = 0;
+  const outcome = await callGeminiWithFailover(rig.db, {
+    ...rig.base,
+    maxRetries: 1,
+    execute: async () => {
+      calls += 1;
+      return calls === 1 ? fail(503, "Service Unavailable") : fail(429, "Too Many Requests");
+    },
+  });
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "rate_limited_all_retries_exhausted");
+});
+
+test("empty 200 (safety block) is empty_response: no retry, key not blamed, detail names the block", async () => {
+  const rig = transientRig();
+  let fetches = 0;
+  const outcome = await generateGeminiContent(rig.db, {
+    ...rig.base,
+    prompt: { systemInstruction: "s", userContent: "u" },
+    fetchSeam: async () => {
+      fetches += 1;
+      return new Response(JSON.stringify({ candidates: [], promptFeedback: { blockReason: "SAFETY" } }), { status: 200 });
+    },
+  });
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "empty_response");
+  assert.ok(outcome.detail?.includes("SAFETY"));
+  assert.equal(fetches, 1);
+  assert.deepEqual(rig.sleeps, []);
+  // No failure report: the only report is the transport-level success.
+  assert.ok(rig.rpcCalls.filter((c) => c.fn === "report_gemini_result").every((c) => (c.args as { p_success: boolean }).p_success));
+});
+
+test("transient: 404 is still model_not_found after one call with no sleep", async () => {
+  const rig = transientRig();
+  let calls = 0;
+  const outcome = await callGeminiWithFailover(rig.db, {
+    ...rig.base,
+    execute: async () => {
+      calls += 1;
+      return fail(404, "Not Found");
+    },
+  });
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "model_not_found");
+  assert.equal(calls, 1);
+  assert.deepEqual(rig.sleeps, []);
+});

@@ -118,6 +118,15 @@ export type GeminiCallOutcome<T> =
         // combined with a JSON response schema). Returned BEFORE a key is claimed, so a
         // malformed request costs no quota and touches no key's failure streak.
         | "invalid_request"
+        // Every attempt in the loop ended in a TRANSIENT upstream failure (500/502/503/504 or a
+        // network error / timeout) — the last one was not a 429. Named apart from `http_error`
+        // (terminal, a retry cannot help) and from the 429 reason (quota, a key problem) because
+        // the remedy differs: wait and re-run later, change nothing in config or keys.
+        | "upstream_unavailable"
+        // A 200 whose body carried no candidates (typically a safety block, see
+        // `promptFeedback.blockReason` in `detail`). Terminal and key-blameless: a retry sends the
+        // same prompt and gets the same block, and the key behaved correctly.
+        | "empty_response"
         | "http_error";
       readonly status?: number;
       readonly detail?: string;
@@ -128,8 +137,13 @@ export type GeminiCallOutcome<T> =
 export interface GeminiFailoverOptions<T> {
   // The actual execution function using the claimed key.
   readonly execute: (apiKey: string, keyIndex: number) => Promise<GeminiExecutionResult<T>>;
-  // Maximum number of 429 failover attempts before giving up (default 3).
+  // Maximum number of RETRIES (default 3, so up to 4 attempts) shared by 429s and transient
+  // upstream failures (5xx / network) as ONE budget, so a flapping upstream cannot loop forever.
   readonly maxRetries?: number;
+  // Backoff sleep seam; defaults to setTimeout. Tests inject a recorder so they never really wait.
+  readonly sleep?: (ms: number) => Promise<void>;
+  // Jitter source in [0,1); defaults to Math.random. Tests inject a constant for exact bounds.
+  readonly random?: () => number;
   // Key reader dependency seam (defaults to reading Deno.env).
   readonly readKey?: KeyReader;
   // Token pacer (defaults to global singleton pacer).
@@ -142,6 +156,12 @@ export interface GeminiFailoverOptions<T> {
   }) => void;
 }
 
+// Statuses worth retrying on another key: gateway/overload errors and 0 (network/timeout).
+const TRANSIENT_STATUSES: ReadonlySet<number> = new Set([0, 500, 502, 503, 504]);
+// Base backoff per attempt. Worst case with defaults (3 sleeps): 1000+3000+7000 = 11000 ms,
+// plus up to 25% jitter = 13750 ms, well under the 25 s budget an Edge Function can spare.
+const BACKOFF_BASE_MS: readonly number[] = [1000, 3000, 7000];
+
 // In-Flight Multi-Key Retry Middleware (1a) with Pacing (1c).
 export async function callGeminiWithFailover<T>(
   db: SupabaseClient,
@@ -150,8 +170,16 @@ export async function callGeminiWithFailover<T>(
   const maxRetries = Math.max(0, options.maxRetries ?? 3);
   const readKey = options.readKey ?? denoKeyReader;
   const pacer = options.pacer ?? defaultGeminiPacer;
+  // Resolved once so every backoff in this call uses the same seams.
+  const sleep = options.sleep ?? systemClock.sleep;
+  const random = options.random ?? Math.random;
 
   let attempt = 0;
+  // Which kind of failure ended the LAST attempt decides the exhausted-loop reason, so both
+  // kinds share one loop but are still reported honestly.
+  let lastFailure: { readonly status: number; readonly detail: string } | null = null;
+  // True when the most recent failure was a 429 (overrides an earlier transient one).
+  let lastWasRateLimit = false;
 
   while (attempt <= maxRetries) {
     attempt += 1;
@@ -213,6 +241,8 @@ export async function callGeminiWithFailover<T>(
         attempt,
       });
 
+      // The last failure is now a 429, so exhaustion must report the quota reason.
+      lastWasRateLimit = true;
       // Continue to next iteration without aborting!
       continue;
     }
@@ -237,7 +267,33 @@ export async function callGeminiWithFailover<T>(
       };
     }
 
-    // 5. On other non-429 HTTP errors (e.g. 400 Bad Request, 500 Internal Error):
+    // 4c. TRANSIENT upstream failure: 500/502/503/504, or status 0 (network error / timeout from
+    // `execute`'s catch). Live evidence: gemini-3.8-flash intermittently answered 503 and the
+    // old code gave up after one call. The outage is the MODEL's, not the key's, so the key is
+    // reported with a NULL retry_after (the SQL then leaves cooldown_until alone) and the next
+    // iteration claims the next key. Checked before the terminal branch below.
+    if (TRANSIENT_STATUSES.has(execResult.status)) {
+      // Status 0 has no HTTP line; say "network error" so the health page is not misleading.
+      const detail =
+        execResult.status === 0
+          ? `network error: ${execResult.statusText ?? "unknown"}`
+          : `HTTP ${execResult.status}: ${execResult.statusText ?? "Service error"}`;
+      await reportResult(db, keyIndex, false, null, detail);
+      // Remembered for the exhausted-loop return at the bottom.
+      lastFailure = { status: execResult.status, detail };
+      lastWasRateLimit = false;
+      options.onKeyRotated?.({ fromKeyIndex: keyIndex, retryAfterSeconds: null, attempt });
+      // Never sleep after the final attempt: nothing follows it, so waiting only delays the error.
+      if (attempt <= maxRetries) {
+        // Clamp attempts past the table to the last delay.
+        const base = BACKOFF_BASE_MS[Math.min(attempt, BACKOFF_BASE_MS.length) - 1]!;
+        // 0-25% jitter so concurrent callers do not retry the overloaded model in lockstep.
+        await sleep(base + base * 0.25 * random());
+      }
+      continue;
+    }
+
+    // 5. On other NON-TRANSIENT, non-429, non-404 HTTP errors (e.g. 400 Bad Request, 401/403):
     // Record error against key and fail closed — rotating keys won't fix a malformed payload.
     await reportResult(
       db,
@@ -267,6 +323,17 @@ export async function callGeminiWithFailover<T>(
     };
   }
 
+  // Loop exhausted. Only transient failures set `lastFailure`, and a later 429 must win the
+  // label, so clear-on-429 is done here by checking which branch ran last (see 429 branch).
+  if (lastFailure !== null && !lastWasRateLimit) {
+    return {
+      ok: false,
+      reason: "upstream_unavailable",
+      status: lastFailure.status,
+      detail: lastFailure.detail,
+      attempts: attempt,
+    };
+  }
   return {
     ok: false,
     reason: "rate_limited_all_retries_exhausted",
@@ -317,6 +384,9 @@ export interface GenerateGeminiOptions {
   readonly maxRetries?: number;
   readonly readKey?: KeyReader;
   readonly pacer?: GeminiPacer;
+  // Test seams forwarded to the failover loop (see GeminiFailoverOptions).
+  readonly sleep?: (ms: number) => Promise<void>;
+  readonly random?: () => number;
 }
 
 export interface GeminiResponseBody {
@@ -380,7 +450,7 @@ export async function generateGeminiContent(
     ...(options.tools !== undefined && options.tools.length > 0 ? { tools: options.tools } : {}),
   };
 
-  return await callGeminiWithFailover<GeminiResponseBody>(db, {
+  const outcome = await callGeminiWithFailover<GeminiResponseBody>(db, {
     // All three of these are optional on BOTH sides: `GenerateGeminiOptions` lets a caller
     // leave them off, and `callGeminiWithFailover` supplies its own defaults for them
     // (`?? 3`, `?? denoKeyReader`, `?? defaultGeminiPacer`). Forwarding them unconditionally
@@ -394,6 +464,9 @@ export async function generateGeminiContent(
     ...(options.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
     ...(options.readKey !== undefined ? { readKey: options.readKey } : {}),
     ...(options.pacer !== undefined ? { pacer: options.pacer } : {}),
+    // Same spread-only-when-defined rule for the backoff seams (exactOptionalPropertyTypes).
+    ...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
+    ...(options.random !== undefined ? { random: options.random } : {}),
     execute: async (apiKey: string) => {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
       try {
@@ -431,4 +504,22 @@ export async function generateGeminiContent(
       }
     },
   });
+
+  // NO FAIL-OPEN ON AN EMPTY 200: `response.ok` says the transport worked, not that Gemini
+  // answered. A body without a non-empty `candidates` array is usually a safety block, and
+  // handing it on as ok:true would let callers parse "nothing" as an answer. Terminal, and the
+  // key is not blamed (no reportResult(false)): a retry resends the same prompt to the same block.
+  if (outcome.ok && !(Array.isArray(outcome.data.candidates) && outcome.data.candidates.length > 0)) {
+    // `promptFeedback` is untrusted API output, so probe it defensively.
+    const feedback = (outcome.data as { promptFeedback?: { blockReason?: unknown } }).promptFeedback;
+    const block = typeof feedback?.blockReason === "string" ? ` (promptFeedback.blockReason: ${feedback.blockReason})` : "";
+    return {
+      ok: false,
+      reason: "empty_response",
+      status: 200,
+      detail: `Gemini returned 200 with no candidates${block}`,
+      attempts: outcome.attempts,
+    };
+  }
+  return outcome;
 }
