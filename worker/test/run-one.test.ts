@@ -57,11 +57,40 @@ describe('runPipeline', () => {
 
   it('stops when the status did not move (targeted found:0)', async () => {
     const none: StepResponse = { ok: true, body: { success: true, targeted: true, found: 0 } };
-    const f = fake([none, ok], ['tailored', 'tailored']);
+    // Starts at the matcher's own input status, so the matcher IS called and finds nothing.
+    const f = fake([none, ok], ['passed_filters', 'passed_filters']);
     const r = await runPipeline(f.deps);
     expect(f.called).toEqual(['matcher']);
-    expect(r).toEqual({ completed: false, finalStatus: 'tailored' });
+    expect(r).toEqual({ completed: false, finalStatus: 'passed_filters' });
     expect(f.logs.join('\n')).toContain('"found": 0');
+  });
+
+  // The live case on 2026-10-05: matcher succeeded, tailor failed, row left at 'scored'.
+  // A re-run must resume at the tailor, never stop at the matcher.
+  it('resumes a row at scored: skips matcher, runs tailor then auditor', async () => {
+    const f = fake([ok, ok], ['scored', 'tailored', 'awaiting_approval']);
+    const r = await runPipeline(f.deps);
+    // The matcher was never invoked: its queue is passed_filters only.
+    expect(f.called).toEqual(['tailor', 'auditor']);
+    expect(r).toEqual({ completed: true, finalStatus: 'awaiting_approval' });
+    // The skip is logged, not silent.
+    expect(f.logs.join('\n')).toContain('matcher: skipped (row at scored');
+  });
+
+  // A row the auditor left mid-way (audit_clean) resumes at the auditor alone.
+  it('resumes a row at audit_clean: only the auditor runs', async () => {
+    const f = fake([ok], ['audit_clean', 'awaiting_approval']);
+    const r = await runPipeline(f.deps);
+    expect(f.called).toEqual(['auditor']);
+    expect(r).toEqual({ completed: true, finalStatus: 'awaiting_approval' });
+  });
+
+  // A row past every step (e.g. already awaiting_approval) calls nothing and spends no Gemini.
+  it('calls nothing for a row past every step', async () => {
+    const f = fake([], ['awaiting_approval']);
+    const r = await runPipeline(f.deps);
+    expect(f.called).toEqual([]);
+    expect(r.finalStatus).toBe('awaiting_approval');
   });
 
   it('stops on an HTTP error', async () => {

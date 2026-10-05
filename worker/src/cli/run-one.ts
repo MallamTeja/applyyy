@@ -10,6 +10,19 @@ import { pathToFileURL } from 'node:url';
 // Fixed order = the status graph's order; each agent's only legal source is the previous output.
 export const STEPS = ['matcher', 'tailor', 'auditor'] as const;
 
+// The status each step's queue selects (matcher/index.ts, tailor/index.ts, auditor/index.ts).
+// A closed map keyed by the STEPS union, so adding a step without its input status fails to
+// compile instead of silently being skipped or always run.
+export const STEP_INPUT_STATUS: Readonly<Record<(typeof STEPS)[number], readonly string[]>> = {
+  // passed_filters -> scored | dropped_filter (matcher/index.ts:268)
+  matcher: ['passed_filters'],
+  // scored -> tailored (tailor/index.ts:194)
+  tailor: ['scored'],
+  // tailored -> audit_clean | audit_flagged -> awaiting_approval; it also picks up rows a
+  // previous auditor run left at audit_clean/audit_flagged (auditor/index.ts:224)
+  auditor: ['tailored', 'audit_clean', 'audit_flagged'],
+};
+
 // Shape check, not a lenient parse: the same regex the edge functions enforce server-side.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -60,6 +73,16 @@ export async function runPipeline(deps: PipelineDeps): Promise<{ completed: bool
   // Shown so a wrong starting status is obvious.
   deps.log(`start: status=${current}`);
   for (const step of STEPS) {
+    // Resume support: a row that already passed this step (e.g. sits at 'scored' after a
+    // tailor failure) must skip the matcher, whose queue is passed_filters only. Without
+    // this, a resumed run stops at the matcher with "did not move" and never reaches the
+    // step that actually failed.
+    if (current === null || !STEP_INPUT_STATUS[step].includes(current)) {
+      // Logged so a skip is visible, never silent.
+      deps.log(`${step}: skipped (row at ${current}, step reads ${STEP_INPUT_STATUS[step].join('|')})`);
+      // Nothing was called, so the baseline is unchanged.
+      continue;
+    }
     // One attempt only: automatic retries would re-spend Gemini quota on a row that failed.
     const res = await deps.callFunction(step);
     // Re-read rather than trust the response; the database is the source of truth.
