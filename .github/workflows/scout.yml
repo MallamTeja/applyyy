@@ -32,31 +32,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
-    env:
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-      APPLYY_APP_USER_EMAIL: ${{ secrets.APPLYY_APP_USER_EMAIL }}
-      APPLYY_APP_USER_PASSWORD: ${{ secrets.APPLYY_APP_USER_PASSWORD }}
-      # 'true' ONLY for a manual run that explicitly asked for it. The old form,
-      # `inputs.force == 'false' && 'false' || 'true'`, resolved to 'true' on
-      # every SCHEDULED run (a schedule has no inputs, so the comparison failed)
-      # and the kill switch never stopped the cron (worker/src/cli/scout.ts).
-      # Written as an allowlist of one case, so anything else fails closed.
-      SCOUT_FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force == 'true' && 'true' || 'false' }}
+    # NO job-level env (moved 2026-10-05): job env reaches every action and every
+    # dependency install script. Only "Run Scout ATS Discovery" reads these
+    # (worker/src/cli/scout.ts:48-52), so they are scoped to that step below.
 
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 1
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           version: 11.25.0
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
           cache: 'pnpm'
@@ -66,3 +58,19 @@ jobs:
 
       - name: Run Scout ATS Discovery
         run: pnpm --filter '@applyy/worker' run scout
+        # Step-scoped: the only reader of these (scout.ts:48-52).
+        env:
+          # Supabase project URL; secret so the project ref is not advertised.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          # Public-by-design anon key; authority comes from the user JWT below.
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # The ordinary app user the scout signs in as, so RLS applies.
+          APPLYY_APP_USER_EMAIL: ${{ secrets.APPLYY_APP_USER_EMAIL }}
+          # Its password: the reason this block is step-scoped at all.
+          APPLYY_APP_USER_PASSWORD: ${{ secrets.APPLYY_APP_USER_PASSWORD }}
+          # 'true' ONLY for a manual run that explicitly asked for it. The old form,
+          # `inputs.force == 'false' && 'false' || 'true'`, resolved to 'true' on
+          # every SCHEDULED run (a schedule has no inputs, so the comparison failed)
+          # and the kill switch never stopped the cron (worker/src/cli/scout.ts).
+          # Written as an allowlist of one case, so anything else fails closed.
+          SCOUT_FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force == 'true' && 'true' || 'false' }}
