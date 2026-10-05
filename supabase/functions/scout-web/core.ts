@@ -188,8 +188,8 @@ export async function discover(
       // Skip the board grouping for refused URLs.
       continue;
     }
-    // Board identity; provider is part of the key because tokens are not unique across providers.
-    const key = `${result.parsed.provider}:${result.parsed.token}`;
+    // Board identity, via boardKey() so the watchlist lookup in handler.ts uses the same key.
+    const key = boardKey(result.parsed.provider, result.parsed.token);
     // Reuse the board entry when a second posting from the same board appears.
     const entry = byBoard.get(key) ?? { provider: result.parsed.provider, token: result.parsed.token, wanted: [] };
     // Remember which posting ids this board must contain.
@@ -281,6 +281,62 @@ export function buildApplicationRows(
 export function slugFromToken(token: string): string {
   // Tokens are already [A-Za-z0-9_-]; this only normalises case and underscores.
   return token.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+// Thrown by the search seam when no Gemini key can be claimed because every key is cooling
+// or system_settings.gemini_daily_call_budget is spent. A class, not a reason string, so the
+// handler tells it apart with instanceof rather than by matching message text.
+// WHY IT IS SEPARATE FROM A FAILURE: the pool treats quota exhaustion as normal and
+// self-healing (_shared/gemini/pool.ts). Recording it as 'failed' would make the health page
+// cry wolf every time the budget did its job. agent_run_status has 'skipped_quota' for this.
+export class QuotaExhaustedError extends Error {
+  // A fixed message: there is no detail to carry, and inventing one would read as an error.
+  constructor() {
+    // The text the run detail and the log show.
+    super("all_keys_cooling_or_daily_budget_spent");
+    // Shows in stack traces, so a log reader knows the class without reading the message.
+    this.name = "QuotaExhaustedError";
+  }
+}
+
+// A watchlist row's naming facts for one board, when the user already tracks it.
+export interface WatchlistName {
+  // The human-entered employer name scout-ats uses for the same board.
+  readonly companyName: string;
+  // The slug the blocklist and weekly cap join on.
+  readonly companySlug: string;
+}
+
+// Key for watchlist lookups. Provider is part of it because tokens are not unique across ATSes.
+export function boardKey(provider: string, token: string): string {
+  // Same shape discover() groups boards by, so the two can never disagree.
+  return `${provider}:${token}`;
+}
+
+// The employer name and slug a jobs row gets. ORDER MATTERS because the name feeds the
+// fingerprint (_shared/ats/registry.ts passes companyName into jobFingerprint):
+//   1. the watchlist row: byte-identical to what scout-ats writes for this board, so the same
+//      posting found by both scouts fingerprints once and dedupes, instead of becoming two jobs;
+//   2. the board's own company_name field, when its payload carries one;
+//   3. the board token, the only name left, as before this change.
+export function companyFor(
+  // The watchlist row for this board, or null when the user does not track it.
+  watch: WatchlistName | null,
+  // The board's raw JSON for this posting. Untrusted, so it is read by shape.
+  rawPayload: unknown,
+  // The URL's board token, already charset-validated by urls.ts.
+  token: string,
+// Both values the jobs row needs.
+): WatchlistName {
+  // A tracked board wins outright, slug included, so blocklist joins match scout-ats rows.
+  if (watch !== null) return watch;
+  // Board payloads are objects. Anything else simply has no name to offer.
+  const raw = typeof rawPayload === "object" && rawPayload !== null ? (rawPayload as Record<string, unknown>)["company_name"] : undefined;
+  // Board-supplied text must be a non-blank string, capped so a hostile payload cannot put a
+  // novel in the company column.
+  const named = typeof raw === "string" && raw.trim() !== "" && raw.trim().length <= 200 ? raw.trim() : null;
+  // The slug stays token-derived either way: it is the URL slug, which is what the blocklist keys on.
+  return { companyName: named ?? token, companySlug: slugFromToken(token) };
 }
 
 // Honest agent_runs verdict. 'failed' whenever nothing the run attempted worked.

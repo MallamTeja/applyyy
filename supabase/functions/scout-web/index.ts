@@ -21,7 +21,7 @@ import { planJobUpsertGroups } from "../_shared/screen/upsert-plan.ts";
 // _shared), so no package.json edit or pnpm install is needed.
 import { checkRobots } from "../../../packages/master-robots/src/index.ts";
 // The pure pipeline's seam types and the applications row builder.
-import { buildApplicationRows, type FetchBoardFn, type SearchFn } from "./core.ts";
+import { buildApplicationRows, QuotaExhaustedError, type FetchBoardFn, type SearchFn, type WatchlistName } from "./core.ts";
 // The lifecycle, and the Store contract this file implements.
 import { handleScoutWeb, type Store } from "./handler.ts";
 // One-hop resolver for the Google redirect URLs that grounding metadata returns.
@@ -89,7 +89,10 @@ function makeSearch(db: Parameters<typeof generateGeminiContent>[0]): SearchFn {
     };
     // Key failover and pacing live inside the shared client.
     const outcome = await generateGeminiContent(db, options);
-    // A failed call is thrown so the handler records a failed run, not an empty success.
+    // Every key cooling, or the daily budget spent (claim_gemini_key enforces
+    // system_settings.gemini_daily_call_budget). Normal quota behaviour, signalled as its own class.
+    if (!outcome.ok && outcome.reason === "all_keys_cooling") throw new QuotaExhaustedError();
+    // Any other failure is thrown so the handler records a failed run, not an empty success.
     if (!outcome.ok) throw new Error(`gemini_${outcome.reason}`);
     // First candidate only; absent means an empty answer, which the shape check will reject.
     const candidate = outcome.data.candidates?.[0];
@@ -144,6 +147,27 @@ Deno.serve(withErrorBoundary("scout-web", async (req: Request): Promise<Response
         async closeRun(runId, patch) {
           // Telemetry failure must not change the HTTP answer, so the result is not inspected.
           await db.from("agent_runs").update({ ...patch, finished_at: new Date().toISOString() }).eq("id", runId);
+        },
+        // Names for boards the user already tracks, so fingerprints match scout-ats's rows.
+        async loadWatchlistNames(boards) {
+          // One read for every board; RLS already confines it to this user's rows.
+          const { data, error } = await db
+            .from("company_watchlist")
+            // Only the columns naming needs.
+            .select("ats_provider, board_token, company_name, company_slug")
+            // Narrowed by token here; provider is matched below, since tokens repeat across ATSes.
+            .in("board_token", [...new Set(boards.map((b) => b.token))]);
+          // A failed read is reported, never mistaken for "nothing tracked".
+          if (error) return { ok: false, reason: error.message };
+          // Keyed exactly as the handler looks them up.
+          const names = new Map<string, WatchlistName>();
+          // Untyped rows from PostgREST, read field by field.
+          for (const r of (data ?? []) as { ats_provider: string; board_token: string; company_name: string; company_slug: string }[]) {
+            // Same key builder as core.ts, so a provider mismatch can never match.
+            names.set(`${r.ats_provider}:${r.board_token}`, { companyName: r.company_name, companySlug: r.company_slug });
+          }
+          // Possibly empty, which correctly means "none of these boards are tracked".
+          return { ok: true, names };
         },
         // The only writes this function makes to pipeline tables.
         async persist(rows) {

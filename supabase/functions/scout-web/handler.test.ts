@@ -3,7 +3,7 @@ import { test } from "node:test";
 // Strict assertions.
 import assert from "node:assert/strict";
 import { handleScoutWeb, type Connection, type HandlerDeps, type RunPatch } from "./handler.ts";
-import { buildApplicationRows, buildSearchPrompt, discover, INSERT_STATUS, runOutcome } from "./core.ts";
+import { buildApplicationRows, buildSearchPrompt, companyFor, discover, INSERT_STATUS, QuotaExhaustedError, runOutcome } from "./core.ts";
 
 // A Greenhouse board payload containing exactly one posting, id 111.
 const GH_BOARD = {
@@ -24,6 +24,7 @@ function makeDeps(opts: {
   fetchFails?: boolean;
   persistResult?: { inserted: number; errors: string[] };
   userId?: string;
+  watchlist?: { ok: true; names: ReadonlyMap<string, { companyName: string; companySlug: string }> } | { ok: false; reason: string };
 }): { deps: HandlerDeps; spy: Spy } {
   // Observations shared with the test.
   const spy: Spy = { persisted: [], runs: [], searches: 0 };
@@ -48,6 +49,8 @@ function makeDeps(opts: {
       loadProfile: () => Promise.resolve({ ok: true as const, profile: { experience: [{ role: "Backend Engineer" }], skills: [{ name: "Node.js" }] } }),
       // Telemetry row id.
       openRun: () => Promise.resolve("run-1"),
+      // Default: no board is tracked, so naming falls back to the board payload or the token.
+      loadWatchlistNames: () => Promise.resolve(opts.watchlist ?? { ok: true as const, names: new Map() }),
       // Record how the run was closed.
       closeRun: (_id, patch) => {
         spy.runs.push(patch);
@@ -241,4 +244,72 @@ test("runOutcome: all-failed is never succeeded", () => {
   const partial = runOutcome({ ...base, boardErrors: 1, errorSamples: ["a"] });
   assert.equal(partial.status, "succeeded");
   assert.equal(partial.errorDetail, "a");
+});
+
+// Swap the search seam on an existing deps object, since search lives on the Connection.
+function withSearch(deps: HandlerDeps, search: Connection["search"]): HandlerDeps {
+  return {
+    ...deps,
+    // Same connection, different search, so every other default stays the happy path.
+    connect: async () => {
+      const c = await deps.connect();
+      return c.ok ? { ...c, search } : c;
+    },
+  };
+}
+
+test("quota exhaustion is a 429 and a skipped_quota run with zero errors, never 'failed'", async () => {
+  const { deps, spy } = makeDeps({});
+  // The seam's signal for "every key cooling or daily budget spent".
+  const res = await handleScoutWeb(post("good"), withSearch(deps, () => Promise.reject(new QuotaExhaustedError())));
+  assert.equal(res.status, 429);
+  assert.equal((await res.json()).status, "quota");
+  assert.equal(spy.runs[0]?.status, "skipped_quota");
+  // Nothing went wrong, so the health page must not count it.
+  assert.equal(spy.runs[0]?.error_count, 0);
+});
+
+test("any other search failure is still a 502 and a failed run", async () => {
+  const { deps, spy } = makeDeps({});
+  // A plain Error is a real failure, and must not be mistaken for quota.
+  const res = await handleScoutWeb(post("good"), withSearch(deps, () => Promise.reject(new Error("gemini_http_error"))));
+  assert.equal(res.status, 502);
+  assert.equal(spy.runs[0]?.status, "failed");
+  assert.equal(spy.runs[0]?.error_count, 1);
+});
+
+test("a tracked board takes its watchlist name and slug, so fingerprints match scout-ats", async () => {
+  const names = new Map([["greenhouse:acme", { companyName: "Acme Inc", companySlug: "acme-inc" }]]);
+  const { deps, spy } = makeDeps({ watchlist: { ok: true, names } });
+  const res = await handleScoutWeb(post("good"), deps);
+  const body = await res.json();
+  assert.equal(body.jobs[0].company_name, "Acme Inc");
+  // The stored row carries the same name and the watchlist's slug, not the token's.
+  const row = spy.persisted[0]?.[0] as { company_name: string; company_slug: string };
+  assert.equal(row.company_name, "Acme Inc");
+  assert.equal(row.company_slug, "acme-inc");
+});
+
+test("an untracked board uses the board payload's company_name, then the token", async () => {
+  // The same posting, but the board's JSON names its employer.
+  const named = { jobs: [{ ...GH_BOARD.jobs[0], company_name: "  Acme Corporation  " }] };
+  const { deps } = makeDeps({});
+  const res = await handleScoutWeb(post("good"), { ...deps, fetchBoard: () => Promise.resolve({ ok: true as const, payload: named }) });
+  // Trimmed board name wins over the token.
+  assert.equal((await res.json()).jobs[0].company_name, "Acme Corporation");
+});
+
+test("a failed watchlist read falls back to the token and is reported, not swallowed", async () => {
+  const { deps, spy } = makeDeps({ watchlist: { ok: false, reason: "rls denied" } });
+  const res = await handleScoutWeb(post("good"), deps);
+  // Still a success: naming degraded, the posting was saved.
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).jobs[0].company_name, "acme");
+  assert.match(spy.runs[0]?.error_detail ?? "", /watchlist_lookup: rls denied/);
+});
+
+test("companyFor ignores blank, non-string and oversized board names", () => {
+  for (const bad of ["   ", 5, null, "x".repeat(201)]) {
+    assert.deepEqual(companyFor(null, { company_name: bad }, "Acme_Co"), { companyName: "Acme_Co", companySlug: "acme-co" });
+  }
 });

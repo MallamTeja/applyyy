@@ -20,8 +20,14 @@ import {
   MAX_CANDIDATES,
   // Derives the honest agent_runs verdict.
   runOutcome,
-  // Board token to the slug the blocklist joins on.
-  slugFromToken,
+  // Board key, shared with discover() so watchlist lookups use the same identity.
+  boardKey,
+  // Naming precedence for the employer name (watchlist, then board, then token).
+  companyFor,
+  // The search seam's signal for "no key available", which is not a failure.
+  QuotaExhaustedError,
+  // Shape of one watchlist naming record.
+  type WatchlistName,
   // Seam type for the robots-gated board fetch.
   type FetchBoardFn,
   // Seam type for the one-hop grounding redirect resolver.
@@ -33,7 +39,7 @@ import {
 // What closing an agent_runs row writes.
 export interface RunPatch {
   // The enum values agent_run_status actually has; no free-form strings.
-  readonly status: "succeeded" | "failed" | "skipped_disabled";
+  readonly status: "succeeded" | "failed" | "skipped_disabled" | "skipped_quota";
   // What we looked at.
   readonly rows_in: number;
   // What we created.
@@ -52,6 +58,12 @@ export interface Store {
   openRun(): Promise<string | null>;
   // Closes it. Must not throw: telemetry failure never changes the HTTP answer.
   closeRun(runId: string, patch: RunPatch): Promise<void>;
+  // Watchlist names for the given boards, keyed by boardKey(). A closed result, because a failed
+  // read must not look like "no board is tracked". Reports, never throws.
+  loadWatchlistNames(
+    // Each verified board once.
+    boards: readonly { provider: string; token: string }[],
+  ): Promise<{ ok: true; names: ReadonlyMap<string, WatchlistName> } | { ok: false; reason: string }>;
   // Upserts jobs then inserts applications at 'discovered'. Reports, never throws.
   persist(rows: readonly JobInsert[]): Promise<{ inserted: number; errors: string[] }>;
 }
@@ -212,6 +224,14 @@ export async function handleScoutWeb(req: Request, deps: HandlerDeps): Promise<R
     found = await discover({ search: conn.search, fetchBoard: deps.fetchBoard, resolveRedirect: deps.resolveRedirect }, prompt, body.limit);
   // Treated as a failed run, never an empty success.
   } catch (err) {
+    // No key could be claimed (all cooling, or the daily budget spent). Normal, self-healing,
+    // and NOT a failure: recorded as skipped_quota so the health page stays quiet about it.
+    if (err instanceof QuotaExhaustedError) {
+      // error_count 0, because nothing went wrong. The detail still says why nothing ran.
+      await close({ status: "skipped_quota", rows_in: 0, rows_out: 0, error_count: 0, error_detail: err.message });
+      // 429: retry later. Distinct from 502, so the UI can say "quota" rather than "broken".
+      return json(429, { status: "quota", message: "gemini quota or daily budget exhausted; try again later" });
+    }
     // The detail goes to telemetry and log; the response stays generic.
     const detail = err instanceof Error ? err.message : String(err);
     // Server log keeps the specifics for debugging.
@@ -224,14 +244,35 @@ export async function handleScoutWeb(req: Request, deps: HandlerDeps): Promise<R
 
   // One clock reading for every row in this run.
   const now = deps.now();
+  // Each verified board once, for the watchlist naming lookup.
+  const boards = [...new Map(found.verified.map((v) => [boardKey(v.parsedUrl.provider, v.parsedUrl.token), { provider: v.parsedUrl.provider, token: v.parsedUrl.token }])).values()];
+  // Collected here and reported with persistence errors, so a naming failure is visible.
+  const lookupErrors: string[] = [];
+  // Empty until the lookup succeeds; an empty map means every board falls back to board/token naming.
+  let names: ReadonlyMap<string, WatchlistName> = new Map();
+  // Only look up when there is something to name, so an empty run spends no database read.
+  if (boards.length > 0) {
+    // The store's own failure is a value, not a throw.
+    const looked = await conn.store.loadWatchlistNames(boards);
+    // On success use the names.
+    if (looked.ok) names = looked.names;
+    // A failed read degrades dedupe, not correctness, so it is an error entry, not an abort.
+    else lookupErrors.push(`watchlist_lookup: ${looked.reason}`);
+  }
+  // The name and slug each verified posting gets, computed once and shared by rows and response.
+  const companies = found.verified.map((v) =>
+    // Watchlist row, then the board's own field, then the token. See companyFor() for why.
+    companyFor(names.get(boardKey(v.parsedUrl.provider, v.parsedUrl.token)) ?? null, v.posting.rawPayload, v.parsedUrl.token)
+  );
   // Build job rows from the BOARD's data only; the model's words never reach here.
-  const rows = await Promise.all(found.verified.map((v) =>
+  const rows = await Promise.all(found.verified.map((v, i) =>
     // Verified postings only: this is the single place the board's data becomes a jobs row.
     toJobInsert(v.posting, v.adapter, {
-      // No watchlist row exists, so the board token is the only authoritative employer name we have.
-      companyName: v.parsedUrl.token,
+      // Watchlist name when tracked (same fingerprint as scout-ats), else the board's, else the token.
+      // companies[i] always exists (built from the same array); the fallback only satisfies the type.
+      companyName: companies[i]?.companyName ?? v.parsedUrl.token,
       // The blocklist and weekly cap join on this slug.
-      companySlug: slugFromToken(v.parsedUrl.token),
+      companySlug: companies[i]?.companySlug ?? v.parsedUrl.token,
       // The run clock.
       now,
       // We are seeing it for the first time right now.
@@ -244,7 +285,7 @@ export async function handleScoutWeb(req: Request, deps: HandlerDeps): Promise<R
   // Counters for the honest telemetry below.
   let inserted = 0;
   // Persistence failures are collected, not thrown, so they reach error_detail.
-  let persistErrors: string[] = [];
+  let persistErrors: string[] = [...lookupErrors];
   // Persist only when there is something verified; applications go in at 'discovered' inside the store.
   if (rows.length > 0) {
     // The store is meant not to throw, but a defect there must not skip run accounting.
@@ -254,11 +295,11 @@ export async function handleScoutWeb(req: Request, deps: HandlerDeps): Promise<R
       // How many applications rows are genuinely new.
       inserted = saved.inserted;
       // Whatever went wrong, verbatim.
-      persistErrors = saved.errors;
+      persistErrors = [...lookupErrors, ...saved.errors];
     // Convert the throw into a reported persistence failure.
     } catch (err) {
       // A throwing store is still a persistence failure, reported honestly.
-      persistErrors = [`persist_threw: ${err instanceof Error ? err.message : String(err)}`];
+      persistErrors = [...lookupErrors, `persist_threw: ${err instanceof Error ? err.message : String(err)}`];
     }
   }
 
@@ -310,11 +351,11 @@ export async function handleScoutWeb(req: Request, deps: HandlerDeps): Promise<R
     // Applications rows newly created (existing ones are never touched).
     inserted,
     // Display data comes from the board, never from the model.
-    jobs: found.verified.map((v) => ({
+    jobs: found.verified.map((v, i) => ({
       // Board's title.
       title: v.posting.title,
-      // Board token, the only authoritative employer name available.
-      company_name: v.parsedUrl.token,
+      // The same name the jobs row got, so the UI never shows a different employer than was stored.
+      company_name: companies[i]?.companyName ?? v.parsedUrl.token,
       // The adapter's canonical submit target.
       apply_url: v.posting.applyUrl,
       // Which adapter submits it.
