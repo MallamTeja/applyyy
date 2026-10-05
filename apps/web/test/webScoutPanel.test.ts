@@ -93,6 +93,20 @@ describe('runWebScout', () => {
     assert.equal((await panel.runWebScout(fake({ data: null, error: { context: broken } }), '')).kind, 'error');
   });
 
+  it('maps a 429 quota envelope to its own quota state, not an error and not zero jobs', async () => {
+    // Exactly what scout-web returns when every key is cooling or the daily budget is spent.
+    const context = { json: async () => ({ status: 'quota', message: 'gemini quota or daily budget exhausted; try again later' }) };
+    const state = await panel.runWebScout(fake({ data: null, error: { context } }), '');
+    // Its own kind, carrying the fixed user-facing remedy.
+    assert.deepEqual(state, { kind: 'quota', message: panel.QUOTA_MESSAGE });
+  });
+
+  it('refuses status quota on a 2xx body', async () => {
+    // A 200 claiming quota is contract drift, so it must be an error, never the quota notice.
+    const state = await panel.runWebScout(fake({ data: { status: 'quota', message: 'x' }, error: null }), '');
+    assert.equal(state.kind, 'error');
+  });
+
   it('sends the trimmed query, and no query key when blank', async () => {
     const bodies: unknown[] = [];
     const client = { functions: { invoke: async (_n: string, o: { body: unknown }) => { bodies.push(o.body); return { data: okBody(), error: null }; } } };
@@ -116,6 +130,13 @@ describe('WebScoutView markup', () => {
   it('shows the disabled message and a disabled button while running', () => {
     assert.match(view({ kind: 'disabled', message: 'Switched off.' }), /<p class="web-scout__notice">Switched off\.<\/p>/);
     assert.match(view({ kind: 'running' }), /<button [^>]*disabled=""/);
+  });
+
+  it('renders the quota state as a non-alert notice', () => {
+    const html = view({ kind: 'quota', message: 'Budget spent.' });
+    // Notice styling, and no role=alert: it is information, not a failure.
+    assert.match(html, /<p class="web-scout__notice">Budget spent\.<\/p>/);
+    assert.equal(/role="alert"/.test(html), false);
   });
 
   it('labels the input', () => {

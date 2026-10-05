@@ -40,6 +40,8 @@ export type WebScoutState =
   | { kind: 'running' }
   | { kind: 'ok'; result: WebScoutOk }
   | { kind: 'disabled'; message: string }
+  // Daily Gemini budget spent or every key cooling: neither an error nor "0 jobs", so it gets its own kind.
+  | { kind: 'quota'; message: string }
   | { kind: 'unauthorized'; message: string }
   | { kind: 'error'; message: string };
 
@@ -110,6 +112,10 @@ export function parseWebScoutOk(body: unknown): WebScoutOk | null {
   return { proposed: body.proposed, verified: body.verified, inserted: body.inserted, jobs, rejected };
 }
 
+// What the quota state says. Fixed text rather than the server's message, because the remedy
+// (wait, or raise the budget setting) is the user's to act on and should read the same every time.
+export const QUOTA_MESSAGE = 'Daily Gemini budget used up — try again tomorrow or raise gemini_daily_call_budget.';
+
 // supabase-js puts non-2xx bodies behind error.context (a fetch Response). Read it
 // defensively: it may be absent, already consumed, or not JSON.
 async function readErrorBody(error: unknown): Promise<unknown> {
@@ -146,6 +152,9 @@ export async function runWebScout(client: WebScoutClient, query: string): Promis
     if (error) {
       // Prefer the body from error.context; fall back to data in case a client puts it there.
       const errBody = (await readErrorBody(error)) ?? data;
+      // 429 {status:'quota'}: the server's skipped_quota run. Checked only here, on the non-2xx path;
+      // parseWebScoutOk still refuses any 2xx body whose status is not 'ok', so a 200 can never claim it.
+      if (isRecord(errBody) && errBody.status === 'quota') return { kind: 'quota', message: QUOTA_MESSAGE };
       // Only a well-formed error envelope is trusted for status and message.
       if (isRecord(errBody) && typeof errBody.message === 'string') {
         // 'disabled' is the kill switch; the user needs to see its message verbatim.
@@ -218,6 +227,8 @@ export function WebScoutView(props: {
       </p>
       {/* Disabled kill switch: informational, not an error. */}
       {state.kind === 'disabled' && <p className="web-scout__notice">{state.message}</p>}
+      {/* Quota spent: same non-error notice styling, because nothing is broken and it heals tomorrow. */}
+      {state.kind === 'quota' && <p className="web-scout__notice">{state.message}</p>}
       {/* Unauthorized and error use role=alert so they interrupt. */}
       {state.kind === 'unauthorized' && <p className="web-scout__error" role="alert">{state.message}</p>}
       {state.kind === 'error' && <p className="web-scout__error" role="alert">{state.message}</p>}
