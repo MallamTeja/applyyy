@@ -452,7 +452,8 @@ export function DiscoveredJobsPage(): ReactElement {
           </select>
 
           <span className="discovery__meta-count">
-            {viewTab === 'matched' ? (
+            {/* Counter is hidden on a failed load: "Showing 0" would assert zero jobs during an outage. */}
+            {loadError === null && (viewTab === 'matched' ? (
               <span>
                 Showing <strong>{filteredItems.length}</strong> clean tech jobs ({droppedCount} dropped by filters)
               </span>
@@ -466,7 +467,7 @@ export function DiscoveredJobsPage(): ReactElement {
                 {/* Says when the cap is hiding rows, so the counts are not read as complete. */}
                 {discoveredTotal !== null && discoveredTotal > items.length && ` (newest ${items.length} loaded)`}
               </span>
-            )}
+            ))}
           </span>
         </div>
       </section>
@@ -483,7 +484,7 @@ export function DiscoveredJobsPage(): ReactElement {
         <div className="discovery__empty">
           <p>Evaluating discovered jobs against Tech constraints and Filter Cascade...</p>
         </div>
-      ) : filteredItems.length === 0 ? (
+      ) : loadError !== null ? /* After a failed load the banner above is the whole answer; "no jobs match" would be a false claim. */ null : filteredItems.length === 0 ? (
         <div className="discovery__empty">
           <p>
             {viewTab === 'matched'
