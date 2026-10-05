@@ -14,7 +14,7 @@ import { test } from "node:test";
 // Strict, so a missing key never compares equal to a key holding `undefined`.
 import assert from "node:assert/strict";
 // Extension-suffixed specifier so this runs under Deno and `node --test` alike.
-import { planTailorBatch } from "./tailor-batch.ts";
+import { allLivenessUnknown, planTailorBatch } from "./tailor-batch.ts";
 
 // A complete joined row, so each test can break exactly one field.
 const COMPLETE_ROW = {
@@ -23,6 +23,9 @@ const COMPLETE_ROW = {
     title: "Backend Engineer Intern",
     company_name: "Acme Corp",
     description_raw: "We need someone who knows Node.js and REST APIs.",
+    // Selected and null: a live posting. Present on purpose, because an ABSENT key is
+    // its own skip reason (liveness_unknown) and would fail every other test here.
+    disappeared_at: null,
   },
 };
 
@@ -96,4 +99,43 @@ test("one malformed row does not abandon the rest of the batch", () => {
   assert.equal(plan.skipped.length, 2);
   // A row with no readable id still reports, with null standing in for the id it lacks.
   assert.deepEqual(plan.skipped[0], { applicationId: null, reason: "malformed_row" });
+});
+
+test("a live row (disappeared_at selected and null) is tailorable", () => {
+  // Pins the happy path of the liveness check: null means live, not unknown.
+  const plan = planTailorBatch([COMPLETE_ROW]);
+  assert.deepEqual(plan.skipped, []);
+  assert.equal(plan.tailorable.length, 1);
+});
+
+test("a disappeared posting is skipped loudly, never silently dropped", () => {
+  // scout-ats marked it gone; tailoring it spends a model call on an unsubmittable row.
+  const plan = planTailorBatch([{ id: "app-7", jobs: { ...COMPLETE_ROW.jobs, disappeared_at: "2026-10-05T00:00:00Z" } }]);
+  assert.equal(plan.tailorable.length, 0);
+  // Reported with its id and the named reason, so the batch accounts for it.
+  assert.deepEqual(plan.skipped, [{ applicationId: "app-7", reason: "posting_disappeared" }]);
+});
+
+test("a row whose select omitted disappeared_at fails closed as liveness_unknown", () => {
+  // THE TRAP: postgrest omits unselected columns, and `!= null` reads a missing key as
+  // live. A query that forgets the column must not let dead jobs through.
+  const { disappeared_at: _omitted, ...withoutLiveness } = COMPLETE_ROW.jobs;
+  const plan = planTailorBatch([{ id: "app-8", jobs: withoutLiveness }]);
+  assert.equal(plan.tailorable.length, 0);
+  assert.deepEqual(plan.skipped, [{ applicationId: "app-8", reason: "liveness_unknown" }]);
+});
+
+test("a batch where every row lacked disappeared_at is named as a select defect", () => {
+  // Two rows, neither with the key: the shape a forgotten select column produces.
+  const { disappeared_at: _omitted, ...withoutLiveness } = COMPLETE_ROW.jobs;
+  const plan = planTailorBatch([{ id: "a", jobs: withoutLiveness }, { id: "b", jobs: withoutLiveness }]);
+  assert.equal(allLivenessUnknown(plan), "all 2 rows lacked disappeared_at; is the select missing the column?");
+});
+
+test("an empty or mixed batch is not a select defect", () => {
+  // Empty queue: idle, not broken.
+  assert.equal(allLivenessUnknown(planTailorBatch([])), null);
+  // One live row beside one unknown: the column arrived, so the run is ordinary.
+  const { disappeared_at: _omitted, ...withoutLiveness } = COMPLETE_ROW.jobs;
+  assert.equal(allLivenessUnknown(planTailorBatch([COMPLETE_ROW, { id: "b", jobs: withoutLiveness }])), null);
 });

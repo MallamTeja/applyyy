@@ -31,6 +31,13 @@ export type SkipReason =
   | "missing_title"
   | "missing_company"
   | "missing_description"
+  // The joined job carries a non-null `disappeared_at`: scout-ats saw it drop off a
+  // trusted board. Tailoring a closed posting spends a model call on an application
+  // that can never be submitted.
+  | "posting_disappeared"
+  // The joined job has NO `disappeared_at` key at all, so the select did not ask for it.
+  // Distinct from `posting_disappeared` because the fix is in the query, not the data.
+  | "liveness_unknown"
   | "malformed_row";
 
 // A row that will not be tailored. Carried rather than silently dropped: a batch that
@@ -97,6 +104,24 @@ export function planTailorBatch(rows: readonly unknown[]): TailorBatchPlan {
       continue;
     }
 
+    // LIVENESS FIRST: a closed posting is not worth validating further.
+    //
+    // FAIL CLOSED ON AN ABSENT KEY. postgrest omits a column the select did not name, so
+    // a query that forgets `disappeared_at` would hand every row over with the key
+    // missing — and a `!= null` check would read that as "live" and let every dead job
+    // through. `in` tells "not selected" apart from "selected and null", which is the
+    // only distinction that makes this guard unable to pass vacuously.
+    if (!("disappeared_at" in job)) {
+      skipped.push({ applicationId, reason: "liveness_unknown" });
+      continue;
+    }
+    // Selected and set: scout-ats marked it gone. Any non-null value counts; this
+    // planner does not second-guess the timestamp's format.
+    if (job.disappeared_at !== null) {
+      skipped.push({ applicationId, reason: "posting_disappeared" });
+      continue;
+    }
+
     // Checked field by field so the skip reason names the missing one. A single
     // "incomplete_job" would send whoever investigates back to the database to work out
     // which of three columns it actually was.
@@ -128,4 +153,22 @@ export function planTailorBatch(rows: readonly unknown[]): TailorBatchPlan {
   }
 
   return { tailorable, skipped };
+}
+
+// The run-level reading of a plan: did EVERY row lack the liveness column?
+//
+// Returns the error_detail to stamp on a failed run, or null when the batch is ordinary.
+// WHY: liveness_unknown fails each row closed, which is right per row and silent per run —
+// a select that forgot `disappeared_at` would skip 100% of rows and read as "nothing to
+// tailor". Only "had rows, and all were liveness_unknown" means that; a mixed batch is just
+// a batch, and an empty one is an idle queue, so both return null.
+export function allLivenessUnknown(plan: TailorBatchPlan): string | null {
+  // An empty queue is idle, not broken.
+  if (plan.skipped.length === 0) return null;
+  // Any tailorable row proves the column arrived for at least that row.
+  if (plan.tailorable.length > 0) return null;
+  // Any other skip reason means some rows carried the column.
+  if (!plan.skipped.every((s) => s.reason === "liveness_unknown")) return null;
+  // The diagnosis, phrased as the question the reader should go and answer.
+  return `all ${plan.skipped.length} rows lacked disappeared_at; is the select missing the column?`;
 }

@@ -26,7 +26,8 @@ import { createAppUserClient } from "../_shared/db/client.ts";
 // The model transport, with key-pool claiming, 429 failover and pacing already handled.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
 // Which rows may be tailored at all. The guard against tailoring an empty posting.
-import { planTailorBatch } from "../_shared/tailor/tailor-batch.ts";
+// allLivenessUnknown names the one batch shape that means the select below lost a column.
+import { allLivenessUnknown, planTailorBatch } from "../_shared/tailor/tailor-batch.ts";
 // The runner: prompt -> model -> validate -> verdict.
 import { createTailorer } from "../_shared/tailor/tailorer.ts";
 // The write: payload first, status second, never the reverse.
@@ -191,7 +192,9 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
     .from("applications")
     // The embedded resource is the posting itself. Fetched in one round trip rather than
     // per row: N+1 against a shared Postgres is how a batch of ten becomes a timeout.
-    .select("id, jobs (title, company_name, description_raw)")
+    // `disappeared_at` is REQUIRED: planTailorBatch fails closed on its absence and skips
+    // the row as liveness_unknown. Pinned by _shared/tailor/tailor-index-select.test.ts.
+    .select("id, jobs (title, company_name, description_raw, disappeared_at)")
     // No `user_id` filter, and that is deliberate — RLS already scopes this to the signed
     // -in user. Adding one would read as defence in depth while actually being a second
     // place for the tenant rule to drift out of step with the policy.
@@ -260,6 +263,11 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
   for (const skip of plan.skipped) {
     // `malformed_row` has no id to fail; it cannot be moved and is only reported.
     if (skip.applicationId === null) continue;
+    // EXCEPT liveness_unknown, which is LEFT at `scored`. It is not a property of the data
+    // but of this function's own select, so the premise above is false for it: failing it
+    // would turn one dropped column into every scored row stuck at `failed`, whose only exit
+    // is a human. The run is marked failed below instead, loudly.
+    if (skip.reason === "liveness_unknown") continue;
     // Through the RPC — a bare status update is refused by the guard with 42501.
     const { error } = await db.rpc("advance_application_status", {
       p_application_id: skip.applicationId,
@@ -306,7 +314,11 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
   // error_count 10) was stamped `succeeded`, the silent stop agent_runs exists to catch.
   // Mixed results stay `succeeded` with error_count set: `agent_run_status` has no
   // `partial` (enums.sql:190), and an empty queue (rows_in 0) is idle, not broken.
-  const runStatus = plan.tailorable.length > 0 && tailored === 0 && failures.length > 0 ? "failed" : "succeeded";
+  // A batch where EVERY row lacked disappeared_at is a select defect, not an empty queue;
+  // without this it reads as "succeeded, nothing to tailor" on the health page.
+  const selectDefect = allLivenessUnknown(plan);
+  // Failed on a select defect, or when there was work and none of it moved.
+  const runStatus = selectDefect !== null || (plan.tailorable.length > 0 && tailored === 0 && failures.length > 0) ? "failed" : "succeeded";
   // The first few DISTINCT reasons, capped: ten rows failing the same way is one fact,
   // and error_detail is a health-page line, not a log. This is the FAILURE half only; a
   // deadline stop adds its own note below, so error_detail can be non-null with error_count 0.
@@ -319,7 +331,8 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
   // Joined so neither hides the other. Null only when there were no failures AND no stop, so a
   // stale reason never sits beside a clean run. A stop alone gives status `succeeded`,
   // error_count 0 and a `deadline:` note: that prefix is how the health page tells it apart.
-  const errorDetail = [failureDetail, stopNote].filter((x) => x !== null).join(" | ") || null;
+  // The select defect leads, since it explains every other number in the run.
+  const errorDetail = [selectDefect, failureDetail, stopNote].filter((x) => x !== null).join(" | ") || null;
 
   // Close the run. Partial failures stay `succeeded` with their count; a run that
   // tailored nothing because every row errored is `failed`.

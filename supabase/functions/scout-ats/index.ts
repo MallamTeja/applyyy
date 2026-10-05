@@ -20,6 +20,15 @@ import { planScreenedApplications } from "../_shared/screen/screen-batch.ts";
 import { loadScreenContext } from "../_shared/screen/context.ts";
 import { supabaseScreenQueries } from "../_shared/screen/supabase-queries.ts";
 import type { AtsProvider, JobInsert } from "../_shared/contracts/shared-types.ts";
+// The liveness guards and the fingerprint dedupe. Pure, so the rules that stop a bad poll
+// wiping the inventory are tested in liveness.test.ts rather than trusted from here.
+import {
+  firstPerFingerprint,
+  planDisappearances,
+  planReappearances,
+  type DisappearedJob,
+  type StoredJob,
+} from "../_shared/scout/liveness.ts";
 
 interface WatchlistRow {
   readonly id: string;
@@ -40,6 +49,16 @@ interface PollSummary {
   readonly fetched: number;
   readonly inserted: number;
   readonly error?: string;
+  // Liveness outcome, present only on an "ok" board (a failed poll never reaches it).
+  readonly liveness?: {
+    // Stored-live jobs marked disappeared by this poll.
+    readonly disappeared_marked: number;
+    // Disappeared jobs this poll listed again, cleared and repost_count bumped.
+    readonly reappeared: number;
+    // Why marking was refused or failed, null when it ran. A refusal is NOT a board
+    // failure: the poll worked, it just was not evidence of closures.
+    readonly disappearance_refused_reason: string | null;
+  };
 }
 
 const corsHeaders = {
@@ -331,6 +350,35 @@ Deno.serve(async (req: Request): Promise<Response> => {
         isFirstPollOfBoard: (board.poll_count === 0 || !board.first_polled_at),
       };
 
+      // LIVENESS SNAPSHOT, READ BEFORE THIS POLL WRITES ANYTHING. Order is the guard: read
+      // after the inserts, a fingerprint drift would insert every posting as a NEW row, the
+      // new rows would overlap the poll 100%, and the drift check would pass vacuously while
+      // every old row was marked dead. Scoped to THIS board: same owner, provider and company,
+      // and discovered through this adapter's source -- an aggregator-found job with the same
+      // provider and slug may not be on this board, so its absence here says nothing.
+      // Deliberately NOT using last_seen_at age: it is untrustworthy on existing rows
+      // (2026-10-05 diagnosis); only a successful poll's fingerprint set is evidence.
+      // ponytail: postgrest caps at 1000 rows; a truncated snapshot can only under-mark,
+      // never over-mark. Page it if a board ever exceeds 1000 stored jobs.
+      const { data: boardJobs, error: boardJobsError } = await db
+        .from("jobs")
+        .select("id, fingerprint, disappeared_at, repost_count")
+        // Explicit owner scope, not only RLS: the update below must never cross users.
+        .eq("user_id", clientResult.userId)
+        // Provider + slug identify the board's company (core_tables.sql jobs columns).
+        .eq("ats_provider", board.ats_provider)
+        .eq("company_slug", board.company_slug)
+        // Only rows this board's adapter has ever reported can drop off this board.
+        .contains("discovered_via", [adapter.discoverySource]);
+      // The snapshot's row shape; postgrest hands back loosely typed rows.
+      type BoardJob = { id: string; fingerprint: string; disappeared_at: string | null; repost_count: number };
+      // Typed once for both splits below.
+      const snapshot = (boardJobs ?? []) as BoardJob[];
+      // Live jobs: the candidates for marking.
+      const storedLive: StoredJob[] = snapshot.filter((j) => j.disappeared_at === null);
+      // Disappeared jobs: the candidates for clearing.
+      const storedDisappeared: DisappearedJob[] = snapshot.filter((j) => j.disappeared_at !== null);
+
       const BATCH_SIZE = 50;
       // Postings stay paired with their rows: a re-sighted posting is rebuilt below with
       // its STORED first_seen_at, which needs the posting, not just the row.
@@ -338,12 +386,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
         parseResult.postings.map(async (posting) => ({ posting, row: await toJobInsert(posting, adapter, context) })),
       );
 
+      // ONE ROW PER FINGERPRINT before any write. The fingerprint is company+title+location,
+      // not the posting id, so two live postings can share one; the re-sighting upsert below
+      // is ON CONFLICT DO UPDATE, and a batch holding both fails whole with "cannot affect
+      // row a second time" -- failing the board. First wins; see firstPerFingerprint.
+      const unique = firstPerFingerprint(prepared, (p) => p.row.fingerprint);
+
       let boardInserted = 0;
       let boardNewApps = 0;
 
-      for (let i = 0; i < prepared.length; i += BATCH_SIZE) {
-        // This slice of postings and the rows built for them.
-        const slice = prepared.slice(i, i + BATCH_SIZE);
+      for (let i = 0; i < unique.length; i += BATCH_SIZE) {
+        // This slice of postings and the rows built for them, one per fingerprint.
+        const slice = unique.slice(i, i + BATCH_SIZE);
         // Rows alone, for the planner and the fallback lookup.
         const batch: JobInsert[] = slice.map((p) => p.row);
 
@@ -502,12 +556,74 @@ Deno.serve(async (req: Request): Promise<Response> => {
       // Reported as a failed board by the catch below.
       if (watchlistError) throw new Error(`watchlist update failed: ${watchlistError.message}`);
 
+      // LIVENESS, ONLY NOW: every batch landed and the success record is written, so this
+      // poll is a complete view of the board. Every throw above skips this block entirely.
+      // The poll's identity set; duplicates are harmless, the planner takes a Set.
+      const polledFingerprints = unique.map((p) => p.row.fingerprint);
+      // Why marking did not run, if it did not. Null means it ran.
+      let refusedReason: string | null = null;
+      // Rows actually marked, counted only when the write landed.
+      let markedCount = 0;
+      // Rows actually cleared, counted only when the write landed.
+      let reappearedCount = 0;
+      if (boardJobsError) {
+        // An unreadable snapshot is "no evidence", never "no stored jobs": refuse, don't fail.
+        refusedReason = `snapshot_failed: ${boardJobsError.message}`;
+      } else {
+        // pollOk and batchErrors are literals because reaching this line PROVES them: a
+        // failed fetch/parse `continue`s, and every per-board write error (lookup, insert,
+        // refresh, fallback, applications, watchlist) THROWS to the catch, which skips this
+        // block. A board with any write error therefore never marks. Kept as inputs so the
+        // pure planner still refuses if this call site is ever restructured to collect
+        // errors instead of throwing.
+        const plan = planDisappearances({ storedLive, polledFingerprints, pollOk: true, batchErrors: 0 });
+        if (plan.kind === "refuse") {
+          // Logged with its numbers so a drift or WAF page is diagnosable without a re-poll.
+          console.warn(`[scout-ats] ${board.ats_provider}/${board.board_token} liveness refused: ${plan.reason} (${plan.detail})`);
+          // Recorded on the summary and the run row; not an error.
+          refusedReason = plan.reason;
+        } else if (plan.ids.length > 0) {
+          // Owner-scoped as well as id-scoped, and only rows still live, so a concurrent
+          // run's mark is not overwritten with a later timestamp.
+          const { error: markError } = await db
+            .from("jobs")
+            .update({ disappeared_at: now.toISOString() })
+            .eq("user_id", clientResult.userId)
+            .in("id", plan.ids)
+            .is("disappeared_at", null);
+          // The jobs were polled fine; a failed mark is a liveness gap, not a failed board.
+          if (markError) refusedReason = `mark_write_failed: ${markError.message}`;
+          // Counted only when the write landed.
+          else markedCount = plan.ids.length;
+        }
+
+        // Reposts: cleared and counted. Per row because repost_count is per-row + 1.
+        // ponytail: read-then-write increment, same ceiling as seen_count above.
+        for (const job of planReappearances({ storedDisappeared, polledFingerprints, pollOk: true })) {
+          const { error: reappearError } = await db
+            .from("jobs")
+            .update({ disappeared_at: null, repost_count: job.repost_count + 1 })
+            .eq("user_id", clientResult.userId)
+            .eq("id", job.id);
+          // Logged, not thrown: the posting is listed either way; next poll retries the clear.
+          if (reappearError) console.warn(`[scout-ats] reappearance clear failed for ${job.id}: ${reappearError.message}`);
+          // Counted only when it landed.
+          else reappearedCount += 1;
+        }
+      }
+
       summaries.push({
         board: board.board_token,
         provider: board.ats_provider,
         status: "ok",
         fetched: parseResult.postings.length,
         inserted: boardInserted,
+        // Per board, because a refusal on one board says nothing about the others.
+        liveness: {
+          disappeared_marked: markedCount,
+          reappeared: reappearedCount,
+          disappearance_refused_reason: refusedReason,
+        },
       });
     } catch (fetchErr: unknown) {
       const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
@@ -547,6 +663,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const attemptedBoards = summaries.filter((s) => s.status !== "skipped").length;
   // All attempted boards failed: the run did not do its job.
   const runFailed = attemptedBoards > 0 && failedBoards.length === attemptedBoards;
+  // Liveness refusals, recorded on the run but NOT counted as errors: the boards polled fine.
+  const livenessRefusals = summaries
+    .filter((s) => s.liveness?.disappearance_refused_reason)
+    .map((s) => `${s.provider}/${s.board}: ${s.liveness?.disappearance_refused_reason}`);
+  // Run-level total for the response.
+  const totalDisappearedMarked = summaries.reduce((n, s) => n + (s.liveness?.disappeared_marked ?? 0), 0);
   if (runId) {
     await db
       .from("agent_runs")
@@ -555,9 +677,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
         // How many boards failed, so a partial failure is visible on the health page.
         error_count: failedBoards.length,
         // The first few reasons; enough to diagnose without unbounded text.
-        error_detail: failedBoards.length > 0
-          ? failedBoards.slice(0, 5).map((s) => `${s.provider}/${s.board}: ${s.error ?? "unknown"}`).join("; ")
-          : null,
+        // Board failures first, then liveness refusals in their own labelled segment, so a
+        // refusal can never be mistaken for one of the error_count failures.
+        error_detail: [
+          ...failedBoards.slice(0, 5).map((s) => `${s.provider}/${s.board}: ${s.error ?? "unknown"}`),
+          ...(livenessRefusals.length > 0 ? [`liveness_refused: ${livenessRefusals.slice(0, 5).join(", ")}`] : []),
+        ].join("; ") || null,
         finished_at: new Date().toISOString(),
         // rows_in is what we looked at, rows_out is what we created. Kept as two
         // numbers because "polled 40 boards, created 0 applications" is the early
@@ -587,6 +712,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // the rules are configured and nothing matched; a populated one means the filters are
     // not actually protecting anything yet.
     screen_warnings: [...screenWarnings],
+    // Run total of jobs marked disappeared; per-board detail is in `results`.
+    disappeared_marked: totalDisappearedMarked,
+    // Boards whose marking was refused, with why. Empty means every ok board was evaluated.
+    disappearance_refused_reason: livenessRefusals,
     results: summaries,
   });
 });
