@@ -24,6 +24,8 @@ import { checkRobots } from "../../../packages/master-robots/src/index.ts";
 import { buildApplicationRows, type FetchBoardFn, type SearchFn } from "./core.ts";
 // The lifecycle, and the Store contract this file implements.
 import { handleScoutWeb, type Store } from "./handler.ts";
+// One-hop resolver for the Google redirect URLs that grounding metadata returns.
+import { resolveGroundingRedirect } from "./redirects.ts";
 
 // The product token robots.txt groups are matched against; must equal the transport's UA product.
 const ROBOTS_PRODUCT_TOKEN = "applyy-scout";
@@ -110,6 +112,8 @@ Deno.serve(withErrorBoundary("scout-web", async (req: Request): Promise<Response
     now: () => new Date(),
     // Robots-gated board fetch.
     fetchBoard,
+    // The real network, used only for the exact Google redirect host (redirects.ts enforces it).
+    resolveRedirect: (url) => resolveGroundingRedirect(url, fetch),
     // Lazily signs in per request, since isolates are stateless.
     connect: async () => {
       // Same sign-in every other agent uses.

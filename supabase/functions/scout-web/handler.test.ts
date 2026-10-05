@@ -72,6 +72,8 @@ function makeDeps(opts: {
       connect: () => Promise.resolve({ ok: true as const, ...conn }),
       fetchBoard: () =>
         Promise.resolve(opts.fetchFails ? { ok: false as const, reason: "robots_refuse: nope" } : { ok: true as const, payload: GH_BOARD }),
+      // No test here exercises redirects, so any call is a refusal rather than a network hit.
+      resolveRedirect: () => Promise.resolve({ ok: false as const, reason: "redirect_unused_in_test" }),
       now: () => new Date("2026-10-04T00:00:00Z"),
     },
   };
@@ -215,6 +217,8 @@ test("discover caps candidates at the limit and dedupes", async () => {
     {
       search: () => Promise.resolve({ text: [...urls, urls[0]].join("\n"), urls: [] }),
       fetchBoard: () => Promise.resolve({ ok: false, reason: "x" }),
+      // No redirect URLs in this input, so the resolver must never be reached.
+      resolveRedirect: () => Promise.resolve({ ok: false, reason: "unused" }),
     },
     "p",
     20,

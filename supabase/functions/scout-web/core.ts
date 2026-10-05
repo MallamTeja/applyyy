@@ -10,12 +10,17 @@ import type { AtsAdapter, ParsedPosting } from "../_shared/ats/types.ts";
 import { createSemaphore } from "../_shared/http/concurrency.ts";
 // The strict shape check and URL mining live apart so they can be tested alone.
 import { extractUrls, parseJobUrl, type ParsedJobUrl, type WebProvider } from "./urls.ts";
+// Grounding citations arrive as Google redirect URLs; this tells us which ones to resolve.
+import { isGroundingRedirect, type RedirectResult } from "./redirects.ts";
 
 // Hard ceiling on candidate URLs per call: each distinct board costs a robots check plus
 // a fetch, and an Edge Function has a wall-clock budget.
 export const MAX_CANDIDATES = 20;
 // How many boards are verified at once. Small, for the same politeness reason as http/index.ts.
 const BOARD_CONCURRENCY = 3;
+// How many grounding redirects are resolved at once. They all hit one Google host, so a small
+// cap keeps us from bursting it while MAX_CANDIDATES lookups still finish well inside the budget.
+const REDIRECT_CONCURRENCY = 5;
 
 // The injected LLM seam. `urls` are machine-collected (e.g. grounding metadata); `text`
 // is the model's prose, which we also mine for URLs.
@@ -29,6 +34,10 @@ export type FetchBoardFn = (
   token: string,
 // A closed result: callers must handle failure, a null would be ambiguous with 'empty board'.
 ) => Promise<{ readonly ok: true; readonly payload: unknown } | { readonly ok: false; readonly reason: string }>;
+
+// The injected redirect seam. Production wires resolveGroundingRedirect over the global fetch.
+// It reads one hop and never throws, so a dead redirect costs one candidate, not the run.
+export type ResolveRedirectFn = (url: string) => Promise<RedirectResult>;
 
 // A posting confirmed to exist on the live board, with the data WE read from the board.
 export interface VerifiedPosting {
@@ -129,7 +138,9 @@ export function buildSearchPrompt(profile: unknown, extra: string | null): strin
 // Propose -> shape check -> live verification.
 export async function discover(
   // The two seams, so tests inject fakes and production injects Gemini and robots-gated fetch.
-  deps: { readonly search: SearchFn; readonly fetchBoard: FetchBoardFn },
+  // The redirect seam is required, not optional. An optional one would let a caller forget it
+  // and silently fall back to dropping every grounded result.
+  deps: { readonly search: SearchFn; readonly fetchBoard: FetchBoardFn; readonly resolveRedirect: ResolveRedirectFn },
   // The built prompt, already derived from the profile.
   prompt: string,
   // Caller's limit, clamped below to the hard cap.
@@ -145,10 +156,29 @@ export async function discover(
 
   // Shape check each candidate; survivors are grouped by board so each board is fetched once.
   const rejected: Rejection[] = [];
+  // Resolve grounding redirects AFTER the cap, so the cap bounds these requests too. The result
+  // is still unverified: every resolved URL goes through the same parseJobUrl gate below.
+  const redirectGate = createSemaphore(REDIRECT_CONCURRENCY);
+  // Order is kept, so the output lines up with candidates and stays stable for tests.
+  const resolvedCandidates = await Promise.all(candidates.map((url) =>
+    // Anything that is not the exact Google redirect host passes through untouched, unfetched.
+    isGroundingRedirect(url) ? redirectGate.run(() => deps.resolveRedirect(url)).then((r) => ({ url, r })) : Promise.resolve({ url, r: null })
+  ));
+  // What actually reaches the shape check: original URLs, plus redirect targets that resolved.
+  const toCheck: string[] = [];
+  // Each candidate either contributes a URL to check or a rejection with its reason.
+  for (const { url, r } of resolvedCandidates) {
+    // Not a redirect: checked exactly as before.
+    if (r === null) toCheck.push(url);
+    // Resolved: the TARGET is what gets checked (and echoed in any later rejection).
+    else if (r.ok) toCheck.push(r.url);
+    // Unresolvable redirect: reported, never silently dropped.
+    else rejected.push({ url, reason: r.reason });
+  }
   // Grouping by board means one fetch serves every posting from that board.
   const byBoard = new Map<string, { provider: WebProvider; token: string; wanted: { url: string; jobId: string }[] }>();
-  // Each candidate gets its own verdict.
-  for (const url of candidates) {
+  // Each candidate gets its own verdict. De-duplicated again, since two redirects can point at one posting.
+  for (const url of new Set(toCheck)) {
     // The strict gate.
     const result = parseJobUrl(url);
     // Refused candidates are reported, never silently dropped.

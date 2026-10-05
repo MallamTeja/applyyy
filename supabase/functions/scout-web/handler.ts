@@ -24,6 +24,8 @@ import {
   slugFromToken,
   // Seam type for the robots-gated board fetch.
   type FetchBoardFn,
+  // Seam type for the one-hop grounding redirect resolver.
+  type ResolveRedirectFn,
   // Seam type for the Gemini search.
   type SearchFn,
 } from "./core.ts";
@@ -72,6 +74,8 @@ export interface HandlerDeps {
   readonly connect: () => Promise<({ ok: true } & Connection) | { ok: false; reason: string }>;
   // The robots-gated board fetch.
   readonly fetchBoard: FetchBoardFn;
+  // The grounding-redirect resolver, injected so tests never touch the network.
+  readonly resolveRedirect: ResolveRedirectFn;
   // Injected clock so a run's timestamps are testable.
   readonly now: () => Date;
 }
@@ -205,7 +209,7 @@ export async function handleScoutWeb(req: Request, deps: HandlerDeps): Promise<R
   // discover() throws only when the search call fails; board failures are returned, not thrown.
   try {
     // The only place the model's output is consumed, and it comes out as verified data.
-    found = await discover({ search: conn.search, fetchBoard: deps.fetchBoard }, prompt, body.limit);
+    found = await discover({ search: conn.search, fetchBoard: deps.fetchBoard, resolveRedirect: deps.resolveRedirect }, prompt, body.limit);
   // Treated as a failed run, never an empty success.
   } catch (err) {
     // The detail goes to telemetry and log; the response stays generic.
