@@ -203,6 +203,17 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
   // Determine batch size limit from request URL parameter
   const batchSize = resolveBatchSize(limitParam);
 
+  // Optional single-row target. Read from the URL so the CLI can push ONE application through
+  // without waiting for it to reach the head of an oldest-first queue.
+  const rawApplicationId = new URL(req.url).searchParams.get("application_id");
+  // A malformed id is REFUSED, never ignored: ignoring it would fall back to the whole
+  // queue and process rows the caller did not ask for (the fail-open this repo forbids).
+  if (rawApplicationId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawApplicationId)) {
+    // 400 with a named reason, so the caller sees what was wrong with the input.
+    return await failRun(400, "invalid_application_id", "application_id must be a UUID");
+  }
+  // Null means "no target": the unchanged whole-queue behaviour.
+  const applicationId: string | null = rawApplicationId;
   // Query the queue: fresh `tailored` rows, plus rows stranded between the two RPCs
   const { data: rows, error: rowsError } = await db
     // Target applications table
@@ -211,6 +222,9 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
     .select("id, status, tailored_profile, tailor_refs, master_version")
     // `audit_clean`/`audit_flagged` are only ever left behind by a failed second hop
     .in("status", ["tailored", "audit_clean", "audit_flagged"])
+    // Narrow to the one requested row; the status filter stays, so a wrong-status id yields
+    // zero rows. An empty match object is a no-op when untargeted.
+    .match(applicationId !== null ? { id: applicationId } : {})
     // Order by created_at ascending
     .order("created_at", { ascending: true })
     // Limit batch size
@@ -439,6 +453,9 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
     error_detail: errorDetail,
     // Master version
     master_version: masterVersion,
+    // Only present on a targeted run, so the untargeted response shape is unchanged. `found: 0`
+    // says "that id is not at this agent's input status", which an empty queue never could.
+    ...(applicationId !== null ? { targeted: true, found: applicationRows.length } : {}),
     // Audited count
     audited: auditedCount,
     // Clean count

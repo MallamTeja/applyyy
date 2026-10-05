@@ -172,6 +172,17 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
   // The work queue. `scored` is the Tailor's only legal source
   // (status_transition_guard.sql:116), so this select IS the edge, expressed as a query.
   const batchSize = resolveBatchSize(new URL(req.url).searchParams.get("limit"));
+  // Optional single-row target. Read from the URL so the CLI can push ONE application through
+  // without waiting for it to reach the head of an oldest-first queue.
+  const rawApplicationId = new URL(req.url).searchParams.get("application_id");
+  // A malformed id is REFUSED, never ignored: ignoring it would fall back to the whole
+  // queue and process rows the caller did not ask for (the fail-open this repo forbids).
+  if (rawApplicationId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawApplicationId)) {
+    // 400 with a named reason, so the caller sees what was wrong with the input.
+    return await failRun(400, "invalid_application_id", "application_id must be a UUID");
+  }
+  // Null means "no target": the unchanged whole-queue behaviour.
+  const applicationId: string | null = rawApplicationId;
   const { data: rows, error: rowsError } = await db
     .from("applications")
     // The embedded resource is the posting itself. Fetched in one round trip rather than
@@ -181,6 +192,9 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
     // -in user. Adding one would read as defence in depth while actually being a second
     // place for the tenant rule to drift out of step with the policy.
     .eq("status", "scored")
+    // Narrow to the one requested row; the status filter stays, so a wrong-status id yields
+    // zero rows. An empty match object is a no-op when untargeted.
+    .match(applicationId !== null ? { id: applicationId } : {})
     // Oldest first, so a persistent failure at the head of the queue is visible rather
     // than being skipped over by newer rows every run.
     .order("created_at", { ascending: true })
@@ -317,6 +331,9 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
     // Which master every verdict in this run was judged against, so a later dispute
     // about a tailoring does not have to guess.
     master_version: masterVersion,
+    // Only present on a targeted run, so the untargeted response shape is unchanged. `found: 0`
+    // says "that id is not at this agent's input status", which an empty queue never could.
+    ...(applicationId !== null ? { targeted: true, found: (rows ?? []).length } : {}),
     // Reached the model and produced a persisted resume.
     tailored,
     // Reached the model and were honestly refused by the validator. NOT an error —

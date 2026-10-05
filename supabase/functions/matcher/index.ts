@@ -245,6 +245,17 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
 
   // Query applications table for candidate applications sitting at status 'passed_filters'.
   // Fetches pending applications ready for Matcher LLM fit scoring.
+  // Optional single-row target. Read from the URL so the CLI can push ONE application through
+  // without waiting for it to reach the head of an oldest-first queue.
+  const rawApplicationId = new URL(req.url).searchParams.get("application_id");
+  // A malformed id is REFUSED, never ignored: ignoring it would fall back to the whole
+  // queue and process rows the caller did not ask for (the fail-open this repo forbids).
+  if (rawApplicationId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawApplicationId)) {
+    // 400 with a named reason, so the caller sees what was wrong with the input.
+    return await failRun(400, "invalid_application_id", "application_id must be a UUID");
+  }
+  // Null means "no target": the unchanged whole-queue behaviour.
+  const applicationId: string | null = rawApplicationId;
   const { data: rows, error: rowsError } = await db
     // Target applications table for queue row lookup.
     .from("applications")
@@ -252,6 +263,9 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     .select("id, job_id, jobs (title, company_name, description_raw, location_raw, min_experience_years, employment_type)")
     // Filter applications where status equals 'passed_filters'.
     .eq("status", "passed_filters")
+    // Narrow to the one requested row; the status filter stays, so a wrong-status id yields
+    // zero rows. An empty match object is a no-op when untargeted.
+    .match(applicationId !== null ? { id: applicationId } : {})
     // Order applications by creation timestamp ascending for FIFO processing queue order.
     .order("created_at", { ascending: true })
     // Limit returned rows to calculated batch size ceiling.
@@ -471,6 +485,9 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     master_version: masterVersion,
     // Count of input application rows fetched from queue.
     rows_in: (rows ?? []).length,
+    // Only present on a targeted run, so the untargeted response shape is unchanged. `found: 0`
+    // says "that id is not at this agent's input status", which an empty queue never could.
+    ...(applicationId !== null ? { targeted: true, found: (rows ?? []).length } : {}),
     // Count of successfully scored applications.
     scored: scoredCount,
     // Total count of Gemini API calls executed.
