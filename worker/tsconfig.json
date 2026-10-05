@@ -19,5 +19,12 @@
   },
   // Tests are type-checked alongside source: a test that no longer compiles
   // against the code it covers is a broken test, and should fail the same run.
-  "include": ["src/**/*.ts", "test/**/*.ts", "*.config.ts"]
+  //
+  // scripts/** added 2026-10-05. Until then a script was typechecked only if a
+  // test happened to import it — true of the one script today (capture-fixture.ts,
+  // via test/capture-fixture-gate.test.ts), which is why it is clean, but a new
+  // manual CLI script with no test would have been invisible to every check,
+  // including CI's worker `tsc --noEmit`. Listing the directory makes coverage a
+  // property of the config rather than an accident of what the tests import.
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "*.config.ts"]
 }
