@@ -60,10 +60,6 @@ function setup(opts: { row?: AssistRow | null; answer?: string | null; gotoFails
     releaseClaim: vi.fn(async () => {
       events.push('release');
     }),
-    // Logged, to prove it happens before the park write.
-    markBlockedReason: vi.fn(async () => {
-      events.push('markBlockedReason');
-    }),
     // Empty bank: every text field is therefore unanswerable.
     fetchAnswers: async () => [],
   };
@@ -178,7 +174,7 @@ describe('runAssisted flow', () => {
       'goto',
       'advance:applying:applier',
       'attach',
-      'markBlockedReason',
+      // No separate block_reason write any more: the park call carries it (next test).
       'advance:blocked_needs_human:applier',
       'advance:applied:human',
     ]);
@@ -221,6 +217,22 @@ describe('runAssisted flow', () => {
     const parkCall = t.advance.mock.calls.find((c) => c[1] === 'blocked_needs_human');
     // The sentence the dashboard shows must be in the detail argument.
     expect(JSON.stringify(parkCall)).toContain(ASSISTED_BLOCK_NOTE);
+  });
+
+  it('carries block_reason through the park RPC detail, the only place it is set', async () => {
+    // No answer needed; only the park matters.
+    const t = setup({ answer: null });
+    // Execute.
+    await runAssisted(t.deps);
+    // The park call: advanceStatus(id, to, agent, detail).
+    const parkCall = t.advance.mock.calls.find((c) => c[1] === 'blocked_needs_human');
+    // The fourth argument is the detail the RPC copies into block_reason / block_detail.
+    const detail = (parkCall as unknown[] | undefined)?.[3] as Record<string, unknown> | undefined;
+    // A real enum member, as a structured field — not merely somewhere in a string —
+    // because the RPC raises 22023 without it and the CHECK refuses the park.
+    expect(detail?.block_reason).toBe('other');
+    // And the port has no side-channel setter left that could mask a missing reason.
+    expect('markBlockedReason' in t.gateway).toBe(false);
   });
 
   it('y -> applied by human', async () => {

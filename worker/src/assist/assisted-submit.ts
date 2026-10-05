@@ -28,7 +28,8 @@ const HUMAN_AGENT: AgentName = 'human';
 
 // Free text the dashboard shows. The DB column `block_reason` is an ENUM that has no
 // "assisted" member, so this sentence travels in `block_detail` and the event note while
-// the enum column gets `other` (see AssistGateway.markBlockedReason).
+// the enum column gets `other` — all three set by advance_application_status from the
+// park call's detail (migration 20261004220000).
 // Exported so tests assert the exact sentence rather than a copy that could drift.
 export const ASSISTED_BLOCK_NOTE = 'assisted: awaiting human submit';
 
@@ -74,9 +75,10 @@ export interface AssistGateway extends StatusWriter {
   // Drops the lease without moving the row.
   // The reason lands in the event log, answering 'why did this sit leased?' later.
   releaseClaim(id: string, reason: string): Promise<void>;
-  // Sets the block_reason COLUMN, which `advance_application_status` does not touch but
-  // the `applications_blocked_has_reason` CHECK requires before a row may be blocked.
-  markBlockedReason(id: string, note: string): Promise<void>;
+  // No separate block_reason setter: since migration 20261004220000 the status RPC
+  // writes block_reason + block_detail from the park call's detail in the SAME update,
+  // which is what the `applications_blocked_has_reason` CHECK needs. A second,
+  // earlier write would only reopen the window where the two could disagree.
   // The answer bank, so planFill can copy human-written answers.
   // Read-only: this flow never writes to the answer bank.
   fetchAnswers(): Promise<readonly AnswerBankRow[]>;
@@ -301,8 +303,6 @@ export async function runAssisted(deps: AssistDeps): Promise<AssistOutcome> {
 
     // ---- Step 4: park IMMEDIATELY, success or not. ------------------------------
     try {
-      // The CHECK constraint needs the block_reason column set before the status moves.
-      await gateway.markBlockedReason(applicationId, ASSISTED_BLOCK_NOTE);
       // Validated against the graph in TypeScript before the database is asked.
       await guardedAdvance(gateway, {
         // The row this run owns.
@@ -313,7 +313,9 @@ export async function runAssisted(deps: AssistDeps): Promise<AssistOutcome> {
         to: 'blocked_needs_human',
         // The worker parks the row; it does not claim anything was sent.
         agent: WORKER_AGENT,
-        // Event note so the dashboard can show why it is parked.
+        // block_reason is REQUIRED here: the RPC copies it into the enum column the CHECK
+        // demands and raises 22023 if it is missing, so dropping it fails the park loudly.
+        // `other` because the enum has no "assisted" member; the sentence explains which.
         detail: { block_reason: 'other', note: ASSISTED_BLOCK_NOTE, unfilled, problems },
       });
     } catch (error) {

@@ -1,5 +1,6 @@
 // The real AssistGateway: the existing worker gateway for everything it already does,
-// plus the three operations it lacks (read ONE row, claim ONE row by id, set block_reason).
+// plus the two operations it lacks (read ONE row, claim ONE row by id). block_reason is
+// no longer set here: the status RPC writes it from the park detail (20261004220000).
 //
 // WHY NOT EXTEND supabase-gateway.ts: it is owned by the scheduled applier and stable.
 // `claim_applications` can only claim "the oldest N approved rows", which is exactly the
@@ -141,23 +142,6 @@ export function createSupabaseAssistGateway(
       // Shape check, not truthiness: exactly one row means we hold the lease.
       // Exactly one: zero means we lost or it moved; more would mean a broken filter.
       return Array.isArray(rows) && rows.length === 1;
-    },
-
-    // Needed because the RPC moves status but never writes this column.
-    async markBlockedReason(id: string, note: string): Promise<void> {
-      // `other` is the enum member for "none of the named reasons"; the sentence goes in
-      // block_detail. Same-status update, so the transition guard lets it through.
-      unwrap(
-        await client
-          // The row's own table; no job data involved.
-          .from('applications')
-          // The enum member plus the human-readable sentence.
-          .update({ block_reason: 'other', block_detail: { note } })
-          // Scoped to the one row.
-          .eq('id', id),
-        // Names the operation in any thrown message.
-        'markBlockedReason',
-      );
     },
   };
 }
