@@ -8,6 +8,11 @@
 //    it parses `retry_after` from the response (via `parseRetryAfterSeconds`), reports the
 //    cooling key back to Postgres (`reportResult`), immediately claims the NEXT active key
 //    from the pool (`claimKey`), and retries the call transparently.
+//    The same loop also retries TRANSIENT upstream failures (500/502/503/504, network errors
+//    and per-attempt timeouts) on the next key, sleeping 1s/3s/7s (+0-25% jitter) between
+//    attempts. One `maxRetries` budget covers both. Exhaustion reasons: `rate_limited_all_
+//    retries_exhausted` (last failure was a 429) or `upstream_unavailable` (last was transient).
+//    A 200 with no usable text part is `empty_response` (terminal, no retry, key not blamed).
 //
 // 2. DETERMINISTIC TOKEN PACER / SEQUENTIAL QUEUE (1c):
 //    Free tier Gemini has strict Rate Per Minute (RPM) limits (e.g. 15 RPM). Rapid concurrent
@@ -158,6 +163,24 @@ export interface GeminiFailoverOptions<T> {
 
 // Statuses worth retrying on another key: gateway/overload errors and 0 (network/timeout).
 const TRANSIENT_STATUSES: ReadonlySet<number> = new Set([0, 500, 502, 503, 504]);
+// Cooldown for a key that got 401/403. The key, not the model, is at fault; an hour lets a human
+// look while the LRU skips it and the rest of the pool keeps working.
+const KEY_REJECTED_COOLDOWN_S = 3600;
+// Appends Google's error.status and error.message to a last_error string: "HTTP 403: Forbidden"
+// alone made a live 403 undiagnosable. Truncated to ~200 chars so one verbose body cannot bloat
+// the row. Any 39-char `AIza...` key pattern is stripped defensively: the key now travels only in
+// a header, but an upstream message can still echo a key, and last_error is shown on a health page.
+function withGoogleError(base: string, errorBody: unknown): string {
+  // errorBody is untrusted JSON (or text); only an object with an `error` object is usable.
+  const err = typeof errorBody === "object" && errorBody !== null ? (errorBody as { error?: unknown }).error : undefined;
+  if (typeof err !== "object" || err === null) return base;
+  const { status, message } = err as { status?: unknown; message?: unknown };
+  const parts = [typeof status === "string" ? status : "", typeof message === "string" ? message : ""].filter((x) => x.length > 0);
+  if (parts.length === 0) return base;
+  // Redact first, then truncate, so a key straddling the cut cannot survive as a prefix.
+  const extra = parts.join(" - ").replace(/AIza[0-9A-Za-z_-]{35}/g, "[redacted-key]").slice(0, 200);
+  return `${base} [${extra}]`;
+}
 // Base backoff per attempt. Worst case with defaults (3 sleeps): 1000+3000+7000 = 11000 ms,
 // plus up to 25% jitter = 13750 ms, well under the 25 s budget an Edge Function can spare.
 const BACKOFF_BASE_MS: readonly number[] = [1000, 3000, 7000];
@@ -178,8 +201,10 @@ export async function callGeminiWithFailover<T>(
   // Which kind of failure ended the LAST attempt decides the exhausted-loop reason, so both
   // kinds share one loop but are still reported honestly.
   let lastFailure: { readonly status: number; readonly detail: string } | null = null;
-  // True when the most recent failure was a 429 (overrides an earlier transient one).
-  let lastWasRateLimit = false;
+  // Which kind of failure came LAST (null before any). A 429, a transient and a key rejection
+  // all share `lastFailure`/this loop, so this tag is the tiebreak that names the exhaustion
+  // reason: an EARLIER failure of another kind must not mislabel the final one.
+  let lastKind: "rate_limit" | "transient" | "key_rejected" | null = null;
 
   while (attempt <= maxRetries) {
     attempt += 1;
@@ -242,7 +267,7 @@ export async function callGeminiWithFailover<T>(
       });
 
       // The last failure is now a 429, so exhaustion must report the quota reason.
-      lastWasRateLimit = true;
+      lastKind = "rate_limit";
       // Continue to next iteration without aborting!
       continue;
     }
@@ -267,30 +292,64 @@ export async function callGeminiWithFailover<T>(
       };
     }
 
+    // 4a. KEY REJECTION (401/403): most likely THIS key is bad (revoked, restricted, wrong
+    // project) while the rest of the pool is healthy, so one bad key must not end the call.
+    // The key, not the model, is at fault: park it for an hour (KEY_REJECTED_COOLDOWN_S) so the
+    // LRU skips it and a human has time to look, then rotate to the next key. NO backoff sleep:
+    // this is not an overload, so waiting buys nothing. Same maxRetries budget as everything else.
+    // 400 is deliberately NOT here: a malformed request fails identically on every key.
+    if (execResult.status === 401 || execResult.status === 403) {
+      const detail = withGoogleError(`HTTP ${execResult.status}: ${execResult.statusText ?? "Key rejected"}`, execResult.errorBody);
+      await reportResult(db, keyIndex, false, KEY_REJECTED_COOLDOWN_S, detail);
+      lastFailure = { status: execResult.status, detail };
+      lastKind = "key_rejected";
+      options.onKeyRotated?.({ fromKeyIndex: keyIndex, retryAfterSeconds: KEY_REJECTED_COOLDOWN_S, attempt });
+      continue;
+    }
+
     // 4c. TRANSIENT upstream failure: 500/502/503/504, or status 0 (network error / timeout from
     // `execute`'s catch). Live evidence: gemini-3.8-flash intermittently answered 503 and the
-    // old code gave up after one call. The outage is the MODEL's, not the key's, so the key is
-    // reported with a NULL retry_after (the SQL then leaves cooldown_until alone) and the next
-    // iteration claims the next key. Checked before the terminal branch below.
+    // old code gave up after one call. The outage is the MODEL's, not the key's, so NO cooldown
+    // is applied: a NULL retry_after makes report_gemini_result leave cooldown_until alone. It
+    // still increments consecutive_failures and overwrites last_error, kept ON PURPOSE because
+    // last_error is how this 503 was diagnosed in the first place. The next iteration claims the
+    // next key. Checked before the terminal branch below.
     if (TRANSIENT_STATUSES.has(execResult.status)) {
       // Status 0 has no HTTP line; say "network error" so the health page is not misleading.
       const detail =
         execResult.status === 0
           ? `network error: ${execResult.statusText ?? "unknown"}`
           : `HTTP ${execResult.status}: ${execResult.statusText ?? "Service error"}`;
-      await reportResult(db, keyIndex, false, null, detail);
+      await reportResult(db, keyIndex, false, null, withGoogleError(detail, execResult.errorBody));
       // Remembered for the exhausted-loop return at the bottom.
       lastFailure = { status: execResult.status, detail };
-      lastWasRateLimit = false;
+      lastKind = "transient";
       options.onKeyRotated?.({ fromKeyIndex: keyIndex, retryAfterSeconds: null, attempt });
       // Never sleep after the final attempt: nothing follows it, so waiting only delays the error.
+      // `attempt <= maxRetries` is exactly "another attempt will follow".
       if (attempt <= maxRetries) {
-        // Clamp attempts past the table to the last delay.
+        // Clamp attempts past the table to the last delay, so a larger maxRetries cannot index
+        // past the array (an undefined delay would become NaN and retry instantly).
         const base = BACKOFF_BASE_MS[Math.min(attempt, BACKOFF_BASE_MS.length) - 1]!;
         // 0-25% jitter so concurrent callers do not retry the overloaded model in lockstep.
         await sleep(base + base * 0.25 * random());
       }
       continue;
+    }
+
+    // 4d. A 200 whose body was not JSON (execute reports it as status 200 + "invalid JSON body").
+    // The malformed body is the UPSTREAM's fault (a gateway error page), so no key is blamed:
+    // reportResult(false) here would bump a different key's failure streak per call and walk the
+    // pool, the same lesson as the 404 branch above. Terminal: a retry gets the same garbage.
+    if (execResult.status === 200) {
+      return {
+        ok: false,
+        reason: "http_error",
+        status: 200,
+        // Fixed wording, so a log line says what was wrong with the body.
+        detail: "invalid JSON body",
+        attempts: attempt,
+      };
     }
 
     // 5. On other NON-TRANSIENT, non-429, non-404 HTTP errors (e.g. 400 Bad Request, 401/403):
@@ -300,7 +359,7 @@ export async function callGeminiWithFailover<T>(
       keyIndex,
       false,
       null,
-      `HTTP ${execResult.status}: ${execResult.statusText ?? "Execution failed"}`,
+      withGoogleError(`HTTP ${execResult.status}: ${execResult.statusText ?? "Execution failed"}`, execResult.errorBody),
     );
 
     return {
@@ -323,9 +382,19 @@ export async function callGeminiWithFailover<T>(
     };
   }
 
-  // Loop exhausted. Only transient failures set `lastFailure`, and a later 429 must win the
-  // label, so clear-on-429 is done here by checking which branch ran last (see 429 branch).
-  if (lastFailure !== null && !lastWasRateLimit) {
+  // Loop exhausted. `lastFailure` is never cleared, so `lastKind` (set by each failure branch)
+  // says which kind came LAST, and that kind names the exhaustion reason.
+  if (lastKind === "key_rejected" && lastFailure !== null) {
+    // Every attempt that ended the loop was a 401/403: report it as the terminal http_error.
+    return {
+      ok: false,
+      reason: "http_error",
+      status: lastFailure.status,
+      detail: `every attempted key was rejected (last: ${lastFailure.detail})`,
+      attempts: attempt,
+    };
+  }
+  if (lastKind === "transient" && lastFailure !== null) {
     return {
       ok: false,
       reason: "upstream_unavailable",
@@ -387,6 +456,11 @@ export interface GenerateGeminiOptions {
   // Test seams forwarded to the failover loop (see GeminiFailoverOptions).
   readonly sleep?: (ms: number) => Promise<void>;
   readonly random?: () => number;
+  // Per-attempt fetch timeout in ms (default 25000). Without one a hung upstream (gemini-3.7-flash
+  // hung 60s instead of answering 503) would stall the whole Edge Function. Worst-case wall clock
+  // with defaults: 4 attempts x 25s + 13.75s backoff = 113.75s, so callers on a short Edge budget
+  // should pass a smaller `timeoutMs` and/or `maxRetries`.
+  readonly timeoutMs?: number;
 }
 
 export interface GeminiResponseBody {
@@ -412,6 +486,8 @@ export async function generateGeminiContent(
   const model = resolveModel(options.model);
   // Network seam, so tests never reach Google.
   const fetchFn = options.fetchSeam ?? fetch;
+  // Per-attempt timeout; see GenerateGeminiOptions.timeoutMs for the wall-clock arithmetic.
+  const timeoutMs = options.timeoutMs ?? 25000;
 
   // REFUSE grounding + JSON schema rather than silently dropping one. Gemini 2.x rejects
   // the combination outright; the structured-output guide
@@ -468,16 +544,30 @@ export async function generateGeminiContent(
     ...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
     ...(options.random !== undefined ? { random: options.random } : {}),
     execute: async (apiKey: string) => {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      // NO key in the URL: a URL travels into error messages, stack traces, proxy/CDN logs and
+      // `Response.url` (kept on `rawResponse`), while a header does not. The key goes only in
+      // the `x-goog-api-key` header below.
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
       try {
         const response = await fetchFn(url, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          // The API key rides in the header so no URL-derived string can ever carry it.
+          headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
           body: JSON.stringify(requestBody),
+          // Abort a hung attempt; the rejection lands in the catch below as status 0 (transient).
+          signal: AbortSignal.timeout(timeoutMs),
         });
 
         if (response.ok) {
-          const json = (await response.json()) as GeminiResponseBody;
+          // A malformed SUCCESS body is not an outage: parse separately so it does not fall into
+          // the outer catch (status 0 = transient) and get retried 4x as a "network error".
+          let json: GeminiResponseBody;
+          try {
+            json = (await response.json()) as GeminiResponseBody;
+          } catch {
+            // Status 200 is not transient, so the loop's terminal http_error branch takes it.
+            return { ok: false, status: 200, statusText: "invalid JSON body" };
+          }
           return { ok: true, data: json };
         }
 
@@ -496,30 +586,53 @@ export async function generateGeminiContent(
           rawResponse: response,
         };
       } catch (err) {
+        // AbortSignal.timeout rejects with a TimeoutError (older runtimes: AbortError); name it so
+        // the log says "timeout" instead of a cryptic "The operation was aborted due to timeout".
+        const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
         return {
           ok: false,
           status: 0,
-          statusText: err instanceof Error ? err.message : String(err),
+          statusText: timedOut ? `timeout after ${timeoutMs}ms` : err instanceof Error ? err.message : String(err),
         };
       }
     },
   });
 
   // NO FAIL-OPEN ON AN EMPTY 200: `response.ok` says the transport worked, not that Gemini
-  // answered. A body without a non-empty `candidates` array is usually a safety block, and
-  // handing it on as ok:true would let callers parse "nothing" as an answer. Terminal, and the
-  // key is not blamed (no reportResult(false)): a retry resends the same prompt to the same block.
-  if (outcome.ok && !(Array.isArray(outcome.data.candidates) && outcome.data.candidates.length > 0)) {
-    // `promptFeedback` is untrusted API output, so probe it defensively.
-    const feedback = (outcome.data as { promptFeedback?: { blockReason?: unknown } }).promptFeedback;
-    const block = typeof feedback?.blockReason === "string" ? ` (promptFeedback.blockReason: ${feedback.blockReason})` : "";
-    return {
-      ok: false,
-      reason: "empty_response",
-      status: 200,
-      detail: `Gemini returned 200 with no candidates${block}`,
-      attempts: outcome.attempts,
-    };
+  // answered. Every caller consumes TEXT (grounded scout-web included), so success requires
+  // candidates[0].content.parts to hold at least one non-empty string `text`. `candidates: []`,
+  // `[{}]`, `[null]` and `[{finishReason:"SAFETY"}]` are the usual shapes of a blocked or
+  // truncated answer, and passing them on as ok:true lets callers parse "nothing" as an answer.
+  // Terminal, and the key is not blamed (no reportResult(false)): a retry resends the same prompt.
+  if (outcome.ok) {
+    // The body is untrusted JSON and may be literally `null`: check it is an object BEFORE
+    // reading `.candidates`, or the TypeError escapes a function that promises outcomes.
+    const body = outcome.data as unknown;
+    const record = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : null;
+    // Anything but an array counts as "no candidates".
+    const candidates = record !== null && Array.isArray(record.candidates) ? (record.candidates as unknown[]) : [];
+    // `[null]` and `[{}]` both normalise to a candidate without content.
+    const first = (candidates[0] ?? null) as { content?: { parts?: unknown }; finishReason?: unknown } | null;
+    const parts = Array.isArray(first?.content?.parts) ? (first!.content!.parts as unknown[]) : [];
+    // Only a part whose `text` is a non-empty string counts (`parts:[{text:""}]` is empty).
+    const hasText = parts.some((part) => {
+      const text = (part as { text?: unknown } | null)?.text;
+      return typeof text === "string" && text.length > 0;
+    });
+    if (!hasText) {
+      // finishReason and blockReason say WHY it is empty (SAFETY, MAX_TOKENS, ...); both are
+      // untrusted, so only strings are echoed into the detail.
+      const finish = typeof first?.finishReason === "string" ? ` (finishReason: ${first.finishReason})` : "";
+      const feedback = record?.promptFeedback as { blockReason?: unknown } | null | undefined;
+      const block = typeof feedback?.blockReason === "string" ? ` (promptFeedback.blockReason: ${feedback.blockReason})` : "";
+      return {
+        ok: false,
+        reason: "empty_response",
+        status: 200,
+        detail: `Gemini returned 200 with no text part${finish}${block}`,
+        attempts: outcome.attempts,
+      };
+    }
   }
   return outcome;
 }

@@ -298,9 +298,11 @@ test("generateGeminiContent packages payload and calls fetchSeam", async () => {
 
   let capturedUrl = "";
   let capturedBody = "";
+  let capturedKeyHeader = "";
 
   const fakeFetch: typeof fetch = async (input, init) => {
     capturedUrl = String(input);
+    capturedKeyHeader = new Headers(init?.headers).get("x-goog-api-key") ?? "";
     capturedBody = String(init?.body);
     return new Response(
       JSON.stringify({
@@ -331,7 +333,8 @@ test("generateGeminiContent packages payload and calls fetchSeam", async () => {
   assert.equal(outcome.ok, true);
   if (!outcome.ok) return;
 
-  assert.ok(capturedUrl.includes("gemini-secret-key-01"));
+  // The key now rides in the header, not the URL (see the dedicated key-leak tests below).
+  assert.equal(capturedKeyHeader, "gemini-secret-key-01");
   const parsedBody = JSON.parse(capturedBody);
   assert.equal(parsedBody.contents[0].parts[0].text, "<untrusted_job_posting>Job description</untrusted_job_posting>");
   assert.equal(parsedBody.systemInstruction.parts[0].text, "<system_policy>Tailor resume</system_policy>");
@@ -411,7 +414,7 @@ test("generateGeminiContent forwards tools verbatim and exposes groundingMetadat
     pacer: new GeminiPacer({ minIntervalMs: 0, clock: createVirtualClock(1000) }),
     fetchSeam: async (_input, init) => {
       capturedBody = String(init?.body);
-      return new Response(JSON.stringify({ candidates: [{ groundingMetadata: grounding }] }), { status: 200 });
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "grounded answer" }] }, groundingMetadata: grounding }] }), { status: 200 });
     },
     tools: [{ google_search: {} }],
     prompt: { systemInstruction: "s", userContent: "u" },
@@ -625,4 +628,262 @@ test("transient: 404 is still model_not_found after one call with no sleep", asy
   assert.equal(outcome.reason, "model_not_found");
   assert.equal(calls, 1);
   assert.deepEqual(rig.sleeps, []);
+});
+
+// --- EMPTY / MALFORMED 200s, TIMEOUTS (round 2) ----------------------------------------
+
+// Runs generateGeminiContent against a fetch that always answers with `body` as a 200.
+async function with200(body: string) {
+  const rig = transientRig();
+  const outcome = await generateGeminiContent(rig.db, {
+    ...rig.base,
+    prompt: { systemInstruction: "s", userContent: "u" },
+    fetchSeam: async () => new Response(body, { status: 200 }),
+  });
+  return { outcome, rig };
+}
+
+test("200 with null body is empty_response and does not throw", async () => {
+  const { outcome } = await with200("null");
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "empty_response");
+});
+
+test("200 with candidates:[{}] is empty_response", async () => {
+  const { outcome } = await with200(JSON.stringify({ candidates: [{}] }));
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "empty_response");
+});
+
+test("200 with a content-less SAFETY candidate is empty_response naming SAFETY", async () => {
+  const { outcome } = await with200(JSON.stringify({ candidates: [{ finishReason: "SAFETY" }] }));
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "empty_response");
+  assert.ok(outcome.detail?.includes("SAFETY"));
+});
+
+test("200 with an empty-string text part is empty_response", async () => {
+  const { outcome } = await with200(JSON.stringify({ candidates: [{ content: { parts: [{ text: "" }] } }] }));
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "empty_response");
+});
+
+test("200 with a real text part is ok", async () => {
+  const { outcome } = await with200(JSON.stringify({ candidates: [{ content: { parts: [{ text: "hello" }] } }] }));
+  assert.equal(outcome.ok, true);
+});
+
+test("a fetch timeout is transient: retried, and the report says timeout", async () => {
+  const rig = transientRig();
+  let fetches = 0;
+  const outcome = await generateGeminiContent(rig.db, {
+    ...rig.base,
+    prompt: { systemInstruction: "s", userContent: "u" },
+    fetchSeam: async () => {
+      fetches += 1;
+      // What AbortSignal.timeout produces.
+      if (fetches === 1) throw new DOMException("The operation timed out.", "TimeoutError");
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "hi" }] } }] }), { status: 200 });
+    },
+  });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.attempts, 2);
+  const failure = rig.rpcCalls.filter((c) => c.fn === "report_gemini_result").map((c) => c.args as { p_error: string | null })[0]!;
+  assert.ok(failure.p_error?.includes("timeout after 25000ms"));
+});
+
+test("non-JSON 200 is terminal http_error: one call, no sleep", async () => {
+  const rig = transientRig();
+  let fetches = 0;
+  const outcome = await generateGeminiContent(rig.db, {
+    ...rig.base,
+    prompt: { systemInstruction: "s", userContent: "u" },
+    fetchSeam: async () => {
+      fetches += 1;
+      return new Response("<html>oops</html>", { status: 200 });
+    },
+  });
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "http_error");
+  assert.equal(fetches, 1);
+  assert.deepEqual(rig.sleeps, []);
+  // The malformed body is the upstream's fault: no failure report, so no key is blamed.
+  assert.equal(outcome.detail, "invalid JSON body");
+  assert.deepEqual(rig.rpcCalls.filter((c) => c.fn === "report_gemini_result"), []);
+});
+
+// Guards the `signal: AbortSignal.timeout(...)` line itself: the hand-thrown TimeoutError test
+// above passes even if that line is deleted, so these two exercise the real signal.
+test("every attempt passes an AbortSignal to fetch", async () => {
+  const rig = transientRig();
+  let signal: unknown = null;
+  await generateGeminiContent(rig.db, {
+    ...rig.base,
+    prompt: { systemInstruction: "s", userContent: "u" },
+    fetchSeam: async (_input, init) => {
+      signal = init?.signal;
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "x" }] } }] }), { status: 200 });
+    },
+  });
+  assert.ok(signal instanceof AbortSignal);
+});
+
+test("a hung fetch is aborted by timeoutMs, retried, and reported as a timeout", async () => {
+  const rig = transientRig();
+  // AbortSignal.timeout timers are unref'd, so keep the loop alive with a ref'd timer.
+  const keepAlive = setTimeout(() => {}, 5000);
+  try {
+    const outcome = await generateGeminiContent(rig.db, {
+      ...rig.base,
+      maxRetries: 1,
+      timeoutMs: 20,
+      prompt: { systemInstruction: "s", userContent: "u" },
+      // Hangs until the signal fires, then rejects with its reason like real fetch.
+      fetchSeam: (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (!signal) return; // no signal: hangs forever, the test's keepAlive/timeout fails it
+          signal.addEventListener("abort", () => reject(signal.reason));
+        }),
+    });
+    assert.equal(outcome.ok, false);
+    if (outcome.ok) return;
+    assert.equal(outcome.reason, "upstream_unavailable");
+    assert.equal(outcome.attempts, 2);
+    const errors = rig.rpcCalls.filter((c) => c.fn === "report_gemini_result").map((c) => (c.args as { p_error: string }).p_error);
+    assert.ok(errors.every((e) => e.includes("timeout after 20ms")));
+  } finally {
+    clearTimeout(keepAlive);
+  }
+});
+
+// --- API KEY NEVER IN THE URL ------------------------------------------------------------
+
+test("the API key travels only in the x-goog-api-key header, never in the URL", async () => {
+  const rig = transientRig();
+  let url = "";
+  let headers: Record<string, string> = {};
+  await generateGeminiContent(rig.db, {
+    ...rig.base,
+    prompt: { systemInstruction: "s", userContent: "u" },
+    fetchSeam: async (input, init) => {
+      url = String(input);
+      // The client passes a plain record; normalise through Headers so either shape would work.
+      headers = Object.fromEntries(new Headers(init?.headers).entries());
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "x" }] } }] }), { status: 200 });
+    },
+  });
+  assert.ok(!url.includes("key="));
+  assert.ok(!url.includes("k1"));
+  assert.equal(headers["x-goog-api-key"], "k1");
+});
+
+test("a failed call's outcome never contains the API key", async () => {
+  const rig = transientRig();
+  const outcome = await generateGeminiContent(rig.db, {
+    ...rig.base,
+    prompt: { systemInstruction: "s", userContent: "u" },
+    // A distinctive key value so a substring hit cannot be a coincidence.
+    readKey: keysFrom({ 1: "SECRET-KEY-VALUE-123" }),
+    fetchSeam: async () => new Response(JSON.stringify({ error: "bad" }), { status: 400, statusText: "Bad Request" }),
+  });
+  assert.equal(outcome.ok, false);
+  // rawResponse is not part of the outcome, but errorBody/detail are: serialise the lot.
+  assert.ok(!JSON.stringify(outcome).includes("SECRET-KEY-VALUE-123"));
+});
+
+// --- 401/403 = ONE BAD KEY, NOT A DEAD CALL -----------------------------------------------
+// Earned 2026-10-05: key 17 answered 403 on the first attempt and ended the whole matcher call
+// while 19 other keys were healthy.
+
+type ReportArgs = { p_key_index: number; p_success: boolean; p_retry_after_seconds: number | null; p_error: string | null };
+const reportsOf = (rig: ReturnType<typeof transientRig>) =>
+  rig.rpcCalls.filter((c) => c.fn === "report_gemini_result").map((c) => c.args as ReportArgs);
+
+test("403 then 200: ok on the second key, first key parked for 3600s, no sleep", async () => {
+  const rig = transientRig();
+  let calls = 0;
+  const outcome = await callGeminiWithFailover(rig.db, {
+    ...rig.base,
+    execute: async () => {
+      calls += 1;
+      return calls === 1 ? fail(403, "Forbidden") : { ok: true, data: { ok: 1 as const } };
+    },
+  });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.attempts, 2);
+  const first = reportsOf(rig)[0]!;
+  assert.equal(first.p_key_index, 1);
+  assert.equal(first.p_success, false);
+  assert.equal(first.p_retry_after_seconds, 3600);
+  // Not an overload: rotating must not wait.
+  assert.deepEqual(rig.sleeps, []);
+});
+
+test("403 on every attempt ends as http_error 403 saying every key was rejected", async () => {
+  const rig = transientRig();
+  const outcome = await callGeminiWithFailover(rig.db, { ...rig.base, maxRetries: 3, execute: async () => fail(403, "Forbidden") });
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "http_error");
+  assert.equal(outcome.status, 403);
+  assert.equal(outcome.attempts, 4);
+  assert.ok(outcome.detail?.includes("every attempted key was rejected"));
+  assert.deepEqual(rig.sleeps, []);
+});
+
+test("401 then 200 is ok", async () => {
+  const rig = transientRig();
+  let calls = 0;
+  const outcome = await callGeminiWithFailover(rig.db, {
+    ...rig.base,
+    execute: async () => {
+      calls += 1;
+      return calls === 1 ? fail(401, "Unauthorized") : { ok: true, data: { ok: 1 as const } };
+    },
+  });
+  assert.equal(outcome.ok, true);
+});
+
+test("400 is still terminal after one call (a malformed request fails on every key)", async () => {
+  const rig = transientRig();
+  let calls = 0;
+  const outcome = await callGeminiWithFailover(rig.db, {
+    ...rig.base,
+    execute: async () => {
+      calls += 1;
+      return fail(400, "Bad Request");
+    },
+  });
+  assert.equal(outcome.ok, false);
+  assert.equal(calls, 1);
+});
+
+test("a 403 errorBody's error.status and message reach last_error", async () => {
+  const rig = transientRig();
+  await callGeminiWithFailover(rig.db, {
+    ...rig.base,
+    maxRetries: 0,
+    execute: async () => ({ ok: false, status: 403, statusText: "Forbidden", errorBody: { error: { status: "PERMISSION_DENIED", message: "API key not valid" } } }),
+  });
+  assert.ok(reportsOf(rig)[0]!.p_error?.includes("PERMISSION_DENIED"));
+  assert.ok(reportsOf(rig)[0]!.p_error?.includes("API key not valid"));
+});
+
+test("an AIza key echoed in an error message is redacted from last_error", async () => {
+  const rig = transientRig();
+  const fakeKey = "AIza" + "A".repeat(35);
+  await callGeminiWithFailover(rig.db, {
+    ...rig.base,
+    maxRetries: 0,
+    execute: async () => ({ ok: false, status: 403, statusText: "Forbidden", errorBody: { error: { status: "X", message: `bad key ${fakeKey} here` } } }),
+  });
+  assert.ok(!reportsOf(rig)[0]!.p_error?.includes(fakeKey));
 });
