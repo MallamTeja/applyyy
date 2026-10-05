@@ -1,0 +1,256 @@
+# =============================================================================
+# CI — typecheck and test every part of the repo on every push and PR to main.
+#
+# WHY THIS EXISTS: until 2026-10-05 no workflow typechecked or tested anything.
+# apply.yml / scout.yml / keepalive.yml only RUN the product, so every test count
+# quoted in this repo ("598/598", "273/273") was measured on somebody's laptop and
+# nothing stopped a red tree from being pushed. Four of those laptop runs on
+# 2026-10-04 also nearly passed vacuously (deno over zero files, `tests 0`), which
+# is why the guards below assert the work HAPPENED, not just that nothing failed.
+#
+# Needs NO secrets: every job is static analysis or hermetic tests. That is a
+# requirement, not an accident — a PR from a fork gets no secrets, and a check
+# that only works with credentials is a check that silently skips.
+# =============================================================================
+name: ci
+
+# Main is the only branch that deploys (Vercel builds it), so it is the one to guard.
+on:
+  # Catches direct pushes, which is how most work lands in this repo today.
+  push:
+    # Only main; feature branches are covered by their pull request.
+    branches: [main]
+  # Catches the change before it lands, when one goes through review.
+  pull_request:
+    # PRs into main are the ones that would deploy.
+    branches: [main]
+
+# Read-only token: CI reads the repo and writes nothing back.
+permissions:
+  # Checkout needs read; nothing here needs write.
+  contents: read
+
+# A newer push to the same ref makes the older run's answer irrelevant.
+concurrency:
+  # One group per workflow + ref, so main and a PR never cancel each other.
+  group: ci-${{ github.ref }}
+  # Saves Actions minutes, which PROJECT_PLAN §2 calls the binding budget.
+  cancel-in-progress: true
+
+# Defaults applied to every `run:` step in every job.
+defaults:
+  # Bash everywhere, so pipefail below means the same thing in each job.
+  run:
+    # `-o pipefail` makes a piped checker's failure fail the step, instead of
+    # the step reporting the exit code of `grep`/`tail` (CLAUDE.md §4 trap).
+    shell: bash -eo pipefail {0}
+
+# Repo-wide environment for every job.
+env:
+  # No job here launches a browser. Skipping the download keeps a ~130MB
+  # Chromium fetch off every install (the unverified budget risk in CLAUDE.md §8).
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # (a) Deno typecheck of the Edge Functions. `pnpm run typecheck` does NOT reach
+  # this tree (it is a separate Deno project with no package.json), which is how
+  # four type errors survived six days in September.
+  # ---------------------------------------------------------------------------
+  deno-check:
+    # A readable name in the PR checks list.
+    name: deno check (edge functions)
+    # Linux runner: cheapest per minute and matches the deploy target's OS.
+    runs-on: ubuntu-latest
+    # A hung type check should fail fast rather than burn the budget.
+    timeout-minutes: 10
+    steps:
+      # The source to check.
+      - name: Checkout
+        # Same major as the existing workflows, so all four move together.
+        uses: actions/checkout@v4
+      # The Deno toolchain the functions are written for.
+      - name: Install Deno
+        # Official action, pinned to a major like the others.
+        uses: denoland/setup-deno@v2
+        # Pinned to the version the repo was last verified with locally.
+        with:
+          # deno 2.9.6 is what produced the clean local runs on 2026-10-04.
+          deno-version: v2.9.6
+      # The check itself, plus the guard that it actually checked something.
+      - name: deno check --reload, and assert it checked files
+        # The Deno project root; deno.json lives here.
+        working-directory: supabase/functions
+        run: |
+          # Every function entry point plus every non-test shared module. Test
+          # files are excluded because deno.json excludes them (they import node:test).
+          mapfile -t files < <(ls */index.ts; find _shared -name '*.ts' ! -name '*.test.ts')
+          # Fail loudly if the glob itself matched nothing: an empty list is the
+          # "deno check over zero files exits 0" trap from CLAUDE.md §4.
+          [ "${#files[@]}" -gt 0 ] || { echo "no files matched"; exit 1; }
+          # Shown so a reader of the log can see what was covered.
+          echo "checking ${#files[@]} files"
+          # --reload defeats the incremental cache, which would otherwise print
+          # nothing on an unchanged tree. Output kept for the count below; the
+          # pipefail default means deno's own non-zero exit still fails the step.
+          deno check --reload "${files[@]}" 2>&1 | tee deno-check.log
+          # Strip ANSI colour codes, then count "Check" lines — the colour codes
+          # are why a plain `grep ^Check` reports zero on a healthy run.
+          checks=$(sed 's/\x1b\[[0-9;]*m//g' deno-check.log | grep -c '^Check' || true)
+          # Printed so the number is visible in the job log.
+          echo "Check lines: $checks"
+          # Zero Check lines means nothing was typechecked, whatever the exit code said.
+          [ "$checks" -gt 0 ] || { echo "deno check checked nothing"; exit 1; }
+
+  # ---------------------------------------------------------------------------
+  # (b) Edge Function unit tests. They run under Node (Node 24 strips types),
+  # not `deno test`, because they import node:test — see package.json's note on
+  # test:functions. They import no npm packages, so no install is needed.
+  # ---------------------------------------------------------------------------
+  edge-tests:
+    # A readable name in the PR checks list.
+    name: node --test (edge functions)
+    # Linux runner, as above.
+    runs-on: ubuntu-latest
+    # These run in seconds locally; ten minutes is a hang, not a slow test.
+    timeout-minutes: 10
+    steps:
+      # The source to test.
+      - name: Checkout
+        # Same pin as every other job.
+        uses: actions/checkout@v4
+      # Node 24 is required: it is the version that strips TypeScript natively.
+      - name: Install Node
+        # Same major as apply.yml.
+        uses: actions/setup-node@v4
+        # The runtime the tests are written against.
+        with:
+          # Must match apply.yml and the machine the counts were measured on.
+          node-version: '24'
+      # Run the suite and refuse a vacuous pass.
+      - name: node --test, and assert tests ran
+        run: |
+          # From the repo root, because the glob is root-relative; run from the
+          # wrong cwd it matches nothing and prints `tests 0` / `fail 0` (CLAUDE.md §4).
+          node --test "supabase/functions/**/*.test.ts" 2>&1 | tee edge-tests.log
+          # Extract the total from the summary line ("ℹ tests 606").
+          total=$(grep -oE 'tests [0-9]+' edge-tests.log | tail -1 | grep -oE '[0-9]+' || echo 0)
+          # Printed so the count is visible in the job log.
+          echo "edge tests: $total"
+          # `fail 0` beside `tests 0` is a glob that matched nothing, not a pass.
+          [ "$total" -gt 0 ] || { echo "no edge tests ran"; exit 1; }
+
+  # ---------------------------------------------------------------------------
+  # (c) Web app: typecheck, production build, tests. The build matters on its own:
+  # Vercel deploys whatever this builds, and nothing else in CI builds apps/web.
+  # ---------------------------------------------------------------------------
+  web:
+    # A readable name in the PR checks list.
+    name: web (tsc, vite build, tests)
+    # Linux runner, as above.
+    runs-on: ubuntu-latest
+    # Install dominates; twenty minutes leaves room for a cold pnpm store.
+    timeout-minutes: 20
+    steps:
+      # The source to build.
+      - name: Checkout
+        # Same pin as every other job.
+        uses: actions/checkout@v4
+      # pnpm must exist before setup-node, whose pnpm cache shells out to pnpm.
+      - name: Install pnpm
+        # Same action and pin as apply.yml.
+        uses: pnpm/action-setup@v4
+        # The exact version package.json's packageManager field pins.
+        with:
+          # Matches "packageManager": "pnpm@11.25.0".
+          version: 11.25.0
+      # Node plus the pnpm store cache.
+      - name: Install Node
+        # Same major as apply.yml.
+        uses: actions/setup-node@v4
+        # Runtime and cache settings.
+        with:
+          # Same Node as every other job.
+          node-version: '24'
+          # Restores the pnpm store between runs; install is most of this job.
+          cache: 'pnpm'
+      # Exactly the locked dependency set — never a resolve.
+      - name: pnpm install --frozen-lockfile
+        # Frozen: CI must fail on a lockfile drift, not quietly repair it.
+        run: pnpm install --frozen-lockfile
+      # Type errors the Vite build would otherwise strip and ship.
+      - name: tsc --noEmit
+        # The web package's own tsconfig.
+        working-directory: apps/web
+        # The package-local binary, as CLAUDE.md §4 documents.
+        run: ./node_modules/.bin/tsc --noEmit
+      # The exact artifact Vercel would deploy; a failure here is a failed deploy.
+      - name: vite build
+        # Same package.
+        working-directory: apps/web
+        # Builds dist/ the way Vercel does.
+        run: ./node_modules/.bin/vite build
+      # The web test suite, with the same vacuous-pass guard as edge-tests.
+      - name: web tests, and assert tests ran
+        run: |
+          # `@applyy/web`, NOT `web`: `--filter web` matches no package and exits 0
+          # having run nothing (CLAUDE.md §4).
+          pnpm --filter @applyy/web test 2>&1 | tee web-tests.log
+          # Extract the total from node --test's summary line.
+          total=$(grep -oE 'tests [0-9]+' web-tests.log | tail -1 | grep -oE '[0-9]+' || echo 0)
+          # Printed so the count is visible in the job log.
+          echo "web tests: $total"
+          # A zero total means the filter or glob matched nothing.
+          [ "$total" -gt 0 ] || { echo "no web tests ran"; exit 1; }
+
+  # ---------------------------------------------------------------------------
+  # (d) Worker: typecheck and vitest. This is the component that types into real
+  # employer forms, so it is the last place a type error should reach unnoticed.
+  # ---------------------------------------------------------------------------
+  worker:
+    # A readable name in the PR checks list.
+    name: worker (tsc, vitest)
+    # Linux runner, as above.
+    runs-on: ubuntu-latest
+    # Install dominates, as in the web job.
+    timeout-minutes: 20
+    steps:
+      # The source to test.
+      - name: Checkout
+        # Same pin as every other job.
+        uses: actions/checkout@v4
+      # pnpm before setup-node, for the same cache reason as the web job.
+      - name: Install pnpm
+        # Same action and pin as apply.yml.
+        uses: pnpm/action-setup@v4
+        # The pinned pnpm version.
+        with:
+          # Matches "packageManager": "pnpm@11.25.0".
+          version: 11.25.0
+      # Node plus the pnpm store cache.
+      - name: Install Node
+        # Same major as apply.yml.
+        uses: actions/setup-node@v4
+        # Runtime and cache settings.
+        with:
+          # Same Node as every other job.
+          node-version: '24'
+          # Restores the pnpm store between runs.
+          cache: 'pnpm'
+      # Exactly the locked dependency set.
+      - name: pnpm install --frozen-lockfile
+        # Frozen, for the same reason as the web job.
+        run: pnpm install --frozen-lockfile
+      # Covers src/** and test/** (worker/tsconfig.json); scripts/** is outside it.
+      - name: tsc --noEmit
+        # The worker's own tsconfig.
+        working-directory: worker
+        # The package-local binary.
+        run: ./node_modules/.bin/tsc --noEmit
+      # vitest exits non-zero on failure AND on "no test files found", so its own
+      # exit code is already a non-vacuous guard here.
+      - name: vitest run
+        # The worker package.
+        working-directory: worker
+        # Runs the suite once, no watch mode.
+        run: ./node_modules/.bin/vitest run
