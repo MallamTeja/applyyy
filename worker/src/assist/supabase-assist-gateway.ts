@@ -6,7 +6,8 @@
 // `claim_applications` can only claim "the oldest N approved rows", which is exactly the
 // wrong tool for "this one row, which I chose", so the by-id claim is done here with a
 // conditional UPDATE instead.
-import type { AnswerBankRow, ResolvedResume } from '@applyy/shared-types';
+// MasterProfile is needed only to type the delegated method below.
+import type { AnswerBankRow, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 // The existing gateway supplies advance/release/answers; only the missing parts are written here.
 import { createSupabaseGateway, type SupabaseLike } from '../supabase-gateway.ts';
 // The port this file implements, declared beside the logic that consumes it.
@@ -51,6 +52,13 @@ export function createSupabaseAssistGateway(
     isSystemEnabled: base.isSystemEnabled,
     // Exposed so the CLI primes the session the gateway checks.
     refreshSession: base.refreshSession,
+    // Delegated like fetchAnswers so the master_profiles query lives once, in the base gateway.
+    // Re-declared (not assigned) so the assisted flow sees a definite Promise even if base omits it.
+    // Declared as a method so the assisted flow's gateway port is satisfied.
+    async fetchLatestProfile(): Promise<MasterProfile | null> {
+      // Null default because the base gateway type marks the method optional.
+      return (await base.fetchLatestProfile?.()) ?? null;
+    },
     // Re-declared (not just assigned) to narrow the base gateway's loose return type.
     async fetchAnswers(): Promise<readonly AnswerBankRow[]> {
       // Delegated: the answer-bank query already exists and is tested.

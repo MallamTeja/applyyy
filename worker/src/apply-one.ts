@@ -20,7 +20,8 @@
 // claim and leaves the row exactly where the human approved it — which is also
 // what makes §18.6's trust period work: after three days of screenshots, the
 // same rows are still sitting there when the flag is flipped.
-import type { AgentName, AnswerBankRow, BlockReason, ResolvedResume } from '@applyy/shared-types';
+// MasterProfile is type-only: the planner needs the shape of identity facts, not a runtime dependency.
+import type { AgentName, AnswerBankRow, BlockReason, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 import { guardedAdvance, type StatusWriter } from './guarded-advance.ts';
 import { planFill, type FillBlocker } from './plan-fill.ts';
 import { resolveSubmissionMode, type SubmissionEnv } from './submission-mode.ts';
@@ -175,6 +176,9 @@ export interface ApplyToOneInput {
   readonly page: ApplicationPage;
   readonly gateway: ApplierGateway;
   readonly answers: readonly AnswerBankRow[];
+  // Master profile for factual fields (email, phone, links); optional so a caller without one only loses profile fills.
+  // Null and absent both mean "no profile", so every existing caller compiles unchanged.
+  readonly profile?: MasterProfile | null;
   // The environment slice the DRY_RUN gate reads. Passed rather than read from
   // process.env so the gate is testable without mutating global state.
   readonly env: SubmissionEnv;
@@ -226,7 +230,8 @@ export type ApplyOutcome =
   | { readonly kind: 'submit_outcome_unknown'; readonly error: string };
 
 export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> {
-  const { row, page, gateway, answers, env, renderResume } = input;
+  // Defaulted to null here so planFill below always receives a definite value.
+  const { row, page, gateway, answers, env, renderResume, profile = null } = input;
 
   // THE GATE, consulted before anything else so its verdict is available at
   // every branch below. A pre-deploy audit found this function had no callers
@@ -260,7 +265,8 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
 
   // Constraint #4 lives here: the planner can copy a human's answer or report a
   // blocker, and has no third branch that invents a value.
-  const plan = planFill(fields, answers);
+  // The profile rides into the planner, the one place that decides what may be typed.
+  const plan = planFill(fields, answers, profile);
 
   // WHERE THE RESUME GOES, decided before anything is typed and while the row is
   // still `approved`. Pure and browser-free: the form has already been read, so
@@ -277,12 +283,15 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
   // the other two here rather than later, because an application that cannot
   // carry its resume must not be typed into, screenshotted as viable, or
   // submitted — and all three of those decisions read this one boolean.
-  const wouldSubmit = detected === null && plan.canProceed && attachment.canProceed;
+  // `let` (not const) because a fill that the live page rejects can still turn a viable
+  // application into a blocked one after this point; see the catch below.
+  let wouldSubmit = detected === null && plan.canProceed && attachment.canProceed;
 
   // Every blocker from every layer, in one list. Merged at the point of decision
   // so no downstream consumer has to remember that there are two sources; a
   // second array would eventually be reported by one caller and not the other.
-  const blockers: readonly ApplicationBlocker[] = [...plan.blockers, ...attachment.blockers];
+  // Mutable for the same reason as wouldSubmit: the fill loop may append a late blocker.
+  const blockers: ApplicationBlocker[] = [...plan.blockers, ...attachment.blockers];
 
   // The rendered artifact, kept out here so both the dry-run exit and the real
   // status write can name it. Null until a viable application actually needs one.
@@ -294,7 +303,32 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
   // half-completed application and no way to tell it from a real attempt.
   if (wouldSubmit) {
     for (const fill of plan.fills) {
-      await page.fill(fill.id, fill.value);
+      // Guarded per fill so one rejected value is caught at the field that caused it.
+      try {
+        // The live filler validates against real options, which the pure planner cannot see.
+        await page.fill(fill.id, fill.value);
+      // Only reached when the page refused a value; the checks below decide whether that is a form gap.
+      } catch (error) {
+        // Only the filler's two KNOWN "the form cannot take this value" errors are form gaps.
+        // Anything else is an unknown failure and must surface unchanged, never be relabelled.
+        // Non-Error throws get an empty message so they fail the prefix test and are rethrown.
+        const message = error instanceof Error ? error.message : '';
+        // Rethrow keeps unknown failures loud instead of disguising them as questions for the human.
+        if (!message.startsWith('no_matching_option:') && !message.startsWith('checkbox_not_autofilled:')) throw error;
+        // Without this the error reached the claim loop, which counted it and left the row
+        // `approved`, so it failed identically every run and never reached the human.
+        // The label (not the opaque DOM id) is what the human needs to see.
+        // Falls back to the id so the blocker is never blank even if the field vanished from the list.
+        const label = fields.find((candidate) => candidate.id === fill.id)?.label ?? fill.id;
+        // Pushed into the shared list so the park path and the dry-run report both see it.
+        blockers.push({ id: fill.id, label, reason: 'no_matching_option' });
+        // Not viable any more: this gates the resume attach, the dry-run report and the park path.
+        // Flipped last so the blocker is recorded before the viability gate changes.
+        wouldSubmit = false;
+        // Stop typing; a half-filled form is not worth completing.
+        // Leaving the loop is the stop: later fills would type into a form we are about to park.
+        break;
+      }
     }
 
     // ---- THE RESUME, RENDERED HERE AND FOR THREE DELIBERATE REASONS --------
@@ -312,7 +346,9 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
     //    A screenshot taken before attaching would picture an application whose
     //    resume box is empty — the one thing the trust period exists to verify,
     //    absent from the artifact that is supposed to verify it.
-    if (attachment.target !== null) {
+    // Skipped when a fill just failed: an application about to be parked must not pay for a PDF.
+    // wouldSubmit is checked first because it is cheap and may have just been cleared.
+    if (wouldSubmit && attachment.target !== null) {
       // Restates at the type level what the planner already guarantees: a target
       // is only ever returned when a snapshot exists. Thrown rather than skipped
       // because the safe failure is "no application", and skipping would send a

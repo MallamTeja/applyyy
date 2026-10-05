@@ -24,7 +24,8 @@
 //
 // The property this buys, on the one component that touches real employers:
 // THE WORKER CANNOT DO ANYTHING TEJA COULD NOT DO FROM THE DASHBOARD.
-import type { AgentName, ApplicationStatus, ResolvedResume } from '@applyy/shared-types';
+// MasterProfile types the return value so callers get the real shape, not any.
+import type { AgentName, ApplicationStatus, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 import type { RunGateway } from './claim-loop.ts';
 import type { ClaimedApplication } from './apply-one.ts';
 
@@ -111,6 +112,7 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
   return {
     async openRun(agent: AgentName) {
       // Opened before any work, so a crash leaves a visible stuck row.
+      // unwrap converts supabase-js's error-as-value into a throw, so a DB failure is not read as no profile.
       const data = unwrap(
         await client.from('agent_runs').insert({ agent }).select().single(),
         'openRun',
@@ -266,6 +268,25 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
 
     // Delegates to the one local implementation, which the claim also uses.
     releaseClaim: releaseApplierClaim,
+
+    // Highest version wins (consumers order version desc limit 1); null when no profile exists yet.
+    // A method on the gateway so tests can fake it and the CLI never touches the client directly.
+    async fetchLatestProfile(): Promise<MasterProfile | null> {
+      // limit(1) after ordering so only the newest row crosses the wire; errors throw via unwrap.
+      const data = unwrap(
+        // Selects only the profile column: the version is used for ordering, not returned.
+        await client.from('master_profiles').select('profile').order('version', { ascending: false }).limit(1),
+        // Names the operation so a thrown error says which query failed.
+        'fetchLatestProfile',
+      );
+      // Shape guard: supabase-js types this loosely, so confirm an array before indexing.
+      // No rows means "no profile", which the planner treats as nothing to copy.
+      // Returning null (not throwing) lets a fresh account run with blockers instead of crashing.
+      if (!Array.isArray(data) || data.length === 0) return null;
+      // Only the profile column was selected; a null jsonb column still reads as "no profile".
+      // The cast is the one trust boundary: the table's jsonb is declared MasterProfile by contract.
+      return (data[0] as { profile: MasterProfile }).profile ?? null;
+    },
 
     async fetchAnswers() {
       const data = unwrap(await client.from('answer_bank').select('*').limit(1000), 'fetchAnswers');

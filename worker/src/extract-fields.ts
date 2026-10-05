@@ -19,7 +19,18 @@ export interface FormField {
   readonly label: string;
   // Normalised control kind. `combobox` covers React-select widgets, which are
   // NOT native <select> elements and cannot be driven by selectOption().
-  readonly kind: 'text' | 'email' | 'tel' | 'file' | 'textarea' | 'combobox';
+  // `native_select` is a real <select> (selectOption works); `radio_group` is ONE field per
+  // group, labelled by its legend/group label, never by the "Yes"/"No" option text;
+  // `checkbox` is a single box. Split out so the filler and planner never `.fill()` them.
+  readonly kind:
+    // Pre-existing kinds, unchanged, so current callers keep working.
+    | 'text' | 'email' | 'tel' | 'file' | 'textarea'
+    // The choice kinds, split so the filler dispatches without guessing.
+    | 'combobox' | 'native_select' | 'radio_group' | 'checkbox';
+  // Option labels, in DOM order, when they can be read without interaction: native <select>
+  // options and radio-group option labels. Absent for react-select (options render only when
+  // opened), so for those the exact-option check happens at fill time instead.
+  readonly options?: readonly string[];
   // Whether leaving this blank blocks submission. Drives the difference between
   // "skip it" and "route the row to blocked_needs_human" (constraint #4).
   readonly required: boolean;
@@ -54,6 +65,9 @@ export async function extractFields(page: Page): Promise<FormField[]> {
     // Accumulator; built imperatively so unlabelled controls can be skipped
     // outright rather than filtered out of a mapped array afterwards.
     const fields: FormField[] = [];
+    // Radios already absorbed into a group field; see the radio branch in the loop.
+    // A Set gives O(1) membership checks; radios are unique elements.
+    const seenRadios = new Set<Element>();
 
     // How far up the ancestor chain a role="group" wrapper may sit before it
     // stops counting as THIS control's group. See the walk further down for why
@@ -72,6 +86,109 @@ export async function extractFields(page: Page): Promise<FormField[]> {
       // Hidden and submit-type inputs are machinery, not questions.
       const inputType = (element as HTMLInputElement).type;
       if (inputType === 'hidden' || inputType === 'submit' || inputType === 'button') continue;
+
+      // RADIOS FIRST, before label resolution. A radio's own label is its OPTION text
+      // ("Yes"/"No"), so running it through the generic path below would emit one bogus
+      // "Yes" field per option and bury the real question. One field per GROUP instead.
+      if (inputType === 'radio') {
+        // Already folded into an earlier group's field; emitting again would duplicate it.
+        // `continue` skips the rest of this iteration only.
+        if (seenRadios.has(element)) continue;
+        // Typed view of the element, for `.name` / `.form`.
+        // `as` is safe: this branch only runs for input[type=radio].
+        const first = element as HTMLInputElement;
+        // The nearest wrapper that can carry the question text.
+        const wrapper = first.closest<HTMLElement>('fieldset, [role="radiogroup"], [role="group"]');
+        // THE DUPLICATED BLOCK starts here and runs through `options` below: group resolution
+        // AND option labelling are MIRRORED in playwright-page.ts fill() (a separate runtime,
+        // so it cannot import this). Change the whole block in BOTH files or fill() will resolve
+        // a different group or label than the one the planner was shown.
+        // Members: same `name` in the same form when named (the HTML definition of a group);
+        // otherwise every radio inside the wrapper; otherwise the lone radio.
+        const members = first.name
+          ? // Named: HTML groups radios by name within one form, wherever they sit in the DOM.
+            Array.from(document.querySelectorAll<HTMLInputElement>('input[type="radio"]')).filter(
+              // Same form too, so two forms reusing one name do not merge into one group.
+              (radio) => radio.name === first.name && radio.form === first.form,
+            )
+          : wrapper
+            ? // Unnamed but wrapped: the wrapper's subtree is the group.
+              Array.from(wrapper.querySelectorAll<HTMLInputElement>('input[type="radio"]'))
+            : // Neither: a lone radio is its own one-option group.
+              [first];
+        // Mark every member so the loop skips them (including the one we are on).
+        // Marking now (not later) also covers early `continue` exits below.
+        for (const member of members) seenRadios.add(member);
+
+        // Group label, never an option's text: aria-label, aria-labelledby, then <legend>.
+        let groupText = wrapper?.getAttribute('aria-label')?.trim() ?? '';
+        // Same multi-id resolution as the control-level branch below.
+        // Read once; used both for the truthiness test and the split.
+        const wrapperLabelledBy = wrapper?.getAttribute('aria-labelledby');
+        // Only consulted when aria-label gave nothing, matching accname precedence.
+        if (!groupText && wrapperLabelledBy) {
+          // Concatenate the referenced elements' text, as a screen reader would.
+          // Split into ids.
+          groupText = wrapperLabelledBy
+            .split(/\s+/)
+            // A dangling id yields '' instead of throwing.
+            .map((labelId) => document.getElementById(labelId)?.textContent?.trim() ?? '')
+            // Single spaces between the referenced texts.
+            .join(' ')
+            .trim();
+        }
+        // A fieldset's <legend> is its native accessible name.
+        if (!groupText) groupText = wrapper?.querySelector('legend')?.textContent?.trim() ?? '';
+        // Same trailing-asterisk strip as every other label, for a stable answer-bank key.
+        // Reassign (not a new const) so every later use sees the cleaned text.
+        groupText = groupText.replace(/\s*\*\s*$/, '').trim();
+
+        // fill() resolves this id: the wrapper's id when it has one, else the first radio's
+        // id (fill() accepts either and finds the siblings itself). No id at all means
+        // nothing can address the group, and an unnamed or unaddressable group is skipped
+        // like any other unlabelled control (constraint #4).
+        const groupId = wrapper?.id || first.id;
+        // Skipping, not emitting blank: a field we cannot name or address must not be guessed at.
+        if (!groupText || !groupId) continue;
+
+        // Option label per radio: aria-label, wrapping <label>, then <label for>.
+        // One label per member, positions matching DOM order.
+        const options = members.map(
+          (radio) =>
+            // Explicit accessible name wins, as everywhere else in this file.
+            radio.getAttribute('aria-label')?.trim() ||
+            // The common markup: <label><input type="radio"> Yes</label>.
+            radio.closest('label')?.textContent?.trim() ||
+            // Otherwise a <label for=id>; CSS.escape is correct here (this runs in the browser).
+            (radio.id
+              ? document.querySelector(`label[for="${CSS.escape(radio.id)}"]`)?.textContent?.trim()
+              : '') ||
+            // Unlabelled option: empty string keeps positions aligned with the DOM order.
+            '',
+        );
+        // THE DUPLICATED BLOCK ends here.
+
+        // One field for the whole group.
+        fields.push({
+          // The address fill() resolves back to this group.
+          id: groupId,
+          // The question, not an option.
+          label: groupText,
+          // Distinct kind so the planner never .fill()s a radio group.
+          kind: 'radio_group',
+          // The only legal answers, in DOM order, for exact matching.
+          // `options` shorthand: the property name is the same as the variable.
+          options,
+          // Required when any member or the wrapper says so, mirroring the generic rule.
+          required:
+            members.some(
+              (radio) => radio.hasAttribute('required') || radio.getAttribute('aria-required') === 'true',
+            ) || wrapper?.getAttribute('aria-required') === 'true',
+        });
+        // The group is fully handled; never fall through to the generic path.
+        // The `continue` is deliberate: generic label handling must not see radios.
+        continue;
+      }
 
       // Label resolution, in the same precedence order a screen reader uses.
       // aria-label is the direct case and covers Greenhouse's custom questions.
@@ -103,6 +220,12 @@ export async function extractFields(page: Page): Promise<FormField[]> {
         label = document.querySelector(`label[for="${CSS.escape(element.id)}"]`)?.textContent?.trim() ?? '';
       }
 
+      // A checkbox is conventionally wrapped in its own <label>; accept that as its name.
+      if (!label && inputType === 'checkbox') {
+        // `?? ''` so a missing wrapper yields an empty label and is dropped below.
+        label = element.closest('label')?.textContent?.trim() ?? '';
+      }
+
       // No recoverable label means no way to look up an answer honestly, and a
       // field we cannot name is one we must not guess at (constraint #4). These
       // are dropped rather than emitted blank, so the caller's "can I answer
@@ -119,17 +242,46 @@ export async function extractFields(page: Page): Promise<FormField[]> {
       const role = element.getAttribute('role');
       const tag = element.tagName.toLowerCase();
       const kind: FormField['kind'] =
-        role === 'combobox' || tag === 'select'
+        // Checked first: a react-select is an <input>, so tag order would misfile it.
+        role === 'combobox'
           ? 'combobox'
-          : tag === 'textarea'
-            ? 'textarea'
-            : inputType === 'file'
-              ? 'file'
-              : inputType === 'email'
-                ? 'email'
-                : inputType === 'tel'
-                  ? 'tel'
-                  : 'text';
+          : // A real <select>: selectOption() works, unlike react-select, so it gets its own kind.
+            tag === 'select'
+            ? 'native_select'
+            // Multi-line free text.
+            : tag === 'textarea'
+              ? 'textarea'
+              // Uploads are attached, never typed.
+              : inputType === 'file'
+                ? 'file'
+                : // Single checkbox: its own kind so no caller ever .fill()s it.
+                  inputType === 'checkbox'
+                  ? 'checkbox'
+                  // Typed text with email semantics.
+                  : inputType === 'email'
+                    ? 'email'
+                    // Typed text with phone semantics.
+                    : inputType === 'tel'
+                      ? 'tel'
+                      // Everything else is plain typed text.
+                      : 'text';
+
+      // Native <select> options are readable without interaction. An empty-value option is the
+      // "Select..." placeholder, not an answer, so it is excluded: offering it would let the
+      // planner "choose" nothing and call it an answer.
+      // Computed before `fields.push` so the push stays a single literal.
+      const selectOptions =
+        // Only selects have a readable option list at extraction time.
+        tag === 'select'
+          ? // Every <option> the browser knows about, in DOM order.
+            Array.from((element as HTMLSelectElement).options)
+              // Drop the value="" placeholder row.
+              .filter((option) => option.value !== '')
+              // `value !== ''` above is the rule; this line only normalises text.
+              // Visible text, trimmed: exactly what fill() compares against.
+              .map((option) => option.text.trim())
+          : // Not a select: stays undefined so the key is omitted from the field.
+            undefined;
 
       // aria-required is what the real form uses; the native attribute is
       // checked too because other ATS vendors mark required-ness that way.
@@ -230,6 +382,9 @@ export async function extractFields(page: Page): Promise<FormField[]> {
         id: element.id,
         label,
         kind,
+        // Only native selects carry options here; spread so the key is absent otherwise.
+        // Spread of {} keeps the key absent, as exactOptionalPropertyTypes requires.
+        ...(selectOptions === undefined ? {} : { options: selectOptions }),
         required,
         ...(groupLabel === undefined ? {} : { groupLabel }),
         ...(groupRequired === undefined ? {} : { groupRequired }),

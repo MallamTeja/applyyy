@@ -448,3 +448,59 @@ describe('createSupabaseGateway.claimApplications', () => {
     await expect(gateway.claimApplications('applier:run-1', 5)).rejects.toThrow(/permission denied for table jobs/);
   });
 });
+
+// fetchLatestProfile: the planner's only source of profile facts. The fake records the query
+// shape because "highest version, one row" is the contract, not just "returns something".
+describe('createSupabaseGateway.fetchLatestProfile', () => {
+  /** A client whose master_profiles query yields `result` and logs the table/order/limit used. */
+  function profileClient(result: { data: unknown; error: { message: string } | null }) {
+    // Records what the gateway asked for, so the test can assert the ordering contract.
+    const seen: { table?: string; order?: [string, unknown]; limit?: number } = {};
+    // Reuses the shared fake and overrides only `from`, the one seam this query touches.
+    const { client } = fakeClient({
+      // The table name is captured because reading the wrong table is a plausible regression.
+      from: (table: string) => ({
+        // Selected columns are not asserted: the contract is table, order and limit.
+        select: () => ({
+          order: (column: string, opts: unknown) => ({
+            limit: async (n: number) => {
+              // Captured at the last link of the chain so every step of the query is recorded.
+              seen.table = table;
+              seen.order = [column, opts];
+              seen.limit = n;
+              // The canned result drives the happy, empty and error cases from one fake.
+              return result;
+            },
+          }),
+        }),
+      }),
+    });
+    // Both returned so each test can call the gateway and inspect the query.
+    return { client, seen };
+  }
+
+  it('reads master_profiles ordered by version descending, limit 1, and returns .profile', async () => {
+    // One row in the shape the table returns: the profile sits inside a `profile` column.
+    const { client, seen } = profileClient({ data: [{ profile: { identity: { email: 'a@b.c' } } }], error: null });
+    // Non-null assertion because the method is optional on the port but always present on the real gateway.
+    const profile = await createSupabaseGateway(client, { userId: 'u1' }).fetchLatestProfile!();
+    // The identity object proves .profile (not the whole row) came back.
+    expect(profile).toEqual({ identity: { email: 'a@b.c' } });
+    // Highest version wins; a changed order would silently serve a stale profile.
+    // Table, descending version order and limit 1 together are the highest-version-wins contract.
+    expect(seen).toEqual({ table: 'master_profiles', order: ['version', { ascending: false }], limit: 1 });
+  });
+
+  it('returns null when there are no rows', async () => {
+    // A fresh account has no master profile yet; that must read as "none", not as an error.
+    const { client } = profileClient({ data: [], error: null });
+    expect(await createSupabaseGateway(client, { userId: 'u1' }).fetchLatestProfile!()).toBeNull();
+  });
+
+  it('throws on a database error rather than reporting "no profile"', async () => {
+    // supabase-js returns errors as values, so unwrap must convert this into a throw.
+    const { client } = profileClient({ data: null, error: { message: 'boom' } });
+    // A swallowed error would quietly drop every profile fill and look like an empty profile.
+    await expect(createSupabaseGateway(client, { userId: 'u1' }).fetchLatestProfile!()).rejects.toThrow(/boom/);
+  });
+});

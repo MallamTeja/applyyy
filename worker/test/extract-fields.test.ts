@@ -395,3 +395,60 @@ describe('the ancestor-walk bound', () => {
     expect(upload?.groupRequired).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// SELECT / RADIO / CHECKBOX awareness.
+//
+// The gitlab capture has no native select, radio or checkbox, so the new kinds are
+// exercised on a SYNTHETIC fixture (fixtures/synthetic/native-controls.html), and the
+// real capture is only asserted for what must NOT change: its react-select widgets
+// stay 'combobox'.
+// ---------------------------------------------------------------------------
+describe('choice controls', () => {
+  test('the real form\'s react-select widgets stay combobox, with no options', async () => {
+    // Fields read off the shared real capture.
+    const fields = await extractFields(page);
+    // The country widget is a role=combobox input, not a native <select>.
+    // The id comes from the real capture's react-select input.
+    const country = fields.find((field) => field.id === 'country');
+    expect(country?.kind).toBe('combobox');
+    // react-select options render only when opened, so none may be claimed up front.
+    expect(country?.options).toBeUndefined();
+    // Non-vacuity: the real form really has combobox fields, and none became native_select.
+    expect(fields.filter((field) => field.kind === 'combobox').length).toBeGreaterThan(0);
+    expect(fields.filter((field) => field.kind === 'native_select')).toEqual([]);
+  });
+
+  test('native select, radio group and checkbox get the right kind, label and options', async () => {
+    // Own tab: this fixture must not disturb the shared page.
+    // Served by the same fixture server as the real capture.
+    const isolated = await browser.newPage();
+    await isolated.goto(`${server.url}/synthetic/native-controls.html`);
+    const fields = await extractFields(isolated);
+    await isolated.close();
+
+    // The select: placeholder (value "") excluded, real options in DOM order.
+    const select = fields.find((field) => field.id === 'country_native');
+    expect(select).toMatchObject({ kind: 'native_select', label: 'Country', required: true });
+    expect(select?.options).toEqual(['India', 'United States']);
+
+    // The radio group: ONE field, labelled by the legend (asterisk stripped), id = the fieldset's.
+    // Exactly one group expected, so find() is enough; toMatchObject checks the rest.
+    const radio = fields.find((field) => field.kind === 'radio_group');
+    expect(radio).toMatchObject({
+      id: 'located_in_india',
+      label: 'Are you located in India?',
+      options: ['Yes', 'No'],
+      required: true,
+    });
+
+    // The single checkbox is named by its wrapping label.
+    expect(fields.find((field) => field.id === 'agree')).toMatchObject({
+      kind: 'checkbox',
+      label: 'I agree to the terms',
+    });
+
+    // The bug being fixed: option text must never surface as a field of its own.
+    expect(fields.filter((field) => field.label === 'Yes' || field.label === 'No')).toEqual([]);
+  });
+});

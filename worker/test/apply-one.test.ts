@@ -731,3 +731,107 @@ describe('applyToOne — recording where the artifacts went', () => {
     expect(outcome.kind).toBe('dry_run_complete');
   });
 });
+
+// FINDING D: the live filler throws when a planned value matches no option. That must park
+// the row for the human, not escape to the claim loop and fail identically on every run.
+describe('applyToOne — a fill the page rejects', () => {
+  // A form whose one field has a bank answer, so the planner plans a fill that the page then rejects.
+  const countryForm: FormField[] = [{ id: 'q1', label: 'Country', kind: 'combobox', required: true }];
+  // The bank answer the page will refuse to select.
+  const countryAnswers = [
+    // A plausible-looking value the page rejects, as a near-miss option would be.
+    { question_key: 'country', answer_value: 'Indo', needs_human: false, answer_type: 'text' },
+  ] as unknown as AnswerBankRow[];
+
+  /** A gateway that also records each transition's `detail`, which fakeGateway drops. */
+  function detailGateway() {
+    // Every advance with its detail, so the block_reason and unanswered list can be asserted.
+    const advances: Array<{ to: string; detail: Record<string, unknown> | undefined }> = [];
+    // Reuses the shared fake for every other port rather than re-implementing them.
+    const { gateway } = fakeGateway();
+    // Spread-and-override keeps this fake identical to fakeGateway except for the one method under test.
+    const recording: ApplierGateway = {
+      // Inherits release, uploads and artifact writes unchanged.
+      ...gateway,
+      // Captures detail, which fakeGateway discards but the block_reason assertion needs.
+      advanceStatus: async (_id, to, _agent, detail) => {
+        // Recorded rather than asserted inline so the test reads top-down.
+        advances.push({ to, detail });
+      },
+    };
+    // Both returned so the test can pass the gateway and inspect the log.
+    return { gateway: recording, advances };
+  }
+
+  it('parks the row as unanswerable_question naming the field LABEL, outcome blocked', async () => {
+    // The exact message shape the filler throws for an option mismatch.
+    const { page, submit } = fakePage({
+      // Gives the page the one field the planner will plan a fill for.
+      extractFields: async () => countryForm,
+      // Throws like the real filler does, instead of silently succeeding.
+      fill: async () => {
+        throw new Error('no_matching_option: q1: "Indo"');
+      },
+    });
+    // Fresh recording gateway per test so transitions never leak between cases.
+    const { gateway, advances } = detailGateway();
+
+    // DRY_RUN false so the real park path runs, not the dry-run exit.
+    const outcome = await applyToOne({ row, page, gateway, answers: countryAnswers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+
+    // Nothing may be submitted for a form that could not be filled.
+    expect(submit).not.toHaveBeenCalled();
+    // The human queue is reached through applying, the only edge that leads there.
+    expect(advances.map((a) => a.to)).toEqual(['applying', 'blocked_needs_human']);
+    // The outcome kind is what the claim loop counts as parked rather than errored.
+    expect(outcome.kind).toBe('blocked');
+    // The RPC rejects a park without a block_reason, and the label (not "q1") is what the human reads.
+    expect(advances[1]?.detail).toMatchObject({ block_reason: 'unanswerable_question', unanswered: ['Country'] });
+  });
+
+  it('rethrows any other error unchanged', async () => {
+    // An unknown failure must not be relabelled as a form gap.
+    const { page } = fakePage({
+      // Gives the page the one field the planner will plan a fill for.
+      extractFields: async () => countryForm,
+      // Throws like the real filler does, instead of silently succeeding.
+      fill: async () => {
+        throw new Error('boom');
+      },
+    });
+    // Fresh gateway per test; this case only needs it to exist.
+    const { gateway } = detailGateway();
+
+    // Asserted as a rejection because swallowing the error is the bug being guarded.
+    await expect(
+      applyToOne({ row, page, gateway, answers: countryAnswers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render }),
+    ).rejects.toThrow('boom');
+  });
+
+  it('dry-run reports the blocker and wouldSubmit false, not a silent gap', async () => {
+    // Same rejection, but with the dry-run default (env empty).
+    const { page } = fakePage({
+      // Gives the page the one field the planner will plan a fill for.
+      extractFields: async () => countryForm,
+      // Throws like the real filler does, instead of silently succeeding.
+      fill: async () => {
+        throw new Error('checkbox_not_autofilled: q1');
+      },
+    });
+    // The plain fake suffices: a dry run must record no transitions at all.
+    const { gateway, transitions } = fakeGateway();
+
+    // Empty env is the dry-run default, the mode this system actually runs in.
+    const outcome = await applyToOne({ row, page, gateway, answers: countryAnswers, env: {}, renderResume: fakeRenderer().render });
+
+    // A dry run never moves the row, whatever happened to the fill.
+    expect(transitions).toHaveLength(0);
+    // The dry-run exit is still taken; only its wouldSubmit and blockers change.
+    expect(outcome.kind).toBe('dry_run_complete');
+    if (outcome.kind === 'dry_run_complete') {
+      // The trust-period log must show this application would NOT have gone out, and why.
+      expect(outcome.wouldSubmit).toBe(false);
+      expect(outcome.blockers.map((b) => b.label)).toEqual(['Country']);
+    }
+  });
+});

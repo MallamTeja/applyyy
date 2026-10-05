@@ -1,0 +1,64 @@
+<!doctype html>
+<!-- SYNTHETIC, hand-authored: proves extractor/filler behaviour, NOT a vendor's real DOM. -->
+<html><body><form>
+  <!-- native select with an empty-value placeholder that must not become an option -->
+  <label for="country_native">Country</label>
+  <select id="country_native" required>
+    <option value="">Select...</option>
+    <option value="in">India</option>
+    <option value="us">United States</option>
+  </select>
+
+  <!-- radio group: the question lives in the legend, never in the Yes/No labels -->
+  <fieldset id="located_in_india">
+    <legend>Are you located in India? *</legend>
+    <label><input type="radio" name="india" value="y" required /> Yes</label>
+    <label><input type="radio" name="india" value="n" /> No</label>
+  </fieldset>
+
+  <!-- single checkbox -->
+  <label><input type="checkbox" id="agree" /> I agree to the terms</label>
+
+  <!-- Three react-select lookalikes. City and Region menus are OPEN and STALE from the start and each hold
+       an "India" option too, so a page-wide option query would click the wrong widget's row.
+       City links its menu with aria-controls; Region has no link (widget-subtree fallback);
+       Lonely has no link and no menu of its own (must fail closed). -->
+  <div id="city-widget">
+    <label id="city-label">City</label>
+    <input id="city" role="combobox" aria-labelledby="city-label" aria-controls="city-menu" aria-expanded="false" type="text" />
+    <div class="select__single-value" id="city-shown"></div>
+    <div id="city-menu"><div role="option">India</div></div>
+  </div>
+  <div id="region-widget">
+    <label id="region-label">Region</label>
+    <input id="region" role="combobox" aria-labelledby="region-label" aria-expanded="true" type="text" />
+    <div class="select__single-value" id="region-shown"></div>
+    <div id="region-menu"><div role="option">India</div><div role="option">Indonesia</div></div>
+  </div>
+  <div id="lonely-widget">
+    <label id="lonely-label">Lonely</label>
+    <input id="lonely" role="combobox" aria-labelledby="lonely-label" aria-expanded="false" type="text" />
+  </div>
+  <script>
+    // Wires a widget: typing re-renders ITS menu only; clicking an option shows it as the value.
+    function wire(inputId, menuId, shownId, items) {
+      const input = document.getElementById(inputId);
+      const menu = document.getElementById(menuId);
+      const shown = document.getElementById(shownId);
+      input.addEventListener('input', () => {
+        menu.innerHTML = '';
+        const q = input.value.toLowerCase();
+        for (const c of items.filter((c) => q && c.toLowerCase().includes(q))) {
+          const o = document.createElement('div');
+          o.setAttribute('role', 'option');
+          o.textContent = c;
+          o.addEventListener('click', () => { shown.textContent = c; input.value = ''; menu.innerHTML = ''; });
+          menu.appendChild(o);
+        }
+      });
+      input.addEventListener('keydown', (e) => { if (e.key === 'Escape') menu.innerHTML = ''; });
+    }
+    wire('city', 'city-menu', 'city-shown', ['India', 'British Indian Ocean Territory', 'Indonesia']);
+    wire('region', 'region-menu', 'region-shown', ['India', 'Indonesia']);
+  </script>
+</form></body></html>

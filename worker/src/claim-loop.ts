@@ -22,7 +22,8 @@ import {
   type ResumeRenderer,
 } from './apply-one.ts';
 import { canStartAnotherApplication, type RunWindowLimits } from './run-window.ts';
-import type { AnswerBankRow } from '@applyy/shared-types';
+// Type-only so the claim loop gains no runtime dependency on the profile module.
+import type { AnswerBankRow, MasterProfile } from '@applyy/shared-types';
 import type { SubmissionEnv } from './submission-mode.ts';
 
 // This worker's identity, used for both the run row and the claim marker.
@@ -42,6 +43,9 @@ export interface RunGateway extends ApplierGateway {
   sweepStaleClaims(): Promise<void>;
   claimApplications(claimedBy: string, limit: number): Promise<ClaimedApplication[]>;
   fetchAnswers(): Promise<readonly AnswerBankRow[]>;
+  // Optional so older gateways keep working; absent means no profile fills, the safe direction.
+  // Declared on the loop's gateway type so the loop can fetch the profile without a cast.
+  fetchLatestProfile?(): Promise<MasterProfile | null>;
   // Expiry of the current access token, in epoch seconds.
   sessionExpiresAtEpochSeconds(): number;
   // Sign in again. The worker holds an ordinary Supabase Auth user's
@@ -177,6 +181,12 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
     // Fetched once per run rather than per application: the bank changes only
     // when a human edits it, and 35 refetches would be 35 needless round trips.
     const answers = await gateway.fetchAnswers();
+    // Fetched once per run for the same reason as the bank: it changes only when a human edits it.
+    // A gateway without the method silently loses every profile fill; warn once per run so a wiring slip is visible.
+    // console.warn rather than throw: a missing profile degrades to blockers, it is not unsafe.
+    if (gateway.fetchLatestProfile === undefined) console.warn('[claim-loop] gateway has no fetchLatestProfile; profile fills disabled');
+    // Optional call plus null default, because an absent method must behave as "no profile".
+    const profile = (await gateway.fetchLatestProfile?.()) ?? null;
 
     // The claim loop proper. Keeps going until the queue empties or a gate says
     // stop; it never drains in one query, so a lease stays short. Labelled so a
@@ -231,7 +241,8 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
         // Opened per application so one poisoned page cannot corrupt the next.
         const page = await openPage();
         try {
-          const outcome = await applyToOne({ row, page, gateway, answers, env, renderResume });
+          // The same profile object is reused for every row, which is the point of fetching it once.
+          const outcome = await applyToOne({ row, page, gateway, answers, profile, env, renderResume });
 
           // Counted separately rather than collapsed into a success/failure
           // pair, because these four mean genuinely different things to the

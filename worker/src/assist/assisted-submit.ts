@@ -11,7 +11,8 @@
 // move the row to `applied` (as agent `human`). `applying -> applied` as `applier` means
 // "the worker confirmed a submission", which this flow can never claim, so it is never
 // written.
-import type { AgentName, AnswerBankRow, ResolvedResume } from '@applyy/shared-types';
+// Type-only: the assisted flow only needs the profile's shape to pass it along.
+import type { AgentName, AnswerBankRow, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 import type { ApplicationPage } from '../apply-one.ts';
 import { guardedAdvance, type StatusWriter } from '../guarded-advance.ts';
 import { planFill } from '../plan-fill.ts';
@@ -82,6 +83,9 @@ export interface AssistGateway extends StatusWriter {
   // The answer bank, so planFill can copy human-written answers.
   // Read-only: this flow never writes to the answer bank.
   fetchAnswers(): Promise<readonly AnswerBankRow[]>;
+  // Optional: absent means no profile fills (the safe direction); the real gateway delegates it.
+  // Declared on the assisted gateway port so the planner call below type-checks.
+  fetchLatestProfile?(): Promise<MasterProfile | null>;
 }
 
 /** Everything the flow needs, injected. */
@@ -251,7 +255,12 @@ export async function runAssisted(deps: AssistDeps): Promise<AssistOutcome> {
       // The accessibility-tree read of the form; shared by both planners below.
       const fields = await page.extractFields();
       // Pure planner decision over those fields and the stored answers.
-      const plan = planFill(fields, await gateway.fetchAnswers());
+      // Warn (once per call) when the gateway cannot supply a profile, so a wiring slip is visible not silent.
+      // Warn instead of throw: the flow still works, it just asks the human for more.
+      if (gateway.fetchLatestProfile === undefined) console.warn('[assisted-submit] gateway has no fetchLatestProfile; profile fills disabled');
+      // Profile read alongside the bank so factual fields (email, phone, links) can be copied.
+      // Null default so an absent method means no profile fills, the safe direction.
+      const plan = planFill(fields, await gateway.fetchAnswers(), (await gateway.fetchLatestProfile?.()) ?? null);
       // Blockers are listed as unfilled so the human knows which questions are theirs.
       // Each blocker is a question the bank cannot answer, so it is the human's to do.
       for (const blocker of plan.blockers) unfilled.push(blocker.label);
