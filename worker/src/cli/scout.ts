@@ -7,10 +7,6 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { getAdapter, supportedProviders, toJobInsert, type JobInsertContext } from '../../../supabase/functions/_shared/ats/registry.ts';
-// The blanking guard. Groups one batch into the fewest upserts that cannot let an
-// omitted field overwrite a stored one — see upsert-plan.ts for why per-row stripping
-// does not work against postgrest's union-of-keys column list.
-import { planJobUpsertGroups } from '../../../supabase/functions/_shared/screen/upsert-plan.ts';
 // The screener glue, shared with the Edge Function rather than duplicated. THIS FILE IS
 // THE ONE ON CRON (.github/workflows/scout.yml:61 -> package.json:13), so this import is
 // what actually puts the cascade in front of Teja's queue.
@@ -18,6 +14,8 @@ import { planScreenedApplications } from '../../../supabase/functions/_shared/sc
 // The Screener's database context, and the adapter that fetches it.
 import { loadScreenContext } from '../../../supabase/functions/_shared/screen/context.ts';
 import { supabaseScreenQueries } from '../../../supabase/functions/_shared/screen/supabase-queries.ts';
+// The dedupe + insert/refresh split that keeps one fingerprint from poisoning a batch.
+import { dedupeByFingerprint, persistJobBatch, watchlistPollUpdate, type PreparedJob } from '../scout/persist-jobs.ts';
 import type { AtsProvider, JobInsert } from '../../../packages/shared-types/src/tables.ts';
 
 function required(name: string): string {
@@ -282,60 +280,55 @@ async function main(): Promise<void> {
         isFirstPollOfBoard: (board.poll_count === 0 || !board.first_polled_at),
       };
 
-      // Convert postings into JobInsert rows with canonical fingerprint & freshness
-      const jobRows: JobInsert[] = await Promise.all(
-        parseResult.postings.map((p) => toJobInsert(p, adapter, context))
+      // Convert postings into JobInsert rows with canonical fingerprint & freshness. Each
+      // keeps a rebuild hook so a re-sighted posting can be rebuilt with its STORED first_seen_at.
+      // Built in parallel because toJobInsert is async and independent per posting.
+      const built: PreparedJob[] = await Promise.all(
+        parseResult.postings.map(async (p) => ({
+          // First-sighting row, used for dedupe and as the insert payload.
+          row: await toJobInsert(p, adapter, context),
+          // Closure over the posting, so the refresh path can rebuild with the stored date without re-parsing.
+          rebuild: (firstSeenAt: Date) => toJobInsert(p, adapter, { ...context, firstSeenAt }),
+        })),
       );
 
+      // ONE POSTING PER FINGERPRINT, for the whole board, before any batching. Two live
+      // postings can share company+title+location, and a duplicate conflict key inside one
+      // statement rejects it whole. Whole-board (not per-batch) so a twin in a later batch
+      // is not mistaken for a re-sighting and does not double-count seen_count.
+      // Destructured once so the log below and the batching share one result.
+      const { kept: prepared, collisions } = dedupeByFingerprint(built);
+      // Never silent: these postings are dropped from the write on purpose.
+      if (collisions > 0) {
+        console.warn(`[applyy-scout] ⚠️ ${board.company_name}: ${collisions} posting(s) shared a fingerprint with another; kept one each.`);
+      }
+
+      // Per-board tally for the closing log line.
       let boardNewJobs = 0;
+      // Counts only rows the insert actually created, since ignored duplicates return nothing.
       let boardNewApps = 0;
+      // Job-write failures for THIS board only; decides healthy vs failed below.
+      const boardErrors: string[] = [];
 
       // Upsert in batches of BATCH_SIZE for high throughput
-      for (let i = 0; i < jobRows.length; i += BATCH_SIZE) {
-        const batch = jobRows.slice(i, i + BATCH_SIZE);
+      for (let i = 0; i < prepared.length; i += BATCH_SIZE) {
+        // Slice keeps the postings paired with their rebuild hooks, which the plain rows lose.
+        const slice = prepared.slice(i, i + BATCH_SIZE);
+        // Plain rows are what the screener and the fallback matching read.
+        const batch: JobInsert[] = slice.map((j) => j.row);
 
-        // ONE UPSERT PER DISTINCT KEY-SET, not one per batch. postgrest-js sends the
-        // UNION of keys across the whole array as `columns=`, so a single request cannot
-        // express "this row omits description_raw but that one sets it" — the omitting
-        // row would be sent as NULL and would blank a stored description.
-        const upsertGroups = planJobUpsertGroups(batch);
-
-        // Fingerprint -> job id. Keyed by fingerprint because that is the only identifier
-        // present both on the row the screener reads and on what the upsert returns.
-        const jobIdByFingerprint = new Map<string, string>();
-
-        for (const group of upsertGroups) {
-          const { data: upsertedJobs, error: jobErr } = await client
-            .from('jobs')
-            .upsert(group, {
-              onConflict: 'user_id,fingerprint',
-              ignoreDuplicates: false,
-            })
-            .select('id, fingerprint');
-
-          // A refused upsert used to fall through silently and the run still
-          // closed `succeeded`. Counted now; the fallback select below may
-          // still resolve the ids if the rows already existed.
-          noteError(`${board.company_name}: upsert jobs`, jobErr);
-          if (!jobErr && upsertedJobs) {
-            for (const job of upsertedJobs) jobIdByFingerprint.set(job.fingerprint, job.id);
-          }
+        // Insert-new / refresh-existing split; first_seen_at is never overwritten.
+        // One call owns every jobs write, so the batch cannot be half-handled by this file.
+        const persisted = await persistJobBatch(client, slice, now);
+        // Recorded on the run AND kept per board, so the board is marked failed too.
+        for (const message of persisted.errors) {
+          // Reuses the run-level error list so the run row closes failed.
+          noteError(`${board.company_name}: ${message}`, { message });
+          // Feeds watchlistPollUpdate, which decides whether the board may read healthy.
+          boardErrors.push(message);
         }
-
-        // Fallback for anything the upsert did not return. Now selects `fingerprint` as
-        // well, because an id alone cannot be matched back to the row the screener reads.
-        const missing = batch.filter((row) => !jobIdByFingerprint.has(row.fingerprint)).map((row) => row.fingerprint);
-        if (missing.length > 0) {
-          const { data: existing, error: existingErr } = await client
-            .from('jobs')
-            .select('id, fingerprint')
-            .in('fingerprint', missing);
-          // Counted: a failed lookup silently drops these postings from the queue.
-          noteError(`${board.company_name}: look up existing jobs`, existingErr);
-          if (existing) {
-            for (const job of existing) jobIdByFingerprint.set(job.fingerprint, job.id);
-          }
-        }
+        // Aliased to the name the unchanged screening code below already uses.
+        const jobIdByFingerprint = persisted.idByFingerprint;
 
         // Pair each persisted job with the row it came from. Unresolved ids are skipped
         // rather than guessed at.
@@ -390,20 +383,15 @@ async function main(): Promise<void> {
         totalDiscovered += entries.length;
       }
 
-      // Update watchlist success telemetry. Checked, because a lost write here
-      // keeps the board at the front of `order by last_polled_at` forever.
-      const { error: successMarkErr } = await client
+      // One decision point: failed job writes yield a failure update, never a healthy one.
+      // Checked, because a lost telemetry write would leave the board stuck at the front of the rotation.
+      const { error: pollMarkErr } = await client
         .from('company_watchlist')
-        .update({
-          poll_count: (board.poll_count || 0) + 1,
-          first_polled_at: board.first_polled_at || now.toISOString(),
-          last_polled_at: now.toISOString(),
-          last_poll_job_count: parseResult.postings.length,
-          consecutive_failures: 0,
-        })
+        // The payload comes from one pure function, so failure and success cannot be mixed up here.
+        .update(watchlistPollUpdate(board, boardErrors, parseResult.postings.length, now))
         .eq('id', board.id);
-      // Counted with the rest, so the run cannot close `succeeded` over it.
-      noteError(`${board.company_name}: record poll success`, successMarkErr);
+      // Counted with the rest, so the run cannot close `succeeded` over a lost write.
+      noteError(`${board.company_name}: record poll result`, pollMarkErr);
 
       console.log(`[applyy-scout] ✓ ${board.company_name}: processed ${boardNewJobs} jobs (${boardNewApps} new applications created).`);
     } catch (err: unknown) {
