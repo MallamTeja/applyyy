@@ -299,7 +299,7 @@ export async function callGeminiWithFailover<T>(
     // this is not an overload, so waiting buys nothing. Same maxRetries budget as everything else.
     // 400 is deliberately NOT here: a malformed request fails identically on every key.
     if (execResult.status === 401 || execResult.status === 403) {
-      const detail = withGoogleError(`HTTP ${execResult.status}: ${execResult.statusText ?? "Key rejected"}`, execResult.errorBody);
+      const detail = withGoogleError(`HTTP ${execResult.status}: ${execResult.statusText || "Key rejected"}`, execResult.errorBody);
       await reportResult(db, keyIndex, false, KEY_REJECTED_COOLDOWN_S, detail);
       lastFailure = { status: execResult.status, detail };
       lastKind = "key_rejected";
@@ -318,8 +318,8 @@ export async function callGeminiWithFailover<T>(
       // Status 0 has no HTTP line; say "network error" so the health page is not misleading.
       const detail =
         execResult.status === 0
-          ? `network error: ${execResult.statusText ?? "unknown"}`
-          : `HTTP ${execResult.status}: ${execResult.statusText ?? "Service error"}`;
+          ? `network error: ${execResult.statusText || "unknown"}`
+          : `HTTP ${execResult.status}: ${execResult.statusText || "Service error"}`;
       await reportResult(db, keyIndex, false, null, withGoogleError(detail, execResult.errorBody));
       // Remembered for the exhausted-loop return at the bottom.
       lastFailure = { status: execResult.status, detail };
@@ -352,14 +352,16 @@ export async function callGeminiWithFailover<T>(
       };
     }
 
-    // 5. On other NON-TRANSIENT, non-429, non-404 HTTP errors (e.g. 400 Bad Request, 401/403):
-    // Record error against key and fail closed — rotating keys won't fix a malformed payload.
+    // 5. On 400 and any other status that is not a 429, 404, key rejection (401/403) or transient
+    // failure: record the error against the key and fail closed — rotating keys won't fix a
+    // malformed payload. `||` (not `??`) on statusText: HTTP/2 yields "", and an empty string
+    // would otherwise leave a double space in last_error ("HTTP 403:  [...]").
     await reportResult(
       db,
       keyIndex,
       false,
       null,
-      withGoogleError(`HTTP ${execResult.status}: ${execResult.statusText ?? "Execution failed"}`, execResult.errorBody),
+      withGoogleError(`HTTP ${execResult.status}: ${execResult.statusText || "Execution failed"}`, execResult.errorBody),
     );
 
     return {
