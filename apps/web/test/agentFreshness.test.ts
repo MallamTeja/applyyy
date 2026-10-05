@@ -27,6 +27,7 @@ import assert from 'node:assert/strict';
 
 import {
   AGENT_CADENCE,
+  describeRunErrors,
   describeVerdict,
   formatAge,
   needsAttention,
@@ -494,4 +495,55 @@ test('every verdict has a description, and none of them is a bare status word', 
       );
     }
   }
+});
+
+/* describeRunErrors: a `succeeded` run with row errors must say so. */
+
+/* Minimal run builder; only status and error_count vary, so everything else is
+   pinned to constants and cannot influence the label. */
+function runWith(status: AgentRunStatus, error_count?: unknown): AgentRunFacts {
+  return {
+    // Any real agent works; the label never reads the name, so take the first.
+    agent: AGENT_NAMES[0],
+    status,
+    // Fixed timestamps: the label ignores time, constants keep runs deterministic.
+    started_at: '2026-01-01T00:00:00Z',
+    // Closed run, so nothing here can be mistaken for a stuck one.
+    finished_at: '2026-01-01T00:01:00Z',
+    // Cast so the malformed shapes (NaN, 1.5) can be fed in like a bad DB row.
+    error_count: error_count as number | null | undefined,
+  };
+}
+
+/* Table: [status, error_count, expected label]. Accept twins (0, unknown)
+   sit beside the rejections so a label that fires always cannot pass. */
+// Typed tuple table: a malformed row is a compile error and each case is one line.
+const ERROR_LABEL_CASES: ReadonlyArray<[AgentRunStatus, unknown, string | null]> = [
+  // Zero errors is a clean success: no caveat to show.
+  ['succeeded', 0, null],
+  // Singular: "1 error", not "1 errors".
+  ['succeeded', 1, 'succeeded with 1 error'],
+  // Plural for anything above one.
+  ['succeeded', 3, 'succeeded with 3 errors'],
+  // Unknown (null/undefined) is NOT zero and NOT a count: no label.
+  ['succeeded', null, null],
+  ['succeeded', undefined, null],
+  // Malformed numbers (NaN, -1, 1.5) must fail the shape check, not be coerced.
+  ['succeeded', NaN, null],
+  ['succeeded', -1, null],
+  ['succeeded', 1.5, null],
+  // A failed run is unaffected: it already reads as a failure.
+  ['failed', 3, null],
+];
+
+for (const [status, count, expected] of ERROR_LABEL_CASES) {
+  test(`describeRunErrors: ${status} / ${String(count)} -> ${expected}`, () => {
+    // One assertion per row keeps the failing case named in the output.
+    assert.equal(describeRunErrors(runWith(status, count)), expected);
+  });
+}
+
+test('describeRunErrors: no run -> no label', () => {
+  // The never-run agent has lastRun null; it must not throw.
+  assert.equal(describeRunErrors(null), null);
 });

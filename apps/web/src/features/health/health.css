@@ -242,6 +242,25 @@
   max-width: 56ch;
 }
 
+/* A caveat on a run that technically succeeded but had row errors. A separate
+   class from `.table__stuck` because that one means "opened and never closed"
+   and is the safety-critical Applier colour; one name must not carry two
+   meanings. */
+.table__run-caveat {
+  /* Own line under the verdict: an additional fact about the same agent. */
+  display: block;
+  /* Same rhythm as the neighbouring stuck-run line so the cell reads evenly. */
+  margin-top: var(--gap-1);
+  /* Amber --signal-strong ("needs human intervention"), not the red alarm
+     token: the run did succeed, a human should look, nothing is on fire.
+     light-dark() lives inside the token, so no [data-theme] rule is needed. */
+  color: var(--signal-strong);
+  /* Secondary line, same size as the other under-verdict notes. */
+  font-size: var(--size-xs);
+  /* Wraps like a sentence rather than stretching the column. */
+  max-width: 56ch;
+}
+
 /* A count in the coverage table. Tabular so four numbers that must sum to a
    fifth can be added up by eye - which is the whole point of showing the
    partition rather than a single figure. */

@@ -131,14 +131,15 @@ export function useAgentRuns(): AgentRunsRead {
           return;
         }
 
-        /* FOUR COLUMNS, which is every column this panel reads and no more.
-           A `select('*')` here would pull counters and a `user_id` into the
-           browser to be discarded, and the narrowest projection that answers
-           the question is the one that cannot leak a column somebody later adds
-           to this table. */
+        /* FIVE COLUMNS, which is every column this panel reads and no more.
+           `error_count` is the one counter admitted: pipeline agents mark a run
+           `succeeded` when any row succeeded, so Health needs it to say
+           "succeeded with N errors". Still no `select('*')` and no `user_id` -
+           the narrowest projection that answers the question cannot leak a
+           column somebody later adds to this table. */
         const { data, error: queryError } = await supabase
           .from('agent_runs')
-          .select('agent, status, started_at, finished_at')
+          .select('agent, status, started_at, finished_at, error_count')
           /* Newest first, so the cap below keeps the rows that matter. Ordering
              on `started_at` rather than `finished_at` because a crashed run has
              no `finished_at` at all and must not sort to the bottom - a run

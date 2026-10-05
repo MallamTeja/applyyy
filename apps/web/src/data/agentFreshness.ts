@@ -61,6 +61,29 @@ export interface AgentRunFacts {
   readonly started_at: string;
   /* When it closed, or null while still running / if it crashed mid-run. */
   readonly finished_at: string | null;
+  /* Rows that failed inside a run. Optional/nullable so old rows and fixtures
+     that predate the column still type-check; absence means "unknown", never 0. */
+  readonly error_count?: number | null;
+}
+
+/* The "succeeded with N errors" label for a run, or null when there is none to
+ * show. Pipeline agents mark a run `succeeded` if ANY row succeeded (see the
+ * `const runStatus = ...` line in supabase/functions/matcher/index.ts: `failed`
+ * only when no row moved; screener, normalizer, tailor and auditor follow the
+ * same rule), so a plain success can hide 99 failures - this is the one place that says so.
+ *
+ * Shape-validated: only a non-negative integer counts. null/undefined/NaN/-1/1.5
+ * are "unknown" and return null rather than being read as 0 or as an error
+ * count, because a lenient coercion would invent either a clean bill or a
+ * number nobody measured. */
+export function describeRunErrors(run: AgentRunFacts | null): string | null {
+  // Only a succeeded run needs the caveat; a failed run already says so.
+  if (run === null || run.status !== 'succeeded') return null;
+  const n = run.error_count;
+  // Validate the shape (integer >= 0) instead of trusting truthiness.
+  if (typeof n !== 'number' || !Number.isInteger(n) || n <= 0) return null;
+  // Singular for 1 so the sentence reads as English.
+  return `succeeded with ${n} ${n === 1 ? 'error' : 'errors'}`;
 }
 
 /* --- Per-agent cadence ------------------------------------------------- */

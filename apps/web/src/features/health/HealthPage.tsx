@@ -64,6 +64,7 @@ import {
    setup there and untestable in a component. */
 import {
   AGENT_CADENCE,
+  describeRunErrors,
   describeVerdict,
   formatAge,
   needsAttention,
@@ -169,6 +170,10 @@ function AgentFreshnessPanel({
                  expected-schedule column is honest even with no data at all -
                  it describes configuration, not state. */
               const cadence = AGENT_CADENCE[agent];
+              /* Computed once per row: the render below needs both the null
+                 test and the text, and two calls could drift apart. */
+              const runErrors =
+                entry === undefined ? null : describeRunErrors(entry.lastRun);
 
               return (
                 <tr
@@ -248,6 +253,20 @@ function AgentFreshnessPanel({
                     ) : (
                       <>
                         <span>{describeVerdict(entry)}</span>
+                        {/* Rendered only when the latest run succeeded with row
+                            errors: a clean or unknown count is not a caveat, so
+                            `null` renders nothing rather than a reassuring
+                            "0 errors" nobody measured. */}
+                        {runErrors === null ? null : (
+                          /* Its own class: `table__stuck` means "opened and
+                             never closed" and carries the Applier alarm
+                             colour, so it must not be reused here. */
+                          <span className="table__run-caveat">
+                            {/* "Latest run" scopes the claim to one run, not
+                                the agent's whole history. */}
+                            Latest run {runErrors}.
+                          </span>
+                        )}
                         {/* A run that opened and never closed, older than a
                             whole cycle. For the Applier this is the
                             safety-critical case: a row left at `applying`
