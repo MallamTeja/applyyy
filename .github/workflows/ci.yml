@@ -8,7 +8,8 @@
 # 2026-10-04 also nearly passed vacuously (deno over zero files, `tests 0`), which
 # is why the guards below assert the work HAPPENED, not just that nothing failed.
 #
-# Needs NO secrets: every job is static analysis or hermetic tests. That is a
+# Needs NO secrets: every job is static analysis or hermetic tests (the browser
+# tests run against local fixtures/servers, never a live site or database). That is a
 # requirement, not an accident — a PR from a fork gets no secrets, and a check
 # that only works with credentials is a check that silently skips.
 # =============================================================================
@@ -45,11 +46,13 @@ defaults:
     # the step reporting the exit code of `grep`/`tail` (CLAUDE.md §4 trap).
     shell: bash -eo pipefail {0}
 
-# Repo-wide environment for every job.
-env:
-  # No job here launches a browser. Skipping the download keeps a ~130MB
-  # Chromium fetch off every install (the unverified budget risk in CLAUDE.md §8).
-  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+# No repo-wide PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD. The first run of this file set
+# it globally on the belief that "no job launches a browser" — wrong: the web
+# e2e suite and several worker tests launch real Chromium, and both jobs failed
+# with "Executable doesn't exist". That same run settled the CLAUDE.md §8
+# question: `pnpm install` does NOT download browsers (they were absent after
+# a full install), so the skip flag was never saving anything at install time.
+# The two jobs that need Chromium install it explicitly, from a cache, below.
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -178,6 +181,28 @@ jobs:
       - name: pnpm install --frozen-lockfile
         # Frozen: CI must fail on a lockfile drift, not quietly repair it.
         run: pnpm install --frozen-lockfile
+      # test/e2eSuite.test.ts drives real Chromium. ~130MB, so cached.
+      - name: Restore the Playwright browser cache
+        # Referenced by the conditional install below.
+        id: playwright-cache
+        # Same action and pin as apply.yml.
+        uses: actions/cache@v4
+        # Same path and key scheme as apply.yml, so the two share one cache.
+        with:
+          # Where Playwright keeps downloaded browsers on Linux.
+          path: ~/.cache/ms-playwright
+          # Keyed on the lockfile: a playwright bump changes it and misses the cache.
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+      # Downloads the browser only on a cache miss.
+      - name: Install Chromium (cache miss)
+        # Skipped on a hit; the system libraries step below still runs.
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        # The web package's own playwright, so the browser revision matches it.
+        run: pnpm --filter '@applyy/web' exec playwright install chromium
+      # System libraries every run: the cache restores the binary, not apt packages.
+      - name: Install Chromium system dependencies
+        # Same reasoning as apply.yml's unconditional install-deps step.
+        run: pnpm --filter '@applyy/web' exec playwright install-deps chromium
       # Type errors the Vite build would otherwise strip and ship.
       - name: tsc --noEmit
         # The web package's own tsconfig.
@@ -241,6 +266,29 @@ jobs:
       - name: pnpm install --frozen-lockfile
         # Frozen, for the same reason as the web job.
         run: pnpm install --frozen-lockfile
+      # Several worker tests (extract-fields, no-spurious-blockers, render-resume-pdf)
+      # launch real Chromium against captured fixtures. Same cache as the web job.
+      - name: Restore the Playwright browser cache
+        # Referenced by the conditional install below.
+        id: playwright-cache
+        # Same action and pin as apply.yml.
+        uses: actions/cache@v4
+        # Shared key with the web job and apply.yml.
+        with:
+          # Where Playwright keeps downloaded browsers on Linux.
+          path: ~/.cache/ms-playwright
+          # Keyed on the lockfile, as everywhere else.
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+      # Downloads the browser only on a cache miss.
+      - name: Install Chromium (cache miss)
+        # Skipped on a hit.
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        # The worker's own playwright, matching apply.yml's install command.
+        run: pnpm --filter '@applyy/worker' exec playwright install chromium
+      # System libraries every run, as in the web job.
+      - name: Install Chromium system dependencies
+        # The cache restores only the binary.
+        run: pnpm --filter '@applyy/worker' exec playwright install-deps chromium
       # Covers src/** and test/** (worker/tsconfig.json); scripts/** is outside it.
       - name: tsc --noEmit
         # The worker's own tsconfig.
