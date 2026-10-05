@@ -299,6 +299,23 @@ export class QuotaExhaustedError extends Error {
   }
 }
 
+// Thrown by the search seam when Gemini itself stayed unavailable (HTTP 500/502/503/504, network
+// error or timeout) through every retry. A class, not a reason string, so the handler uses
+// instanceof, same as QuotaExhaustedError.
+// WHY IT IS NOT QUOTA: quota is our budget doing its job; this is the provider being overloaded.
+// Filing it as skipped_quota would hide outages inside quota stats, so the handler records it
+// as a failed run. WHY IT IS NOT A GENERIC 502: it is self-healing and not our bug, and the UI
+// should say "try again in a few minutes" instead of "broken".
+export class UpstreamUnavailableError extends Error {
+  // The client's detail is carried so the run row still says what the upstream answered.
+  constructor(detail: string) {
+    // The text the run detail and the log show.
+    super(detail);
+    // Shows in stack traces, so a log reader knows the class without reading the message.
+    this.name = "UpstreamUnavailableError";
+  }
+}
+
 // A watchlist row's naming facts for one board, when the user already tracks it.
 export interface WatchlistName {
   // The human-entered employer name scout-ats uses for the same board.

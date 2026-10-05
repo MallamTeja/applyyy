@@ -119,6 +119,21 @@ describe('runWebScout', () => {
     assert.equal(state.kind, 'error');
   });
 
+  it('maps a 503 upstream_unavailable envelope to its own upstream state', async () => {
+    // Exactly what scout-web returns when Gemini stayed overloaded through every retry.
+    const context = { json: async () => ({ status: 'upstream_unavailable', message: 'gemini is temporarily overloaded; try again in a few minutes' }) };
+    const state = await panel.runWebScout(fake({ data: null, error: { context } }), '');
+    // Fixed user-facing text, not the server's.
+    assert.deepEqual(state, { kind: 'upstream', message: panel.UPSTREAM_MESSAGE });
+  });
+
+  it('refuses status upstream_unavailable on a 2xx body', async () => {
+    // Same drift guard as quota: otherwise-valid body, so only the status check can reject it.
+    const state = await panel.runWebScout(fake({ data: { ...okBody(), status: 'upstream_unavailable' }, error: null }), '');
+    // Error kind proves the upstream branch is unreachable from a 2xx.
+    assert.equal(state.kind, 'error');
+  });
+
   it('sends the trimmed query, and no query key when blank', async () => {
     // Collects what each call sent, since the body is the only thing this test observes.
     const bodies: unknown[] = [];
@@ -182,6 +197,16 @@ describe('WebScoutView markup', () => {
     assert.equal(view({ kind: 'quota', message: 'Budget spent.' }).split('Budget spent.').length - 1, 1);
   });
 
+  it('renders the upstream notice inside the live region, once, and never as an alert', () => {
+    const html = view({ kind: 'upstream', message: 'Overloaded.' });
+    // Inside the role=status element, so a screen-reader user hears it.
+    assert.match(statusRegion(html), /<p class="web-scout__notice">Overloaded\.<\/p>/);
+    // Information, not a failure.
+    assert.equal(/role="alert"/.test(html), false);
+    // Not duplicated elsewhere on the page.
+    assert.equal(html.split('Overloaded.').length - 1, 1);
+  });
+
   it('keeps the running message in the live region and errors outside it as alerts', () => {
     // The running text is the region's own content, so it is announced on change.
     assert.match(statusRegion(view({ kind: 'running' })), /^<div [^>]*>Searching the web and verifying links\./);
@@ -193,7 +218,7 @@ describe('WebScoutView markup', () => {
     // In JSX children a bare `//` line is literal text, not a comment; tsc cannot see it, so test the rendered output.
     const ok = await panel.runWebScout(fake({ data: okBody(), error: null }), '');
     // Every state, with the ok state carrying jobs AND rejected rows so the whole result block renders.
-    const states = [{ kind: 'idle' }, { kind: 'running' }, ok, { kind: 'disabled', message: 'Off.' }, { kind: 'quota', message: 'Spent.' }, { kind: 'unauthorized', message: 'Sign in.' }, { kind: 'error', message: 'Boom.' }];
+    const states = [{ kind: 'idle' }, { kind: 'running' }, ok, { kind: 'disabled', message: 'Off.' }, { kind: 'quota', message: 'Spent.' }, { kind: 'upstream', message: 'Busy.' }, { kind: 'unauthorized', message: 'Sign in.' }, { kind: 'error', message: 'Boom.' }];
     // The ok state must really be ok, or the result block would be silently untested.
     assert.equal(ok.kind, 'ok');
     for (const state of states) {

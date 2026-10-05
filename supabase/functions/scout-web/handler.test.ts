@@ -3,7 +3,7 @@ import { test } from "node:test";
 // Strict assertions.
 import assert from "node:assert/strict";
 import { handleScoutWeb, type Connection, type HandlerDeps, type RunPatch } from "./handler.ts";
-import { buildApplicationRows, buildSearchPrompt, companyFor, discover, INSERT_STATUS, QuotaExhaustedError, runOutcome } from "./core.ts";
+import { buildApplicationRows, buildSearchPrompt, companyFor, discover, INSERT_STATUS, QuotaExhaustedError, runOutcome, UpstreamUnavailableError } from "./core.ts";
 
 // A Greenhouse board payload containing exactly one posting, id 111.
 const GH_BOARD = {
@@ -267,6 +267,24 @@ test("quota exhaustion is a 429 and a skipped_quota run with zero errors, never 
   assert.equal(spy.runs[0]?.status, "skipped_quota");
   // Nothing went wrong, so the health page must not count it.
   assert.equal(spy.runs[0]?.error_count, 0);
+});
+
+test("upstream overload is a 503 with Retry-After and a failed run, never skipped_quota", async () => {
+  const { deps, spy } = makeDeps({});
+  // The seam's signal for "Gemini stayed 503 through every retry".
+  const res = await handleScoutWeb(post("good"), withSearch(deps, () => Promise.reject(new UpstreamUnavailableError("http 503 high demand"))));
+  assert.equal(res.status, 503);
+  // Its own status string, so the UI can say "overloaded" instead of "broken".
+  assert.equal((await res.json()).status, "upstream_unavailable");
+  // Tells well-behaved clients when to come back.
+  assert.equal(res.headers.get("retry-after"), "60");
+  // CORS must survive the extra header, or the browser cannot read the body.
+  assert.ok(res.headers.get("access-control-allow-origin"));
+  // A failure from the run's point of view, and not hidden in quota stats.
+  assert.equal(spy.runs[0]?.status, "failed");
+  assert.equal(spy.runs[0]?.error_count, 1);
+  // The prefix distinguishes an outage from a real search failure.
+  assert.match(spy.runs[0]?.error_detail ?? "", /^upstream_unavailable/);
 });
 
 test("any other search failure is still a 502 and a failed run", async () => {

@@ -58,6 +58,8 @@ export type WebScoutState =
   | { kind: 'disabled'; message: string }
   // Daily Gemini budget spent or every key cooling: neither an error nor "0 jobs", so it gets its own kind.
   | { kind: 'quota'; message: string }
+  // Gemini itself is overloaded: self-healing and not our bug, so not an error and not quota.
+  | { kind: 'upstream'; message: string }
   // Session expired: the remedy (sign in again) differs from a generic error, so it is separate.
   | { kind: 'unauthorized'; message: string }
   // Everything else that went wrong; the message says what, never a guessed cause.
@@ -145,6 +147,9 @@ export function parseWebScoutOk(body: unknown): WebScoutOk | null {
 // (wait, or raise the budget setting) is the user's to act on and should read the same every time.
 export const QUOTA_MESSAGE = 'Daily Gemini budget used up — try again tomorrow or raise gemini_daily_call_budget.';
 
+// What the upstream state says. Fixed text, like QUOTA_MESSAGE, so the remedy reads the same every time.
+export const UPSTREAM_MESSAGE = 'Gemini is overloaded right now — try again in a few minutes.';
+
 // supabase-js puts non-2xx bodies behind error.context (a fetch Response). Read it
 // defensively: it may be absent, already consumed, or not JSON.
 async function readErrorBody(error: unknown): Promise<unknown> {
@@ -188,6 +193,8 @@ export async function runWebScout(client: WebScoutClient, query: string): Promis
       // 429 {status:'quota'}: the server's skipped_quota run. Checked only here, on the non-2xx path;
       // parseWebScoutOk still refuses any 2xx body whose status is not 'ok', so a 200 can never claim it.
       if (isRecord(errBody) && errBody.status === 'quota') return { kind: 'quota', message: QUOTA_MESSAGE };
+      // 503 {status:'upstream_unavailable'}: Gemini overloaded. Non-2xx path only, for the same reason as quota.
+      if (isRecord(errBody) && errBody.status === 'upstream_unavailable') return { kind: 'upstream', message: UPSTREAM_MESSAGE };
       // Only a well-formed error envelope is trusted for status and message.
       if (isRecord(errBody) && typeof errBody.message === 'string') {
         // 'disabled' is the kill switch; the user needs to see its message verbatim.
@@ -275,6 +282,8 @@ export function WebScoutView(props: {
         {state.kind === 'disabled' && <p className="web-scout__notice">{state.message}</p>}
         {/* Quota spent: same non-error notice styling, because nothing is broken and it heals tomorrow. */}
         {state.kind === 'quota' && <p className="web-scout__notice">{state.message}</p>}
+        {/* Gemini overloaded: a polite notice, never role=alert, because it heals on its own. */}
+        {state.kind === 'upstream' && <p className="web-scout__notice">{state.message}</p>}
       </div>
       {/* Unauthorized and error use role=alert so they interrupt. */}
       {/* Errors stay outside the polite region: role=alert is assertive and announces on its own. */}

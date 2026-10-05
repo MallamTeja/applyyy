@@ -21,7 +21,7 @@ import { planJobUpsertGroups } from "../_shared/screen/upsert-plan.ts";
 // _shared), so no package.json edit or pnpm install is needed.
 import { checkRobots } from "../../../packages/master-robots/src/index.ts";
 // The pure pipeline's seam types and the applications row builder.
-import { buildApplicationRows, QuotaExhaustedError, type FetchBoardFn, type SearchFn, type WatchlistName } from "./core.ts";
+import { buildApplicationRows, QuotaExhaustedError, UpstreamUnavailableError, type FetchBoardFn, type SearchFn, type WatchlistName } from "./core.ts";
 // The lifecycle, and the Store contract this file implements.
 import { handleScoutWeb, type Store } from "./handler.ts";
 // One-hop resolver for the Google redirect URLs that grounding metadata returns.
@@ -92,6 +92,9 @@ function makeSearch(db: Parameters<typeof generateGeminiContent>[0]): SearchFn {
     // Every key cooling, or the daily budget spent (claim_gemini_key enforces
     // system_settings.gemini_daily_call_budget). Normal quota behaviour, signalled as its own class.
     if (!outcome.ok && outcome.reason === "all_keys_cooling") throw new QuotaExhaustedError();
+    // Gemini stayed overloaded or unreachable through every retry: its own class, because the
+    // remedy ("try again in a few minutes") differs from both quota and a real failure.
+    if (!outcome.ok && outcome.reason === "upstream_unavailable") throw new UpstreamUnavailableError(outcome.detail ?? "no_detail");
     // Any other failure is thrown so the handler records a failed run, not an empty success.
     if (!outcome.ok) throw new Error(`gemini_${outcome.reason}`);
     // First candidate only; absent means an empty answer, which the shape check will reject.

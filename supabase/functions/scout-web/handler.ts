@@ -26,6 +26,8 @@ import {
   companyFor,
   // The search seam's signal for "no key available", which is not a failure.
   QuotaExhaustedError,
+  // The search seam's signal for "Gemini itself is overloaded", which is neither quota nor our bug.
+  UpstreamUnavailableError,
   // Shape of one watchlist naming record.
   type WatchlistName,
   // Seam type for the robots-gated board fetch.
@@ -93,13 +95,13 @@ export interface HandlerDeps {
 }
 
 // One JSON answer, CORS included so the browser can read errors too.
-function json(status: number, body: Record<string, unknown>): Response {
+function json(status: number, body: Record<string, unknown>, extraHeaders: Record<string, string> = {}): Response {
   // The contract: every non-2xx carries `status` and `message`.
   return new Response(JSON.stringify(body), {
     // Caller-chosen HTTP status.
     status,
-    // JSON plus CORS in one place so no exit path can forget either.
-    headers: { "content-type": "application/json; charset=utf-8", ...corsHeaders },
+    // JSON plus CORS in one place so no exit path can forget either; extras (Retry-After) ride along.
+    headers: { "content-type": "application/json; charset=utf-8", ...corsHeaders, ...extraHeaders },
   });
 }
 
@@ -231,6 +233,17 @@ export async function handleScoutWeb(req: Request, deps: HandlerDeps): Promise<R
       await close({ status: "skipped_quota", rows_in: 0, rows_out: 0, error_count: 0, error_detail: err.message });
       // 429: retry later. Distinct from 502, so the UI can say "quota" rather than "broken".
       return json(429, { status: "quota", message: "gemini quota or daily budget exhausted; try again later" });
+    }
+    // Gemini overloaded through every retry. Self-healing and not our bug, but still a run that
+    // did not do its job, so it is 'failed' (error_count 1), NOT skipped_quota: agent_run_status
+    // has no skipped_upstream value, and quota stats must not absorb provider outages.
+    if (err instanceof UpstreamUnavailableError) {
+      // Log keeps the upstream detail for debugging.
+      console.error(`[scout-web] upstream_unavailable: ${err.message}`);
+      // The prefix lets the health page tell an outage from a real search failure.
+      await close({ status: "failed", rows_in: 0, rows_out: 0, error_count: 1, error_detail: `upstream_unavailable: ${err.message}` });
+      // 503 + Retry-After: retryable, and the UI says "overloaded" rather than "broken".
+      return json(503, { status: "upstream_unavailable", message: "gemini is temporarily overloaded; try again in a few minutes" }, { "Retry-After": "60" });
     }
     // The detail goes to telemetry and log; the response stays generic.
     const detail = err instanceof Error ? err.message : String(err);
