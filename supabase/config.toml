@@ -147,3 +147,90 @@ enabled = false
 # applyyy-f8 owns supabase/functions/** and owns that in-function check; this
 # file only opens the gate it has to check behind.
 verify_jwt = false
+
+# ---------------------------------------------------------------------------
+# Every other function, pinned explicitly (added 2026-10-05).
+#
+# Why pin at all: `supabase functions deploy` applies THIS file. A function with
+# no entry here deploys with the default verify_jwt = true, so a routine deploy
+# would silently flip any function whose LIVE setting is false. Before this
+# block only email-tracker-intake had an entry, so the first CLI deploy of the
+# 2026-10-04 fixes would have changed four functions' gateway behaviour as a
+# side effect nobody asked for. Each value below is the live value as read by
+# session applyyy-cc on 2026-10-05 via the Supabase MCP (not re-read by the
+# author of this block), so a deploy changes code, not posture.
+#
+# Why false is not "open": since a12bce3 / ef9cc6e every pipeline function
+# calls authorizeCaller() (_shared/db/gates.ts), which verifies the bearer token
+# in-function and refuses anyone but the app user. Gateway verification is a
+# second, redundant layer for those; the in-function check is the control.
+# ---------------------------------------------------------------------------
+
+# Live = false. Kept: the in-function authorizeCaller() is the control here.
+[functions.normalizer]
+# Matches live; flipping it is a separate, deliberate decision, not a deploy side effect.
+verify_jwt = false
+
+# Live = false. Kept for the same reason as normalizer.
+[functions.screener]
+# Matches live; in-function authorizeCaller() still rejects non-app-user callers.
+verify_jwt = false
+
+# Live = false. Kept for the same reason as normalizer.
+[functions.auditor]
+# Matches live; in-function authorizeCaller() still rejects non-app-user callers.
+verify_jwt = false
+
+# Live = false. The browser invokes it from discoveryService.ts; in-function
+# authorizeCaller() (ef9cc6e) is what restricts it to the app user.
+[functions.scout-ats]
+# Matches live; changing it is a posture decision, not a deploy side effect.
+verify_jwt = false
+
+# Live = true. Browser-invoked with the user's session token via functions.invoke.
+[functions.matcher]
+# Gateway verification plus in-function authorizeCaller(): two layers, both kept.
+verify_jwt = true
+
+# Live = true. Browser-invoked via the pipeline runner.
+[functions.tailor]
+# Matches live; the gateway rejects tokenless calls before any Gemini spend.
+verify_jwt = true
+
+# Live = true. Browser-invoked; spends Gemini quota per row.
+[functions.follow-up]
+# Matches live; a tokenless caller must never reach the Gemini call.
+verify_jwt = true
+
+# Live = true. Spends Gemini quota per row.
+[functions.cover-letter]
+# Matches live; gateway check keeps anonymous callers off the quota.
+verify_jwt = true
+
+# Live = true. Spends Gemini quota; ?force no longer bypasses the kill switch (ba401be).
+[functions.interview-prep]
+# Matches live; gateway plus in-function authorizeCaller().
+verify_jwt = true
+
+# Live = true. Spends Gemini quota and writes append-only application_events.
+[functions.referral]
+# Matches live; an anonymous writer into an undeletable table must be stopped at the gate.
+verify_jwt = true
+
+# Live = true. Spends Gemini quota per run.
+[functions.skill-gap]
+# Matches live; gateway check keeps anonymous callers off the quota.
+verify_jwt = true
+
+# Live = true. Seeds and deletes test rows to prove RLS; must never be anonymous.
+[functions.rls-proof]
+# Matches live; a tokenless caller must not be able to trigger seeding.
+verify_jwt = true
+
+# New function (a0149bb), not yet deployed, so there is no live value to match.
+# The browser calls it through functions.invoke('scout-web') from WebScoutPanel,
+# which always sends the signed-in user's JWT, and it spends Gemini search-grounding
+# quota — so there is no legitimate tokenless caller and every reason to refuse one.
+[functions.scout-web]
+# True: the gateway rejects anonymous calls before any quota is spent.
+verify_jwt = true
