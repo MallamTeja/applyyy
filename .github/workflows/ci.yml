@@ -31,12 +31,20 @@ permissions:
   # Checkout needs read; nothing here needs write.
   contents: read
 
-# A newer push to the same ref makes the older run's answer irrelevant.
+# Cancel superseded PR runs, but NEVER cancel a run on main.
+#
+# The first version grouped by ref with cancel-in-progress: true. Four sessions
+# push to main concurrently in this repo, so each push cancelled the previous
+# commit's run before it finished — runs 37332476592 and 37332628545 were both
+# cancelled that way, leaving those commits with no verdict at all. On main every
+# push is a DIFFERENT commit that needs its own answer; on a PR, a new push to
+# the same branch genuinely does make the old run irrelevant.
 concurrency:
-  # One group per workflow + ref, so main and a PR never cancel each other.
-  group: ci-${{ github.ref }}
-  # Saves Actions minutes, which PROJECT_PLAN §2 calls the binding budget.
-  cancel-in-progress: true
+  # PRs group by ref (one live run per PR); main groups by sha (one per commit,
+  # so two different commits never share a group and never cancel each other).
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  # Only PR runs dedupe; still saves the Actions minutes PROJECT_PLAN §2 budgets.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Defaults applied to every `run:` step in every job.
 defaults:
