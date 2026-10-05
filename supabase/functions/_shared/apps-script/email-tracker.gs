@@ -7,8 +7,9 @@
  * un-recoverable, and the whole reason PROJECT_PLAN §12 chose Apps Script was to keep
  * the intelligence in the repo — so the pipe itself had better be in the repo too.
  *
- * WHAT THIS SCRIPT IS: a dumb pipe. It reads message headers, POSTs them, and labels
- * what it sent. It performs ZERO classification — no keyword matching, no "is this a
+ * WHAT THIS SCRIPT IS: a dumb pipe. It reads message headers AND the plain-text body
+ * (first 4096 chars, see the `snippet` field below), POSTs them, and labels what it sent.
+ * It performs ZERO classification — no keyword matching, no "is this a
  * rejection", nothing. All of that happens in the Edge Function where it is
  * version-controlled and testable.
  *
@@ -65,7 +66,9 @@ var APPLYY_SEARCH_WINDOW = 'newer_than:2d';
 /** Messages per POST. Mirrors MAX_MESSAGES_PER_BATCH in `_shared/intake/email-contract.ts`. */
 var APPLYY_BATCH_SIZE = 50;
 
-/** Snippet ceiling. Mirrors MAX_SNIPPET_CHARS; the endpoint re-truncates defensively. */
+/** Cap on the plain-body text sent as `snippet` (4096 chars, whitespace-collapsed). Mirrors
+ *  MAX_SNIPPET_CHARS; the endpoint re-truncates defensively. This is the body, not Gmail's
+ *  ~100-char snippet: see the comment on the `snippet` field in applyyCollectMessages_. */
 var APPLYY_SNIPPET_LIMIT = 4096;
 
 /** Threads to pull per run. A ceiling on work, so a backlog drains over several runs
@@ -191,11 +194,19 @@ function applyyCollectMessages_(threads) {
           to: message.getTo(),
           // Subject line.
           subject: message.getSubject(),
-          // SUBJECT AND SNIPPET ONLY — NEVER `getBody()` OR `getPlainBody()`. Two
-          // independent reasons and either alone would justify it: a far smaller
-          // prompt-injection surface for the classifier (constraint #17), and far
-          // less PII leaving the mailbox — a recruiter thread routinely carries a
-          // phone number, a CTC figure and a home address this system has no use for.
+          // NOT A SHORT SNIPPET: this is `getPlainBody()` (not `getBody()`, so no HTML),
+          // whitespace-collapsed and cut to 4096 chars by applyyyTruncate_. Up to 4096
+          // chars of body text, which can include phone numbers, CTC figures and
+          // addresses, leaves the mailbox in every POST. What the intake does with it
+          // (verified 2026-10-05): the wire validator accepts it
+          // (_shared/intake/email-contract.ts:217), the classifier READS it as
+          // `parseEmail({body})` -> `cleanBody` (email-tracker-intake/decide.ts:71,75;
+          // _shared/email/classifier.ts:246,249) and it is stored in
+          // `email_events.snippet` (email-tracker-intake/index.ts:239). Company matching
+          // uses from+subject only (decide.ts:159-165). The body is sent so the
+          // classifier can see outcome wording that is not in the subject. Sending less
+          // (or none) is the owner's privacy decision, not a code fix: it needs an edit
+          // here AND a redeploy of the script in Google, and costs classifier accuracy.
           snippet: applyyTruncate_(message.getPlainBody(), APPLYY_SNIPPET_LIMIT),
           // When it arrived, as ISO-8601 for a timestamptz column.
           received_at: message.getDate().toISOString(),
