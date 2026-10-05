@@ -12,42 +12,62 @@ export type WebScoutProvider = 'greenhouse' | 'lever' | 'ashby';
 
 // One verified job as the backend returns it.
 export interface WebScoutJob {
+  // The link text the user clicks, so it must be a real string.
   title: string;
+  // Shown beside the title so two postings with the same title are distinguishable.
   company_name: string;
+  // The only field that becomes an href, hence the http(s) check in parseWebScoutOk.
   apply_url: string;
+  // Closed union so the meta line can never print a provider the backend does not support.
   ats_provider: WebScoutProvider;
+  // Nullable because many postings list no location; null renders as a label rather than "undefined".
   location_raw: string | null;
 }
 
 // One URL the verifier refused, with the reason, so the user can see what was invented.
 export interface WebScoutRejected {
+  // Kept as text only: it was not verified, so it must never become a link.
   url: string;
+  // Why the verifier refused it; this is the evidence of what the LLM invented.
   reason: string;
 }
 
 // A validated 200 body.
 export interface WebScoutOk {
+  // How many links the LLM suggested; the gap to `verified` shows how much it made up.
   proposed: number;
+  // How many survived server-side verification.
   verified: number;
+  // How many were new rows in Discovered; can be below `verified` when some already existed.
   inserted: number;
+  // Verified jobs to list; separate from `rejected` so an invented URL is never mistaken for one.
   jobs: WebScoutJob[];
+  // Refused URLs, kept so the user can audit the verifier rather than trust it blindly.
   rejected: WebScoutRejected[];
 }
 
 // Closed union: every render path is one of these, so "no jobs" can never mean "bad body".
 export type WebScoutState =
+  // Nothing requested yet, so the panel claims nothing.
   | { kind: 'idle' }
+  // Its own state rather than a boolean beside the others: it disables the button and drives the live message.
   | { kind: 'running' }
+  // Carries the validated result; only reachable through parseWebScoutOk.
   | { kind: 'ok'; result: WebScoutOk }
+  // Kill switch is off: the backend's own message is shown verbatim, and it is not a failure.
   | { kind: 'disabled'; message: string }
   // Daily Gemini budget spent or every key cooling: neither an error nor "0 jobs", so it gets its own kind.
   | { kind: 'quota'; message: string }
+  // Session expired: the remedy (sign in again) differs from a generic error, so it is separate.
   | { kind: 'unauthorized'; message: string }
+  // Everything else that went wrong; the message says what, never a guessed cause.
   | { kind: 'error'; message: string };
 
 // Minimal slice of SupabaseClient the panel needs; structural so a test fake fits.
 export interface WebScoutClient {
+  // Only the functions namespace is needed, so a test fake does not have to implement auth or storage.
   functions: {
+    // Mirrors supabase-js: error and data are both returned, never thrown, for non-2xx responses.
     invoke(name: string, options: { body: Record<string, unknown> }): Promise<{ data: unknown; error: unknown }>;
   };
 }
@@ -76,7 +96,9 @@ export function parseWebScoutOk(body: unknown): WebScoutOk | null {
   // jobs and rejected must be arrays; a missing `jobs` is an error, never an empty list.
   if (!Array.isArray(body.jobs) || !Array.isArray(body.rejected)) return null;
   // Accumulators filled only with rows that pass the per-row shape checks.
+  // Typed arrays so a push of an unvalidated row fails to compile.
   const jobs: WebScoutJob[] = [];
+  // Separate list because rejected rows have a different shape and are never linked.
   const rejected: WebScoutRejected[] = [];
   // Every job row is validated; one bad row invalidates the body rather than being dropped silently.
   for (const row of body.jobs) {
@@ -89,13 +111,19 @@ export function parseWebScoutOk(body: unknown): WebScoutOk | null {
     // Location is string-or-null by contract, not undefined or a number.
     if (row.location_raw !== null && typeof row.location_raw !== 'string') return null;
     // Only http(s) URLs may become links; refuses javascript: URLs from a compromised backend.
+    // Case-insensitive because schemes are, and anchored so "xhttp://" cannot slip through.
     if (!/^https?:\/\//i.test(row.apply_url)) return null;
     // Copy field by field so extra unknown properties never reach the DOM.
     jobs.push({
+      // Each field was narrowed by the checks above, so no cast is needed to satisfy the type.
       title: row.title,
+      // Copied by name so an extra backend field can never reach the DOM.
       company_name: row.company_name,
+      // Safe to link: the http(s) check above already passed for this row.
       apply_url: row.apply_url,
+      // Already proven to be one of the three literals.
       ats_provider: row.ats_provider,
+      // Null passes through untouched; the view decides the fallback label.
       location_raw: row.location_raw,
     });
   }
@@ -109,6 +137,7 @@ export function parseWebScoutOk(body: unknown): WebScoutOk | null {
     rejected.push({ url: row.url, reason: row.reason });
   }
   // Fully validated; safe to hand to the view.
+  // Counters are re-read from body rather than recomputed, because they are the server's claim to display.
   return { proposed: body.proposed, verified: body.verified, inserted: body.inserted, jobs, rejected };
 }
 
@@ -124,6 +153,7 @@ async function readErrorBody(error: unknown): Promise<unknown> {
   // The Response lives under `context` in FunctionsHttpError.
   const context = error.context;
   // Only something with a json() method can be read; anything else is skipped.
+  // The typeof/null checks come first because a cast alone would throw on a primitive.
   if (typeof context === 'object' && context !== null && typeof (context as { json?: unknown }).json === 'function') {
     // A body that is not JSON must not throw out of the handler.
     try {
@@ -135,12 +165,14 @@ async function readErrorBody(error: unknown): Promise<unknown> {
     }
   }
   // Nothing readable.
+  // null (not throw) so the caller's generic-message branch handles it uniformly.
   return null;
 }
 
 // Runs one search and maps every outcome to a WebScoutState. Never throws.
 export async function runWebScout(client: WebScoutClient, query: string): Promise<WebScoutState> {
   // Empty query is omitted so the backend applies the user's saved preferences.
+  // Trimmed so stray spaces neither reach the LLM prompt nor turn a blank into a query.
   const trimmed = query.trim();
   // Body carries only what the contract names.
   const body: Record<string, unknown> = trimmed === '' ? {} : { query: trimmed };
@@ -149,6 +181,7 @@ export async function runWebScout(client: WebScoutClient, query: string): Promis
     // Contract: invoke('scout-web', { body }).
     const { data, error } = await client.functions.invoke('scout-web', { body });
     // Non-2xx path: classify by the body's status when it is readable.
+    // Checked before `data` because supabase-js returns data null alongside an error.
     if (error) {
       // Prefer the body from error.context; fall back to data in case a client puts it there.
       const errBody = (await readErrorBody(error)) ?? data;
@@ -172,9 +205,11 @@ export async function runWebScout(client: WebScoutClient, query: string): Promis
     // A malformed body is an error state, never "0 jobs found".
     if (parsed === null) return { kind: 'error', message: 'The web search returned an unexpected response shape.' };
     // Validated result.
+    // Wrapped in a kind so the view cannot render a result without going through validation.
     return { kind: 'ok', result: parsed };
   } catch (thrown) {
     // Transport failure: surface the message if there is one.
+    // The Error check matters because a promise can reject with a non-Error, which has no .message.
     return { kind: 'error', message: thrown instanceof Error ? thrown.message : 'The web search request failed.' };
   }
 }
@@ -190,6 +225,7 @@ export function WebScoutView(props: {
   const { state, query, onQueryChange, onSearch } = props;
   // Running disables the button so a double click cannot start two paid LLM searches.
   const running = state.kind === 'running';
+  // A single return so every state shares the same landmark, form and live region.
   return (
     // Section landmark labelled by its heading so screen readers can jump to it.
     <section className="web-scout" aria-labelledby="web-scout-heading">
@@ -198,6 +234,7 @@ export function WebScoutView(props: {
       {/* A form so Enter submits; preventDefault stops a page reload. */}
       <form
         className="web-scout__form"
+        // Handler on the form, not the button, so Enter in the input and a click take the same path.
         onSubmit={(event) => {
           // SPA: never navigate.
           event.preventDefault();
@@ -209,29 +246,42 @@ export function WebScoutView(props: {
         <label className="web-scout__label" htmlFor="web-scout-query">Optional query</label>
         {/* Controlled input; empty means "use my saved preferences". */}
         <input
+          // Matches the label's htmlFor above, which is what gives the input its accessible name.
           id="web-scout-query"
+          // Shared input styling lives in the co-located stylesheet.
           className="web-scout__input"
+          // Free text; the backend does the interpreting, so no stricter type is useful.
           type="text"
+          // Controlled so the typed text survives a result re-render.
           value={query}
+          // An example only: the label, not the placeholder, carries the meaning.
           placeholder="e.g. senior backend engineer, remote"
+          // Lifts the raw string; trimming is deferred to runWebScout so the box shows what was typed.
           onChange={(event) => onQueryChange(event.target.value)}
         />
         {/* aria-busy tells assistive tech the control is working, not broken. */}
         <button className="button web-scout__button" type="submit" disabled={running} aria-busy={running}>
+          {/* The label itself changes so the busy state is visible without relying on colour. */}
           {running ? 'Searching...' : 'Search the web'}
         </button>
       </form>
-      {/* Polite live region, always mounted: regions injected together with their text are often not announced. */}
-      <p className="web-scout__status" role="status" aria-live="polite">
+      {/* Polite live region, always mounted: regions injected together with their text are often not announced.
+          A div, not a p, because the non-error notices below are paragraphs and a p cannot contain a p.
+          The notices live INSIDE it so a screen-reader user hears why a search produced nothing. */}
+      <div className="web-scout__status" role="status" aria-live="polite">
+        {/* Plain text, so the running message is the region's own content and is announced on change. */}
         {running ? 'Searching the web and verifying links. This can take a minute.' : ''}
-      </p>
-      {/* Disabled kill switch: informational, not an error. */}
-      {state.kind === 'disabled' && <p className="web-scout__notice">{state.message}</p>}
-      {/* Quota spent: same non-error notice styling, because nothing is broken and it heals tomorrow. */}
-      {state.kind === 'quota' && <p className="web-scout__notice">{state.message}</p>}
+        {/* Disabled kill switch: informational, not an error. */}
+        {state.kind === 'disabled' && <p className="web-scout__notice">{state.message}</p>}
+        {/* Quota spent: same non-error notice styling, because nothing is broken and it heals tomorrow. */}
+        {state.kind === 'quota' && <p className="web-scout__notice">{state.message}</p>}
+      </div>
       {/* Unauthorized and error use role=alert so they interrupt. */}
+      {/* Errors stay outside the polite region: role=alert is assertive and announces on its own. */}
       {state.kind === 'unauthorized' && <p className="web-scout__error" role="alert">{state.message}</p>}
+      {/* Same alert treatment as above, for every other failure. */}
       {state.kind === 'error' && <p className="web-scout__error" role="alert">{state.message}</p>}
+      {/* Result block exists only for a validated body, so "no jobs" can never mean "bad body". */}
       {state.kind === 'ok' && (
         <div className="web-scout__result">
           {/* Summary shows all three counts so the gap between proposed and verified is visible. */}
@@ -239,10 +289,13 @@ export function WebScoutView(props: {
             Proposed {state.result.proposed} · verified {state.result.verified} · added {state.result.inserted} to Discovered
           </p>
           {/* Verified jobs; keyed by URL, which is unique per posting. */}
+          {/* Semantic list so assistive tech announces "list, N items" for the results. */}
           <ul className="web-scout__jobs">
             {state.result.jobs.map((job) => (
+              // One row per posting; the key comment above explains why the URL is the identity.
               <li key={job.apply_url} className="web-scout__job">
                 {/* External link: noopener+noreferrer so the target cannot reach window.opener. */}
+                {/* The title is the link text, so the accessible name is the job itself. */}
                 <a className="web-scout__link" href={job.apply_url} target="_blank" rel="noopener noreferrer">{job.title}</a>
                 {/* Company, location and provider on one wrapping meta line. */}
                 <span className="web-scout__meta">
@@ -253,14 +306,19 @@ export function WebScoutView(props: {
           </ul>
           {/* Collapsed by default; rejected URLs are the evidence of what the LLM invented. */}
           {state.result.rejected.length > 0 && (
+            // Native details/summary gives keyboard and screen-reader disclosure without any state of our own.
             <details className="web-scout__rejected">
+              {/* The count in the label tells the user what is hidden before they open it. */}
               <summary>Rejected ({state.result.rejected.length})</summary>
+              {/* Plain list: rejected rows are evidence to scan, not actions. */}
               <ul className="web-scout__rejected-list">
                 {state.result.rejected.map((item) => (
                   // URL plus reason can repeat across rows, so the key adds the reason.
                   <li key={`${item.url}|${item.reason}`}>
                     {/* Plain text, not a link: these were not verified and must not be one click away. */}
+                    {/* Distinct class so the URL can wrap or break without touching the reason text. */}
                     <span className="web-scout__rejected-url">{item.url}</span>
+                    {/* Leading space keeps the reason apart from the URL when styles are off. */}
                     <span className="web-scout__meta"> {item.reason}</span>
                   </li>
                 ))}
@@ -281,9 +339,13 @@ export function WebScoutPanel(props: { client: WebScoutClient; onInserted?: (cou
   const [state, setState] = useState<WebScoutState>({ kind: 'idle' });
   return (
     <WebScoutView
+      // Passed down rather than read inside the view, so tests can render any state directly.
       state={state}
+      // Held here so typing does not reset when a result arrives.
       query={query}
+      // The setter is stable, so no wrapper callback is needed.
       onQueryChange={setQuery}
+      // Defined inline because it closes over the current query and client.
       onSearch={() => {
         // Flip to running synchronously so the button disables before the await.
         setState({ kind: 'running' });

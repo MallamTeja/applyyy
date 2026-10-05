@@ -69,26 +69,35 @@ const view = (state: unknown) => render(h(panel.WebScoutView, { state: state as 
 
 describe('runWebScout', () => {
   it('maps a valid 200 body to an ok state with its counts', async () => {
+    // The happy path is the baseline every other case is a deviation from.
     const state = await panel.runWebScout(fake({ data: okBody(), error: null }), '');
+    // The kind proves the body passed the shape check.
     assert.equal(state.kind, 'ok');
+    // A count read back proves the result was carried through, not just labelled ok.
     assert.equal(state.kind === 'ok' && state.result.verified, 2);
   });
 
   it('treats a body with no jobs as an error, never as zero jobs', async () => {
+    // Destructure `jobs` away so every other field stays valid and only the missing array can fail it.
     const { jobs: _dropped, ...noJobs } = okBody();
     const state = await panel.runWebScout(fake({ data: noJobs, error: null }), '');
+    // Error, not ok with an empty list: absent data must never read as "0 jobs found".
     assert.equal(state.kind, 'error');
   });
 
   it('reads a disabled envelope from error.context', async () => {
+    // Mimics supabase-js: a non-2xx puts the Response under error.context, with data null.
     const context = { json: async () => ({ status: 'disabled', message: 'Web scout is switched off.' }) };
     const state = await panel.runWebScout(fake({ data: null, error: { context } }), '');
+    // deepEqual also pins the message, which must reach the user verbatim.
     assert.deepEqual(state, { kind: 'disabled', message: 'Web scout is switched off.' });
   });
 
   it('maps unauthorized and survives an unreadable error body', async () => {
+    // Unauthorized needs its own kind because the remedy is signing in, not retrying.
     const context = { json: async () => ({ status: 'unauthorized', message: 'Sign in again.' }) };
     assert.equal((await panel.runWebScout(fake({ data: null, error: { context } }), '')).kind, 'unauthorized');
+    // A body that is not JSON must degrade to a generic error, never throw out of the handler.
     const broken = { json: async () => { throw new Error('not json'); } };
     assert.equal((await panel.runWebScout(fake({ data: null, error: { context: broken } }), '')).kind, 'error');
   });
@@ -103,43 +112,101 @@ describe('runWebScout', () => {
 
   it('refuses status quota on a 2xx body', async () => {
     // A 200 claiming quota is contract drift, so it must be an error, never the quota notice.
-    const state = await panel.runWebScout(fake({ data: { status: 'quota', message: 'x' }, error: null }), '');
+    // The body is otherwise fully valid (counts and arrays), so ONLY the `status !== 'ok'` guard can reject it;
+    // a body missing those fields would be refused by the count checks and leave that guard untested.
+    const state = await panel.runWebScout(fake({ data: { ...okBody(), status: 'quota' }, error: null }), '');
+    // Error kind proves the guard fired rather than the quota branch being reachable from a 2xx.
     assert.equal(state.kind, 'error');
   });
 
   it('sends the trimmed query, and no query key when blank', async () => {
+    // Collects what each call sent, since the body is the only thing this test observes.
     const bodies: unknown[] = [];
+    // Fake that records the body and returns a valid result so the call itself succeeds.
     const client = { functions: { invoke: async (_n: string, o: { body: unknown }) => { bodies.push(o.body); return { data: okBody(), error: null }; } } };
+    // Padded query: the backend should get the trimmed text, not the user's stray spaces.
     await panel.runWebScout(client, '  rust  ');
+    // Whitespace-only counts as blank, so the backend falls back to saved preferences.
     await panel.runWebScout(client, '   ');
+    // An absent key, not query:'', is how the contract says "use my preferences".
     assert.deepEqual(bodies, [{ query: 'rust' }, {}]);
   });
 });
 
 describe('WebScoutView markup', () => {
   it('renders the summary counts, the job link and the rejected details', async () => {
+    // Go through runWebScout so the markup is rendered from a really-validated state.
     const state = await panel.runWebScout(fake({ data: okBody(), error: null }), '');
     const html = view(state);
+    // All three counts, so the proposed-versus-verified gap is visible.
     assert.match(html, /Proposed 5 · verified 2 · added 1 to Discovered/);
+    // noopener+noreferrer on the external link so the target cannot reach window.opener.
     assert.match(html, /<a [^>]*href="https:\/\/boards\.greenhouse\.io\/acme\/jobs\/1"[^>]*rel="noopener noreferrer"/);
+    // Evidence of what was invented sits in the collapsible block, reason included.
     assert.match(html, /<details [^>]*>[\s\S]*https:\/\/example\.com\/made-up[\s\S]*not a known ATS host/);
     // Rejected URLs must never be anchors.
     assert.equal(/<a [^>]*made-up/.test(html), false);
   });
 
   it('shows the disabled message and a disabled button while running', () => {
+    // Notice styling, not alert styling: the kill switch is information.
     assert.match(view({ kind: 'disabled', message: 'Switched off.' }), /<p class="web-scout__notice">Switched off\.<\/p>/);
+    // The disabled attribute is what stops a double click starting two paid searches.
     assert.match(view({ kind: 'running' }), /<button [^>]*disabled=""/);
   });
 
   it('renders the quota state as a non-alert notice', () => {
+    // A fixed message stands in for the state's own text; only the markup is under test.
     const html = view({ kind: 'quota', message: 'Budget spent.' });
     // Notice styling, and no role=alert: it is information, not a failure.
     assert.match(html, /<p class="web-scout__notice">Budget spent\.<\/p>/);
     assert.equal(/role="alert"/.test(html), false);
   });
 
+  // The announcement contract: a live region injected together with its text is often not announced,
+  // so the status container must exist from the first render and the notices must sit inside it.
+  // Non-greedy up to the first `</div>`: the region holds no nested div, so that is its own closing tag.
+  const statusRegion = (html: string) => /<div [^>]*role="status"[^>]*>[\s\S]*?<\/div>/.exec(html)?.[0] ?? '';
+
+  it('keeps the live region mounted while idle, as a div so it can hold a paragraph', () => {
+    // Present before any state change, otherwise the first announcement can be dropped.
+    assert.match(view({ kind: 'idle' }), /<div class="web-scout__status" role="status" aria-live="polite"><\/div>/);
+  });
+
+  it('renders the quota and disabled notices INSIDE the live region, once each', () => {
+    // Quota notice: inside the role=status element, not a sibling after it.
+    assert.match(statusRegion(view({ kind: 'quota', message: 'Budget spent.' })), /<p class="web-scout__notice">Budget spent\.<\/p>/);
+    // Disabled notice: same placement, same reason.
+    assert.match(statusRegion(view({ kind: 'disabled', message: 'Switched off.' })), /<p class="web-scout__notice">Switched off\.<\/p>/);
+    // Visible text must not be duplicated (e.g. a hidden twin for screen readers).
+    assert.equal(view({ kind: 'quota', message: 'Budget spent.' }).split('Budget spent.').length - 1, 1);
+  });
+
+  it('keeps the running message in the live region and errors outside it as alerts', () => {
+    // The running text is the region's own content, so it is announced on change.
+    assert.match(statusRegion(view({ kind: 'running' })), /^<div [^>]*>Searching the web and verifying links\./);
+    // An error is assertive: it must follow the empty polite region, not be nested in it.
+    assert.match(view({ kind: 'error', message: 'Boom.' }), /<div [^>]*role="status"[^>]*><\/div>[\s\S]*<p class="web-scout__error" role="alert">Boom\.<\/p>/);
+  });
+
+  it('never renders comment syntax as visible text in any state', async () => {
+    // In JSX children a bare `//` line is literal text, not a comment; tsc cannot see it, so test the rendered output.
+    const ok = await panel.runWebScout(fake({ data: okBody(), error: null }), '');
+    // Every state, with the ok state carrying jobs AND rejected rows so the whole result block renders.
+    const states = [{ kind: 'idle' }, { kind: 'running' }, ok, { kind: 'disabled', message: 'Off.' }, { kind: 'quota', message: 'Spent.' }, { kind: 'unauthorized', message: 'Sign in.' }, { kind: 'error', message: 'Boom.' }];
+    // The ok state must really be ok, or the result block would be silently untested.
+    assert.equal(ok.kind, 'ok');
+    for (const state of states) {
+      // Tags stripped so only the text a user (or screen reader) receives is inspected.
+      const text = view(state).replace(/<[^>]*>/g, ' ');
+      // `//` not preceded by `:` so the legitimate https:// in a rejected URL is not a false positive.
+      // Neither line-comment nor block-comment openers may appear in rendered text.
+      assert.equal(/(^|[^:])\/\/|\/\*/.test(text), false, `comment syntax rendered in state ${state.kind}`);
+    }
+  });
+
   it('labels the input', () => {
+    // A real label tied by for/id, because a placeholder is not an accessible name.
     assert.match(view({ kind: 'idle' }), /<label [^>]*for="web-scout-query"[^>]*>[\s\S]*<input id="web-scout-query"/);
   });
 });
