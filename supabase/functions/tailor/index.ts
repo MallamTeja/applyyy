@@ -37,6 +37,8 @@ import type { MasterProfile } from "../_shared/contracts/shared-types.ts";
 import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 // Shared CORS headers, plus the boundary that keeps them on an uncaught 500.
 import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
+// Per-invocation deadline: plans each Gemini call from the time left and stops between rows.
+import { createDeadline, deadlineNote, runBatchWithDeadline, shortenedBudgetNote, type CallOptions } from "../_shared/agent/deadline.ts";
 
 // How many rows one invocation will attempt. Bounded because each row is a Gemini call
 // against a shared key pool, and an unbounded batch would drain the quota that every
@@ -71,6 +73,8 @@ function resolveBatchSize(raw: string | null): number {
 
 // Wrapped so a throw anywhere below still answers with CORS headers the browser can read.
 Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Response> => {
+  // Started first so startup, auth and the queue read all count against the 150 s kill.
+  const deadline = createDeadline();
   // Preflight, before any work or any database connection.
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
@@ -206,6 +210,10 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
   // reason rather than sent to the model as a well-formed request about nothing.
   const plan = planTailorBatch(rows ?? []);
 
+  // The budget planned for the row in flight; set by the batch runner before each row and read
+  // by callLlm below. Undefined until the first row, which falls back to the client defaults.
+  let callBudget: CallOptions | undefined;
+
   // Bind the model to this master and version once, rather than per row.
   const tailor = createTailorer({
     master,
@@ -220,6 +228,8 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
           userContent: prompt.userContent,
           responseSchema: prompt.responseSchema,
         },
+        // Spread only when set: exactOptionalPropertyTypes forbids passing `undefined`.
+        ...(callBudget ? { timeoutMs: callBudget.timeoutMs, maxRetries: callBudget.maxRetries } : {}),
       });
       // A pool or transport failure is not a tailoring verdict. Thrown so the row is
       // recorded as an error rather than being persisted as a refusal, which would
@@ -264,25 +274,32 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
 
   // Sequential on purpose. The key pool paces itself, and firing ten concurrent calls
   // would race every one of them into the same 429 the pacer exists to avoid.
-  for (const job of plan.tailorable) {
-    try {
-      const outcome = await tailor(job.input);
-      // Persist decides the write order; this loop only reports what it returned.
-      const written = await persistTailorOutcome(db, job.applicationId, outcome);
-      if (!written.ok) {
-        failures.push({ applicationId: job.applicationId, error: written.message });
-        continue;
+  // The deadline check lives in runBatchWithDeadline and runs only BETWEEN rows, so a row is
+  // never stopped between persist's payload write and its status write. Unreached rows stay
+  // at `scored` and the next run picks them up; they are not failures.
+  const batch = await runBatchWithDeadline(plan.tailorable, async (job, call) => {
+    // Hand this row's planned timeout/retries to callLlm through the closure above.
+    callBudget = call;
+      try {
+        const outcome = await tailor(job.input);
+        // Persist decides the write order; this loop only reports what it returned.
+        const written = await persistTailorOutcome(db, job.applicationId, outcome);
+        if (!written.ok) {
+          failures.push({ applicationId: job.applicationId, error: written.message });
+          return;
+        }
+        // Counted from what was actually persisted, not from the verdict — a verdict that
+        // failed to write is not a row anyone can act on.
+        if (written.status === "tailored") tailored += 1;
+        else refused += 1;
+      } catch (err) {
+        // A throw here is a transport or schema failure, never a fabrication finding. The
+        // row keeps its `scored` status and will be picked up by the next invocation.
+        // Tagged when the deadline cut this row's Gemini budget, so a deadline-caused timeout
+        // is distinguishable from a real model timeout.
+        failures.push({ applicationId: job.applicationId, error: (err instanceof Error ? err.message : String(err)) + shortenedBudgetNote(call) });
       }
-      // Counted from what was actually persisted, not from the verdict — a verdict that
-      // failed to write is not a row anyone can act on.
-      if (written.status === "tailored") tailored += 1;
-      else refused += 1;
-    } catch (err) {
-      // A throw here is a transport or schema failure, never a fabrication finding. The
-      // row keeps its `scored` status and will be picked up by the next invocation.
-      failures.push({ applicationId: job.applicationId, error: err instanceof Error ? err.message : String(err) });
-    }
-  }
+  }, { deadline, targeted: applicationId !== null });
 
   // HONEST FINAL STATUS. `failed` when there was work, none of it moved, and errors
   // explain why: the live matcher run seen 2026-10-04 (rows_in 10, rows_out 0,
@@ -291,12 +308,18 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
   // `partial` (enums.sql:190), and an empty queue (rows_in 0) is idle, not broken.
   const runStatus = plan.tailorable.length > 0 && tailored === 0 && failures.length > 0 ? "failed" : "succeeded";
   // The first few DISTINCT reasons, capped: ten rows failing the same way is one fact,
-  // and error_detail is a health-page line, not a log. Null on a clean run so a stale
-  // reason never sits beside error_count 0.
-  const errorDetail = failures.length > 0
+  // and error_detail is a health-page line, not a log. This is the FAILURE half only; a
+  // deadline stop adds its own note below, so error_detail can be non-null with error_count 0.
+  const failureDetail = failures.length > 0
     // Set dedupes, slice(0, 3) keeps it short, slice(0, 500) bounds a pathological message.
     ? [...new Set(failures.map((f) => f.error))].slice(0, 3).join(" | ").slice(0, 500)
     : null;
+  // An early stop is reported next to any failures, never as one: skipped rows are untouched.
+  const stopNote = deadlineNote(batch);
+  // Joined so neither hides the other. Null only when there were no failures AND no stop, so a
+  // stale reason never sits beside a clean run. A stop alone gives status `succeeded`,
+  // error_count 0 and a `deadline:` note: that prefix is how the health page tells it apart.
+  const errorDetail = [failureDetail, stopNote].filter((x) => x !== null).join(" | ") || null;
 
   // Close the run. Partial failures stay `succeeded` with their count; a run that
   // tailored nothing because every row errored is `failed`.
@@ -306,7 +329,7 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
       .update({
         // Derived from the counters, never hard-coded: see runStatus above.
         status: runStatus,
-        // The failure summary, so the health page says WHY and not just how many.
+        // Failure reasons plus, on an early stop, the `deadline:` note (see errorDetail above).
         error_detail: errorDetail,
         // When the run closed.
         finished_at: new Date().toISOString(),
@@ -326,7 +349,7 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
     success: true,
     // The same status written to agent_runs, so the dashboard and health page agree.
     status: runStatus,
-    // The same failure summary, so the operator sees it without a DB query.
+    // The same failure reasons and deadline note, so the operator sees them without a DB query.
     error_detail: errorDetail,
     // Which master every verdict in this run was judged against, so a later dispute
     // about a tailoring does not have to guess.
