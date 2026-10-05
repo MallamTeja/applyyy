@@ -444,3 +444,37 @@ test("prompt enforces negative constraints with concrete near-miss few-shots", (
   // 4. Forced citation references
   assert.ok(instructions.includes("FORCED CITATION REFERENCES (ref_id)"));
 });
+
+// The schema now asks for award refs, so the model must be able to SEE them. Without
+// these lines in the instruction region a model can only invent an id or return [].
+test("the instruction region lists achievement and certification refs under their own headers", () => {
+  // Same master, plus one award and one bullet-less credential — the live shape.
+  const prompt = buildTailorPrompt({
+    master: {
+      ...MASTER,
+      achievements: [{ id: "ach_synthetic_contest", label: "Top 10% — synthetic contest", description: null, bullets: [{ id: "bullet_ach_synthetic", text: "Solved 200 synthetic problems", tags: [] }] }],
+      certifications: [{ id: "cert_synthetic_sql", label: "Synthetic SQL Certificate", description: "Example Issuer", bullets: [] }],
+    },
+    masterVersion: PINNED_VERSION,
+    jobDescription: CLEAN_JD,
+    jobTitle: "Backend Intern",
+    company: "Zomato",
+  });
+  // Split once so each assertion matches a whole rendered LINE, not a loose substring.
+  const lines = prompt.systemInstruction.split("\n");
+  // The award node line, in the same `- ref=<id> :: ` shape every other node uses.
+  assert.ok(lines.includes("- ref=ach_synthetic_contest :: Top 10% — synthetic contest"));
+  // Its bullet, indented under it so the model sees the parent scope.
+  assert.ok(lines.includes("    - ref=bullet_ach_synthetic :: Solved 200 synthetic problems"));
+  // The credential, with its qualifying detail.
+  assert.ok(lines.includes("- ref=cert_synthetic_sql :: Synthetic SQL Certificate (Example Issuer)"));
+  // Each section sits under its own header, so the two namespaces are visibly apart:
+  // the achievement header must come before the award line and the cert header after it.
+  const achHeader = lines.indexOf("ACHIEVEMENTS (ref these ids under `achievements`):");
+  // Located by whole-line match, like the node lines above.
+  const certHeader = lines.indexOf("CERTIFICATIONS (ref these ids under `certifications`):");
+  // Ordering: header, award, cert header, credential.
+  assert.ok(achHeader >= 0 && achHeader < lines.indexOf("- ref=ach_synthetic_contest :: Top 10% — synthetic contest"));
+  // And the credential falls under the certification header, not the award one.
+  assert.ok(certHeader > achHeader && certHeader < lines.indexOf("- ref=cert_synthetic_sql :: Synthetic SQL Certificate (Example Issuer)"));
+});

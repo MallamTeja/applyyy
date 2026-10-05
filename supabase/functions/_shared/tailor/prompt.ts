@@ -14,7 +14,38 @@
 // exhaustively without a network or a key.
 
 // aa's contract, through this stream's single re-export module.
-import type { MasterProfile } from "../contracts/shared-types.ts";
+import type { MasterProfile, TailoredSectionKind } from "../contracts/shared-types.ts";
+
+// The section names the schema's `section_order` enum offers, as a runtime tuple — a
+// JSON schema needs values, and the contract's `TailoredSectionKind` is a type only.
+//
+// `satisfies` catches a name the contract does not have; the `Exclude` check below
+// catches a name the contract has and this list forgot. BOTH directions matter: the
+// enum used to stop at "education", so the model could not even ORDER the award
+// sections the contract gained on 2026-09-11, and nothing failed to compile.
+export const TAILOR_SECTION_KINDS = [
+  // The optional prose paragraph.
+  "summary",
+  // Skill refs.
+  "skills",
+  // Employers.
+  "experience",
+  // Projects.
+  "projects",
+  // Qualifications.
+  "education",
+  // Awards — absent from this list until the live rehearsal that this fix answers.
+  "achievements",
+  // Credentials — same.
+  "certifications",
+] as const satisfies readonly TailoredSectionKind[];
+
+// Any contract section this tuple is missing. `never` when the two agree.
+type MissingSectionKinds = Exclude<TailoredSectionKind, (typeof TAILOR_SECTION_KINDS)[number]>;
+// The compile-time half of the agreement: assigning `true` only typechecks while
+// `MissingSectionKinds` is `never`, so a new contract section fails `deno check` here
+// instead of silently being unorderable by the model. Exported so it is not dead code.
+export const TAILOR_SECTION_KINDS_EXHAUSTIVE: [MissingSectionKinds] extends [never] ? true : never = true;
 
 // The fence delimiters. Exported because the regression suite asserts on them
 // directly — a fence whose exact text a test has to guess is a fence nobody can
@@ -119,6 +150,35 @@ function renderMasterProfile(master: MasterProfile, masterVersion: number): stri
     }
   }
 
+  // Achievements, same structure. Rendered because the schema now asks for them, and a
+  // model asked for a ref it cannot see either invents one or returns nothing.
+  sections.push("\nACHIEVEMENTS (ref these ids under `achievements`):");
+  // One block per award.
+  for (const node of master.achievements) {
+    // The label is shown for selection but not requestable as text: a tailored
+    // achievement has no label field, so "Winner" cannot become "International Winner".
+    sections.push(`- ref=${node.id} :: ${node.label}${node.description === null ? "" : ` (${node.description})`}`);
+    // Its bullets, often none — most awards are one line.
+    for (const bullet of node.bullets) {
+      // Same line shape as every other bullet, so the model reads one convention.
+      sections.push(`    - ref=${bullet.id} :: ${bullet.text}`);
+    }
+  }
+
+  // Certifications, same structure, in their own namespace: a certification ref that
+  // names an achievement is refused by the validator, so they are listed apart.
+  sections.push("\nCERTIFICATIONS (ref these ids under `certifications`):");
+  // One block per credential.
+  for (const node of master.certifications) {
+    // Label and qualifying detail, shown for selection only — same reason as above.
+    sections.push(`- ref=${node.id} :: ${node.label}${node.description === null ? "" : ` (${node.description})`}`);
+    // Its bullets; the live master's three certifications have none.
+    for (const bullet of node.bullets) {
+      // Same line shape again.
+      sections.push(`    - ref=${bullet.id} :: ${bullet.text}`);
+    }
+  }
+
   // Skills last. The model returns these ids and never any skill text.
   sections.push("\nSKILLS (ref these ids under `skills`):");
   // One line per skill, category included so the model can select coherently.
@@ -156,6 +216,11 @@ const TAILOR_POLICY = [
   "  master profile by code you cannot influence.",
   // Rule 4: Master version echoing requirement.
   "- Echo master_version exactly as given.",
+  // Rule 5 part 1: award sections. Stated because they arrived after the other
+  // sections and a model that is never told about them tends to drop them.
+  "- Select achievements and certifications from the master by ref, the same way as",
+  // Rule 5 part 2: when an empty array is the honest answer.
+  "  education. Return an empty array only when none is relevant to the posting.",
   // Section separator.
   "",
   // Section header for automated honesty enforcement rules.
@@ -270,7 +335,11 @@ const TAILOR_POLICY = [
 // The response schema, shaped to aa's `TailoredProfile`. Declared on every call per
 // §10 defense 2, and note what it does NOT contain: no field anywhere in which a
 // skill name could be written, so an injected "add Docker" has no slot to occupy.
-const TAILOR_RESPONSE_SCHEMA: Record<string, unknown> = {
+//
+// Exported so the structural test can hold it against the parser's required keys
+// (`TAILOR_REQUIRED_ARRAY_KEYS` in tailorer.ts). The two disagreed — this schema had
+// no award sections while the parser demanded them — and every live call threw.
+export const TAILOR_RESPONSE_SCHEMA = {
   // Gemini's structured-output dialect is JSON-Schema-shaped.
   type: "object",
   // Top-level property definitions matching the exact fields of TailoredProfile.
@@ -279,8 +348,10 @@ const TAILOR_RESPONSE_SCHEMA: Record<string, unknown> = {
     // Must be integer matching master profile version.
     master_version: { type: "integer" },
     // Which sections appear and in what order — a tailoring decision carried in data.
-    // Strictly restricted to known enum section names.
-    section_order: { type: "array", items: { type: "string", enum: ["summary", "skills", "experience", "projects", "education"] } },
+    // Strictly restricted to the contract's section names, taken from the tuple above
+    // that is compile-checked against `TailoredSectionKind`. Spread into a fresh array
+    // so the schema never hands out a reference to the readonly tuple.
+    section_order: { type: "array", items: { type: "string", enum: [...TAILOR_SECTION_KINDS] } },
     // The optional prose paragraph, with its mandatory supporting refs.
     summary: {
       // Nullable in aa's type; expressed as an object the model may omit.
@@ -375,10 +446,64 @@ const TAILOR_RESPONSE_SCHEMA: Record<string, unknown> = {
         required: ["ref", "bullets"],
       },
     },
+    // Achievements, education's shape exactly. Missing until the live rehearsal: with
+    // structured output the model cannot emit a key the schema lacks, so the parser's
+    // demand for this array failed every real call.
+    achievements: {
+      // Array of selected awards.
+      type: "array",
+      // Items in achievements array.
+      items: {
+        // One award block.
+        type: "object",
+        // Achievement object properties. No label field — the label is rendered from
+        // the master, so the model has nowhere to write an inflated one.
+        properties: {
+          // Ref to a master achievement node.
+          ref: { type: "string" },
+          // Bullets belonging to this award; usually none.
+          bullets: {
+            // Array of bullet items for this award.
+            type: "array",
+            // Bullet item definition with ref and text.
+            items: { type: "object", properties: { ref: { type: "string" }, text: { type: "string" } }, required: ["ref", "text"] },
+          },
+        },
+        // Both required, as for every bullet-bearing section, so the parser's
+        // ref-and-bullets check always has both to inspect.
+        required: ["ref", "bullets"],
+      },
+    },
+    // Certifications, identical shape, kept a separate key because the validator
+    // resolves them in their own namespace.
+    certifications: {
+      // Array of selected credentials.
+      type: "array",
+      // Items in certifications array.
+      items: {
+        // One credential block.
+        type: "object",
+        // Certification object properties. No label field, same reason as above.
+        properties: {
+          // Ref to a master certification node.
+          ref: { type: "string" },
+          // Bullets belonging to this credential; the live master's have none.
+          bullets: {
+            // Array of bullet items for this credential.
+            type: "array",
+            // Bullet item definition with ref and text.
+            items: { type: "object", properties: { ref: { type: "string" }, text: { type: "string" } }, required: ["ref", "text"] },
+          },
+        },
+        // Both ref and bullets required.
+        required: ["ref", "bullets"],
+      },
+    },
   },
   // The sections that must always be present, so a truncated response fails loudly
-  // rather than resolving into a half-empty resume.
-  required: ["master_version", "section_order", "skills", "experience", "projects", "education"],
+  // rather than resolving into a half-empty resume. Must be a superset of the parser's
+  // `TAILOR_REQUIRED_ARRAY_KEYS`; the structural test in tailorer.test.ts holds that.
+  required: ["master_version", "section_order", "skills", "experience", "projects", "education", "achievements", "certifications"],
 };
 
 // Assemble a Tailor request. Deterministic — no nonce, no timestamp, no randomised

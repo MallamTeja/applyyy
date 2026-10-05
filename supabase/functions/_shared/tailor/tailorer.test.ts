@@ -20,7 +20,10 @@ import { test } from "node:test";
 // Strict, so a missing key never compares equal to a key holding `undefined`.
 import assert from "node:assert/strict";
 // Extension-suffixed specifier so this runs under Deno and `node --test` alike.
-import { createTailorer } from "./tailorer.ts";
+import { createTailorer, TAILOR_REQUIRED_ARRAY_KEYS } from "./tailorer.ts";
+// The schema Gemini is actually sent, and the section tuple its enum is built from —
+// imported, never restated, so these tests check the shipped values.
+import { TAILOR_RESPONSE_SCHEMA, TAILOR_SECTION_KINDS } from "./prompt.ts";
 // The contract types, reached through this stream's single re-export module. Nothing
 // here redefines one — a redefined type does not fail, it drifts.
 import type { MasterProfile, TailoredProfile } from "../contracts/shared-types.ts";
@@ -246,4 +249,94 @@ test("the posting text reaches the model as untrusted content, never as instruct
   assert.ok(seen!.userContent.includes("Node.js and REST APIs"));
   // And must never appear in the instruction region, where it could steer the model.
   assert.equal(seen!.systemInstruction.includes("Node.js and REST APIs"), false);
+});
+
+// ---------------------------------------------------------------------------
+// SCHEMA <-> PARSER AGREEMENT. Found by a live rehearsal, not by this suite: the
+// parser demanded `achievements` and `certifications` while `TAILOR_RESPONSE_SCHEMA`
+// never offered them, and structured output cannot emit a key the schema lacks — so
+// every real call threw. Every test above hand-builds its response, which is why
+// nothing caught it. These tests derive both sides from the shipped constants.
+// ---------------------------------------------------------------------------
+
+// The schema's top-level `required` and `properties`, read off the shipped object.
+const schemaRequired: readonly string[] = TAILOR_RESPONSE_SCHEMA.required;
+// Property names the model is permitted to emit at all.
+const schemaProperties = Object.keys(TAILOR_RESPONSE_SCHEMA.properties);
+
+test("every array the parser requires is required and declared by the response schema", () => {
+  // Guard against a vacuous pass: an empty tuple would satisfy every loop below.
+  assert.ok(TAILOR_REQUIRED_ARRAY_KEYS.length > 0);
+  // The parser's OWN constant, not a list written here, so a key added to the parser
+  // without the schema fails this test by name.
+  for (const key of TAILOR_REQUIRED_ARRAY_KEYS) {
+    // Declared: otherwise structured output can never emit it.
+    assert.ok(schemaProperties.includes(key), `schema.properties lacks ${key}`);
+    // Required: otherwise the model may legally omit what the parser cannot do without.
+    assert.ok(schemaRequired.includes(key), `schema.required lacks ${key}`);
+  }
+  // The two scalars the parser also refuses to go without are required too.
+  for (const key of ["master_version", "section_order"]) {
+    // Named in the message so a failure points at the missing key.
+    assert.ok(schemaRequired.includes(key), `schema.required lacks ${key}`);
+  }
+});
+
+test("section_order's enum offers exactly the contract's section kinds", () => {
+  // The enum as actually shipped, dug out of the schema rather than restated.
+  const sectionEnum = TAILOR_RESPONSE_SCHEMA.properties.section_order.items.enum;
+  // Exactly the tuple whose agreement with `TailoredSectionKind` deno check enforces,
+  // so the chain type -> tuple -> schema has no hand-written link.
+  assert.deepEqual(sectionEnum, [...TAILOR_SECTION_KINDS]);
+  // And the two award sections specifically, because they are the ones that were missing.
+  assert.ok(sectionEnum.includes("achievements") && sectionEnum.includes("certifications"));
+});
+
+// Build an instance of a JSON-schema node: every declared property, one item per array.
+// Walking the schema itself is what makes the response "shaped by the schema" rather
+// than shaped by whoever wrote the test.
+function instanceOf(node: Record<string, unknown>): unknown {
+  // An enum takes its first value, so `section_order` holds a legal section name.
+  if (Array.isArray(node.enum)) return node.enum[0];
+  // Objects get EVERY property the schema declares, required or not.
+  if (node.type === "object") {
+    // Properties walked in declaration order; absent means an empty object.
+    const props = (node.properties ?? {}) as Record<string, Record<string, unknown>>;
+    // Recurse per property.
+    return Object.fromEntries(Object.entries(props).map(([k, v]) => [k, instanceOf(v)]));
+  }
+  // One item, so the parser's per-entry ref-and-bullets check is actually exercised.
+  if (node.type === "array") return [instanceOf(node.items as Record<string, unknown>)];
+  // The pin; any number would parse, the real one keeps the verdict about refs only.
+  if (node.type === "integer") return MASTER_VERSION;
+  // Strings become a ref no master holds, so the validator answers instead of crashing.
+  if (node.type === "string") return "schema-shaped-ref";
+  // A schema type this walker does not know is a test bug; fail loudly, never guess.
+  throw new Error(`instanceOf: unhandled schema node ${JSON.stringify(node)}`);
+}
+
+test("a response shaped by the schema parses and reaches the validator", async () => {
+  // Every schema property present, every array holding one schema-shaped item.
+  const shaped = instanceOf(TAILOR_RESPONSE_SCHEMA) as Record<string, unknown>;
+  // Non-vacuity: the instance really carries the award arrays the parser demands.
+  assert.ok(Array.isArray(shaped.achievements) && Array.isArray(shaped.certifications));
+
+  // Parsed, then judged. A shape failure would REJECT; reaching "refused" proves the
+  // parser accepted it and the validator ran (the refs resolve to nothing, by design).
+  const outcome = await tailorerReturning(JSON.stringify(shaped))(POSTING);
+  // The discriminant is the evidence of a verdict rather than a thrown shape error.
+  assert.equal(outcome.kind, "refused");
+});
+
+test("a schema-legal response that omits the optional summary still parses", async () => {
+  // `summary` is declared but not required, so the model may leave it out entirely.
+  const { summary: _omitted, ...withoutSummary } = instanceOf(TAILOR_RESPONSE_SCHEMA) as Record<string, unknown>;
+  // Guard that the omission actually happened, or this is the test above twice.
+  assert.equal("summary" in withoutSummary, false);
+
+  // Before the parser normalised absence to null, `undefined !== null` sent this down
+  // the malformed-summary branch and a schema-legal answer threw.
+  const outcome = await tailorerReturning(JSON.stringify(withoutSummary))(POSTING);
+  // A verdict, not a throw.
+  assert.equal(outcome.kind, "refused");
 });

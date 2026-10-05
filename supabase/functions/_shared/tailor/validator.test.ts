@@ -1187,3 +1187,96 @@ test("rejects duplicate citation references in summary.refs", () => {
   );
 });
 
+
+// ---------------------------------------------------------------------------
+// LIVE-SHAPED AWARD SECTIONS. The live master holds 2 achievements (one bullet each,
+// ids like `ach_*` / `bullet_ach_*`) and 3 certifications with NO bullets (`cert_*`).
+// The tests above use one of each with bullets, so the bullet-less credential — the
+// commonest real case — was never exercised. Ids mirror the live naming; every piece
+// of text is synthetic, because the real profile is personal data.
+// ---------------------------------------------------------------------------
+
+// MASTER with its award sections replaced by the live shape.
+const LIVE_SHAPED_MASTER: MasterProfile = {
+  // Everything else unchanged, so a failure is about the award sections only.
+  ...MASTER,
+  // Two awards, each with exactly one bullet, as live.
+  achievements: [
+    // A ranking-style award.
+    { id: "ach_contest", label: "Synthetic contest rating 1800", description: null, bullets: [{ id: "bullet_ach_contest", text: "Solved 300 synthetic problems", tags: [] }] },
+    // A hackathon-style award.
+    { id: "ach_hackathon", label: "Finalist — Synthetic Hackathon", description: "national round", bullets: [{ id: "bullet_ach_hackathon", text: "Built a Node.js prototype in 36 hours", tags: [] }] },
+  ],
+  // Three credentials with NO bullets, as live.
+  certifications: [
+    // Database credential.
+    { id: "cert_sql", label: "Synthetic SQL Basics", description: "Example Academy", bullets: [] },
+    // Prompting credential.
+    { id: "cert_prompting", label: "Synthetic Prompt Design", description: "Example Academy", bullets: [] },
+    // ML credential.
+    { id: "cert_ml", label: "Synthetic ML Foundations", description: null, bullets: [] },
+  ],
+};
+
+// The baseline plus a live-shaped award selection: one achievement with its own bullet
+// verbatim, and two bullet-less certifications.
+function withLiveShapedAwards(): TailoredProfile {
+  return {
+    // Honest baseline, so the awards are the only variable.
+    ...baseline(),
+    // Ordered as a real response would order them, using the two new section names.
+    section_order: ["skills", "experience", "projects", "education", "achievements", "certifications"],
+    // One award, its bullet unchanged so the vocabulary check passes trivially and the
+    // verdict is about resolution.
+    achievements: [{ ref: "ach_hackathon", bullets: [{ ref: "bullet_ach_hackathon", text: "Built a Node.js prototype in 36 hours" }] }],
+    // Two credentials, empty bullets, exactly what the live master can offer.
+    certifications: [{ ref: "cert_sql", bullets: [] }, { ref: "cert_ml", bullets: [] }],
+  };
+}
+
+test("live-shaped: an achievement and bullet-less certifications selected by real ref validate clean", () => {
+  // The honest live-shaped selection.
+  const result = validateTailoredProfile(withLiveShapedAwards(), LIVE_SHAPED_MASTER, PINNED_VERSION);
+  // Accepted, with the violations printed if not, so a failure says why.
+  assert.equal(result.ok, true, result.ok === false ? JSON.stringify(result.violations) : "");
+  if (!result.ok) return;
+  // Labels come from the master, in the selected order.
+  assert.deepEqual(result.resume.certifications.map((c) => c.label), ["Synthetic SQL Basics", "Synthetic ML Foundations"]);
+  // The award resolved with its own bullet's master text.
+  assert.equal(result.resume.achievements[0]?.bullets[0]?.master_text, "Built a Node.js prototype in 36 hours");
+});
+
+test("live-shaped: a certification ref naming a real achievement id is refused as unresolved under certifications", () => {
+  // `ach_contest` is real but an ACHIEVEMENT, and it is mentioned nowhere else in the
+  // tailoring, so the duplicate-ref check cannot pre-empt the section check.
+  const result = validateTailoredProfile(
+    { ...withLiveShapedAwards(), certifications: [{ ref: "ach_contest", bullets: [] }] },
+    LIVE_SHAPED_MASTER,
+    PINNED_VERSION,
+  );
+  // Refused.
+  assert.equal(result.ok, false);
+  // With the specific violation: that id, unresolvable in the certifications namespace.
+  assert.ok(
+    result.ok === false &&
+      result.violations.some((v) => v.kind === "unresolved_ref" && v.ref === "ach_contest" && v.where === "certifications"),
+    result.ok === false ? JSON.stringify(result.violations) : "expected a refusal",
+  );
+});
+
+test("live-shaped: a certification ref absent from the master is refused as unresolved under certifications", () => {
+  // Shaped like the live ids, held by nobody.
+  const result = validateTailoredProfile(
+    { ...withLiveShapedAwards(), certifications: [{ ref: "cert_cloud_architect", bullets: [] }] },
+    LIVE_SHAPED_MASTER,
+    PINNED_VERSION,
+  );
+  // Refused.
+  assert.equal(result.ok, false);
+  // Named, with its section.
+  assert.ok(
+    result.ok === false &&
+      result.violations.some((v) => v.kind === "unresolved_ref" && v.ref === "cert_cloud_architect" && v.where === "certifications"),
+    result.ok === false ? JSON.stringify(result.violations) : "expected a refusal",
+  );
+});

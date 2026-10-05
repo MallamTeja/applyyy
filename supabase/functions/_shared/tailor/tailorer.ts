@@ -100,6 +100,25 @@ function hasRefAndBullets(value: unknown): boolean {
   return Array.isArray(value.bullets);
 }
 
+// The arrays the parser refuses to go without. EXPORTED so the structural test can hold
+// `TAILOR_RESPONSE_SCHEMA.required` against this exact tuple: the parser demanded the
+// two award arrays while the schema never offered them, so with structured output every
+// live call threw "no achievements array". One constant, read by both, ends that class.
+export const TAILOR_REQUIRED_ARRAY_KEYS = [
+  // Bare refs, no bullets.
+  "skills",
+  // Bullet-bearing parents from here down; the second parser loop walks these.
+  "experience",
+  // Projects.
+  "projects",
+  // Qualifications.
+  "education",
+  // Awards.
+  "achievements",
+  // Credentials.
+  "certifications",
+] as const;
+
 // THE SHAPE CHECK, and the reason it lives in this file rather than in the validator.
 //
 // `validateTailoredProfile` takes a `TailoredProfile` and TRUSTS that type — it walks
@@ -132,13 +151,17 @@ function parseTailoredProfile(raw: string): TailoredProfile {
   if (!Array.isArray(parsed.section_order)) throw new Error("Tailor response has no section_order array");
   // Required arrays, possibly empty — the contract makes them required precisely so an
   // omission cannot be mistaken for a deliberate empty selection.
-  for (const key of ["skills", "experience", "projects", "education", "achievements", "certifications"] as const) {
+  // Iterates the exported tuple rather than a local list, so the structural test checks
+  // the very keys this loop demands and the two cannot drift apart again.
+  for (const key of TAILOR_REQUIRED_ARRAY_KEYS) {
     // Checked by name so the error says which one, rather than "malformed response".
     if (!Array.isArray(parsed[key])) throw new Error(`Tailor response has no ${key} array`);
   }
   // The five sections whose elements carry nested bullets the validator walks. `skills`
   // is excluded deliberately: a `TailoredSkill` is a bare ref with no bullets at all.
-  for (const key of ["experience", "projects", "education", "achievements", "certifications"] as const) {
+  for (const key of TAILOR_REQUIRED_ARRAY_KEYS) {
+    // Skipped by name, not by a second hand-kept list that could drift from the first.
+    if (key === "skills") continue;
     // `as unknown[]` is safe: the loop above already proved each of these is an array.
     if (!(parsed[key] as unknown[]).every(hasRefAndBullets)) {
       throw new Error(`Tailor response has a malformed entry in ${key}`);
@@ -146,6 +169,11 @@ function parseTailoredProfile(raw: string): TailoredProfile {
   }
   // Summary is nullable, so only a non-null value has a shape to check — and it is the
   // one place the model emits free prose, which the validator checks against its refs.
+  // The schema leaves `summary` optional, so a schema-valid response may OMIT it — and
+  // the validator dereferences any non-null summary, so `undefined` would crash it.
+  // Omission and null mean the same thing here (no paragraph), so normalise to null.
+  if (parsed.summary === undefined) parsed.summary = null;
+  // Only a present, non-null summary has a shape left to check.
   if (parsed.summary !== null) {
     if (!isRecord(parsed.summary) || typeof parsed.summary.text !== "string" || !Array.isArray(parsed.summary.refs)) {
       throw new Error("Tailor response has a malformed summary");
