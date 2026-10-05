@@ -62,6 +62,9 @@ import type { MasterProfile } from "../_shared/contracts/shared-types.ts";
 import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 // Shared CORS headers, plus the boundary that keeps them on an uncaught 500.
 import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
+// The score threshold: decides advance (-> scored), drop (-> dropped_filter) or refuse. Pure,
+// so its boundaries are table-tested in match/score-threshold.test.ts rather than only here.
+import { decideScoreThreshold } from "../_shared/match/score-threshold.ts";
 
 // Default batch limit for one invocation to preserve key pool quota.
 // Controls how many application rows are processed per function call.
@@ -325,6 +328,9 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // Initialize successful scoring completion count accumulator.
   // Measures number of applications successfully scored and updated.
   let scoredCount = 0;
+  // Rows below the threshold moved to dropped_filter. Kept apart from scoredCount so
+  // rows_out still means "rows handed to the Tailor".
+  let droppedCount = 0;
   // Initialize array holding individual application row processing failure records.
   // Captures per-row errors without halting whole batch execution.
   const failures: Array<{ applicationId: string; error: string }> = [];
@@ -376,6 +382,18 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
       // Evaluates technical, experience, behavioral, and career dimensions.
       const matchScore = await scorer(evalCase);
 
+      // STEP 0: Gate the score BEFORE any write. An unreadable score (NaN, null, wrong scale)
+      // FAILS CLOSED: nothing is written, the row stays at passed_filters, and the reason
+      // lands in `failures` — never advanced, never dropped on a number that is not one.
+      const threshold = decideScoreThreshold(matchScore.score);
+      // The refusal branch: report it and move on to the next row.
+      if (threshold.kind === "invalid") {
+        // Counted as a failure so the run's error_count and error_detail show it.
+        failures.push({ applicationId: row.id, error: threshold.reason });
+        // No write and no status move for this row.
+        continue;
+      }
+
       // STEP 1: Persist match_score and match_reasoning payload onto applications table row FIRST.
       // Enforces payload-before-status-transition rule to avoid orphaned statuses.
       const { error: patchError } = await db
@@ -385,6 +403,11 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
         .update({
           match_score: matchScore.score,
           match_reasoning: matchScore.reasoning,
+          // The drop reason rides in the SAME write as the score, as persistScreenVerdict
+          // does it: a dropped row always says why. CLEARED (null, not omitted) on advance:
+          // if an earlier run wrote a drop and its RPC then failed, a retry that now scores
+          // >= the floor would otherwise leave that stale reason on a `scored` row.
+          drop_reason: threshold.kind === "drop" ? threshold.reason : null,
         })
         // Match specific application row identifier.
         .eq("id", row.id);
@@ -397,19 +420,23 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
         continue;
       }
 
-      // STEP 2: Advance application status to 'scored' via advance_application_status RPC SECOND.
-      // Executes atomic status transition and logs status change event.
+      // STEP 2: Move the row via advance_application_status RPC SECOND — to 'scored' on advance,
+      // to 'dropped_filter' below the threshold. Both edges allow the matcher (live, 2026-10-05).
       const { error: advanceError } = await db.rpc("advance_application_status", {
         // Target application row identifier parameter.
         p_application_id: row.id,
-        // Target status parameter set to 'scored'.
-        p_to_status: "scored",
+        // The threshold's verdict decides the edge; there is no third value by construction.
+        p_to_status: threshold.kind === "advance" ? "scored" : "dropped_filter",
         // Acting agent name parameter set to 'matcher'.
         p_agent: "matcher",
         // Event detail JSONB parameter carrying score and reasoning details.
         p_detail: {
           score: matchScore.score,
           reasoning: matchScore.reasoning,
+          // The band, so the event log shows WHERE the score fell, not just the number.
+          band: threshold.band,
+          // Present only on a drop, mirroring the drop_reason column.
+          ...(threshold.kind === "drop" ? { reason: threshold.reason } : {}),
         },
       });
 
@@ -421,8 +448,10 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
         continue;
       }
 
-      // Increment successful scoring completion count.
-      scoredCount += 1;
+      // Counted separately: a drop is a SUCCESSFUL outcome (the row moved), not an error.
+      if (threshold.kind === "drop") droppedCount += 1;
+      // Advanced rows are the ones the Tailor will pick up.
+      else scoredCount += 1;
     } catch (err) {
       // Catch exceptions thrown during scoring or database writes and record error message.
       // Prevents single row exception from crashing batch run.
@@ -440,7 +469,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // error_count 10) was stamped `succeeded`, the silent stop agent_runs exists to catch.
   // Mixed results stay `succeeded` with error_count set: `agent_run_status` has no
   // `partial` (enums.sql:190), and an empty queue (rows_in 0) is idle, not broken.
-  const runStatus = (rows ?? []).length > 0 && scoredCount === 0 && failures.length > 0 ? "failed" : "succeeded";
+  // A batch where every row was DROPPED moved every row, so it counts as progress, not failure.
+  const runStatus = (rows ?? []).length > 0 && scoredCount + droppedCount === 0 && failures.length > 0 ? "failed" : "succeeded";
   // The first few DISTINCT reasons, capped: ten rows failing the same way is one fact,
   // and error_detail is a health-page line, not a log. Null on a clean run so a stale
   // reason never sits beside error_count 0.
@@ -490,6 +520,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     ...(applicationId !== null ? { targeted: true, found: (rows ?? []).length } : {}),
     // Count of successfully scored applications.
     scored: scoredCount,
+    // Count dropped below the threshold, so the caller sees the gate working.
+    dropped: droppedCount,
     // Total count of Gemini API calls executed.
     gemini_calls: geminiCallsCount,
     // Array of individual application row failure objects.
