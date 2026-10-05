@@ -1,0 +1,110 @@
+# Pushes ONE application through matcher -> tailor -> auditor, on demand.
+# Exists so the pipeline can be driven end to end without a human pasting the
+# app-user password into a local terminal: the credentials already live in this
+# repo's Actions secrets (set 2026-09-11 for apply.yml), and this job reuses them.
+# It NEVER submits anything. run-one stops at awaiting_approval at the latest, so
+# the human approval gate (constraint #15) and the human Submit click are untouched.
+name: applyy run one application
+
+# Manual trigger only: a scheduled or push-triggered run would spend Gemini calls
+# on whatever row someone last typed, which nobody would be watching.
+on:
+  workflow_dispatch:
+    # The one input: which application row to advance.
+    inputs:
+      # Required, so a dispatch with no id cannot fall back to "the whole queue".
+      application_id:
+        # Shown in the Actions UI so the dispatcher knows what to paste.
+        description: 'applications.id (uuid) to push through matcher -> tailor -> auditor'
+        # A missing id is refused by GitHub before the job even starts.
+        required: true
+
+# Read-only token: the job talks to Supabase with its own credentials and never
+# needs to write to the repository.
+permissions:
+  # Checkout is the only GitHub API use.
+  contents: read
+
+# One run per application at a time: two concurrent runs on the same row would
+# race the status guard and waste Gemini calls on a row the other run moves.
+concurrency:
+  # Keyed on the input so different rows can still run side by side.
+  group: run-one-${{ inputs.application_id }}
+  # Never cancel a run midway: a half-advanced row is worse than a queued run.
+  cancel-in-progress: false
+
+# A single job: the three agents must run in order, so there is nothing to parallelise.
+jobs:
+  # Named for what it does, so the Actions list is readable.
+  run-one:
+    # Same runner image as apply.yml, so behaviour matches the scheduled applier.
+    runs-on: ubuntu-latest
+    # Three edge-function calls plus install; 15 minutes is generous and still
+    # caps a hung Gemini call well under the 2,000-minute monthly budget.
+    timeout-minutes: 15
+    # Secrets as env vars, the same names worker/src/cli/run-one.ts reads.
+    env:
+      # Public project URL, stored as a secret only for parity with apply.yml.
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      # The ANON key: all authority comes from the signed-in app user's JWT.
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      # The app user the edge functions' authorizeCaller() requires.
+      APPLYY_APP_USER_EMAIL: ${{ secrets.APPLYY_APP_USER_EMAIL }}
+      # Masked in logs by GitHub; never echoed by this workflow.
+      APPLYY_APP_USER_PASSWORD: ${{ secrets.APPLYY_APP_USER_PASSWORD }}
+      # Passed through env, NOT interpolated into a run: line, so a crafted input
+      # cannot inject shell (the classic workflow_dispatch injection).
+      APPLICATION_ID: ${{ inputs.application_id }}
+    # Steps run top to bottom; any failure stops the job.
+    steps:
+      # Refuse a malformed id before spending an install: the edge functions also
+      # 400 on it, but failing here is cheaper and clearer.
+      - name: Validate application_id is a UUID
+        # Strict shape check; anything else exits 1 (never "fall back to the queue").
+        run: |
+          # Lowercase-or-uppercase hex UUID, 8-4-4-4-12, nothing before or after.
+          if ! printf '%s' "$APPLICATION_ID" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
+            # Explain the refusal in the log, then fail the job.
+            echo "application_id is not a UUID: refusing to run." >&2
+            # Non-zero so the run shows red, not green-with-nothing-done.
+            exit 1
+          fi
+      # The CLI and its imports live in the repo.
+      - name: Check out the repository
+        # Pinned major, matching apply.yml.
+        uses: actions/checkout@v4
+        # Shallow: history is not needed to run a script.
+        with:
+          # One commit is enough.
+          fetch-depth: 1
+      # pnpm is the only package manager this repo allows (only-allow preinstall).
+      - name: Install pnpm
+        # Same action and version as apply.yml and ci.yml.
+        uses: pnpm/action-setup@v4
+        # Exact pin: corepack rejects ranges.
+        with:
+          # Matches the repo's packageManager pin.
+          version: 11.25.0
+      # Node 24 strips TypeScript natively, which is how run-one.ts executes.
+      - name: Set up Node
+        # Pinned major.
+        uses: actions/setup-node@v4
+        # Version plus the pnpm store cache.
+        with:
+          # worker/package.json engines requires >= 24.
+          node-version: '24'
+          # Reuses the store cache other workflows populate.
+          cache: 'pnpm'
+      # run-one dynamically imports @supabase/supabase-js, which must be installed.
+      - name: Install dependencies
+        # Frozen: this job must never rewrite the lockfile.
+        run: pnpm install --frozen-lockfile
+        # No browsers are needed: run-one only calls edge functions over HTTP.
+        env:
+          # Skips any Playwright browser download during install.
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+      # The actual work: matcher -> tailor -> auditor for one row, stopping at the
+      # first step that fails or does not advance it (see run-one.ts).
+      - name: Run matcher -> tailor -> auditor for the application
+        # The id comes from env, never from ${{ }} inside the script text.
+        run: node worker/src/cli/run-one.ts --id "$APPLICATION_ID"
