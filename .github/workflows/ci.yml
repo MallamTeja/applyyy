@@ -13,6 +13,7 @@
 # requirement, not an accident — a PR from a fork gets no secrets, and a check
 # that only works with credentials is a check that silently skips.
 # =============================================================================
+# Shown as the workflow name in the Actions tab and in required-check settings.
 name: ci
 
 # Main is the only branch that deploys (Vercel builds it), so it is the one to guard.
@@ -110,8 +111,9 @@ jobs:
           checks=$(sed 's/\x1b\[[0-9;]*m//g' deno-check.log | grep -c '^Check' || true)
           # Printed so the number is visible in the job log.
           echo "Check lines: $checks"
-          # Zero Check lines means nothing was typechecked, whatever the exit code said.
-          [ "$checks" -gt 0 ] || { echo "deno check checked nothing"; exit 1; }
+          # Must EQUAL the files passed (CLAUDE.md §4), not merely exceed zero: a
+          # partial check is as silent as an empty one. Measured 83 == 83 locally.
+          [ "$checks" -eq "${#files[@]}" ] || { echo "checked $checks of ${#files[@]} files"; exit 1; }
 
   # ---------------------------------------------------------------------------
   # (b) Edge Function unit tests. They run under Node (Node 24 strips types),
@@ -144,8 +146,9 @@ jobs:
           # From the repo root, because the glob is root-relative; run from the
           # wrong cwd it matches nothing and prints `tests 0` / `fail 0` (CLAUDE.md §4).
           node --test "supabase/functions/**/*.test.ts" 2>&1 | tee edge-tests.log
-          # Extract the total from the summary line ("ℹ tests 606").
-          total=$(grep -oE 'tests [0-9]+' edge-tests.log | tail -1 | grep -oE '[0-9]+' || echo 0)
+          # Only the summary line ("ℹ tests 606", ending the line), so a test TITLE
+          # containing "tests 3" can never be read as the total.
+          total=$(grep -E 'ℹ tests [0-9]+$' edge-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
           # Printed so the count is visible in the job log.
           echo "edge tests: $total"
           # `fail 0` beside `tests 0` is a glob that matched nothing, not a pass.
@@ -229,8 +232,8 @@ jobs:
           # `@applyy/web`, NOT `web`: `--filter web` matches no package and exits 0
           # having run nothing (CLAUDE.md §4).
           pnpm --filter @applyy/web test 2>&1 | tee web-tests.log
-          # Extract the total from node --test's summary line.
-          total=$(grep -oE 'tests [0-9]+' web-tests.log | tail -1 | grep -oE '[0-9]+' || echo 0)
+          # Same anchored summary-line match as edge-tests, for the same reason.
+          total=$(grep -E 'ℹ tests [0-9]+$' web-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
           # Printed so the count is visible in the job log.
           echo "web tests: $total"
           # A zero total means the filter or glob matched nothing.
