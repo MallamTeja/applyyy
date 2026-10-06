@@ -198,11 +198,18 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
       // — releasing every row on a transient error would disguise an outage as
       // an empty queue, and the rows keep their leases for the sweeper instead.
       const jobs = unwrap(
-        await client.from('jobs').select('id, apply_url').in('id', jobIds),
+        // disappeared_at rides the same read so liveness costs no extra round trip.
+        // Awaited and unwrapped below so a failed read throws instead of looking like dead rows.
+        await client.from('jobs').select('id, apply_url, disappeared_at').in('id', jobIds),
         'claimApplications: read jobs.apply_url',
-      ) as Array<{ id: string; apply_url: string | null }> | null;
+        // disappeared_at is optional in the type: the key can be absent at runtime.
+      // Cast so the fields are typed; `disappeared_at?` is optional because the loop tests key presence.
+      ) as Array<{ id: string; apply_url: string | null; disappeared_at?: string | null }> | null;
       // Keyed by job id so each claimed row finds its URL in one lookup.
       const urlByJobId = new Map((jobs ?? []).map((job) => [job.id, job.apply_url]));
+      // Keyed the same way, whole record kept so the loop can test key PRESENCE.
+      // A Map so each claimed row finds its job in one lookup, same as the URL map above.
+      const jobById = new Map((jobs ?? []).map((job) => [job.id, job]));
 
       // Rows that can actually be navigated to, each paired with its URL. Built
       // in a loop rather than one filter, because the rejected rows need an
@@ -217,6 +224,39 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
         // `application_events` so "why was this never attempted" has an answer.
         if (!url) {
           await releaseApplierClaim(row.id, `no apply_url on job ${row.job_id}; not attempted`);
+          continue;
+        }
+        // Always defined here: a job missing from the map had no URL and already took the no-URL release above.
+        const job = jobById.get(row.job_id);
+        // FAIL CLOSED on a missing key: an older schema or a select that dropped the
+        // column must not read as "alive". Released, not failed, like the no-URL gap.
+        // `in` tests key PRESENCE, because a null value is a valid answer (alive) and must not be confused with absence.
+        if (job && !('disappeared_at' in job)) {
+          // Lease returned with a reason, so the event log answers 'why not attempted'.
+          await releaseApplierClaim(
+            // The row whose liveness could not be established.
+            // Passed so the release targets exactly this lease.
+            row.id,
+            // Names the missing column, never the word 'alive'.
+            // Includes the job id so the sweeper log is traceable to the posting.
+            `jobs.disappeared_at missing from read for job ${row.job_id}; liveness unknown, not attempted`,
+          );
+          // Skip to the next row; this one must not reach the usable list.
+          continue;
+        }
+        // A non-null timestamp means the posting dropped off its board: nowhere live to go.
+        // `!= null` (loose) so only a real timestamp trips it; null and undefined both mean not dead.
+        if (job?.disappeared_at != null) {
+          // Same release path as the no-URL gap: a status write needs a legal edge.
+          await releaseApplierClaim(
+            // The row whose posting is gone.
+            // Passed so the release targets exactly this lease.
+            row.id,
+            // Distinct token so health queries can count dead postings separately.
+            // Carries the timestamp so a human can see how long the posting has been dead.
+            `posting_disappeared: job ${row.job_id} disappeared at ${job.disappeared_at}; not attempted`,
+          );
+          // Not usable, so skipped like the other release cases.
           continue;
         }
         // Kept with its row so the mapping below needs no second lookup.

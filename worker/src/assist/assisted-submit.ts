@@ -56,6 +56,11 @@ export interface AssistRow {
   readonly status: string;
   // Nullable because it is joined from `jobs`, which can be missing or empty.
   readonly applyUrl: string | null;
+  // Whether the posting has dropped off its board (jobs.disappeared_at non-null). A
+  // tri-state, not a boolean, so "the column was not in the read" ('unknown') cannot be
+  // mistaken for "alive": only an explicit false lets the flow open a browser.
+  // Required (no `?`) so a hand-built row that forgets it fails to compile instead of passing as alive.
+  readonly postingDisappeared: boolean | 'unknown';
   // The frozen snapshot the human approved; the resume PDF is rendered from it only.
   readonly tailoredProfile: ResolvedResume | null;
   // For the printed summary only; never used in a decision.
@@ -191,6 +196,15 @@ export async function runAssisted(deps: AssistDeps): Promise<AssistOutcome> {
   if (row.applyUrl === null || row.applyUrl.trim() === '') {
     // Nothing to open, so nothing to claim.
     return { kind: 'refused', reason: 'the job has no apply_url' };
+  }
+  // FAIL CLOSED: anything but an explicit `false` refuses, so a dead posting, or a read
+  // that could not say, never reaches a browser. Before the claim, so the row is not
+  // leased and its status is untouched.
+  // Strict `!== false` is the fail-closed test: true and 'unknown' both land inside this branch.
+  if (row.postingDisappeared !== false) {
+    // Names the token the scheduled gateway also uses, so one grep finds both refusals.
+    // Returned as a value, not thrown, so the CLI prints it like every other refusal and exits cleanly.
+    return { kind: 'refused', reason: `posting_disappeared: job posting state is ${String(row.postingDisappeared)}` };
   }
   // Narrowed copies, so the compiler knows these are non-null below.
   // Trimmed so stray whitespace from the database cannot break navigation.

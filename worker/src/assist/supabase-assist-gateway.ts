@@ -91,14 +91,25 @@ export function createSupabaseAssistGateway(
           // Where the canonical apply URL lives.
           .from('jobs')
           // The URL for navigation, the rest for the printed summary.
-          .select('apply_url, title, company_name')
+          // disappeared_at joins the existing read so liveness is checked at no extra round trip.
+          .select('apply_url, title, company_name, disappeared_at')
           // The job this application points at.
           .eq('id', app.job_id)
           // A missing job is handled by the null fallbacks below.
           .maybeSingle(),
         // Distinct label, so a failure says which of the two reads broke.
         'loadApplication: job',
-      ) as { apply_url: string | null; title: string; company_name: string } | null;
+        // Cast to the row shape so the fields below are typed; the runtime key may still be absent.
+      ) as {
+        // The navigation target, null when the scout found none.
+        apply_url: string | null;
+        // Display only, for the printed summary.
+        title: string;
+        // Display only, shown beside the title.
+        company_name: string;
+        // Optional in the type because the key can be absent at runtime (older schema).
+        disappeared_at?: string | null;
+      } | null;
       // Flattened into the shape the pure core expects.
       return {
         // Echoed from the row actually read.
@@ -107,6 +118,12 @@ export function createSupabaseAssistGateway(
         status: app.status,
         // Null if the job row is missing, which the core treats as a refusal.
         applyUrl: job?.apply_url ?? null,
+        // Key absent means the read could not say, so 'unknown' (refused downstream);
+        // a missing job row stays on the no-URL path, so it reports 'unknown' too.
+        // A non-null timestamp is a dead posting; only an explicit null is alive.
+        // Computed here, not in the core, because only this layer can see whether the key was present.
+        postingDisappeared:
+          job === null || !('disappeared_at' in job) ? 'unknown' : job.disappeared_at !== null,
         // Normalised so undefined and null mean the same thing downstream.
         tailoredProfile: app.tailored_profile ?? null,
         // Display only; a placeholder is fine because no decision reads it.

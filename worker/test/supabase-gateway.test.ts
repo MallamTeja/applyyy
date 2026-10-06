@@ -400,7 +400,7 @@ describe('createSupabaseGateway.claimApplications', () => {
     // The claimed row carries `job_id` and no `apply_url` — the real wire shape.
     const { client, jobQueries } = claimClient(
       [{ id: 'app-1', job_id: 'job-1', tailored_profile: null }],
-      { data: [{ id: 'job-1', apply_url: 'https://boards.example/apply/1' }], error: null },
+      { data: [{ id: 'job-1', apply_url: 'https://boards.example/apply/1', disappeared_at: null }], error: null },
     );
     const gateway = createSupabaseGateway(client, { userId: 'u1' });
 
@@ -411,7 +411,7 @@ describe('createSupabaseGateway.claimApplications', () => {
       { id: 'app-1', status: 'approved', applyUrl: 'https://boards.example/apply/1', tailoredProfile: null },
     ]);
     // Asked for by id, for exactly the claimed rows' jobs.
-    expect(jobQueries).toEqual([{ columns: 'id, apply_url', column: 'id', ids: ['job-1'] }]);
+    expect(jobQueries).toEqual([{ columns: 'id, apply_url, disappeared_at', column: 'id', ids: ['job-1'] }]);
   });
 
   it('releases, and never returns, a row whose job has no apply_url', async () => {
@@ -422,7 +422,7 @@ describe('createSupabaseGateway.claimApplications', () => {
         { id: 'app-1', job_id: 'job-1', tailored_profile: null },
         { id: 'app-2', job_id: 'job-2', tailored_profile: null },
       ],
-      { data: [{ id: 'job-1', apply_url: '' }, { id: 'job-2', apply_url: 'https://boards.example/2' }], error: null },
+      { data: [{ id: 'job-1', apply_url: '', disappeared_at: null }, { id: 'job-2', apply_url: 'https://boards.example/2', disappeared_at: null }], error: null },
     );
     const gateway = createSupabaseGateway(client, { userId: 'u1' });
 
@@ -434,6 +434,70 @@ describe('createSupabaseGateway.claimApplications', () => {
     const release = rpcCalls.find((call) => call.fn === 'release_application_claim');
     expect(release?.args).toMatchObject({ p_application_id: 'app-1', p_agent: 'applier' });
     expect((release?.args as { p_reason: string }).p_reason).toMatch(/apply_url/);
+  });
+
+  it('releases a row whose posting disappeared, keeps the live one', async () => {
+    // Two rows, two jobs: one live (null), one dead (an ISO timestamp from scout-ats).
+    // Arrange: one live and one dead job, so the test proves the filter splits them rather than blocking all.
+    const { client, rpcCalls } = claimClient(
+      [
+        // Points at the live job: must survive the filter.
+        { id: 'app-live', job_id: 'job-live', tailored_profile: null },
+        // Points at the dead job: must be released.
+        { id: 'app-dead', job_id: 'job-dead', tailored_profile: null },
+      ],
+      {
+        // The jobs table answer, one row per job above.
+        data: [
+          // Explicit null is the 'alive' answer from scout-ats.
+          { id: 'job-live', apply_url: 'https://boards.example/live', disappeared_at: null },
+          // An ISO timestamp is how scout-ats records a posting that left its board.
+          { id: 'job-dead', apply_url: 'https://boards.example/dead', disappeared_at: '2026-10-01T00:00:00Z' },
+        ],
+        // No read error, so the filter logic alone is under test.
+        error: null,
+      },
+    );
+    // The gateway under test, wired to the fake client seam.
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    // Act: claim, which does the jobs read and the release.
+    const claimed = await gateway.claimApplications('applier:run-1', 5);
+
+    // Only the live posting is handed to the browser.
+    expect(claimed.map((row) => row.id)).toEqual(['app-live']);
+    // The dead one got its lease back, with the reason naming the cause.
+    // Guards: the dead row is released, not failed, so its status stays legal.
+    const release = rpcCalls.find((call) => call.fn === 'release_application_claim');
+    // Guards: the right row is released, by the applier agent.
+    expect(release?.args).toMatchObject({ p_application_id: 'app-dead', p_agent: 'applier' });
+    // Guards: the reason names the cause, so 'why not attempted' is answerable later.
+    expect((release?.args as { p_reason: string }).p_reason).toMatch(/posting_disappeared/);
+  });
+
+  it('fails closed when the job has no disappeared_at key at all', async () => {
+    // An older schema or a dropped select column: liveness is unknowable, not "alive".
+    // Arrange: a job with a good URL but NO disappeared_at key, the only variable under test.
+    const { client, rpcCalls } = claimClient(
+      // One claimed row pointing at the job below.
+      [{ id: 'app-1', job_id: 'job-1', tailored_profile: null }],
+      // No disappeared_at key at all: absence, not null.
+      { data: [{ id: 'job-1', apply_url: 'https://boards.example/1' }], error: null },
+    );
+    // The gateway under test, wired to the fake client seam.
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    // Act: claim against the schema that lacks the column.
+    const claimed = await gateway.claimApplications('applier:run-1', 5);
+
+    // Never handed over.
+    // Guards: nothing usable comes back.
+    expect(claimed).toEqual([]);
+    // Released with a reason naming the missing column.
+    // Guards: absence is released, not treated as alive.
+    const release = rpcCalls.find((call) => call.fn === 'release_application_claim');
+    // Guards: the reason names the missing column so an operator can fix the schema.
+    expect((release?.args as { p_reason: string }).p_reason).toMatch(/disappeared_at missing/);
   });
 
   it('throws when the jobs read fails, rather than treating every URL as missing', async () => {

@@ -15,6 +15,10 @@ import {
 import type { FormField } from '../src/extract-fields.ts';
 // A valid snapshot that satisfies the real type (see the fixture's own header).
 import { syntheticResume } from './resolved-resume-fixture.ts';
+// The real gateway, exercised against a stub client for its liveness mapping only.
+import { createSupabaseAssistGateway } from '../src/assist/supabase-assist-gateway.ts';
+// Type only: the client shape the stub is cast to.
+import type { SupabaseLike } from '../src/supabase-gateway.ts';
 
 // A text field the empty answer bank cannot answer, plus a file input for the resume.
 const FIELDS: FormField[] = [
@@ -32,6 +36,8 @@ const goodRow: AssistRow = {
   status: 'approved',
   // A reserved .test domain, so nothing real can ever be reached by accident.
   applyUrl: 'https://example.test/apply',
+  // Explicitly alive: only an explicit false lets the flow reach a browser.
+  postingDisappeared: false,
   // Present, because a null here is a refusal case tested separately.
   tailoredProfile: syntheticResume,
   // Display-only values.
@@ -154,6 +160,27 @@ describe('runAssisted refusals', () => {
     expect(t.events).toEqual([]);
   });
 
+  // Guards the fail-closed rule: a dead or unknowable posting must never reach a browser.
+  it('refuses a disappeared posting before any claim or browser work', async () => {
+    // True models disappeared_at being non-null; 'unknown' models the key being absent.
+    for (const state of [true, 'unknown'] as const) {
+      // Fresh fakes per state so the assertions below see one run only.
+      const t = setup({ row: { ...goodRow, postingDisappeared: state } });
+      // Run the flow end to end.
+      const outcome = await runAssisted(t.deps);
+      // Refused, with the shared token in the message.
+      expect(outcome).toMatchObject({ kind: 'refused', reason: expect.stringContaining('posting_disappeared') });
+      // No lease taken.
+      // Guards: a refused row is never leased.
+      expect(t.gateway.claim).not.toHaveBeenCalled();
+      // No page opened and no status write: the log is empty and goto never ran.
+      // Guards: no status write or release happened, so the row keeps its status.
+      expect(t.events).toEqual([]);
+      // Guards: no browser navigation happened.
+      expect(t.page.goto).not.toHaveBeenCalled();
+    }
+  });
+
   it('refuses a row it cannot see', async () => {
     // RLS-hidden and non-existent rows both load as null.
     const t = setup({ row: null });
@@ -274,6 +301,55 @@ describe('runAssisted flow', () => {
       expect(t.events).not.toContain('advance:applied:applier');
       // The submit spy on the fake page stays untouched.
       expect(t.submit).not.toHaveBeenCalled();
+    }
+  });
+});
+
+// The gateway is the only layer that can see whether `disappeared_at` was in the read at
+// all, so its mapping is the fail-open seam: if it ever turned an absent key into `false`,
+// every core test above would stay green while a dead posting reached a browser.
+describe('createSupabaseAssistGateway posting liveness', () => {
+  // A chain stub: each table answers one fixed row, which is all loadApplication reads.
+  // Built by hand rather than with a mock library because only four chained calls are used.
+  function stubClient(jobRow: Record<string, unknown> | null): SupabaseLike {
+    // Rows by table, so the two reads in loadApplication get different answers.
+    const rows: Record<string, unknown> = {
+      // An approved application pointing at job-1; tailored_profile null is irrelevant here.
+      applications: { id: 'app-1', status: 'approved', job_id: 'job-1', tailored_profile: null },
+      // The case under test: the job row exactly as the database would return it.
+      jobs: jobRow,
+    };
+    // Each step returns the same object so any chain order resolves; maybeSingle ends it.
+    const chain = (table: string) => {
+      // The terminal call carries the data in supabase-js's { data, error } shape.
+      const step = { select: () => step, eq: () => step, maybeSingle: async () => ({ data: rows[table], error: null }) };
+      // Returned as the head of the chain.
+      return step;
+    };
+    // Cast: the stub implements only what loadApplication calls, not the whole client.
+    return { from: chain } as unknown as SupabaseLike;
+  }
+  // The three config values the factory needs; never used because nothing signs in here.
+  const config = { userId: 'u-1', email: 'e@example.test', password: 'p' };
+
+  it('maps null to alive, a timestamp to dead, and a missing key or job to unknown', async () => {
+    // Each pair: the job row the read returns -> what the core must be told.
+    const cases: Array<[Record<string, unknown> | null, boolean | 'unknown']> = [
+      // Explicit null is the only answer that means alive.
+      [{ apply_url: 'https://example.test/a', title: 't', company_name: 'c', disappeared_at: null }, false],
+      // A real timestamp is a dead posting.
+      [{ apply_url: 'https://example.test/a', title: 't', company_name: 'c', disappeared_at: '2026-10-05T00:00:00Z' }, true],
+      // Key absent (older schema, dropped select): the read could not say, so never alive.
+      [{ apply_url: 'https://example.test/a', title: 't', company_name: 'c' }, 'unknown'],
+      // No job row at all: also unknown, never alive.
+      [null, 'unknown'],
+    ];
+    // One loop so all four mappings sit side by side and a regression names its input.
+    for (const [jobRow, expected] of cases) {
+      // A fresh gateway per case so no state carries between them.
+      const row = await createSupabaseAssistGateway(stubClient(jobRow), config).loadApplication('app-1');
+      // The exact tri-state value, not truthiness, because 'unknown' is truthy.
+      expect(row?.postingDisappeared, JSON.stringify(jobRow)).toBe(expected);
     }
   });
 });
