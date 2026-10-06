@@ -14,7 +14,10 @@ import { test } from "node:test";
 // Strict, so a missing key never compares equal to a key holding `undefined`.
 import assert from "node:assert/strict";
 // Extension-suffixed specifier so this runs under Deno and `node --test` alike.
-import { allLivenessUnknown, planTailorBatch } from "./tailor-batch.ts";
+import { planTailorBatch } from "./tailor-batch.ts";
+// The run-level helpers moved to the shared liveness module so every reader that adopts
+// them names a lost column identically; tested here against the Tailor's own row shape.
+import { allLivenessUnknown, classifyJobLiveness, LIVENESS_UNKNOWN_DETAIL } from "../scout/liveness.ts";
 
 // A complete joined row, so each test can break exactly one field.
 const COMPLETE_ROW = {
@@ -128,14 +131,33 @@ test("a row whose select omitted disappeared_at fails closed as liveness_unknown
 test("a batch where every row lacked disappeared_at is named as a select defect", () => {
   // Two rows, neither with the key: the shape a forgotten select column produces.
   const { disappeared_at: _omitted, ...withoutLiveness } = COMPLETE_ROW.jobs;
-  const plan = planTailorBatch([{ id: "a", jobs: withoutLiveness }, { id: "b", jobs: withoutLiveness }]);
-  assert.equal(allLivenessUnknown(plan), "all 2 rows lacked disappeared_at; is the select missing the column?");
+  // Raw rows, classified the way tailor/index.ts does: from row.jobs, not from the plan.
+  const rows = [{ id: "a", jobs: withoutLiveness }, { id: "b", jobs: withoutLiveness }];
+  // The boolean is the run-level verdict tailor/index.ts branches on.
+  assert.equal(allLivenessUnknown(rows.map((r) => classifyJobLiveness(r.jobs))), true);
+  // The exact wording pinned, because a health-page search depends on it never drifting.
+  assert.equal(LIVENESS_UNKNOWN_DETAIL(rows.length), "all 2 rows lacked disappeared_at; is the select missing the column?");
 });
 
 test("an empty or mixed batch is not a select defect", () => {
-  // Empty queue: idle, not broken.
-  assert.equal(allLivenessUnknown(planTailorBatch([])), null);
+  // Empty queue: idle, not broken. Guards the `every`-on-empty-is-true trap.
+  assert.equal(allLivenessUnknown([]), false);
   // One live row beside one unknown: the column arrived, so the run is ordinary.
   const { disappeared_at: _omitted, ...withoutLiveness } = COMPLETE_ROW.jobs;
-  assert.equal(allLivenessUnknown(planTailorBatch([COMPLETE_ROW, { id: "b", jobs: withoutLiveness }])), null);
+  // Mixed classifications built from real row shapes, not hand-written literals.
+  const mixed = [COMPLETE_ROW, { id: "b", jobs: withoutLiveness }].map((r) => classifyJobLiveness(r.jobs));
+  // A single 'live' among the unknowns proves the select carried the column.
+  assert.equal(allLivenessUnknown(mixed), false);
+});
+
+test("live-row guarantee: a scored row whose job has disappeared_at null is tailorable", () => {
+  // Mirrors the live target row ba1e5d1d (GitLab, status scored, disappeared_at null): the
+  // liveness change must not starve the one real row waiting for the Tailor.
+  const row = { id: "ba1e5d1d", jobs: { title: "Backend Engineer", company_name: "GitLab", description_raw: "Ruby, Go and PostgreSQL at scale.", disappeared_at: null } };
+  // Run through the real planner, so the shared classifyJobLiveness is on the path.
+  const plan = planTailorBatch([row]);
+  // Planned, not skipped: null means "selected and live", never "unknown".
+  assert.deepEqual(plan.skipped, []);
+  // Exactly this row, so a planner that dropped and re-added rows could not pass.
+  assert.deepEqual(plan.tailorable.map((t) => t.applicationId), ["ba1e5d1d"]);
 });

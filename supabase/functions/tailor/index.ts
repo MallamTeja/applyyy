@@ -26,8 +26,10 @@ import { createAppUserClient } from "../_shared/db/client.ts";
 // The model transport, with key-pool claiming, 429 failover and pacing already handled.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
 // Which rows may be tailored at all. The guard against tailoring an empty posting.
-// allLivenessUnknown names the one batch shape that means the select below lost a column.
-import { allLivenessUnknown, planTailorBatch } from "../_shared/tailor/tailor-batch.ts";
+import { planTailorBatch } from "../_shared/tailor/tailor-batch.ts";
+// The shared reader-side liveness helpers, so every reader that adopts them names a lost
+// column the same way (today the Tailor is the only one). allLivenessUnknown spots the batch shape that means the select below lost it.
+import { allLivenessUnknown, classifyJobLiveness, LIVENESS_UNKNOWN_DETAIL } from "../_shared/scout/liveness.ts";
 // The runner: prompt -> model -> validate -> verdict.
 import { createTailorer } from "../_shared/tailor/tailorer.ts";
 // The write: payload first, status second, never the reverse.
@@ -193,8 +195,14 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
     // The embedded resource is the posting itself. Fetched in one round trip rather than
     // per row: N+1 against a shared Postgres is how a batch of ten becomes a timeout.
     // `disappeared_at` is REQUIRED: planTailorBatch fails closed on its absence and skips
-    // the row as liveness_unknown. Pinned by _shared/tailor/tailor-index-select.test.ts.
-    .select("id, jobs (title, company_name, description_raw, disappeared_at)")
+    // the row as liveness_unknown. `!inner` is REQUIRED too: without it the .is() below
+    // only nulls the embed and the dead job's application still arrives (the reasoning and
+    // citation live at the top of _shared/scout/liveness.ts). Both pinned by
+    // _shared/tailor/tailor-index-select.test.ts.
+    .select("id, jobs!inner (title, company_name, description_raw, disappeared_at)")
+    // Exclude postings scout-ats marked gone. They stay at `scored`, unselected, so a
+    // repost clears disappeared_at and they rejoin this queue with no status repair.
+    .is("jobs.disappeared_at", null)
     // No `user_id` filter, and that is deliberate — RLS already scopes this to the signed
     // -in user. Adding one would read as defence in depth while actually being a second
     // place for the tenant rule to drift out of step with the policy.
@@ -267,7 +275,11 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
     // but of this function's own select, so the premise above is false for it: failing it
     // would turn one dropped column into every scored row stuck at `failed`, whose only exit
     // is a human. The run is marked failed below instead, loudly.
-    if (skip.reason === "liveness_unknown") continue;
+    // AND EXCEPT posting_disappeared, also LEFT at `scored`: a dead posting is NOT
+    // permanent — planReappearances clears disappeared_at when the job is reposted, and a
+    // row already at `failed` could not rejoin the queue. The query filter keeps these out
+    // of the batch; reaching here means that filter was lost, and the skip still holds.
+    if (skip.reason === "liveness_unknown" || skip.reason === "posting_disappeared") continue;
     // Through the RPC — a bare status update is refused by the guard with 42501.
     const { error } = await db.rpc("advance_application_status", {
       p_application_id: skip.applicationId,
@@ -316,7 +328,13 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
   // `partial` (enums.sql:190), and an empty queue (rows_in 0) is idle, not broken.
   // A batch where EVERY row lacked disappeared_at is a select defect, not an empty queue;
   // without this it reads as "succeeded, nothing to tailor" on the health page.
-  const selectDefect = allLivenessUnknown(plan);
+  // Classified from the RAW rows rather than the plan, so any reader that adopts these
+  // helpers can share one definition of "the column never arrived" without a Tailor plan.
+  const queueRows = rows ?? [];
+  // The exact shared wording, or null for an ordinary batch.
+  const selectDefect = allLivenessUnknown(queueRows.map((row) => classifyJobLiveness(row?.jobs)))
+    ? LIVENESS_UNKNOWN_DETAIL(queueRows.length)
+    : null;
   // Failed on a select defect, or when there was work and none of it moved.
   const runStatus = selectDefect !== null || (plan.tailorable.length > 0 && tailored === 0 && failures.length > 0) ? "failed" : "succeeded";
   // The first few DISTINCT reasons, capped: ten rows failing the same way is one fact,
@@ -376,7 +394,8 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
     // this number being zero forever is the suspicious reading, not a high one.
     refused,
     // Never reached the model, with the reason each was skipped. Each one with an id has
-    // now been moved to `failed` (unless listed in `failures`).
+    // now been moved to `failed` (unless listed in `failures`), except liveness_unknown
+    // and posting_disappeared, which stay at `scored` by design.
     skipped: plan.skipped,
     // Transport, quota or write failures. These rows are still at `scored`.
     failures,
