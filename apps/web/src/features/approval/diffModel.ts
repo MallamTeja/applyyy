@@ -186,21 +186,35 @@ export function deriveBucket(diff: ResumeDiff): ReviewBucket {
   return collectFlaggedClaims(diff).length > 0 ? 'B' : 'A';
 }
 
-/* Coverage as a whole percentage, rounded. Two numbers, computed the same way,
+/* Keyword coverage as a CLOSED UNION, so "nothing was measured" cannot be a number.
+ * Until 2026-10-06 this returned `number` and the empty case returned 0, directly under a
+ * comment saying 0 would be wrong: a row with no recorded JD keywords (selected_jd_keywords
+ * '{}', because nothing wrote it) rendered "0% Match" and read as a failed tailoring. A
+ * percent now exists only on the `measured` arm, so every caller must say what it shows
+ * when there is none, and the compiler refuses one that forgets. */
+export type CoverageMeasure =
+  /* At least one JD keyword was recorded; percent is a real ratio, 0-100. */
+  | { readonly kind: 'measured'; readonly percent: number }
+  /* No JD keywords were recorded: coverage is undefined, neither 0% nor 100%. */
+  | { readonly kind: 'unmeasured' };
+
+/* Coverage as a whole percentage, rounded. Two figures, computed the same way,
  * so the pair is directly comparable on screen. */
 export function coveragePercent(
   coverage: KeywordCoverage,
   include: 'honest' | 'withFabrication',
-): number {
+): CoverageMeasure {
+  /* The denominator: how many JD keywords there were to match. */
   const total = coverage.jdKeywords.length;
-  /* No keywords extracted means coverage is undefined, not zero - returning 0
-   * would render a red empty bar and read as a tailoring failure. */
-  if (total === 0) return 0;
+  /* Nothing to divide by means nothing was measured; never a number, so never "0% Match". */
+  if (total === 0) return { kind: 'unmeasured' };
 
+  /* Honest counts only what the master supports; withFabrication adds the flagged matches. */
   const matched =
     include === 'honest'
       ? coverage.honestlyMatched.length
       : coverage.honestlyMatched.length + coverage.matchedByFabrication.length;
 
-  return Math.round((matched / total) * 100);
+  /* Rounded so the badge, bar and legend all show one integer. */
+  return { kind: 'measured', percent: Math.round((matched / total) * 100) };
 }

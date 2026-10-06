@@ -168,13 +168,37 @@ function JobPosting({ diff }: { readonly diff: ResumeDiff }): ReactElement | nul
 
 /* --- Coverage ---------------------------------------------------------- */
 
-/* Two-segment bar: honest coverage vs coverage purchased by fabrication. */
-function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactElement {
+/* Two-segment bar: honest coverage vs coverage purchased by fabrication.
+   Exported for the test that pins the unmeasured branch (test/coverageUnmeasured.test.ts). */
+export function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactElement {
   /* Coverage the master genuinely supports. */
-  const honest = coveragePercent(diff.coverage, 'honest');
+  const honestMeasure = coveragePercent(diff.coverage, 'honest');
   /* Coverage including the flagged claims, which is what would actually be
    * submitted if the operator approved blindly. */
-  const total = coveragePercent(diff.coverage, 'withFabrication');
+  const totalMeasure = coveragePercent(diff.coverage, 'withFabrication');
+
+  /* NOT MEASURED IS A STATE, NOT A NUMBER. Same denominator for both figures, so they are
+     unmeasured together; checking both lets the compiler narrow each to its percent below.
+     No bar, no badge and no "verified claims" line: each of those would state a result
+     about keywords that were never recorded. */
+  if (honestMeasure.kind === 'unmeasured' || totalMeasure.kind === 'unmeasured') {
+    return (
+      <div className="coverage coverage--unmeasured">
+        <div className="coverage__header-row">
+          <h3 className="coverage__title">ATS Match Score</h3>
+        </div>
+        {/* Says what is missing and why, so it reads as a gap in the data, not a verdict. */}
+        <p className="coverage__unmeasured">
+          ATS keyword score: not measured for this application. No job-description keywords were recorded, so there is nothing to score.
+        </p>
+      </div>
+    );
+  }
+
+  /* Narrowed to measured above, so these are real ratios. */
+  const honest = honestMeasure.percent;
+  /* Includes flagged matches; never below honest, since it adds to the same numerator. */
+  const total = totalMeasure.percent;
   /* The purchased portion is the gap between them. */
   const purchased = total - honest;
 
