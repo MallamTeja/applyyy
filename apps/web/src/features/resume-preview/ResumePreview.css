@@ -1,0 +1,61 @@
+/* Resume preview: two paper sheets side by side.
+ *
+ * Semantic tokens only (CLAUDE.md section 6): no [data-theme='dark'] rules, which never
+ * match for a user on the "system" setting. The frames themselves need no theming: the
+ * template paints its own white paper, which is correct in both themes - a resume is a
+ * printed document, not app chrome. */
+
+.resume-preview {
+  /* Two equal panes, so tailored and master lines sit at comparable heights. */
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr));
+  /* Wide enough that two sheets never read as one document. */
+  gap: var(--gap-5);
+  margin-top: var(--gap-4);
+}
+
+.resume-preview__pane {
+  /* Lets the frame fill the column. */
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-2);
+  /* Grid children default to min-width:auto, which lets a wide frame overflow. */
+  min-width: 0;
+}
+
+.resume-preview__bar {
+  /* Heading left, downloads right, wrapping on narrow screens. */
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--gap-2);
+}
+
+.resume-preview__heading {
+  /* Matches the queue's sub-headings without competing with the bucket titles. */
+  font-size: var(--size-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.resume-preview__actions {
+  /* The two download buttons, spaced like the row actions. */
+  display: inline-flex;
+  gap: var(--gap-2);
+}
+
+.resume-preview__frame {
+  /* A full page is tall; a short frame would hide the bottom half of the resume. */
+  width: 100%;
+  height: 70rem;
+  /* The sheet edge, themed by the token. */
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+}
+
+.resume-preview__status {
+  /* Loading and refusal text, at body size, readable width. */
+  max-width: 65ch;
+  color: var(--text-secondary);
+}

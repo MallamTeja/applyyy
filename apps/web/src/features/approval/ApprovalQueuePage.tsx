@@ -51,6 +51,9 @@ import type { ClaimDecision } from './DiffView';
 import { buildResumeDiff } from './diffAdapter';
 import { deriveBucket } from './diffModel';
 import type { ResumeDiff } from './diffModel';
+// The submitted resume and its master side by side, rendered by the worker's own renderer,
+// so every row can be SEEN before it is approved. Shared with the pipeline history page.
+import { ResumePreview } from '../resume-preview/ResumePreview';
 import { supabase } from '../../data/supabase';
 
 import './ApprovalQueuePage.css';
@@ -119,6 +122,18 @@ export function ApprovalQueuePage(): ReactElement {
   /* Rows the operator has acted on this session, so they leave the queue
      without a refetch. */
   const [settled, setSettled] = useState<ReadonlySet<string>>(() => new Set());
+
+  /* The tailored resume behind each diff, keyed by application id. ResumeDiff holds
+     the comparison lines, not the snapshot, and the preview must render the SNAPSHOT:
+     that is what the worker turns into the PDF. Set in the same pass as the queue. */
+  const [resumes, setResumes] = useState<ReadonlyMap<string, ResolvedResume>>(() => new Map());
+
+  /* Bucket A rows the operator has opened, for the diff and for the preview
+     separately. Added 2026-10-06: Bucket A used to be a count and a batch button
+     only, so a clean row could be approved by someone who never saw its resume. */
+  const [reviewing, setReviewing] = useState<ReadonlySet<string>>(() => new Set());
+  // Rows whose rendered resume is showing; separate because a preview is tall.
+  const [previewing, setPreviewing] = useState<ReadonlySet<string>>(() => new Set());
 
   /* Query real applications from Supabase where status = awaiting_approval */
   useEffect(() => {
@@ -198,6 +213,8 @@ export function ApprovalQueuePage(): ReactElement {
         setLoadError(null);
 
         const diffs: ResumeDiff[] = [];
+        // The snapshot each diff was built from, so the preview renders exactly that.
+        const snapshots = new Map<string, ResolvedResume>();
         /* Collected alongside, never merged in. See UnreviewableRow. */
         const refused: UnreviewableRow[] = [];
         for (const app of data) {
@@ -253,9 +270,13 @@ export function ApprovalQueuePage(): ReactElement {
           });
 
           diffs.push(diff);
+          // Same row, same snapshot: the preview can never show a different resume than the diff.
+          snapshots.set(app.id, resolved);
         }
 
         setQueue(diffs);
+        // Published with the queue so a rendered row always has its snapshot.
+        setResumes(snapshots);
 
         /* Published in the same pass, so the banner and the buckets can
 
@@ -360,6 +381,56 @@ export function ApprovalQueuePage(): ReactElement {
         `${failed.length} ${noun} could not be recorded and ${failed.length === 1 ? 'is' : 'are'} still waiting. Check you are signed in, then try again.`,
       );
     }
+  }
+
+  /* ONE approval path for every individually reviewed row, Bucket A or B, so the
+     two buckets cannot drift into recording different things. It still ends in
+     settle(), i.e. the advance_application_status RPC with p_agent 'human'.
+     The decisions map is FORWARDED, not dropped: each entry is one flagged claim
+     the operator chose to keep or remove, and it travels into the RPC's p_detail
+     so the audit log records the reasoning rather than a bare verdict. Serialised
+     as an object because p_detail is jsonb and a Map has no JSON representation -
+     it would have arrived as {}. */
+  function approveReviewed(
+    // The one row being approved.
+    applicationId: string,
+    // The operator's per-claim choices from DiffView (empty for a clean row).
+    decisions: ReadonlyMap<string, ClaimDecision>,
+    // Which screen path produced this approval, for the audit trail.
+    reviewPath: 'bucket_b_review' | 'bucket_a_review',
+  ): void {
+    // Fire and forget: settle() reports success and failure through toasts itself.
+    void settle([applicationId], 'approved', {
+      // What was decided, claim by claim.
+      claim_decisions: Object.fromEntries(decisions),
+      /* Counted here rather than derived later: this is the number the button
+         showed the operator, so it is the number the record should reproduce. */
+      claims_removed: [...decisions.values()].filter((d: ClaimDecision) => d === 'remove').length,
+      // Distinguishes an opened-and-read Bucket A row from the batch button.
+      review_path: reviewPath,
+    });
+  }
+
+  /* A rejection is a modelled edge, not an ad-hoc state write:
+     `awaiting_approval -> dropped_filter` is human-only, noted in the graph as
+     "a human is the last filter in the cascade". drop_reason carries why. */
+  function rejectReviewed(applicationId: string, reason: string): void {
+    // Same door as approval, other edge.
+    void settle([applicationId], 'dropped_filter', { drop_reason: reason });
+  }
+
+  // Flip one id in a set-valued state; used by both Bucket A disclosures.
+  function toggle(setter: typeof setReviewing, id: string): void {
+    // A new Set each time, so React sees the change.
+    setter((previous) => {
+      // Copy, then flip membership.
+      const next = new Set(previous);
+      // Open if closed, close if open.
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      // The new state.
+      return next;
+    });
   }
 
   /* Loading state while checking database */
@@ -487,39 +558,51 @@ export function ApprovalQueuePage(): ReactElement {
           {/* Expanded, one after another. Never a collapsed list: a row that
               must be read cannot be behind a disclosure triangle. */}
           <ul className="queue__list">
-            {bucketB.map((diff) => (
-              <li key={diff.applicationId} className="queue__item">
-                <DiffView
-                  diff={diff}
-                  /* The decisions map is now FORWARDED, not dropped. Each entry
-                     is one flagged claim the operator explicitly chose to keep
-                     or remove, and it travels into the RPC's p_detail so the
-                     audit log records the reasoning rather than a bare verdict.
-                     Serialised as an object because p_detail is jsonb and a Map
-                     has no JSON representation - it would have arrived as {}. */
-                  onApprove={(decisions) =>
-                    void settle([diff.applicationId], 'approved', {
-                      claim_decisions: Object.fromEntries(decisions),
-                      /* Counted here rather than derived later: this is the
-                         number the button showed the operator, so it is the
-                         number the record should be able to reproduce. */
-                      claims_removed: [...decisions.values()].filter(
-                        (d: ClaimDecision) => d === 'remove',
-                      ).length,
-                    })
-                  }
-                  /* A rejection is a modelled edge, not an ad-hoc state write:
-                     `awaiting_approval -> dropped_filter` is human-only, noted
-                     in the graph as "a human is the last filter in the
-                     cascade". drop_reason carries why. */
-                  onReject={(reason) =>
-                    void settle([diff.applicationId], 'dropped_filter', {
-                      drop_reason: reason,
-                    })
-                  }
-                />
-              </li>
-            ))}
+            {bucketB.map((diff) => {
+              // The snapshot behind this diff, for the rendered preview.
+              const resume = resumes.get(diff.applicationId);
+              // Whether this row's rendered resume is open.
+              const isPreviewing = previewing.has(diff.applicationId);
+              // Region id for the disclosure.
+              const previewId = `preview-${diff.applicationId}`;
+              return (
+                <li key={diff.applicationId} className="queue__item">
+                  <DiffView
+                    diff={diff}
+                    /* The shared approval path; see approveReviewed for why the
+                       decisions are forwarded and how they are serialised. */
+                    onApprove={(decisions) => approveReviewed(diff.applicationId, decisions, 'bucket_b_review')}
+                    /* The shared rejection path; see rejectReviewed. */
+                    onReject={(reason) => rejectReviewed(diff.applicationId, reason)}
+                  />
+                  {/* The diff stays expanded (Bucket B is never collapsed); the
+                      rendered document is an extra, opened on demand because it is tall. */}
+                  <button
+                    type="button"
+                    className="button button--secondary button--small queue__preview-toggle"
+                    /* Disclosure semantics, as in Bucket A. */
+                    aria-expanded={isPreviewing}
+                    aria-controls={previewId}
+                    onClick={() => toggle(setPreviewing, diff.applicationId)}
+                  >
+                    {/* Same words as Bucket A, so the action reads the same everywhere. */}
+                    {isPreviewing ? 'Hide resume' : 'Preview resume'}
+                  </button>
+                  {isPreviewing && resume ? (
+                    <div id={previewId}>
+                      <ResumePreview
+                        applicationId={diff.applicationId}
+                        tailoredProfile={resume}
+                        /* Pinned version from the snapshot; see Bucket A. */
+                        masterVersion={resume.master_version}
+                        jobTitle={diff.jobTitle}
+                        companyName={diff.companyName}
+                      />
+                    </div>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
         </section>
       ) : null}
@@ -535,29 +618,108 @@ export function ApprovalQueuePage(): ReactElement {
             All tailored claims verified against master profile ground truth.
           </p>
 
-          {/* One row per application, but as a compact line rather than a diff.
-              The operator can still open any of them; the default is that they
-              do not need to. */}
+          {/* One compact line per application, collapsed by default, and every
+              line OPENS: "Review" expands the same DiffView Bucket B uses, and
+              "Preview resume" renders the exact document the worker will submit.
+              Until 2026-10-06 this comment claimed the operator "can still open any
+              of them" while the rows had no way to open - a clean row could only be
+              approved unseen, through the batch button below. */}
           <ul className="queue__clean-list">
-            {bucketA.map((diff) => (
-              <li key={diff.applicationId} className="queue__clean-row">
-                <span className="queue__clean-job">
-                  {diff.jobTitle} at {diff.companyName}
-                </span>
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.75rem' }}>
-                  {diff.discoveredVia && diff.discoveredVia.length > 0 && (
-                    <SourceBadge
-                      discoveredVia={diff.discoveredVia as readonly DiscoverySource[]}
-                      sourceRefs={diff.sourceRefs}
-                    />
-                  )}
-                  <StatusBadge status="audit_clean" label="audit_clean" />
-                  <span className="identifier">
-                    master v{diff.masterVersion}
-                  </span>
-                </span>
-              </li>
-            ))}
+            {bucketA.map((diff) => {
+              // Whether this row's diff is open.
+              const isReviewing = reviewing.has(diff.applicationId);
+              // Whether this row's rendered resume is open.
+              const isPreviewing = previewing.has(diff.applicationId);
+              // The snapshot behind this diff; always set in the same pass as the queue.
+              const resume = resumes.get(diff.applicationId);
+              // Stable ids so each button can name the region it controls.
+              const reviewId = `review-${diff.applicationId}`;
+              // Same, for the preview region.
+              const previewId = `preview-${diff.applicationId}`;
+              return (
+                <li key={diff.applicationId} className="queue__clean-row queue__clean-row--openable">
+                  <div className="queue__clean-line">
+                    <span className="queue__clean-job">
+                      {diff.jobTitle} at {diff.companyName}
+                    </span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.75rem' }}>
+                      {diff.discoveredVia && diff.discoveredVia.length > 0 && (
+                        <SourceBadge
+                          discoveredVia={diff.discoveredVia as readonly DiscoverySource[]}
+                          sourceRefs={diff.sourceRefs}
+                        />
+                      )}
+                      <StatusBadge status="audit_clean" label="audit_clean" />
+                      <span className="identifier">
+                        master v{diff.masterVersion}
+                      </span>
+                      <button
+                        type="button"
+                        className="button button--secondary button--small"
+                        /* aria-expanded is what tells a screen reader this is a disclosure. */
+                        aria-expanded={isReviewing}
+                        aria-controls={reviewId}
+                        onClick={() => toggle(setReviewing, diff.applicationId)}
+                      >
+                        {/* Says what opening does, and what closing does. */}
+                        {isReviewing ? 'Hide review' : 'Review'}
+                      </button>
+                      <button
+                        type="button"
+                        className="button button--secondary button--small"
+                        /* Same disclosure semantics as Review. */
+                        aria-expanded={isPreviewing}
+                        aria-controls={previewId}
+                        onClick={() => toggle(setPreviewing, diff.applicationId)}
+                      >
+                        {/* "resume", not "PDF": the PDF is one button further in. */}
+                        {isPreviewing ? 'Hide resume' : 'Preview resume'}
+                      </button>
+                    </span>
+                  </div>
+
+                  {/* The full comparison, identical to Bucket B's, approving through
+                      the same RPC path. Only mounted when open: thirty diffs rendered
+                      hidden would cost the whole page for rows nobody opened. */}
+                  {isReviewing ? (
+                    <div id={reviewId} className="queue__clean-detail">
+                      <DiffView
+                        diff={diff}
+                        /* Same path as Bucket B, tagged so the audit log shows this
+                           clean row was opened and read, not batch-approved. */
+                        onApprove={(decisions) => approveReviewed(diff.applicationId, decisions, 'bucket_a_review')}
+                        /* Same rejection edge as Bucket B. */
+                        onReject={(reason) => rejectReviewed(diff.applicationId, reason)}
+                      />
+                    </div>
+                  ) : null}
+
+                  {/* The submitted document itself. A missing snapshot cannot happen
+                      (rows without one are refused above), but if it did, saying so
+                      beats an empty frame next to an approve button. */}
+                  {isPreviewing ? (
+                    <div id={previewId} className="queue__clean-detail">
+                      {resume ? (
+                        <ResumePreview
+                          applicationId={diff.applicationId}
+                          tailoredProfile={resume}
+                          /* The PINNED version from the snapshot, not diff.masterVersion:
+                             the loader stamps the LATEST master onto every diff. */
+                          masterVersion={resume.master_version}
+                          jobTitle={diff.jobTitle}
+                          companyName={diff.companyName}
+                        />
+                      ) : (
+                        <p className="resume-preview__refused" role="alert">
+                          {/* Names the gap rather than hiding it. */}
+                          No tailored resume snapshot was loaded for this application.
+                        </p>
+                      )}
+                    </div>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
 
           <button

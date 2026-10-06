@@ -74,6 +74,36 @@
   border-bottom: none;
 }
 
+/* An openable row stacks its line above whatever it expands to, instead of laying
+   the expanded diff beside the job title. */
+.queue__clean-row--openable {
+  /* Column, so the detail sits under the line. */
+  flex-direction: column;
+  align-items: stretch;
+}
+
+/* The original one-line layout, now inside the openable row. */
+.queue__clean-line {
+  /* Title left, badges and buttons right, wrapping when narrow. */
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--gap-3);
+}
+
+/* An expanded diff or preview inside a clean row. */
+.queue__clean-detail {
+  /* Separated from the line it belongs to, still inside the row's hairlines. */
+  margin-top: var(--gap-3);
+}
+
+/* Bucket B's preview toggle, under its always-open diff. */
+.queue__preview-toggle {
+  /* Clear of the diff's own approve/reject controls. */
+  margin-top: var(--gap-4);
+}
+
 .queue__clean-job {
   /* Serif: this is the job the resume was written for, so it belongs to the
      document side of the paper/machine split rather than to the chrome. */
