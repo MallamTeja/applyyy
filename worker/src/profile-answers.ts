@@ -47,16 +47,12 @@ const SYNONYMS: ReadonlyMap<string, ProfileField> = new Map<string, ProfileField
   ['phone_number', 'phone'],
   ['mobile', 'phone'],
   ['mobile_number', 'phone'],
-  // More phrasings of the same single stored number (none overlaps a denylist fragment).
-  // Mobile variant of the one stored number.
+  // More phrasings of the same single stored number (mobile, contact, abbreviated, formal).
+  // None overlaps a denylist fragment, so none can route a legal question to the phone value.
   ['mobile_phone', 'phone'],
-  // Contact variant.
   ['contact_number', 'phone'],
-  // Contact variant.
   ['contact_phone', 'phone'],
-  // Abbreviated variant.
   ['phone_no', 'phone'],
-  // Formal variant.
   ['telephone', 'phone'],
   // Full name, copied as-is. "legal_name" is deliberately absent: it can differ from the profile name.
   // The canonical label.

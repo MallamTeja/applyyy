@@ -197,13 +197,12 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
       // Through `unwrap`, so a failed read THROWS rather than reading as "no URL"
       // — releasing every row on a transient error would disguise an outage as
       // an empty queue, and the rows keep their leases for the sweeper instead.
+      // disappeared_at rides the same read so liveness costs no extra round trip; unwrapped so a
+      // failed read throws instead of looking like dead rows. `disappeared_at?` is optional in the
+      // cast because the key can be absent at runtime, and the loop below tests its PRESENCE.
       const jobs = unwrap(
-        // disappeared_at rides the same read so liveness costs no extra round trip.
-        // Awaited and unwrapped below so a failed read throws instead of looking like dead rows.
         await client.from('jobs').select('id, apply_url, disappeared_at').in('id', jobIds),
         'claimApplications: read jobs.apply_url',
-        // disappeared_at is optional in the type: the key can be absent at runtime.
-      // Cast so the fields are typed; `disappeared_at?` is optional because the loop tests key presence.
       ) as Array<{ id: string; apply_url: string | null; disappeared_at?: string | null }> | null;
       // Keyed by job id so each claimed row finds its URL in one lookup.
       const urlByJobId = new Map((jobs ?? []).map((job) => [job.id, job.apply_url]));
@@ -228,17 +227,15 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
         }
         // Always defined here: a job missing from the map had no URL and already took the no-URL release above.
         const job = jobById.get(row.job_id);
-        // FAIL CLOSED on a missing key: an older schema or a select that dropped the
-        // column must not read as "alive". Released, not failed, like the no-URL gap.
-        // `in` tests key PRESENCE, because a null value is a valid answer (alive) and must not be confused with absence.
+        // FAIL CLOSED on a missing key: an older schema or a select that dropped the column must
+        // not read as "alive". `in` tests PRESENCE, because null is a valid answer (alive).
+        // Released, not failed, like the no-URL gap.
         if (job && !('disappeared_at' in job)) {
           // Lease returned with a reason, so the event log answers 'why not attempted'.
           await releaseApplierClaim(
-            // The row whose liveness could not be established.
-            // Passed so the release targets exactly this lease.
+            // Targets exactly this row's lease.
             row.id,
-            // Names the missing column, never the word 'alive'.
-            // Includes the job id so the sweeper log is traceable to the posting.
+            // Names the missing column (never the word 'alive') and the job, so the log is traceable.
             `jobs.disappeared_at missing from read for job ${row.job_id}; liveness unknown, not attempted`,
           );
           // Skip to the next row; this one must not reach the usable list.
@@ -249,11 +246,9 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
         if (job?.disappeared_at != null) {
           // Same release path as the no-URL gap: a status write needs a legal edge.
           await releaseApplierClaim(
-            // The row whose posting is gone.
-            // Passed so the release targets exactly this lease.
+            // Targets exactly this row's lease.
             row.id,
-            // Distinct token so health queries can count dead postings separately.
-            // Carries the timestamp so a human can see how long the posting has been dead.
+            // Distinct token so health queries can count dead postings; the timestamp shows how long it has been dead.
             `posting_disappeared: job ${row.job_id} disappeared at ${job.disappeared_at}; not attempted`,
           );
           // Not usable, so skipped like the other release cases.
