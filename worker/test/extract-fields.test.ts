@@ -452,3 +452,22 @@ describe('choice controls', () => {
     expect(fields.filter((field) => field.label === 'Yes' || field.label === 'No')).toEqual([]);
   });
 });
+
+// hCaptcha guard: Lever-like pages carry a hidden, unlabelled h-captcha-response textarea that
+// must never surface as a field, or the planner would see a required-looking unanswerable item.
+describe('hCaptcha response sink', () => {
+  test('is never extracted, while the labelled field beside it is', async () => {
+    // Own tab so the shared page is undisturbed.
+    const isolated = await browser.newPage();
+    // Synthetic fixture served by the same fixture server.
+    await isolated.goto(`${server.url}/synthetic/hcaptcha-lever-like.html`);
+    // Extract everything the planner would be shown.
+    const fields = await extractFields(isolated);
+    // Close the tab so it cannot leak into other tests.
+    await isolated.close();
+    // Non-vacuity: the normal field IS extracted, so an empty result cannot pass this test.
+    expect(fields.map((field) => field.id)).toContain('full_name');
+    // The captcha textarea is absent by id.
+    expect(fields.some((field) => field.id === 'h-captcha-response')).toBe(false);
+  });
+});

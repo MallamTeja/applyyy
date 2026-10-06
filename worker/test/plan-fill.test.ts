@@ -112,7 +112,7 @@ const profile = {
   // Everything the resolver reads lives under identity, matching the live master_profiles rows.
   identity: {
     // Present only to prove the planner never derives name fields from it.
-    full_name: 'Mallam Teja',
+    full_name: 'Asha Rao',
     // Null, as in the live rows; nothing may read it.
     headline: null,
     // The email the profile resolver should copy.
@@ -414,5 +414,40 @@ describe('planFill — answer bank hardening', () => {
     expect(planFill([f], [answer('notice_period', '30')]).blockers[0]?.reason).toBe('no_matching_option');
     // The exact option string is accepted.
     expect(planFill([f], [answer('notice_period', '30 days')]).fills[0]?.value).toBe('30 days');
+  });
+});
+
+// Round-3 table rows: full name copied whole, city derived, and the hCaptcha non-fill.
+describe('planFill - full name and city rows', () => {
+  // Rows are [label, expected value]; profile location is "Hyderabad, India" (two segments).
+  const rows: Array<[string, string]> = [
+    // Full name: copied as-is from identity.full_name, never split into first/last.
+    ['Full name', 'Asha Rao'],
+    // City: first location segment, allowed because the location has two segments.
+    ['City', 'Hyderabad'],
+  ];
+  // One plan over both rows, answered purely from the profile (empty bank).
+  const plan = planFill(rows.map(([l], i) => fieldOf(`r${i}`, l, true, 'text')), [], profile);
+
+  test('fills Full name as-is and City from the first segment', () => {
+    // Value and source asserted together so a bank-sourced fill cannot pass by accident.
+    expect(plan.fills.map((x) => [x.value, x.source])).toEqual(rows.map(([, v]) => [v, 'profile']));
+  });
+
+  test('a one-segment location refuses City (ambiguous) but still fills Full name', () => {
+    // "Hyderabad" alone could be a country, so City must block with no_answer.
+    const p = planFill(rows.map(([l], i) => fieldOf(`r${i}`, l, true, 'text')), [], profileAt('Hyderabad'));
+    // Only the name fills.
+    expect(p.fills.map((x) => x.value)).toEqual(['Asha Rao']);
+    // City is the blocker.
+    expect(p.blockers.map((b) => b.reason)).toEqual(['no_answer']);
+  });
+
+  test('a bank row keyed h-captcha-response fills nothing, as no such field is extracted', () => {
+    // The REAL guard is the extraction test (hcaptcha-lever-like.html): the field never exists.
+    // With only real fields passed in, a stray bank row has nothing to attach to.
+    const p = planFill([fieldOf('full_name', 'Full name', true, 'text')], [answer('h-captcha-response', 'token')], profile);
+    // Only the real field fills; no fill carries the captcha id.
+    expect(p.fills.map((x) => x.id)).toEqual(['full_name']);
   });
 });

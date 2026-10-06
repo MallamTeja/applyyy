@@ -1,0 +1,10 @@
+<!doctype html>
+<!-- SYNTHETIC, hand-authored: a Lever-like hCaptcha response sink beside a normal field. NOT a vendor's real DOM. -->
+<html><body><form>
+  <!-- the real question; proves extraction still works on this page (non-vacuity) -->
+  <label for="full_name">Full name</label>
+  <input id="full_name" type="text" />
+
+  <!-- hCaptcha writes its token here; it has no label and is not a question, so it must never be extracted -->
+  <textarea name="h-captcha-response" id="h-captcha-response" style="display:none"></textarea>
+</form></body></html>

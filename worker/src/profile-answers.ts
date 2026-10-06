@@ -30,7 +30,10 @@ export function normaliseKey(text: string): string {
 }
 
 // Which profile value a label resolves to; a closed union so a typo cannot add a new kind.
-type ProfileField = 'email' | 'phone' | 'linkedin' | 'github' | 'website' | 'country';
+// full_name, city, location and company join the original six; each is a plain stored fact.
+type ProfileField =
+  | 'email' | 'phone' | 'linkedin' | 'github' | 'website' | 'country'
+  | 'full_name' | 'city' | 'location' | 'company';
 
 // The closed synonym table: normalised label -> profile field. Exact keys only, by design.
 // A Map (not an object literal) because a label like "constructor" or "__proto__" would hit
@@ -44,6 +47,41 @@ const SYNONYMS: ReadonlyMap<string, ProfileField> = new Map<string, ProfileField
   ['phone_number', 'phone'],
   ['mobile', 'phone'],
   ['mobile_number', 'phone'],
+  // More phrasings of the same single stored number (none overlaps a denylist fragment).
+  // Mobile variant of the one stored number.
+  ['mobile_phone', 'phone'],
+  // Contact variant.
+  ['contact_number', 'phone'],
+  // Contact variant.
+  ['contact_phone', 'phone'],
+  // Abbreviated variant.
+  ['phone_no', 'phone'],
+  // Formal variant.
+  ['telephone', 'phone'],
+  // Full name, copied as-is. "legal_name" is deliberately absent: it can differ from the profile name.
+  // The canonical label.
+  ['full_name', 'full_name'],
+  // The second-person phrasing of the same label.
+  ['your_full_name', 'full_name'],
+  // Bare Name; no denylist fragment contains it, so it reaches the table.
+  ['name', 'full_name'],
+  // City, derived from the first location segment. Only ever a city label, never "location".
+  // The canonical city label.
+  ['city', 'city'],
+  // Same question, stated as current.
+  ['current_city', 'city'],
+  // Same question, stated as residence.
+  ['city_of_residence', 'city'],
+  // Free-text location, copied whole. "where_are_you_located" is absent: it overlaps the located_in denylist.
+  // Explicit free-text location label.
+  ['current_location', 'location'],
+  // Bare Location; distinct from the denylisted located_in phrasing.
+  ['location', 'location'],
+  // Employer of the single role explicitly marked "Present". "company_name" is absent: too ambiguous.
+  // The canonical employer label.
+  ['current_company', 'company'],
+  // Synonym for the same fact.
+  ['current_employer', 'company'],
   // LinkedIn.
   ['linkedin', 'linkedin'],
   ['linkedin_profile', 'linkedin'],
@@ -104,6 +142,47 @@ function countryOf(location: string | null | undefined): string | null {
 }
 
 /**
+ * The city from a "City, Region, Country" location, or null when it cannot be told.
+ * Same two-segment floor as countryOf: a lone "Hyderabad" could be a city or a country, so
+ * it is refused here rather than typed into a city field on a guess.
+ */
+function cityOf(location: string | null | undefined): string | null {
+  // Missing or blank location has no city.
+  const text = nonEmpty(location);
+  // Nothing to parse.
+  if (text === null) return null;
+  // Drop empty segments so "Hyderabad, , " does not count as three parts.
+  const parts = text.split(',').map((part) => part.trim()).filter((part) => part !== '');
+  // One segment is ambiguous (city? country?), so refuse rather than guess.
+  if (parts.length < 2) return null;
+  // Convention is most-specific first, so the first segment is the city.
+  return parts[0] ?? null;
+}
+
+/**
+ * The employer of the one experience entry whose end_display is the literal "Present"
+ * (the documented current-role marker, profile-nodes.ts:175), or null.
+ * A null end_date is NOT used: it can mean "current" or "never entered", and treating it as
+ * current would turn missing data into an answer. Zero or several markers also give null.
+ */
+function currentCompanyOf(experience: unknown): string | null {
+  // jsonb may not be an array at runtime; anything else has no current role.
+  if (!Array.isArray(experience)) return null;
+  // Collect every entry carrying the explicit marker, tolerating malformed entries.
+  const current = experience.filter(
+    (entry) =>
+      // Skip junk entries rather than throwing on jsonb of unknown shape.
+      entry !== null && typeof entry === 'object' &&
+      // The marker is compared normalised so "Present" and "present" both count, nothing else does.
+      typeof entry.end_display === 'string' && normaliseKey(entry.end_display) === 'present',
+  );
+  // Two concurrent current roles make "the" employer ambiguous, so refuse.
+  if (current.length !== 1) return null;
+  // The one marked entry's employer, blank-safe.
+  return nonEmpty(current[0].company);
+}
+
+/**
  * The value the master profile holds for this field's label, or null when the label is not
  * in the table, the profile lacks the value, or (country) the control would not accept it.
  */
@@ -121,6 +200,15 @@ export function resolveProfileAnswer(field: FormField, profile: MasterProfile | 
   if (target === 'email') return nonEmpty(identity.email);
   // Phone is a stored fact like email; a blank one stays unanswered.
   if (target === 'phone') return nonEmpty(identity.phone);
+
+  // Full name is stored whole and copied whole; never split (family-name-first risk).
+  if (target === 'full_name') return nonEmpty(identity.full_name);
+  // Location is free text copied verbatim; no parsing, so nothing to get wrong.
+  if (target === 'location') return nonEmpty(identity.location);
+  // City is derived, so it carries cityOf's two-segment guard.
+  if (target === 'city') return cityOf(identity.location);
+  // Company comes from the experience list, never from identity.
+  if (target === 'company') return currentCompanyOf(profile.experience);
 
   // Country is the one DERIVED value, so it gets the extra guards below.
   if (target === 'country') {
