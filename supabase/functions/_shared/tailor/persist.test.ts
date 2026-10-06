@@ -53,7 +53,8 @@ const RESUME: ResolvedResume = {
 const REFS = { master_version: 7, summary: null } as unknown as TailoredProfile;
 
 // A clean verdict, ready to persist.
-const TAILORED: TailorOutcome = { kind: "tailored", resume: RESUME, refs: REFS };
+// `jdKeywords` is a recognisable pair so the keyword test can assert it arrived intact.
+const TAILORED: TailorOutcome = { kind: "tailored", resume: RESUME, refs: REFS, jdKeywords: ["Go", "PostgreSQL"] };
 
 // One recorded call against the database seam, in the order it was made.
 interface RecordedCall {
@@ -123,6 +124,24 @@ test("the raw tailor refs are written in the SAME update as the profile", async 
   // would silently disable the Auditor's ref check for that row.
   assert.equal((calls[0].payload.values as Record<string, unknown>).tailor_refs, REFS);
   // Still one update and one rpc — the refs did not add a write that could half-fail.
+  assert.deepEqual(calls.map((c) => c.kind), ["update", "rpc"]);
+});
+
+test("persist writes selected_jd_keywords alongside tailored_profile", async () => {
+  // A clean run against the recording fake.
+  const { client, calls } = recordingClient();
+  // Persist the clean verdict.
+  await persistTailorOutcome(client, APPLICATION_ID, TAILORED);
+  // The first call's columns: the one update statement.
+  const values = calls[0].payload.values as Record<string, unknown>;
+  // The keywords are in the SAME statement as the profile, so the approval page can never
+  // read a written resume with an empty ATS denominator (the 0% bug, 2026-10-06).
+  assert.deepEqual(values.selected_jd_keywords, ["Go", "PostgreSQL"]);
+  // And the profile is in that statement too, which is what "alongside" means.
+  assert.equal(values.tailored_profile, RESUME);
+  // A plain array, because postgrest serialises it to the `text[]` column.
+  assert.ok(Array.isArray(values.selected_jd_keywords));
+  // Still exactly one update and one rpc: the keywords added no write that could half-fail.
   assert.deepEqual(calls.map((c) => c.kind), ["update", "rpc"]);
 });
 

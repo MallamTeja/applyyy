@@ -32,6 +32,8 @@
 import { buildTailorPrompt, type TailorPrompt } from "./prompt.ts";
 // The honesty gate. The ONLY constructor of a `ResolvedResume`, per its own header.
 import { validateTailoredProfile, type TailorViolation } from "./validator.ts";
+// The posting's skill terms, deterministic and vocabulary-gated, for selected_jd_keywords.
+import { extractJdKeywords } from "./jd-keywords.ts";
 // The contract, reached through this stream's single re-export module. Nothing here
 // redefines one of these — a redefined type does not fail, it drifts.
 import type { MasterProfile, ResolvedResume, TailoredProfile } from "../contracts/shared-types.ts";
@@ -77,7 +79,9 @@ export type TailorOutcome =
   // `refs` is the raw ref-based output the resume was resolved from. Carried so it can
   // be persisted to `tailor_refs`: the Auditor's summary-ref check (audit/detector.ts:503)
   // reads that column, and nothing wrote it, so the check could never fire.
-  | { readonly kind: "tailored"; readonly resume: ResolvedResume; readonly refs: TailoredProfile }
+  // `jdKeywords` is the posting's skill terms (jd-keywords.ts), carried ON the verdict so
+  // persist.ts writes them in the same statement as the resume they were measured against.
+  | { readonly kind: "tailored"; readonly resume: ResolvedResume; readonly refs: TailoredProfile; readonly jdKeywords: readonly string[] }
   // Never persisted as a profile; the reasons go to the dashboard and the row fails.
   | { readonly kind: "refused"; readonly violations: readonly TailorViolation[] };
 
@@ -218,6 +222,8 @@ export function createTailorer(deps: TailorDeps): Tailorer {
 
     // Clean. The resume is safe to persist and to hand to the Auditor, when one exists.
     // `tailored` is the parsed model output that passed validation — the refs, unresolved.
-    return { kind: "tailored", resume: validation.resume, refs: tailored };
+    // `jdKeywords` comes from the SAME posting the model was given, never re-read later,
+    // so the keywords and the resume can never describe two different versions of a job.
+    return { kind: "tailored", resume: validation.resume, refs: tailored, jdKeywords: extractJdKeywords(input.jobDescription) };
   };
 }

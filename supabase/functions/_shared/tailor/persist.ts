@@ -83,7 +83,11 @@ export async function persistTailorOutcome(
     // `tailor_refs` rides in the SAME statement as the profile: a second write could fail
     // alone and leave a `tailored` row whose refs the Auditor never sees. The column is
     // `tailor_refs jsonb` (core_tables.sql:351), read by audit/detector.ts:503.
-    .update({ tailored_profile: outcome.resume, tailor_refs: outcome.refs })
+    // `selected_jd_keywords` rides along for the same reason (2026-10-06): it is the
+    // denominator of the approval page's ATS coverage, so a resume written without it
+    // reads 0%. Copied to a plain array because the column is `text[]` and the outcome's
+    // list is readonly.
+    .update({ tailored_profile: outcome.resume, tailor_refs: outcome.refs, selected_jd_keywords: [...outcome.jdKeywords] })
     // Scoped to one row. Without this predicate the update would rewrite every
     // application the caller's RLS context can see.
     .eq("id", applicationId);
