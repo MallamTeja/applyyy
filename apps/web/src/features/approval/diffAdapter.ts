@@ -44,6 +44,12 @@ import type {
   TailoredRun,
 } from './diffModel';
 
+/* THE PRODUCER'S matching rule, reached by relative path into the Deno tree (precedent:
+   master-robots reaching the shared Retry-After parser). The same function chose these
+   keywords in the tailor, so scoring them here cannot use a looser rule than selected them.
+   Safe to bundle: the module is pure with zero imports. */
+import { keywordAppearsIn } from '../../../../../supabase/functions/_shared/tailor/jd-keywords.ts';
+
 /* Everything the adapter needs. Passed as one object rather than five
  * positional parameters, because five positional strings and objects at a call
  * site is how the master and the tailored resume end up swapped. */
@@ -356,34 +362,46 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
 
 /* Does this JD keyword appear in text the master supports?
  *
- * Case-insensitive substring, which is the same test an ATS keyword scanner
- * applies - so the number on screen reflects what the machine reading the PDF
- * will actually see rather than a stricter definition of our own. */
-function keywordAppearsInTracedText(
+ * WORD-BOUNDED, by the PRODUCER'S rule (changed 2026-10-06). This used to be a
+ * case-insensitive substring, defended as "the same test an ATS scanner applies". On the
+ * live GitLab row that credited "Go" via "Google Cloud Platform" and "Rails" via
+ * "Tool Calling & Guardrails": 8/23 shown where 6/23 was honest. The keywords in
+ * selected_jd_keywords were chosen by jd-keywords.ts with word-bounded, per-term
+ * case rules; scoring them with a looser rule than the one that selected them inflates
+ * the number the operator trusts. keywordAppearsIn is that same rule, imported rather
+ * than copied, so the two sides cannot drift. Exported for test/keywordWordBounded.test.ts. */
+export function keywordAppearsInTracedText(
   keyword: string,
   lines: readonly DiffLine[],
 ): boolean {
-  const needle = keyword.toLowerCase();
+  /* Any one supported run is enough: the keyword is in the resume the master backs. */
   return lines.some((line) =>
     line.tailoredRuns.some(
       (run) =>
+        /* Flagged runs are excluded: text the Auditor doubts cannot earn coverage. */
         run.verdict !== 'fabricated' &&
-        run.text.toLowerCase().includes(needle),
+        /* Per RUN, never over joined runs: joining could invent a word boundary that exists
+           in neither run, and would mix traced with flagged text. The producer decides case
+           and bounds, so no toLowerCase here. */
+        keywordAppearsIn(keyword, run.text),
     ),
   );
 }
 
-/* Does this JD keyword appear only inside something the Auditor flagged? */
-function keywordAppearsInFlaggedText(
+/* Does this JD keyword appear only inside something the Auditor flagged?
+ * Same producer rule as above, so "purchased" coverage is counted as strictly as honest. */
+export function keywordAppearsInFlaggedText(
   keyword: string,
   lines: readonly DiffLine[],
 ): boolean {
-  const needle = keyword.toLowerCase();
+  /* Any flagged run containing it, by the same word-bounded rule. */
   return lines.some((line) =>
     line.tailoredRuns.some(
       (run) =>
+        /* Only flagged runs: this is the fabrication-purchased side of the bar. */
         run.verdict === 'fabricated' &&
-        run.text.toLowerCase().includes(needle),
+        /* Identical matcher to the traced side, so the two figures stay comparable. */
+        keywordAppearsIn(keyword, run.text),
     ),
   );
 }
