@@ -944,3 +944,126 @@ test("last_error keeps its HTTP prefix and Google bracket, then ends with model=
   // The 403 branch carries the same tag, so a key rejection also names its model.
   assert.match(errors[1]!, /^HTTP 403: Forbidden \[PERMISSION_DENIED - denied\] model=gemini-3\.6-flash$/);
 });
+
+// --- OVERLOAD BACKOFF AND FALLBACK MODEL ------------------------------------------------
+// Earned 2026-10-06 (run 37423817507): four 503 "high demand" answers on four keys within ~17 s,
+// every one returned in seconds. The attempts were spent inside one spike. These tests pin the
+// budget-aware backoff (spread the SAME attempts across the time the caller already budgeted)
+// and the optional GEMINI_FALLBACK_MODEL switch.
+
+// One rig for this section: virtual clock shared by sleep and the budget, URLs recorded per call.
+function overloadRig(script: ReadonlyArray<number | { status: number; headers?: Record<string, string> }>, attemptMs = 0) {
+  // Records report RPCs so the per-attempt last_error tags can be read back.
+  const rpcCalls: Array<{ fn: string; args: unknown }> = [];
+  // One key per scripted response, so no claim ever runs dry.
+  const claimSequence = script.map((_, i) => ({ data: i + 1, error: null }));
+  // The fake pool behind every claim and report.
+  const db = fakeClient({ claimSequence, reportCalls: rpcCalls });
+  // ONE clock for sleeps and the budget, so "elapsed" is exactly what the loop chose to spend.
+  const clock = createVirtualClock(0);
+  // Every requested URL, in order, so the model of each attempt is measured from the request.
+  const urls: string[] = [];
+  return {
+    rpcCalls, clock, urls, db,
+    // Model segment of each requested URL, parsed by shape rather than substring.
+    models: () => urls.map((u) => new URL(u).pathname.match(/^\/v1beta\/models\/([^/:]+):generateContent$/)?.[1]),
+    // The p_error of every failure report, in order.
+    errors: () => rpcCalls.filter((c) => c.fn === "report_gemini_result").map((c) => (c.args as { p_error: string | null }).p_error).filter((e) => e !== null),
+    // Shared options; each test adds model/fallback/budget knobs.
+    base: {
+      readKey: keysFrom(Object.fromEntries(script.map((_, i) => [i + 1, `k${i + 1}`]))),
+      // Zero spacing on a SEPARATE clock, so pacer bookkeeping never touches the budget clock.
+      pacer: new GeminiPacer({ minIntervalMs: 0, clock: createVirtualClock(0) }),
+      sleep: clock.sleep,
+      now: clock.now,
+      // Maximum jitter, so every expected delay is exact.
+      random: () => 1,
+      prompt: { systemInstruction: "s", userContent: "u" },
+      // Plays the script; `attemptMs` models how long each attempt held the connection.
+      fetchSeam: async (input: string | URL | Request) => {
+        urls.push(String(input));
+        clock.advance(attemptMs);
+        const step = script[urls.length - 1]!;
+        const { status, headers } = typeof step === "number" ? { status: step, headers: undefined } : step;
+        if (status === 200) return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "hi" }] } }] }), { status: 200 });
+        return new Response(JSON.stringify({ error: { status: "UNAVAILABLE", message: "high demand" } }), { status, ...(headers ? { headers } : {}) });
+      },
+    },
+  };
+}
+
+test("overload backoff: fast 503s are spread 4s/16s/48s across the budget, not burned in ~17s", async () => {
+  // Four 503s that return instantly, as live: the case the short 1s/3s/7s schedule wasted.
+  const rig = overloadRig([503, 503, 503, 503]);
+  const outcome = await generateGeminiContent(rig.db, { ...rig.base, model: "m-primary" });
+  // Still the honest exhaustion reason: backoff changes timing, not the verdict.
+  assert.equal(outcome.ok, false);
+  // Same attempt count as before (maxRetries 3 => 4): the budget is spent more wisely, not raised.
+  assert.equal(rig.urls.length, 4);
+  // Equal jitter at random()=1 hits each ceiling exactly; the short schedule's max was 1250/3750/8750.
+  assert.deepEqual(rig.clock.sleepLog, [4000, 16000, 48000]);
+});
+
+test("overload backoff never outlives the caller's planned worst case when every attempt times out", async () => {
+  // Each attempt holds its full 25 s timeout: the exact worst case deadline.ts plans for.
+  const rig = overloadRig([503, 503, 503, 503], 25000);
+  await generateGeminiContent(rig.db, { ...rig.base, model: "m-primary" });
+  // With no slack, each gap shrinks to deadline.ts's reservation (base x 1.25).
+  assert.deepEqual(rig.clock.sleepLog, [1250, 3750, 8750]);
+  // worstCaseCallMs({timeoutMs:25000, maxRetries:3}) = 4x25000 + 13750; ended at it, not past it.
+  assert.equal(rig.clock.now(), 113750);
+});
+
+test("overload backoff honours Google's Retry-After instead of its own schedule", async () => {
+  // A 503 carrying an explicit 10 s hint, then success.
+  const rig = overloadRig([{ status: 503, headers: { "retry-after": "10" } }, 200]);
+  const outcome = await generateGeminiContent(rig.db, { ...rig.base, model: "m-primary" });
+  assert.equal(outcome.ok, true);
+  // 10000, not the 4000 the schedule would pick at random()=1.
+  assert.deepEqual(rig.clock.sleepLog, [10000]);
+});
+
+test("fallback: the primary's first 503 switches every remaining attempt, tags name the model called", async () => {
+  // Primary sheds load once; the fallback 503s twice, then answers.
+  const rig = overloadRig([503, 503, 503, 200]);
+  const outcome = await generateGeminiContent(rig.db, { ...rig.base, model: "m-primary", fallbackModel: "m-fallback" });
+  assert.equal(outcome.ok, true);
+  // Measured from the requests: switched after the first 503 and never switched back.
+  assert.deepEqual(rig.models(), ["m-primary", "m-fallback", "m-fallback", "m-fallback"]);
+  // Each last_error names the model that produced it (shape: the tag is the final token).
+  assert.deepEqual(rig.errors().map((e) => e!.match(/ model=([^\s]+)$/)?.[1]), ["m-primary", "m-fallback", "m-fallback"]);
+  // The switch waits only the brief gap (1000 x 1.25); later fallback 503s get the overload backoff.
+  assert.deepEqual(rig.clock.sleepLog, [1250, 16000, 48000]);
+});
+
+test("a fallback attempt still calls claim_gemini_key: the kill switch and budget gate every attempt", async () => {
+  // Same switching script as above.
+  const rig = overloadRig([503, 503, 503, 200]);
+  await generateGeminiContent(rig.db, { ...rig.base, model: "m-primary", fallbackModel: "m-fallback" });
+  // claim_gemini_key is where system_enabled and the daily budget are checked and every call is
+  // counted. One claim per attempt, fallback attempts included; reusing a key without claiming
+  // would let retries bypass the kill switch, which is why this is pinned.
+  const claims = rig.rpcCalls.filter((c) => c.fn === "claim_gemini_key").length;
+  // Non-vacuity: four attempts really happened, three of them on the fallback.
+  assert.equal(rig.urls.length, 4);
+  // Exactly one claim per attempt.
+  assert.equal(claims, rig.urls.length);
+});
+
+test("fallback unset (or equal to the primary) never switches: today's behaviour", async () => {
+  // The exact script that switches in the previous test.
+  for (const fallbackModel of [undefined, "m-primary", "  "]) {
+    const rig = overloadRig([503, 503, 503, 200]);
+    await generateGeminiContent(rig.db, { ...rig.base, model: "m-primary", ...(fallbackModel !== undefined ? { fallbackModel } : {}) });
+    // Every attempt stays on the primary; the label names which unset form broke.
+    assert.deepEqual(rig.models(), ["m-primary", "m-primary", "m-primary", "m-primary"], `fallbackModel=${JSON.stringify(fallbackModel)}`);
+  }
+});
+
+test("only a 503 switches: a 429 (4xx) and a 500 stay on the primary, then the 503 switches", async () => {
+  // A quota 429 and a non-overload 500 first; neither is "high demand". Then the 503, then success.
+  const rig = overloadRig([429, 500, 503, 200]);
+  await generateGeminiContent(rig.db, { ...rig.base, model: "m-primary", fallbackModel: "m-fallback" });
+  // The first three attempts stay on the primary; only the attempt after the 503 moves.
+  assert.deepEqual(rig.models(), ["m-primary", "m-primary", "m-primary", "m-fallback"]);
+});

@@ -9,8 +9,12 @@
 //    cooling key back to Postgres (`reportResult`), immediately claims the NEXT active key
 //    from the pool (`claimKey`), and retries the call transparently.
 //    The same loop also retries TRANSIENT upstream failures (500/502/503/504, network errors
-//    and per-attempt timeouts) on the next key, sleeping 1s/3s/7s (+0-25% jitter) between
-//    attempts. One `maxRetries` budget covers both. Exhaustion reasons: `rate_limited_all_
+//    and per-attempt timeouts) on the next key. Between attempts it sleeps 1s/3s/7s (+0-25%
+//    jitter) when it does not know the per-attempt timeout (a direct caller), and a longer,
+//    BUDGET-CAPPED overload backoff (Retry-After, else ~2-4s/8-16s/24-48s) when it does (every
+//    generateGeminiContent call). With GEMINI_FALLBACK_MODEL set, the primary's first 503
+//    switches the remaining attempts to the fallback model after a brief wait.
+//    One `maxRetries` budget covers both. Exhaustion reasons: `rate_limited_all_
 //    retries_exhausted` (last failure was a 429) or `upstream_unavailable` (last was transient).
 //    A 200 with no usable text part is `empty_response` (terminal, no retry, key not blamed).
 //
@@ -140,8 +144,22 @@ export type GeminiCallOutcome<T> =
     };
 
 export interface GeminiFailoverOptions<T> {
-  // The actual execution function using the claimed key.
-  readonly execute: (apiKey: string, keyIndex: number) => Promise<GeminiExecutionResult<T>>;
+  // The actual execution function using the claimed key. The third argument is the model this
+  // attempt must call (the primary, or the fallback after a switch), so the loop, not the URL
+  // builder, owns the decision; existing two-argument executors simply ignore it.
+  readonly execute: (apiKey: string, keyIndex: number, model: string | undefined) => Promise<GeminiExecutionResult<T>>;
+  // Per-attempt abort timeout the executor enforces. Known => the loop can recompute the worst
+  // case the caller budgeted (deadline.ts worstCaseCallMs) and spend unused time on longer
+  // overload backoff without ever exceeding it. Unknown => the original short schedule, since
+  // no longer sleep can be proven to fit.
+  readonly attemptTimeoutMs?: number;
+  // Clock seam for the budget arithmetic; tests advance a virtual clock instead of waiting.
+  readonly now?: () => number;
+  // Model to switch to after the primary's FIRST 503. One is enough: a controlled probe
+  // (2026-10-06, same key, same body) showed the 503 is per MODEL and sustained, with a lighter
+  // model answering the identical request. Absent (or equal to the primary) means the loop never
+  // switches: today's model behaviour, exactly.
+  readonly fallbackModel?: string;
   // Maximum number of RETRIES (default 3, so up to 4 attempts) shared by 429s and transient
   // upstream failures (5xx / network) as ONE budget, so a flapping upstream cannot loop forever.
   readonly maxRetries?: number;
@@ -195,7 +213,36 @@ function withModel(text: string, model: string | undefined): string {
 }
 // Base backoff per attempt. Worst case with defaults (3 sleeps): 1000+3000+7000 = 11000 ms,
 // plus up to 25% jitter = 13750 ms, well under the 25 s budget an Edge Function can spare.
+// ALSO THE RESERVATION TABLE: deadline.ts plans each gap at base x 1.25 and its tripwire test
+// reads this exact literal, so the budgeted backoff below always leaves every FUTURE gap this
+// much, which keeps deadline.ts's worst-case arithmetic true without touching that file.
 const BACKOFF_BASE_MS: readonly number[] = [1000, 3000, 7000];
+// Jitter ceiling deadline.ts assumes (MAX_JITTER there); named so the reservation reads it.
+const BACKOFF_JITTER = 0.25;
+// Overload backoff ceilings per gap, x4 each step. Live 2026-10-06: four 503s "high demand"
+// came back within ~17 s on the short schedule, i.e. the retries were spent inside the same
+// spike. Google's own text says spikes are "usually temporary", so the attempts are spread
+// across the time the caller already budgeted instead of being burned in the first seconds.
+const OVERLOAD_BACKOFF_MS: readonly number[] = [4000, 16000, 48000];
+
+// The worst case deadline.ts budgets for one call (its worstCaseCallMs, restated here because
+// that module imports nothing from this one): every attempt runs to its timeout and every gap
+// sleeps base x 1.25. Total time is measured against this, so the call can never overrun it.
+function plannedWorstCaseMs(attemptTimeoutMs: number, maxRetries: number): number {
+  // All attempts at their full timeout.
+  let total = (maxRetries + 1) * attemptTimeoutMs;
+  // One gap before each retry, at its maximum jittered length.
+  for (let gap = 0; gap < maxRetries; gap++) total += gapReserveMs(gap);
+  // The budget end is the call's start plus this.
+  return total;
+}
+
+// What deadline.ts reserves for one gap: the base delay at maximum jitter, clamped to the
+// table's last entry exactly as the short schedule clamps it.
+function gapReserveMs(gap: number): number {
+  // Clamp so a maxRetries longer than the table reuses the last delay instead of reading undefined.
+  return BACKOFF_BASE_MS[Math.min(gap, BACKOFF_BASE_MS.length - 1)]! * (1 + BACKOFF_JITTER);
+}
 
 // In-Flight Multi-Key Retry Middleware (1a) with Pacing (1c).
 export async function callGeminiWithFailover<T>(
@@ -208,6 +255,18 @@ export async function callGeminiWithFailover<T>(
   // Resolved once so every backoff in this call uses the same seams.
   const sleep = options.sleep ?? systemClock.sleep;
   const random = options.random ?? Math.random;
+  // Same clock seam for the budget arithmetic, so a virtual clock drives both in tests.
+  const now = options.now ?? systemClock.now;
+  // Budget end, only when the per-attempt timeout is known; null selects the short schedule.
+  const budgetEndsAt =
+    options.attemptTimeoutMs !== undefined ? now() + plannedWorstCaseMs(options.attemptTimeoutMs, maxRetries) : null;
+  // Blank or same-as-primary fallback is treated as unset, so "configured" can never mean "no-op switch".
+  const fallbackModel =
+    options.fallbackModel !== undefined && options.fallbackModel.trim().length > 0 && options.fallbackModel.trim() !== options.model
+      ? options.fallbackModel.trim()
+      : undefined;
+  // The model the NEXT attempt calls; starts at the primary and changes at most once.
+  let currentModel = options.model;
 
   let attempt = 0;
   // Which kind of failure ended the LAST attempt decides the exhausted-loop reason, so both
@@ -246,7 +305,8 @@ export async function callGeminiWithFailover<T>(
     const { index: keyIndex, apiKey } = claim;
 
     // 2. Execute the request through the deterministic token pacer.
-    const execResult = await pacer.pace(() => options.execute(apiKey, keyIndex));
+    // The model is passed per attempt because a fallback switch changes it mid-call.
+    const execResult = await pacer.pace(() => options.execute(apiKey, keyIndex, currentModel));
 
     // 3. On success: record positive outcome in Postgres and return.
     if (execResult.ok) {
@@ -271,7 +331,7 @@ export async function callGeminiWithFailover<T>(
           : execResult.statusText ?? "429 Too Many Requests";
 
       // Tagged so a 429 names the model whose quota ran out (quotas are per model).
-      await reportResult(db, keyIndex, false, retryAfterSeconds, withModel(`HTTP 429: ${errorText}`, options.model));
+      await reportResult(db, keyIndex, false, retryAfterSeconds, withModel(`HTTP 429: ${errorText}`, currentModel));
 
       options.onKeyRotated?.({
         fromKeyIndex: keyIndex,
@@ -299,7 +359,9 @@ export async function callGeminiWithFailover<T>(
         reason: "model_not_found",
         status: 404,
         // A human-readable pointer to the fix, so a log line names the knob to turn.
-        detail: "Gemini returned 404 for generateContent: the model id is retired or wrong; set GEMINI_MODEL or update GEMINI_DEFAULT_MODEL",
+        // Tagged with the model that 404'd: after a fallback switch it is GEMINI_FALLBACK_MODEL
+        // that is wrong, and an untagged message would send the fix to the primary instead.
+        detail: withModel("Gemini returned 404 for generateContent: the model id is retired or wrong; set GEMINI_MODEL / GEMINI_FALLBACK_MODEL or update GEMINI_DEFAULT_MODEL", currentModel),
         errorBody: execResult.errorBody,
         attempts: attempt,
       };
@@ -314,7 +376,7 @@ export async function callGeminiWithFailover<T>(
     if (execResult.status === 401 || execResult.status === 403) {
       const detail = withGoogleError(`HTTP ${execResult.status}: ${execResult.statusText || "Key rejected"}`, execResult.errorBody);
       // Tagged at the write only; `detail` itself stays untagged for the returned outcome.
-      await reportResult(db, keyIndex, false, KEY_REJECTED_COOLDOWN_S, withModel(detail, options.model));
+      await reportResult(db, keyIndex, false, KEY_REJECTED_COOLDOWN_S, withModel(detail, currentModel));
       lastFailure = { status: execResult.status, detail };
       lastKind = "key_rejected";
       options.onKeyRotated?.({ fromKeyIndex: keyIndex, retryAfterSeconds: KEY_REJECTED_COOLDOWN_S, attempt });
@@ -335,19 +397,64 @@ export async function callGeminiWithFailover<T>(
           ? `network error: ${execResult.statusText || "unknown"}`
           : `HTTP ${execResult.status}: ${execResult.statusText || "Service error"}`;
       // Tagged last, after Google's bracket, so a 503 says WHICH model was overloaded.
-      await reportResult(db, keyIndex, false, null, withModel(withGoogleError(detail, execResult.errorBody), options.model));
+      await reportResult(db, keyIndex, false, null, withModel(withGoogleError(detail, execResult.errorBody), currentModel));
       // Remembered for the exhausted-loop return at the bottom.
       lastFailure = { status: execResult.status, detail };
       lastKind = "transient";
+      // THE NEXT ATTEMPT CLAIMS AGAIN, even though a 503 is per model and not per key. The claim
+      // is not just key selection: claim_gemini_key is where the kill switch and the daily budget
+      // are checked and where every call is counted, so reusing the key without it would let
+      // retries bypass both. Rotation costs one RPC and a bump of the write-only
+      // consecutive_failures; a true same-key retry needs a claim that accepts a preferred key.
       options.onKeyRotated?.({ fromKeyIndex: keyIndex, retryAfterSeconds: null, attempt });
+      // Only a 503 ON THE PRIMARY switches: 500/502/504/0 are not "high demand", and a 503 on the
+      // fallback has nowhere further to go. currentModel !== fallbackModel makes it happen once.
+      const switching =
+        fallbackModel !== undefined && execResult.status === 503 && currentModel === options.model;
+      // Applied before the sleep decision, so the next attempt (and its last_error tag) uses it.
+      if (switching) {
+        // Logged because the switch changes which model answers, which a reader of the output must know.
+        console.warn(`[gemini] ${options.model} returned 503; falling back to ${fallbackModel} for the remaining attempts`);
+        // Every remaining attempt calls the fallback; the loop never switches back mid-call.
+        currentModel = fallbackModel;
+      }
       // Never sleep after the final attempt: nothing follows it, so waiting only delays the error.
       // `attempt <= maxRetries` is exactly "another attempt will follow".
       if (attempt <= maxRetries) {
+        // Zero-based gap index between this attempt and the next.
+        const gap = attempt - 1;
         // Clamp attempts past the table to the last delay, so a larger maxRetries cannot index
         // past the array (an undefined delay would become NaN and retry instantly).
-        const base = BACKOFF_BASE_MS[Math.min(attempt, BACKOFF_BASE_MS.length) - 1]!;
-        // 0-25% jitter so concurrent callers do not retry the overloaded model in lockstep.
-        await sleep(base + base * 0.25 * random());
+        const base = BACKOFF_BASE_MS[Math.min(gap, BACKOFF_BASE_MS.length - 1)]!;
+        // Short schedule: the original 0-25% jitter, used when the budget cannot be computed.
+        let delay = base + base * BACKOFF_JITTER * random();
+        // Budget known: aim for the overload backoff, then cap it to what provably fits.
+        if (budgetEndsAt !== null) {
+          // Google's own delay wins when it sends one (header or RetryInfo); null when absent,
+          // so a missing hint falls through to our schedule instead of becoming a zero wait.
+          const hinted = execResult.rawResponse ? parseRetryAfterSeconds(execResult.rawResponse, execResult.errorBody) : null;
+          // Overload ceiling for this gap, clamped to the table's last entry like `base`.
+          const ceiling = OVERLOAD_BACKOFF_MS[Math.min(gap, OVERLOAD_BACKOFF_MS.length - 1)]!;
+          // "Equal jitter": half fixed, half random, so concurrent callers spread out but never
+          // retry almost instantly the way full jitter can. Never below the short schedule's base.
+          const wanted = hinted !== null ? hinted * 1000 : Math.max(base, ceiling / 2 + (ceiling / 2) * random());
+          // A model switch gets only the brief short-schedule wait: the fallback is not the model
+          // shedding load, so an overload wait would spend budget on the wrong model.
+          const target = switching ? base + base * BACKOFF_JITTER * random() : wanted;
+          // Attempts still to run after this sleep; each keeps its full timeout in reserve.
+          const attemptsLeft = maxRetries + 1 - attempt;
+          // Their gaps (all but the one being slept now) keep deadline.ts's reservation too.
+          let reserve = attemptsLeft * options.attemptTimeoutMs!;
+          // Future gaps start after this one.
+          for (let later = gap + 1; later < maxRetries; later++) reserve += gapReserveMs(later);
+          // What this gap may spend without the call outliving the caller's planned worst case.
+          const allowed = budgetEndsAt - now() - reserve;
+          // Capped by the budget and never negative: sleeping less is always safe, sleeping past
+          // the plan is the one thing this must never do.
+          delay = Math.max(0, Math.min(target, allowed));
+        }
+        // Zero (no budget left for this gap) is skipped rather than slept.
+        if (delay > 0) await sleep(delay);
       }
       continue;
     }
@@ -377,7 +484,7 @@ export async function callGeminiWithFailover<T>(
       false,
       null,
       // Same tag as every other failure write, so no branch leaves last_error model-blind.
-      withModel(withGoogleError(`HTTP ${execResult.status}: ${execResult.statusText || "Execution failed"}`, execResult.errorBody), options.model),
+      withModel(withGoogleError(`HTTP ${execResult.status}: ${execResult.statusText || "Execution failed"}`, execResult.errorBody), currentModel),
     );
 
     return {
@@ -453,8 +560,24 @@ function resolveModel(explicit: string | undefined): string {
   return GEMINI_DEFAULT_MODEL;
 }
 
+// The optional fallback model: explicit option, then the GEMINI_FALLBACK_MODEL secret, else none.
+// NO DEFAULT on purpose: an unset secret must mean "never switch" (today's behaviour), not a
+// model id this file guessed, which is exactly how a retired id 404'd the pipeline before.
+function resolveFallbackModel(explicit: string | undefined): string | undefined {
+  // A per-call choice wins, as for the primary.
+  if (explicit !== undefined && explicit.trim().length > 0) return explicit.trim();
+  // Probed via globalThis because Deno is absent under node --test.
+  const env = (globalThis as { Deno?: { env: { get(k: string): string | undefined } } }).Deno?.env.get("GEMINI_FALLBACK_MODEL");
+  // Blank counts as unset, so an empty secret cannot become a model id.
+  return env !== undefined && env.trim().length > 0 ? env.trim() : undefined;
+}
+
 export interface GenerateGeminiOptions {
   readonly model?: string;
+  // Overrides GEMINI_FALLBACK_MODEL for this call; mainly a test seam, since no caller sets it.
+  readonly fallbackModel?: string;
+  // Clock seam for the backoff budget, forwarded to the failover loop.
+  readonly now?: () => number;
   // Gemini `Tool` objects, forwarded VERBATIM as the request body's `tools` field —
   // e.g. `[{ google_search: {} }]` for Grounding with Google Search. Verbatim because the
   // Tool union is wide (googleSearch, urlContext, codeExecution, …) and a typed subset
@@ -502,6 +625,8 @@ export async function generateGeminiContent(
 ): Promise<GeminiCallOutcome<GeminiResponseBody>> {
   // Explicit option, then GEMINI_MODEL, then GEMINI_DEFAULT_MODEL — see resolveModel.
   const model = resolveModel(options.model);
+  // Resolved once per call, like the primary; undefined means no switch can happen.
+  const fallbackModel = resolveFallbackModel(options.fallbackModel);
   // Network seam, so tests never reach Google.
   const fetchFn = options.fetchSeam ?? fetch;
   // Per-attempt timeout; see GenerateGeminiOptions.timeoutMs for the wall-clock arithmetic.
@@ -563,11 +688,19 @@ export async function generateGeminiContent(
     ...(options.random !== undefined ? { random: options.random } : {}),
     // The id this call's URL is built from, so last_error records it MEASURED, not inferred.
     model,
-    execute: async (apiKey: string) => {
+    // Lets the loop size its backoff to the budget the caller planned with this same timeout.
+    attemptTimeoutMs: timeoutMs,
+    // Spread only when set (exactOptionalPropertyTypes); unset keeps the loop from ever switching.
+    ...(fallbackModel !== undefined ? { fallbackModel } : {}),
+    // Same spread rule for the clock seam.
+    ...(options.now !== undefined ? { now: options.now } : {}),
+    // `attemptModel` is the loop's per-attempt choice; `?? model` only satisfies the type, since
+    // the loop always passes the primary or the fallback.
+    execute: async (apiKey: string, _keyIndex: number, attemptModel: string | undefined) => {
       // NO key in the URL: a URL travels into error messages, stack traces, proxy/CDN logs and
       // `Response.url` (kept on `rawResponse`), while a header does not. The key goes only in
       // the `x-goog-api-key` header below.
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${attemptModel ?? model}:generateContent`;
       try {
         const response = await fetchFn(url, {
           method: "POST",
