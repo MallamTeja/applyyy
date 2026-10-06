@@ -7,12 +7,17 @@
 // what lets the whole 400/413/202 decision table be covered by cheap table-driven tests
 // (PROJECT_PLAN.md §19).
 //
-// WHY APPS SCRIPT SENDS SUBJECT + SNIPPET AND NEVER THE BODY: two independent reasons,
-// and either alone would justify it. It is a far smaller prompt-injection surface for
-// the classifier (constraint #17), and it is far less PII leaving the mailbox — a
-// recruiter thread routinely contains a phone number, a CTC figure and a home address
-// that this system has no use for. Apps Script performs ZERO classification: it is a
-// dumb pipe, so the intelligence stays in this repo where it is version-controlled,
+// WHAT THE `snippet` FIELD REALLY CARRIES (corrected 2026-10-05; an earlier version of this
+// header said Apps Script "never sends the body", which was false). Despite its name,
+// `snippet` holds up to 4096 chars of the PLAIN-TEXT BODY (`getPlainBody()`, whitespace
+// collapsed, cut by the script and re-cut at MAX_SNIPPET_CHARS below). WHY THE BODY IS SENT:
+// the classifier, out-of-office detection and scheduling/assessment link extraction need
+// wording that is not in the subject ("we will not be moving forward" lives in the body).
+// Only the application matcher ignores it. The cost is real: a recruiter thread can carry a
+// phone number, a CTC figure or a home address, and body text is untrusted input to the
+// classifier (constraint #17). Shrinking it is the owner's privacy decision and needs a
+// Google-side redeploy of the Apps Script. Apps Script itself performs ZERO classification:
+// it is a dumb pipe, so the intelligence stays in this repo where it is version-controlled,
 // reviewable and testable, rather than in a script editor nobody diffs.
 
 // The untrusted-string marker from the schema owner. It is `string` to the compiler and

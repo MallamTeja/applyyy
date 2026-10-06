@@ -76,7 +76,28 @@ const ATS_VENDOR_DOMAINS: ReadonlySet<string> = new Set([
   "breezy.hr",
   "rippling.com",
   "icims.com",
+  // Greenhouse notification domain, observed as `us.greenhouse-mail.io` in Greenhouse-sent mail;
+  // NOT yet verified against our own mailbox (added 2026-10-06 from general knowledge, not a captured header).
+  // Listed as the registrable name so the suffix rule below also covers any regional subdomain.
+  "greenhouse-mail.io",
 ]);
+
+// Is this host a vendor domain or a subdomain of one? (`hire.lever.co` -> lever.co.)
+//
+// WHY SUFFIX-AWARE (2026-10-06): vendors send from subdomains (`hire.lever.co`), and an exact
+// `Set.has` let those through as "employer domains". The email tracker then skipped its
+// display-name fallback for them, so "Stripe Recruiting <no-reply@hire.lever.co>" matched nothing.
+// WHY THE LEADING DOT: a bare `endsWith("lever.co")` would also swallow an unrelated
+// `notlever.co`; the dot makes it a whole-label suffix.
+function isAtsVendorHost(domain: string): boolean {
+  // Linear scan: twelve-ish entries, called once per email.
+  for (const vendor of ATS_VENDOR_DOMAINS) {
+    // Exact vendor host, or any subdomain of it.
+    if (domain === vendor || domain.endsWith(`.${vendor}`)) return true;
+  }
+  // Not a known vendor.
+  return false;
+}
 
 // Known scheduling platform patterns used by recruiters to set up interview calls.
 //
@@ -202,8 +223,9 @@ export function extractCompanyDomain(senderHeader: string): string | null {
   // If raw domain is in public email provider list, it does not represent an employer domain.
   if (PUBLIC_EMAIL_DOMAINS.has(rawDomain)) return null;
 
-  // If raw domain is a known ATS vendor domain, filter it out as vendor infra.
-  if (ATS_VENDOR_DOMAINS.has(rawDomain)) return null;
+  // If raw domain is a known ATS vendor domain OR a subdomain of one, filter it out as vendor infra.
+  // Suffix-aware here, in the one shared function, so every caller of the parse gets it.
+  if (isAtsVendorHost(rawDomain)) return null;
 
   // Return valid extracted domain.
   return rawDomain;

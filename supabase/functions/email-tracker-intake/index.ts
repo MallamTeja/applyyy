@@ -42,12 +42,9 @@ import { MAX_BODY_BYTES, validateIntakeBody, type IntakeMessage } from "../_shar
 // Database row insert shape and the status enum type.
 // The insert shape keeps the upsert payload checked against the schema owner's type.
 import type { EmailEventInsert, ApplicationStatus } from "../_shared/contracts/shared-types.ts";
-// Legal status transition checker enforcing status transition graph rules.
-// Checked client-side so an illegal edge is skipped quietly instead of raising in the RPC.
-import { canTransition } from "../_shared/contracts/shared-types.ts";
 // Pure decisions: classification, status mapping, and the one-match-or-none matcher.
 // Separate module so `node --test` can exercise them without Deno or a database.
-import { classifyMessage, matchApplication, targetStatusFor, type ActiveApplication, type MessageDecision } from "./decide.ts";
+import { classifyMessage, matchApplication, statusMoveFor, type ActiveApplication, type MessageDecision } from "./decide.ts";
 
 // Central helper function to emit standard JSON responses with explicit headers.
 //
@@ -286,12 +283,16 @@ Deno.serve(async (request: Request): Promise<Response> => {
   for (const { message, decision, matchedApplicationId } of toTransition) {
     // Narrowed by the filter above.
     const applicationId = matchedApplicationId!;
-    // The status this classification implies, if any.
-    const targetStatus = targetStatusFor(decision.classification);
     // Where the application is now, as far as this batch knows.
     const currentStatus = statusById.get(applicationId);
-    // No target, unknown row, or an edge the tracker may not walk: leave it.
-    if (targetStatus === null || currentStatus === undefined || !canTransition(currentStatus, targetStatus, "tracker")) continue;
+    // Unknown row: leave it.
+    if (currentStatus === undefined) continue;
+    // Target status after the graph check AND the confidence gate (see `statusMoveFor`);
+    // a low-confidence verdict such as the 0.5-0.8 moderate-rejection band is stored above
+    // but returns null here, so it moves nothing.
+    const targetStatus = statusMoveFor(decision, currentStatus);
+    // Nothing to do.
+    if (targetStatus === null) continue;
     // The only correct way to change status.
     const { error: transitionError } = await client.db.rpc("advance_application_status", {
       // Application UUID.

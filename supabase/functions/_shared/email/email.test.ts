@@ -54,6 +54,16 @@ test("extractCompanyDomain extracts employer domain while filtering public webma
   assert.equal(extractCompanyDomain("invalid-header"), null);
 });
 
+// 2026-10-06: vendor filtering must be suffix-aware, and only on a whole label.
+test("extractCompanyDomain nulls ATS vendor SUBDOMAINS but not lookalike registrable names", () => {
+  // Lever sends from a subdomain; an exact Set lookup used to return it as an employer domain.
+  assert.equal(extractCompanyDomain("Stripe Recruiting <no-reply@hire.lever.co>"), null);
+  // Greenhouse notification host (unverified against our mailbox, see parser.ts); same rule.
+  assert.equal(extractCompanyDomain("Acme <no-reply@us.greenhouse-mail.io>"), null);
+  // A different company whose name merely ENDS in "lever.co" is not Lever: the leading dot is load-bearing.
+  assert.equal(extractCompanyDomain("Jobs <jobs@notlever.co>"), "notlever.co");
+});
+
 // Test scheduling URL extraction.
 test("extractSchedulingUrl detects known interview scheduling links", () => {
   // Calendly link in body.

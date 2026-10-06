@@ -49,7 +49,8 @@ export interface OutcomeClassification {
 //
 // WHY SIGNAL RULES ARE TYPED STRUCTURES: Defines declarative matching rules with target scope and weights,
 // keeping heuristic definitions clean and extensible without hardcoded conditional logic clutter.
-interface SignalRule {
+// Exported (2026-10-06) only so the weight guards in `email-tracker-intake/decide.test.ts` can type the rules.
+export interface SignalRule {
   // Description tag for logging and auditing matched signals.
   readonly tag: string;
   // Regular expression pattern matching specific wording in the email text.
@@ -58,19 +59,29 @@ interface SignalRule {
   readonly weight: number;
   // Target text section to inspect ('subject', 'body', or 'both').
   readonly target: "subject" | "body" | "both";
+  // True for a weak signal that may only CORROBORATE a decision phrase, never reach a terminal
+  // verdict by itself or with other weak ones. WHY A FLAG AND NOT A COMMENT: scores are ADDITIVE
+  // (`totalScore += rule.weight` in `evaluateSignals`), so "can only corroborate" is a property of
+  // the SUM of all such rules, which only a test can hold. The flag is what that test reads.
+  readonly corroborateOnly?: true;
 }
+
+// Lowest rejection score the moderate branch labels `rejected` (it never moves a status: the
+// tracker's terminal gate is 0.8). Exported so the weight guard reads the live cutoff, not a copy.
+export const MODERATE_REJECTION_MIN = 0.5;
 
 // Strong explicit rejection phrases used by ATS platforms and hiring managers.
 //
 // WHY REJECTION PATTERNS ARE EXPLICIT: Rejection emails follow predictable corporate templates.
 // Identifying these exact decision phrases guarantees zero false positives for active candidates.
-const REJECTION_SIGNALS: readonly SignalRule[] = [
+// Exported (2026-10-06) for the weight-sum guard only; nothing at runtime imports it.
+export const REJECTION_SIGNALS: readonly SignalRule[] = [
   // Direct statement of non-selection ("not moving forward", "decided not to proceed").
   //
   // WHY THIS HAS HIGH WEIGHT: Explicit statements of non-selection carry near-certain confidence of rejection.
   {
     tag: "not_moving_forward",
-    pattern: /\b(?:not\s+(?:be\s+)?moving\s+forward|will\s+not\s+(?:be\s+)?proceeding|decided\s+not\s+to\s+proceed)\b/i,
+    pattern: /\b(?:not\s+(?:be\s+)?moving\s+forward|will\s+not\s+(?:be\s+)?proceeding|decided\s+not\s+to\s+(?:proceed|move\s+forward))\b/i,
     weight: 0.95,
     target: "both",
   },
@@ -79,7 +90,7 @@ const REJECTION_SIGNALS: readonly SignalRule[] = [
   // WHY THIS HAS HIGH WEIGHT: Candidate competition decisions indicate final non-selection for this position.
   {
     tag: "moved_with_other_candidates",
-    pattern: /\b(?:mov(?:ed|ing)\s+forward\s+with\s+other|pursu(?:ing|e)\s+other\s+candidates|chosen\s+another\s+candidate|selected\s+another\s+applicant)\b/i,
+    pattern: /\b(?:mov(?:ed|ing)\s+forward\s+with\s+other\s+(?:candidates?|applicants?)|pursu(?:ing|e)\s+other\s+candidates|chosen\s+another\s+candidate|selected\s+another\s+applicant)\b/i,
     weight: 0.95,
     target: "both",
   },
@@ -88,9 +99,28 @@ const REJECTION_SIGNALS: readonly SignalRule[] = [
   // WHY THIS HAS HIGH WEIGHT: Standard formal rejection opening phrases used by corporate recruitment teams.
   {
     tag: "regret_to_inform",
-    pattern: /\b(?:regret\s+to\s+inform\s+you|unfortunately,\s+we|after\s+careful\s+consideration,\s+we)\b/i,
+    // WHY NO BARE "unfortunately, we" HERE (fixed 2026-10-05): "Unfortunately, we need to reschedule
+    // your interview" scored 0.85 as a rejection and `rejected` is terminal. Only a decision phrase
+    // after "unfortunately, we" counts as strong; "after careful consideration, we" needs the same decision phrase
+    // (2026-10-05: "after careful consideration, we have scheduled your onsite" was a false terminal rejection).
+    pattern: /\b(?:regret\s+to\s+inform\s+you|unfortunately,\s+we\s+(?:have\s+)?(?:decided|chosen|elected|will\s+not|are\s+not|cannot\s+(?:move|proceed)|are\s+unable\s+to\s+(?:move|proceed|offer))|after\s+careful\s+consideration,\s+we\s+(?:have\s+)?(?:decided|determined|chosen|elected|will\s+not|are\s+not|cannot\s+(?:move|proceed)|are\s+unable\s+to\s+(?:move|proceed|offer)))\b/i,
     weight: 0.85,
     target: "both",
+  },
+  // Bare politeness opener with no decision phrase ("unfortunately, we need to reschedule",
+  // "after careful consideration, we have scheduled your final round").
+  //
+  // WHY THIS HAS LOW WEIGHT: It is a tone word, also used for scheduling, delay and outage news.
+  // 0.35 (was 0.4 until 2026-10-06): below the 0.5 moderate cutoff alone, and lowered so that ALL
+  // corroborate-only rules firing together (0.35 + 0.25 + 0.15 = 0.75) stay under the 0.8 terminal gate.
+  // At 0.4 with the old sign-off weight, "Unfortunately, we ... best in your job search" scored 0.85.
+  {
+    tag: "unfortunately_bare",
+    pattern: /\b(?:unfortunately|after\s+careful\s+consideration),?\s+we\b/i,
+    weight: 0.35,
+    target: "both",
+    // Tone word only; see the weight-sum guard in decide.test.ts.
+    corroborateOnly: true,
   },
   // Position filled or closed notification ("role has been filled").
   //
@@ -104,20 +134,28 @@ const REJECTION_SIGNALS: readonly SignalRule[] = [
   // Decline subject line pattern ("update on your application").
   //
   // WHY THIS HAS LOW MODERATE WEIGHT: Rejection email subject lines are often vague and need body phrase support.
+  // 0.25 (was 0.3 until 2026-10-06): part of the corroborate-only budget that must sum under 0.8.
+  // With the bare opener (0.35) it still reaches 0.6, the stored-but-never-moved moderate band.
   {
     tag: "rejection_subject",
     pattern: /\b(?:update\s+on\s+your\s+application|status\s+of\s+your\s+application|your\s+application\s+to|thank\s+you\s+for\s+interviewing)\b/i,
-    weight: 0.3,
+    weight: 0.25,
     target: "subject",
+    // "Update on your application" heads offers and interviews too; it can only corroborate.
+    corroborateOnly: true,
   },
   // Wish best in job search signature phrase ("best of luck in your search").
   //
-  // WHY THIS HAS HIGH WEIGHT: Closing sign-offs wishing luck in job search are classic rejection closing indicators.
+  // WHY THIS HAS LOW WEIGHT (0.8 until 2026-10-05, 0.45 until 2026-10-06, now 0.15): a sign-off is
+  // politeness, not a decision. At 0.45 it plus the bare opener (0.4) summed to 0.85 and cleared the
+  // terminal gate with no decision phrase at all. 0.15 keeps all corroborate-only rules at 0.75 total.
   {
     tag: "best_in_job_search",
     pattern: /\b(?:wish\s+you\s+(?:the\s+)?best\s+in\s+your\s+job\s+search|best\s+of\s+luck\s+with\s+your\s+search)\b/i,
-    weight: 0.8,
+    weight: 0.15,
     target: "body",
+    // Sign-off only; see the weight-sum guard in decide.test.ts.
+    corroborateOnly: true,
   },
 ];
 
@@ -384,7 +422,8 @@ export function classifyEmail(parsed: ParsedEmail): OutcomeClassification {
   // Moderate rejection signal check (score >= 0.5 when no interview or screen signals present).
   //
   // WHY CATCH MODERATE REJECTIONS: Catches softer rejection phrases when no competing active signals exist.
-  if (rejection.score >= 0.5 && boostedInterviewingScore < 0.3 && boostedScreeningScore < 0.3) {
+  // Named constant so the weight guard tests the same cutoff this branch uses.
+  if (rejection.score >= MODERATE_REJECTION_MIN && boostedInterviewingScore < 0.3 && boostedScreeningScore < 0.3) {
     // Construct and return moderate confidence rejection verdict object.
     return {
       // Primary outcome classification string verdict.

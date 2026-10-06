@@ -9,7 +9,8 @@ import { parseEmail } from "../_shared/email/parser.ts";
 // Outcome classifier; it already ranks outcomes above the auto-reply fallback internally.
 import { classifyEmail } from "../_shared/email/classifier.ts";
 // Schema-owned enum types, so a typo here is a compile error, not a 22P02 at runtime.
-import type { ApplicationStatus, EmailClassification } from "../_shared/contracts/shared-types.ts";
+// `isTerminal` and `canTransition` are the runtime mirror of the status graph; read them, never a hand-kept list.
+import { canTransition, isTerminal, type ApplicationStatus, type EmailClassification } from "../_shared/contracts/shared-types.ts";
 
 // The three message fields the decisions read. Narrower than `IntakeMessage` so tests can
 // build one without the wire contract's other fields.
@@ -100,6 +101,29 @@ export function classifyMessage(message: DecidableMessage): MessageDecision {
   return { classification: "unclassified", ...base };
 }
 
+// Minimum classifier confidence to MOVE a status into a terminal state (`rejected`).
+// WHY 0.8: terminal is irreversible by the tracker (the graph has no edge out), so a wrong
+// move needs a human to notice. 0.8 is the classifier's own "confident rejection" cutoff
+// (`rejection.score >= 0.8`) and the lowest score that needs a strong phrase on its own.
+export const TERMINAL_MIN_CONFIDENCE = 0.8;
+// Minimum confidence for any other (recoverable) move.
+// WHY 0.7: every interview/screening verdict the classifier emits is already >= 0.7 and the
+// receipt reading is 0.9, so this changes nothing for them; it only blocks the 0.5-0.8
+// "moderate rejection" band and any low-confidence future verdict.
+export const NON_TERMINAL_MIN_CONFIDENCE = 0.7;
+
+// May the tracker act on this verdict? Pure, so it is tested without a database.
+// Below the gate the email is still stored with its classification; only the status stays put.
+// This is what stops the classifier's moderate-rejection branch (score 0.5 to 0.8): it is
+// labelled `rejection` and targets `rejected`, but its confidence is under 0.8, so it is
+// visible in `email_events` and never moves an application.
+export function passesConfidenceGate(target: ApplicationStatus, confidence: number): boolean {
+  // Terminal targets need the higher bar; everything else the lower one.
+  const required = isTerminal(target) ? TERMINAL_MIN_CONFIDENCE : NON_TERMINAL_MIN_CONFIDENCE;
+  // NaN compares false, so a malformed confidence fails closed.
+  return confidence >= required;
+}
+
 // The status a classification implies, or null for none. `other` and `unclassified`
 // (which include out-of-office) never move anything.
 export function targetStatusFor(classification: EmailClassification): ApplicationStatus | null {
@@ -134,6 +158,18 @@ export function targetStatusFor(classification: EmailClassification): Applicatio
   }
 }
 
+// The status this verdict should move an application to from `current`, or null for no move.
+// One pure answer for "does anything change": a target exists, the graph lets the tracker walk
+// that edge, AND the confidence gate passes. `index.ts` calls this so the tested rule is the live one.
+export function statusMoveFor(decision: Pick<MessageDecision, "classification" | "confidence">, current: ApplicationStatus): ApplicationStatus | null {
+  // The status the classification implies, if any.
+  const target = targetStatusFor(decision.classification);
+  // No target, or an edge the tracker may not walk: no move.
+  if (target === null || !canTransition(current, target, "tracker")) return null;
+  // Confidence gate last; below it the email is stored but nothing moves.
+  return passesConfidenceGate(target, decision.confidence) ? target : null;
+}
+
 // Escapes a slug for use inside a RegExp; slugs are data, not patterns.
 function escapeRegExp(text: string): string {
   // Standard metacharacter set.
@@ -143,26 +179,81 @@ function escapeRegExp(text: string): string {
 // Minimum slug length considered. Two-letter slugs ("ai", "hp") match too much text.
 const MIN_SLUG_LENGTH = 3;
 
-// Does the sender's domain name this company exactly? Compares each domain label except
-// the TLD (`careers.stripe.com` -> `careers`, `stripe`) for EQUALITY with the slug or the
-// slug without hyphens. Equality, not `includes`: the old substring test matched
-// `meta` inside `metabase` and `ola` inside `motorola`.
+// Second-level public suffixes under a country code ("co" in co.uk). The registrable label
+// sits one to the left of these. WHY A LIST AND NOT A PACKAGE: the lockfile is single-owner, and
+// a short list covers the countries employers actually mail from.
+// ponytail: incomplete PSL; a rare suffix (e.g. a .co.zz we missed) makes the registrable label
+// look like "co", which matches no slug, so it fails CLOSED (an unmatched email, never a wrong one).
+// Upgrade path: vendor the full Public Suffix List when a real miss is observed.
+const MULTI_PART_SUFFIXES: ReadonlySet<string> = new Set([
+  // United Kingdom.
+  "co.uk", "org.uk", "ac.uk", "gov.uk", "ltd.uk", "plc.uk",
+  // India.
+  "co.in", "net.in", "org.in", "ac.in", "gov.in", "firm.in", "ind.in",
+  // Australia and New Zealand.
+  "com.au", "net.au", "org.au", "edu.au", "co.nz", "org.nz",
+  // Japan, South Korea.
+  "co.jp", "ne.jp", "or.jp", "ac.jp", "co.kr", "or.kr",
+  // Brazil, Mexico, Argentina.
+  "com.br", "net.br", "org.br", "com.mx", "com.ar",
+  // South Africa, Singapore, Hong Kong, China, Taiwan, Turkey.
+  "co.za", "com.sg", "com.hk", "com.cn", "com.tw", "com.tr",
+  // Israel, Indonesia, Malaysia, Philippines, Nigeria, Pakistan, Egypt, Saudi Arabia, Vietnam.
+  "co.il", "co.id", "com.my", "com.ph", "com.ng", "com.pk", "com.eg", "com.sa", "com.vn",
+]);
+
+// The label directly left of the public suffix (`mail.stripe.co.uk` -> `stripe`), or null when
+// it cannot be decided. Null fails closed: the caller treats it as no match.
+function registrableLabel(senderDomain: string): string | null {
+  // Lowercased labels; a trailing dot or empty label means a malformed domain.
+  const labels = senderDomain.toLowerCase().split(".");
+  // Malformed input (empty label) or a bare TLD: no registrable label to compare.
+  if (labels.length < 2 || labels.some((label) => label.length === 0)) return null;
+  // Does the last two labels form a known multi-part suffix?
+  const lastTwo = labels.slice(-2).join(".");
+  // Multi-part suffix: the registrable label is the third from the end; a bare "co.uk" has none.
+  if (MULTI_PART_SUFFIXES.has(lastTwo)) return labels.length >= 3 ? labels[labels.length - 3]! : null;
+  // Single-label suffix (.com, .io, ...): the registrable label is second from the end.
+  return labels[labels.length - 2]!;
+}
+
+// Does the sender's domain name this company? Only the REGISTRABLE label is compared, for
+// EQUALITY with the slug or the slug without hyphens. Two earlier bugs: `includes` matched
+// `meta` inside `metabase`; and then "any non-TLD label" matched `stripe.evil.com`, where the
+// attacker (or an unrelated vendor) controls everything left of their own registrable name.
+// Subdomains of the real company (`mail.stripe.com`) still match: that label is theirs to issue.
 function domainMatches(senderDomain: string, slug: string): boolean {
-  // Labels without the final TLD.
-  const labels = senderDomain.toLowerCase().split(".").slice(0, -1);
+  // The one label the sender's owner actually registered.
+  const label = registrableLabel(senderDomain);
+  // Undecidable: fail closed.
+  if (label === null) return false;
   // Hyphenated slugs (`scale-ai`) appear unhyphenated in domains (`scaleai.com`).
   const compact = slug.replace(/-/g, "");
   // Exact label equality with either form.
-  return labels.some((label) => label === slug || label === compact);
+  return label === slug || label === compact;
 }
 
-// Does the slug appear as a whole word sequence in the sender or subject? The snippet is
-// excluded: email bodies mention other companies ("we use Stripe for payments").
+// The From header's DISPLAY NAME only: `Stripe Recruiting <no-reply@hire.lever.co>` -> `Stripe Recruiting `.
+// WHY (2026-10-06): the address part is exactly what the domain rule already judged. Letting the text
+// fallback read it again would let `x@stripe.evil.com` supply the slug `stripe` through its own
+// address and win back the match `registrableLabel` refused. Stripping it lets the fallback run for
+// every sender (vendor subdomains included) without reopening that spoof.
+function displayNameOf(from: string): string {
+  // Drop the bracketed address first (the RFC 5322 `Name <addr>` form).
+  const withoutBracketed = from.replace(/<[^>]*>/g, " ");
+  // Then any bare or quoted address token (a header that is only `x@stripe.evil.com`, or a
+  // display name that is itself an address), since it carries the same untrusted domain.
+  return withoutBracketed.replace(/[^\s"'<>]+@[^\s"'<>]+/g, " ");
+}
+
+// Does the slug appear as a whole word sequence in the sender's display name or the subject?
+// The snippet is excluded: email bodies mention other companies ("we use Stripe for payments").
+// The sender ADDRESS is excluded too; see `displayNameOf`.
 function slugNamedIn(message: DecidableMessage, slug: string): boolean {
   // Hyphens in the slug match a space or hyphen in text ("scale-ai" ~ "Scale AI").
   const pattern = new RegExp(`(?:^|[^a-z0-9])${slug.split("-").map(escapeRegExp).join("[\\s-]+")}(?:$|[^a-z0-9])`);
-  // Lowercased header text only.
-  return pattern.test(`${message.from} ${message.subject}`.toLowerCase());
+  // Lowercased display name plus subject; never the address.
+  return pattern.test(`${displayNameOf(message.from)} ${message.subject}`.toLowerCase());
 }
 
 // The single application a message belongs to, or null. Null when NOTHING matches and
@@ -183,7 +274,13 @@ export function matchApplication(
   const byDomain = senderDomain === null
     ? []
     : candidates.filter((app) => domainMatches(senderDomain, app.jobs!.company_slug.toLowerCase()));
-  // Any domain match decides the question, ambiguous or not.
+  // Any domain match decides the question, ambiguous or not. Otherwise the text fallback runs for
+  // EVERY sender, including ones with a non-matching domain. WHY NO `senderDomain !== null` SKIP
+  // ANY MORE (removed 2026-10-06): that skip refused `x@stripe.evil.com`, but it also refused every
+  // vendor subdomain the parser failed to null (`hire.lever.co`), losing real ATS mail. The spoof
+  // is now refused by `displayNameOf` instead: the fallback never reads the address, so a domain
+  // cannot supply the slug. The trust boundary is unchanged from the null-domain case: a display
+  // name and subject are sender-chosen text, exactly as they were for webmail and ATS senders.
   const pool = byDomain.length > 0
     ? byDomain
     : candidates.filter((app) => slugNamedIn(message, app.jobs!.company_slug.toLowerCase()));
