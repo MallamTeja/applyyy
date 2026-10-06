@@ -556,7 +556,9 @@ test("transient: a network error (fetch throws) then 200 succeeds after two atte
   assert.equal(outcome.attempts, 2);
   // The failure was reported with the explicit network-error wording.
   const failure = rig.rpcCalls.filter((c) => c.fn === "report_gemini_result").map((c) => c.args as { p_error: string | null })[0]!;
-  assert.equal(failure.p_error, "network error: connection reset");
+  // Ends with the default model's tag: no option and no Deno env under node, so resolveModel fell
+  // through to the constant — and last_error must say so rather than leave the model unstated.
+  assert.equal(failure.p_error, `network error: connection reset model=${GEMINI_DEFAULT_MODEL}`);
 });
 
 test("transient: 429 then 503 x3 ends as upstream_unavailable (last failure was transient)", async () => {
@@ -886,4 +888,59 @@ test("an AIza key echoed in an error message is redacted from last_error", async
     execute: async () => ({ ok: false, status: 403, statusText: "Forbidden", errorBody: { error: { status: "X", message: `bad key ${fakeKey} here` } } }),
   });
   assert.ok(!reportsOf(rig)[0]!.p_error?.includes(fakeKey));
+});
+
+// --- last_error NAMES THE MODEL ---------------------------------------------------------
+// Earned 2026-10-06: two live tailor runs failed with 503 "high demand", and last_error could
+// not say which model had been called, so GEMINI_MODEL had to be INFERRED from isolate boot
+// times. The tag makes it measured. Driven through generateGeminiContent, not the loop directly,
+// because the forward from resolveModel into the loop is half of what is being guarded.
+
+test("last_error keeps its HTTP prefix and Google bracket, then ends with model=<the id the URL used>", async () => {
+  // Records the report RPCs so the exact p_error strings can be read back.
+  const rpcCalls: Array<{ fn: string; args: unknown }> = [];
+  // Two keys: first answers 503, second answers 403, so both write branches are exercised.
+  const db = fakeClient({ claimSequence: [{ data: 1, error: null }, { data: 2, error: null }], reportCalls: rpcCalls });
+  // Records the URL so the tag can be compared against what was actually requested.
+  const urls: string[] = [];
+  // A non-default id, so a tag that silently fell back to the constant would be caught.
+  const model = "gemini-3.6-flash";
+  await generateGeminiContent(db, {
+    // The explicit option is the most specific source resolveModel honours.
+    model,
+    // One key per attempt so each failure lands on its own report.
+    readKey: keysFrom({ 1: "k1", 2: "k2" }),
+    // Zero spacing so the test never waits on the pacer.
+    pacer: new GeminiPacer({ minIntervalMs: 0, clock: createVirtualClock(1000) }),
+    // Never really sleeps between the transient retry and the next key.
+    sleep: async () => {},
+    // One retry: exactly two attempts, the 503 then the 403.
+    maxRetries: 1,
+    // Google's real error envelope, so the bracket is built the way it is live.
+    fetchSeam: async (input) => {
+      // Kept to compare against the tag.
+      urls.push(String(input));
+      // First call overloaded, second rejected: the two branches that wrote live last_errors.
+      return urls.length === 1
+        ? new Response(JSON.stringify({ error: { status: "UNAVAILABLE", message: "high demand" } }), { status: 503, statusText: "Service Unavailable" })
+        : new Response(JSON.stringify({ error: { status: "PERMISSION_DENIED", message: "denied" } }), { status: 403, statusText: "Forbidden" });
+    },
+    prompt: { systemInstruction: "s", userContent: "u" },
+  });
+  // The model segment of the URL actually requested, parsed from its path, not assumed.
+  const requested = new URL(urls[0]!).pathname.match(/^\/v1beta\/models\/([^/:]+):generateContent$/)?.[1];
+  // Non-vacuity: the URL really carried the id, so the comparison below is against a measurement.
+  assert.equal(requested, model);
+  // Every failure report's p_error, in order.
+  const errors = rpcCalls
+    .filter((c) => c.fn === "report_gemini_result")
+    .map((c) => (c.args as { p_error: string | null }).p_error);
+  // Both failures were reported; zero would make every check below pass vacuously.
+  assert.equal(errors.length, 2);
+  // SHAPE, not substring: the unchanged prefix, Google's bracket, then the tag as the LAST token.
+  assert.match(errors[0]!, /^HTTP 503: Service Unavailable \[UNAVAILABLE - high demand\] model=([^\s]+)$/);
+  // The id after "model=" is exactly the one the URL was built from.
+  assert.equal(errors[0]!.match(/ model=([^\s]+)$/)?.[1], requested);
+  // The 403 branch carries the same tag, so a key rejection also names its model.
+  assert.match(errors[1]!, /^HTTP 403: Forbidden \[PERMISSION_DENIED - denied\] model=gemini-3\.6-flash$/);
 });

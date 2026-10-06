@@ -153,6 +153,10 @@ export interface GeminiFailoverOptions<T> {
   readonly readKey?: KeyReader;
   // Token pacer (defaults to global singleton pacer).
   readonly pacer?: GeminiPacer;
+  // The model id this call targets, appended to every last_error this loop writes. Optional
+  // because the loop itself never builds a URL; generateGeminiContent passes the one it resolved.
+  // Without it a live 503 could only be pinned to a model by INFERRING which env was deployed.
+  readonly model?: string;
   // Optional rotation hook for logging / metrics.
   readonly onKeyRotated?: (info: {
     readonly fromKeyIndex: number;
@@ -180,6 +184,14 @@ function withGoogleError(base: string, errorBody: unknown): string {
   // Redact first, then truncate, so a key straddling the cut cannot survive as a prefix.
   const extra = parts.join(" - ").replace(/AIza[0-9A-Za-z_-]{35}/g, "[redacted-key]").slice(0, 200);
   return `${base} [${extra}]`;
+}
+// Appends " model=<id>" to a last_error string, AFTER everything else, so the existing
+// "HTTP 503: Service Unavailable [UNAVAILABLE - ...]" prefix the Health page and humans read stays
+// byte-identical. No model (a direct caller that passed none) leaves the text untouched, so the
+// tag is never a guess: it appears only when the URL was actually built from that id.
+function withModel(text: string, model: string | undefined): string {
+  // Blank counts as absent, so a stray "" can never write a bare "model=" that reads as an answer.
+  return model !== undefined && model.trim().length > 0 ? `${text} model=${model.trim()}` : text;
 }
 // Base backoff per attempt. Worst case with defaults (3 sleeps): 1000+3000+7000 = 11000 ms,
 // plus up to 25% jitter = 13750 ms, well under the 25 s budget an Edge Function can spare.
@@ -258,7 +270,8 @@ export async function callGeminiWithFailover<T>(
           ? JSON.stringify(execResult.errorBody)
           : execResult.statusText ?? "429 Too Many Requests";
 
-      await reportResult(db, keyIndex, false, retryAfterSeconds, `HTTP 429: ${errorText}`);
+      // Tagged so a 429 names the model whose quota ran out (quotas are per model).
+      await reportResult(db, keyIndex, false, retryAfterSeconds, withModel(`HTTP 429: ${errorText}`, options.model));
 
       options.onKeyRotated?.({
         fromKeyIndex: keyIndex,
@@ -300,7 +313,8 @@ export async function callGeminiWithFailover<T>(
     // 400 is deliberately NOT here: a malformed request fails identically on every key.
     if (execResult.status === 401 || execResult.status === 403) {
       const detail = withGoogleError(`HTTP ${execResult.status}: ${execResult.statusText || "Key rejected"}`, execResult.errorBody);
-      await reportResult(db, keyIndex, false, KEY_REJECTED_COOLDOWN_S, detail);
+      // Tagged at the write only; `detail` itself stays untagged for the returned outcome.
+      await reportResult(db, keyIndex, false, KEY_REJECTED_COOLDOWN_S, withModel(detail, options.model));
       lastFailure = { status: execResult.status, detail };
       lastKind = "key_rejected";
       options.onKeyRotated?.({ fromKeyIndex: keyIndex, retryAfterSeconds: KEY_REJECTED_COOLDOWN_S, attempt });
@@ -320,7 +334,8 @@ export async function callGeminiWithFailover<T>(
         execResult.status === 0
           ? `network error: ${execResult.statusText || "unknown"}`
           : `HTTP ${execResult.status}: ${execResult.statusText || "Service error"}`;
-      await reportResult(db, keyIndex, false, null, withGoogleError(detail, execResult.errorBody));
+      // Tagged last, after Google's bracket, so a 503 says WHICH model was overloaded.
+      await reportResult(db, keyIndex, false, null, withModel(withGoogleError(detail, execResult.errorBody), options.model));
       // Remembered for the exhausted-loop return at the bottom.
       lastFailure = { status: execResult.status, detail };
       lastKind = "transient";
@@ -361,7 +376,8 @@ export async function callGeminiWithFailover<T>(
       keyIndex,
       false,
       null,
-      withGoogleError(`HTTP ${execResult.status}: ${execResult.statusText || "Execution failed"}`, execResult.errorBody),
+      // Same tag as every other failure write, so no branch leaves last_error model-blind.
+      withModel(withGoogleError(`HTTP ${execResult.status}: ${execResult.statusText || "Execution failed"}`, execResult.errorBody), options.model),
     );
 
     return {
@@ -545,6 +561,8 @@ export async function generateGeminiContent(
     // Same spread-only-when-defined rule for the backoff seams (exactOptionalPropertyTypes).
     ...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
     ...(options.random !== undefined ? { random: options.random } : {}),
+    // The id this call's URL is built from, so last_error records it MEASURED, not inferred.
+    model,
     execute: async (apiKey: string) => {
       // NO key in the URL: a URL travels into error messages, stack traces, proxy/CDN logs and
       // `Response.url` (kept on `rawResponse`), while a header does not. The key goes only in
