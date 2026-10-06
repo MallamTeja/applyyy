@@ -171,3 +171,49 @@
 .column__head--interactive:hover {
   background: var(--surface-hover);
 }
+
+/* ---- Resume overlay (added 2026-10-06): reopen the resume tailored for a row ---- */
+
+/* Above the drawer (z-index 9000), because it opens FROM a drawer card and must cover it. */
+.drawer__resume-overlay {
+  /* Pinned to the viewport, not the drawer column, so the side-by-side gets full width. */
+  position: fixed;
+  /* Every edge, so nothing behind it stays clickable. */
+  inset: 0;
+  /* One layer above the drawer backdrop. */
+  z-index: 9001;
+  /* Same scrim as the drawer backdrop, so the two layers read as one family. */
+  background: rgba(0, 0, 0, 0.45);
+  /* Centres the panel and keeps a margin from the viewport edge. */
+  display: flex;
+  justify-content: center;
+  padding: var(--gap-5);
+}
+
+/* The sheet holding the preview; semantic tokens only, so it follows light and dark themes. */
+.drawer__resume-panel {
+  /* Fills the overlay up to a readable cap for two A4-ish panes side by side. */
+  width: 100%;
+  max-width: 96rem;
+  /* Scrolls inside itself so a long resume never scrolls the page behind. */
+  overflow: auto;
+  /* The same surface and edge as the drawer itself. */
+  background: var(--sheet);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-control);
+  padding: var(--gap-4) var(--gap-5);
+}
+
+/* Title and close on one row, matching the drawer header's layout. */
+.drawer__resume-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* Separates the header from the panes below. */
+  margin-bottom: var(--gap-4);
+}
+
+/* Pushes the action to the row's end, after the date and score. */
+.drawer__view-resume {
+  margin-left: auto;
+}

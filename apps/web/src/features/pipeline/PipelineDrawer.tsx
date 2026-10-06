@@ -1,9 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import type { ApplicationStatus } from '../../data/contract';
 import { StatusBadge } from '../../app/StatusBadge';
-import { SourceBadge } from '../../app/SourceBadge';
 import { supabase, supabaseStatus } from '../../data/supabase';
 /* THE HOUSE CLASSIFIER, not a local boolean. This drawer was the last reader in
    apps/web still hand-rolling its own empty state while its OWN PARENT,
@@ -15,17 +14,14 @@ import { classifyRead, describeEmptyState, isConclusive } from '../../data/readS
 
 /* Import the prep panel to display when the user is viewing the 'interview' stage applications. */
 import { InterviewPrepPanel } from './InterviewPrepPanel';
+/* The card, split out so its one decision (offer View resume or not) is testable without a client. */
+import { DrawerAppCard, type DrawerAppItem } from './DrawerAppCard';
+/* Shape check on tailored_profile: anything that is not a real snapshot becomes null, never a guess. */
+import { readResumeSnapshot } from './resumeSnapshot';
+/* The shared tailored-vs-master view (owned by resume-preview/); imported, never modified here. */
+import { ResumePreview } from '../resume-preview/ResumePreview';
 
 import './PipelineDrawer.css';
-
-interface DrawerAppItem {
-  readonly id: string;
-  readonly role: string;
-  readonly company: string;
-  readonly createdAt: string;
-  readonly discoveredVia?: readonly string[] | null;
-  readonly score?: number | null;
-}
 
 export function PipelineDrawer({
   status,
@@ -52,6 +48,36 @@ export function PipelineDrawer({
      the pipeline rather than a fact about it. There is no Auth user in this
      system yet, so today this is the branch that actually runs. */
   const [signedIn, setSignedIn] = useState(false);
+  /* The row whose resume is open, or null. One at a time: the preview is a full-width
+     side-by-side, so two would not fit and would not be comparable anyway. */
+  const [viewing, setViewing] = useState<DrawerAppItem | null>(null);
+  /* The overlay's Close button, focused on open so keyboard users land INSIDE the modal
+     rather than behind its scrim (aria-modal promises they cannot reach what is behind). */
+  const closeResumeRef = useRef<HTMLButtonElement | null>(null);
+  /* Whatever had focus when the overlay opened (the card's View resume), so closing returns
+     the keyboard user to where they were instead of to the top of the page. */
+  const resumeOpenerRef = useRef<HTMLElement | null>(null);
+
+  /* Remembers the opener BEFORE the overlay renders, since the click target is the opener. */
+  function openResume(app: DrawerAppItem): void {
+    /* activeElement is the clicked button at this instant; captured before focus moves. */
+    resumeOpenerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    /* Rendering the overlay is what the effect below reacts to. */
+    setViewing(app);
+  }
+
+  /* Focus follows the overlay: into it on open, back to the opener on close. */
+  useEffect(() => {
+    /* Open: the Close button exists now that the overlay has rendered. */
+    if (viewing !== null) closeResumeRef.current?.focus();
+    /* Closed after having been opened: hand focus back once, then forget the opener. */
+    else if (resumeOpenerRef.current !== null) {
+      /* Back to the card's View resume, which is still mounted under the drawer. */
+      resumeOpenerRef.current.focus();
+      /* Cleared so a later re-render cannot steal focus back to a stale button. */
+      resumeOpenerRef.current = null;
+    }
+  }, [viewing]);
 
   useEffect(() => {
     let active = true;
@@ -89,7 +115,10 @@ export function PipelineDrawer({
 
         const { data, error: queryError } = await client
           .from('applications')
-          .select('id, created_at, fit_score, jobs:job_id(title, company_name, discovered_via, source_refs)')
+          /* tailored_profile added 2026-10-06 so any row, in any status, can reopen the resume
+             tailored for it ("sent" is only true from `applied` on, so it is not claimed here).
+             Read-only: this drawer never writes a status. */
+          .select('id, created_at, fit_score, tailored_profile, jobs:job_id(title, company_name, discovered_via, source_refs)')
           .eq('status', status)
           .order('created_at', { ascending: false })
           .limit(25);
@@ -116,6 +145,8 @@ export function PipelineDrawer({
           createdAt: row.created_at,
           discoveredVia: row.jobs?.discovered_via ?? null,
           score: row.fit_score ?? null,
+          /* Null unless it is a real snapshot, so a malformed jsonb row offers nothing rather than an empty resume. */
+          resume: readResumeSnapshot(row.tailored_profile),
         }));
 
         setRows(mapped);
@@ -144,12 +175,17 @@ export function PipelineDrawer({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        onClose();
+        /* Innermost layer first: Escape over an open resume closes the resume, not the
+           whole drawer underneath it. */
+        if (viewing !== null) setViewing(null);
+        /* Nothing open above the drawer, so Escape closes the drawer as before. */
+        else onClose();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
+    /* viewing is a dependency because the handler reads it; a stale closure would always close the drawer. */
+  }, [onClose, viewing]);
 
   /* Classified on every render from the current facts, by the pure function that
      has a test per branch in test/readState.test.ts. Six distinct outcomes where
@@ -265,22 +301,8 @@ export function PipelineDrawer({
             </div>
           ) : (
             state.rows.map((app) => (
-              <article key={app.id} className="drawer__app-card">
-                <div className="drawer__app-top">
-                  <div>
-                    <h3 className="drawer__app-role">{app.role}</h3>
-                    <span className="drawer__app-company">{app.company}</span>
-                  </div>
-                  {app.discoveredVia && app.discoveredVia.length > 0 && (
-                    <SourceBadge discoveredVia={app.discoveredVia as any} />
-                  )}
-                </div>
-                <div className="drawer__app-meta">
-                  <span className="identifier">{app.id.slice(0, 8)}</span>
-                  <span>{new Date(app.createdAt).toLocaleDateString()}</span>
-                  {app.score !== null && <span>Match: {app.score}%</span>}
-                </div>
-              </article>
+              /* The card owns the View resume decision; the drawer only owns which row is open. */
+              <DrawerAppCard key={app.id} app={app} onViewResume={openResume} />
             ))
           )}
             </>
@@ -302,6 +324,32 @@ export function PipelineDrawer({
           )}
         </div>
       </div>
+
+      {/* THE RESUME, ABOVE THE DRAWER, NOT INSIDE IT. The preview is a side-by-side of
+          tailored and master, which needs the viewport's width; inside the drawer's
+          column it would be two unreadable slivers. Rendered only for a row whose
+          snapshot passed readResumeSnapshot, so `viewing.resume` is never null here. */}
+      {viewing !== null && viewing.resume !== null && (
+        <div className="drawer__resume-overlay" role="dialog" aria-modal="true" aria-label={`Resume for ${viewing.role} at ${viewing.company}`}>
+          <div className="drawer__resume-panel">
+            <header className="drawer__resume-header">
+              <h2 className="drawer__title">{viewing.role} · {viewing.company}</h2>
+              <button ref={closeResumeRef} type="button" className="drawer__close-btn" onClick={() => setViewing(null)} aria-label="Close resume">
+                ✕ Close
+              </button>
+            </header>
+            <ResumePreview
+              applicationId={viewing.id}
+              tailoredProfile={viewing.resume}
+              /* The PINNED version this resume was tailored against, never the latest master:
+                 the comparison must show what the tailoring actually started from. */
+              masterVersion={viewing.resume.master_version}
+              jobTitle={viewing.role}
+              companyName={viewing.company}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
