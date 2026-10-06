@@ -70,6 +70,29 @@ export interface SignalRule {
 // tracker's terminal gate is 0.8). Exported so the weight guard reads the live cutoff, not a copy.
 export const MODERATE_REJECTION_MIN = 0.5;
 
+// Either apostrophe: mail clients swap ASCII ' for the typographic ’ freely, so "we've"
+// arrives in both forms and a rule that knew only one would miss half of real mail.
+const APOS = "['’]";
+
+// What must follow "Unfortunately, we" / "After careful consideration, we" for it to be a DECISION.
+//
+// WHY EVERY BRANCH CARRIES ITS OBJECT (2026-10-06): the bare verb is not a decision. "decided" alone
+// made "after careful consideration, we have decided to move forward with your application" a strong
+// TERMINAL rejection, and "cannot move" did the same to "unfortunately, we cannot move your
+// interview to Friday" — both live false rejections. So "decided" counts only with "not to" or with
+// OTHER candidates, and every negated verb only with "move forward", "proceed with your/further",
+// or an offer. Shared by both openers, so the two can never drift apart.
+const DECISION_AFTER_WE = [
+  // "we decided" / "we have decided" / "we've decided" (and determined, chosen, elected)...
+  `(?:\\s+have|${APOS}ve)?\\s+(?:decided|determined|chosen|elected)\\s+`,
+  // ...followed by a refusal, or by choosing someone else. "to move forward with you" is NOT here.
+  `(?:not\\s+to\\b|to\\s+(?:move|go)\\s+forward\\s+with\\s+(?:other|another|different)\\b|to\\s+pursue\\s+other\\b)`,
+  // OR a negated ability or intent, contracted or not ("won't", "we're not", "can't", "are unable to")...
+  `|(?:\\s+will\\s+not|\\s+won${APOS}t|\\s+are\\s+not|${APOS}re\\s+not|\\s+aren${APOS}t|\\s+cannot|\\s+can${APOS}t|\\s+are\\s+unable\\s+to|${APOS}re\\s+unable\\s+to)`,
+  // ...followed by moving forward, proceeding with the candidate, or an offer. Never a meeting or a slot.
+  `\\s+(?:be\\s+)?(?:able\\s+to\\s+)?(?:mov(?:e|ing)\\s+forward|proceed(?:ing)?\\s+(?:with\\s+your|further)|offer\\s+you|extend(?:ing)?\\s+(?:you\\s+)?an\\s+offer)`,
+].join("");
+
 // Strong explicit rejection phrases used by ATS platforms and hiring managers.
 //
 // WHY REJECTION PATTERNS ARE EXPLICIT: Rejection emails follow predictable corporate templates.
@@ -81,7 +104,22 @@ export const REJECTION_SIGNALS: readonly SignalRule[] = [
   // WHY THIS HAS HIGH WEIGHT: Explicit statements of non-selection carry near-certain confidence of rejection.
   {
     tag: "not_moving_forward",
-    pattern: /\b(?:not\s+(?:be\s+)?moving\s+forward|will\s+not\s+(?:be\s+)?proceeding|decided\s+not\s+to\s+(?:proceed|move\s+forward))\b/i,
+    // WHY THE LOOKAHEAD (2026-10-06): "not moving forward" is a verdict only when what follows is
+    // the candidate, a time qualifier, or the end of the clause. "will not be moving forward with the
+    // onsite until..." is a postponement and used to score 0.95 as a terminal rejection.
+    // WHY `won't`/`aren't` (2026-10-06): the contraction of the same phrase matched nothing, since
+    // "won't" contains no "not". Both apostrophes, via APOS.
+    pattern: new RegExp(
+      // The negation, written out or contracted; `\b` sits before each because "won't" has no
+      // word boundary before its "n".
+      `(?:\\bnot|\\b(?:won|aren|isn)${APOS}t)\\s+(?:be\\s+)?moving\\s+forward` +
+        // ...and only when its object is the candidate, a time, or the clause simply ends.
+        `(?=\\s+with\\s+(?:your|you)\\b|\\s+at\\s+this\\s+(?:time|stage|point)\\b|\\s*[.,;!]|\\s*$)` +
+        // The other two phrasings, unchanged in meaning; `won't be proceeding` added for the contraction.
+        `|\\b(?:will\\s+not|won${APOS}t)\\s+(?:be\\s+)?proceeding\\b|\\bdecided\\s+not\\s+to\\s+(?:proceed|move\\s+forward)\\b`,
+      // Case-insensitive, as every rule here.
+      "i",
+    ),
     weight: 0.95,
     target: "both",
   },
@@ -90,7 +128,11 @@ export const REJECTION_SIGNALS: readonly SignalRule[] = [
   // WHY THIS HAS HIGH WEIGHT: Candidate competition decisions indicate final non-selection for this position.
   {
     tag: "moved_with_other_candidates",
-    pattern: /\b(?:mov(?:ed|ing)\s+forward\s+with\s+other\s+(?:candidates?|applicants?)|pursu(?:ing|e)\s+other\s+candidates|chosen\s+another\s+candidate|selected\s+another\s+applicant)\b/i,
+    // WHY BASE FORM, `go`, `proceed` AND `another` (2026-10-06): "we have decided to MOVE forward
+    // with other candidates" (no "Unfortunately,") matched no rule at all, nor did "go forward with
+    // another candidate". The object stays mandatory: OTHER/ANOTHER/DIFFERENT candidates or
+    // applicants, so "move forward with you" or "with your application" can never match here.
+    pattern: /\b(?:(?:mov(?:e|ed|ing)|go(?:ing)?|went)\s+forward\s+with\s+(?:other|another|different)\s+(?:candidates?|applicants?)|proceed(?:ed|ing)?\s+with\s+(?:other|another|different)\s+(?:candidates?|applicants?)|pursu(?:ing|e|ed)\s+other\s+candidates|chosen\s+another\s+candidate|selected\s+another\s+(?:applicant|candidate))\b/i,
     weight: 0.95,
     target: "both",
   },
@@ -103,7 +145,14 @@ export const REJECTION_SIGNALS: readonly SignalRule[] = [
     // your interview" scored 0.85 as a rejection and `rejected` is terminal. Only a decision phrase
     // after "unfortunately, we" counts as strong; "after careful consideration, we" needs the same decision phrase
     // (2026-10-05: "after careful consideration, we have scheduled your onsite" was a false terminal rejection).
-    pattern: /\b(?:regret\s+to\s+inform\s+you|unfortunately,\s+we\s+(?:have\s+)?(?:decided|chosen|elected|will\s+not|are\s+not|cannot\s+(?:move|proceed)|are\s+unable\s+to\s+(?:move|proceed|offer))|after\s+careful\s+consideration,\s+we\s+(?:have\s+)?(?:decided|determined|chosen|elected|will\s+not|are\s+not|cannot\s+(?:move|proceed)|are\s+unable\s+to\s+(?:move|proceed|offer)))\b/i,
+    // 2026-10-06: the decision phrase is DECISION_AFTER_WE (see it for why every branch needs an
+    // object), the comma is optional ("Unfortunately we..."), and contractions are accepted.
+    pattern: new RegExp(
+      // The formal opener stands alone; the two softer openers need a decision phrase after "we".
+      `\\b(?:regret\\s+to\\s+inform\\s+you|(?:unfortunately|after\\s+careful\\s+consideration),?\\s+we(?:${DECISION_AFTER_WE}))`,
+      // Case-insensitive, as every rule here.
+      "i",
+    ),
     weight: 0.85,
     target: "both",
   },
