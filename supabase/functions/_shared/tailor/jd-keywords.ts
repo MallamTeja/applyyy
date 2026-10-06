@@ -24,8 +24,8 @@
 // One vocabulary entry: the canonical spelling written to the column, and the pattern
 // that finds it in a posting.
 interface SkillTerm {
-  // Written verbatim to the column, and matched by the web as a case-insensitive
-  // SUBSTRING of resume text, so it is spelled the way resumes spell it.
+  // Written verbatim to the column, and read back through keywordAppearsIn (this module's
+  // matcher for resume text) using this entry's own pattern; spelled the way resumes spell it.
   readonly term: string;
   // Word-bounded, so "Go" is not found in "Google" and "SQL" not in "PostgreSQL".
   readonly pattern: RegExp;
@@ -57,7 +57,7 @@ const SKILL_VOCABULARY: readonly SkillTerm[] = [
   { term: "Rails", pattern: word("rails") },
   // The language; "rust" as a word is rare enough in postings to accept.
   { term: "Rust", pattern: word("rust") },
-  // Hand-written pattern: `` cannot sit after "+", so only the left edge is bounded.
+  // Hand-written pattern: `\b` cannot sit after "+", so only the left edge is bounded.
   { term: "C++", pattern: /(?<![A-Za-z0-9])c\+\+/i },
   // Same reason as C++: the trailing "#" defeats a word boundary.
   { term: "C#", pattern: /(?<![A-Za-z0-9])c#/i },
@@ -163,8 +163,7 @@ const SKILL_VOCABULARY: readonly SkillTerm[] = [
   { term: "Concurrency", pattern: word("concurrency") },
   // Operational duty; the hyphen distinguishes it from "on call" in prose.
   { term: "On-call", pattern: word("on-call") },
-  // AI. `exact` for AI: the capitalised acronym, never "said" or "maintain".
-  // Case-sensitive acronym, never the letters inside "said" or "maintain".
+  // AI group. Case-sensitive acronym, never the letters inside "said" or "maintain".
   { term: "AI", pattern: exact("AI") },
   // Case-sensitive acronym, singular or plural.
   { term: "LLM", pattern: exact("LLMs?") },
@@ -176,12 +175,53 @@ const SKILL_VOCABULARY: readonly SkillTerm[] = [
   { term: "Prompt engineering", pattern: word("prompt engineering") },
 ];
 
+// term -> entry, built once at module load so a per-keyword lookup is O(1), not a scan per call.
+const VOCABULARY_BY_TERM: ReadonlyMap<string, SkillTerm> = new Map(SKILL_VOCABULARY.map((entry) => [entry.term, entry]));
+
+// Entity-decoded so "Ruby &amp; Rails" in scraped HTML reads as text. One helper so the
+// extractor and the matcher cannot decode differently.
+const decodeEntities = (text: string): string => text.replace(/&amp;/g, "&");
+
+// THE single matching rule, over ALREADY-decoded text. Internal so both exports share it
+// and each decodes exactly once (decoding twice would turn "&amp;amp;" into "&", changing
+// the extractor's output, which is a future cache-key input).
+function appearsInDecoded(keyword: string, decoded: string): boolean {
+  // Empty or blank keyword: a bounded empty pattern would match almost anywhere, so it
+  // must be an explicit "no", never a vacuous "yes" (CLAUDE.md §5).
+  if (keyword.trim() === "") return false;
+  // A vocabulary term uses its curated pattern, so "Go" honours its case-sensitive rule.
+  const entry = VOCABULARY_BY_TERM.get(keyword);
+  // Exact string equality only: "go" is NOT "Go", so it falls through to the fallback,
+  // which is case-insensitive and WOULD credit "go to market". Reachable only by a hand-edited
+  // row: the column is written solely by extractJdKeywords, which emits canonical terms.
+  if (entry) return entry.pattern.test(decoded);
+  // Unknown keyword: escaped so "C++"-like text is literal, never a regex; bounded and
+  // case-insensitive like word(), so it is never a raw substring ("Svelte" not in "sveltekit").
+  return word(keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).test(decoded);
+}
+
+/**
+ * Does `keyword` appear in `text` under the same rule the extractor uses? Exported for the
+ * web approval page, whose case-insensitive substring match credited "Go" from "Google".
+ *
+ * A keyword that is a vocabulary `term` (exact, case-sensitive equality) uses that entry's
+ * own pattern. An UNKNOWN keyword — a legacy or hand-entered row, or one orphaned by a future
+ * vocabulary edit — is matched as an escaped literal inside the same word bounds as `word()`,
+ * case-insensitive, and NEVER as a substring: a substring is exactly the "Go in Google" bug
+ * this replaces. An empty or blank keyword is false. `&amp;` in `text` is decoded first.
+ */
+export function keywordAppearsIn(keyword: string, text: string): boolean {
+  // Decode here, once, exactly as the extractor does.
+  return appearsInDecoded(keyword, decodeEntities(text));
+}
+
 // The posting's skill terms: every vocabulary term found in it, once, sorted.
 export function extractJdKeywords(jobDescription: string): readonly string[] {
-  // Entity-decoded so "Ruby &amp; Rails" in scraped HTML reads as text.
-  const text = jobDescription.replace(/&amp;/g, "&");
+  // Decoded once by the shared helper, so this and keywordAppearsIn see the same text.
+  const text = decodeEntities(jobDescription);
   // Each term at most once, whatever its frequency: the column is a set, not a histogram.
-  const found = SKILL_VOCABULARY.filter((entry) => entry.pattern.test(text)).map((entry) => entry.term);
+  // Routed through the shared rule so the extractor and the matcher cannot diverge.
+  const found = SKILL_VOCABULARY.filter((entry) => appearsInDecoded(entry.term, text)).map((entry) => entry.term);
   // Code-point order, not locale order, so the cache-key input is identical on every runtime.
   return [...new Set(found)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
