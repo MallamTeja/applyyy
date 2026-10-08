@@ -261,6 +261,32 @@
   max-width: 56ch;
 }
 
+/* The rules the screener skipped in an agent's latest run (2026-10-08). A
+   separate class from `.table__run-caveat` because a skipped rule is not a row
+   error: the run's error_count does not include it. Same amber token, because
+   the meaning is the same - a human should look, nothing is on fire - and the
+   token already carries light-dark(), so no [data-theme] rule is needed. */
+.table__rule-warnings {
+  /* Own block under the verdict, like the other per-run notes. */
+  display: block;
+  /* Same rhythm as the neighbouring caveat lines. */
+  margin-top: var(--gap-1);
+  /* Amber, as above. */
+  color: var(--signal-strong);
+  /* Secondary text, same size as the other under-verdict notes. */
+  font-size: var(--size-xs);
+  /* Wraps like a sentence rather than stretching the column. */
+  max-width: 56ch;
+}
+
+/* The list itself: indented just enough to read as items of the heading. */
+.table__rule-warnings-list {
+  /* No browser-default top/bottom margin inside a table cell. */
+  margin: 0;
+  /* A small indent keeps the bullets inside the cell. */
+  padding-left: 1.25em;
+}
+
 /* A count in the coverage table. Tabular so four numbers that must sum to a
    fifth can be added up by eye - which is the whole point of showing the
    partition rather than a single figure. */

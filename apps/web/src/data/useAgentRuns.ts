@@ -46,6 +46,8 @@ import { classifyRead } from './readState.ts';
 import type { ReadState } from './readState.ts';
 import { summarizeAgentRuns } from './agentFreshness.ts';
 import type { AgentFreshness, AgentRunFacts } from './agentFreshness.ts';
+/* Picks which run's error_detail answers "which rules were skipped". */
+import { pickRuleWarningRun } from './ruleWarnings.ts';
 
 /* How many run rows to pull.
  *
@@ -61,6 +63,37 @@ import type { AgentFreshness, AgentRunFacts } from './agentFreshness.ts';
  * of every agent even when the busiest one has run many times today, and the
  * page is honest about the window in the note it renders. */
 export const RUN_WINDOW = 200;
+
+/* SEVEN COLUMNS, which is every column this page reads and no more.
+   `error_count` is the one counter admitted: pipeline agents mark a run
+   `succeeded` when any row succeeded, so Health needs it to say "succeeded with
+   N errors". `error_detail` is admitted (2026-10-08) because it is the only
+   carrier of the screener's "rule skipped" warnings (`withRuleWarnings`,
+   supabase/functions/_shared/screen/run-summary.ts) - without it the operator
+   sees a run that dropped every row and no reason. It is free text written by
+   our own agents, never user content, and the page renders it only through
+   `parseRuleWarnings`. `rows_in` is admitted with it, because a run that
+   screened nothing (an empty queue is normal) has a clean detail that says
+   nothing about rules - only a closed run with rows_in > 0 may stand for "the
+   warnings went away" (`pickRuleWarningRun`). Still no `select('*')` and no
+   `user_id` - the narrowest projection that answers the question cannot leak a
+   column somebody later adds to this table. Exported so a test can assert the
+   list rather than trust this comment. */
+export const AGENT_RUN_COLUMNS =
+  'agent, status, started_at, finished_at, error_count, error_detail, rows_in';
+
+/* One `agent_runs` row as this read returns it. Extends the freshness module's
+   facts rather than editing them, because that module needs only the timing
+   columns and owns its own type. `unknown`-safe: optional so a fixture or an
+   older row without the column still type-checks, and the page never trusts it
+   without `parseRuleWarnings`. */
+export interface AgentRunRow extends AgentRunFacts {
+  /* The run's failure summary and/or `rule_warnings:` segment; null on a clean run. */
+  readonly error_detail?: string | null;
+  /* Rows the run took in; `not null default 0` in the schema, optional here
+     for fixtures. Validated at use, never trusted. */
+  readonly rows_in?: number | null;
+}
 
 export interface AgentRunsRead {
   /* The classified read. A caller cannot reach rows without having handled
@@ -80,6 +113,12 @@ export interface AgentRunsRead {
      age with no "as of" is unfalsifiable: the operator cannot tell a nine-day
      silence from a nine-day-old page. */
   readonly measuredAt: number | null;
+  /* Per agent, the run whose error_detail says which rules it skipped: the
+     newest CLOSED run that took in rows (`pickRuleWarningRun`). NOT simply the
+     latest run - an idle or still-open run is newer and says nothing about
+     rules. Absent for an agent with no such run, and empty whenever the read
+     was not conclusive, for the same reason `freshness` is. */
+  readonly ruleWarningRuns: ReadonlyMap<string, AgentRunRow>;
 }
 
 export function useAgentRuns(): AgentRunsRead {
@@ -91,7 +130,8 @@ export function useAgentRuns(): AgentRunsRead {
   /* NULL, NOT []. Null means no successful read has completed; `[]` would claim
      the database was asked and answered nothing. That distinction is the whole
      reason `readState.ts` exists. */
-  const [rows, setRows] = useState<readonly AgentRunFacts[] | null>(null);
+  /* Typed as the full row, so `error_detail` rides through to the page. */
+  const [rows, setRows] = useState<readonly AgentRunRow[] | null>(null);
   const [signedIn, setSignedIn] = useState(false);
   /* Captured when the rows arrive rather than read at render time. Ages must be
      measured against a fixed instant: recomputing `Date.now()` on every render
@@ -131,15 +171,10 @@ export function useAgentRuns(): AgentRunsRead {
           return;
         }
 
-        /* FIVE COLUMNS, which is every column this panel reads and no more.
-           `error_count` is the one counter admitted: pipeline agents mark a run
-           `succeeded` when any row succeeded, so Health needs it to say
-           "succeeded with N errors". Still no `select('*')` and no `user_id` -
-           the narrowest projection that answers the question cannot leak a
-           column somebody later adds to this table. */
+        /* The explicit column list, defined once above with its reasons. */
         const { data, error: queryError } = await supabase
           .from('agent_runs')
-          .select('agent, status, started_at, finished_at, error_count')
+          .select(AGENT_RUN_COLUMNS)
           /* Newest first, so the cap below keeps the rows that matter. Ordering
              on `started_at` rather than `finished_at` because a crashed run has
              no `finished_at` at all and must not sort to the bottom - a run
@@ -163,7 +198,7 @@ export function useAgentRuns(): AgentRunsRead {
            manufacture a positive "nothing has ever run" answer out of a state
            we do not understand - so it stays null and classifies as still
            loading rather than as a conclusive empty. */
-        setRows(data as readonly AgentRunFacts[] | null);
+        setRows(data as readonly AgentRunRow[] | null);
         /* Stamped at the same moment as the rows, so the ages on screen and the
            "as of" label can never disagree. */
         setMeasuredAt(Date.now());
@@ -212,5 +247,19 @@ export function useAgentRuns(): AgentRunsRead {
         )
       : [];
 
-  return { state, freshness, measuredAt };
+  /* Built from the same conclusive read, from the typed rows (which carry
+     error_detail and rows_in), keyed by the roster the freshness entries use. */
+  const ruleWarningRuns = new Map<string, AgentRunRow>();
+  // Only a conclusive read can name a run; otherwise the map stays empty.
+  if (state.kind === 'rows' && rows !== null) {
+    // One lookup per roster agent; the read is capped, so this is cheap.
+    for (const entry of freshness) {
+      // The newest closed run that screened rows, or null when there is none.
+      const run = pickRuleWarningRun(rows, entry.agent);
+      // Absent rather than null in the map, so `.get()` has one "none" value.
+      if (run !== null) ruleWarningRuns.set(entry.agent, run);
+    }
+  }
+
+  return { state, freshness, measuredAt, ruleWarningRuns };
 }

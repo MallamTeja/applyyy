@@ -75,11 +75,15 @@ import {
    a page that misdescribes its own bounds is worse than one that says nothing,
    because the operator would trust it. */
 import { useAgentRuns } from '../../data/useAgentRuns';
-import type { AgentRunsRead } from '../../data/useAgentRuns';
+import type { AgentRunRow, AgentRunsRead } from '../../data/useAgentRuns';
 /* The shared vocabulary for every state that is not an answer. Imported so
    "not signed in" reads identically on this page, the pipeline board and any
    panel added later - the operator learns one phrase per state, once. */
 import { describeEmptyState } from '../../data/readState';
+/* The shape-validating reader for the `rule_warnings:` segment of
+   `error_detail`. Imported rather than parsed inline so the parity test can
+   round-trip it against the writer. */
+import { parseRuleWarnings } from '../../data/ruleWarnings';
 /* Whether the console can reach a database at all.
    IMPORTING THIS IS LOAD-BEARING BEYOND THIS PANEL: `supabase.ts` enforces the
    anon-key rule at module scope, and until something imported it that check
@@ -92,6 +96,75 @@ import { supabaseStatus } from '../../data/supabase';
 import './health.css';
 
 /* --- Panels ----------------------------------------------------------- */
+
+/* The rules the screener skipped, from ONE run: the agent's newest CLOSED run
+ * that took in rows (chosen by `pickRuleWarningRun` in `useAgentRuns`).
+ *
+ * WHAT THIS CLAIMS, and no more. A closed run that screened rows writes its
+ * warnings into error_detail when there are any, so a clean detail on THAT run
+ * means the rules ran. An idle run (rows_in 0) or one still open says nothing
+ * about rules, so neither is allowed to replace an older run's list. When no
+ * run ever screened rows, the caller passes null and nothing renders.
+ *
+ * NOTHING RENDERED MEANS "KNOWN: NONE", never "could not tell". The parser's
+ * closed union makes the cut-off and unreadable cases say so out loud.
+ *
+ * Exported so a test can render it on its own; the freshness table is its only
+ * caller. Everything in it is DATA from the database: rendered as text nodes,
+ * which React escapes, never as markup. */
+export function RuleWarningsNote({
+  run,
+}: {
+  /* The chosen run, or null when this agent has none that screened rows. */
+  readonly run: AgentRunRow | null;
+}): ReactElement | null {
+  /* Validated by the parser rather than trusted, since the column is free
+     text and a fixture or older read may lack it entirely. */
+  const parsed = run === null ? null : parseRuleWarnings(run.error_detail);
+  /* Known-clean: the chosen run recorded no warnings and nothing was cut. */
+  if (parsed === null) return null;
+
+  /* The cap ate the segment, or its label: say warnings MAY exist. */
+  if (parsed.kind === 'maybe_cut') {
+    return (
+      <div className="table__rule-warnings">
+        Rule warnings may have been cut off: this run&apos;s error detail hit
+        its 1000-character limit.
+      </div>
+    );
+  }
+
+  /* A label was recorded but its body is not the writer's shape: point the
+     operator at the raw column rather than guessing at a list. */
+  if (parsed.kind === 'unreadable') {
+    return (
+      <div className="table__rule-warnings">
+        Rule warnings were recorded but could not be read; see this run&apos;s
+        error_detail.
+      </div>
+    );
+  }
+
+  return (
+    <div className="table__rule-warnings">
+      {/* Scopes the claim to one named run, so it cannot be read as the
+          agent's whole history or as the run in the other columns. */}
+      <span>
+        Rules skipped in the last run that screened jobs (
+        <span className="identifier">{run?.finished_at}</span>)
+      </span>
+      {/* The cap note sits beside the heading: the writer cuts at 1000
+          characters, so the last item below may be incomplete. */}
+      {parsed.truncated ? <span> (list truncated)</span> : null}
+      <ul className="table__rule-warnings-list">
+        {parsed.warnings.map((warning) => (
+          /* The writer dedupes, so the text itself is a unique, stable key. */
+          <li key={warning}>{warning}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 /* Agent freshness panel: roster-driven table showing age since last run.
  * Driven by AGENT_NAMES roster, not query results, so missing agents are visible. */
@@ -267,6 +340,13 @@ function AgentFreshnessPanel({
                             Latest run {runErrors}.
                           </span>
                         )}
+                        {/* Which rules this agent's newest closed run that
+                            screened rows skipped - deliberately not
+                            entry.lastRun, which may be idle or still open. */}
+                        <RuleWarningsNote
+                          run={read.ruleWarningRuns.get(agent) ?? null}
+                        />
+
                         {/* A run that opened and never closed, older than a
                             whole cycle. For the Applier this is the
                             safety-critical case: a row left at `applying`
