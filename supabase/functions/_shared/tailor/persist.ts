@@ -87,7 +87,11 @@ export async function persistTailorOutcome(
     // denominator of the approval page's ATS coverage, so a resume written without it
     // reads 0%. Copied to a plain array because the column is `text[]` and the outcome's
     // list is readonly.
-    .update({ tailored_profile: outcome.resume, tailor_refs: outcome.refs, selected_jd_keywords: [...outcome.jdKeywords] })
+    // `master_version` too (2026-10-08): the column was never written, so its FK to
+    // master_profiles guarded nothing and every reader had to dig the pin out of JSON.
+    // It is the validator-stamped pin (validator.ts:776), in the same statement so the
+    // column can never disagree with the resume it mirrors.
+    .update({ tailored_profile: outcome.resume, tailor_refs: outcome.refs, selected_jd_keywords: [...outcome.jdKeywords], master_version: outcome.resume.master_version })
     // Scoped to one row. Without this predicate the update would rewrite every
     // application the caller's RLS context can see.
     .eq("id", applicationId);

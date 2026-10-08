@@ -211,3 +211,21 @@ test("a refusal carries its violations into the event detail", async () => {
   // branches on, and a string would force it to parse prose back into a discriminant.
   assert.deepEqual(detail.violations, refused.kind === "refused" ? refused.violations : []);
 });
+
+test("persist writes applications.master_version from the resume pin in the SAME update", async () => {
+  // A clean run against the recording fake.
+  const { client, calls } = recordingClient();
+  // Persist the clean verdict.
+  await persistTailorOutcome(client, APPLICATION_ID, TAILORED);
+  // The first call is the one update statement.
+  const values = calls[0].payload.values as Record<string, unknown>;
+  // The column must equal the pin the validator stamped into the resume. It was never
+  // written before 2026-10-08, so the auditor and the approval page had to read JSON.
+  assert.equal(values.master_version, RESUME.master_version);
+  // A real number, so the composite FK to master_profiles(user_id, version) can check it.
+  assert.equal(typeof values.master_version, "number");
+  // Same statement as the profile, so the column can never disagree with the JSON it mirrors.
+  assert.equal(values.tailored_profile, RESUME);
+  // Still exactly one update and one rpc: the pin added no write that could half-fail.
+  assert.deepEqual(calls.map((c) => c.kind), ["update", "rpc"]);
+});
