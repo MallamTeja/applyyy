@@ -549,6 +549,16 @@
 
 /* --- Actions (Sticky Floating Bar) ----------------------------------- */
 
+/* Item 3 (2026-10-08): RESERVE the bar's height for scroll-into-view. A render check found that
+   focusing a line's Edit button while the sticky bar covered it neither scrolled nor revealed it:
+   the browser counts "behind a sticky bar" as visible (WCAG 2.4.11, Focus Not Obscured).
+   scroll-padding on the scroller shrinks the region focus scrolling treats as visible. Scoped with
+   :has() so pages without the bar keep their normal scrolling. Bar measured at 57px tall + gap. */
+html:has(.diff__actions) {
+  /* About the bar's height plus its bottom offset, with a little margin. */
+  scroll-padding-bottom: 6rem;
+}
+
 .diff__actions {
   position: sticky;
   bottom: var(--gap-3);
@@ -559,10 +569,10 @@
   justify-content: space-between;
   gap: var(--gap-3);
   padding: var(--gap-3) var(--gap-5);
+  /* OPAQUE (item 3, 2026-10-08). A 0.88-alpha light-dark() wash with a blur used to override this,
+     so diff text showed through as unreadable ghost lines behind the buttons. The bar sits on top
+     of the words being approved; nothing should show through it. */
   background: var(--sheet);
-  background-color: light-dark(rgba(255, 255, 255, 0.88), rgba(21, 25, 36, 0.88));
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--rule-strong);
   border-radius: var(--radius-sheet);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12), 0 1px 3px rgba(0, 0, 0, 0.08);
@@ -585,6 +595,12 @@
 /* --- Narrow screens --------------------------------------------------- */
 
 @media (max-width: 62rem) {
+  /* At phone width the buttons wrap and the bar measured 149px tall, so reserve more. */
+  html:has(.diff__actions) {
+    /* Bar height plus offset, with margin. */
+    scroll-padding-bottom: 11rem;
+  }
+
   .diff__panes {
     grid-template-columns: 1fr;
   }
