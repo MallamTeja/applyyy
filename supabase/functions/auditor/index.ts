@@ -26,6 +26,9 @@ import { createAppUserClient } from "../_shared/db/client.ts";
 // Import anti-fabrication auditor orchestrator function
 import { auditApplication } from "../_shared/audit/audit.ts";
 
+// Resolves each row's master by its pin; the closed union is what makes "use the latest" unwritable.
+import { collectPins, resolvePinnedMaster } from "../_shared/audit/pinned-master.ts";
+
 // Import shared contract interfaces for MasterProfile, ResolvedResume, and TailoredProfile
 import type { MasterProfile, ResolvedResume, TailoredProfile } from "../_shared/contracts/shared-types.ts";
 
@@ -172,30 +175,10 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
     return jsonResponse(200, { success: true, status: "skipped_disabled", detail: killSwitch.detail });
   }
 
-  // Query highest-version pinned MasterProfile record from master_profiles table
-  const { data: masterRow, error: masterError } = await db
-    // Target master_profiles table
-    .from("master_profiles")
-    // Select profile JSON and version number
-    .select("profile, version")
-    // Order by version descending
-    .order("version", { ascending: false })
-    // Limit to top 1 highest version
-    .limit(1)
-    // Return single row or null
-    .maybeSingle();
-
-  // Handle master profile read error
-  if (masterError) return await failRun(503, "master_profile_unreadable", masterError.message);
-
-  // Check if master profile exists
-  if (!masterRow) return await failRun(409, "no_master_profile", "master_profiles table is empty");
-
-  // Cast retrieved master profile JSON into typed MasterProfile interface
-  const master = masterRow.profile as MasterProfile;
-
-  // Store master version number
-  const masterVersion = masterRow.version;
+  // NO "latest master" read here any more. This used to load `version desc limit 1` and audit
+  // every row against it, so a master uploaded after tailoring became the ground truth for
+  // resumes built from an older one. Masters are now loaded per batch, by each row's pin,
+  // after the queue read below (see pinned-master.ts).
 
   // Extract limit query parameter from request URL
   const limitParam = new URL(req.url).searchParams.get("limit");
@@ -219,7 +202,9 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
     // Target applications table
     .from("applications")
     // `status` is selected so the loop can tell a fresh row from a stranded one
-    .select("id, status, tailored_profile, tailor_refs, master_version")
+    // `applications.master_version` is deliberately NOT selected: nothing writes it (null on every
+    // live row, 2026-10-08), so the pin is read from `tailored_profile.master_version` instead.
+    .select("id, status, tailored_profile, tailor_refs")
     // `audit_clean`/`audit_flagged` are only ever left behind by a failed second hop
     .in("status", ["tailored", "audit_clean", "audit_flagged"])
     // Narrow to the one requested row; the status filter stays, so a wrong-status id yields
@@ -232,6 +217,28 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
 
   // Handle applications queue read error
   if (rowsError) return await failRun(503, "queue_unreadable", rowsError.message);
+
+  // The pin lives in the resolved resume: the tailor's validator refuses output whose version
+  // differs from the master it loaded and stamps it there (validator.ts:431-433, :776). Only
+  // `tailored` rows are audited, so only their pins decide which masters to load.
+  const pinOf = (row: { tailored_profile: unknown }): unknown =>
+    // Optional chaining: a null profile yields undefined, which resolves to "unpinned".
+    (row.tailored_profile as { master_version?: unknown } | null)?.master_version;
+  // Distinct, shape-checked pins for this batch; invalid ones are reported per row below.
+  const pins = collectPins((rows ?? []).filter((row) => row.status === "tailored").map((row) => ({ master_version: pinOf(row) })));
+
+  // Exactly the pinned versions, one query. RLS scopes master_profiles to the signed-in
+  // owner (createAppUserClient), and versions are immutable (forbid_update/forbid_delete).
+  const mastersByVersion = new Map<number, MasterProfile>();
+  // Skip the round trip when nothing is pinned; `.in()` with an empty list is pointless.
+  if (pins.length > 0) {
+    // Same table and columns as the old latest-master read, filtered to the pins instead.
+    const { data: masterRows, error: masterError } = await db.from("master_profiles").select("profile, version").in("version", pins);
+    // A failed read is an error for the whole run, never a reason to audit against something else.
+    if (masterError) return await failRun(503, "master_profile_unreadable", masterError.message);
+    // Index by version so each row resolves its own pin with an exact lookup.
+    for (const m of masterRows ?? []) mastersByVersion.set(m.version as number, m.profile as MasterProfile);
+  }
 
   // Initialize total audited counter
   let auditedCount = 0;
@@ -316,8 +323,35 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
         continue;
       }
 
-      // Execute anti-fabrication audit against master profile
-      const outcome = auditApplication(master, resume, tailorRefs);
+      // The master this row was TAILORED against; anything but `pinned` fails closed below.
+      const pinned = resolvePinnedMaster(pinOf(row), mastersByVersion);
+
+      // No trustworthy ground truth. Falling back to the latest master is the bug this replaced
+      // (CLAUDE.md §5), so the row is failed with a named reason, like a missing profile above:
+      // the pin cannot appear later (the profile is written once by the tailor), and leaving
+      // the row would block the oldest-first queue behind it forever.
+      if (pinned.kind !== "pinned") {
+        // Through the RPC; `tailored -> failed` is the auditor's edge (:123).
+        const failMove = await db.rpc("advance_application_status", {
+          // Application ID
+          p_application_id: row.id,
+          // Off the queue for good
+          p_to_status: "failed",
+          // Acting agent identity
+          p_agent: "auditor",
+          // The verdict object itself, so the dashboard shows which pin problem it was.
+          p_detail: { reason: `master_pin_${pinned.kind}`, pin: pinned },
+        });
+        // A refused move leaves the row in place; report it rather than count it
+        if (failMove.error) failures.push({ applicationId: row.id, error: failMove.error.message });
+        // Counted as failed, separately from transient errors
+        else failedCount += 1;
+        // Never audit this row against anything
+        continue;
+      }
+
+      // Execute anti-fabrication audit against the PINNED master profile
+      const outcome = auditApplication(pinned.master, resume, tailorRefs);
 
       // Step 1: Write audit findings array into applications table row
       const findingsWrite = await db
@@ -346,7 +380,8 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
         // Acting agent identity
         p_agent: "auditor",
         // Detail object
-        p_detail: { findings_count: outcome.findings.length, master_version: masterVersion },
+        // The version actually audited against, so the event records this row's ground truth.
+        p_detail: { findings_count: outcome.findings.length, master_version: pinned.version },
       });
 
       // Handle first status transition error
@@ -451,8 +486,9 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
     status: runStatus,
     // The same failure summary, so the operator sees it without a DB query.
     error_detail: errorDetail,
-    // Master version
-    master_version: masterVersion,
+    // Every master version this batch audited against; a batch can span several, so it is a
+    // list. No worker/web code read the old single `master_version` field (grep 2026-10-08).
+    master_versions: pins,
     // Only present on a targeted run, so the untargeted response shape is unchanged. `found: 0`
     // says "that id is not at this agent's input status", which an empty queue never could.
     ...(applicationId !== null ? { targeted: true, found: applicationRows.length } : {}),
