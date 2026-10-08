@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-17.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
+
 # Unapplied migrations — pre-apply review
 
 **Date:** 2026-09-17 · **Author:** `applyyy-5c` · **Target:** the live Supabase project

@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-17.** Current state: [README.md](./README.md).
+
 # UI audit — accessibility and interaction
 
 **Date:** 2026-09-17 · **Scope:** every `.tsx` and `.css` under `apps/web/src`

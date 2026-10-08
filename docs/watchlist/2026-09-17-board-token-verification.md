@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-17.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
+
 # Company watchlist — board token verification, 65 companies
 
 **Date:** 2026-09-17

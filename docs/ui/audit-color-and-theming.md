@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-17.** Current state: [theming-convention.md](./theming-convention.md).
+
 # UI audit — colour and theming
 
 **Date:** 2026-09-17 · **Scope:** all 16 `.css` files under `apps/web/src`, plus inline `style={{}}` in all 27 `.tsx`

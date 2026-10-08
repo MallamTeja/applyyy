@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-17.** Current state: [tech-gate.ts](../../supabase/functions/_shared/screen/tech-gate.ts).
+
 # Tech-only discovery — design
 
 **Date:** 2026-09-17

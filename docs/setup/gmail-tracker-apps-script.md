@@ -57,11 +57,11 @@ infrastructure, free.
 
 ```
 Gmail (yours)
-   │  Apps Script time trigger, every 15 min
+   │  Apps Script: on-demand Web App call (doGet), or the optional 15-min trigger (applyyInstallTrigger)
    │  reads: from / subject / snippet  ── nothing else
    ▼
-Supabase Edge Function  (owned by applyyy-d0)
-   │  Gemini classifies: rejected / OA invite / interview / offer
+Supabase Edge Function  email-tracker-intake
+   │  deterministic classifier (_shared/email/classifier.ts), no LLM
    │  matches to an application row, advances its status
    ▼
 Pipeline kanban
@@ -103,9 +103,9 @@ the way it is.
 
 ---
 
-## Setup & Live Verification — COMPLETED & WORKING (2026-09-11)
+## Setup & Live Verification — verified 2026-09-11
 
-> ✅ **LIVE AND END-TO-END VERIFIED.** The wire contract and script are published in the repo:
+> **End-to-end verified on 2026-09-11 — a measurement, not a standing property:** re-check liveness with `select count(*), max(received_at) from public.email_events;` (MCP `execute_sql`, or whichever route currently works). The wire contract and script are published in the repo:
 > [`supabase/functions/_shared/apps-script/email-tracker.gs`](file:///c:/Users/tejam/OneDrive/myproj/applyyy/supabase/functions/_shared/apps-script/email-tracker.gs).
 > On 2026-09-11 17:51 IST, a live execution ingested 9 emails, returned HTTP 202 Accepted,
 > and verified 9 rows stored in `public.email_events` via the Supabase CLI.
@@ -123,6 +123,7 @@ the way it is.
    - `EMAIL_INTAKE_SHARED_SECRET`: Shared secret used for header authentication (`X-Applyy-Intake-Secret`).
    - `APPLYY_APP_USER_EMAIL`: `tejamallam00@gmail.com`
    - `APPLYY_APP_USER_PASSWORD`: Configured password
+   - `APPLYY_AGENT_KEY`: the machine-agent key. The intake advances statuses as agent `tracker`, and migration `20261008160000` makes `advance_application_status` refuse non-`human` agents without the `x-applyy-agent-key` header once a hash is seeded. Check enforcement with `select count(*) from applyy_internal.agent_key;` (0 = not enforced yet).
    - Auth user: Provisioned in `auth.users` so the Edge Function signs in and writes rows under RLS.
 
 3. **How It Works**:
@@ -138,7 +139,7 @@ the way it is.
        - **Who has access**: `Anyone`
      - Copy the Web App URL (e.g. `https://script.google.com/macros/s/.../exec`).
      - Append your secret query parameter: `?secret=<APPLYY_INTAKE_SECRET>`.
-     - Set this in `apps/web/.env.local` as `VITE_EMAIL_SYNC_WEBHOOK_URL` or paste it into the **Sync Settings** drawer on `/emails`.
+     - Set this in `apps/web/.env.local` as `VITE_EMAIL_SYNC_WEBHOOK_URL` or paste it into the **Sync Settings** drawer on `/emails`. **Never set it in Vercel's env:** every `VITE_` variable is compiled into the public bundle, and this URL carries the intake secret.
      - Whenever you navigate to `/emails` or click the **"Refresh Interviews"** button, the web console triggers this Web App to immediately ingest new recruiter emails from Gmail without any 15-minute lag!
 
 4. **Live Verification Record (2026-09-11 17:51 IST)**:
@@ -161,7 +162,7 @@ other silent deaths in this system (Supabase's 1-week idle pause and GitHub's
 - Google quietly disables triggers on repeated failure — so a burst of Edge
   Function 500s can cost you the trigger, not just the messages.
 - The **System Health** dashboard page must surface "no `email_events` in N
-  hours" as a warning. A tracker that stopped looks identical to a quiet inbox,
+  hours" as a warning. Not built yet; check with `grep -rn email_events apps/web/src/features/health`. A tracker that stopped looks identical to a quiet inbox,
   and you'd read silence as "no rejections yet."
 
 ---

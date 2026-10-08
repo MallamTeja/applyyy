@@ -2,7 +2,7 @@
 
 Records of external codebases examined for reuse, and the decisions taken from them.
 
-One directory per harvest source, one file per topic. A harvest source lives in
+One file per topic, date-prefixed and named for its source; implementation briefs live in `briefs/`. A harvest source lives in
 `reference/<repo>/` on disk and is **gitignored** — read from, never vendored.
 
 | Doc | Topic |

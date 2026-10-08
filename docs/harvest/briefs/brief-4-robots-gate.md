@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-16.** Current state: [SYSTEM_ARCHITECTURE.md](../../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../../PROGRESS.md).
+
 # Brief 4 — Programmatic robots.txt Gate (`@applyy/master-robots`)
 
 **Audience:** a peer Claude session starting with an EMPTY context window.

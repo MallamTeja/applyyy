@@ -264,3 +264,43 @@ test("an unclassified posting passes the gate and surfaces a warning", () => {
   assert.equal(planned.inserts[0]!.status, "passed_filters");
   assert.match(planned.warnings.join(" "), /matched no configured title or keyword/);
 });
+
+// --- single-row targeting (?application_id=) parity ---------------------------------
+
+// The screener's targeted mode narrows the queue read to one row and then calls this
+// planner with `[entry]`, exactly as the batch loop already does per row. These pin that a
+// one-entry plan equals that entry's slot in a batch plan over the same context snapshot,
+// i.e. the planner carries no batch-accumulated state. Parity over the pure planner because
+// screener/index.ts imports jsr: and has no seam; the `?application_id=bad` -> 400 path is
+// left to a live smoke test.
+test("a one-entry plan equals that entry's verdict inside a batch, including a weekly-cap drop", () => {
+  // The cap counted from history (context.ts), never from the batch: 2 already this week.
+  const capContext: ScreenContext = { ...BASE_CONTEXT, applicationsThisWeekByCompany: new Map([["acme", 2]]) };
+  // Title blocklist first, then a cap of 2, so the two drops are attributable to different rules.
+  const rules = [TITLE_RULE, rule("per_company_weekly_cap", { max_per_week: 2 }, 10)];
+  // One pass, one title-rule drop, one cap drop.
+  const entries = [
+    // Survives both rules.
+    { jobId: "pass-1", row: BASE_ROW },
+    // Dropped by the title blocklist.
+    { jobId: "title-1", row: { ...BASE_ROW, fingerprint: "fp-t", title: "Senior Backend Engineer" } },
+    // Dropped by the weekly cap: acme is already at 2 of 2 in the history snapshot.
+    { jobId: "cap-1", row: { ...BASE_ROW, fingerprint: "fp-c", company_slug: "acme", company_name: "Acme" } },
+  ];
+  // The batch plan.
+  const batch = planScreenedApplications(entries, rules, capContext, OPEN_PREFS);
+  // Sanity: the fixture really exercises a pass, a rule drop and a cap drop.
+  assert.deepEqual(
+    batch.inserts.map((i) => i.drop_reason),
+    [null, "title_blocklist", "per_company_weekly_cap"],
+  );
+  // Each entry alone, against the same context and rules.
+  for (const [index, entry] of entries.entries()) {
+    // The targeted mode's call shape.
+    const single = planScreenedApplications([entry], rules, capContext, OPEN_PREFS);
+    // The persisted verdict (status + drop_reason) is identical.
+    assert.deepEqual(single.inserts[0], batch.inserts[index]);
+    // The run-summary prose is identical too, matched by job id.
+    assert.deepEqual(single.dropped, batch.dropped.filter((d) => d.jobId === entry.jobId));
+  }
+});

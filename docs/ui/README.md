@@ -3,15 +3,15 @@
 Two kinds of file live here:
 
 - **Conventions** — rules that bind future work. Read before writing UI code.
-- **Audits** — dated snapshots of findings. Nothing in them is implemented until you pick it.
+- **Audits** — dated snapshots of findings (2026-09-17). Some have since been fixed (marked below); re-check any finding against the tree before picking it.
 
 | File | What it is |
 |---|---|
 | [`theming-convention.md`](./theming-convention.md) | **Convention.** Why `[data-theme='dark']` colour rules are dead in this app, and what to write instead. The tree is currently clean; any new instance is a regression. |
-| [`audit-color-and-theming.md`](./audit-color-and-theming.md) | Audit · 20 findings (`K*`) — contrast, token drift, hue-meaning collisions. |
-| [`audit-accessibility.md`](./audit-accessibility.md) | Audit · 20 findings (`A*`) — focus, keyboard, ARIA, live regions, hit targets. |
-| [`audit-layout-and-typography.md`](./audit-layout-and-typography.md) | Audit · 32 findings (`L*`) — undefined tokens, states that lie, PAPER/MACHINE, type scale, card density. |
-| [`audit-copy-and-ux.md`](./audit-copy-and-ux.md) | Audit · 32 findings (`C*`) — vocabulary leaks, error messages, empty states, destructive actions. |
+| [`audit-color-and-theming.md`](./audit-color-and-theming.md) | Audit · `K*` findings — contrast, token drift, hue-meaning collisions. |
+| [`audit-accessibility.md`](./audit-accessibility.md) | Audit · `A*` findings — focus, keyboard, ARIA, live regions, hit targets. |
+| [`audit-layout-and-typography.md`](./audit-layout-and-typography.md) | Audit · `L*` findings — undefined tokens, states that lie, PAPER/MACHINE, type scale, card density. |
+| [`audit-copy-and-ux.md`](./audit-copy-and-ux.md) | Audit · `C*` findings — vocabulary leaks, error messages, empty states, destructive actions. |
 
 All four audits are dated **2026-09-17** and were taken at commit `286ea2e`.
 
@@ -32,7 +32,7 @@ from two angles, so picking one should pick both.
 
 Ranked by *consequence per line changed*, across all four audits:
 
-1. **[L5](./audit-layout-and-typography.md)** — on a database read failure the Approval Queue renders a **green "you're finished"** empty state. The one screen that gates irreversible submissions cannot tell "nothing to do" from "I couldn't ask."
+1. **[L5](./audit-layout-and-typography.md)** — on a database read failure the Approval Queue renders a **green "you're finished"** empty state. *(Fixed since: the page now says "Could not reach the application queue".)* The one screen that gates irreversible submissions cannot tell "nothing to do" from "I couldn't ask."
 2. **[K1](./audit-color-and-theming.md)** — `--text-muted` fails WCAG AA in dark on every surface (3.63:1). **One token edit fixes ~88 call sites**, and `tokens.css` currently claims this block is "AA certified", which is false.
 3. **[L1](./audit-layout-and-typography.md) / [K4](./audit-color-and-theming.md)** — seven CSS variables are used but never defined, so the declarations silently drop. Every job card and email card has square corners and no background fill. **~25 lines.**
 4. **[C1](./audit-copy-and-ux.md)** — database status enums (`awaiting_approval`, `audit_clean`) are the label on four screens. One lookup map.

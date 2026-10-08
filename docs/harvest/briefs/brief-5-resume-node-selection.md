@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-16.** Current state: [SYSTEM_ARCHITECTURE.md](../../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../../PROGRESS.md).
+
 # Brief 5 — Relevance-weighted node selection + four anti-fabrication auditor rules
 
 > `Ported from MadsLorentzen/ai-job-search @ 968fb1bd (MIT, © 2026 Mads Lorentzen).`

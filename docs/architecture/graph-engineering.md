@@ -64,7 +64,8 @@ only the discipline to draw the thing.
 ### What graph engineering is NOT
 
 **It is not "use a graph database."** Say this out loud before anyone suggests
-Neo4j. This repo's status graph is ~20 nodes and 45 edges. A Postgres table with
+Neo4j. This repo's status graph is a few dozen edges
+(`select count(*) from public.application_status_transitions`). A Postgres table with
 a `WITH RECURSIVE` query handles it with room to spare, and it already does.
 Adding a graph database here would add an operational dependency, a second source
 of truth, and a sync problem, in exchange for nothing. See §6.
@@ -306,6 +307,10 @@ goes via the Management API. Sessions had been assuming live-schema questions we
 unanswerable without `supabase start`. They aren't. That single command is what
 makes every "declared vs live" diff in §4 actually runnable today.
 
+> **Note 2026-10-08:** since 2026-10-04 `supabase db query --linked` returns **403**; the
+> working read path is the Supabase MCP `execute_sql` tool. Re-test both before relying on
+> either — routes to the database change.
+
 ---
 
 ## 4. What to actually do — ranked by payoff, not by elegance
@@ -324,6 +329,11 @@ diffs it against `STATUS_TRANSITIONS` — as sets, both directions, including
 `allowed_agents` — replaces the checklist with a failure. It is maybe forty lines,
 `supabase db query --linked` already gives it the read path, and it retires an
 entire class of drift.
+
+> **Status 2026-10-08:** still not built against the LIVE table.
+> `packages/shared-types/test/enum-parity.test.ts` checks the TS mirror against the
+> migration *files*, which is the cheaper half. The §3.1 cycle is also still unbounded
+> (`email-tracker-intake/decide.ts` returns `oa_pending` from `interview`).
 
 It also generalises: **migrations-in-git vs migrations-applied is the same diff at
 a different layer.** "File exists" and "edge exists in the live graph" are
@@ -411,7 +421,8 @@ This is level 3, and it's the part that generalises past this repo.
 **Write-ownership partitioning is graph colouring.** Build a *conflict graph*:
 nodes are tasks, and an edge joins two tasks that write the same file. Your rule
 "no two workers may write the same file" is exactly "assign tasks to workers so
-that no two adjacent tasks share a worker." Today's partition:
+that no two adjacent tasks share a worker." The partition on 2026-09-11
+(historical; session names and ownership change daily):
 
 | Session | Owns |
 |---|---|
@@ -477,7 +488,7 @@ the system was safer for it.
 
 ## 6. What not to do
 
-- **Do not add a graph database.** ~20 nodes, 45 edges. `WITH RECURSIVE` in
+- **Do not add a graph database.** A few dozen edges. `WITH RECURSIVE` in
   Postgres is the correct tool, needs no new dependency, and keeps the graph in the
   same transaction as the rows it constrains. A separate graph store would create a
   second source of truth for the one table whose authority is the entire safety
@@ -500,12 +511,12 @@ the system was safer for it.
 
 | Want | Use | Note |
 |---|---|---|
-| See the 45-edge status graph | Mermaid `stateDiagram-v2`, published as an **Artifact** | Artifacts render Mermaid natively, no library needed. Generate the source **from the live table**, never hand-drawn |
+| See the status graph | Mermaid `stateDiagram-v2`, published as an **Artifact** | Artifacts render Mermaid natively, no library needed. Generate the source **from the live table**, never hand-drawn |
 | The same on a FigJam canvas | `/figma-generate-diagram` | Installed, unused. Good for walking a human through the approval gate |
 | Write the invariant tests | `superpowers:test-driven-development` | Red first — §4.2 #6 should fail on its first run |
 | Review the invariant suite | `/code-review` | Reads a diff; point it at the new tests |
 | Recursive reachability SQL | `supabase:supabase-postgres-best-practices` | Load **before** writing the CTE, per its own trigger rule |
-| Read live schema with no Docker | `supabase db query --linked "<sql>"` | Via the Management API. Verified by `applyyy-76` at 11:46 |
+| Read live schema with no Docker | Supabase MCP `execute_sql` (CLI `db query --linked` 403 since 2026-10-04) | Re-test the route each time |
 | Sanity-check the ownership partition | `ListAgents` + `SendMessage` | How §5 was built; four messages, ten minutes |
 
 **Capability gap in your setup:** there is no `pnpm` script anywhere that answers

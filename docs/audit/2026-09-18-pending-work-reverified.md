@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-18.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
+
 # Pending-work re-verification — 2026-09-18
 
 **Measured:** 2026-09-18, ~13:00 IST, session `applyyy-b0`, HEAD `3c09f54`, working tree clean,

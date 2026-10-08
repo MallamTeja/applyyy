@@ -3,6 +3,14 @@
 **Written 2026-09-10 21:56 IST.** Answers "how many agents do we have and what
 does each do", in detail.
 
+> **Status note, 2026-10-08.** The *per-agent reasoning* below (why the Screener has no
+> LLM, the `misattributed_bullet` attack, why submit never retries) is still the best
+> explanation in the repo. The *built / not-built* claims are a 2026-09-10 snapshot and
+> most are now false — every pipeline agent has an entrypoint under
+> `supabase/functions/<agent>/`. For current state read
+> [`../SYSTEM_ARCHITECTURE.md`](../SYSTEM_ARCHITECTURE.md); regenerate the inventory with
+> `ls -d supabase/functions/*/ | grep -v _shared`.
+
 **Read the status column first.** There are **twelve agent identities** the
 database recognises, **eleven** things that could reasonably be called an agent,
 and — as of tonight — **two** of them have code you could run. A roster that
@@ -33,10 +41,11 @@ of `supabase/functions/**` for what exists.
 | 11 | **Keepalives** ×2 | Actions cron / DB query | no | **one built but disabled, one implicit** |
 | — | **`human`** | you, in the dashboard | no | the most powerful identity in the system |
 
-**So: two agents you can actually run today** (Applier in dry-run, Sweeper),
-**one live endpoint** (the Tracker's email intake), and **nine agents' worth of
-shared logic sitting in `supabase/functions/_shared/` with nothing wired to
-call it.**
+**So, on 2026-09-10: two agents you could run** (Applier in dry-run, Sweeper),
+**one live endpoint** (the Tracker's email intake), and nine agents' worth of
+shared logic with nothing wired to call it. **Superseded 2026-10-08:** the State
+column above is historical — every Edge Function agent now has an entrypoint; see
+`../SYSTEM_ARCHITECTURE.md` §2.
 
 That last point is the real state of the project and it is better news than it
 sounds — see §5.
@@ -60,9 +69,9 @@ row in the dashboard is not something the kill switch exists to prevent.
 worth understanding:
 
 1. `system_enabled = false` — the deliberate stop. What you flip.
-2. **No settings row at all** — the account was never bootstrapped. *This is the
-   live database's current state*, so it is production behaviour, not a
-   hypothetical.
+2. **No settings row at all** — the account was never bootstrapped. *(Was the
+   live state on 2026-09-10; both users have a row since 2026-09-18 — check with
+   `select user_id, system_enabled from system_settings`.)*
 3. **The read failed** — transport, RLS, a paused project.
 
 All three halt, and they halt under **different names** (`disabled`,
@@ -93,8 +102,9 @@ runner in the repo until commit `5d367b4`.
 The "may write" column is not documentation — it is enforced. Every status
 change goes through `advance_application_status()`, which checks the attempted
 edge against `public.application_status_transitions` **and** against the
-`applyy.acting_agent` identity the caller set. There are **45 edges** in that
-table on the live database right now.
+`applyy.acting_agent` identity the caller set. Count the edges live rather than
+trusting a number here:
+`select count(*) from public.application_status_transitions`.
 
 > Note: PROJECT_PLAN and several docs say **44 edges**. Measured live tonight it
 > is **45** — migration `20260910190000` added `approved → blocked_needs_human`
@@ -110,13 +120,20 @@ why: a Greenhouse `content=true` response returns every full job description at
 once, so a multi-megabyte `JSON.parse` is the actual CPU risk on a ~2s CPU
 budget.
 
-*Built:* `_shared/ats/` has Greenhouse, Lever and Ashby adapters plus a registry,
-all tested. **No `scout-ats/` function directory exists**, so nothing invokes
-them.
+*Built:* `_shared/ats/` (Greenhouse, Lever, Ashby + registry) is wired into
+`supabase/functions/scout-ats/` (manual, from the dashboard) and
+`worker/src/cli/scout.ts` (the cron path, `scout.yml`). Both screen inline via
+`_shared/screen/screen-batch.ts`, so rows are inserted at `passed_filters` /
+`dropped_filter`, falling back to `discovered` only when screening is unavailable.
+*(Was "no entrypoint" on 2026-09-10.)*
 
 ### 2. Scout-Aggregator — finds jobs on aggregators
 Same job via Adzuna/Jooble, for postings that never touch an ATS board.
-**Not built at all** — no adapter, no entrypoint.
+*Built (2026-10):* as `supabase/functions/scout-web/` (identity `scout_aggregator`):
+Gemini with web search proposes Greenhouse/Lever/Ashby URLs, deterministic code verifies
+each against the live board, rows insert at `discovered`. The Adzuna/Jooble/Workable/
+SmartRecruiters adapters in `_shared/scout/adapters/` are **not reached** —
+`grep -rn "scout/tiers" supabase/functions worker/src | grep -v test` returns nothing.
 
 ### 3. Normalizer — deduplicates and dates
 `discovered` → `deduped` / `dropped_duplicate` / `failed`. Fingerprints each job
@@ -135,8 +152,9 @@ day one of any new board, where an entire back catalogue arrives looking three
 days old. So a board's *first* poll marks everything `unknown` and excludes it
 from the filter. Boards become trustworthy from their second poll onward.
 
-*Built:* `_shared/normalize/fingerprint.ts` and `posted-at.ts`, tested.
-**No entrypoint.**
+*Built:* `_shared/normalize/fingerprint.ts` and `posted-at.ts`, wired as
+`supabase/functions/normalizer/` (writes `deduped` / `dropped_duplicate`).
+*(Was "no entrypoint" on 2026-09-10.)*
 
 ### 4. Screener — throws most jobs away, cheaply
 `deduped` → `passed_filters` / `dropped_filter` / `failed`.
@@ -147,7 +165,8 @@ anything costs a model call, and most discovered jobs die here. Batch size
 **200** — the one stage with no LLM and no I/O, so it is the only one that can
 afford volume and it is the one that needs it.
 
-*Built:* `_shared/filter/cascade.ts`, tested. **No entrypoint.**
+*Built:* `_shared/filter/cascade.ts`, wired as `supabase/functions/screener/`
+(reads `deduped`) and inline in both scouts via `_shared/screen/screen-batch.ts`.
 
 ### 5. Matcher — scores fit
 `passed_filters` → `scored` / `dropped_filter` / `failed`. First Gemini call:
@@ -159,8 +178,9 @@ a prompt to fix one bad match and silently break scoring on everything else with
 no way to notice. **Those labels don't exist yet, so a Matcher built now could
 not be evaluated** — which is precisely the failure the gate exists to prevent.
 
-*Built:* the eval gate (`_shared/eval/gate.ts`) and the Gemini pool exist.
-**No prompt, no entrypoint.**
+*Built:* `supabase/functions/matcher/` (reads `passed_filters`, writes `scored`
+or `dropped_filter` by threshold; the score write only lands while the row is still
+at `passed_filters`, `matcher/write-score.ts`).
 
 ### 6. Tailor — rewrites the resume for one job
 `scored` → `tailored` / `failed`. Second Gemini call, and **the most
@@ -186,7 +206,9 @@ not merely for existence.
 *Built:* `_shared/tailor/validator.ts` and `prompt.ts`, both tested — and the
 validator's tests **had never been executed by any runner** until commit
 `65a9842` tonight, despite §19 calling that file "the load-bearing wall under
-constraint #2". **No entrypoint.**
+constraint #2". *Now wired:* `supabase/functions/tailor/` reads `scored`, writes
+`tailored_profile`, `tailor_refs` and `master_version`, then moves the row to `tailored`
+(`_shared/tailor/persist.ts`).
 
 ⚠️ One live gap found while wiring those tests: the *invented-metric* check is
 caught by exactly **one** test out of 249. It works, but it is thinly defended.
@@ -204,7 +226,10 @@ prose invents more freely than bullet points — a cover letter is exactly where
 model writes *"during my time leading a team of five…"* about something that
 never happened.
 
-*Built:* **nothing.** No prompt, no entrypoint.
+*Built:* `supabase/functions/auditor/` + `_shared/audit/`. Reads `tailored` (and
+re-picks rows stranded at `audit_clean`/`audit_flagged`), resolves the master pinned in
+`tailored_profile.master_version` (`_shared/audit/pinned-master.ts`), and makes both hops to
+`awaiting_approval`. *(Was "nothing" on 2026-09-10.)*
 
 ### 8. Applier — actually submits (and currently cannot)
 `approved` → `applying` → `applied` / `blocked_needs_human` / `failed`. Runs on
@@ -233,7 +258,10 @@ matrix is the obvious "speed-up" and would multiply the billed minutes by ~35,
 because GitHub bills every job rounded up to a whole minute.
 
 *Built:* yes — `worker/src/` has the claim loop, guarded advance, run window,
-field extraction, fill planning and PDF rendering, with 62 of 65 tests passing.
+field extraction, fill planning and PDF rendering. Submission is still unimplemented
+(`SUBMISSION_IMPLEMENTED = false`, `worker/src/playwright-page.ts`); the working path is
+`worker/src/cli/assist.ts`, which fills one approved application in a visible browser and
+lets the human click Submit. *(2026-09-10 snapshot follows:)* 62 of 65 tests passing.
 ⚠️ The three failures are all in `render-resume-pdf.test.ts`
 (`Unsupported resume schema_version undefined`), so **resume PDF rendering is
 currently broken**, and `apply-one.ts` never calls the renderer anyway.
@@ -269,10 +297,12 @@ a Supabase JWT; it authenticates on `X-Applyy-Intake-Secret` instead.
 - Google Apps Script [`supabase/functions/_shared/apps-script/email-tracker.gs`](file:///c:/Users/tejam/OneDrive/myproj/applyyy/supabase/functions/_shared/apps-script/email-tracker.gs) executed `applyyIngest()`: 9 emails ingested, status `202 Accepted` (`{"accepted":9,"duplicates":0,"rejected":0}`), threads labelled `applyy-ingested` in Gmail.
 - Verified in Postgres via Supabase CLI (`SELECT count(*) FROM email_events` = 9).
 
-The Gemini classifier that reads those rows (`processed_at is null`) is **not built**.
+*Superseded:* classification is **deterministic, not Gemini** — the classifier in
+`_shared/email/classifier.ts` / `email-tracker-intake/decide.ts` runs inside the intake,
+which then advances matched applications via `advance_application_status` as `tracker`.
 
-⚠️ Known gap: `email_events` has no column for `thread_id`, so it is validated
-and dropped. That is the one that hurts — `thread_id` is the key for "has this
+⚠️ Known gap: `email_events.thread_id` exists since `20260918213000`, but the intake
+still does not write it (`grep -n thread_id supabase/functions/email-tracker-intake/index.ts`). That is the one that hurts — `thread_id` is the key for "has this
 recruiter already replied?"
 
 ### 10. Sweeper — cleans up after crashes
@@ -294,10 +324,10 @@ so that *nothing stops silently*.
 - **Supabase pauses a free project after ~1 week idle.** The daily Actions cron's
   database query counts as activity, so this one is implicit in the Applier run.
 - **GitHub disables scheduled workflows after 60 days of repo inactivity.** A
-  weekly workflow touches a timestamp file. *Built as
-  `.github/workflows/keepalive.yml` but **disabled**, pending your approval — it
-  is the only workflow with `contents: write`, because it force-pushes a
-  timestamp commit to a dedicated branch.*
+  scheduled workflow touches a timestamp file. *Built as
+  `.github/workflows/keepalive.yml`, now scheduled (check the `cron:` line and
+  `gh workflow list`). It is the only workflow with `contents: write`, because it
+  force-pushes a timestamp commit to `automation-keepalive`.*
 
 **Neither failure errors. They just stop.** That is why `keepalive` earned its own
 `agent_name` identity and why the health page must be able to say *"Scout hasn't
@@ -327,6 +357,10 @@ The pool draws on **six** keys (`GEMINI_API_KEY_01`–`_06`, not the fifteen §6
 aspires to) with a daily budget and a circuit breaker, because without a cap one
 retry loop burns every key before noon.
 
+*Superseded 2026-09-18:* both auth users exist and the pool is seeded — re-measure with
+`select user_id, count(*), count(*) filter (where enabled) from gemini_key_state group by 1`.
+The 2026-09-10 text follows.
+
 ⚠️ **The live pool is empty and will stay empty until someone signs in.**
 `bootstrap_user_defaults()` seeds the pool, `system_settings` and the filter
 rules — but it must be *called by an authenticated session*, and no Auth user
@@ -339,6 +373,9 @@ its previous status and gets picked up next run. Nothing fails, nothing is lost.
 ---
 
 ## 5. So what is actually left to do
+
+> **Superseded 2026-10-08.** The wiring this section plans is done. Current gaps live in
+> `../SYSTEM_ARCHITECTURE.md` §9, each with the command that re-checks it.
 
 **Less than the table in §1 suggests, and this is the useful conclusion.**
 

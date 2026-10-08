@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-18.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
+
 # Progress against the product goal — 2026-09-18 (Updated ~19:55 IST)
 
 **Measured:** 2026-09-18, ~19:55 IST, HEAD `d32e7be`.

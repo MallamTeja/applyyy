@@ -1,3 +1,5 @@
+> **Historical record as of 2026-10-06.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
+
 # Handoff — first live end-to-end application (2026-10-06)
 
 Written by `applyyy-11` (orchestrator) at session end. Supersedes nothing; `RESUME-HERE.md`

@@ -2,6 +2,10 @@
 
 Written 2026-09-09.
 
+> **Update 2026-10-08:** the Supabase MCP is authorized (`execute_sql` works) and both
+> servers' tool lists are visible; rows corrected below. Re-check with `/mcp` before relying
+> on any cell.
+
 ## Honesty about the evidence
 
 The `vercel` and `supabase` MCP servers are **configured but unauthorized** in this session,
@@ -27,27 +31,27 @@ That single rule predicts almost every gap below.
 
 | Capability | CLI | MCP |
 |---|---|---|
-| Deploy / promote / rollback | Yes | **No** |
+| Deploy / promote / rollback | Yes | Yes (`create_deployment`, `request_promote`, `request_rollback`) |
 | `vercel dev` local runtime | Yes | **No** (needs local process) |
 | `vercel build --prebuilt` | Yes | **No** (needs filesystem) |
 | Env var pull to `.env` | Yes | **No** (writes local files) |
-| Env var read/manage remotely | Yes | Partial |
-| Domains, DNS, certs | Yes | **No** |
-| Firewall / WAF rules | Yes | **No** |
+| Env var read/manage remotely | Yes | Yes (`create_project_env`, `edit_project_env`) |
+| Domains, DNS, certs | Yes | Yes (`add_project_domain`, `get_records`, `issue_cert`) |
+| Firewall / WAF rules | Yes | Yes (`get_firewall_config`, `put_firewall_config`) |
 | List projects & deployments | Yes | Yes |
 | Read deployment build logs | Yes | Yes, **structured** |
 | Search Vercel documentation | No | **Yes** |
 
 **Verdict: CLI wins decisively.** The MCP server's real edge is documentation search and
 returning deployment/build data as JSON an agent can reason over without parsing terminal
-output. Everything that changes the state of a deployment is CLI-only.
+output. Local-process work (`vercel dev`, `build --prebuilt`, `env pull`) is still CLI-only.
 
 ## Supabase
 
 | Capability | CLI | MCP |
 |---|---|---|
 | Local dev stack (`supabase start`, Docker Postgres/Studio/Auth) | Yes | **No** |
-| Deploy Edge Functions | Yes | **No** |
+| Deploy Edge Functions | Yes | Yes (`deploy_edge_function`) |
 | Local migration diffing (`db diff`, `db pull`, `db reset`) | Yes | **No** |
 | Seed data, local testing | Yes | **No** |
 | Set function secrets | Yes | **No** |

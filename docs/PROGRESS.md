@@ -1,6 +1,6 @@
 # `applyy` — live progress
 
-**Last updated: 2026-09-10 19:06 IST** · maintained by session `applyyy-8c`
+**"Current state" below is live; everything after it is a dated log, last appended 2026-09-10 19:06 IST** by session `applyyy-8c`
 (Stream 0 — `supabase/migrations/**`, `supabase/config.toml`, root config,
 `docs/**`, `PROJECT_PLAN.md`)
 
@@ -18,6 +18,49 @@ catalogue query. Where the evidence is a peer's own report rather than my
 measurement, the row says so. **Nothing is written in the past tense until it is
 actually true**, and a claim retracted later is left visible rather than edited
 away.
+
+---
+
+## Current state (2026-10-08)
+
+Architecture, agents and data flow: [`SYSTEM_ARCHITECTURE.md`](SYSTEM_ARCHITECTURE.md). This
+section holds only **live facts, each with the command that regenerates it** — numbers are
+never written here, because they date-stamp themselves. Run the command.
+
+**Pipeline:** scout → normalizer (`deduped`) → screener → matcher (`scored`) → tailor →
+auditor → `awaiting_approval` → human approves → `worker/src/cli/assist.ts` fills the form
+headed → **the human clicks Submit**. Automated submission is off:
+`SUBMISSION_IMPLEMENTED = false` (`worker/src/playwright-page.ts`). The scouts screen at
+insert, so most rows are born at `passed_filters` / `dropped_filter`; `discovered` is the
+screener-unavailable fallback.
+
+| Fact | Regenerate with |
+|---|---|
+| Migrations applied vs local | `supabase migration list --linked`, or `select version from supabase_migrations.schema_migrations order by version;` |
+| Application status distribution | `select status, count(*) from public.applications group by status order by 2 desc;` |
+| Agent-key enforcement (0 = off, guards only warn) | `select count(*) from applyy_internal.agent_key;` |
+| Which agents have actually run, and when | `select agent, count(*), max(started_at) from public.agent_runs group by 1 order by 1;` |
+| Edge functions present | `ls -d supabase/functions/*/ \| grep -v _shared` |
+| Which edge functions have a caller | `grep -rn "functions\.invoke(" apps/web/src worker/src` plus `.github/workflows/*.yml`. A template-literal call (`pipelineRunner.ts`, `rowPipelineDeps.ts`) takes its name from an agent list, so read that list too |
+
+**Agent-key guards:** `advance_application_status`, `claim_applications` and
+`release_application_claim` check a machine agent's `x-applyy-agent-key` header (migrations
+`20261008160000`, `20261008170000`). They enforce only once `applyy_internal.agent_key` is
+seeded; until then they `raise warning` and allow the call.
+
+**Built but not reached on a schedule:**
+- normalizer, screener, matcher, tailor and auditor have no cron (`pg_cron` is not installed)
+  and no scheduled workflow; matcher → tailor → auditor runs one row at a time via the manual
+  `run-one.yml` dispatch.
+- `experience_ceiling` and `degree_mismatch` can never fire: nothing populates
+  `jobs.min_experience_years` / `requires_advanced_degree`. Their skips are recorded in
+  `agent_runs.error_detail` (`_shared/screen/run-summary.ts`) and shown on the Health page.
+- Nothing calls `bootstrap_user_defaults()`, so a new signup gets no rules.
+- Every status transition writes two `application_events` rows: one from the RPC and one
+  from the `log_status_change` trigger.
+
+**Gates:** `.github/workflows/ci.yml` typechecks and tests every tree on each push to `main`.
+Traps: [`verification-traps.md`](verification-traps.md).
 
 ---
 
@@ -163,6 +206,8 @@ edits, which is the signal that none of them reached the output.
 ---
 
 ## Per-stream status
+
+> *2026-10-08: dated 2026-09-10; every stream named here is dead. See "Current state" above.*
 
 | Stream | Owns | Verified | In progress | Blocked on |
 |---|---|---|---|---|
@@ -552,6 +597,8 @@ you cannot justify after an incident.**
 
 ### `git add --renormalize .`
 
+> *2026-10-08: moot — `git ls-files --eol | grep -c "^i/crlf"` returns 0; the index is already LF.*
+
 **Decision: deferred by `applyyy-2b`. Not a maybe.** The root `.gitattributes`
 protects fresh clones and CI, which is where the real damage was (the Ubuntu
 runner receiving different bytes than a Windows clone). The existing working tree
@@ -570,6 +617,8 @@ the keyboard. Recorded here so it is neither quietly forgotten nor quietly done.
 These are the items a progress document is uniquely good at not losing.
 
 ### The `status_change` trigger will cause double-writes
+
+> *2026-10-08: no longer future. The trigger is live and the RPC still inserts its own event, so every transition double-writes.*
 
 The `log_status_change` trigger **has never run** in any consumer's environment,
 so consumers written *now* are emitting those audit events **explicitly**. The
@@ -658,6 +707,8 @@ every subsequent status write then fails with
 
 ## Open questions — recorded rather than silently resolved
 
+> *2026-10-08: Q2 mostly closed — `email_events.thread_id` and `label_ids` exist live; `to` does not. Q1 and Q3 still open.*
+
 1. **`application_status_transitions` has `relforcerowsecurity = f`** while the
    other 14 tables have force RLS **on**. It is the read-only reference seed, so
    this is *defensible* — but defensible is not *decided*, and it is the single
@@ -677,6 +728,8 @@ every subsequent status write then fails with
 ---
 
 ## Runtime defects found in my tree — not yet fixed
+
+> *2026-10-08: #1 fixed (`20260910190000`, `20260918213000`); #2 fixed (bootstrap now seeds `gemini_key_state`, but has no caller); #4 corrected in place; #3 stands, in an applied migration.*
 
 Load-time is clean; these are behavioural.
 
@@ -718,6 +771,8 @@ Load-time is clean; these are behavioural.
 
 ## Waiting on Teja — nothing below can proceed without him
 
+> *2026-10-08: all three rows resolved — git push works, migrations are applied, and `db push` needs no Docker. For what is waiting now, see "Current state".*
+
 | Item | Detail |
 |---|---|
 | **`gh auth login`** | `git push` fails with `remote: Repository not found` on `github.com/MallamTeja/applyy`; `gh auth status` says not logged in. GitHub returns 404-instead-of-403 for private repos to avoid leaking their existence, so this is an **auth** failure, not a missing repo. Commits are stacked locally. |
@@ -727,6 +782,8 @@ Load-time is clean; these are behavioural.
 ---
 
 ## Not done — stated as not done
+
+> *2026-10-08: dated 2026-09-10. Everything is now deployed, and CI gates typecheck. Still true: no `supabase/tests/invariants.sql`; SCHEMA_CONTRACT §8.3 still says `APPLYY_WORKER_*`.*
 
 - **Nothing is deployed.** No `supabase link`, no `db push`, no `vercel deploy`,
   no Actions run has ever executed. This has not changed today.
@@ -741,6 +798,8 @@ Load-time is clean; these are behavioural.
   executed** across contract, function, workflows and Actions secrets.
 
 ## Unknowns, stated rather than smoothed over
+
+> *2026-10-08: the force-RLS question is still open — live `relforcerowsecurity` for `application_status_transitions` is false.*
 
 - **Why the local `supabase_storage` container reports `unhealthy`.** It made
   `supabase db reset` **exit 1 while the SQL itself fully succeeded**. Unrelated

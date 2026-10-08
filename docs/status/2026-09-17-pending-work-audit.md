@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-17.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
+
 # Pending-work audit — 2026-09-17
 
 **Written by `applyyy-92` (a coordinating session, not the partition-map holder).

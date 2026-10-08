@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-16.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
+
 # Tailor & Queue "no acting agent" — a deploy blocker, not a code bug
 
 **Date:** 2026-09-16

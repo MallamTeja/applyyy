@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-17.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
+
 # Orchestrator handoff — 2026-09-17
 
 **From:** `applyyy-e7` (retiring) · **To:** the incoming orchestrator

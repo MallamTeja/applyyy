@@ -1,6 +1,6 @@
 # Verification traps
 
-**One family of bug, fourteen instances.** Every entry here is a check that
+**One family of bug, many instances** (count: `grep -c '^## Instance' docs/verification-traps.md`). Every entry here is a check that
 **reported success for a reason other than the one you believed**. None of them
 were caught by a failing test, because in every case the test passed.
 
@@ -67,15 +67,15 @@ moment the protection changed hands.**
 
 ## Instance 2 — the boot-time check in a module nobody imports
 
-`apps/web/src/data/supabase.ts` contains an anon-key role check at lines 80-89.
-It has **zero importers.**
+`apps/web/src/data/supabase.ts` contained an anon-key role check that, as of 2026-09-10,
+had **zero importers.** (It is imported now; re-check with `grep -rn "data/supabase" apps/web/src`.)
 
 Module-level code does not run until something imports the module. So the check
 is not merely untested — it is **unreachable**. It cannot fail, cannot pass, and
 cannot protect anything. This is worse than instance 1, where the dead guard at
 least executed.
 
-`resolveSubmissionMode` has the same shape: **zero callers.**
+`resolveSubmissionMode` had the same shape at the time: **zero callers.** (Now called from `worker/src/apply-one.ts` and `worker/src/cli/apply.ts`.)
 
 **Generalised:** before asking "is this guard tested?", ask "**does this guard
 run?**" Coverage tooling reports an unimported module as uncovered, which reads
@@ -245,10 +245,10 @@ has recorded is a property that disappears silently.
 ## Instance 11 — the migration files and the live database disagree
 
 Two corrective migrations (`20260910185900_add_keepalive_agent_name.sql`,
-`20260910190000_fix_sweep_count_bootstrap_seed_and_blocked_edge.sql`) exist as
-files with **empty `remote` entries** in `supabase migration list`. The live
-database therefore does not have the `keepalive` agent value, does not have the
-`approved -> blocked_needs_human` edge, and still runs the un-fixed
+`20260910190000_fix_sweep_count_bootstrap_seed_and_blocked_edge.sql`) existed as
+files with **empty `remote` entries** in `supabase migration list` (both applied since;
+re-check with `supabase migration list --linked`). The live database therefore did not have the `keepalive` agent value, does not have the
+`approved -> blocked_needs_human` edge, and still ran the un-fixed
 `bootstrap_user_defaults` and `sweep_stale_claims`.
 
 **Nothing errors.** A peer reading the files gets one answer; the same peer

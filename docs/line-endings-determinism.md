@@ -120,6 +120,8 @@ writers and produce exactly the tangled diff that write-ownership partitioning
 exists to prevent. It is scheduled for when peers are idle and Teja is at the
 keyboard.
 
+Still deferred as of 2026-10-08; list the affected working copies with `git ls-files --eol | grep w/crlf`.
+
 In the meantime the exposure is cosmetic: the repository blobs are LF, fresh
 clones and CI get LF, and the renderer performs its own normalisation at its
 choke point — which covers the runtime guarantee independently of git. That

@@ -93,6 +93,19 @@ Deno.serve(withErrorBoundary("applyy-normalizer", async (req: Request): Promise<
   const reqUrl = new URL(req.url);
   // Resolve batch size limit from query parameter.
   const batchSize = resolveBatchSize(reqUrl.searchParams.get("limit"));
+  // Optional single-row target, so the dashboard can push ONE discovered job through
+  // without waiting for it to reach the head of the queue (same contract as auditor/index.ts).
+  const rawApplicationId = reqUrl.searchParams.get("application_id");
+  // A malformed id is REFUSED, never ignored: ignoring it would fall back to the whole
+  // queue and process rows the caller did not ask for (the fail-open this repo forbids).
+  // Checked BEFORE the agent_runs insert, so a bad request leaves no run row behind:
+  // nothing ran, and a `failed` row would tell the health page the agent broke.
+  if (rawApplicationId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawApplicationId)) {
+    // 400 with a named reason, so the caller sees what was wrong with its input.
+    return jsonResponse(400, { success: false, error: "invalid_application_id", detail: "application_id must be a UUID" });
+  }
+  // Null means "no target": the unchanged whole-queue behaviour.
+  const applicationId: string | null = rawApplicationId;
 
   // Record agent run start in agent_runs table for telemetry.
   const { data: runRow } = await db
@@ -166,6 +179,9 @@ Deno.serve(withErrorBoundary("applyy-normalizer", async (req: Request): Promise<
     `)
     // Filter for applications sitting at discovered status.
     .eq("status", "discovered")
+    // Narrow to the one requested row; the status filter stays, so a wrong-status id yields
+    // zero rows (a no-op). An empty match object is a no-op when untargeted.
+    .match(applicationId !== null ? { id: applicationId } : {})
     // Apply batch size limit.
     .limit(batchSize);
 
@@ -227,6 +243,8 @@ Deno.serve(withErrorBoundary("applyy-normalizer", async (req: Request): Promise<
       deduped: 0,
       // Count of jobs transitioned to dropped_duplicate.
       dropped_duplicate: 0,
+      // Targeted runs say so, and `found: 0` tells the button the id was not at `discovered`.
+      ...(applicationId !== null ? { targeted: true, found: 0 } : {}),
     });
   }
 
@@ -440,5 +458,7 @@ Deno.serve(withErrorBoundary("applyy-normalizer", async (req: Request): Promise<
     dropped_duplicate: droppedDuplicateCount,
     // Total error count encountered.
     errors: errorCount,
+    // Targeted runs say so, with how many rows the narrowed read found (0 or 1).
+    ...(applicationId !== null ? { targeted: true, found: items.length } : {}),
   });
 }));

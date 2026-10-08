@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-11.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
+
 # Orchestrator Peer Session Assignments & Status Registry
 
 **Dispatched by:** Orchestrator (Autonomous Command Desk)  

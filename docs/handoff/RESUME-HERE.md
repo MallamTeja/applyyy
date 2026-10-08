@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-18.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
+
 # RESUME HERE — `applyyy`
 
 **Last updated:** 2026-09-18, ~13:10 IST, by `applyyy-b0`.

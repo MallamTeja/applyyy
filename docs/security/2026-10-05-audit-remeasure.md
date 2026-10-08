@@ -1,3 +1,5 @@
+> **Historical record as of 2026-10-05.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
+
 # Dependency audit — re-measure (2026-10-05)
 
 **Measured:** 2026-10-05 ~20:50 IST at HEAD `1938f82`, by `applyyy-d3`.

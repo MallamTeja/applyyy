@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-16.** Current state: [SYSTEM_ARCHITECTURE.md](../../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../../PROGRESS.md).
+
 # Brief 1 — Shared HTTP transport (retry / backoff / timeout)
 
 **Read this whole file before you touch anything.** You are starting with an empty

@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-16.** Current state: [SYSTEM_ARCHITECTURE.md](../../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../../PROGRESS.md).
+
 # Brief 3 — Job Scoring Rubric + Salary Gate (the Scorer's logic)
 
 > **Attribution header to reproduce at the top of every source file you create:**

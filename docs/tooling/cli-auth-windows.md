@@ -7,7 +7,7 @@ Audited 2026-09-09 in repo `applyy`. Facts below came from live checks, not memo
 | Tool | Installed? | Version | Logged in? | Credential location |
 |------|-----------|---------|-----------|---------------------|
 | Vercel CLI | Yes — global npm (`%APPDATA%\npm\vercel.cmd`) | 59.5.0 | **Yes**, as `mallamteja` | `%APPDATA%\xdg.data\com.vercel.cli\auth.json` |
-| Supabase CLI | **Yes** — `C:\Users\tejam\tools\supabase\supabase.exe` (official release binary) | 2.117.0 | **Not yet** — needs a browser step | Windows Credential Manager, once logged in |
+| Supabase CLI | **Yes** — `C:\Users\tejam\tools\supabase\supabase.exe` (official release binary) | 2.117.0 as of 2026-10-08 (re-check: `supabase --version`) | Authenticated as of 2026-10-08 (re-check: `supabase migration list --linked`) | `SUPABASE_ACCESS_TOKEN` env var (set), which overrides Credential Manager |
 | Node / pnpm | Yes | v24.14.0 / 11.25.0 | — | — |
 
 Installed 2026-09-09 by downloading `supabase_2.117.0_windows_amd64.zip` from GitHub
@@ -58,7 +58,7 @@ be re-consented after a session expires.
 There is no supported global npm install for the Supabase CLI, and it is not in the
 Chocolatey community repo (checked — no results). Two workable routes:
 
-### Route A — project dev dependency (recommended for `applyy`)
+### Route A — project dev dependency (not taken: the standalone binary above was installed instead)
 
 ```powershell
 pnpm init                 # this repo has no package.json yet
@@ -109,7 +109,9 @@ setx SUPABASE_DB_PASSWORD "..."
 ```
 
 `SUPABASE_ACCESS_TOKEN` overrides whatever `supabase login` stored, so it is the one that
-makes agent-run commands work.
+makes agent-run commands work — and the one that breaks them. As of 2026-10-08,
+`migration list --linked` succeeds while `db query --linked` returns 403 (insufficient
+privileges); check which account the token belongs to before trusting it.
 
 ## Making the IDE actually see the variables
 
@@ -126,11 +128,13 @@ Cursor/VS Code inherits the environment of the *editor process*, not of Windows-
 
 ## Things that will bite later
 
-- **CLI login is not MCP login.** The `supabase` and `vercel` MCP servers in this session
-  are unauthorized and need their own OAuth via `/mcp` in an interactive session. Setting
+- **CLI login is not MCP login.** The `supabase` and `vercel` MCP servers authorize separately
+  (OAuth via `/mcp` in an interactive session). As of 2026-10-08 the Supabase MCP's
+  `execute_sql` works while CLI `db query` gets 403 — the working route changes, so
+  re-enumerate routes each time. Setting
   `SUPABASE_ACCESS_TOKEN` does not authorize the MCP server.
 - ~~This repo has no `.gitignore`~~ — fixed 2026-09-09. `.gitignore` now covers `.env`,
-  `.env.*`, `.vercel/`, `.supabase/` and `*.stackdump`. Verified with `git check-ignore -v .env`.
+  `.env.*`, `.vercel/`, `supabase/.temp/`, `supabase/.branches/` and `bash.exe.stackdump`. Verified with `git check-ignore -v .env`.
 - **Never echo the tokens.** `echo $env:VERCEL_TOKEN` puts the secret in scrollback, shell
   history and any transcript capture.
 - `bash.exe.stackdump` in the repo root is crash debris — safe to delete, unrelated to auth.

@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-17.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
+
 # Dependency vulnerability remediation plan
 
 **Date:** 2026-09-17

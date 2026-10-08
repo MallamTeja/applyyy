@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-17.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
+
 # Orchestrator handoff #2 — 2026-09-17, 17:50 IST
 
 **From:** `applyyy-94` (second orchestrator of the day) · **To:** whoever runs this next

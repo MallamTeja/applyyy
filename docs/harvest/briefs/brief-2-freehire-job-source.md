@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-16.** Current state: [SYSTEM_ARCHITECTURE.md](../../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../../PROGRESS.md).
+
 # Brief 2 — `freehire` job-board adapter (P6 in the harvest plan)
 
 **Read this whole file before you touch anything.** You are starting with an empty

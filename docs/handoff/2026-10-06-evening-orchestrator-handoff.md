@@ -1,3 +1,5 @@
+> **Historical record as of 2026-10-06.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
+
 # Handoff — 2026-10-06 evening (orchestrator applyyy-bc)
 
 Written at ~21:20 IST because Teja hit the usage limit and closed every session.

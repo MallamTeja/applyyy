@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-17.** Current state: [README.md](./README.md).
+
 # UI audit — the written interface
 
 **Date:** 2026-09-17 · **Scope:** all 51 `.tsx`/`.ts` files under `apps/web/src`

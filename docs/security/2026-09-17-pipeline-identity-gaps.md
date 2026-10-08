@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-17.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
+
 # Two gaps in the pipeline's safety case — a proposal
 
 **Status:** Gap 1 — PROPOSAL ONLY, no SQL, target recorded for a later coordinated

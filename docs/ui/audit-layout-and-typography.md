@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-17.** Current state: [README.md](./README.md).
+
 # UI audit — layout, information architecture and typography
 
 **Date:** 2026-09-17 · **Scope:** all CSS and page components under `apps/web/src`

@@ -19,11 +19,11 @@ that silently ships the wrong palette.
 ## Why — the mechanism
 
 The app has three theme states, not two: `system`, `light`, `dark`
-(`apps/web/src/app/theme.ts:26`). `system` is the default, and it is applied by
+(`ThemePreference` in `apps/web/src/app/theme.ts`). `system` is the default, and it is applied by
 **removing** the attribute, not by setting it:
 
 ```ts
-// apps/web/src/app/theme.ts:106-112
+// apps/web/src/app/theme.ts, applyTheme()
 export function applyTheme(root: Element, preference: ThemePreference): void {
   if (preference === DEFAULT_THEME) {
     root.removeAttribute(THEME_ATTRIBUTE);   // <- 'system' means NO attribute
@@ -34,7 +34,7 @@ export function applyTheme(root: Element, preference: ThemePreference): void {
 ```
 
 This is deliberate and it is asserted by a test:
-`apps/web/test/theme.test.ts:148` — *"choosing system REMOVES the attribute rather
+`apps/web/test/theme.test.ts` — *"choosing system REMOVES the attribute rather
 than setting it"*. The reason is sound: stamping an explicit value for the OS's
 current state would freeze it at page-load time, and the console would stop
 following the machine at sunset.
@@ -52,10 +52,10 @@ So an attribute-keyed dark rule reaches **only** the operators who went into
 Appearance and explicitly chose Dark. Everyone on the default setting with a dark
 OS gets the **light** half of the stylesheet painted onto a `#151924` card.
 
-`tokens.css` handles this correctly and explains itself at `apps/web/src/styles/tokens.css:29-53`:
-`:root { color-scheme: light dark }` (line 56) lets the browser resolve every
+`tokens.css` handles this correctly and explains itself in the header comment of `apps/web/src/styles/tokens.css`:
+`:root { color-scheme: light dark }` lets the browser resolve every
 `light-dark()` call live from `prefers-color-scheme`, and the two override rules
-(lines 198 and 205) flip `color-scheme` rather than restating any colour.
+(`:root[data-theme='light']`, `:root[data-theme='dark']`) flip `color-scheme` rather than restating any colour.
 
 ## What to write instead
 
@@ -91,16 +91,19 @@ tunes one copy, the toggle and the OS setting quietly disagree.
 that is not a colour — currently just `--lift`, a `box-shadow` — needs the long
 form: a `@media (prefers-color-scheme: dark)` block guarded with
 `:root:not([data-theme='light'])`, **plus** a `:root[data-theme='dark']` rule. Both
-are required; either alone leaves a state uncovered. See `tokens.css:210-226`.
+are required; either alone leaves a state uncovered. See the `--lift` block in `tokens.css`.
 
 ## How to check
 
 ```bash
-grep -rn "data-theme=" apps/web/src --include=*.css
+grep -rnE "\[data-theme=[^]]*\][^*]*\{" apps/web/src --include=*.css
 ```
 
 Expected output: hits in `apps/web/src/styles/tokens.css` only, and only on
-`color-scheme` / `--lift`. **Any hit in another file is the bug.**
+`color-scheme` / `--lift`. **Any hit in another file is the bug.** The pattern matches
+selectors only: several stylesheets *describe* the dead pattern in comments, and a bare
+`grep "data-theme="` fires on those explanations — a check that forbids naming the bug fires
+on its own documentation.
 
 ## What this cost, and what was fixed
 

@@ -1,3 +1,5 @@
+> **Historical record as of 2026-09-10.** Current state: [theming-convention.md](../ui/theming-convention.md).
+
 # The Cursor-style palette — what changed, and the two catches worth keeping
 
 **Date:** 2026-09-10 · **Built by:** `applyyy-20` · **Written up by:** `applyyy-da`

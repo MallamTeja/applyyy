@@ -116,6 +116,19 @@ Deno.serve(withErrorBoundary("screener", async (req: Request): Promise<Response>
     });
   }
 
+  // Optional single-row target, so the dashboard can push ONE application through without
+  // waiting for it to reach the head of an oldest-first queue (same contract as auditor/index.ts).
+  const rawApplicationId = url.searchParams.get("application_id");
+  // A malformed id is REFUSED, never ignored: ignoring it would fall back to the whole
+  // queue and process rows the caller did not ask for (the fail-open this repo forbids).
+  // Checked before the context load, so a bad request costs no further reads.
+  if (rawApplicationId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawApplicationId)) {
+    // failRun closes the run row this function already opened, matching the auditor.
+    return await failRun(400, "invalid_application_id", "application_id must be a UUID");
+  }
+  // Null means "no target": the unchanged whole-queue behaviour.
+  const applicationId: string | null = rawApplicationId;
+
   // Load screen context at current run timestamp.
   const now = new Date();
   const screenContext = await loadScreenContext(supabaseScreenQueries(db, now), now);
@@ -129,6 +142,9 @@ Deno.serve(withErrorBoundary("screener", async (req: Request): Promise<Response>
     .from("applications")
     .select("id, job_id, user_id, status, jobs ( id, fingerprint, title, company_name, company_slug, location_raw, locations, employment_type, min_experience_years, requires_advanced_degree, posted_at, posted_at_source, description_raw )")
     .eq("status", "deduped")
+    // Narrow to the one requested row; the status filter stays, so a wrong-status id yields
+    // zero rows (a no-op). An empty match object is a no-op when untargeted.
+    .match(applicationId !== null ? { id: applicationId } : {})
     .order("created_at", { ascending: true })
     .limit(batchSize);
 
@@ -150,6 +166,8 @@ Deno.serve(withErrorBoundary("screener", async (req: Request): Promise<Response>
       processed: 0,
       passed: 0,
       dropped: 0,
+      // Targeted runs say so, and `found: 0` tells the button the id was not at `deduped`.
+      ...(applicationId !== null ? { targeted: true, found: 0 } : {}),
     });
   }
 
@@ -255,5 +273,7 @@ Deno.serve(withErrorBoundary("screener", async (req: Request): Promise<Response>
     dropped: droppedCount,
     failed: failedCount,
     warnings: [...warnings],
+    // Targeted runs say so, with how many rows the narrowed read found (0 or 1).
+    ...(applicationId !== null ? { targeted: true, found: apps.length } : {}),
   });
 }));
