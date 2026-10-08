@@ -6,7 +6,7 @@ import assert from "node:assert";
 // Test runner suite and test functions from Node.
 import { test } from "node:test";
 // Import the planner and types under test.
-import { planNormalizeBatch, type DiscoveredApplicationItem, type NormalizationDecision } from "./normalize-batch.ts";
+import { planNormalizeBatch, type DiscoveredApplicationItem, type ExistingJobResult, type NormalizationDecision } from "./normalize-batch.ts";
 // The real canonical digest, so a fake "existing job" holds exactly what the planner computes.
 import { jobFingerprint } from "./fingerprint.ts";
 
@@ -47,7 +47,7 @@ test("planNormalizeBatch — marks unique job as deduped", async () => {
   // Define input item.
   const item = makeItem("app-1", "job-1", "Google", "Software Engineer");
   // Mock DB lookup returning no existing job.
-  const lookup = async () => null;
+  const lookup = async () => ({ kind: "none" as const });
 
   // Execute planner.
   const decisions = await planNormalizeBatch([item], lookup);
@@ -69,7 +69,7 @@ test("planNormalizeBatch — drops intra-batch duplicate posting", async () => {
   // Define second item with identical identity (company legal suffix stripped, title folded).
   const item2 = makeItem("app-2", "job-2", "Acme", "Backend Developer");
   // Mock DB lookup returning no existing job.
-  const lookup = async () => null;
+  const lookup = async () => ({ kind: "none" as const });
 
   // Execute planner with both items.
   const decisions = await planNormalizeBatch([item1, item2], lookup);
@@ -93,7 +93,7 @@ test("planNormalizeBatch — drops posting colliding with existing database job"
     // Verify excludeJobId is passed correctly.
     assert.equal(excludeJobId, "job-1");
     // Return existing DB job ID.
-    return "existing-job-99";
+    return { kind: "found" as const, jobId: "existing-job-99" };
   };
 
   // Execute planner.
@@ -129,9 +129,12 @@ interface FakeJob {
 // mutable array, so a test can apply the fingerprint patch a real run would write.
 function fakeLookup(jobs: FakeJob[]) {
   // Same three predicates and `limit(1)` as the live query, so verdicts match it.
-  return async (userId: string, fingerprint: string, excludeJobId: string): Promise<string | null> =>
-    // First match or null, mirroring `existingJobs[0]?.id ?? null`.
-    jobs.find((j) => j.userId === userId && j.fingerprint === fingerprint && j.id !== excludeJobId)?.id ?? null;
+  return async (userId: string, fingerprint: string, excludeJobId: string): Promise<ExistingJobResult> => {
+    // First match, as the live query's limit(1) returns it.
+    const hit = jobs.find((j) => j.userId === userId && j.fingerprint === fingerprint && j.id !== excludeJobId);
+    // A successful query: "found" with the id, or "none" — this fake never fails.
+    return hit ? { kind: "found", jobId: hit.id } : { kind: "none" };
+  };
 }
 
 // The handler's targeted run, reduced to what matters for the next run: plan one item,

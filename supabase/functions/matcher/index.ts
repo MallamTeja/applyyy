@@ -16,7 +16,9 @@
 //    Writing `match_score` and `match_reasoning` happens FIRST via a non-status update on `applications`.
 //    Advancing the workflow status to `scored` happens SECOND via the `advance_application_status` RPC.
 //    Advancing status without a payload written opens a race window where downstream agents see
-//    an un-scored row sitting at `scored`.
+//    an un-scored row sitting at `scored`. Both steps are guarded against a duplicate run
+//    (write-score.ts): the write only while the row is at passed_filters, the move only while
+//    updated_at is still the stamp our own write produced.
 //
 // 3. KEY POOL FAILOVER AND PACING:
 //    LLM calls are routed through `generateGeminiContent` from `_shared/gemini/client.ts`. This handles
@@ -67,8 +69,9 @@ import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 import { decideScoreThreshold } from "../_shared/match/score-threshold.ts";
 // Per-invocation deadline: plans each Gemini call from the time left and stops between rows.
 import { createDeadline, deadlineNote, runBatchWithDeadline, shortenedBudgetNote, type CallOptions } from "../_shared/agent/deadline.ts";
-// The status-guarded score write; extracted so its guard is unit-tested (write-score.test.ts).
-import { writeMatchScore } from "./write-score.ts";
+// The status-guarded score write and the stamp-guarded status move; extracted so both guards
+// are unit-tested (write-score.test.ts).
+import { advanceScoredRow, writeMatchScore } from "./write-score.ts";
 
 // Default batch limit for one invocation to preserve key pool quota.
 // Controls how many application rows are processed per function call.
@@ -252,8 +255,6 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // Clamps batch size within safe operating bounds.
   const batchSize = resolveBatchSize(new URL(req.url).searchParams.get("limit"));
 
-  // Query applications table for candidate applications sitting at status 'passed_filters'.
-  // Fetches pending applications ready for Matcher LLM fit scoring.
   // Optional single-row target. Read from the URL so the CLI can push ONE application through
   // without waiting for it to reach the head of an oldest-first queue.
   const rawApplicationId = new URL(req.url).searchParams.get("application_id");
@@ -265,6 +266,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   }
   // Null means "no target": the unchanged whole-queue behaviour.
   const applicationId: string | null = rawApplicationId;
+  // Query applications table for candidate applications sitting at status 'passed_filters'.
+  // Fetches pending applications ready for Matcher LLM fit scoring.
   const { data: rows, error: rowsError } = await db
     // Target applications table for queue row lookup.
     .from("applications")
@@ -342,7 +345,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // Rows below the threshold moved to dropped_filter. Kept apart from scoredCount so
   // rows_out still means "rows handed to the Tailor".
   let droppedCount = 0;
-  // Rows a faster overlapping run moved off passed_filters before our score write landed.
+  // Rows another overlapping run took from us: moved off passed_filters before our score write
+  // landed (step 1), or written after it so our stamped move was refused (step 2, PT409).
   // Neither scored nor failed by THIS run, so they get their own counter.
   let skippedStaleCount = 0;
   // Initialize array holding individual application row processing failure records.
@@ -445,15 +449,15 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
 
         // STEP 2: Move the row via advance_application_status RPC SECOND — to 'scored' on advance,
         // to 'dropped_filter' below the threshold. Both edges allow the matcher (live, 2026-10-05).
-        const { error: advanceError } = await db.rpc("advance_application_status", {
-          // Target application row identifier parameter.
-          p_application_id: row.id,
+        // Guarded by the stamp STEP 1 returned, so a duplicate run that wrote in between makes
+        // this move refuse (PT409) instead of landing on that run's score (see write-score.ts).
+        const moved = await advanceScoredRow(
+          db,
+          // Target application row.
+          row.id,
           // The threshold's verdict decides the edge; there is no third value by construction.
-          p_to_status: threshold.kind === "advance" ? "scored" : "dropped_filter",
-          // Acting agent name parameter set to 'matcher'.
-          p_agent: "matcher",
-          // Event detail JSONB parameter carrying score and reasoning details.
-          p_detail: {
+          threshold.kind === "advance" ? "scored" : "dropped_filter",
+          {
             score: matchScore.score,
             reasoning: matchScore.reasoning,
             // The band, so the event log shows WHERE the score fell, not just the number.
@@ -461,13 +465,23 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
             // Present only on a drop, mirroring the drop_reason column.
             ...(threshold.kind === "drop" ? { reason: threshold.reason } : {}),
           },
-        });
+          // The stamp of OUR write; only a row nobody has written since may be moved.
+          written.updatedAt,
+        );
 
-        // Check if advance_application_status RPC execution returned error.
-        if (advanceError) {
+        // Check if advance_application_status RPC execution returned a real error.
+        if (moved.kind === "error") {
           // Push status transition failure details to failures array.
-          failures.push({ applicationId: row.id, error: advanceError.message });
+          failures.push({ applicationId: row.id, error: moved.message });
           // Continue loop to next application row.
+          return;
+        }
+        // Another run wrote this row after us: its payload is the one in the row, so the move is
+        // its to make. Counted with the step-1 skips — the same race, lost one step later.
+        if (moved.kind === "skipped_stale") {
+          // Expected under duplicate runs, so not a failure.
+          skippedStaleCount += 1;
+          // No status move for a row whose payload is no longer ours.
           return;
         }
 
@@ -510,7 +524,7 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // error_count 0 and a `deadline:` note: that prefix is how the health page tells it apart.
   // agent_runs has no skip column, so a lost race is a note beside the others (like the
   // deadline note): visible on the health page, never counted in error_count.
-  const staleNote = skippedStaleCount > 0 ? `skipped_stale: ${skippedStaleCount} row(s) already moved by another run` : null;
+  const staleNote = skippedStaleCount > 0 ? `skipped_stale: ${skippedStaleCount} row(s) lost a race to another run` : null;
   const errorDetail = [failureDetail, stopNote, staleNote].filter((x) => x !== null).join(" | ") || null;
 
   // Check if valid agent run identifier exists for this execution.

@@ -19,6 +19,10 @@ import {
 import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 // Shared CORS headers, plus the boundary that keeps them on an uncaught 500.
 import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
+// The shared `?application_id=` parser, so normalizer and screener refuse a bad id identically.
+// The duplicate lookup, extracted so its fail-closed handling of a query error is unit-tested.
+import { createExistingJobLookup, type ExistingJobClient } from "../_shared/normalize/existing-job-lookup.ts";
+import { parseApplicationIdParam } from "../_shared/http/application-id.ts";
 
 // Default batch processing size when limit parameter is omitted.
 const DEFAULT_BATCH_SIZE = 50;
@@ -95,17 +99,17 @@ Deno.serve(withErrorBoundary("applyy-normalizer", async (req: Request): Promise<
   const batchSize = resolveBatchSize(reqUrl.searchParams.get("limit"));
   // Optional single-row target, so the dashboard can push ONE discovered job through
   // without waiting for it to reach the head of the queue (same contract as auditor/index.ts).
-  const rawApplicationId = reqUrl.searchParams.get("application_id");
+  const target = parseApplicationIdParam(reqUrl.searchParams);
   // A malformed id is REFUSED, never ignored: ignoring it would fall back to the whole
   // queue and process rows the caller did not ask for (the fail-open this repo forbids).
   // Checked BEFORE the agent_runs insert, so a bad request leaves no run row behind:
   // nothing ran, and a `failed` row would tell the health page the agent broke.
-  if (rawApplicationId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawApplicationId)) {
+  if (target.kind === "invalid") {
     // 400 with a named reason, so the caller sees what was wrong with its input.
     return jsonResponse(400, { success: false, error: "invalid_application_id", detail: "application_id must be a UUID" });
   }
   // Null means "no target": the unchanged whole-queue behaviour.
-  const applicationId: string | null = rawApplicationId;
+  const applicationId: string | null = target.kind === "valid" ? target.id : null;
 
   // Record agent run start in agent_runs table for telemetry.
   const { data: runRow } = await db
@@ -286,33 +290,13 @@ Deno.serve(withErrorBoundary("applyy-normalizer", async (req: Request): Promise<
     };
   });
 
-  // Define DB collision lookup function for duplicate detection against public.jobs.
-  const lookupExistingJob = async (
-    // User UUID parameter.
-    userId: string,
-    // Fingerprint string parameter.
-    fingerprint: string,
-    // Current job ID to exclude from collision query.
-    excludeJobId: string,
-  ): Promise<string | null> => {
-    // Query jobs table for collision with identical user_id and fingerprint.
-    const { data: existingJobs } = await db
-      // Target jobs table.
-      .from("jobs")
-      // Select ID of existing job.
-      .select("id")
-      // Filter by user ID for tenant isolation.
-      .eq("user_id", userId)
-      // Filter by canonical fingerprint digest.
-      .eq("fingerprint", fingerprint)
-      // Exclude the current job being evaluated.
-      .neq("id", excludeJobId)
-      // Limit to 1 result.
-      .limit(1);
-
-    // Return existing job ID if found, otherwise return null.
-    return existingJobs && existingJobs.length > 0 ? existingJobs[0]!.id : null;
-  };
+  // Duplicate lookup against public.jobs. Extracted (existing-job-lookup.ts) because the inline
+  // version dropped supabase-js's `error`, so a failed query read as "no existing job" and the
+  // row was advanced to deduped. It now returns a closed result, and a failure plans no move.
+  // Cast, because comparing SupabaseClient's generic builder chain to the narrow interface
+  // overflows tsc (TS2589), the same one cast cover-letter/index.ts makes. The interface is the
+  // contract; existing-job-lookup.test.ts exercises it with a fake shaped like the real chain.
+  const lookupExistingJob = createExistingJobLookup(db as unknown as ExistingJobClient);
 
   // Plan normalization decisions for the entire batch.
   const decisions = await planNormalizeBatch(items, lookupExistingJob);
@@ -403,6 +387,13 @@ Deno.serve(withErrorBoundary("applyy-normalizer", async (req: Request): Promise<
         // Increment successfully dropped duplicate count.
         droppedDuplicateCount++;
       }
+    } else if (decision.kind === "lookup_failed") {
+      // FAIL CLOSED: the duplicate check could not answer, so there is no verdict to act on.
+      // No RPC: the row stays at discovered and the next run checks it again. Logged here
+      // like every other per-row failure, since error_detail points to this log.
+      console.error(`[applyy-normalizer] duplicate lookup failed for app ${decision.applicationId} (job ${decision.jobId}); left at discovered:`, decision.message);
+      // Counted, so a run where every lookup failed is stamped `failed`, not `succeeded`.
+      errorCount++;
     }
   }
 

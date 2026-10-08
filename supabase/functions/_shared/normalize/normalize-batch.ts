@@ -1,7 +1,8 @@
 // Core normalization & deduplication batch processor for PROJECT_PLAN.md §9.
 // Pure and testable logic that computes canonical fingerprints for discovered jobs,
 // detects duplicate postings against existing database records or current batch items,
-// and plans status transitions to 'deduped' or 'dropped_duplicate'.
+// and plans status transitions to 'deduped' or 'dropped_duplicate' — or no transition at all
+// ('lookup_failed') when the duplicate check could not answer.
 
 // Import the canonical fingerprint computation primitive.
 import { jobFingerprint } from "./fingerprint.ts";
@@ -53,7 +54,29 @@ export type NormalizationDecision =
       readonly canonicalFingerprint: string;
       // UUID of the existing job that this posting duplicates.
       readonly duplicateOfJobId: string;
+    }
+  // The duplicate check itself failed: no verdict, so the row must not move. The handler
+  // counts it as an error and leaves the application at `discovered` for the next run.
+  | {
+      // Discriminant indicating the lookup could not answer.
+      readonly kind: "lookup_failed";
+      // Application left where it is.
+      readonly applicationId: string;
+      // Its job, for the log line.
+      readonly jobId: string;
+      // The database's message, for the run's error_detail.
+      readonly message: string;
     };
+
+// What a duplicate lookup can say. Closed, so "the query failed" can never be written the
+// same way as "no existing job" — the fail-open the old `string | null` allowed.
+export type ExistingJobResult =
+  // A successful query that matched nothing.
+  | { readonly kind: "none" }
+  // A successful query that matched an existing job.
+  | { readonly kind: "found"; readonly jobId: string }
+  // The query failed or answered in a shape that is not an answer.
+  | { readonly kind: "failed"; readonly message: string };
 
 // Abstract database lookup interface for duplicate detection dependency injection.
 export type ExistingJobLookup = (
@@ -63,7 +86,7 @@ export type ExistingJobLookup = (
   fingerprint: string,
   // Exclude current job ID from collision query.
   excludeJobId: string,
-) => Promise<string | null>;
+) => Promise<ExistingJobResult>;
 
 // Process a batch of discovered application items into normalization decisions.
 export async function planNormalizeBatch(
@@ -115,9 +138,26 @@ export async function planNormalizeBatch(
     }
 
     // Query external database for existing job sharing the canonical fingerprint.
-    const dbDuplicateJobId = await lookupExistingJob(item.userId, canonicalFp, item.jobId);
+    const existing = await lookupExistingJob(item.userId, canonicalFp, item.jobId);
+    // The check could not answer: plan no move at all. Not registered in seenInBatch either,
+    // so a later sibling with the same fingerprint is judged on its own lookup, not on a guess.
+    if (existing.kind === "failed") {
+      // Record the failure so the handler counts it and leaves the row at discovered.
+      decisions.push({
+        // Set discriminant.
+        kind: "lookup_failed",
+        // Pass application ID.
+        applicationId: item.applicationId,
+        // Pass job ID.
+        jobId: item.jobId,
+        // Carry the reason through to error_detail.
+        message: existing.message,
+      });
+      // Continue to next item in batch.
+      continue;
+    }
     // If database collision is found, mark application as dropped duplicate.
-    if (dbDuplicateJobId !== null) {
+    if (existing.kind === "found") {
       // Record dropped duplicate decision referencing existing database job ID.
       decisions.push({
         // Set discriminant.
@@ -129,7 +169,7 @@ export async function planNormalizeBatch(
         // Pass computed canonical fingerprint.
         canonicalFingerprint: canonicalFp,
         // Link to existing DB job ID.
-        duplicateOfJobId: dbDuplicateJobId,
+        duplicateOfJobId: existing.jobId,
       });
       // Continue to next item in batch.
       continue;

@@ -28,6 +28,8 @@ import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 // Persists the cascade's "rule skipped" warnings into the run row (B1, 2026-10-08).
 import { withRuleWarnings } from "../_shared/screen/run-summary.ts";
+// The shared `?application_id=` parser, so screener and normalizer refuse a bad id identically.
+import { parseApplicationIdParam } from "../_shared/http/application-id.ts";
 
 // Default batch processing size per run.
 const DEFAULT_BATCH_SIZE = 50;
@@ -69,6 +71,23 @@ Deno.serve(withErrorBoundary("screener", async (req: Request): Promise<Response>
   const caller = await authorizeCaller(req, db, connection.userId);
   if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });
 
+  // Parsed once here: the application_id check below and the batch `limit` further down both read it.
+  const url = new URL(req.url);
+  // Optional single-row target, so the dashboard can push ONE application through without
+  // waiting for it to reach the head of an oldest-first queue (same contract as auditor/index.ts).
+  const target = parseApplicationIdParam(url.searchParams);
+  // A malformed id is REFUSED, never ignored: ignoring it would fall back to the whole
+  // queue and process rows the caller did not ask for (the fail-open this repo forbids).
+  // Checked BEFORE the agent_runs insert, as the normalizer does: a malformed request is not
+  // a run, and a `failed` row for it would tell the health page the screener broke. It also
+  // runs before the kill switch, so a bad id is refused even while the pipeline is off.
+  if (target.kind === "invalid") {
+    // Plain 400 with a named reason, no failRun: there is no run row to close yet.
+    return jsonResponse(400, { success: false, error: "invalid_application_id", detail: "application_id must be a UUID" });
+  }
+  // Null means "no target": the unchanged whole-queue behaviour.
+  const applicationId: string | null = target.kind === "valid" ? target.id : null;
+
   // Insert agent_runs tracking row for screener agent.
   const { data: runRow } = await db
     .from("agent_runs")
@@ -91,7 +110,6 @@ Deno.serve(withErrorBoundary("screener", async (req: Request): Promise<Response>
   // The shared fail-closed kill switch. The old `?force=true` bypass is gone: every
   // agent now honours the switch the same way, and a URL parameter overriding a safety
   // switch is exactly the inconsistency this replaced.
-  const url = new URL(req.url);
   const killSwitch = await readKillSwitch(db);
   // A failed read halts as an error, never as a decision either way.
   if (killSwitch.kind === "unreadable") {
@@ -115,19 +133,6 @@ Deno.serve(withErrorBoundary("screener", async (req: Request): Promise<Response>
       processed: 0,
     });
   }
-
-  // Optional single-row target, so the dashboard can push ONE application through without
-  // waiting for it to reach the head of an oldest-first queue (same contract as auditor/index.ts).
-  const rawApplicationId = url.searchParams.get("application_id");
-  // A malformed id is REFUSED, never ignored: ignoring it would fall back to the whole
-  // queue and process rows the caller did not ask for (the fail-open this repo forbids).
-  // Checked before the context load, so a bad request costs no further reads.
-  if (rawApplicationId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawApplicationId)) {
-    // failRun closes the run row this function already opened, matching the auditor.
-    return await failRun(400, "invalid_application_id", "application_id must be a UUID");
-  }
-  // Null means "no target": the unchanged whole-queue behaviour.
-  const applicationId: string | null = rawApplicationId;
 
   // Load screen context at current run timestamp.
   const now = new Date();
