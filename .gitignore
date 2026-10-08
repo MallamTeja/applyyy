@@ -3,6 +3,9 @@
 .env
 .env.*
 !.env.example
+# The e2e build's config (apps/web/.env.e2e): a public project URL and an unsigned
+# placeholder anon JWT, no secret. Committed so CI and every machine build the same bundle.
+!.env.e2e
 
 # --- Playwright browser session state. Contains live logged-in cookies
 # --- for ATS accounts; leaking these is equivalent to leaking passwords.

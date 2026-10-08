@@ -224,22 +224,20 @@ jobs:
       - name: vite build
         # Same package.
         working-directory: apps/web
-        # Build-time config the bundle needs to render its signed-in shell at all.
-        # Locally Vite reads the gitignored .env.local; the runner has none, so the
-        # bundle came up "not connected" and 8 e2e tests timed out waiting for
-        # .page__title (run 37333298262). These are NOT secrets and NOT real:
-        env:
-          # The PUBLIC project URL (already in vercel.json's CSP). It must be this
-          # ref because e2eSuite seeds `sb-xynqxekcqizwhtskzqrq-auth-token`, and the
-          # suite intercepts every *.supabase.co request, so nothing reaches live.
-          VITE_SUPABASE_URL: https://xynqxekcqizwhtskzqrq.supabase.co
-          # An unsigned placeholder JWT ({"alg":"none"}, role "anon", iss names it a
-          # placeholder). supabaseConfig.ts only checks the role claim, which must be
-          # "anon" or the app refuses to start; the signature is never verified
-          # client-side and every request is intercepted, so it authorizes nothing.
-          VITE_SUPABASE_ANON_KEY: eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJyb2xlIjoiYW5vbiIsImlzcyI6ImNpLXBsYWNlaG9sZGVyLW5vdC1hLXJlYWwta2V5In0.ci
-        # Builds dist/ the way Vercel does.
+        # No env on purpose: the runner has no .env.local, so this builds "unconfigured",
+        # which vite.config.ts allows (only a non-anon key is fatal). It proves the
+        # shipped code compiles; it is NOT what the e2e suite runs against (next step).
         run: ./node_modules/.bin/vite build
+      # The bundle the e2e suite serves. Its config is the committed apps/web/.env.e2e
+      # (public project URL + unsigned placeholder anon JWT), which Vite loads ABOVE any
+      # .env.local, so CI and every machine test the same bundle. Without it the shell
+      # stops at sign-in and the suite fails with E2E_DIST_UNCONFIGURED (run 37333298262
+      # was the 8-timeout version of that). Runs second so dist/ is the e2e bundle.
+      - name: vite build (e2e mode)
+        # Same package.
+        working-directory: apps/web
+        # --mode e2e selects .env.e2e; overwrites the plain build's dist/.
+        run: ./node_modules/.bin/vite build --mode e2e
       # The web test suite, with the same vacuous-pass guard as edge-tests.
       - name: web tests, and assert tests ran
         run: |
