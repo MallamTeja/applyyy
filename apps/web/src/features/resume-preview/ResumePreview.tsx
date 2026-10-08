@@ -26,9 +26,11 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
+// The approval page's master SHAPE check, so both screens refuse the same malformed masters.
+import { masterFromRow } from '../approval/tailoredEdits';
 
-// The snapshot and master types.
-import type { MasterProfile, ResolvedResume } from '../../data/contract';
+// The snapshot type; the master arrives already shape-checked by masterFromRow.
+import type { ResolvedResume } from '../../data/contract';
 // The browser client; RLS scopes every read to the signed-in user.
 import { supabase } from '../../data/supabase';
 // Pure helpers: the shared render, the master mapping, the filename title.
@@ -101,13 +103,17 @@ export function ResumePreview({ applicationId, tailoredProfile, masterVersion, j
           return;
         }
         // "Asked, nothing there": the version this tailoring cites is not stored.
-        if (data === null || typeof data.profile !== 'object' || data.profile === null) {
+        /* A SHAPE check (2026-10-08), not "is it an object": '{}' used to pass and render as an
+           empty master beside the tailored resume. Same check as the approval page. */
+        const profile = masterFromRow(data?.profile);
+        // Missing or malformed are both "no usable master"; never rendered as one.
+        if (profile === null) {
           // Named, so the gap is visible next to the tailored resume.
-          setMaster({ kind: 'unavailable', message: `Master resume v${masterVersion} is not stored.` });
+          setMaster({ kind: 'unavailable', message: `Master resume v${masterVersion} is not stored, or is not a valid profile.` });
           return;
         }
         // Map and render through the same renderer as the tailored pane.
-        const resume = masterAsResume(data.profile as MasterProfile, masterVersion);
+        const resume = masterAsResume(profile, masterVersion);
         // Ready, or refused by the renderer; the pane handles both.
         setMaster({ kind: 'ready', preview: buildResumePreview(resume, previewDocumentTitle(fullName, companyName, 'master')) });
       });

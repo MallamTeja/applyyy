@@ -402,4 +402,19 @@ describe('approval page wiring: per-row freshness (fixes 2b/3) and missing maste
     // And never an early exit from the loader.
     assert.doesNotMatch(missing, /return;/);
   });
+
+  it('7b: an unpinned or malformed pin refuses its own row before any master is fetched', () => {
+    // From the classifier's no_pin branch to the resume shape gate that follows it.
+    const pin = between("if (classifyTailored(app.tailored_profile) === 'no_pin') {", 'if (!isResumeShape(app.tailored_profile))');
+    // The pin verdict (from classifyTailored, unit-tested in tailoredEdits.test.ts) refuses by name...
+    assert.match(pin, /reason: 'no_pin'[\s\S]*continue;/);
+    // ...and never turned into a page-wide error.
+    assert.doesNotMatch(pin, /setLoadError\(/);
+    // The pin check precedes the master fetch, so no "latest" or other version is ever asked for.
+    assert.ok(page.indexOf('classifyTailored(') < page.indexOf(".from('master_profiles')"), 'the pin must be checked before any master is fetched');
+    // The diff shows the snapshot's own pin, with no fallback to the never-written column.
+    const adapter = ts.createPrinter({ removeComments: true }).printFile(ts.createSourceFile('a.ts', readFileSync(fileURLToPath(new URL('../src/features/approval/diffAdapter.ts', import.meta.url)), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS));
+    // Shape, not prose: the property assignment names only the snapshot.
+    assert.match(adapter, /masterVersion: resolved\.master_version,/);
+  });
 });

@@ -141,6 +141,17 @@
   font-size: var(--size-xs);
 }
 
+/* B1 (2026-10-08): a rule that is switched on but cannot fire. The warn notice's bronze tokens,
+   because this is "something you should know", not a failure; tokens, never [data-theme] rules,
+   which are dead in this repo (CLAUDE.md section 6). */
+.cascade__not-enforced {
+  /* A left rule, like the warn notice, so it reads as a flag on the row rather than more description. */
+  padding-left: var(--gap-1);
+  border-left: 3px solid var(--signal);
+  /* Full ink, not muted: the point is that it is not skimmed past. */
+  color: var(--ink);
+}
+
 /* --- Tables ----------------------------------------------------------- */
 
 /* The watchlist, blocklist and answer bank are lists of rows rather than forms.

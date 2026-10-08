@@ -592,3 +592,66 @@ describe('removeBullet and resetTarget, v2 cases', () => {
     assert.deepEqual(refs(okResume(edits.resetTarget(one, orig, { kind: 'bullet', ref: 'b-api' }))), ['b-api', 'b-tests', 'b-docs']);
   });
 });
+
+/* 7b (2026-10-08): the approval page reads a row's pin from tailored_profile.master_version and
+ * must judge it EXACTLY as the auditor does (supabase/functions/_shared/audit/pinned-master.ts),
+ * or the screen and the auditor could disagree about which master a resume is checked against.
+ * A PARITY test, not a copy of the rules: both resolvers run over one table of pins, so a change
+ * to either side that the other does not mirror goes red here. */
+describe('readPin: parity with the auditor', () => {
+  // The auditor's resolver, imported by relative path; it has no runtime imports.
+  let auditor: typeof import('../../../supabase/functions/_shared/audit/pinned-master.ts');
+  // Loaded once for the block.
+  before(async () => {
+    auditor = await import('../../../supabase/functions/_shared/audit/pinned-master.ts');
+  });
+
+  it('classifies every pin the way resolvePinnedMaster does', () => {
+    // Absent, malformed, coerced-looking and valid pins; strings must NOT be coerced.
+    const pins: unknown[] = [undefined, null, 0, -1, 1.5, '2', NaN, Infinity, 2 ** 53, true, {}, 1, 3];
+    // A map holding every valid pin above, so the auditor never answers "version missing" here.
+    const all = new Map([[1, {} as never], [3, {} as never]]);
+    // Each pin, side by side.
+    for (const pin of pins) {
+      // The auditor's verdict for this pin.
+      const theirs = auditor.resolvePinnedMaster(pin, all);
+      // Ours, which stops before the lookup (the page fetches the version itself).
+      const ours = edits.readPin(pin);
+      // Same kind, named by the pin so a failure says which one diverged.
+      assert.equal(ours.kind, theirs.kind, `pin ${String(pin)}`);
+      // And the same version when pinned.
+      if (ours.kind === 'pinned' && theirs.kind === 'pinned') assert.equal(ours.version, theirs.version);
+    }
+  });
+
+  it('a string pin is invalid, never coerced to its number', () => {
+    // Number('2') === 2 is the lenient-parser trap the auditor refuses too.
+    assert.equal(edits.readPin('2').kind, 'invalid_pin');
+  });
+});
+
+/* 7b review fix: the page's refusal cause comes from classifyTailored. The first 7b cut checked the
+ * pin before the shape, so '{}' read "master version missing" and sent the operator to the wrong fix. */
+describe('classifyTailored: the pin is blamed only when it is the ONLY problem', () => {
+  it("'{}', null, an array and a string are no resume, never a pin problem", () => {
+    // The case the reviewer found: an empty object has no pin AND no resume.
+    assert.equal(edits.classifyTailored({}), 'not_a_resume');
+    // Non-objects never reach the pin question.
+    for (const value of [null, undefined, [], 'resume']) assert.equal(edits.classifyTailored(value), 'not_a_resume');
+  });
+
+  it('a full resume with a missing or malformed pin is no_pin', () => {
+    // Pin removed: everything else is intact.
+    const { master_version: _dropped, ...unpinned } = original() as unknown as Record<string, unknown>;
+    assert.equal(edits.classifyTailored(unpinned), 'no_pin');
+    // A string pin is malformed, not coerced.
+    assert.equal(edits.classifyTailored({ ...original(), master_version: '2' }), 'no_pin');
+  });
+
+  it('a valid pin with a broken body is no resume; a complete one is a resume', () => {
+    // The pin is fine, so the problem is the body.
+    assert.equal(edits.classifyTailored({ ...original(), schema_version: 2 }), 'not_a_resume');
+    // Positive control.
+    assert.equal(edits.classifyTailored(original()), 'resume');
+  });
+});

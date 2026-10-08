@@ -55,6 +55,8 @@ import {
   isResumeShape,
   // A SHAPE check on the pinned master, so '{}' is refused like a missing version, not diffed against.
   masterFromRow,
+  // The auditor's pin rules behind it, so a resume with a bad pin is refused by name (7b).
+  classifyTailored,
   rebuildOriginal,
   removeBullet,
   resetTarget,
@@ -84,7 +86,7 @@ interface UnreviewableRow {
 }
 
 // The only three ways a queued row can be unreviewable on this screen.
-type RefusalReason = 'no_job' | 'no_tailored_resume' | 'no_pinned_master';
+type RefusalReason = 'no_job' | 'no_tailored_resume' | 'no_pin' | 'no_pinned_master';
 
 /* Per-cause wording for the refused list and the p_detail code for its reject. A literal table,
    so a new cause fails to compile here instead of rendering under the wrong explanation. */
@@ -93,6 +95,8 @@ const REFUSAL: Readonly<Record<RefusalReason, { readonly label: string; readonly
   no_job: { label: 'Job record missing', code: 'refused_missing_job' },
   // The original cause; the code is kept so earlier rejections stay comparable.
   no_tailored_resume: { label: 'No tailored resume', code: 'refused_unreviewed_tailoring' },
+  // A resume with no usable master_version: nothing says which master it must be checked against.
+  no_pin: { label: 'Master version missing or invalid', code: 'refused_unpinned' },
   // A valid resume whose pinned master version is not stored (or is not a profile).
   no_pinned_master: { label: 'Master profile version missing', code: 'refused_missing_master' },
 };
@@ -305,6 +309,26 @@ export function ApprovalQueuePage(): ReactElement {
              is the exact failure the approval gate exists to prevent, delivered
              by the gate itself. Fail loud, never fail clean.
              A SHAPE check (isResumeShape), never a null check: '{}' is not a resume. */
+          /* 7b: a tailored resume whose PIN is missing or malformed is refused with that cause.
+             It used to fall into the shape check below and read "No tailored resume", which sent
+             the operator to re-run a tailor that had run. Never resolved to another version:
+             same verdicts as the auditor (readPin is parity-tested against it). classifyTailored blames
+             the pin ONLY when the rest is resume-shaped, so '{}' still reads "No tailored resume". */
+          if (classifyTailored(app.tailored_profile) === 'no_pin') {
+            refused.push({
+              // The real row id, so the operator can reject it.
+              applicationId: app.id,
+              // The job is known; name it.
+              jobTitle: job.title,
+              // Same.
+              companyName: job.company_name,
+              // The resume exists; which master it was tailored from is unknown or malformed.
+              reason: 'no_pin',
+            });
+            // Refuse THIS row only; the rest of the queue still loads.
+            continue;
+          }
+
           if (!isResumeShape(app.tailored_profile)) {
             refused.push({
               applicationId: app.id,

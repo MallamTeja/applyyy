@@ -231,6 +231,46 @@ export function isResumeShape(value: unknown): value is ResolvedResume {
   return ['experience', 'skills', 'projects', 'education'].every((key) => Array.isArray(v[key]));
 }
 
+/* 7b (2026-10-08): which master version a tailored resume is pinned to, judged EXACTLY as the
+ * auditor's resolvePinnedMaster judges it (supabase/functions/_shared/audit/pinned-master.ts;
+ * held by a parity test, not by this comment). Stops before the lookup: the page fetches the
+ * version itself, and a pin whose version is not stored is its own refusal there. A closed
+ * union, so the page names WHY a row has no pin instead of falling back to another master. */
+export type PinRead =
+  // The one version this resume may be compared against.
+  | { readonly kind: 'pinned'; readonly version: number }
+  // No pin recorded at all.
+  | { readonly kind: 'unpinned' }
+  // A pin of the wrong shape, kept so the refusal can show what was there.
+  | { readonly kind: 'invalid_pin'; readonly pin: unknown };
+
+// Exported for the page's classifier and the auditor-parity test.
+export function readPin(pin: unknown): PinRead {
+  // Absent is its own reason, distinct from malformed, matching the auditor.
+  if (pin === null || pin === undefined) return { kind: 'unpinned' };
+  // typeof first, so '2' is refused rather than coerced; safe-integer rejects NaN, fractions, Infinity.
+  if (typeof pin !== 'number' || !Number.isSafeInteger(pin) || pin <= 0) return { kind: 'invalid_pin', pin };
+  // The exact version; there is deliberately no "latest" branch.
+  return { kind: 'pinned', version: pin };
+}
+
+/* 7b review fix (2026-10-08): WHY a tailored_profile cannot be reviewed, so the refusal names the
+ * true cause. `no_pin` ONLY when everything but the pin is resume-shaped: a first version checked the
+ * pin first, so `{}` (no resume at all) was labelled "master version missing" and sent the operator
+ * to fix a pin instead of re-running the tailor - the very mislabel 7b set out to remove. */
+export function classifyTailored(profile: unknown): 'resume' | 'no_pin' | 'not_a_resume' {
+  // A full, pinned resume: reviewable.
+  if (isResumeShape(profile)) return 'resume';
+  // Only a plain object can be "a resume with a bad pin"; null, arrays and strings are no resume.
+  if (!isPlainObject(profile)) return 'not_a_resume';
+  // The pin, by the auditor's rules.
+  const pin = readPin(profile['master_version']);
+  // A valid pin here means some OTHER field broke the shape: that is a broken resume, not a pin problem.
+  if (pin.kind === 'pinned') return 'not_a_resume';
+  // Bad pin: blame it only if a valid pin would have made this a resume.
+  return isResumeShape({ ...profile, master_version: 1 }) ? 'no_pin' : 'not_a_resume';
+}
+
 /* The master_profiles row's `profile` column as a MasterProfile, or null (D9).
  *
  * The page used to accept any object (`typeof profile === 'object'`), so `{}` became a master

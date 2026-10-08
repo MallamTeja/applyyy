@@ -34,20 +34,28 @@ import type { FilterRuleConfig } from './filtersStore.ts';
 
 import './settings.css';
 
-interface RuleCopy {
+// Exported for the B1 render test, which renders rows from the same copy the page uses.
+export interface RuleCopy {
   readonly name: string;
   readonly drops: string;
+  /* B1 (2026-10-08): set ONLY for a rule the screener cannot enforce with today's job data. Two
+     rules shipped enabled and read as working while they could never drop a job; this says so on
+     the row instead of leaving it to a reader of cascade.ts. */
+  readonly notEnforced?: string;
   readonly threshold:
     | { readonly kind: 'none' }
     | { readonly kind: 'number'; readonly label: string; readonly suffix: string; readonly key: string }
     | { readonly kind: 'list'; readonly label: string; readonly placeholder: string; readonly key: string };
 }
 
-const RULE_COPY: Readonly<Partial<Record<FilterRuleType, RuleCopy>>> = {
+// Exported so the B1 test can assert exactly which rules carry the "Not enforced" note.
+export const RULE_COPY: Readonly<Partial<Record<FilterRuleType, RuleCopy>>> = {
   experience_ceiling: {
     name: 'Experience ceiling',
     drops: 'Filters out postings exceeding your maximum target years.',
     threshold: { kind: 'number', label: 'Maximum experience required', suffix: 'years', key: 'max_years' },
+    // cascade.ts:157 skips this rule whenever min_experience_years is null, and no job carries it.
+    notEnforced: "Not enforced: job data doesn't include this.",
   },
   title_blocklist: {
     name: 'Title blocklist',
@@ -93,6 +101,11 @@ const RULE_COPY: Readonly<Partial<Record<FilterRuleType, RuleCopy>>> = {
     name: 'Degree mismatch',
     drops: "Excludes roles strictly requiring a Master's or PhD.",
     threshold: { kind: 'none' },
+    /* cascade.ts:315 skips it whenever requires_advanced_degree is null, and no job carries it.
+       The second sentence is because filtersStore's evaluateJobMatch DOES read the description
+       text, so the Discovered Jobs view can flag a role the screener never drops. */
+    notEnforced:
+      "Not enforced: job data doesn't include this. The Discovered Jobs view checks the description text, but the screener does not.",
   },
   per_company_weekly_cap: {
     name: 'Per-company weekly cap',
@@ -100,6 +113,29 @@ const RULE_COPY: Readonly<Partial<Record<FilterRuleType, RuleCopy>>> = {
     threshold: { kind: 'number', label: 'Max applications per company', suffix: 'per week', key: 'max_per_week' },
   },
 };
+
+/* One rule's name, what it drops, and (B1) whether it can actually be enforced. Exported for the
+   render test; the page renders every row through it, so the test reads the shipped markup. */
+export function RuleText({ ruleType, copy }: { readonly ruleType: FilterRuleType; readonly copy: RuleCopy | undefined }): ReactElement {
+  return (
+    <div>
+      <p className="cascade__name">
+        {copy === undefined ? ruleType : copy.name}
+      </p>
+      <p className="cascade__drops">
+        {copy === undefined
+          ? 'This rule was added to the schema after this page was written.'
+          : copy.drops}
+      </p>
+      {/* A role=note line, styled as a warning, so an enabled-but-dead rule cannot read as working. */}
+      {copy?.notEnforced !== undefined ? (
+        <p className="cascade__drops cascade__not-enforced" role="note">
+          {copy.notEnforced}
+        </p>
+      ) : null}
+    </div>
+  );
+}
 
 export function FiltersPage(): ReactElement {
   const toast = useToast();
@@ -345,16 +381,8 @@ export function FiltersPage(): ReactElement {
                     aria-label={'Enable ' + (copy === undefined ? ruleType : copy.name)}
                   />
 
-                  <div>
-                    <p className="cascade__name">
-                      {copy === undefined ? ruleType : copy.name}
-                    </p>
-                    <p className="cascade__drops">
-                      {copy === undefined
-                        ? 'This rule was added to the schema after this page was written.'
-                        : copy.drops}
-                    </p>
-                  </div>
+                  {/* Extracted so the B1 note is render-tested on the exact markup this row ships. */}
+                  <RuleText ruleType={ruleType} copy={copy} />
 
                   {/* Number Threshold */}
                   {copy !== undefined && copy.threshold.kind === 'number' ? (

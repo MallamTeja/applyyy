@@ -575,12 +575,11 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
     applicationId: application.id,
     jobTitle: job.title,
     companyName: job.company_name,
-    /* The snapshot's own version first, the row's pin only as a fallback. They should
-     * agree; if they do not, the snapshot is what the worker will actually render,
-     * so it is the honest number to show. (The order used to be reversed, contradicting
-     * this very comment; flipped in task 8 v2. The `??` stays because node-run test
-     * fixtures may build a resolved resume without the field.) */
-    masterVersion: resolved.master_version ?? application.master_version,
+    /* The snapshot's own pin, and only that. The `?? application.master_version` fallback was
+     * removed in 7b (2026-10-08): that column is never written (null on every row), and the
+     * page refuses an unpinned resume before it reaches here, so the fallback could only ever
+     * substitute null for a missing pin - a silent answer where a refusal belongs. */
+    masterVersion: resolved.master_version,
     coverage: {
       /* Half of the `tailored_hash` input, and what the Tailor chose to
        * emphasise. UNTRUSTED - these came out of a job description. */
