@@ -473,8 +473,13 @@ function isTailoredProfileShape(value: unknown): value is TailoredProfile {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   /* Indexed as a record for the field checks. */
   const v = value as Record<string, unknown>;
-  /* Schema 1 is the only shape the validator understands. */
-  if (v['schema_version'] !== 1) return false;
+  /* Schema 1 is the only shape the validator understands. An ABSENT marker is also schema 1:
+     the live tailor stores Gemini's parsed output as tailor_refs and never stamps the key
+     (tailorer.ts parseTailoredProfile), so requiring it disabled editing on every real row
+     while every fixture carried it. Only absence is forgiven - any present value other
+     than 1 (2, '1', null) is still a shape this code was not written for. The validator
+     below remains the real check: every ref must still resolve against the pinned master. */
+  if (!(v['schema_version'] === 1 || !('schema_version' in v))) return false;
   /* The validator compares this against the pin; a non-number would compare unequal anyway,
      but refusing here keeps the reason in one place. */
   if (typeof v['master_version'] !== 'number') return false;
