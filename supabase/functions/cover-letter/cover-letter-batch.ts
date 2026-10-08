@@ -32,9 +32,6 @@ export interface RawApplicationRow {
   /** Raw tailor references JSON or null. */
   readonly tailor_refs: unknown;
 
-  /** Master profile version number associated with the application. */
-  readonly master_version: number | null;
-
   /** Embedded job relation metadata or array/null. */
   readonly jobs:
     | {

@@ -32,6 +32,10 @@ const DEFAULT_BATCH_SIZE = 10;
 // Ceiling, so a caller cannot ask for an unsustainable spend.
 const MAX_BATCH_SIZE = 25;
 
+// Marks a failed master_profiles read, so the catch around the batch can tell it from a
+// failed queue read by type instead of by sniffing message text.
+class MasterProfileUnreadable extends Error {}
+
 // One JSON response shape for every exit.
 function jsonResponse(status: number, data: Record<string, unknown>): Response {
   // CORS on every response, or the browser hides the status behind a CORS error.
@@ -121,33 +125,28 @@ Deno.serve(withErrorBoundary("applyy-cover-letter", async (req: Request): Promis
     return jsonResponse(200, { success: true, status: "skipped_disabled", detail: killSwitch.detail });
   }
 
-  // Identity for the letter header comes from the newest master profile.
-  const { data: masterRow, error: masterError } = await db
-    .from("master_profiles")
-    // Only the profile JSON.
-    .select("profile")
-    // Versions are append-only, so the highest is current.
-    .order("version", { ascending: false })
-    // Just that one.
-    .limit(1)
-    // Zero rows is a state, not an error.
-    .maybeSingle();
-  // A failed read must not read as "no profile".
-  if (masterError) {
-    // Recorded with the reason.
-    await closeRun({ status: "failed", error_detail: masterError.message.slice(0, 500) });
-    // Retryable.
-    return jsonResponse(503, { success: false, error: "master_profile_unreadable" });
-  }
-  // No profile: there is no truthful letter to write.
-  if (!masterRow) {
-    // Recorded so the health page names the missing prerequisite.
-    await closeRun({ status: "failed", error_detail: "master_profiles is empty" });
-    // A state the user must fix, not a transient fault.
-    return jsonResponse(409, { success: false, error: "no_master_profile" });
+  // Identity for each letter comes from the master version THAT row was tailored against,
+  // loaded per batch by run.ts once the pins are known. The old newest-master read (and its
+  // 409 no_master_profile) is gone: a master uploaded after tailoring put an identity the
+  // resume never came from into the letter. Same fix as the auditor (c209921).
+  async function loadMasters(versions: readonly number[]): Promise<ReadonlyMap<number, MasterProfile>> {
+    // Filled from the query; a version the database lacks stays absent and that row fails closed.
+    const byVersion = new Map<number, MasterProfile>();
+    // Nothing pinned: skip the round trip, `.in()` with an empty list is pointless.
+    if (versions.length === 0) return byVersion;
+    // Exactly the pinned versions, one query. RLS scopes master_profiles to the signed-in
+    // owner, and versions are immutable, so a version number names one fixed profile.
+    const { data, error } = await db.from("master_profiles").select("profile, version").in("version", [...versions]);
+    // Thrown as its own type so the catch below answers master_profile_unreadable, not
+    // queue_unreadable — and never treats a failed read as "no such version".
+    if (error) throw new MasterProfileUnreadable(error.message);
+    // Index by version so each row resolves its own pin with an exact lookup.
+    for (const m of data ?? []) byVersion.set(m.version as number, m.profile as MasterProfile);
+    // Stored JSON is unchecked; the prompt builder reads it defensively.
+    return byVersion;
   }
 
-  // The batch; throws only when the queue read fails.
+  // The batch; throws only when the queue read or the master load fails.
   let result;
   try {
     // Adapts the pool client to the injected seam run.ts expects.
@@ -167,14 +166,21 @@ Deno.serve(withErrorBoundary("applyy-cover-letter", async (req: Request): Promis
         // The schema-constrained reply is in the first candidate's first part.
         return { ok: true, text: outcome.data.candidates?.[0]?.content?.parts?.[0]?.text };
       },
-      // Stored JSON is unchecked; the prompt builder reads it defensively.
-      masterRow.profile as MasterProfile,
+      // Pinned-master loader, defined above.
+      loadMasters,
       // Validated above.
       resolveBatchSize(new URL(req.url).searchParams.get("limit")),
     );
   } catch (err) {
-    // The queue could not be read: a failed run, not an empty one.
+    // Either read failed: a failed run, not an empty one.
     const detail = err instanceof Error ? err.message : String(err);
+    // The master read keeps its own error name, as the pre-pin version answered it.
+    if (err instanceof MasterProfileUnreadable) {
+      // Recorded with the reason.
+      await closeRun({ status: "failed", error_detail: detail.slice(0, 500) });
+      // Retryable.
+      return jsonResponse(503, { success: false, error: "master_profile_unreadable" });
+    }
     // Recorded with the reason.
     await closeRun({ status: "failed", error_detail: detail.slice(0, 500) });
     // Retryable.

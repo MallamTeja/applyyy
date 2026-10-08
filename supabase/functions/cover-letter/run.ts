@@ -19,6 +19,9 @@ import { planCoverLetterBatch, type RawApplicationRow } from "./cover-letter-bat
 import { parseCoverLetterReply } from "./parse-letter.ts";
 // The master profile supplies identity for the letter header.
 import type { MasterProfile } from "../_shared/contracts/shared-types.ts";
+// The auditor's pin resolver, reused rather than re-derived so the two agents cannot
+// disagree about what a valid pin is; its closed union has no "use the latest" branch.
+import { collectPins, resolvePinnedMaster } from "../_shared/audit/pinned-master.ts";
 
 // Every status at which a tailored resume exists and nothing has been sent yet. A letter
 // is useful from `tailored` until a human approves; reading across all four (rather than
@@ -65,6 +68,20 @@ export type GenerateLetter = (prompt: {
   responseSchema: Record<string, unknown>;
 }) => Promise<{ ok: true; text: unknown } | { ok: false; reason: string }>;
 
+// Loads exactly the given master versions, keyed by version. Injected (instead of one
+// `master` argument) because the right master depends on each row's pin, which is only
+// known after the queue read. A version absent from the map is reported per row; a
+// failed read must THROW, so it fails the run instead of looking like "no such version".
+export type LoadMasters = (versions: readonly number[]) => Promise<ReadonlyMap<number, MasterProfile>>;
+
+// The pin the tailor's validator stamped into the resolved resume (validator.ts:776) —
+// the same source the auditor reads. Not `applications.master_version`: that column only
+// becomes truthful after a migration that has not been pushed.
+function pinOf(resume: unknown): unknown {
+  // Optional chaining: a missing key yields undefined, which resolves to "unpinned".
+  return (resume as { master_version?: unknown } | null)?.master_version;
+}
+
 // What a run did, for agent_runs and the HTTP response.
 export interface CoverLetterRunResult {
   // Rows the queue read returned.
@@ -79,15 +96,16 @@ export interface CoverLetterRunResult {
   readonly failures: ReadonlyArray<{ applicationId: string; error: string }>;
 }
 
-// Runs one batch. Throws only if the queue read fails — that is a failed run, and the
-// caller records it; every per-row problem is collected instead.
+// Runs one batch. Throws only if the queue read or the master load fails — that is a
+// failed run, and the caller records it; every per-row problem is collected instead.
 export async function runCoverLetterBatch(
   // RLS-scoped client.
   db: CoverLetterClient,
   // The model.
   generate: GenerateLetter,
-  // Identity for the letter header.
-  master: MasterProfile,
+  // Identity for the letter header, by pinned version — never "the newest master",
+  // which would put an identity the resume was not tailored from into the letter.
+  loadMasters: LoadMasters,
   // Already validated by the caller's resolveBatchSize.
   batchSize: number,
   // Injected so a test can pin the timestamp.
@@ -96,8 +114,11 @@ export async function runCoverLetterBatch(
   // The queue, oldest first so no row waits behind newer ones forever.
   const { data: rows, error } = await db
     .from("applications")
-    // Only what the planner and prompt read; job text comes through the FK embed.
-    .select("id, status, tailored_profile, tailor_refs, master_version, jobs (title, company_name, description_raw)")
+    // Only what the planner and prompt read; job text comes through the FK embed. The
+    // `master_version` COLUMN is deliberately not selected: it was never read here, and
+    // the pin that is read lives inside `tailored_profile` (see pinOf) — selecting a
+    // column that looks like the pin invites the next reader to use the wrong one.
+    .select("id, status, tailored_profile, tailor_refs, jobs (title, company_name, description_raw)")
     // See COVER_LETTER_STATUSES.
     .in("status", COVER_LETTER_STATUSES)
     // Excluded in the DATABASE, not by the planner: the three live `awaiting_approval`
@@ -117,6 +138,12 @@ export async function runCoverLetterBatch(
   // ponytail: a refused row stays queued and re-read every run; if refusals ever fill a
   // batch, filter jobs.title/company_name in the query above.
   const plan = planCoverLetterBatch((rows ?? []) as RawApplicationRow[]);
+  // Distinct, shape-checked pins of the rows that could spend quota; invalid or absent
+  // pins are dropped here and reported per row by resolvePinnedMaster below.
+  const pins = collectPins(plan.eligible.map((job) => ({ master_version: pinOf(job.resume) })));
+  // One load per batch, exactly those versions. Not caught: a failed read is a failed
+  // run, never a reason to write letters from some other master.
+  const mastersByVersion = await loadMasters(pins);
   // Counters for the result.
   let generated = 0;
   // Every attempt counts, successful or not.
@@ -127,8 +154,18 @@ export async function runCoverLetterBatch(
   // Sequential: the key pool is shared and paced.
   for (const job of plan.eligible) {
     try {
+      // The master this resume was TAILORED against; anything but `pinned` fails closed.
+      const pinned = resolvePinnedMaster(pinOf(job.resume), mastersByVersion);
+      // No honest identity source: no letter and no Gemini spend. The row stays queued
+      // (cover-letter never moves status), and the reason is named so the run says why.
+      if (pinned.kind !== "pinned") {
+        // `master_pin_<kind>` mirrors the resolver's own vocabulary, one reason per kind.
+        failures.push({ applicationId: job.applicationId, error: `master_pin_${pinned.kind}` });
+        // Next row; the rest of the batch is unaffected.
+        continue;
+      }
       // Fenced prompt; can throw on a malformed stored resume, caught below.
-      const prompt = buildCoverLetterPrompt({ master, resume: job.resume, job: job.job });
+      const prompt = buildCoverLetterPrompt({ master: pinned.master, resume: job.resume, job: job.job });
       // Counted before the await so a thrown transport error is still counted.
       geminiCalls += 1;
       // The model call.
