@@ -5,7 +5,8 @@
  * failed save can simply keep the old object because nothing was mutated in place.
  *
  * R0 IS THE POINT OF THIS FILE. An edit writes a bullet's `text` or the top-level
- * `summary` string and nothing else. `master_text` is the Auditor's and the diff's
+ * `summary` string, or (T3) appends a skill built field for field from a pinned-master
+ * node, and nothing else. `master_text` is the Auditor's and the diff's
  * ground truth (supabase/functions/_shared/audit/detector.ts:404); writing it would
  * make an operator's wording read back as traced-from-master. Every write below is a
  * spread of the existing node with exactly one field replaced, so there is no code
@@ -25,10 +26,17 @@ import type { EditTarget } from './diffModel';
    original with any other code would let "original" drift from what the tailor
    actually produced. Safe to bundle: pure, with type-only imports. */
 import { validateTailoredProfile } from '../../../../../supabase/functions/_shared/tailor/validator.ts';
+/* THE PRODUCER'S keyword rule (T3), the same relative-path import diffAdapter.ts uses: the tailor
+   chose the JD keywords with this word-bounded matcher, so deciding which master skill supplies a
+   keyword with any looser rule ("Go" inside "Google") would offer the wrong skill. Pure, no imports. */
+import { keywordAppearsIn } from '../../../../../supabase/functions/_shared/tailor/jd-keywords.ts';
 
 /* The bullet node, derived from ResolvedResume rather than imported, because the
    contract seam re-exports only ResolvedResume and widening it is not this file's call. */
 type ResolvedBullet = ResolvedResume['experience'][number]['bullets'][number];
+/* The resolved skill node {ref, name, category}, derived for the same reason. Exported because
+   addableSkillFor returns one and its callers (page, tests) need to name the type. */
+export type ResolvedSkill = ResolvedResume['skills'][number];
 
 /* Every section whose entries carry `bullets`. Listed once so locate, remove and
    reset cannot disagree about where a bullet may live. */
@@ -81,15 +89,34 @@ export function rebuildOriginal(tailorRefs: unknown, master: MasterProfile, vers
   }
 }
 
-/* Stable key for one edit target, for React keys and per-line saving state. A bullet's
-   ref is already unique across the resume; the summary has no ref, so it gets a fixed one. */
+/* Stable key for one edit target, for React keys, per-line saving state and p_detail.edited_refs.
+   A bullet's ref is already unique across the resume; the summary and the skills list have no
+   ref of their own, so each gets a fixed key that no NodeId is expected to take. */
 export function editKey(t: EditTarget): string {
-  /* Two arms, both explicit, so a third arm added later fails to typecheck here. */
-  return t.kind === 'bullet' ? t.ref : 'summary';
+  /* A switch with no default: the `never` check below makes a fourth arm fail typecheck here. */
+  switch (t.kind) {
+    /* The bullet's own ref. */
+    case 'bullet':
+      return t.ref;
+    /* The one summary. */
+    case 'summary':
+      return 'summary';
+    /* The whole skills list (T3), which the page records as one edited line. */
+    case 'skills':
+      return 'skills';
+  }
+  /* Unreachable while the union has three arms; a new arm turns this into a compile error. */
+  const unhandled: never = t;
+  /* Kept for the type check above; returned so the function still has a string at runtime. */
+  return String(unhandled);
 }
 
 /* Replace one bullet's text, or the summary, with the operator's wording. */
 export function applyTextEdit(current: ResolvedResume, target: EditTarget, text: string): EditOutcome {
+  /* T3: the skills list takes no typed text, ever. A skill is a ref into the master, so a typed
+     skill would be an invented one - the exact claim the auditor exists to stop. Refused before
+     anything else, so no later branch can treat the skills target as a bullet. */
+  if (target.kind === 'skills') return { ok: false, reason: 'Skills are chosen from your master profile, not typed. Use Add or Remove.' };
   /* Leading/trailing whitespace is never intentional on a resume line and would make an
      unchanged line compare as edited. */
   const trimmed = text.trim();
@@ -155,6 +182,18 @@ export function resetTarget(current: ResolvedResume, original: ResolvedResume, t
     return { ok: true, resume: { ...current, summary: original.summary }, before: current.summary, after: original.summary };
   }
 
+  /* T3: the skills list goes back to EXACTLY the tailor's list - every added skill dropped, the
+     tailor's own in the tailor's order. Copying the validator's array (by reference) is restoring,
+     not assigning, so every skill arrives exactly as the validator resolved it from the master. */
+  if (target.kind === 'skills') {
+    /* Already the tailor's list: no event for a no-op. */
+    if (deepEqual(current.skills, original.skills)) return { ok: false, reason: 'Nothing to reset.' };
+    /* Only `skills` replaced; every other field carried by reference. */
+    const resume: ResolvedResume = { ...current, skills: original.skills };
+    /* before/after as the printed lists, so the event alone shows what the reset undid. */
+    return { ok: true, resume, before: skillNames(current.skills), after: skillNames(original.skills) };
+  }
+
   /* Where the bullet lived in the tailor's version - the only source of its text. */
   const from = locateBullet(original, target.ref);
   /* A ref the tailor never produced has no original to restore. */
@@ -211,6 +250,81 @@ export function resetTarget(current: ResolvedResume, original: ResolvedResume, t
   ]);
   /* before is null: the bullet was not on the resume. */
   return { ok: true, resume, before: null, after: originalBullet.text };
+}
+
+/* --- Skills (T3, Option A, 2026-10-08) ------------------------------------------
+ *
+ * A resume skill is ONLY a ref into the master: ResolvedSkill {ref, name, category}, with
+ * name and category copied from the master by the validator. So the one honest skills edit
+ * is a SELECTION change - put an unselected master skill on, or take an added one back off.
+ * Every skill these functions emit is built from a master node, field for field; there is no
+ * parameter through which a caller could supply a name or a category. */
+
+/* The unselected master skill that would supply a missing JD keyword, or null if the master
+ * has none. Matching is the TAILOR's word-bounded rule in both directions - keyword inside the
+ * skill name ("React" in "React Native") or name inside the keyword ("Kafka" in "Apache Kafka"),
+ * never a raw substring ("SQL" does NOT match "PostgreSQL") - plus a plain case-insensitive
+ * equality so "go" still finds a master skill spelled "Go". Deterministic:
+ * the first qualifying skill in MASTER order, so the same row always offers the same skill. */
+export function addableSkillFor(keyword: string, resume: ResolvedResume, master: MasterProfile): ResolvedSkill | null {
+  /* A blank keyword would match vacuously; it is never a reason to offer a skill. */
+  if (keyword.trim() === '') return null;
+  /* Refs already printed, so a skill the resume has is never offered twice. */
+  const onResume = new Set(resume.skills.map((skill) => skill.ref));
+  /* Lowercased once for the equality test below. */
+  const lowered = keyword.trim().toLowerCase();
+  /* Master order is the tie-break, so `find` (first hit) is the whole rule. */
+  const hit = master.skills.find(
+    (skill) =>
+      /* Already on the resume: adding it again would be a duplicate the validator refuses. */
+      !onResume.has(skill.id) &&
+      /* Same word, whatever the case. */
+      (skill.name.trim().toLowerCase() === lowered ||
+        /* The keyword, by its own (possibly case-sensitive) producer rule, inside the name. */
+        keywordAppearsIn(keyword, skill.name) ||
+        /* The name, as a bounded literal, inside the keyword. Review fix (2026-10-08): only for a
+           name of 3+ characters and a keyword with no '+' or '#'. The word boundary is "not a
+           letter or digit", so "C" was found in "C++" and "C#" (the '+'/'#' ends the word) and
+           adding "C" would hide the offer while "C++" stays missing. Short names ("Go", "R")
+           still match by the equality and forward branches above. */
+        (skill.name.trim().length >= 3 && !/[+#]/.test(keyword) && keywordAppearsIn(skill.name, keyword))),
+  );
+  /* No master skill supplies it: the UI says "Not in your master profile". */
+  if (hit === undefined) return null;
+  /* Exactly the validator's resolved shape, every field from the master node. */
+  return { ref: hit.id, name: hit.name, category: hit.category };
+}
+
+/* Append one unselected master skill to the resume. Refuses anything that is not a master skill
+ * or is already printed, so the only skills this can produce are ones the master holds. */
+export function addSkill(resume: ResolvedResume, master: MasterProfile, skillRef: string): EditOutcome {
+  /* The master node by id; the caller supplies ONLY the ref, never the name. */
+  const node = master.skills.find((skill) => skill.id === skillRef);
+  /* Not a master skill: adding it would be inventing one. */
+  if (node === undefined) return { ok: false, reason: 'That skill is not in your master profile, so it cannot be added.' };
+  /* Already printed: a duplicate is no change, and the validator would refuse it. */
+  if (resume.skills.some((skill) => skill.ref === skillRef)) return { ok: false, reason: 'That skill is already on this resume.' };
+  /* Built field for field from the master, the same shape validator.ts resolves. */
+  const added: ResolvedSkill = { ref: node.id, name: node.name, category: node.category };
+  /* A NEW array and a NEW resume; the tailor's skills keep their order, the addition goes last. */
+  return { ok: true, resume: { ...resume, skills: [...resume.skills, added] }, before: null, after: node.name };
+}
+
+/* Take back one skill the OPERATOR added. The tailor's own choices are refused: removing them is
+ * a different decision (it changes what the tailor argued for) and is out of scope; Reset is the
+ * path back to the tailor's list. */
+export function removeAddedSkill(resume: ResolvedResume, original: ResolvedResume, skillRef: string): EditOutcome {
+  /* The tailor chose it: not this action's to remove. */
+  if (original.skills.some((skill) => skill.ref === skillRef)) {
+    /* Named so the operator knows why the button is not there for this one. */
+    return { ok: false, reason: "That skill was chosen by the tailor; only skills you added can be removed." };
+  }
+  /* The printed skill, for the event's `before`. */
+  const old = resume.skills.find((skill) => skill.ref === skillRef);
+  /* Not on the resume: nothing to remove, and "removed" must never be shown for a no-op. */
+  if (old === undefined) return { ok: false, reason: 'That skill is no longer on this resume.' };
+  /* A new array without it; every other skill keeps its place. */
+  return { ok: true, resume: { ...resume, skills: resume.skills.filter((skill) => skill.ref !== skillRef) }, before: old.name, after: null };
 }
 
 /* The gate the save path runs before writing tailored_profile. Checks the shape the
@@ -290,8 +404,11 @@ export function masterFromRow(row: unknown): MasterProfile | null {
   const summary = row['summary'];
   /* Null is a legal "no summary"; anything else must carry a string id and text. */
   if (summary !== null && !(isPlainObject(summary) && typeof summary['id'] === 'string' && typeof summary['text'] === 'string')) return null;
-  /* skillsLine maps names and the validator indexes ids, so each skill needs both as strings. */
-  if (!isArrayOf(row['skills'], (s) => typeof s['id'] === 'string' && typeof s['name'] === 'string')) return null;
+  /* skillsLine maps names and the validator indexes ids, so each skill needs both as strings.
+     Review fix (2026-10-08): category too. addSkill and the R0 check copy it into {ref, name,
+     category} and deepEqual it against the stored skill; a missing category made every row
+     load as "edited" (Bucket B) and refused every add, so the row is refused here instead. */
+  if (!isArrayOf(row['skills'], (s) => typeof s['id'] === 'string' && typeof s['name'] === 'string' && typeof s['category'] === 'string')) return null;
   /* Required array; not dereferenced here, but a non-array would break the next reader that is. */
   if (!Array.isArray(row['links'])) return null;
   /* All five bullet-bearing sections: the validator walks every one with `for..of parent.bullets`. */
@@ -304,27 +421,43 @@ export function masterFromRow(row: unknown): MasterProfile | null {
 }
 
 /* R0 AT THE WRITE BOUNDARY. True only if `next` differs from `previous` in bullet `text`,
- * the `summary` string, and bullets removed or re-inserted by this page - nothing else.
+ * the `summary` string, bullets removed or re-inserted by this page, and (T3) master skills
+ * added after the tailor's own - nothing else.
  *
  * The functions above keep R0 by construction (spread, replace one field). That holds
  * only for callers that use them. The save path calls this just before writing, so a
  * resume built any other way - a future caller, a bug, a hand-crafted object - is refused
  * before it can reach tailored_profile. Two independent controls, answering two different
  * questions: "did we build it right" and "is what we are about to write still R0-clean". */
-export function onlyTextChanged(previous: ResolvedResume, next: ResolvedResume, original: ResolvedResume): boolean {
+export function onlyTextChanged(
+  /* The resume the edit was computed from (what is stored now). */
+  previous: ResolvedResume,
+  /* The candidate about to be written. */
+  next: ResolvedResume,
+  /* The tailor's version, rebuilt by the validator: ground truth for refs and master_text. */
+  original: ResolvedResume,
+  /* T3: the PINNED master, the only source an added skill may come from. Required, so no caller
+     can forget it and silently fall back to "skills may not change" or, worse, "any skill". */
+  master: MasterProfile,
+): boolean {
   /* Read as records so EVERY top-level key is checked, including ones added to the type later. */
   const prev = previous as unknown as Record<string, unknown>;
   /* Same view of the candidate. */
   const nxt = next as unknown as Record<string, unknown>;
-  /* Keys this page may touch at the top level; every other key must be unchanged. */
-  const free = new Set<string>(['summary', ...BULLET_SECTIONS]);
+  /* Keys this page may touch at the top level; every other key must be unchanged. `skills` is
+     here since T3 and checked by its own rule just below, never left unchecked. */
+  const free = new Set<string>(['summary', 'skills', ...BULLET_SECTIONS]);
   /* Union of both key sets, so a key ADDED to next is checked as well as a changed one. */
   for (const key of new Set([...Object.keys(prev), ...Object.keys(nxt)])) {
-    /* schema_version, master_version, identity, section_order, skills, and anything else. */
+    /* schema_version, master_version, identity, section_order, and anything else. */
     if (!free.has(key) && !deepEqual(prev[key], nxt[key])) return false;
   }
   /* The summary is free text, but it must still BE text or null - not an object smuggled in. */
   if (next.summary !== null && typeof next.summary !== 'string') return false;
+  /* Skills: unchanged from previous is always fine (that is the pre-T3 rule, so an unrelated
+     text edit on a row is never blocked by its skills); a CHANGED list must be the tailor's list
+     plus master skills only. */
+  if (!deepEqual(prev['skills'], nxt['skills']) && !skillsAreOriginalPlusMaster(nxt['skills'], original, master)) return false;
 
   /* The validator's bullets by ref, WITH their home: the only bullets this page can emit, and
      the only place each may sit. The parent is part of the claim - the same bullet under
@@ -416,6 +549,75 @@ export function onlyTextChanged(previous: ResolvedResume, next: ResolvedResume, 
 }
 
 /* --- internals -------------------------------------------------------------- */
+
+/* T3's save-boundary rule for a CHANGED skills list. True only when:
+ *   1. it is an array of plain objects;
+ *   2. every one of the tailor's skills is present, deep-equal to the validator's node, and in
+ *      the tailor's relative order (a subsequence walk) - none dropped, none altered, none moved
+ *      past another;
+ *   3. every other entry deep-equals {ref, name, category} of a master skill, built from the
+ *      master node - so no invented skill, and no real ref wearing an edited name or category;
+ *   4. no ref appears twice.
+ * Positive shape throughout: each entry must be proven to be one of the two allowed kinds. */
+function skillsAreOriginalPlusMaster(candidate: unknown, original: ResolvedResume, master: MasterProfile): boolean {
+  /* Not an array: not a skills list at all. */
+  if (!Array.isArray(candidate)) return false;
+  /* A missing master (an old 3-argument caller at runtime) can vouch for nothing: fail closed. */
+  if (!isPlainObject(master) || !Array.isArray(master.skills)) return false;
+  /* The master's skills by id, each as the exact node an add would build. */
+  const fromMaster = new Map<string, ResolvedSkill>(
+    /* Field for field, the same construction addSkill uses, so "deep-equal" means "built by addSkill". */
+    master.skills.map((skill) => [skill.id, { ref: skill.id, name: skill.name, category: skill.category }]),
+  );
+  /* The tailor's skills by ref, with their position, so order can be enforced. */
+  const tailorIndex = new Map<string, number>(original.skills.map((skill, index) => [skill.ref, index]));
+  /* Refs seen so far, for the duplicate check. */
+  const seen = new Set<string>();
+  /* How many of the tailor's skills have been seen, which must reach all of them by the end. */
+  let tailorSeen = 0;
+  /* The last tailor skill's position; strictly increasing means the tailor's order is kept. */
+  let lastTailorIndex = -1;
+  /* Every entry, proven to be either a tailor skill or a master addition. */
+  for (const entry of candidate as unknown[]) {
+    /* Each skill must be an object before its ref can be read. */
+    if (!isPlainObject(entry)) return false;
+    /* The ref, read defensively: `next` is untrusted at this boundary. */
+    const ref = entry['ref'];
+    /* A skill without a string ref is not a skill. */
+    if (typeof ref !== 'string') return false;
+    /* Twice on one resume is a duplicate the validator itself would refuse. */
+    if (seen.has(ref)) return false;
+    /* Remember it. */
+    seen.add(ref);
+    /* Where the tailor put it, if the tailor chose it. */
+    const at = tailorIndex.get(ref);
+    /* A tailor skill: must be the validator's node verbatim, in the tailor's order. */
+    if (at !== undefined) {
+      /* Any field changed (a renamed skill) is outside R0. */
+      if (!deepEqual(entry, original.skills[at])) return false;
+      /* Behind an earlier tailor skill is a reorder, not an addition. */
+      if (at <= lastTailorIndex) return false;
+      /* Advance the floor. */
+      lastTailorIndex = at;
+      /* Count it toward "all of the tailor's skills are still here". */
+      tailorSeen += 1;
+      /* Proven; next entry. */
+      continue;
+    }
+    /* Otherwise it must be a master skill, exactly as the master holds it. */
+    const node = fromMaster.get(ref);
+    /* Not in the master: an invented skill. Or in it with any other field: a relabelled one. */
+    if (node === undefined || !deepEqual(entry, node)) return false;
+  }
+  /* Every one of the tailor's skills is still printed; dropping one is not this page's edit. */
+  return tailorSeen === original.skills.length;
+}
+
+/* A skills list as it prints, for an event's before/after: names in order, comma-separated. */
+function skillNames(skills: readonly ResolvedSkill[]): string {
+  /* The same separator the diff's skills line uses, so the log reads like the screen. */
+  return skills.map((skill) => skill.name).join(', ');
+}
 
 /* Structural equality for JSON-shaped values. Key order is ignored, because a resume read
    back from jsonb comes out with Postgres's key order, not the order we spread in - a

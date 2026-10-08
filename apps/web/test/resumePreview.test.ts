@@ -164,7 +164,8 @@ describe('the preview frame cannot run scripts', () => {
     assert.ok(sandboxes.length > 0, 'no sandbox attribute found');
     // None grants scripts.
     for (const value of sandboxes) assert.doesNotMatch(value, /allow-scripts/);
-    // And the frame content is srcdoc, not a URL that could load something else.
-    assert.match(frame, /srcDoc=\{preview\.html\}/);
+    // And the frame content is srcdoc, not a URL that could load something else. The preview
+    // html now passes through the screen-only zoom wrapper first; it is still inline markup.
+    assert.match(frame, /srcDoc=\{zoomedPreviewHtml\(preview\.html, zoom\)\}/);
   });
 });

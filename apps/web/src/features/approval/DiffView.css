@@ -241,6 +241,66 @@
   border: 1px dashed var(--rule);
 }
 
+/* T3: a missing keyword the master can supply. Same missing look (it IS still missing until the
+   operator adds it), plus the signals that say "this one is a control". */
+.kw-chip--addable {
+  /* A button inherits no chip font by default; the chip's own font keeps the row uniform. */
+  font: inherit;
+  /* Re-applied after font: inherit, so it matches the other chips' size and face. */
+  font-size: var(--size-xs);
+  /* Same machine face as the other chips. */
+  font-family: var(--font-machine);
+  /* The pointer is the mouse user's first hint that this chip, unlike its neighbours, acts. */
+  cursor: pointer;
+}
+
+/* Hover/focus: the accent border, the colour of "you can act here" on this screen. The global
+   focus ring (base.css) still draws; this only adds to it. */
+.kw-chip--addable:hover:not(:disabled),
+.kw-chip--addable:focus-visible {
+  /* Solid accent replaces the dashed rule, so the change survives greyscale. */
+  border: 1px solid var(--accent);
+  /* Accent ink, readable in both themes. */
+  color: var(--accent-strong);
+}
+
+/* The action half of an addable chip ("＋ Add SQL"), drawn as a small accent pill so the chip
+   reads as a button at rest, not only on hover; the "✕ SQL" half keeps the plain missing look. */
+.kw-chip__add {
+  /* Pill shape on the inline text, without breaking the chip's single line. */
+  display: inline-block;
+  /* Tight padding: a pill inside a chip, not a second chip. */
+  padding: 0 5px;
+  /* Separated from the keyword it acts on. */
+  margin-left: 2px;
+  /* Fully rounded: the shape that says "press me" on this screen. */
+  border-radius: 999px;
+  /* Accent tokens already flip per theme, so no theme-specific rule is needed. */
+  border: 1px solid var(--accent);
+  /* Soft accent fill, the same wash the operator's own edits use. */
+  background: var(--accent-subtle);
+  /* Strong accent ink, readable on the subtle wash in both themes. */
+  color: var(--accent-strong);
+  /* A touch heavier than the keyword, so the verb is what the eye lands on. */
+  font-weight: 600;
+}
+
+/* Mid-save the chip waits like every other control. */
+.kw-chip--addable:disabled {
+  /* The cursor says so before the click does. */
+  cursor: not-allowed;
+  /* Visibly inert. */
+  opacity: 0.6;
+}
+
+/* The one link out for keywords the master lacks. */
+.coverage__master-link {
+  /* Separated from the chips it refers to. */
+  margin-top: var(--gap-2);
+  /* Small: a pointer, not a call to action competing with the score. */
+  font-size: var(--size-xs);
+}
+
 /* --- The fabrication alert -------------------------------------------- */
 
 /* The ONLY dark surface in the application. Its scarcity is the signal: a dark
@@ -749,6 +809,55 @@ html:has(.diff__actions) {
   border-bottom: 1px dashed var(--accent);
 }
 
+/* T3: the skills the operator added, one row each, under the skills line. */
+.line__added-skills {
+  /* A wrapping row of chips, not a bulleted list. */
+  display: flex;
+  /* Long skill lists wrap rather than overflow the pane. */
+  flex-wrap: wrap;
+  /* Separated so neither Remove is mis-clicked. */
+  gap: var(--gap-1);
+  /* Away from the skills text above. */
+  margin: var(--gap-2) 0 0;
+  /* No bullets or indent: these are chips. */
+  padding: 0;
+  list-style: none;
+}
+
+/* One added skill: the same accent treatment as an edited run, never the traced sage (R1). */
+.line__added-skill {
+  /* Name, tag and button on one line. */
+  display: inline-flex;
+  /* Vertically centred against the small button. */
+  align-items: center;
+  /* Breathing room between the three parts. */
+  gap: var(--gap-1);
+  /* Chip size, like the keyword chips above. */
+  font-size: var(--size-xs);
+  /* Same hair of padding as the keyword chips. */
+  padding: 2px 6px;
+  /* Chip corners. */
+  border-radius: var(--radius-sm);
+  /* Accent wash: "you did this", matching .run--edited. */
+  background: var(--accent-subtle);
+  /* Dashed accent border, the non-colour signal it is not master-traced. */
+  border: 1px dashed var(--accent);
+}
+
+/* "added by you": the provenance, in the edited accent ink. */
+.line__added-skill-tag {
+  /* Readable accent ink. */
+  color: var(--accent-strong);
+  /* Secondary to the skill name. */
+  font-style: italic;
+}
+
+/* The Remove button sits inside the chip, so it drops the auto margin it has in the header. */
+.line__added-skill .line__edit-trigger {
+  /* Inline with the name, not pushed to the far edge. */
+  margin-left: 0;
+}
+
 /* A removed bullet: kept on screen, struck and muted, so Reset has something to point at. */
 .line__text--removed {
   /* Muted: it will not be submitted. */
@@ -792,7 +901,7 @@ html:has(.diff__actions) {
   color: inherit;
 }
 
-/* "skills can't be edited yet" and the summary hint: quiet facts, not controls. */
+/* Quiet facts beside controls (the summary hint on the alarm band): information, not controls. */
 .line__edit-unavailable,
 .alarm__hint {
   /* Small, beside the controls they stand in for. */
@@ -924,4 +1033,48 @@ html:has(.diff__actions) {
   /* Preserves the paragraph breaks that survived tag-stripping, without
      re-introducing markup. */
   white-space: pre-wrap;
+}
+
+/* --- Click-to-edit tailored text (2026-10-08) ---------------------------
+   The tailored text itself is the edit trigger. It must still READ as resume text, so the
+   button sheds all of its chrome and inherits the paragraph's type; only hover and focus
+   reveal that it is interactive. Tokens only, so both themes follow without [data-theme]. */
+.line__text-button {
+  /* Block and full width: the whole line is the hit target, not just the words' boxes. */
+  display: block;
+  /* Fills the pane so a click in the gap after a short line still opens the editor. */
+  width: 100%;
+  /* Buttons centre text by default; resume prose reads from the left. */
+  text-align: left;
+  /* Same family, size, weight and leading as the surrounding .line__text paragraph. */
+  font: inherit;
+  /* Ink comes from the paragraph, not the UA button colour. */
+  color: inherit;
+  /* No UA fill: the text sits on the sheet like every other line. */
+  background: transparent;
+  /* No UA border: a box around every line would turn the resume into a form. */
+  border: 0;
+  /* A hair of room so the hover wash does not touch the glyphs. */
+  padding: 0.1em 0.2em;
+  /* Pulls the padding back out so the text aligns with the master pane's text. */
+  margin: 0 -0.2em;
+  /* Matches the other small controls' rounding. */
+  border-radius: var(--radius-control);
+  /* An I-beam: this opens a text editor, not a navigation or a toggle. */
+  cursor: text;
+  /* Gentle wash on hover, quick enough not to lag the pointer. */
+  transition: background-color 120ms ease;
+  /* Deliberately NO outline/box-shadow rule: base.css's global :focus-visible ring must apply. */
+}
+
+/* Hover cue, only when clicking would actually do something. */
+.line__text-button:hover:not(:disabled) {
+  /* The accent wash already means "you can act here / you did this" on this screen. */
+  background: var(--accent-subtle);
+}
+
+/* Mid-save: still readable text, but it says it will not respond. */
+.line__text-button:disabled {
+  /* Same signal as the other locked controls. */
+  cursor: not-allowed;
 }

@@ -13,12 +13,14 @@
  * Kept out of the page so the guards below sit in one function every edit crosses, and so a
  * test can drive it with a fake client instead of a browser. */
 
-import type { ResolvedResume } from '../../data/contract';
+import type { MasterProfile, ResolvedResume } from '../../data/contract';
 // Builder-1's pure module: one definition of "a resume", and R0 enforced at the write boundary.
 import { deepEqual, isResumeShape, onlyTextChanged } from './tailoredEdits';
 
-/* Closed union, so the event log can only ever name one of three operator actions. */
-export type EditEventKind = 'resume_edit' | 'resume_remove' | 'resume_reset';
+/* Closed union, so the event log can only ever name one of five operator actions. The two skill
+   kinds (T3) record a selection change: the event ref is the MASTER skill's id and before/after
+   carry its name, so the log alone says which skill went on or came off. */
+export type EditEventKind = 'resume_edit' | 'resume_remove' | 'resume_reset' | 'resume_add_skill' | 'resume_remove_skill';
 
 /* What the database holds NOW, read back after an unknown or refused write. */
 export interface StoredRow {
@@ -206,6 +208,9 @@ type SaveArgs = {
   previous: ResolvedResume;
   // The tailor's own version, the ground truth for refs and master_text.
   original: ResolvedResume;
+  // T3: the PINNED master, the only source an added skill may come from; required so the R0
+  // check below can never run without it.
+  master: MasterProfile;
   // The stamp the page last saw; the write lands only if nobody changed the row since.
   expectedUpdatedAt: string;
   // What the operator did, for the append-only log.
@@ -271,9 +276,9 @@ export async function saveTailoredEdit(
   if (!isResumeShape(args.resume)) {
     return { ok: false, reason: 'invalid_resume_shape', message: 'the edited resume was malformed, so nothing was sent.' };
   }
-  /* R0 at the boundary (fix 5): only bullet text, the summary and removed/restored bullets may
-     differ. A change to master_text would make an edit read as traced, so it never leaves here. */
-  if (!onlyTextChanged(args.previous, args.resume, args.original)) {
+  /* R0 at the boundary (fix 5): only bullet text, the summary, removed/restored bullets and (T3)
+     master skills added after the tailor's own may differ. A change to master_text would make an edit read as traced, so it never leaves here. */
+  if (!onlyTextChanged(args.previous, args.resume, args.original, args.master)) {
     return { ok: false, reason: 'not_text_only', message: 'the edit changed more than text, so nothing was sent.' };
   }
 

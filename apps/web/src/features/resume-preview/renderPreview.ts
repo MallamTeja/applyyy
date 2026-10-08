@@ -60,6 +60,51 @@ export function buildResumePreview(resume: ResolvedResume, documentTitle: string
   return { kind: 'rendered', html: titled };
 }
 
+// The template's sheet, A4 (its `@page { size: A4 }`), in CSS px at 96 per inch: 210mm.
+// The preview lays the resume out at this width so it wraps exactly like the PDF page.
+export const PAGE_WIDTH_PX = 794;
+
+// The zoom used before the frame has been measured (and in a server render): small enough
+// that a whole A4 width fits a half-width pane, large enough that 10.5pt body stays legible.
+export const DEFAULT_PREVIEW_ZOOM = 0.6;
+
+// Zoom bounds shared by "Fit" and the -/+ buttons. One pair, so a fitted value can never sit
+// outside what the buttons allow (a "+" that zooms OUT, a "-" that zooms IN).
+export const MIN_ZOOM = 0.3;
+// Above 1.5 a two-column pane scrolls sideways for no reading benefit.
+export const MAX_ZOOM = 1.5;
+
+// Any computed zoom pulled into [MIN_ZOOM, MAX_ZOOM], so every caller shares one rule.
+export function clampZoom(zoom: number): number {
+  // min/max rather than branches: one expression, no case to miss.
+  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
+}
+
+// The template's closing </head>, the one place a preview-only stylesheet can go.
+const HEAD_CLOSE = '</head>';
+
+// The resume as a sheet of paper scaled by `zoom`, for the FRAME ONLY. Downloads keep
+// using `preview.html`, so neither file the operator saves carries any of this.
+//
+// WHY `@media screen`: "Download PDF" prints this same frame. Print media skips the block,
+// so the PDF keeps the template's own @page layout at 100% instead of a shrunken copy.
+// WHY CSS `zoom`, not transform: zoom changes layout size, so the frame's scrollbar
+// matches the shrunken page; a transform leaves the full-size scroll height behind.
+// WHY width/padding on body: on screen the body would otherwise stretch to the frame and
+// rewrap the text; 210mm with the @page's 14mm inset (border-box, set by the template)
+// reproduces the printed line breaks.
+export function zoomedPreviewHtml(html: string, zoom: number): string {
+  // NaN, Infinity or a non-positive zoom would print `zoom:NaN`, which the browser drops
+  // silently; refusing it here makes the wrong value unrepresentable in the frame (§6).
+  if (!Number.isFinite(zoom) || zoom <= 0) return html;
+  // The style lives in the head, after the template's own sheet, so it wins on equal specificity.
+  // `data-preview-zoom` names it, so a test can find it without matching prose.
+  const style = `<style data-preview-zoom>@media screen{html{zoom:${zoom}}body{width:210mm;min-height:297mm;padding:14mm}}</style>`;
+  // The renderer always emits </head>; without one, show the document unzoomed rather
+  // than splice a style into an unknown shape - a full-size preview is still the right resume.
+  return html.includes(HEAD_CLOSE) ? html.replace(HEAD_CLOSE, `${style}${HEAD_CLOSE}`) : html;
+}
+
 // "<Name> - <Company> - tailored", the default filename for a download. Characters that
 // file systems refuse are dropped here, because the browser derives the name from it.
 export function previewDocumentTitle(fullName: string, companyName: string, variant: 'tailored' | 'master'): string {

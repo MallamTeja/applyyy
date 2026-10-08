@@ -28,10 +28,18 @@
  * path through it that does not involve reading each claim.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 
-import type { DiffLine, EditTarget, FlaggedClaim, ResumeDiff, TailoredRun } from './diffModel';
+import type {
+  AddedSkill,
+  DiffLine,
+  EditTarget,
+  FlaggedClaim,
+  ResumeDiff,
+  SkillEditAction,
+  TailoredRun,
+} from './diffModel';
 import {
   collectFlaggedClaims,
   coveragePercent,
@@ -57,7 +65,10 @@ export type EditAction =
   // Delete a whole bullet (D2); summaries are edited, never removed.
   | { readonly kind: 'remove'; readonly target: { readonly kind: 'bullet'; readonly ref: string } }
   // Put the tailor's original text (or the removed bullet) back.
-  | { readonly kind: 'reset'; readonly target: EditTarget };
+  | { readonly kind: 'reset'; readonly target: EditTarget }
+  // T3: add an unselected master skill / take back one the operator added. Imported, not
+  // redeclared, so the page and this view can never disagree on the arm's shape.
+  | SkillEditAction;
 
 /* A save either landed or it did not; the reason is shown to the operator verbatim. */
 export type EditResult = { readonly ok: true } | { readonly ok: false; readonly reason: string };
@@ -198,7 +209,49 @@ function JobPosting({ diff }: { readonly diff: ResumeDiff }): ReactElement | nul
 /* Three-segment bar: honest coverage, coverage from the operator's own edits, and coverage
    purchased by fabrication. Exported for the test that pins the unmeasured branch
    (test/coverageUnmeasured.test.ts). */
-export function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactElement {
+export function CoverageBar({
+  diff,
+  onEdit,
+  busy,
+}: {
+  readonly diff: ResumeDiff;
+  /* T3: the save path for "add this master skill". Optional because the bar is also rendered
+     standalone (tests, read-only screens), and then a missing keyword is only a fact, not an offer. */
+  readonly onEdit?: ((action: EditAction) => Promise<EditResult>) | null | undefined;
+  /* A save is in flight somewhere in this diff; one write at a time per resume. */
+  readonly busy?: boolean | undefined;
+}): ReactElement {
+  /* The last failed add, shown under the chips. Declared before the unmeasured early return
+     because hooks must run in the same order on every render. */
+  const [addError, setAddError] = useState<string | null>(null);
+  /* What the polite live region says after a successful add. The clicked chip unmounts on success
+     and focus falls to <body>, so without this a screen-reader user hears nothing at all. */
+  const [addedNotice, setAddedNotice] = useState<string>('');
+  /* The add offers exist only with a save path; without one the chips stay today's plain spans. */
+  const addable = onEdit ? diff.coverage.addable : undefined;
+
+  /* Add one master skill, but only after the operator affirms they have it: the auditor exists to
+     stop fabricated claims, and a one-click add with no question would be a fabrication button. */
+  async function addSkill(skill: AddedSkill): Promise<void> {
+    // Unreachable without a save path (no button is rendered then); narrows the type.
+    if (!onEdit) return;
+    // Native confirm: simple, keyboard-accessible, and impossible to style into a dark pattern.
+    const sure = window.confirm(`Add "${skill.name}" to this resume?
+
+Only add skills you actually have.`);
+    // Cancel means nothing is sent at all.
+    if (!sure) return;
+    // A new attempt clears the old failure.
+    setAddError(null);
+    // Emptied first, so adding the same name twice in a row still changes the text and is re-announced.
+    setAddedNotice('');
+    // The page looks the ref up in the pinned master and saves the whole resume.
+    const result = await onEdit({ kind: 'add_skill', ref: skill.ref });
+    // A refused save is named, so the operator knows the resume did not change.
+    if (!result.ok) setAddError(result.reason);
+    // A landed add is announced, since the chip that was clicked is gone.
+    else setAddedNotice(`Added ${skill.name} to this resume`);
+  }
   /* Coverage the master genuinely supports. */
   const honestMeasure = coveragePercent(diff.coverage, 'honest');
   /* Honest plus what the operator's own wording added. Never counted as "verified": the
@@ -237,6 +290,10 @@ export function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactEleme
   /* withFabrication adds only the flagged matches to honest, so its gap is the purchased part. */
   const purchased = totalMeasure.percent - honest;
 
+  /* Each chip list once per distinct, non-blank keyword: a repeated keyword would collide as a
+     React key (and draw two chips), and a blank one would draw an empty "✕" chip. */
+  const distinct = (list: readonly string[]): string[] => [...new Set(list)].filter((k) => k.trim() !== '');
+
   /* Keywords matched by nothing at all: not the master, not an edit, not a flagged claim. */
   const matchedSet = new Set([
     ...diff.coverage.honestlyMatched,
@@ -245,7 +302,7 @@ export function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactEleme
     ...diff.coverage.matchedByFabrication,
   ]);
   // What is left over is genuinely missing from the resume.
-  const missingKeywords = diff.coverage.jdKeywords.filter((k) => !matchedSet.has(k));
+  const missingKeywords = distinct(diff.coverage.jdKeywords.filter((k) => !matchedSet.has(k)));
 
   return (
     <div className="coverage">
@@ -315,27 +372,82 @@ export function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactEleme
 
       {/* JD Keyword chips: matched, from your edits, flagged, and missing */}
       <div className="coverage__keywords">
-        {diff.coverage.honestlyMatched.map((kw) => (
+        {distinct(diff.coverage.honestlyMatched).map((kw) => (
           <span key={kw} className="kw-chip kw-chip--matched" title="Verified in master resume">
             ✓ {kw}
           </span>
         ))}
-        {(diff.coverage.matchedByEdit ?? []).map((kw) => (
+        {distinct(diff.coverage.matchedByEdit ?? []).map((kw) => (
           <span key={kw} className="kw-chip kw-chip--edited" title="Only in text you edited">
             ✎ {kw}
           </span>
         ))}
-        {diff.coverage.matchedByFabrication.map((kw) => (
+        {distinct(diff.coverage.matchedByFabrication).map((kw) => (
           <span key={kw} className="kw-chip kw-chip--flagged" title="Flagged untraced claim">
             ⚠ {kw}
           </span>
         ))}
-        {missingKeywords.map((kw) => (
-          <span key={kw} className="kw-chip kw-chip--missing" title="Missing from resume">
-            ✕ {kw}
-          </span>
-        ))}
+        {missingKeywords.map((kw) => {
+          /* {ref,name}: an unselected master skill supplies it. null: the master has none.
+             undefined: no offer at all (no save path, or the original could not be rebuilt). */
+          const offer = addable?.get(kw);
+          /* A real button, so it is reachable by keyboard and its disabled state is the platform's. */
+          if (offer) {
+            return (
+              <button
+                key={kw}
+                type="button"
+                className="kw-chip kw-chip--missing kw-chip--addable"
+                // No aria-label: the name comes from the content, so it always contains the visible words (WCAG 2.5.3).
+                title="In your master profile — click to add to this resume"
+                // One write at a time per resume.
+                disabled={busy === true}
+                onClick={() => void addSkill(offer)}
+              >
+                {/* The keyword part keeps the missing look: it IS missing until the add lands. */}
+                ✕ {kw}{' '}
+                {/* The action part, drawn as a pill so the chip reads as a control, not a fact. */}
+                <span className="kw-chip__add">＋ Add {offer.name}</span>
+                {/* Spoken only: WHERE the skill comes from, which the visible "Add" leaves implicit. */}
+                <span className="visually-hidden"> from your master profile</span>
+              </button>
+            );
+          }
+          // Not addable here: today's chip, with a title that says why when the master was checked.
+          return (
+            <span
+              key={kw}
+              className="kw-chip kw-chip--missing"
+              title={offer === null ? 'Not in your master profile' : 'Missing from resume'}
+            >
+              ✕ {kw}
+            </span>
+          );
+        })}
       </div>
+
+      {/* One way out for keywords the master lacks: add them to the master itself, where they are
+          the operator's own claim, not to this resume. A plain <a> (not a router Link) because the
+          bar also renders outside any Router in tests; it navigates only and writes nothing. */}
+      {missingKeywords.some((kw) => addable?.get(kw) === null) ? (
+        <p className="coverage__master-link">
+          <a href="/master-profile">Add missing skills to your master profile</a>
+        </p>
+      ) : null}
+
+      {/* A failed add: the resume is unchanged, said where the click happened. */}
+      {addError !== null ? (
+        <p className="line__edit-error" role="alert">
+          {/* Rendered as given: the page says "Not saved" only when that is known to be true. */}
+          {addError}
+        </p>
+      ) : null}
+
+      {/* Always mounted (a live region added together with its text is often not read), and
+          polite, so a landed add is announced without interrupting the operator. */}
+      <p className="visually-hidden" role="status">
+        {addedNotice}
+      </p>
     </div>
   );
 }
@@ -561,12 +673,15 @@ function Line({
   line,
   onEdit,
   busy,
+  editDisabledReason,
 }: {
   readonly line: DiffLine;
   // Null when this screen offers no editing.
   readonly onEdit: ((action: EditAction) => Promise<EditResult>) | null;
   // Any save in this diff is in flight; one write at a time per resume.
   readonly busy: boolean;
+  // D4: why no line can be edited, so each line's text can answer "why can't I click this?".
+  readonly editDisabledReason: string | null;
 }): ReactElement {
   // Whether the textarea is open.
   const [isEditing, setIsEditing] = useState<boolean>(false);
@@ -576,11 +691,54 @@ function Line({
   const [savingHere, setSavingHere] = useState<boolean>(false);
   // The last failed save's reason, shown under the line.
   const [error, setError] = useState<string | null>(null);
+  // The clickable text, so focus can come back to it when the editor closes.
+  const textButtonRef = useRef<HTMLButtonElement | null>(null);
+  /* The tailored paragraph of a line with NO text button (skills, a removed bullet): where focus
+     goes after Remove or Reset unmounts the clicked control, instead of falling to <body>. */
+  const plainTextRef = useRef<HTMLParagraphElement | null>(null);
+  /* Set only when the EDITOR closes, so focus returns after cancel/save but never steals focus
+     on first render (every line mounts closed, and only one may own focus). */
+  const returnFocusRef = useRef<boolean>(false);
+
+  /* Return focus to the line's text after the editor closes: without it, focus falls to <body>
+     when the textarea unmounts and a keyboard user loses their place in a 30-line resume. */
+  useEffect(() => {
+    // Only after a close we caused, and only once the editor is gone.
+    if (!returnFocusRef.current || isEditing) return;
+    // The text button is still disabled mid-save: wait for the lock to lift (busy re-runs this).
+    if (textButtonRef.current?.disabled === true) return;
+    // Consumed here, found or not, so a later unrelated re-render can never yank focus back.
+    returnFocusRef.current = false;
+    // Back to the text the operator just edited, or to the plain paragraph when there is no button.
+    (textButtonRef.current ?? plainTextRef.current)?.focus();
+    /* busy: the button re-enables only when the save lock lifts. savingHere: a Reset or Remove
+       never opens the editor, so isEditing does not change and this is what re-runs the effect. */
+  }, [isEditing, busy, savingHere]);
+
+  /* One close path for Cancel, Escape and a finished save, so all three restore focus alike. */
+  function closeEditor(): void {
+    // Ask the effect above to restore focus once the textarea has unmounted.
+    returnFocusRef.current = true;
+    // Unmounts the textarea; the stored text renders again.
+    setIsEditing(false);
+  }
+
+  /* One open path for the text button, so the draft always starts from what is saved. */
+  function openEditor(): void {
+    // Start from what is saved, never from an old draft.
+    setDraftText(storedText);
+    // Open the editor.
+    setIsEditing(true);
+  }
 
   /* The STORED text: what the saved resume holds, which is what the PDF will print. */
   const storedText = line.tailoredRuns.map((run) => run.text).join('');
-  /* Editing needs both a save path and a line that can be edited (not skills, not D4). */
+  /* Editing needs both a save path and a line that can be edited (not D4); skills get selection edits only. */
   const target = onEdit === null ? null : line.editTarget;
+  /* Where TYPED text may land: bullets and the summary only. The skills arm of EditTarget takes
+     selection edits, never free text (R0), so a skills line never becomes click-to-type even once
+     it carries a target (Reset still uses `target`, which skills may legitimately have). */
+  const textTarget = target !== null && target.kind !== 'skills' ? target : null;
   /* A human name for this line in aria-labels: its kind plus the start of its words (the stored
      text, or the tailor's for a removed bullet), never a machine id a screen reader spells out. */
   const lineWords = storedText !== '' ? storedText : (line.originalText ?? '');
@@ -590,6 +748,25 @@ function Line({
   /* A skills list is scanned token by token; resume prose is read as a
      sentence. Different reading modes want different measure and leading. */
   const kindClass = 'line__text line__text--' + line.kind;
+
+  /* Why THIS line's text is not clickable, as a hover title on the text. Undefined (no title)
+     when the screen offers no editing at all, or when the line IS editable - a title on every
+     non-editable line of a read-only screen would explain a feature that is not there. */
+  const whyNotEditable: string | undefined =
+    // No save path on this screen: nothing to explain.
+    onEdit === null
+      ? undefined
+      : // D4: the original could not be rebuilt, so the page-level reason applies to every line.
+        target === null
+        ? (editDisabledReason ?? undefined)
+        : // T3: skills are never typed (R0) but ARE addable, so point at where adding happens.
+          line.kind === 'skills'
+          ? 'Add skills from the missing keywords above'
+          : // A removed bullet has no text to edit; Reset is the way back.
+            line.editState === 'removed'
+            ? 'Removed. Use Reset to bring it back.'
+            : // Editable: the button's own title speaks instead.
+              undefined;
 
   /* One path for every action on this line, so disabling and error handling cannot diverge. */
   async function submit(action: EditAction): Promise<void> {
@@ -603,8 +780,9 @@ function Line({
     const result = await onEdit(action);
     // Done either way.
     setSavingHere(false);
-    // Success or failure, the editor closes so the STORED text is what shows, never the draft.
-    setIsEditing(false);
+    // Success or failure, the editor closes so the STORED text is what shows, never the draft;
+    // through closeEditor so focus returns to the line rather than falling to <body>.
+    closeEditor();
     // A refused save is named, so the operator knows the PDF did not change.
     if (!result.ok) setError(result.reason);
   }
@@ -633,46 +811,35 @@ function Line({
           {/* Controls only for an editable line and only while the editor is closed. */}
           {target !== null && !isEditing ? (
             <span className="line__controls">
-              {/* A removed bullet has no text to edit; Reset is how it comes back. */}
-              {line.editState !== 'removed' ? (
-                <button
-                  type="button"
-                  className="line__edit-trigger"
-                  disabled={busy}
-                  // Names WHICH line, since every row has an identical button.
-                  aria-label={'Edit text of ' + lineName}
-                  onClick={() => {
-                    // Start from what is saved, never from an old draft.
-                    setDraftText(storedText);
-                    // Open the editor.
-                    setIsEditing(true);
-                  }}
-                >
-                  Edit text
-                </button>
-              ) : null}
+              {/* No "Edit text" button: the tailored text below IS the edit trigger, so a second
+                  button would be a second tab stop for the same action. */}
               {/* Reset exists only where there is something of the operator's to undo. */}
               {line.editState !== 'original' ? (
                 <button
                   type="button"
                   className="line__edit-trigger"
                   disabled={busy}
-                  // Same reason as Edit: one label per line, not one per screen.
-                  aria-label={'Reset ' + lineName + ' to the tailor’s version'}
+                  // No aria-label: the name comes from the content, so it contains the visible words (WCAG 2.5.3).
                   onClick={() => void submit({ kind: 'reset', target })}
                 >
-                  {savingHere ? 'Saving…' : 'Reset to tailor’s version'}
+                  {/* Mid-save the button says so; otherwise the visible verb plus a spoken suffix
+                      naming WHICH line, since every edited line has a Reset with the same words. */}
+                  {savingHere ? (
+                    'Saving…'
+                  ) : (
+                    <>
+                      Reset to tailor’s version
+                      {/* Spoken only: the skills list, or the line's kind and opening words. */}
+                      <span className="visually-hidden"> ({target.kind === 'skills' ? 'skills' : lineName})</span>
+                    </>
+                  )}
                 </button>
               ) : null}
             </span>
           ) : null}
-          {/* D3: said plainly rather than leaving the operator to wonder where the button went. */}
-          {onEdit !== null && line.kind === 'skills' ? (
-            <span className="line__edit-unavailable">skills can&apos;t be edited yet</span>
-          ) : null}
         </div>
 
-        {isEditing && target !== null ? (
+        {isEditing && textTarget !== null ? (
           <div className="line__edit-box">
             <textarea
               className="line__edit-textarea"
@@ -683,14 +850,26 @@ function Line({
               // Human words, not the machine ref (contract v2 nit).
               aria-label={'Edit ' + lineName}
               autoFocus
+              onKeyDown={(e) => {
+                // Escape is the universal "cancel" for an inline editor; Enter stays a newline.
+                if (e.key === 'Escape') {
+                  // Cancels the browser's own default for Escape; propagation is untouched, so an
+                  // enclosing dialog's own Escape handler still sees the key.
+                  e.preventDefault();
+                  // Mid-save the draft is already sent; closing now would hide "Saving…".
+                  if (busy) return;
+                  // Same as Cancel: nothing was saved, so closing is the whole cancel.
+                  closeEditor();
+                }
+              }}
             />
             <div className="line__edit-actions">
               <button
                 type="button"
                 className="line__edit-cancel"
                 disabled={busy}
-                // Nothing was saved, so closing is the whole cancel.
-                onClick={() => setIsEditing(false)}
+                // Nothing was saved, so closing is the whole cancel; focus goes back to the text.
+                onClick={closeEditor}
               >
                 Cancel
               </button>
@@ -698,7 +877,7 @@ function Line({
                 type="button"
                 className="line__edit-save"
                 disabled={busy}
-                onClick={() => void submit({ kind: 'edit', target, text: draftText })}
+                onClick={() => void submit({ kind: 'edit', target: textTarget, text: draftText })}
               >
                 {savingHere ? 'Saving…' : 'Save'}
               </button>
@@ -706,16 +885,84 @@ function Line({
           </div>
         ) : line.editState === 'removed' ? (
           /* The tailor's words, struck: the operator can see what Reset would bring back. */
-          <p className={kindClass + ' line__text--removed'}>
+          <p
+            ref={plainTextRef}
+            className={kindClass + ' line__text--removed'}
+            title={whyNotEditable}
+            // Focusable by script only (no tab stop), so focus has a home if the Reset button unmounts.
+            tabIndex={-1}
+          >
             <s>{line.originalText}</s>
           </p>
-        ) : (
+        ) : textTarget !== null ? (
+          /* Click-to-edit: the text itself is the trigger. A real <button> (not a div with
+             onClick) so Enter/Space, focus and the disabled state come from the platform. */
           <p className={kindClass}>
+            <button
+              ref={textButtonRef}
+              type="button"
+              className="line__text-button"
+              // Locked while any save in this diff is in flight, like every other control.
+              disabled={busy}
+              // The hover hint a sighted mouse user gets. No aria-label: it would REPLACE the content
+              // as the accessible name and silence the spoken verdicts inside the runs (R1).
+              title="Click to edit"
+              onClick={openEditor}
+            >
+              {/* The spoken verb, so the name is "Edit: <text and its verdicts>". */}
+              <span className="visually-hidden">Edit: </span>
+              {/* The same runs as before, so traced/fabricated/edited marking (R1) is unchanged. */}
+              {line.tailoredRuns.map((run, index) => (
+                <Run key={line.id + '-run-' + index} run={run} />
+              ))}
+            </button>
+          </p>
+        ) : (
+          /* Not editable here (skills, D4, or a read-only screen): plain text, with the reason
+             as a title when there is one to give. */
+          <p
+            ref={plainTextRef}
+            className={kindClass}
+            title={whyNotEditable}
+            // Script-focusable only where a control on this line can unmount under the operator's
+            // focus (Remove, Reset); a read-only screen has no such control, so no attribute there.
+            tabIndex={target !== null ? -1 : undefined}
+          >
             {line.tailoredRuns.map((run, index) => (
               <Run key={line.id + '-run-' + index} run={run} />
             ))}
           </p>
         )}
+
+        {/* T3: each skill the operator added, labelled as theirs (never traced), with the way back. */}
+        {line.addedSkills !== undefined && line.addedSkills.length > 0 ? (
+          <ul
+            className="line__added-skills"
+            // `list-style: none` makes Safari/VoiceOver drop list semantics; the role keeps the count spoken.
+            role="list"
+          >
+            {line.addedSkills.map((skill) => (
+              <li key={skill.ref} className="line__added-skill">
+                {/* The name plus who put it there; nothing checked it against the master's evidence. */}
+                {skill.name} <span className="line__added-skill-tag">added by you</span>
+                {/* Remove only where a save path exists; a read-only screen just shows the label. */}
+                {target !== null ? (
+                  <button
+                    type="button"
+                    className="line__edit-trigger"
+                    // One write at a time per resume.
+                    disabled={busy}
+                    // Names the skill and its provenance, since every chip has the same button.
+                    aria-label={`Remove ${skill.name}, added by you`}
+                    onClick={() => void submit({ kind: 'remove_skill', ref: skill.ref })}
+                  >
+                    Remove
+                  </button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        ) : null}
 
         {/* A failed save keeps the stored text above and says why it did not change. */}
         {error !== null ? (
@@ -864,7 +1111,8 @@ export function DiffView({
           </p>
         </div>
 
-        <CoverageBar diff={diff} />
+        {/* T3: given the save path so a missing keyword the master can supply becomes an Add. */}
+        <CoverageBar diff={diff} onEdit={runEdit} busy={busy} />
       </header>
 
       {/* The job, before the verdict on the resume. Reading order is the
@@ -929,7 +1177,14 @@ export function DiffView({
           <h3 className="diff__pane-head">Tailored for this job</h3>
 
           {diff.lines.map((line) => (
-            <Line key={line.id} line={line} onEdit={runEdit} busy={busy} />
+            <Line
+              key={line.id}
+              line={line}
+              onEdit={runEdit}
+              busy={busy}
+              // Threaded down so each line's title can say why it is not clickable (D4).
+              editDisabledReason={editDisabledReason ?? null}
+            />
           ))}
         </div>
       ) : (

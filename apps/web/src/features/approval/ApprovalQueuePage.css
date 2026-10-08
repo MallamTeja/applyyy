@@ -224,3 +224,17 @@
   font-size: var(--size-sm);
   color: var(--text-secondary);
 }
+
+/* --- Card focus after a bucket move ------------------------------------ */
+
+/* A save that moves a card between buckets sends focus to the card itself (tabindex -1, set by
+   script only). The global :where([tabindex]) ring is a box-shadow at zero specificity, so
+   .queue__item's own --lift shadow would hide it; an outline cannot be overridden that way.
+   :focus-visible, not :focus, so a mouse click inside the card does not frame the whole card. */
+.queue__item:focus-visible,
+.queue__clean-row:focus-visible {
+  /* Same accent token as the global ring, so the moved card reads as "focus", not a new state. */
+  outline: 2px solid var(--accent);
+  /* Off the card's own border, so the ring is not lost against the hairline. */
+  outline-offset: 2px;
+}

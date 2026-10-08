@@ -38,6 +38,7 @@ import type {
 } from '../../data/contract';
 
 import type {
+  AddedSkill,
   DiffLine,
   FlaggedClaim,
   ResumeDiff,
@@ -49,6 +50,11 @@ import type {
    keywords in the tailor, so scoring them here cannot use a looser rule than selected them.
    Safe to bundle: the module is pure with zero imports. */
 import { keywordAppearsIn } from '../../../../../supabase/functions/_shared/tailor/jd-keywords.ts';
+/* T3: the ONE definition of "which master skill would supply this keyword" (shared with the page's
+   add path and its tests), and the ONE structural equality the save boundary also uses, so the
+   adapter's "skills changed" and the boundary's cannot disagree. tailoredEdits imports only types
+   from diffModel, so this adds no import cycle. */
+import { addableSkillFor, deepEqual } from './tailoredEdits.ts';
 
 /* Everything the adapter needs. Passed as one object rather than five
  * positional parameters, because five positional strings and objects at a call
@@ -202,7 +208,7 @@ function splitEdited(
 /* --- Building the lines ----------------------------------------------- */
 
 /* The fields every line carries when editing is NOT in play: the original could not be
- * rebuilt (D4), or the line is skills (D3). Spelled once so the "nothing is edited"
+ * rebuilt (D4). (Skills were also here until T3 made them selection-editable.) Spelled once so the "nothing is edited"
  * shape cannot differ between the three line builders. */
 const NOT_EDITABLE = {
   /* No target: the UI offers no edit control. */
@@ -413,25 +419,97 @@ function bulletLines(
  * it as a list and needs to see the ORDER - leading with the JD's language is
  * most of what tailoring a skills section means. The master side shows every
  * master skill, so what was dropped is visible alongside what was kept. */
-function skillsLine(resolved: ResolvedResume, master: MasterProfile): DiffLine {
-  /* Selected skills, in the order they will print. */
-  const selected = resolved.skills.map((skill) => skill.name).join(', ');
+function skillsLine(resolved: ResolvedResume, master: MasterProfile, original: ResolvedResume | null): DiffLine {
   /* Every skill the master holds, so omissions are visible. */
   const all = master.skills.map((skill) => skill.name).join(', ');
 
+  /* D4: no original means no way to tell an added skill from a chosen one, so the line is built
+     exactly as before T3 - one traced run, no edit control. */
+  if (original === null) {
+    return {
+      id: 'skills',
+      kind: 'skills',
+      masterText: all,
+      masterNodeId: 'skills',
+      /* ALWAYS one traced run, never split. A skill is chosen by id and carries
+       * no text, so a fabricated skill is not expressible - there is nothing here
+       * for a finding to attach to. Marking this line would imply a risk that
+       * the contract has already made impossible. */
+      tailoredRuns: [{ text: resolved.skills.map((skill) => skill.name).join(', '), verdict: 'traced', tracesTo: 'skills' }],
+      /* Nothing editable, nothing edited. */
+      ...NOT_EDITABLE,
+      /* Nothing can be told apart as added. */
+      addedSkills: [],
+    };
+  }
+
+  /* The refs the TAILOR chose: the only skills that may read as traced. */
+  const tailorRefs = new Set(original.skills.map((skill) => skill.ref));
+  /* Everything on the resume the tailor did not choose: added by the operator (T3). Never
+     traced, because the auditor never read a resume carrying them (R1). */
+  const added = resolved.skills.filter((skill) => !tailorRefs.has(skill.ref));
+
+  /* The runs, in TRUE print order: consecutive tailor skills merge into one traced run (so an
+     untouched line is the same single run as before T3), and each added skill is its own
+     EDITED run. Per-skill edited runs so coverage credits each added skill to "from your edits"
+     on its own, and per-run matching means a keyword can never span a traced and an edited name.
+     Walked in print order rather than "tailor's, then added" so the line never shows an order
+     the PDF does not print, even for a stored list no page edit produced. */
+  const runs: TailoredRun[] = [];
+  /* Tailor skill names waiting to be flushed as one traced run. */
+  let tracedNames: string[] = [];
+  /* Close the pending traced group, if any, as one run. */
+  const flushTraced = (): void => {
+    /* Nothing pending: no zero-width run. */
+    if (tracedNames.length === 0) return;
+    /* Separated from whatever precedes it, with unmarked text. */
+    if (runs.length > 0) runs.push({ text: ', ', verdict: null, tracesTo: null });
+    /* The tailor's names, exactly as the pre-T3 line joined them. */
+    runs.push({ text: tracedNames.join(', '), verdict: 'traced', tracesTo: 'skills' });
+    /* Start a fresh group. */
+    tracedNames = [];
+  };
+  /* Every printed skill, in print order. */
+  for (const skill of resolved.skills) {
+    /* A tailor skill joins the pending traced group. */
+    if (tailorRefs.has(skill.ref)) {
+      /* Merged with its traced neighbours. */
+      tracedNames.push(skill.name);
+      /* Next skill. */
+      continue;
+    }
+    /* An added skill ends any traced group before it. */
+    flushTraced();
+    /* The separator is unmarked text: highlighting a comma as "edited by you" would be noise. */
+    if (runs.length > 0) runs.push({ text: ', ', verdict: null, tracesTo: null });
+    /* The operator's choice: 'edited', tracing to nothing the auditor checked. */
+    runs.push({ text: skill.name, verdict: 'edited', tracesTo: null });
+  }
+  /* Whatever traced group is left at the end. */
+  flushTraced();
+  /* An empty skills list keeps the pre-T3 single empty traced run, so an untouched empty line is
+     byte-for-byte the line it always was. */
+  if (runs.length === 0) runs.push({ text: '', verdict: 'traced', tracesTo: 'skills' });
+
+  /* Edited whenever the printed list is not exactly the tailor's: an addition, or any divergence
+     no page edit produces (a dropped or reordered tailor skill). Fail closed into Bucket B. */
+  const changed = !deepEqual(resolved.skills, original.skills);
   return {
     id: 'skills',
     kind: 'skills',
     masterText: all,
     masterNodeId: 'skills',
-    /* ALWAYS one traced run, never split. A skill is chosen by id and carries
-     * no text, so a fabricated skill is not expressible - there is nothing here
-     * for a finding to attach to. Marking this line would imply a risk that
-     * the contract has already made impossible. */
-    tailoredRuns: [{ text: selected, verdict: 'traced', tracesTo: 'skills' }],
-    /* D3: skills cannot be edited yet - a skill is chosen by id, so an edit would have
-       to be a selection change, which is a different feature. */
-    ...NOT_EDITABLE,
+    tailoredRuns: runs,
+    /* T3: editable by selection only - Add, Remove (added skills) and Reset. */
+    editTarget: { kind: 'skills' },
+    /* Counted in editCount when changed, which is what moves the row out of Bucket A (R2). */
+    editState: changed ? 'edited' : 'original',
+    /* The tailor's list as it printed, for comparison and what Reset restores. */
+    originalText: original.skills.map((skill) => skill.name).join(', '),
+    /* Skills carry no findings (see the D4 branch), so nothing can be superseded. */
+    supersededClaims: [],
+    /* What the UI renders as "added by you", each with its own Remove. */
+    addedSkills: added.map((skill) => ({ ref: skill.ref, name: skill.name })),
   };
 }
 
@@ -544,7 +622,8 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
   const summary = summaryLine(resolved, original, findingsByPath, matchedClaims, supersededKeys);
   if (summary !== null) lines.push(summary);
   lines.push(...bulletLines(resolved, original, findingsByPath, matchedClaims, supersededKeys));
-  lines.push(skillsLine(resolved, master));
+  /* The original is passed so added skills (T3) can be told apart from the tailor's. */
+  lines.push(skillsLine(resolved, master, original));
 
   /* THE FAIL-LOUD STEP. Any finding whose claim text was not located inside a
    * rendered line becomes an unlocated claim rather than disappearing.
@@ -605,6 +684,8 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
           !keywordAppearsInFlaggedText(keyword, lines) &&
           keywordAppearsInEditedText(keyword, lines),
       ),
+      /* T3: what the operator could add for each keyword missing from the resume entirely. */
+      addable: addableByKeyword(application.selected_jd_keywords, lines, resolved, master, original),
     },
     lines,
     unlocatedClaims,
@@ -623,6 +704,42 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
     applyUrl: job.apply_url,
     jobDescription: job.description_raw,
   };
+}
+
+/* T3: for each JD keyword found in NO run of any verdict, the unselected master skill that would
+ * supply it (or null: "Not in your master profile"). A keyword already present - traced, flagged
+ * or edited - is left out, so the UI never offers to add what the resume already says.
+ * Empty when there is no original (D4): an add could not be told apart or saved then, so
+ * offering one would be a button that can only fail.
+ * A Map because the keys are UNTRUSTED JD strings ("__proto__" on a plain object reads the
+ * prototype). Exported so a test can drive it without building a whole diff. */
+export function addableByKeyword(
+  /* The JD keywords, in the row's order; duplicates collapse onto one Map key. */
+  keywords: readonly string[],
+  /* The finished lines, so "present" is judged by exactly the coverage figures' rule. */
+  lines: readonly DiffLine[],
+  /* The stored resume, whose skills an offer must not repeat. */
+  resolved: ResolvedResume,
+  /* The PINNED master, the only source an offer may come from. */
+  master: MasterProfile,
+  /* The tailor's version; null switches offers off (D4). */
+  original: ResolvedResume | null,
+): ReadonlyMap<string, AddedSkill | null> {
+  /* Insertion-ordered, so the UI can list offers in the row's keyword order. */
+  const offers = new Map<string, AddedSkill | null>();
+  /* D4: nothing is addable without an original to measure the add against. */
+  if (original === null) return offers;
+  /* Each keyword once, in order. */
+  for (const keyword of keywords) {
+    /* Present in any run already: nothing to add for it. */
+    if (keywordAppearsInTracedText(keyword, lines) || keywordAppearsInFlaggedText(keyword, lines) || keywordAppearsInEditedText(keyword, lines)) continue;
+    /* The single shared rule picks the skill; null is a real answer ("not in your master"). */
+    const skill = addableSkillFor(keyword, resolved, master);
+    /* Only ref and name cross to the UI: the page re-reads the master on Add, never trusting these. */
+    offers.set(keyword, skill === null ? null : { ref: skill.ref, name: skill.name });
+  }
+  /* Read-only to callers. */
+  return offers;
 }
 
 /* Does this JD keyword appear in text the master supports?

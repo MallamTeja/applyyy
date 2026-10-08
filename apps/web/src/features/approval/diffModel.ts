@@ -33,14 +33,42 @@ export type TraceVerdict = 'traced' | 'fabricated' | 'edited';
 
 /* What an edit on a line would write to. A closed union rather than a bare ref
  * string, because the summary has no ref (ResolvedResume.summary is a bare
- * string) and a magic 'summary' ref could collide with a real NodeId. Only these
- * two arms exist because only bullet text and the summary are editable (D3);
- * there is no arm that could name master_text, identity or a version (R0). */
+ * string) and a magic 'summary' ref could collide with a real NodeId. Bullet text
+ * and the summary take typed text; the skills arm (T3) takes only selection edits
+ * of master skills. There is no arm that could name master_text, identity or a
+ * version (R0). */
 export type EditTarget =
   /* One bullet, named by its ref - refs are unique across the resume, so the ref alone locates it. */
   | { readonly kind: 'bullet'; readonly ref: string }
   /* The top-level summary paragraph. */
-  | { readonly kind: 'summary' };
+  | { readonly kind: 'summary' }
+  /* The skills list as a whole (T3, 2026-10-08). Its only edits are SELECTION edits - add an
+     unselected master skill, remove one the operator added, reset to the tailor's list - never
+     typed text: a skill is a ref into the master, so there is no free text to write (R0).
+     One target for the whole line because Reset restores the whole list. */
+  | { readonly kind: 'skills' };
+
+/* A skill as the UI needs it to render "added by you" with a Remove button: the master ref the
+ * Remove action names, and the name it shows. No category: the UI never decides by it, and
+ * every extra field is one more thing that could drift from the master. */
+export interface AddedSkill {
+  /* The MASTER skill's id, exactly as stored on the resume skill's `ref`. */
+  readonly ref: string;
+  /* The master's canonical name, as printed on the resume. */
+  readonly name: string;
+}
+
+/* The two skill-selection actions the page performs, beyond DiffView's text EditAction
+ * (T3). Declared HERE, not in DiffView.tsx, because the page must handle them before the
+ * UI agent widens DiffView's EditAction union; once it does, both unions name the same
+ * literals and the page's `EditAction | SkillEditAction` parameter accepts either source.
+ * Each arm carries only a master ref: the page looks the skill up in the pinned master, so
+ * the UI can never hand it a name or category to store. */
+export type SkillEditAction =
+  /* Put one unselected master skill onto the resume, appended after the tailor's own. */
+  | { readonly kind: 'add_skill'; readonly ref: string }
+  /* Take back one skill the operator added; the tailor's own skills are not removable here. */
+  | { readonly kind: 'remove_skill'; readonly ref: string };
 
 /* Which review path this row takes (section 11). DERIVED from whether any
  * finding exists - the schema stream's own comment on `audit_findings` says
@@ -92,8 +120,9 @@ export interface DiffLine {
   readonly masterText: string | null;
   readonly masterNodeId: string;
   readonly tailoredRuns: readonly TailoredRun[];
-  /* Where an edit on this line would land. NULL for skills (D3: not editable yet)
-   * and for EVERY line when the original could not be rebuilt (D4): without the
+  /* Where an edit on this line would land. `{kind:'skills'}` on the skills line when an
+   * original exists (T3: add/remove master skills, never typed text). NULL for EVERY
+   * line when the original could not be rebuilt (D4): without the
    * original there is no way to tell an edit from the tailor's text, so offering
    * the control would create edits nobody could later recognise as edits. */
   readonly editTarget: EditTarget | null;
@@ -111,6 +140,11 @@ export interface DiffLine {
    * precisely where the Auditor objected. Never flagged, never unlocated, never in
    * collectFlaggedClaims. */
   readonly supersededClaims: readonly string[];
+  /* Skills line only (T3): the master skills the OPERATOR added, in resume order, so the UI
+   * can render each as "added by you" with its own Remove. Empty on an untouched skills line.
+   * Optional because only the skills line has such a list; absent on every other line, and on
+   * hand-built fixtures that predate T3 (absent reads as "none added", the truthful reading). */
+  readonly addedSkills?: readonly AddedSkill[];
 }
 
 /* Keyword coverage, section 18.7 - "so you can see whether the tailoring
@@ -137,6 +171,14 @@ export interface KeywordCoverage {
    * "honest" would credit unaudited wording as verified, and adding them to
    * "fabrication" would accuse the operator of the tailor's offence. */
   readonly matchedByEdit: readonly string[];
+  /* T3: for each JD keyword the resume does NOT contain at all (in no traced, flagged or
+   * edited run), the unselected master skill that would supply it, or null when the master
+   * has none - the UI shows "Add" for the first and "Not in your master profile" for null.
+   * A Map, not a Record: the keys are UNTRUSTED JD strings, and a plain object keyed by
+   * "__proto__" or "constructor" would read the prototype instead of an entry.
+   * Empty when editing is off (no original, D4), because an add could not be saved then.
+   * Optional so coverage objects built before T3 (fixtures, older callers) stay valid. */
+  readonly addable?: ReadonlyMap<string, AddedSkill | null>;
 }
 
 export interface ResumeDiff {

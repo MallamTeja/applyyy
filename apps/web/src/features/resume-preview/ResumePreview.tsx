@@ -34,7 +34,7 @@ import type { ResolvedResume } from '../../data/contract';
 // The browser client; RLS scopes every read to the signed-in user.
 import { supabase } from '../../data/supabase';
 // Pure helpers: the shared render, the master mapping, the filename title.
-import { buildResumePreview, masterAsResume, previewDocumentTitle } from './renderPreview';
+import { buildResumePreview, clampZoom, DEFAULT_PREVIEW_ZOOM, masterAsResume, PAGE_WIDTH_PX, previewDocumentTitle, zoomedPreviewHtml } from './renderPreview';
 import type { ResumePreview as RenderedPreview } from './renderPreview';
 
 import './ResumePreview.css';
@@ -169,6 +169,36 @@ interface ResumePaneProps {
 function ResumePane({ heading, frameTitle, fileStem, preview }: ResumePaneProps): ReactElement {
   // The frame, so "Download PDF" can print its window rather than the dashboard.
   const frameRef = useRef<HTMLIFrameElement>(null);
+  // The operator's chosen zoom, or 'fit' to follow the frame's width (the default view).
+  const [chosenZoom, setChosenZoom] = useState<number | 'fit'>('fit');
+  // The zoom that makes one A4 width fill the frame; the default stands in until measured.
+  const [fitZoom, setFitZoom] = useState(DEFAULT_PREVIEW_ZOOM);
+  // What is actually applied: the operator's choice wins over fit once they press -/+.
+  const zoom = chosenZoom === 'fit' ? fitZoom : chosenZoom;
+
+  // Measure the frame so "Fit" means "the page width fills this box", whatever the layout
+  // (two columns on the queue, one in the pipeline drawer). Declared before the refusal
+  // return below, because hooks must run in the same order on every render.
+  useEffect(() => {
+    // A refused render has no frame to measure.
+    const frame = frameRef.current;
+    // Nothing mounted, or a browser without ResizeObserver: the default zoom stays.
+    if (frame === null || typeof ResizeObserver === 'undefined') return;
+    // Recomputed whenever the box changes width (window resize, drawer open).
+    const observer = new ResizeObserver(() => {
+      // Minus 20px for the frame's own vertical scrollbar, so the page never scrolls sideways.
+      // Rounded to 2 places: each new value rebuilds srcdoc (a reload), so sub-pixel jitter must not.
+      // Clamped with the buttons' own bounds, so -/+ always move away from the fitted value.
+      setFitZoom(clampZoom(Math.round(((frame.clientWidth - 20) / PAGE_WIDTH_PX) * 100) / 100));
+    });
+    // Watch this pane's frame only.
+    observer.observe(frame);
+    // Stop watching when the pane goes away.
+    return () => observer.disconnect();
+  }, [preview.kind]);
+  // One zoom step, clamped so neither button can make the page vanish or explode. Each change
+  // rebuilds srcdoc, so the frame reloads and its scroll returns to the top (accepted, see report).
+  const stepZoom = (delta: number) => setChosenZoom(clampZoom(Math.round((zoom + delta) * 10) / 10));
 
   // A refused render is SAID, never shown as an empty frame: an empty frame next to an
   // approve button reads as "nothing to check", which is the fail-clean this page avoids.
@@ -205,6 +235,18 @@ function ResumePane({ heading, frameTitle, fileStem, preview }: ResumePaneProps)
       <div className="resume-preview__bar">
         <h3 className="resume-preview__heading">{heading}</h3>
         <span className="resume-preview__actions">
+          {/* Zoom affects the frame only; both downloads stay at the template's own size. */}
+          <span className="resume-preview__zoom" role="group" aria-label="Preview zoom">
+            {/* Smaller page: more of the resume in view. */}
+            <button type="button" className="button button--secondary button--small" aria-label="Zoom out" onClick={() => stepZoom(-0.1)}>−</button>
+            {/* Back to "page width fills the box", and shows the current percentage. */}
+            <button type="button" className="button button--secondary button--small" aria-label={`Fit page width, now ${Math.round(zoom * 100)}%`} onClick={() => setChosenZoom('fit')}>
+              {/* The applied zoom, so the operator knows what they are looking at. */}
+              {Math.round(zoom * 100)}%
+            </button>
+            {/* Larger page: easier to read a line closely. */}
+            <button type="button" className="button button--secondary button--small" aria-label="Zoom in" onClick={() => stepZoom(0.1)}>+</button>
+          </span>
           <button
             type="button"
             className="button button--secondary button--small"
@@ -234,8 +276,9 @@ function ResumePane({ heading, frameTitle, fileStem, preview }: ResumePaneProps)
         title={frameTitle}
         /* See the header: same-origin for print(), modals for the dialog, never scripts. */
         sandbox="allow-same-origin allow-modals"
-        /* The complete document from the shared renderer, body unmodified. */
-        srcDoc={preview.html}
+        /* The shared renderer's document plus a screen-only zoom style; the downloads use
+           preview.html untouched, and print media ignores the style (see zoomedPreviewHtml). */
+        srcDoc={zoomedPreviewHtml(preview.html, zoom)}
       />
     </section>
   );

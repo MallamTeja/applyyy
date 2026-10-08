@@ -48,8 +48,14 @@ import type { ClaimDecision, EditAction, EditResult } from './DiffView';
 import { buildResumeDiff } from './diffAdapter';
 import { deriveBucket } from './diffModel';
 import type { ResumeDiff } from './diffModel';
+// The bucket a save moved a row from and to, for the page-level announcement.
+import type { ReviewBucket } from './diffModel';
+// T3: the skill add/remove actions, declared in diffModel until DiffView's EditAction names them too.
+import type { SkillEditAction } from './diffModel';
 // Pure edit operations and the original-rebuild (builder-1's module): no React, no Supabase.
 import {
+  // T3: put one unselected PINNED-master skill on the resume, built from the master node.
+  addSkill,
   applyTextEdit,
   editKey,
   isResumeShape,
@@ -58,6 +64,8 @@ import {
   // The auditor's pin rules behind it, so a resume with a bad pin is refused by name (7b).
   classifyTailored,
   rebuildOriginal,
+  // T3: take back a skill the operator added; the tailor's own are refused.
+  removeAddedSkill,
   removeBullet,
   resetTarget,
 } from './tailoredEdits';
@@ -118,16 +126,77 @@ interface RowSource {
   readonly hasCoverLetter: boolean;
 }
 
+/* Every action the page saves: DiffView's text actions plus T3's skill actions. A union rather
+   than waiting for DiffView to name the skill arms, so the page handles them now; once DiffView's
+   EditAction gains the same two arms the union simply overlaps and nothing here changes. */
+type PageEditAction = EditAction | SkillEditAction;
+
 /* Which history event each operator action writes. A literal table, so a new action fails to
    compile here instead of logging under the wrong name. */
-const EVENT_KIND: Readonly<Record<EditAction['kind'], EditEventKind>> = {
+const EVENT_KIND: Readonly<Record<PageEditAction['kind'], EditEventKind>> = {
   // Text replaced.
   edit: 'resume_edit',
   // Whole bullet deleted.
   remove: 'resume_remove',
   // Tailor's text restored.
   reset: 'resume_reset',
+  // T3: an unselected master skill put on the resume.
+  add_skill: 'resume_add_skill',
+  // T3: an operator-added skill taken back off.
+  remove_skill: 'resume_remove_skill',
 };
+
+/* The event's ref: the line key for text actions, the MASTER skill id for skill actions, so the
+   log names exactly which skill went on or came off (its name rides in before/after). */
+function eventRef(action: PageEditAction): string {
+  // Skill actions carry the master ref directly; there is no line target to key.
+  return action.kind === 'add_skill' || action.kind === 'remove_skill' ? action.ref : editKey(action.target);
+}
+
+/* What the page-level live region says after a save landed. It lives on the PAGE, not in DiffView,
+   because a save that moves a row between buckets remounts DiffView under the other bucket's list
+   and wipes DiffView's own region with it; a screen-reader user then heard nothing at all.
+   `before`/`after` are the pure edit's outcome: the skill's printed name rides in them. */
+function announcementFor(
+  // Which operator action landed; each gets its own sentence.
+  kind: PageEditAction['kind'],
+  // The outcome's before/after text, the only place the skill's NAME is known on the page.
+  outcome: { readonly before: string | null; readonly after: string | null },
+  // The row's bucket before the save, so a move can be named.
+  from: ReviewBucket | undefined,
+  // The row's bucket after the save.
+  to: ReviewBucket | undefined,
+): string {
+  // One sentence per action; a literal table could not carry the skill name, so a ternary over the closed union.
+  const what =
+    kind === 'add_skill'
+      ? // An add carries the new skill's name in `after`.
+        `Added ${outcome.after ?? 'the skill'} to this resume.`
+      : kind === 'remove_skill'
+        ? // A removal carries the old skill's name in `before`.
+          `Removed ${outcome.before ?? 'the skill'}.`
+        : kind === 'edit'
+          ? // Text replaced; reading the new text back would be noise.
+            'Saved your edit.'
+          : kind === 'remove'
+            ? // A whole bullet deleted.
+              'Removed the bullet.'
+            : // The only arm left is reset.
+              "Reset to the tailor's version.";
+  // No move (or an unknown bucket): the action alone says it all.
+  if (from === undefined || to === undefined || from === to) return what;
+  // Into B: the batch button no longer covers this row, and the operator must know why it moved.
+  if (to === 'B') return `${what} This application now needs individual approval.`;
+  // Back into A: the batch covers it again.
+  return `${what} This application is back in the verified batch.`;
+}
+
+/* The focus target for one application's card, in either bucket. ONE builder so the id the effect
+   looks up and the id the markup carries cannot drift apart. */
+function cardId(applicationId: string): string {
+  // Prefixed so it can never collide with the review-/preview- region ids of the same row.
+  return `app-card-${applicationId}`;
+}
 
 /* D4, in words: why the controls are missing, so it does not read as a bug. */
 const EDIT_DISABLED_REASON =
@@ -138,7 +207,7 @@ const EDIT_DISABLED_REASON =
 function editedRefs(diff: ResumeDiff | undefined): string[] {
   // No diff (should not happen for a loaded row) means nothing to name.
   if (diff === undefined) return [];
-  // Edited and removed lines both have a target; skills and untouched lines are left out.
+  // Edited and removed lines both have a target, the skills line too since T3 (key 'skills'); untouched lines are left out.
   return diff.lines.flatMap((line) =>
     line.editState !== 'original' && line.editTarget !== null ? [editKey(line.editTarget)] : [],
   );
@@ -218,6 +287,23 @@ export function ApprovalQueuePage(): ReactElement {
   const [reviewing, setReviewing] = useState<ReadonlySet<string>>(() => new Set());
   // Rows whose rendered resume is showing; separate because a preview is tall.
   const [previewing, setPreviewing] = useState<ReadonlySet<string>>(() => new Set());
+  /* The page-level polite announcement. Page state, not DiffView state, so it survives the
+     DiffView remount a cross-bucket save causes. */
+  const [announcement, setAnnouncement] = useState<string>('');
+  /* The row whose card should take focus once the save that moved it has rendered. Set ONLY on a
+     bucket move: an in-bucket save keeps DiffView mounted, and its own focus return handles it. */
+  const [pendingFocusId, setPendingFocusId] = useState<string | null>(null);
+
+  /* Runs after the commit that drew the moved card in its new bucket, so the element exists.
+     Without it focus falls to <body> when the old card unmounts. */
+  useEffect(() => {
+    // Nothing moved: leave focus wherever the operator (or DiffView) put it.
+    if (pendingFocusId === null) return;
+    // The card in its NEW bucket; absent only if the row also left the queue, and then there is nothing to focus.
+    document.getElementById(cardId(pendingFocusId))?.focus();
+    // One-shot: a later unrelated render must not yank focus back here.
+    setPendingFocusId(null);
+  }, [pendingFocusId]);
 
   /* Query real applications from Supabase where status = awaiting_approval */
   useEffect(() => {
@@ -799,7 +885,7 @@ export function ApprovalQueuePage(): ReactElement {
      resume (or, if the save is refused or unconfirmed, with what IS stored). Nothing is shown as
      changed until the database has accepted it, so the preview, the Download and the score can
      never describe a resume that was not stored. */
-  async function editRow(applicationId: string, action: EditAction): Promise<EditResult> {
+  async function editRow(applicationId: string, action: PageEditAction): Promise<EditResult> {
     // What this row's diff was built from.
     const source = sources.get(applicationId);
     // An approval or rejection is in flight; an edit now could land mid-approval.
@@ -814,6 +900,13 @@ export function ApprovalQueuePage(): ReactElement {
     if (source === undefined || current === undefined || stamp === undefined) return notSaved('this row is not loaded.');
     // D4: no original means no honest "edited" and no Reset; refuse rather than guess.
     if (source.original === null) return notSaved(EDIT_DISABLED_REASON);
+    /* Review fix (2026-10-08): the master and the original were built from the pin read at load.
+       A resume now pinned elsewhere (adopted from another tab) would have a skill added from, and
+       an edit checked against, the WRONG master; refuse every edit until a reload re-reads it. */
+    if (current.master_version !== source.original.master_version) {
+      // Operator-phrased: the fix is a reload, not anything on this line.
+      return notSaved("this resume's master version changed since the page loaded; reload before editing.");
+    }
     // No client, no write; say so instead of pretending.
     if (supabase === null) return notSaved('not connected to the database.');
 
@@ -824,10 +917,20 @@ export function ApprovalQueuePage(): ReactElement {
         ? applyTextEdit(current, action.target, action.text)
         : action.kind === 'remove'
           ? removeBullet(current, action.target)
-          : resetTarget(current, source.original, action.target);
+          : action.kind === 'add_skill'
+            ? // T3: only the ref crosses from the UI; the skill is built from the PINNED master.
+              addSkill(current, source.master, action.ref)
+            : action.kind === 'remove_skill'
+              ? // T3: only skills the operator added; the tailor's are refused by name.
+                removeAddedSkill(current, source.original, action.ref)
+              : resetTarget(current, source.original, action.target);
     // A refused edit never reaches the network.
     if (!outcome.ok) return notSaved(outcome.reason);
 
+    // Emptied before the save, so the same sentence twice in a row still changes the text and is re-announced.
+    setAnnouncement('');
+    // The bucket BEFORE the save, from the ref (not the render closure), to tell whether the save moved the row.
+    const previousDiff = latestDiffs.current.get(applicationId);
     // Marked before the await, so a batch approval skips this row while it saves.
     editing.current.add(applicationId);
     // Declared outside the try so the result survives the finally.
@@ -843,10 +946,12 @@ export function ApprovalQueuePage(): ReactElement {
         previous: current,
         // The tailor's version: the ground truth for refs and master_text.
         original: source.original,
+        // T3: the pinned master the diff was built against, the only source an added skill may come from.
+        master: source.master,
         // Optimistic concurrency: refused if another tab changed the row (fix 2a).
         expectedUpdatedAt: stamp,
         // What changed, for the append-only log.
-        event: { kind: EVENT_KIND[action.kind], ref: editKey(action.target), before: outcome.before, after: outcome.after },
+        event: { kind: EVENT_KIND[action.kind], ref: eventRef(action), before: outcome.before, after: outcome.after },
       });
     } finally {
       // Released whatever happened, so a failure never strands the row as "saving".
@@ -870,6 +975,18 @@ export function ApprovalQueuePage(): ReactElement {
 
     // Saved: the new resume and the NEW stamp, so the next edit presents the right one.
     adoptRow(applicationId, outcome.resume, saved.updatedAt);
+    // Bucket before, derived the same way the render partitions the queue.
+    const from = previousDiff === undefined ? undefined : deriveBucket(previousDiff);
+    // adoptRow just put the rebuilt diff in the ref synchronously, so this is the bucket the row now renders in.
+    const nextDiff = latestDiffs.current.get(applicationId);
+    // Bucket after; undefined only if the row was never loaded, which the guards above already refused.
+    const to = nextDiff === undefined ? undefined : deriveBucket(nextDiff);
+    // Page-level, so it is still mounted when the save remounts DiffView in the other bucket.
+    // An add that STAYS in its bucket is already announced by CoverageBar's own status region
+    // (DiffView did not remount), so the page stays quiet then rather than speak it twice.
+    if (!(action.kind === 'add_skill' && from === to)) setAnnouncement(announcementFor(action.kind, outcome, from, to));
+    // Only a MOVE needs the page to place focus; an in-bucket save keeps DiffView's own focus return.
+    if (from !== undefined && to !== undefined && from !== to) setPendingFocusId(applicationId);
     // The edit IS saved; only the history note is missing, and the operator should know.
     if (!saved.eventRecorded) toast.error('Your edit was saved, but it could not be added to the application history.');
     // The line closes its editor and shows the saved text.
@@ -944,6 +1061,13 @@ export function ApprovalQueuePage(): ReactElement {
        page measure would force the operator to scroll to compare them. */
     <div className="page page--wide">
       <PageHeader path="approvals" />
+
+      {/* THE PAGE'S ONE polite live region, mounted outside both buckets so a save that moves a
+          card from A to B (or back) cannot unmount it mid-announcement. Always rendered, even
+          empty, because a region inserted together with its text is often not read at all. */}
+      <p className="visually-hidden" role="status" aria-live="polite">
+        {announcement}
+      </p>
 
       {/* REFUSED ROWS FIRST, above even Bucket B. They are not a third bucket
           and carry no approve button: this screen cannot form a verdict on
@@ -1032,7 +1156,17 @@ export function ApprovalQueuePage(): ReactElement {
               // Region id for the disclosure.
               const previewId = `preview-${diff.applicationId}`;
               return (
-                <li key={diff.applicationId} className="queue__item">
+                <li
+                  key={diff.applicationId}
+                  className="queue__item"
+                  /* The focus target after a save moved this row INTO Bucket B. The card, not its
+                     heading: the heading is DiffView's, and the card is what this page renders. */
+                  id={cardId(diff.applicationId)}
+                  /* Focusable by script only; -1 keeps the card out of the Tab order. */
+                  tabIndex={-1}
+                  /* What a screen reader says on landing here: the same words as the card's title. */
+                  aria-label={`${diff.jobTitle} at ${diff.companyName}`}
+                >
                   <DiffView
                     diff={diff}
                     /* The shared approval path; see approveReviewed for why the
@@ -1111,7 +1245,16 @@ export function ApprovalQueuePage(): ReactElement {
               // Same, for the preview region.
               const previewId = `preview-${diff.applicationId}`;
               return (
-                <li key={diff.applicationId} className="queue__clean-row queue__clean-row--openable">
+                <li
+                  key={diff.applicationId}
+                  className="queue__clean-row queue__clean-row--openable"
+                  /* The focus target after a save moved this row BACK into Bucket A; same builder as Bucket B. */
+                  id={cardId(diff.applicationId)}
+                  /* Script-focusable only, as in Bucket B. */
+                  tabIndex={-1}
+                  /* Same accessible name as the Bucket B card, so the row is announced the same either side. */
+                  aria-label={`${diff.jobTitle} at ${diff.companyName}`}
+                >
                   <div className="queue__clean-line">
                     <span className="queue__clean-job">
                       {diff.jobTitle} at {diff.companyName}

@@ -59,3 +59,11 @@
   max-width: 65ch;
   color: var(--text-secondary);
 }
+
+.resume-preview__zoom {
+  /* The three zoom buttons read as one control, set apart from the downloads. */
+  display: inline-flex;
+  gap: var(--gap-1);
+  /* Room between the zoom group and Download PDF. */
+  margin-inline-end: var(--gap-2);
+}
