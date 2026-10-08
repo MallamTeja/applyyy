@@ -384,6 +384,17 @@ test("an unparseable stored posted_at warns rather than dropping", () => {
   assert.equal(result.warnings.length, 1);
 });
 
+// The warning lands in agent_runs.error_detail, whose segments are split on "; " and
+// " | ". A board-supplied date carrying those separators must not forge extra segments.
+test("an unparseable posted_at is JSON-quoted in its warning so separators stay inert", () => {
+  // Both separators run-summary.ts uses, plus a fake label, inside one hostile value.
+  const hostile = '"; x: | y';
+  // Not a date, so the staleness rule reaches the warning branch.
+  const result = screen([rule("staleness", { window_days: 3 })], { postedAt: hostile });
+  // JSON.stringify escapes the embedded quote, so the value stays one string literal.
+  assert.ok((result.warnings[0] ?? "").includes(JSON.stringify(hostile)), result.warnings[0]);
+});
+
 // --- degree mismatch ---------------------------------------------------------------
 
 test("degree mismatch drops a JD requiring an advanced degree", () => {

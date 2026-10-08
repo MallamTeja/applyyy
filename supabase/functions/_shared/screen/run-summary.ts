@@ -12,6 +12,19 @@
 
 // Bounds what one run can write; long enough for every distinct rule warning that exists.
 const MAX_DETAIL_LENGTH = 1000;
+// Slice the failure summary may never eat when warnings exist. Without it, a 2000-char
+// summary (the worker joins up to 20 db errors) pushed every warning past the cap and the
+// warnings vanished silently — the exact invisibility this module exists to remove.
+const WARNINGS_RESERVED_LENGTH = 400;
+
+// Cut to `max` chars, ending in "…" when anything was dropped, so a reader of the health
+// page can tell a truncated line from a complete one.
+function capWithEllipsis(text: string, max: number): string {
+  // Fits: return it untouched, so short text never gains a misleading marker.
+  if (text.length <= max) return text;
+  // One char of the budget goes to the marker, keeping the result within `max`.
+  return `${text.slice(0, max - 1)}…`;
+}
 
 /** Append a labelled, deduped `rule_warnings:` segment to a run's existing error_detail. */
 export function withRuleWarnings(detail: string | null, warnings: Iterable<string>): string | null {
@@ -21,8 +34,13 @@ export function withRuleWarnings(detail: string | null, warnings: Iterable<strin
   if (distinct.length === 0) return detail;
   // Labelled segment; " | " inside it, "; " between segments, matching scout-ats.
   const segment = `rule_warnings: ${distinct.join(" | ")}`;
-  // The failure summary first, because it is the more urgent fact and must survive the cap.
-  const combined = detail ? `${detail}; ${segment}` : segment;
-  // Capped like the other agents' summaries, so a pathological run stays a health-page line.
-  return combined.slice(0, MAX_DETAIL_LENGTH);
+  // No failure summary: the segment alone gets the whole budget.
+  if (!detail) return capWithEllipsis(segment, MAX_DETAIL_LENGTH);
+  // The summary is capped FIRST, leaving the reserve free, so it can never crowd warnings out.
+  const head = capWithEllipsis(detail, MAX_DETAIL_LENGTH - WARNINGS_RESERVED_LENGTH);
+  // The segment gets whatever is left after the summary and the "; " separator — at least
+  // the reserve minus 2, more when the summary is short — so the total stays ≤ the cap.
+  const tail = capWithEllipsis(segment, MAX_DETAIL_LENGTH - head.length - 2);
+  // The failure summary first, because it is the more urgent fact.
+  return `${head}; ${tail}`;
 }

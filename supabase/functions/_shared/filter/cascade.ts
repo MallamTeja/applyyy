@@ -293,8 +293,10 @@ function staleness(job: ScreenableJob, config: Json, context: ScreenContext): Ru
   // Parse the stored date.
   const posted = Date.parse(job.postedAt);
   // An unparseable stored date is our bug, not the job's fault, so it must not drop
-  // the job silently — it is reported instead.
-  if (Number.isNaN(posted)) return { drop: false, warning: `job has an unparseable posted_at "${job.postedAt}"` };
+  // the job silently — it is reported instead. The value is board-supplied and this warning
+  // lands in agent_runs.error_detail, whose segments split on "; " and " | " (run-summary.ts);
+  // JSON.stringify quotes and escapes it so a hostile date cannot forge a separator.
+  if (Number.isNaN(posted)) return { drop: false, warning: `job has an unparseable posted_at ${JSON.stringify(job.postedAt)}` };
   // How old it is, in days.
   const ageInDays = (context.now.getTime() - posted) / MS_PER_DAY;
   // Drop only when genuinely outside the window.
