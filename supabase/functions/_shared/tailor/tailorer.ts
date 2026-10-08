@@ -184,6 +184,18 @@ function parseTailoredProfile(raw: string): TailoredProfile {
     }
   }
 
+  // THE CONTRACT VERSION. TailoredProfile declares `schema_version: 1`, but the schema sent
+  // to Gemini (prompt.ts TAILOR_RESPONSE_SCHEMA) has no such property, so a live reply never
+  // carries it, and the cast below used to persist tailor_refs without it. The web editor's
+  // gate then refused every live row (applyyy-e8, 2026-10-08). Absent means "the version we
+  // asked for", so stamp it; any OTHER value is a contract we do not speak, so refuse it
+  // like every other shape failure rather than overwrite it.
+  if (parsed.schema_version !== undefined && parsed.schema_version !== 1) {
+    throw new Error("Tailor response has an unsupported schema_version");
+  }
+  // Stamped here, at the one parse boundary, so every stored tailor_refs matches its type.
+  parsed.schema_version = 1;
+
   // Every field the validator touches has now been checked to exist and be the right
   // kind. The assertion is earned by the lines above, not assumed.
   return parsed as unknown as TailoredProfile;

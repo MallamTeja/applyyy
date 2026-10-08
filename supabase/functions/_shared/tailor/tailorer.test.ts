@@ -340,3 +340,35 @@ test("a schema-legal response that omits the optional summary still parses", asy
   // A verdict, not a throw.
   assert.equal(outcome.kind, "refused");
 });
+
+// THE LIVE REPLY SHAPE, not a fixture. HONEST_TAILORING carries schema_version: 1, but the
+// schema Gemini is SENT has no such property, so a real reply never contains it. That gap
+// kept every test green while live tailor_refs lacked the field and the web editor's gate
+// refused every row (found by applyyy-e8, 2026-10-08). This keeps ONLY the keys the shipped
+// schema declares, i.e. exactly what a schema-conforming model can return.
+const LIVE_SHAPED_REPLY = Object.fromEntries(
+  // Every key of the fixture that the sent schema also declares; nothing else survives.
+  Object.entries(HONEST_TAILORING).filter(([key]) => key in (TAILOR_RESPONSE_SCHEMA.properties as Record<string, unknown>)),
+);
+
+test("a schema-shaped reply (no schema_version) is stamped schema_version 1 in the stored refs", async () => {
+  // Precondition, so this test cannot pass vacuously if the schema ever gains the field.
+  assert.equal("schema_version" in LIVE_SHAPED_REPLY, false);
+  // The model returns only what the schema allowed it to.
+  const tailor = tailorerReturning(JSON.stringify(LIVE_SHAPED_REPLY));
+  // Run the real parse -> validate path.
+  const outcome = await tailor(POSTING);
+  // A clean tailoring, so the refs are what persist.ts writes into tailor_refs.
+  assert.equal(outcome.kind, "tailored");
+  // Narrow for the compiler.
+  if (outcome.kind !== "tailored") return;
+  // The producer now matches its own type: TailoredProfile declares schema_version: 1.
+  assert.equal(outcome.refs.schema_version, 1);
+});
+
+test("a reply claiming a different schema_version is refused, never restamped", async () => {
+  // A model (or a future schema) asserting another contract version is not ours to coerce.
+  const tailor = tailorerReturning(JSON.stringify({ ...LIVE_SHAPED_REPLY, schema_version: 2 }));
+  // Thrown as a shape failure, like every other malformed reply.
+  await assert.rejects(tailor(POSTING), /schema_version/);
+});
