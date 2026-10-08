@@ -3,9 +3,12 @@
 // ============================================================================
 //
 // The Auditor judges fabrication by comparing a tailored resume to the master
-// profile. The ground truth must be the master version the Tailor was PINNED to
-// (`applications.master_version`), not the newest upload: a master uploaded after
-// tailoring would flag true claims or pass ones that are no longer backed.
+// profile. The ground truth must be the master version the Tailor was PINNED to, not
+// the newest upload: a master uploaded after tailoring would flag true claims or pass
+// ones that are no longer backed. The auditor reads that pin from the resume itself,
+// `tailored_profile.master_version`, stamped by the tailor's validator (validator.ts:776).
+// `applications.master_version` was never written before fbd28f9 and is not what the
+// auditor passes in here.
 //
 // A missing or malformed pin FAILS CLOSED. Falling back to the latest master is the
 // exact bug this module replaces (CLAUDE.md §5: a lenient reader is the fail-open),
