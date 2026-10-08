@@ -93,7 +93,8 @@ CI (`ci.yml`) runs the Deno check with a file-count assertion, plus a web tsc + 
 - **`deno check` over zero files exits 0.** Count it:
   `deno check --reload <paths> 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -c "^Check"`
   must equal the number of files.
-- **`tests 0` + `fail 0` is a glob that matched nothing.** Report the two together.
+- **`tests 0` + `fail 0` is a glob that matched nothing.** Report the two together. Also read
+  `cancelled`: a `before()` hook that can't import leaves tests cancelled, neither passed nor failed.
 - **`$?` after a pipe is the last command's code.** Run the checker bare.
 - **`deno check` writes `deno.lock` files.** Never commit them as a side effect.
 - **`--lockfile-only` leaves the OLD version installed.** A green run after it proves nothing.
