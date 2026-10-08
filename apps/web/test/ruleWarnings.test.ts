@@ -105,36 +105,60 @@ describe('parseRuleWarnings: liveness_refused and trailing segments', () => {
   });
 });
 
+/* The writer as it shipped from 9a85f0b until a3c130a: summary first, then the segment, then a bare
+   .slice(0, 1000) that could cut the label off entirely. a3c130a gave the segment a reserved budget,
+   so the live writer no longer produces these shapes - but rows it wrote before that deploy stay in
+   agent_runs, and Health keeps showing an agent's newest screening run (pickRuleWarningRun, over the
+   last RUN_WINDOW rows, with no date bound) until that agent screens again. Those rows must still
+   parse, so their inputs are rebuilt here as literal strings in the old layout rather than through
+   the real writer, which can no longer reach them. */
+const preA3c130a = (summary: string, warnings: string[]): string =>
+  // The exact old expression: no reserve, no ellipsis, a silent cut at the cap.
+  `${summary}; rule_warnings: ${[...new Set(warnings)].sort().join(' | ')}`.slice(0, 1000);
+
 describe('parseRuleWarnings: D1, the cap can delete the segment', () => {
-  it('20 long db errors push the label past the cap: maybe_cut, not null', () => {
+  it('pre-a3c130a row: 20 long db errors push the label past the cap: maybe_cut, not null', () => {
     // worker/src/cli/scout.ts:449 joins up to 20 db errors with "\n" in front of the segment.
     const dbErrors = Array.from({ length: 20 }, (_, i) => `insert failed for job ${i}: ${'x'.repeat(80)}`).join('\n');
-    // The REAL writer: summary first, then the segment, then sliced to 1000.
-    const detail = withRuleWarnings(dbErrors, [EXP]);
+    // The OLD writer's layout: summary first, then the segment, then sliced to 1000.
+    const detail = preA3c130a(dbErrors, [EXP]);
     // Precondition: the cap really did cut the label off, or this test proves nothing.
-    assert.ok(detail !== null && detail.length === 1000 && !detail.includes('rule_warnings: '));
+    assert.ok(detail.length === 1000 && !detail.includes('rule_warnings: '));
     // We cannot know whether warnings existed, and must say so.
     assert.deepEqual(parseRuleWarnings(detail), { kind: 'maybe_cut' });
   });
 
-  it('a label cut mid-word at the cap ("...; rule_war") is maybe_cut', () => {
-    // A summary sized so the slice lands inside the label.
+  it('pre-a3c130a row: a label cut mid-word at the cap ("...; rule_war") is maybe_cut', () => {
+    // A summary sized so the old slice lands inside the label.
     const summary = 'e'.repeat(1000 - '; rule_war'.length);
-    // Writer output, cut exactly there.
-    const detail = withRuleWarnings(summary, [EXP]);
+    // Old-layout output, cut exactly there.
+    const detail = preA3c130a(summary, [EXP]);
     // Precondition on where the cut fell.
-    assert.ok(detail?.endsWith('; rule_war'));
+    assert.ok(detail.endsWith('; rule_war'));
     // Unknowable, said out loud.
     assert.deepEqual(parseRuleWarnings(detail), { kind: 'maybe_cut' });
   });
 
-  it('a label cut just after its colon is maybe_cut, since the items were the part cut', () => {
-    // The slice lands right after "rule_warnings: ", leaving a label with no items.
+  it('pre-a3c130a row: a label cut just after its colon is maybe_cut, since the items were the part cut', () => {
+    // The old slice lands right after "rule_warnings: ", leaving a label with no items.
     const summary = 'e'.repeat(1000 - '; rule_warnings: '.length);
-    // Writer output.
-    const detail = withRuleWarnings(summary, [EXP]);
+    // Old-layout output.
+    const detail = preA3c130a(summary, [EXP]);
+    // Precondition: the label survived whole and nothing follows it, or this is a different case.
+    assert.ok(detail.length === 1000 && detail.endsWith('; rule_warnings: '));
     // At the cap with an empty body: the cap, not the writer, emptied it.
     assert.deepEqual(parseRuleWarnings(detail), { kind: 'maybe_cut' });
+  });
+
+  it('a3c130a writer: the same 20 db errors no longer delete the segment - a complete list', () => {
+    // The input that used to cut the label off, now through the REAL (current) writer.
+    const dbErrors = Array.from({ length: 20 }, (_, i) => `insert failed for job ${i}: ${'x'.repeat(80)}`).join('\n');
+    // The reserve keeps room for the segment after the capped summary.
+    const detail = withRuleWarnings(dbErrors, [EXP]);
+    // Precondition: the summary really was long enough to have overflowed the old writer.
+    assert.ok(dbErrors.length > 1000);
+    // Read back whole: the warning survives, and the list is known complete (under the cap).
+    assert.deepEqual(parseRuleWarnings(detail), { kind: 'warnings', warnings: [EXP], truncated: false });
   });
 
   it('a short failure-only detail is still null: under the cap, no label means no warnings', () => {
