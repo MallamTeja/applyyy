@@ -116,8 +116,10 @@ export function toScreenableJob(row: JobInsert | JobRow): ScreenableJob {
     title: row.title,
     // The normalised join key for the blocklist and the weekly cap.
     companySlug: row.company_slug,
-    // Always `[]` from `toJobInsert` today — splitting locations is the Normalizer's
-    // job. `?? []` because the column is NOT NULL with a `'{}'` default.
+    // Always `[]` today: `toJobInsert` (registry.ts:162) and both tier lanes (tiers.ts:296,
+    // :370) hard-code it, and NOTHING splits locations later. The Normalizer only reads
+    // the array; it never writes it. Corrected 2026-10-08, since this used to say splitting
+    // is the Normalizer's job. `?? []` because the column is NOT NULL with a `'{}'` default.
     locations: row.locations ?? [],
     // THE FALLBACK THAT CARRIES THE LOCATION RULE TODAY. With `locations` empty, the
     // allowlist matches against this raw string instead.
