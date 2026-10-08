@@ -217,3 +217,65 @@
 .drawer__view-resume {
   margin-left: auto;
 }
+
+/* "Send through pipeline" (2026-10-08), passed_filters cards only. Tokens only, no theme
+   selector: a dark-theme attribute rule never matches for a system-preference user here. */
+.drawer__send {
+  /* Button, reason and progress stack in reading order. */
+  display: flex;
+  /* Vertical, so the step list sits under the button it belongs to. */
+  flex-direction: column;
+  /* Left-aligned, so the button keeps its natural width instead of stretching. */
+  align-items: flex-start;
+  /* Same rhythm as the card's own rows. */
+  gap: var(--gap-2);
+  /* Separates the action from the meta row, the way the drawer separates sections. */
+  padding-top: var(--gap-2);
+  /* A hairline, so the run reads as a distinct block on the card. */
+  border-top: 1px solid var(--rule);
+}
+
+/* Why the button is disabled; secondary text, never an alarm. */
+.drawer__send-reason,
+.drawer__send-outcome {
+  /* Helper size, matching the drawer's other explanatory lines. */
+  font-size: var(--size-xs);
+  /* Readable but quieter than the card heading. */
+  color: var(--text-secondary);
+  /* Paragraph default margins would double the flex gap. */
+  margin: 0;
+}
+
+/* The three steps, one per line, without list bullets competing with the state text. */
+.drawer__send-steps {
+  /* Numbered order is already in the step names; bullets add noise. */
+  list-style: none;
+  /* Flush with the button above. */
+  margin: 0;
+  /* Same reason. */
+  padding: 0;
+  /* Small type: progress is secondary to the outcome. */
+  font-size: var(--size-xs);
+  /* Machine voice, the same as the status identifiers. */
+  font-family: var(--font-machine);
+  /* Muted by default; states below lift it. */
+  color: var(--text-muted);
+}
+
+/* The step the agent is working on now. */
+.drawer__send-step[data-state='running'] {
+  /* The accent says "this one is live". */
+  color: var(--accent);
+}
+
+/* Steps that finished and moved the row. */
+.drawer__send-step[data-state='done'] {
+  /* Full ink: settled facts read as primary text. */
+  color: var(--text-primary);
+}
+
+/* The step where the run ended early. */
+.drawer__send-step[data-state='stopped'] {
+  /* Signal colour marks where to look, without the alarm palette. */
+  color: var(--signal-strong);
+}

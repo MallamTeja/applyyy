@@ -112,7 +112,8 @@ export function PipelineRunModal({ onClose, onRefresh }: PipelineRunModalProps):
             <div className="pipeline-step-item">
               <span className="pipeline-step-item__num">5</span>
               <div>
-                <strong>Auditor (Gemini)</strong>
+                {/* No "(Gemini)" here, unlike step 4: the auditor checks claims against the Master Profile with deterministic code and calls no LLM (supabase/functions/auditor + _shared/audit import none), so the label must not promise one. */}
+                <strong>Auditor</strong>
                 <p>Audits claims against Master Profile & queues verified resumes into Approval Queue.</p>
               </div>
             </div>

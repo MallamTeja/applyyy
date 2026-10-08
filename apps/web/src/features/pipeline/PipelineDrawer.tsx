@@ -18,6 +18,8 @@ import { InterviewPrepPanel } from './InterviewPrepPanel';
 import { DrawerAppCard, type DrawerAppItem } from './DrawerAppCard';
 /* Shape check on tailored_profile: anything that is not a real snapshot becomes null, never a guess. */
 import { readResumeSnapshot } from './resumeSnapshot';
+/* The real invoke/read deps for "Send through pipeline"; null when Supabase is unconfigured. */
+import { liveRowPipelineDeps } from './rowPipelineDeps';
 /* The shared tailored-vs-master view (owned by resume-preview/); imported, never modified here. */
 import { ResumePreview } from '../resume-preview/ResumePreview';
 
@@ -117,8 +119,10 @@ export function PipelineDrawer({
           .from('applications')
           /* tailored_profile added 2026-10-06 so any row, in any status, can reopen the resume
              tailored for it ("sent" is only true from `applied` on, so it is not claimed here).
-             Read-only: this drawer never writes a status. */
-          .select('id, created_at, fit_score, tailored_profile, jobs:job_id(title, company_name, discovered_via, source_refs)')
+             Read-only: this drawer never writes a status.
+             match_score, NOT fit_score (2026-10-08): fit_score exists in no migration and not in the live
+             table, so PostgREST refused this select and the drawer listed nothing for EVERY status. */
+          .select('id, created_at, match_score, tailored_profile, jobs:job_id(title, company_name, discovered_via, source_refs)')
           .eq('status', status)
           .order('created_at', { ascending: false })
           .limit(25);
@@ -144,7 +148,8 @@ export function PipelineDrawer({
           company: row.jobs?.company_name ?? 'Unknown Company',
           createdAt: row.created_at,
           discoveredVia: row.jobs?.discovered_via ?? null,
-          score: row.fit_score ?? null,
+          // A finite number or nothing: the card prints it as a percentage, so a non-number must never reach it.
+          score: typeof row.match_score === 'number' && Number.isFinite(row.match_score) ? row.match_score : null,
           /* Null unless it is a real snapshot, so a malformed jsonb row offers nothing rather than an empty resume. */
           resume: readResumeSnapshot(row.tailored_profile),
         }));
@@ -302,7 +307,8 @@ export function PipelineDrawer({
           ) : (
             state.rows.map((app) => (
               /* The card owns the View resume decision; the drawer only owns which row is open. */
-              <DrawerAppCard key={app.id} app={app} onViewResume={openResume} />
+              /* The card decides from `status` whether to offer "Send through pipeline" (passed_filters only). */
+              <DrawerAppCard key={app.id} app={app} onViewResume={openResume} sendThroughPipeline={{ status, deps: liveRowPipelineDeps }} />
             ))
           )}
             </>
