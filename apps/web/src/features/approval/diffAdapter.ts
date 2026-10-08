@@ -82,6 +82,11 @@ export interface DiffAdapterInput {
    * resume carries only the SELECTED skills, and the operator needs to see what
    * was dropped as well as what was kept. */
   readonly master: MasterProfile;
+  /* The tailor's resume rebuilt from tailor_refs + the pinned master (tailoredEdits.ts
+   * rebuildOriginal). The ONLY thing an edit is measured against: "edited" is derived by
+   * comparing `resolved` with this, never stored. Null when it cannot be rebuilt, which
+   * disables editing on every line (D4) and otherwise leaves the diff exactly as before. */
+  readonly original: ResolvedResume | null;
 }
 
 /* --- Locating a finding inside a line -------------------------------- */
@@ -98,7 +103,14 @@ function splitIntoRuns(
   text: string,
   claims: readonly string[],
   tracesTo: string,
+  /* The verdict of the text AROUND the claims. 'traced' for the tailor's own text;
+     'edited' for an operator edit that kept a flagged claim, so the kept claim still
+     carves out as fabricated while the rest stays unaudited, never traced (R1).
+     Defaulted so every pre-existing caller is unchanged. */
+  baseVerdict: 'traced' | 'edited' = 'traced',
 ): { runs: TailoredRun[]; matched: string[] } {
+  /* An edited run traces to nothing (the Auditor never read it); only traced text keeps the ref. */
+  const baseTracesTo = baseVerdict === 'traced' ? tracesTo : null;
   /* Longest claims first. If the Auditor flagged both "Docker" and "Docker
    * Compose" on one line, matching the short one first would consume half of
    * the long one and leave "  Compose" unmatched and unmarked. */
@@ -112,7 +124,7 @@ function splitIntoRuns(
    * claims out of it. Carving rather than assembling means any text the
    * Auditor did not object to keeps its traced verdict by default - the safe
    * reading, since the bullet's `ref` is guaranteed to resolve. */
-  let runs: TailoredRun[] = [{ text, verdict: 'traced', tracesTo }];
+  let runs: TailoredRun[] = [{ text, verdict: baseVerdict, tracesTo: baseTracesTo }];
 
   for (const claim of ordered) {
     /* Empty claims would match everywhere and split every run infinitely. */
@@ -144,12 +156,14 @@ function splitIntoRuns(
        * would otherwise leave stray padding from the marker styles. */
       const pieces: TailoredRun[] = [];
       if (before !== '') {
-        pieces.push({ text: before, verdict: 'traced', tracesTo });
+        /* The left edge keeps the line's base verdict, traced or edited. */
+        pieces.push({ text: before, verdict: baseVerdict, tracesTo: baseTracesTo });
       }
       /* The finding. `tracesTo: null` is not missing data - it IS the verdict. */
       pieces.push({ text: hit, verdict: 'fabricated', tracesTo: null });
       if (after !== '') {
-        pieces.push({ text: after, verdict: 'traced', tracesTo });
+        /* So does the right edge. */
+        pieces.push({ text: after, verdict: baseVerdict, tracesTo: baseTracesTo });
       }
       return pieces;
     });
@@ -160,30 +174,103 @@ function splitIntoRuns(
   return { runs, matched };
 }
 
+/* Split an EDITED line: claims the operator's text still contains stay flagged; only
+ * claims whose words are gone become superseded.
+ *
+ * Superseding every finding on any edit was an honesty hole: change one unrelated word,
+ * keep "Docker", and the claim left the gate while the fabricated word shipped. An edit
+ * supersedes a claim only by removing it. "Still contains" uses the same case-insensitive
+ * indexOf that splitIntoRuns locates with, so a claim counted present here is one
+ * splitIntoRuns can carve out. */
+function splitEdited(
+  text: string,
+  claims: readonly string[],
+  tracesTo: string,
+): { runs: TailoredRun[]; matched: string[]; superseded: string[] } {
+  /* Lowercased once; the per-claim test below compares against it. */
+  const lower = text.toLowerCase();
+  /* Claims whose words survived the edit: they still need a decision. */
+  const present = claims.filter((claim) => lower.includes(claim.toLowerCase()));
+  /* Claims whose words the edit removed: nothing of them is sent any more. */
+  const superseded = claims.filter((claim) => !lower.includes(claim.toLowerCase()));
+  /* Carve the survivors out of an 'edited' base, so they render and gate as fabricated. */
+  const { runs, matched } = splitIntoRuns(text, present, tracesTo, 'edited');
+  /* matched feeds the fail-loud bookkeeping; superseded goes to the line. */
+  return { runs, matched, superseded };
+}
+
 /* --- Building the lines ----------------------------------------------- */
 
-/* Every bullet in the resolved resume, in document order, with the master text
- * beside it.
+/* The fields every line carries when editing is NOT in play: the original could not be
+ * rebuilt (D4), or the line is skills (D3). Spelled once so the "nothing is edited"
+ * shape cannot differ between the three line builders. */
+const NOT_EDITABLE = {
+  /* No target: the UI offers no edit control. */
+  editTarget: null,
+  /* Without an original, nothing can be shown to differ from it. */
+  editState: 'original',
+  /* Unknown, and said so, rather than guessed from the current text. */
+  originalText: null,
+  /* Nothing was replaced, so nothing was superseded. */
+  supersededClaims: [],
+} as const;
+
+/* The bullet node, derived from ResolvedResume because the contract seam does not
+ * re-export it, and widening that seam is not this change's call. */
+type ResolvedBullet = ResolvedResume['experience'][number]['bullets'][number];
+
+/* Experience, projects and education all hold bullets with identical shape, so one
+ * list of the three collections avoids three near-copies that would drift the moment
+ * one of them needed a fix. Achievements and certifications are NOT here: the diff has
+ * never shown them, and adding them would change every row's lines and coverage, which
+ * is a separate decision from editing. A function so the current and the original
+ * resume are walked by the same definition. */
+function bulletGroups(resume: ResolvedResume) {
+  /* `as const` keeps each section name a literal for the line id. */
+  return [
+    { section: 'experience', entries: resume.experience },
+    { section: 'projects', entries: resume.projects },
+    { section: 'education', entries: resume.education },
+  ] as const;
+}
+
+/* Every bullet, in document order, with the master text beside it.
  *
  * `ResolvedBullet` carries `master_text` specifically so this screen needs no
- * second lookup - the contract's author put it there for the diff view. */
+ * second lookup - the contract's author put it there for the diff view.
+ *
+ * With an original (task 8) the ORIGINAL is walked as the skeleton. An edit changes
+ * text and a removal deletes a bullet, but neither moves anything, so walking the
+ * tailor's version keeps a removed bullet in its own place and turns every comparison
+ * into "same ref - what does it say now". */
 function bulletLines(
   resolved: ResolvedResume,
+  original: ResolvedResume | null,
   findingsByPath: ReadonlyMap<string, readonly AuditFinding[]>,
   matchedClaims: Set<string>,
+  /* Out-parameter, like matchedClaims: findings accounted for as superseded, so the
+     caller's fail-loud step does not ALSO report them as unlocated. */
+  supersededKeys: Set<string>,
 ): DiffLine[] {
+  /* Accumulated in skeleton order, so the screen reads in the tailor's document order. */
   const lines: DiffLine[] = [];
 
-  /* Experience, projects and education all hold bullets with identical shape,
-   * so one loop over the three collections avoids three near-copies that would
-   * drift the moment one of them needed a fix. */
-  const bulletGroups = [
-    { section: 'experience', entries: resolved.experience },
-    { section: 'projects', entries: resolved.projects },
-    { section: 'education', entries: resolved.education },
-  ] as const;
+  /* Current bullets by ref, so each original bullet finds its stored text in one lookup.
+     Refs are unique across the resume (the validator refuses duplicates). */
+  const currentByRef = new Map<string, ResolvedBullet>();
+  /* The same three sections the skeleton walk covers, so the lookup and the walk agree. */
+  for (const group of bulletGroups(resolved)) {
+    /* Every entry in that section. */
+    for (const entry of group.entries) {
+      /* Index every stored bullet; the walk below consumes them by ref. */
+      for (const bullet of entry.bullets) currentByRef.set(bullet.ref, bullet);
+    }
+  }
 
-  for (const group of bulletGroups) {
+  /* No original: walk the stored resume, exactly as before task 8. */
+  const skeleton = original ?? resolved;
+
+  for (const group of bulletGroups(skeleton)) {
     for (const entry of group.entries) {
       for (const bullet of entry.bullets) {
         /* The path the Auditor would have used to name this bullet. Findings
@@ -193,17 +280,126 @@ function bulletLines(
         const findings = findingsByPath.get(path) ?? [];
         const claims = findings.map((finding) => finding.claim);
 
-        const { runs, matched } = splitIntoRuns(bullet.text, claims, bullet.ref);
-        /* Record what landed so the caller can compute the difference. */
-        for (const claim of matched) matchedClaims.add(path + '::' + claim);
+        /* D4: without an original no edit can be recognised, so the line is built as it
+           always was and offers no control. */
+        if (original === null) {
+          const { runs, matched } = splitIntoRuns(bullet.text, claims, bullet.ref);
+          /* Record what landed so the caller can compute the difference. */
+          for (const claim of matched) matchedClaims.add(path + '::' + claim);
+          lines.push({
+            id: path,
+            kind: 'bullet',
+            masterText: bullet.master_text,
+            masterNodeId: bullet.ref,
+            tailoredRuns: runs,
+            /* Nothing editable, nothing edited. */
+            ...NOT_EDITABLE,
+          });
+          /* Done with this bullet. */
+          continue;
+        }
+
+        /* Here `bullet` is the TAILOR's version; `now` is what is stored for that ref. */
+        const now = currentByRef.get(bullet.ref);
+        /* Consumed, so anything left afterwards is a bullet the original never had. */
+        currentByRef.delete(bullet.ref);
+        /* Edit controls address the bullet by ref, whatever its state. */
+        const editTarget = { kind: 'bullet', ref: bullet.ref } as const;
+
+        /* Unchanged: the Auditor read exactly this text, so its findings still apply. */
+        if (now !== undefined && now.text === bullet.text) {
+          const { runs, matched } = splitIntoRuns(now.text, claims, bullet.ref);
+          /* Same bookkeeping as the no-original path. */
+          for (const claim of matched) matchedClaims.add(path + '::' + claim);
+          lines.push({
+            id: path,
+            kind: 'bullet',
+            /* The ORIGINAL's master_text - the validator's - never the stored copy: the
+               ground-truth pane must come from the source R0 protects. */
+            masterText: bullet.master_text,
+            /* Same ref either side; the original's is the one the Auditor named. */
+            masterNodeId: bullet.ref,
+            /* The Auditor's findings, carved out exactly as before task 8. */
+            tailoredRuns: runs,
+            /* Editable: an original exists to compare a future edit against. */
+            editTarget,
+            /* Unchanged from what the tailor wrote and the Auditor read. */
+            editState: 'original',
+            /* The tailor's text, for the edit box and Reset. */
+            originalText: bullet.text,
+            /* Nothing replaced, so nothing superseded; its findings are live runs above. */
+            supersededClaims: [],
+          });
+          /* Done with this bullet. */
+          continue;
+        }
+
+        /* Removed: every claim's words are gone, so all are superseded. Edited: only the
+           claims the new text no longer contains; kept claims stay flagged runs. */
+        const edited =
+          now === undefined
+            ? { runs: [], matched: [], superseded: claims }
+            : splitEdited(now.text, claims, bullet.ref);
+        /* Kept claims that landed: located, so not unlocated, and they gate as fabricated. */
+        for (const claim of edited.matched) matchedClaims.add(path + '::' + claim);
+        /* Gone claims: shown on the line, never blocking, never unlocated. */
+        for (const claim of edited.superseded) supersededKeys.add(path + '::' + claim);
 
         lines.push({
           id: path,
           kind: 'bullet',
+          /* From the original, as above. */
           masterText: bullet.master_text,
+          /* The ref the edit and Reset address. */
           masterNodeId: bullet.ref,
-          tailoredRuns: runs,
+          /* Edited: the operator's words as 'edited' runs, never traced (R1), with any
+             kept claim carved out as fabricated. Removed: no runs - nothing is sent. */
+          tailoredRuns: edited.runs,
+          /* Kept on a removed line too: Reset needs somewhere to point. */
+          editTarget,
+          /* Absent from the stored resume means removed; present with other text means edited. */
+          editState: now === undefined ? 'removed' : 'edited',
+          /* The tailor's text, for comparison and Reset. */
+          originalText: bullet.text,
+          /* Only the findings whose words the edit or removal actually took off the resume. */
+          supersededClaims: edited.superseded,
         });
+      }
+    }
+  }
+
+  /* Bullets stored now that the original never had. No edit on this page produces one, so
+     this is divergence; it is shown as EDITED (unaudited, forces Bucket B) rather than as
+     traced, because nothing proves the tailor wrote it. Fail closed, never clean. */
+  if (original !== null) {
+    /* Walk the STORED resume this time: the leftovers exist only there. */
+    for (const group of bulletGroups(resolved)) {
+      /* Entry by entry, so the leftovers keep their stored order. */
+      for (const entry of group.entries) {
+        /* Each stored bullet; the consumed ones are skipped just below. */
+        for (const bullet of entry.bullets) {
+          /* Only the leftovers the walk above did not consume. */
+          if (!currentByRef.has(bullet.ref)) continue;
+          lines.push({
+            /* Its own path in the stored resume: the original has none to lend it. */
+            id: group.section + '.' + entry.ref + '.' + bullet.ref,
+            /* Still a bullet, so it renders and edits like one. */
+            kind: 'bullet',
+            /* Only the stored copy exists here; it is shown, never written (R0). */
+            masterText: bullet.master_text,
+            /* The ref the operator can look up on the Master Profile page. */
+            masterNodeId: bullet.ref,
+            /* The operator-side verdict: unaudited text. */
+            tailoredRuns: [{ text: bullet.text, verdict: 'edited', tracesTo: null }],
+            /* Editable and removable, so the operator can act on the divergence. */
+            editTarget: { kind: 'bullet', ref: bullet.ref },
+            /* Counted in editCount, which is what keeps the row out of Bucket A. */
+            editState: 'edited',
+            /* No tailor version exists to show or reset to. */
+            originalText: null,
+            supersededClaims: [],
+          });
+        }
       }
     }
   }
@@ -233,6 +429,9 @@ function skillsLine(resolved: ResolvedResume, master: MasterProfile): DiffLine {
      * for a finding to attach to. Marking this line would imply a risk that
      * the contract has already made impossible. */
     tailoredRuns: [{ text: selected, verdict: 'traced', tracesTo: 'skills' }],
+    /* D3: skills cannot be edited yet - a skill is chosen by id, so an edit would have
+       to be a selection change, which is a different feature. */
+    ...NOT_EDITABLE,
   };
 }
 
@@ -245,24 +444,68 @@ function skillsLine(resolved: ResolvedResume, master: MasterProfile): DiffLine {
  * real things, and therefore harder to check". */
 function summaryLine(
   resolved: ResolvedResume,
+  original: ResolvedResume | null,
   findingsByPath: ReadonlyMap<string, readonly AuditFinding[]>,
   matchedClaims: Set<string>,
+  /* Out-parameter shared with bulletLines, for the same reason as there. */
+  supersededKeys: Set<string>,
 ): DiffLine | null {
-  /* No summary section means no line, rather than an empty one. */
-  if (resolved.summary === null || resolved.summary === '') return null;
+  /* Null and '' both mean "no summary"; normalised once so the comparisons below agree. */
+  const now = resolved.summary === null || resolved.summary === '' ? null : resolved.summary;
+  /* Superseded-ness is decided against `was`, so its null-handling must match `now`'s exactly. */
+  /* The tailor's summary, by the same rule; null when there is no original at all. */
+  const was = original === null || original.summary === null || original.summary === '' ? null : original.summary;
+  /* No summary on either side means no line, rather than an empty one. */
+  if (now === null && was === null) return null;
 
   const findings = findingsByPath.get('summary') ?? [];
   const claims = findings.map((finding) => finding.claim);
 
-  const { runs, matched } = splitIntoRuns(resolved.summary, claims, 'summary');
-  for (const claim of matched) matchedClaims.add('summary::' + claim);
+  /* Unchanged (or no original to compare with, D4): the Auditor read this text, so split
+     its findings out of it exactly as before task 8. `now` is non-null here because a null
+     `now` with an equal `was` returned above. */
+  if (original === null || now === was) {
+    const { runs, matched } = splitIntoRuns(now as string, claims, 'summary');
+    /* Recorded so the fail-loud step knows which summary findings landed. */
+    for (const claim of matched) matchedClaims.add('summary::' + claim);
+    return {
+      id: 'summary',
+      kind: 'summary',
+      masterText: null,
+      masterNodeId: 'summary',
+      tailoredRuns: runs,
+      /* D4 leaves the line exactly as it was; otherwise it is editable and untouched. */
+      ...(original === null
+        ? NOT_EDITABLE
+        : { editTarget: { kind: 'summary' }, editState: 'original', originalText: was, supersededClaims: [] }),
+    };
+  }
 
+  /* Changed. Gone summary: every claim superseded. Edited summary: only claims the new
+     text dropped; kept claims stay flagged (same rule and helper as bullets). */
+  const edited = now === null ? { runs: [], matched: [], superseded: claims } : splitEdited(now, claims, 'summary');
+  /* Kept claims that landed are located, so the fail-loud step does not repeat them. */
+  for (const claim of edited.matched) matchedClaims.add('summary::' + claim);
+  /* Gone claims are listed on the line instead of blocking. */
+  for (const claim of edited.superseded) supersededKeys.add('summary::' + claim);
   return {
+    /* Same id as the unchanged case, so the line keeps its React key across a save. */
     id: 'summary',
+    /* Rendered as prose. */
     kind: 'summary',
+    /* No single master counterpart, edited or not - see the note above this function. */
     masterText: null,
+    /* The fixed pseudo-id the findings path uses for the summary. */
     masterNodeId: 'summary',
-    tailoredRuns: runs,
+    /* Edited runs in the operator's words with kept claims carved out (R1). Gone: none. */
+    tailoredRuns: edited.runs,
+    editTarget: { kind: 'summary' },
+    /* No summary now where the tailor wrote one reads as removed; anything else as edited. */
+    editState: now === null ? 'removed' : 'edited',
+    /* The tailor's summary, or null when the tailor wrote none. */
+    originalText: was,
+    /* Only the claims whose words are no longer sent. */
+    supersededClaims: edited.superseded,
   };
 }
 
@@ -270,6 +513,9 @@ function summaryLine(
 
 export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
   const { application, job, resolved, master } = input;
+  /* `?? null` because node-run tests and older callers may omit the field entirely; an
+     absent original must mean D4 (nothing editable), never a crash or a guess. */
+  const original = input.original ?? null;
 
   /* Group findings by path once, so each line does a map lookup instead of a
    * scan of every finding. At 35 rows a day this is not a performance
@@ -287,13 +533,17 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
   /* Every `path::claim` the run-splitter managed to locate. The difference
    * against the full finding list is what could not be placed. */
   const matchedClaims = new Set<string>();
+  /* Every `path::claim` whose line the operator edited or removed. These are accounted
+   * for on their line as superseded, so they must not ALSO surface as unlocated - that
+   * would block approval on text that is no longer on the resume. */
+  const supersededKeys = new Set<string>();
 
   /* Summary first, then bullets, then skills - the order a resume is read in,
    * and the order the sections print. */
   const lines: DiffLine[] = [];
-  const summary = summaryLine(resolved, findingsByPath, matchedClaims);
+  const summary = summaryLine(resolved, original, findingsByPath, matchedClaims, supersededKeys);
   if (summary !== null) lines.push(summary);
-  lines.push(...bulletLines(resolved, findingsByPath, matchedClaims));
+  lines.push(...bulletLines(resolved, original, findingsByPath, matchedClaims, supersededKeys));
   lines.push(skillsLine(resolved, master));
 
   /* THE FAIL-LOUD STEP. Any finding whose claim text was not located inside a
@@ -304,7 +554,11 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
    * which is worse than having no gate because the operator would trust it. */
   const unlocatedClaims: FlaggedClaim[] = application.audit_findings
     .filter(
-      (finding) => !matchedClaims.has(finding.path + '::' + finding.claim),
+      (finding) =>
+        /* Located inside a line: it is a fabricated run there. */
+        !matchedClaims.has(finding.path + '::' + finding.claim) &&
+        /* Superseded by an edit or removal: it is listed on its line instead. */
+        !supersededKeys.has(finding.path + '::' + finding.claim),
     )
     .map((finding) => ({
       key: 'unlocated::' + finding.path + '::' + finding.claim,
@@ -321,10 +575,12 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
     applicationId: application.id,
     jobTitle: job.title,
     companyName: job.company_name,
-    /* The row's pinned version, falling back to the snapshot's own. They should
-     * agree; if they do not, the snapshot is what the worker will actually
-     * render, so it is the honest number to show. */
-    masterVersion: application.master_version ?? resolved.master_version,
+    /* The snapshot's own version first, the row's pin only as a fallback. They should
+     * agree; if they do not, the snapshot is what the worker will actually render,
+     * so it is the honest number to show. (The order used to be reversed, contradicting
+     * this very comment; flipped in task 8 v2. The `??` stays because node-run test
+     * fixtures may build a resolved resume without the field.) */
+    masterVersion: resolved.master_version ?? application.master_version,
     coverage: {
       /* Half of the `tailored_hash` input, and what the Tailor chose to
        * emphasise. UNTRUSTED - these came out of a job description. */
@@ -342,9 +598,19 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
           !keywordAppearsInTracedText(keyword, lines) &&
           keywordAppearsInFlaggedText(keyword, lines),
       ),
+      /* Keywords that appear ONLY in the operator's edited text: not master-backed, not
+         flagged, and kept apart from both so neither figure is credited with them. */
+      matchedByEdit: application.selected_jd_keywords.filter(
+        (keyword) =>
+          !keywordAppearsInTracedText(keyword, lines) &&
+          !keywordAppearsInFlaggedText(keyword, lines) &&
+          keywordAppearsInEditedText(keyword, lines),
+      ),
     },
     lines,
     unlocatedClaims,
+    /* Derived from the lines, never passed in, so it cannot disagree with them (R2). */
+    editCount: lines.filter((line) => line.editState !== 'original').length,
     discoveredVia: job.discovered_via,
     sourceRefs: job.source_refs,
     employmentType: job.employment_type,
@@ -378,8 +644,10 @@ export function keywordAppearsInTracedText(
   return lines.some((line) =>
     line.tailoredRuns.some(
       (run) =>
-        /* Flagged runs are excluded: text the Auditor doubts cannot earn coverage. */
-        run.verdict !== 'fabricated' &&
+        /* Traced runs ONLY. This was `!== 'fabricated'` until task 8, which would now
+           count the operator's edited runs as master-backed (R1). Text the Auditor
+           doubts, and text it never read, cannot earn verified coverage. */
+        run.verdict === 'traced' &&
         /* Per RUN, never over joined runs: joining could invent a word boundary that exists
            in neither run, and would mix traced with flagged text. The producer decides case
            and bounds, so no toLowerCase here. */
@@ -401,6 +669,24 @@ export function keywordAppearsInFlaggedText(
         /* Only flagged runs: this is the fabrication-purchased side of the bar. */
         run.verdict === 'fabricated' &&
         /* Identical matcher to the traced side, so the two figures stay comparable. */
+        keywordAppearsIn(keyword, run.text),
+    ),
+  );
+}
+
+/* Does this JD keyword appear in the operator's own edited text?
+ * Same producer rule again, so "from your edits" is measured exactly like the other two. */
+export function keywordAppearsInEditedText(
+  keyword: string,
+  lines: readonly DiffLine[],
+): boolean {
+  /* Any edited run containing it. */
+  return lines.some((line) =>
+    line.tailoredRuns.some(
+      (run) =>
+        /* Only the operator's runs: the third, unaudited segment of the bar. */
+        run.verdict === 'edited' &&
+        /* Per run, same matcher, same reasons as the traced side. */
         keywordAppearsIn(keyword, run.text),
     ),
   );

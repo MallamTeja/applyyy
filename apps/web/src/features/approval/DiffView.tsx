@@ -31,7 +31,7 @@
 import { useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
 
-import type { DiffLine, FlaggedClaim, ResumeDiff, TailoredRun } from './diffModel';
+import type { DiffLine, EditTarget, FlaggedClaim, ResumeDiff, TailoredRun } from './diffModel';
 import {
   collectFlaggedClaims,
   coveragePercent,
@@ -43,14 +43,40 @@ import type { DiscoverySource } from '../../data/contract';
 
 import './DiffView.css';
 
-/* Two named outcomes per claim, not a single acknowledgement checkbox. */
-export type ClaimDecision = 'remove' | 'keep';
+/* The one decision left on a flagged claim: "keep it, I can defend it".
+   Until 2026-10-06 there was also 'remove', which reached p_detail and never changed the PDF -
+   the button said "cut" and the submitted resume kept the words. Cutting is now a real edit
+   (the bullet is removed and saved), so the only thing left to RECORD is the acknowledgement. */
+export type ClaimDecision = 'keep';
+
+/* What the operator asked to change. DiffView only names the intent; the page turns it into a
+   new resume and saves it, so this component stays free of data access. */
+export type EditAction =
+  // Replace one bullet's (or the summary's) text.
+  | { readonly kind: 'edit'; readonly target: EditTarget; readonly text: string }
+  // Delete a whole bullet (D2); summaries are edited, never removed.
+  | { readonly kind: 'remove'; readonly target: { readonly kind: 'bullet'; readonly ref: string } }
+  // Put the tailor's original text (or the removed bullet) back.
+  | { readonly kind: 'reset'; readonly target: EditTarget };
+
+/* A save either landed or it did not; the reason is shown to the operator verbatim. */
+export type EditResult = { readonly ok: true } | { readonly ok: false; readonly reason: string };
 
 /* Pure presentation component - no data access, no Supabase. */
 export interface DiffViewProps {
   readonly diff: ResumeDiff;
   readonly onApprove: (decisions: ReadonlyMap<string, ClaimDecision>) => void;
   readonly onReject: (reason: string) => void;
+  /* Async because it is a real write. Absent means "this screen offers no editing", which keeps
+     any render-only caller (and the tests) working without stubbing a save path. */
+  readonly onEdit?: ((action: EditAction) => Promise<EditResult>) | undefined;
+  /* D4: why editing is off for this row, shown instead of controls that could not be honest. */
+  readonly editDisabledReason?: string | null | undefined;
+  /* Whether the row carries a generated cover letter, which an edit does not regenerate. */
+  readonly hasCoverLetter?: boolean | undefined;
+  /* The page is approving or rejecting this row right now: no edit may land mid-approval and
+     Approve must not fire twice, so every control waits. */
+  readonly locked?: boolean | undefined;
 }
 
 /* --- The job being approved against ------------------------------------- */
@@ -166,22 +192,31 @@ function JobPosting({ diff }: { readonly diff: ResumeDiff }): ReactElement | nul
   );
 }
 
+
 /* --- Coverage ---------------------------------------------------------- */
 
-/* Two-segment bar: honest coverage vs coverage purchased by fabrication.
-   Exported for the test that pins the unmeasured branch (test/coverageUnmeasured.test.ts). */
+/* Three-segment bar: honest coverage, coverage from the operator's own edits, and coverage
+   purchased by fabrication. Exported for the test that pins the unmeasured branch
+   (test/coverageUnmeasured.test.ts). */
 export function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactElement {
   /* Coverage the master genuinely supports. */
   const honestMeasure = coveragePercent(diff.coverage, 'honest');
+  /* Honest plus what the operator's own wording added. Never counted as "verified": the
+     master did not supply it, and nobody re-audited it (R1). */
+  const editsMeasure = coveragePercent(diff.coverage, 'withEdits');
   /* Coverage including the flagged claims, which is what would actually be
    * submitted if the operator approved blindly. */
   const totalMeasure = coveragePercent(diff.coverage, 'withFabrication');
 
-  /* NOT MEASURED IS A STATE, NOT A NUMBER. Same denominator for both figures, so they are
-     unmeasured together; checking both lets the compiler narrow each to its percent below.
+  /* NOT MEASURED IS A STATE, NOT A NUMBER. Same denominator for every figure, so they are
+     unmeasured together; checking each lets the compiler narrow each to its percent below.
      No bar, no badge and no "verified claims" line: each of those would state a result
      about keywords that were never recorded. */
-  if (honestMeasure.kind === 'unmeasured' || totalMeasure.kind === 'unmeasured') {
+  if (
+    honestMeasure.kind === 'unmeasured' ||
+    editsMeasure.kind === 'unmeasured' ||
+    totalMeasure.kind === 'unmeasured'
+  ) {
     return (
       <div className="coverage coverage--unmeasured">
         <div className="coverage__header-row">
@@ -197,22 +232,26 @@ export function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactEleme
 
   /* Narrowed to measured above, so these are real ratios. */
   const honest = honestMeasure.percent;
-  /* Includes flagged matches; never below honest, since it adds to the same numerator. */
-  const total = totalMeasure.percent;
-  /* The purchased portion is the gap between them. */
-  const purchased = total - honest;
+  /* The edit segment is the gap between honest and honest-plus-edits. */
+  const edited = editsMeasure.percent - honest;
+  /* withFabrication adds only the flagged matches to honest, so its gap is the purchased part. */
+  const purchased = totalMeasure.percent - honest;
 
-  /* Keywords missing from both master and tailored */
+  /* Keywords matched by nothing at all: not the master, not an edit, not a flagged claim. */
   const matchedSet = new Set([
     ...diff.coverage.honestlyMatched,
+    // `?? []`: same tolerance diffModel's coveragePercent has for a coverage built before edits existed.
+    ...(diff.coverage.matchedByEdit ?? []),
     ...diff.coverage.matchedByFabrication,
   ]);
+  // What is left over is genuinely missing from the resume.
   const missingKeywords = diff.coverage.jdKeywords.filter((k) => !matchedSet.has(k));
 
   return (
     <div className="coverage">
       <div className="coverage__header-row">
         <h3 className="coverage__title">ATS Match Score</h3>
+        {/* The badge stays the honest figure: it is the one the operator can defend. */}
         <span className="coverage__ats-badge">{honest}% Match</span>
       </div>
 
@@ -224,6 +263,7 @@ export function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactEleme
         aria-label={
           honest +
           '% of job-description keywords are supported by your master profile' +
+          (edited > 0 ? '; ' + edited + '% more come from your own edits' : '') +
           (purchased > 0
             ? '; a further ' + purchased + '% comes only from flagged claims'
             : '')
@@ -234,6 +274,13 @@ export function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactEleme
           className="coverage__fill coverage__fill--honest"
           style={{ width: honest + '%' }}
         />
+        {/* The operator's own wording: its own colour, so it can never read as master-verified. */}
+        {edited > 0 ? (
+          <span
+            className="coverage__fill coverage__fill--edited"
+            style={{ width: edited + '%' }}
+          />
+        ) : null}
         {/* Oxblood segment: purchased with fabrication. Rendered only when it
             exists, so a clean row shows a single uninterrupted bar. */}
         {purchased > 0 ? (
@@ -249,22 +296,33 @@ export function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactEleme
         <span className="coverage__stat coverage__stat--honest">
           {honest}% verified from master
         </span>
+        {/* Stated as an addition beside the verified figure, never inside it. */}
+        {edited > 0 ? (
+          <span className="coverage__stat coverage__stat--edited">
+            plus {edited}% from your edits
+          </span>
+        ) : null}
         {/* The purchased figure is stated as an addition, not a total, so it
             never reads as an achievement. */}
         {purchased > 0 ? (
           <span className="coverage__stat coverage__stat--purchased">
             plus {purchased}% unverified / flagged
           </span>
-        ) : (
+        ) : edited > 0 ? null : (
           <span className="coverage__stat">100% verified claims</span>
         )}
       </p>
 
-      {/* JD Keyword chips: Matched, Flagged, and Missing */}
+      {/* JD Keyword chips: matched, from your edits, flagged, and missing */}
       <div className="coverage__keywords">
         {diff.coverage.honestlyMatched.map((kw) => (
           <span key={kw} className="kw-chip kw-chip--matched" title="Verified in master resume">
             ✓ {kw}
+          </span>
+        ))}
+        {(diff.coverage.matchedByEdit ?? []).map((kw) => (
+          <span key={kw} className="kw-chip kw-chip--edited" title="Only in text you edited">
+            ✎ {kw}
           </span>
         ))}
         {diff.coverage.matchedByFabrication.map((kw) => (
@@ -287,14 +345,26 @@ export function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactEleme
 /* Dark-surface alert for untraceable claims. Single-use alarm surface. */
 function FabricationAlert({
   claims,
+  lines,
   masterVersion,
   decisions,
   onDecide,
+  onRemove,
+  busy,
+  removeError,
 }: {
   readonly claims: readonly FlaggedClaim[];
+  // Needed to find whether a claim sits in a bullet that can be removed.
+  readonly lines: readonly DiffLine[];
   readonly masterVersion: number;
   readonly decisions: ReadonlyMap<string, ClaimDecision>;
   readonly onDecide: (key: string, decision: ClaimDecision) => void;
+  // Null when this screen offers no editing; then only "keep" is possible.
+  readonly onRemove: ((target: { readonly kind: 'bullet'; readonly ref: string }) => void) | null;
+  // A save is in flight; every control waits for it.
+  readonly busy: boolean;
+  // The last failed removal's reason, shown in the band where the click happened.
+  readonly removeError: string | null;
 }): ReactElement {
   /* Name the first claim in the consequence sentence. A specific sentence -
    * "the first question is about your Docker setup" - lands where a generic
@@ -323,14 +393,26 @@ function FabricationAlert({
       <p className="alarm__instruction">
         {/* Says exactly what unblocks the screen. An empty or blocked state is
             an instruction, not a mood. */}
-        Decide on each claim to unlock approval.
+        Cut each claim from the resume, or keep it. Every claim needs one to unlock approval.
       </p>
+
+      {/* A failed cut leaves the bullet in the resume; saying so here, where the click was. */}
+      {removeError !== null ? (
+        <p className="alarm__error" role="alert">
+          Not cut: {removeError}
+        </p>
+      ) : null}
 
       <ul className="alarm__claims">
         {claims.map((claim) => {
           /* Undefined until the operator decides, which is what keeps Approve
              disabled. Absence of a decision is the gate. */
           const decision = decisions.get(claim.key);
+          /* The line the claim sits on; unlocated claims have none. */
+          const line = lines.find((candidate) => candidate.id === claim.lineId);
+          /* Only a BULLET can be cut: removing a summary would delete the whole paragraph,
+             so a summary claim is fixed by editing the text instead. */
+          const target = line?.editTarget?.kind === 'bullet' ? line.editTarget : null;
 
           return (
             <li key={claim.key} className="alarm__claim">
@@ -339,35 +421,39 @@ function FabricationAlert({
                   rather than as a UI label about them. */}
               <span className="alarm__claim-text">{claim.text}</span>
 
-              {/* A radio group, not a checkbox: two named outcomes cannot be
-                  satisfied by reflex-clicking, and both are legitimate. */}
               <span className="alarm__choices" role="group" aria-label={'Decide on ' + claim.text}>
+                {/* A REAL cut: the whole bullet leaves the saved resume, and the claim with it. */}
+                {onRemove !== null && target !== null ? (
+                  <button
+                    type="button"
+                    className="button button--secondary button--small"
+                    disabled={busy}
+                    onClick={() => onRemove(target)}
+                  >
+                    Cut this bullet
+                  </button>
+                ) : null}
+
+                {/* Keeping requires affirming defensibility. The label is the
+                    commitment, so the operator cannot later say they were not
+                    asked. */}
                 <label className="alarm__choice">
                   <input
                     type="radio"
                     /* Grouped per claim so each is an independent decision. */
                     name={'decision-' + claim.key}
-                    value="remove"
-                    checked={decision === 'remove'}
-                    onChange={() => onDecide(claim.key, 'remove')}
-                  />
-                  {/* Active voice, says what happens. */}
-                  Cut it
-                </label>
-
-                <label className="alarm__choice">
-                  <input
-                    type="radio"
-                    name={'decision-' + claim.key}
                     value="keep"
                     checked={decision === 'keep'}
+                    disabled={busy}
                     onChange={() => onDecide(claim.key, 'keep')}
                   />
-                  {/* Keeping requires affirming defensibility. The label is the
-                      commitment, so the operator cannot later say they were not
-                      asked. */}
                   Keep it, I can defend it
                 </label>
+
+                {/* Tells the operator the other route when there is no cut button. */}
+                {onRemove !== null && line?.editTarget?.kind === 'summary' ? (
+                  <span className="alarm__hint">or edit the summary below</span>
+                ) : null}
               </span>
             </li>
           );
@@ -381,9 +467,11 @@ function FabricationAlert({
 
 /* One run of tailored text, marked according to its provenance.
  *
- * Three treatments, and the differences between them are the whole point:
+ * Four treatments, and the differences between them are the whole point:
  *   null       - carried over untouched. No marking at all.
  *   traced     - reworded from a real master node. A quiet sage wash.
+ *   edited     - the operator's own wording. Its own mark, NEVER the traced one (R1):
+ *                nothing checked it against the master.
  *   fabricated - traces to nothing. Oxblood, heavy underline, and announced to
  *                assistive technology, because a colour-only signal would hide
  *                the single most consequential fact on the screen. */
@@ -409,6 +497,17 @@ function Run({ run }: { readonly run: TailoredRun }): ReactElement {
     );
   }
 
+  if (run.verdict === 'edited') {
+    return (
+      <span className="run run--edited">
+        {/* The operator's text, escaped like every other run. */}
+        {run.text}
+        {/* Spoken, so the provenance is not carried by colour alone. */}
+        <span className="visually-hidden"> — edited by you, not checked against the master</span>
+      </span>
+    );
+  }
+
   return (
     <span className="run run--traced">
       {run.text}
@@ -417,40 +516,97 @@ function Run({ run }: { readonly run: TailoredRun }): ReactElement {
   );
 }
 
-/* One aligned row: master text on the left, tailored runs on the right, plus a
- * provenance footer under the tailored side and optional operator inline editing. */
+/* The footer under a tailored line: where it came from, and what the Auditor said about the
+   version it replaced. Shared by both view modes so they cannot describe a line differently. */
+function Provenance({ line }: { readonly line: DiffLine }): ReactElement {
+  /* The untraceable runs on this line, so the footer can name them. */
+  const fabricated = line.tailoredRuns.filter((run) => run.verdict === 'fabricated');
+
+  return (
+    <>
+      {/* Who wrote the line: removed, edited, or the tailor (traced). */}
+      {line.editState === 'removed' ? (
+        <p className="line__provenance line__provenance--removed">removed by you</p>
+      ) : line.editState === 'edited' ? (
+        <p className="line__provenance line__provenance--edited">edited by you</p>
+      ) : fabricated.length === 0 ? (
+        <p className="line__provenance line__provenance--traced">
+          traced to <span className="identifier">{line.masterNodeId}</span>
+        </p>
+      ) : null}
+
+      {/* INDEPENDENT of the above: an edited line can still carry flagged runs, and "edited by
+          you" must never hide that some of its words trace to nothing. */}
+      {fabricated.length > 0 ? (
+        <p className="line__provenance line__provenance--fabricated">
+          {fabricated.map((run) => run.text).join(' and ')} trace
+          {fabricated.length === 1 ? 's' : ''} to nothing
+        </p>
+      ) : null}
+
+      {/* Claims the edit or removal replaced. Shown, not hidden, so the operator sees what they
+          answered - but no longer flagged, because those words are no longer in the resume. */}
+      {line.supersededClaims.map((claim) => (
+        <p key={claim} className="line__superseded">
+          Auditor flagged “{claim}” in the tailor&apos;s version
+        </p>
+      ))}
+    </>
+  );
+}
+
+/* One aligned row: master text on the left, tailored text on the right, a provenance footer,
+ * and the edit controls that SAVE (there is no local-only edit any more). */
 function Line({
   line,
-  customText,
-  onSaveCustomText,
+  onEdit,
+  busy,
 }: {
   readonly line: DiffLine;
-  readonly customText?: string | undefined;
-  readonly onSaveCustomText?: ((lineId: string, text: string) => void) | undefined;
+  // Null when this screen offers no editing.
+  readonly onEdit: ((action: EditAction) => Promise<EditResult>) | null;
+  // Any save in this diff is in flight; one write at a time per resume.
+  readonly busy: boolean;
 }): ReactElement {
+  // Whether the textarea is open.
   const [isEditing, setIsEditing] = useState<boolean>(false);
-  const currentTailoredText = customText ?? line.tailoredRuns.map((r) => r.text).join('');
-  const [draftText, setDraftText] = useState<string>(currentTailoredText);
+  // The unsaved text; never displayed outside the textarea.
+  const [draftText, setDraftText] = useState<string>('');
+  // Whether THIS line started the in-flight save, so only it says "Saving…".
+  const [savingHere, setSavingHere] = useState<boolean>(false);
+  // The last failed save's reason, shown under the line.
+  const [error, setError] = useState<string | null>(null);
 
-  /* The untraceable runs on this line, so the footer can name them. */
-  const fabricated = line.tailoredRuns.filter(
-    (run) => run.verdict === 'fabricated',
-  );
+  /* The STORED text: what the saved resume holds, which is what the PDF will print. */
+  const storedText = line.tailoredRuns.map((run) => run.text).join('');
+  /* Editing needs both a save path and a line that can be edited (not skills, not D4). */
+  const target = onEdit === null ? null : line.editTarget;
+  /* A human name for this line in aria-labels: its kind plus the start of its words (the stored
+     text, or the tailor's for a removed bullet), never a machine id a screen reader spells out. */
+  const lineWords = storedText !== '' ? storedText : (line.originalText ?? '');
+  // Trimmed to 40 characters so a label stays a label.
+  const lineName = (line.kind === 'summary' ? 'summary' : 'bullet') + ': ' + (lineWords.length > 40 ? lineWords.slice(0, 40) + '…' : lineWords);
 
   /* A skills list is scanned token by token; resume prose is read as a
      sentence. Different reading modes want different measure and leading. */
   const kindClass = 'line__text line__text--' + line.kind;
 
-  function handleSave() {
-    if (onSaveCustomText) {
-      onSaveCustomText(line.id, draftText);
-    }
+  /* One path for every action on this line, so disabling and error handling cannot diverge. */
+  async function submit(action: EditAction): Promise<void> {
+    // No save path, nothing to do (the buttons are not rendered then anyway).
+    if (onEdit === null) return;
+    // A new attempt clears the old failure.
+    setError(null);
+    // Marks this line as the one saving.
+    setSavingHere(true);
+    // The page builds the new resume and writes it.
+    const result = await onEdit(action);
+    // Done either way.
+    setSavingHere(false);
+    // Success or failure, the editor closes so the STORED text is what shows, never the draft.
     setIsEditing(false);
-  }
-
-  function handleCancel() {
-    setDraftText(currentTailoredText);
-    setIsEditing(false);
+    // A refused save is named, so the operator knows the PDF did not change.
+    if (!result.ok) setError(result.reason);
   }
 
   return (
@@ -472,75 +628,104 @@ function Line({
       </div>
 
       <div className="line line--tailored">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div className="line__tailored-head">
           <p className="line__side-label">Tailored</p>
-          {!isEditing && (
-            <button
-              type="button"
-              className="line__edit-trigger"
-              onClick={() => {
-                setDraftText(currentTailoredText);
-                setIsEditing(true);
-              }}
-              title="Edit this tailored bullet directly"
-            >
-              ✏️ Edit text
-            </button>
-          )}
+          {/* Controls only for an editable line and only while the editor is closed. */}
+          {target !== null && !isEditing ? (
+            <span className="line__controls">
+              {/* A removed bullet has no text to edit; Reset is how it comes back. */}
+              {line.editState !== 'removed' ? (
+                <button
+                  type="button"
+                  className="line__edit-trigger"
+                  disabled={busy}
+                  // Names WHICH line, since every row has an identical button.
+                  aria-label={'Edit text of ' + lineName}
+                  onClick={() => {
+                    // Start from what is saved, never from an old draft.
+                    setDraftText(storedText);
+                    // Open the editor.
+                    setIsEditing(true);
+                  }}
+                >
+                  Edit text
+                </button>
+              ) : null}
+              {/* Reset exists only where there is something of the operator's to undo. */}
+              {line.editState !== 'original' ? (
+                <button
+                  type="button"
+                  className="line__edit-trigger"
+                  disabled={busy}
+                  // Same reason as Edit: one label per line, not one per screen.
+                  aria-label={'Reset ' + lineName + ' to the tailor’s version'}
+                  onClick={() => void submit({ kind: 'reset', target })}
+                >
+                  {savingHere ? 'Saving…' : 'Reset to tailor’s version'}
+                </button>
+              ) : null}
+            </span>
+          ) : null}
+          {/* D3: said plainly rather than leaving the operator to wonder where the button went. */}
+          {onEdit !== null && line.kind === 'skills' ? (
+            <span className="line__edit-unavailable">skills can&apos;t be edited yet</span>
+          ) : null}
         </div>
 
-        {isEditing ? (
+        {isEditing && target !== null ? (
           <div className="line__edit-box">
             <textarea
               className="line__edit-textarea"
               value={draftText}
+              // Locked while saving, so what is sent is what the operator sees.
+              disabled={busy}
               onChange={(e) => setDraftText(e.target.value)}
-              placeholder="Edit tailored text..."
+              // Human words, not the machine ref (contract v2 nit).
+              aria-label={'Edit ' + lineName}
               autoFocus
             />
             <div className="line__edit-actions">
               <button
                 type="button"
                 className="line__edit-cancel"
-                onClick={handleCancel}
+                disabled={busy}
+                // Nothing was saved, so closing is the whole cancel.
+                onClick={() => setIsEditing(false)}
               >
                 Cancel
               </button>
               <button
                 type="button"
                 className="line__edit-save"
-                onClick={handleSave}
+                disabled={busy}
+                onClick={() => void submit({ kind: 'edit', target, text: draftText })}
               >
-                Save
+                {savingHere ? 'Saving…' : 'Save'}
               </button>
             </div>
           </div>
+        ) : line.editState === 'removed' ? (
+          /* The tailor's words, struck: the operator can see what Reset would bring back. */
+          <p className={kindClass + ' line__text--removed'}>
+            <s>{line.originalText}</s>
+          </p>
         ) : (
           <p className={kindClass}>
-            {customText ? (
-              <span className="run run--traced">{customText}</span>
-            ) : (
-              line.tailoredRuns.map((run, index) => (
-                <Run key={line.id + '-run-' + index} run={run} />
-              ))
-            )}
+            {line.tailoredRuns.map((run, index) => (
+              <Run key={line.id + '-run-' + index} run={run} />
+            ))}
           </p>
         )}
 
-        {customText ? (
-          <p className="line__provenance line__provenance--edited">
-            ✏️ customized by operator
+        {/* A failed save keeps the stored text above and says why it did not change. */}
+        {error !== null ? (
+          <p className="line__edit-error" role="alert">
+            {/* Rendered as given: the page says "Not saved" only when that is known to be true. */}
+            {error}
           </p>
-        ) : fabricated.length > 0 ? (
-          <p className="line__provenance line__provenance--fabricated">
-            {fabricated.map((run) => run.text).join(' and ')} trace
-            {fabricated.length === 1 ? 's' : ''} to nothing
-          </p>
-        ) : (
-          <p className="line__provenance line__provenance--traced">
-            traced to <span className="identifier">{line.masterNodeId}</span>
-          </p>
-        )}
+        ) : null}
+
+        <Provenance line={line} />
       </div>
     </>
   );
@@ -548,19 +733,52 @@ function Line({
 
 /* --- The screen -------------------------------------------------------- */
 
-export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactElement {
+export function DiffView({
+  diff,
+  onApprove,
+  onReject,
+  onEdit,
+  editDisabledReason,
+  hasCoverLetter,
+  locked,
+}: DiffViewProps): ReactElement {
+  // Every claim still in the resume; claims on edited or removed lines are already gone.
   const claims = useMemo(() => collectFlaggedClaims(diff), [diff]);
+  // A or B, derived; an edited row is always B (R2).
   const bucket = useMemo(() => deriveBucket(diff), [diff]);
+  // Side-by-side or unified; local because no other part of the app cares.
   const [viewMode, setViewMode] = useState<'split' | 'unified'>('split');
 
   const [decisions, setDecisions] = useState<ReadonlyMap<string, ClaimDecision>>(
     () => new Map(),
   );
-  const [customLines, setCustomLines] = useState<Record<string, string>>({});
+  // One save at a time per resume: each save writes the WHOLE profile, so two in flight would race.
+  const [saving, setSaving] = useState<boolean>(false);
+  // The last failed cut from the alarm band.
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  // One flag for "controls wait": our own save, or the page's approve/reject on this row.
+  const busy = saving || locked === true;
 
-  function handleSaveCustomLine(lineId: string, text: string) {
-    setCustomLines((prev) => ({ ...prev, [lineId]: text }));
-  }
+  /* Every save from this view goes through here, so `saving` cannot be left stuck and a
+     thrown error becomes a shown reason instead of an unhandled rejection. */
+  const runEdit =
+    onEdit === undefined
+      ? null
+      : async (action: EditAction): Promise<EditResult> => {
+          // Locks every control in this view.
+          setSaving(true);
+          try {
+            // The page does the real work.
+            return await onEdit(action);
+          } catch (cause) {
+            /* A throw here escaped the page, so whether the write landed is unknown; said as unknown
+               (the prefix is no longer added at render), never as "not saved". */
+            return { ok: false, reason: `Save status unknown: ${cause instanceof Error ? cause.message : 'the save threw'}. Reload to see what is stored.` };
+          } finally {
+            // Unlocks whatever happened.
+            setSaving(false);
+          }
+        };
 
   function decide(key: string, decision: ClaimDecision): void {
     setDecisions((previous) => {
@@ -570,17 +788,26 @@ export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactEle
     });
   }
 
+  /* Cutting from the alarm band: a real removal of the whole bullet, saved immediately. */
+  async function cut(target: { readonly kind: 'bullet'; readonly ref: string }): Promise<void> {
+    // Unreachable without a save path; the button is not rendered then.
+    if (runEdit === null) return;
+    // A new attempt clears the old failure.
+    setRemoveError(null);
+    // Same save path as every other edit.
+    const result = await runEdit({ kind: 'remove', target });
+    // The bullet is still there; say so in the band.
+    if (!result.ok) setRemoveError(result.reason);
+  }
+
+  /* THE GATE: every claim STILL IN THE RESUME needs a decision. A cut claim vanished from
+     `claims` with its bullet, so it needs none; a stale 'keep' for a claim that no longer
+     exists is dropped before approval so the record lists only what was actually submitted. */
   const undecided = claims.filter((claim) => !decisions.has(claim.key));
-  const canApprove = undecided.length === 0;
-
-  const cutCount = claims.filter(
-    (claim) => decisions.get(claim.key) === 'remove',
-  ).length;
-
-  const approveLabel =
-    cutCount > 0
-      ? 'Approve without ' + cutCount + (cutCount === 1 ? ' claim' : ' claims')
-      : 'Approve and queue for submission';
+  // Never approve mid-save (the stored resume is about to change) or mid-approval (no double send).
+  const canApprove = undecided.length === 0 && !busy;
+  // The keys that still exist, for filtering the decisions handed to the page.
+  const liveKeys = new Set(claims.map((claim) => claim.key));
 
   return (
     <article className="diff">
@@ -597,9 +824,11 @@ export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactEle
                   sourceRefs={diff.sourceRefs}
                 />
               )}
+              {/* Three honest states: clean, flagged by the Auditor, or edited by the operator
+                  (which nothing re-audited, so it must not borrow either audit label). */}
               <StatusBadge
-                status={bucket === 'A' ? 'audit_clean' : 'audit_flagged'}
-                label={bucket === 'A' ? 'audit_clean' : 'audit_flagged'}
+                status={bucket === 'A' ? 'audit_clean' : claims.length > 0 ? 'audit_flagged' : 'edited'}
+                label={bucket === 'A' ? 'audit_clean' : claims.length > 0 ? 'audit_flagged' : 'edited by you'}
               />
               <StatusBadge status="awaiting_approval" label="awaiting_approval" />
             </div>
@@ -643,19 +872,35 @@ export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactEle
           you have not been shown. */}
       <JobPosting diff={diff} />
 
-      {bucket === 'B' ? (
+      {/* The alarm only when a claim remains; an edits-only row is B for a different reason. */}
+      {claims.length > 0 ? (
         <FabricationAlert
           claims={claims}
+          lines={diff.lines}
           masterVersion={diff.masterVersion}
           decisions={decisions}
           onDecide={decide}
+          onRemove={runEdit === null ? null : (target) => void cut(target)}
+          busy={busy}
+          removeError={removeError}
         />
-      ) : (
+      ) : bucket === 'A' ? (
         <p className="clear-notice">
           Every line traces to master version {diff.masterVersion}. Safe to
           batch-approve with the other clean applications.
         </p>
+      ) : (
+        <p className="diff__edit-note">
+          {/* R2: an edited row never rides the batch button, and this says why it left. */}
+          You changed {diff.editCount} {diff.editCount === 1 ? 'line' : 'lines'}, so this
+          application needs your individual approval rather than the batch.
+        </p>
       )}
+
+      {/* D4: the reason editing is off, once, above the lines it applies to. */}
+      {onEdit !== undefined && editDisabledReason ? (
+        <p className="diff__edit-note">{editDisabledReason}</p>
+      ) : null}
 
       {/* View Mode Toolbar */}
       <div className="diff__toolbar">
@@ -684,53 +929,56 @@ export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactEle
           <h3 className="diff__pane-head">Tailored for this job</h3>
 
           {diff.lines.map((line) => (
-            <Line
-              key={line.id}
-              line={line}
-              customText={customLines[line.id]}
-              onSaveCustomText={handleSaveCustomLine}
-            />
+            <Line key={line.id} line={line} onEdit={runEdit} busy={busy} />
           ))}
         </div>
       ) : (
         <div className="diff__panes--unified">
-          {diff.lines.map((line) => {
-            const fabricated = line.tailoredRuns.filter((r) => r.verdict === 'fabricated');
-            return (
-              <div key={line.id} className="unified-line">
-                <div className="unified-line__meta">
-                  <span className="identifier">{line.masterNodeId}</span>
-                  <span className="tag-pill">{line.kind}</span>
-                </div>
+          {/* Read-only view, but it shows edits and removals exactly as the split view does. */}
+          {diff.lines.map((line) => (
+            <div key={line.id} className="unified-line">
+              <div className="unified-line__meta">
+                <span className="identifier">{line.masterNodeId}</span>
+                <span className="tag-pill">{line.kind}</span>
+              </div>
+              {line.editState === 'removed' ? (
+                <p className={`line__text line__text--${line.kind} line__text--removed`}>
+                  <s>{line.originalText}</s>
+                </p>
+              ) : (
                 <p className={`line__text line__text--${line.kind}`}>
                   {line.tailoredRuns.map((run, idx) => (
                     <Run key={`${line.id}-unified-${idx}`} run={run} />
                   ))}
                 </p>
-                {fabricated.length > 0 ? (
-                  <p className="line__provenance line__provenance--fabricated">
-                    {fabricated.map((r) => r.text).join(' and ')} trace to nothing
-                  </p>
-                ) : (
-                  <p className="line__provenance line__provenance--traced">
-                    traced to <span className="identifier">{line.masterNodeId}</span>
-                  </p>
-                )}
-              </div>
-            );
-          })}
+              )}
+              <Provenance line={line} />
+            </div>
+          ))}
         </div>
       )}
 
       <footer className="diff__actions">
+        {/* R6: said where the approval happens, because the Auditor never saw these words. */}
+        {diff.editCount > 0 ? (
+          <p className="diff__own-wording">
+            Edits are not re-audited. You are approving your own wording.
+          </p>
+        ) : null}
+        {/* The letter was written from the tailor's version and is not regenerated. */}
+        {hasCoverLetter === true && diff.editCount > 0 ? (
+          <p className="diff__edit-note">Cover letter was generated before your edits.</p>
+        ) : null}
+
         <div className="diff__actions-group">
           <button
             type="button"
             className="button button--approve"
             disabled={!canApprove}
-            onClick={() => onApprove(decisions)}
+            // Only decisions about claims that are still in the resume.
+            onClick={() => onApprove(new Map([...decisions].filter(([key]) => liveKeys.has(key))))}
           >
-            {approveLabel}
+            Approve and queue for submission
           </button>
 
           <button
@@ -742,7 +990,7 @@ export function DiffView({ diff, onApprove, onReject }: DiffViewProps): ReactEle
           </button>
         </div>
 
-        {canApprove ? null : (
+        {undecided.length === 0 ? null : (
           <p className="diff__gate-note">
             {undecided.length} {undecided.length === 1 ? 'claim needs' : 'claims need'}{' '}
             a decision above.

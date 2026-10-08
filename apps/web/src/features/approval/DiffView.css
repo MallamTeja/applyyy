@@ -688,6 +688,161 @@
   font-weight: 550;
 }
 
+/* --- Saved operator edits (task 8, 2026-10-06) ------------------------
+   The operator's own wording is a THIRD language beside traced and fabricated: accent,
+   never forest (R1 - nothing checked it against the master), never oxblood (it is not a
+   finding). Semantic tokens only, so both themes follow without a [data-theme] rule. */
+
+/* Label row of the tailored pane; replaces an inline style so the layout lives in CSS. */
+.line__tailored-head {
+  /* Label left, controls right. */
+  display: flex;
+  /* Keeps the small buttons on the label's baseline. */
+  align-items: center;
+  /* Pushes the controls to the far edge. */
+  justify-content: space-between;
+  /* Room between the label and the controls on narrow panes. */
+  gap: var(--gap-2);
+}
+
+/* Edit and Reset side by side. */
+.line__controls {
+  /* A row of small buttons. */
+  display: inline-flex;
+  /* Separated so neither is mis-clicked. */
+  gap: var(--gap-1);
+}
+
+/* A save in flight locks every control; the cursor says so before the click does. */
+.line__edit-trigger:disabled,
+.line__edit-save:disabled,
+.line__edit-cancel:disabled {
+  /* Dimmed: visibly unavailable. */
+  opacity: 0.55;
+  /* The pointer would promise an action that will not happen. */
+  cursor: not-allowed;
+}
+
+/* The operator's wording: an accent wash with a dashed underline, so it survives greyscale. */
+.run--edited {
+  /* Accent, the colour of "you did this" elsewhere on the screen. */
+  background: var(--accent-subtle);
+  /* Same hair of padding as the traced wash, so lines do not shift. */
+  padding: 0 0.1em;
+  /* Dashed: a second, non-colour signal that this is not master-traced. */
+  border-bottom: 1px dashed var(--accent);
+}
+
+/* A removed bullet: kept on screen, struck and muted, so Reset has something to point at. */
+.line__text--removed {
+  /* Muted: it will not be submitted. */
+  color: var(--ink-muted);
+}
+
+/* "removed by you": muted rather than accented, because nothing of it remains in the resume. */
+.line__provenance--removed {
+  /* Same neutral as other absent things on this screen. */
+  color: var(--ink-muted);
+  /* Still a label, so it keeps some weight. */
+  font-weight: 550;
+}
+
+/* What the Auditor said about the replaced version: context, not an alarm. */
+.line__superseded {
+  /* Tight under the provenance line it annotates. */
+  margin-top: var(--gap-1);
+  /* Footer size, like the provenance it sits with. */
+  font-size: var(--size-xs);
+  /* Muted: these words are no longer in the resume, so they must not shout. */
+  color: var(--ink-muted);
+}
+
+/* A failed save: the stored text stays above, and this says it did not change. */
+.line__edit-error,
+.alarm__error {
+  /* Separated from the text it refers to. */
+  margin-top: var(--gap-2);
+  /* Readable, not a footnote: the PDF did not change and the operator must notice. */
+  font-size: var(--size-xs);
+  /* Weight carries it beyond colour alone. */
+  font-weight: 600;
+  /* Error tone; the strong variant keeps contrast on the alarm band too. */
+  color: var(--fabricated-strong);
+}
+
+/* The alarm band is dark in both themes, so its error uses the band's own light ink. */
+.alarm__error {
+  /* Same ink as the rest of the band's text. */
+  color: inherit;
+}
+
+/* "skills can't be edited yet" and the summary hint: quiet facts, not controls. */
+.line__edit-unavailable,
+.alarm__hint {
+  /* Small, beside the controls they stand in for. */
+  font-size: var(--size-xs);
+  /* Muted: information, not an action. */
+  color: var(--ink-muted);
+}
+
+/* The hint sits on the dark band, so it takes the band's ink. */
+.alarm__hint {
+  /* Inherits the band's light text, stays readable in both themes. */
+  color: inherit;
+  /* Still visibly secondary to the choices. */
+  opacity: 0.75;
+}
+
+/* Edits-only notice, D4 reason, cover-letter note: muted statements of fact. */
+.diff__edit-note {
+  /* Separated from the blocks around it. */
+  margin-top: var(--gap-3);
+  /* Body-adjacent size; these are read once. */
+  font-size: var(--size-sm);
+  /* Muted, because none of them is a verdict. */
+  color: var(--ink-muted);
+}
+
+/* R6: the one sentence the operator must not miss before approving their own words. */
+.diff__own-wording {
+  /* Room above the buttons. */
+  margin-bottom: var(--gap-2);
+  /* Same size as the gate note it sits near. */
+  font-size: var(--size-sm);
+  /* Weight, not colour, so it reads as important without reading as an error. */
+  font-weight: 600;
+  /* Accent: this is about the operator's own action. */
+  color: var(--accent);
+}
+
+/* Coverage from the operator's edits: accent, dotted, never forest (never "verified"). */
+.coverage__fill--edited {
+  /* Dotted pattern so it is distinct from both other segments in greyscale. */
+  background: repeating-linear-gradient(
+    90deg,
+    var(--accent) 0 4px,
+    var(--accent-subtle) 4px 6px
+  );
+}
+
+/* The legend's "from your edits" figure. */
+.coverage__stat--edited {
+  /* Same accent as its bar segment. */
+  color: var(--accent);
+  /* Same weight as the other two stated figures. */
+  font-weight: 500;
+}
+
+/* Keyword found only in text the operator wrote. */
+.kw-chip--edited {
+  /* Accent wash, matching the run marker. */
+  background: var(--accent-subtle);
+  /* Readable accent ink. */
+  color: var(--accent-strong);
+  /* Dashed, matching the run marker's underline. */
+  border: 1px dashed var(--accent);
+}
+
 
 /* --- The posting this resume was written for -----------------------------
    ADDED 2026-09-17. The diff used to show the tailored resume and withhold the

@@ -22,7 +22,7 @@
  * that matters, which is exactly the skim the design is trying to prevent.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
@@ -40,17 +40,29 @@ import type {
   ResolvedResume,
 } from '../../data/contract';
 import { DiffView } from './DiffView';
-// ClaimDecision is imported again because the decisions are no longer discarded.
-// DiffViewProps.onApprove hands back a ReadonlyMap<string, ClaimDecision> of the
-// operator's per-claim keep/remove choices; the handler now forwards it into the
-// RPC's p_detail, so the audit log records WHAT WAS DECIDED rather than only that
-// someone approved. Previously the button could read "Approve without 2 claims"
-// while the page recorded a plain approval - the string described an action the
-// handler did not perform.
-import type { ClaimDecision } from './DiffView';
+// ClaimDecision is imported because the decisions are not discarded: DiffViewProps.onApprove
+// hands back a ReadonlyMap<string, ClaimDecision> of the claims the operator chose to KEEP, and
+// the handler forwards it into the RPC's p_detail so the audit log records what was decided.
+// EditAction/EditResult are the save contract between the diff's controls and this page.
+import type { ClaimDecision, EditAction, EditResult } from './DiffView';
 import { buildResumeDiff } from './diffAdapter';
 import { deriveBucket } from './diffModel';
 import type { ResumeDiff } from './diffModel';
+// Pure edit operations and the original-rebuild (builder-1's module): no React, no Supabase.
+import {
+  applyTextEdit,
+  editKey,
+  isResumeShape,
+  // A SHAPE check on the pinned master, so '{}' is refused like a missing version, not diffed against.
+  masterFromRow,
+  rebuildOriginal,
+  removeBullet,
+  resetTarget,
+} from './tailoredEdits';
+// The one write path for an edit: resume first, history note second.
+// confirmFresh: the per-row cross-tab check every approval crosses right before its RPC.
+import { confirmFresh, saveTailoredEdit } from './saveTailoredEdit';
+import type { EditEventKind, StoredRow } from './saveTailoredEdit';
 // The submitted resume and its master side by side, rendered by the worker's own renderer,
 // so every row can be SEEN before it is approved. Shared with the pipeline history page.
 import { ResumePreview } from '../resume-preview/ResumePreview';
@@ -65,27 +77,73 @@ interface UnreviewableRow {
   readonly applicationId: string;
   readonly jobTitle: string;
   readonly companyName: string;
+  /* WHY it is refused. A closed union, because the three causes need different fixes (re-run
+     the tailor vs restore a master version) and the reject is logged with the true one. Until
+     2026-10-08 a missing pinned master was labelled "queued without a tailored resume". */
+  readonly reason: RefusalReason;
 }
 
-/**
- * Structural shape validation for tailored profile snapshots.
- * Ensures the profile has required sections (identity/contact, experience, skills)
- * and is not an empty object `{}` or malformed JSON.
- */
-function isValidTailoredProfile(profile: unknown): profile is ResolvedResume {
-  if (typeof profile !== 'object' || profile === null) {
-    return false;
-  }
-  const p = profile as Record<string, unknown>;
+// The only three ways a queued row can be unreviewable on this screen.
+type RefusalReason = 'no_job' | 'no_tailored_resume' | 'no_pinned_master';
 
-  return (
-    typeof p.identity === 'object' &&
-    p.identity !== null &&
-    Array.isArray(p.experience) &&
-    Array.isArray(p.skills)
+/* Per-cause wording for the refused list and the p_detail code for its reject. A literal table,
+   so a new cause fails to compile here instead of rendering under the wrong explanation. */
+const REFUSAL: Readonly<Record<RefusalReason, { readonly label: string; readonly code: string }>> = {
+  // The job join came back empty.
+  no_job: { label: 'Job record missing', code: 'refused_missing_job' },
+  // The original cause; the code is kept so earlier rejections stay comparable.
+  no_tailored_resume: { label: 'No tailored resume', code: 'refused_unreviewed_tailoring' },
+  // A valid resume whose pinned master version is not stored (or is not a profile).
+  no_pinned_master: { label: 'Master profile version missing', code: 'refused_missing_master' },
+};
+
+/* Everything needed to rebuild one row's diff after a save, kept from the load so a save never
+   has to re-read the database (and so can never diff against a different master than the load). */
+interface RowSource {
+  // The queue row as loaded; its audit findings and keywords do not change on an edit.
+  readonly application: ApplicationRow;
+  // The job, for the header and the posting.
+  readonly job: JobRow;
+  // The PINNED master, at the version the resume was tailored from.
+  readonly master: MasterProfile;
+  // The tailor's own version, rebuilt from tailor_refs; null means editing is off (D4).
+  readonly original: ResolvedResume | null;
+  // Whether a generated cover letter exists, which an edit does not regenerate.
+  readonly hasCoverLetter: boolean;
+}
+
+/* Which history event each operator action writes. A literal table, so a new action fails to
+   compile here instead of logging under the wrong name. */
+const EVENT_KIND: Readonly<Record<EditAction['kind'], EditEventKind>> = {
+  // Text replaced.
+  edit: 'resume_edit',
+  // Whole bullet deleted.
+  remove: 'resume_remove',
+  // Tailor's text restored.
+  reset: 'resume_reset',
+};
+
+/* D4, in words: why the controls are missing, so it does not read as a bug. */
+const EDIT_DISABLED_REASON =
+  'Editing is off for this application: the tailor’s original version could not be rebuilt from its saved references, so your edits could not be told apart from its text.';
+
+/* Fix 3: WHICH lines carry the operator's wording, for p_detail.edited_refs. A count says that
+   something changed; the refs say what, so the record can be checked against the event log. */
+function editedRefs(diff: ResumeDiff | undefined): string[] {
+  // No diff (should not happen for a loaded row) means nothing to name.
+  if (diff === undefined) return [];
+  // Edited and removed lines both have a target; skills and untouched lines are left out.
+  return diff.lines.flatMap((line) =>
+    line.editState !== 'original' && line.editTarget !== null ? [editKey(line.editTarget)] : [],
   );
 }
 
+/* A save that definitely did not happen. The prefix lives HERE, not in DiffView, because only the
+   page knows whether a failure is definite or unconfirmed (fix 1); DiffView renders the reason as given. */
+function notSaved(why: string): EditResult {
+  // One wording for every definite refusal.
+  return { ok: false, reason: `Not saved: ${why}` };
+}
 
 export function ApprovalQueuePage(): ReactElement {
   /* Feedback for the one irreversible action in the product. */
@@ -128,6 +186,26 @@ export function ApprovalQueuePage(): ReactElement {
      that is what the worker turns into the PDF. Set in the same pass as the queue. */
   const [resumes, setResumes] = useState<ReadonlyMap<string, ResolvedResume>>(() => new Map());
 
+  /* What each row's diff was built from, so a save can rebuild the diff without a re-read. */
+  const [sources, setSources] = useState<ReadonlyMap<string, RowSource>>(() => new Map());
+
+  /* THE LATEST SAVED STATE, outside the render closure. editRow and settle are async and can
+     be called from a render that is already stale; reading `resumes`/`queue` there could
+     compute an edit from an older resume and write it over a newer one, or approve a row on
+     a bucket it has since left. Refs are updated synchronously on load and on every save. */
+  const latestResumes = useRef<Map<string, ResolvedResume>>(new Map());
+  // The latest diff per row, for the bucket re-check and edited_lines at settle time.
+  const latestDiffs = useRef<Map<string, ResumeDiff>>(new Map());
+  /* Fix 2a: each row's updated_at as last seen. An edit is written only if the row still carries
+     this stamp, so a change from another tab is refused instead of silently overwritten. */
+  const latestStamps = useRef<Map<string, string>>(new Map());
+  // Rows with a save in flight: a second save would start from the pre-save resume.
+  const editing = useRef<Set<string>>(new Set());
+  // Rows with an approve/reject RPC in flight; a ref so the async loop sees it immediately.
+  const settlingRef = useRef<Set<string>>(new Set());
+  // The same set as state, so DiffView re-renders with its controls locked.
+  const [settling, setSettling] = useState<ReadonlySet<string>>(() => new Set());
+
   /* Bucket A rows the operator has opened, for the diff and for the preview
      separately. Added 2026-10-06: Bucket A used to be a count and a batch button
      only, so a clean row could be approved by someone who never saw its resume. */
@@ -146,39 +224,7 @@ export function ApprovalQueuePage(): ReactElement {
       try {
         setLoading(true);
 
-        // 1. Fetch latest master profile
-        const { data: masterData, error: masterError } = await supabase!
-          .from('master_profiles')
-          .select('*')
-          .order('version', { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        // A cancelled render has nothing to report (same rule as the queue read below).
-        if (!live) return;
-
-        /* NO MASTER, NO AUDIT. Until 2026-10-04 this read never checked `error`, and
-           on failure (or no row) diffed every tailored resume against a HARDCODED
-           profile — a literal name, email and skills line. Audit findings computed
-           against invented data are worse than none: they look like a verdict.
-           So a failed read and a missing row both stop here, before any diff exists. */
-        if (masterError || masterData === null || typeof masterData.profile !== 'object' || masterData.profile === null) {
-          // Distinguish "could not ask" from "nothing stored" so the operator knows which fix applies.
-          setLoadError(
-            masterError
-              ? 'Could not load your master profile, so no tailored resume can be audited against it. Nothing here was checked.'
-              : 'No master profile is stored, so there is nothing to audit tailored resumes against. Upload one in Master profile.',
-          );
-          // Nothing below may run without a real master.
-          return;
-        }
-
-        // Real values only: the version and profile of the row that actually loaded.
-        const masterVersion: number = masterData.version;
-        // Shape-checked above as a non-null object; the contract type is the stored profile.
-        const masterProfile: MasterProfile = masterData.profile as MasterProfile;
-
-        // 2. Fetch applications at awaiting_approval
+        // 1. Fetch applications at awaiting_approval
         const { data, error } = await supabase!
           .from('applications')
           /* apply_url and description_raw added 2026-09-17: the diff could not
@@ -215,8 +261,17 @@ export function ApprovalQueuePage(): ReactElement {
         const diffs: ResumeDiff[] = [];
         // The snapshot each diff was built from, so the preview renders exactly that.
         const snapshots = new Map<string, ResolvedResume>();
+        // The inputs of each diff, so a save can rebuild it.
+        const rowSources = new Map<string, RowSource>();
         /* Collected alongside, never merged in. See UnreviewableRow. */
         const refused: UnreviewableRow[] = [];
+        /* PINNED masters, cached by version: rows tailored from the same version share one read.
+           Until 2026-10-06 this page loaded the LATEST master once and stamped its version onto
+           every row, so a resume tailored from v2 was audited against v3. */
+        // null = "this version is not stored", cached so every row on it is refused without re-asking.
+        const masters = new Map<number, MasterProfile | null>();
+        // Each row's concurrency stamp from the same read, seeded into latestStamps below.
+        const stamps = new Map<string, string>();
         for (const app of data) {
           const job = app.jobs as unknown as JobRow | null;
           /* A missing job row used to fall back to an invented "Software Engineer at
@@ -231,6 +286,8 @@ export function ApprovalQueuePage(): ReactElement {
               jobTitle: 'Job record missing',
               // No company is known; say so rather than invent one.
               companyName: 'unknown company',
+              // The job itself is what is missing.
+              reason: 'no_job',
             });
             // Skip diffing: there is nothing to compare against.
             continue;
@@ -246,42 +303,105 @@ export function ApprovalQueuePage(): ReactElement {
              claims to have checked.
              Refused here rather than rendered quietly, because the alternative
              is the exact failure the approval gate exists to prevent, delivered
-             by the gate itself. Fail loud, never fail clean. */
-          if (!isValidTailoredProfile(app.tailored_profile)) {
+             by the gate itself. Fail loud, never fail clean.
+             A SHAPE check (isResumeShape), never a null check: '{}' is not a resume. */
+          if (!isResumeShape(app.tailored_profile)) {
             refused.push({
               applicationId: app.id,
               jobTitle: job.title,
               companyName: job.company_name,
+              // There is no resume to review; the fix is to re-run the tailor.
+              reason: 'no_tailored_resume',
             });
             continue;
           }
 
           const resolved = app.tailored_profile;
+          // The version the Tailor resolved against; the only honest master to diff with.
+          const version = resolved.master_version;
 
-          const diff = buildResumeDiff({
-            application: {
-              ...app,
-              master_version: masterVersion,
-              selected_jd_keywords: app.selected_jd_keywords || [],
-            } as ApplicationRow,
-            job,
-            resolved,
-            master: masterProfile,
-          });
+          // Read each pinned version once.
+          let master = masters.get(version);
+          // Only a version never asked about is fetched; a cached null stays refused.
+          if (master === undefined) {
+            const { data: masterData, error: masterError } = await supabase!
+              .from('master_profiles')
+              .select('profile')
+              .eq('version', version)
+              .maybeSingle();
+            // A cancelled render has nothing to report.
+            if (!live) return;
+            /* NO MASTER, NO AUDIT. Until 2026-10-04 a failed read diffed every resume against a
+               HARDCODED profile. Audit findings computed against invented data are worse than
+               none: they look like a verdict.
+               A TRANSPORT failure stops the page: nothing else can be trusted to load either. */
+            if (masterError) {
+              // "Could not ask" is page-level: the operator's fix is the connection, not a row.
+              setLoadError(
+                `Could not load master profile version ${version}, so no tailored resume can be audited against it. Nothing here was checked.`,
+              );
+              // Nothing below may run while the database is unreachable.
+              return;
+            }
+            /* Fix 4: a version that is simply NOT STORED refuses only the rows pinned to it. One
+               bad row used to blank the whole queue, hiding every reviewable row behind it. */
+            /* A SHAPE check, not "is it an object": '{}' used to pass and be diffed against, so
+               every claim would read as untraced against a master with no content. */
+            master = masterFromRow(masterData?.profile);
+            // Cached either way: the master, or the fact that it is missing.
+            masters.set(version, master);
+          }
+          // No pinned master: named in the refused list, never diffed against another version.
+          if (master === null) {
+            // Same shape as the other refusals, so the operator can reject it from the pipeline.
+            refused.push({
+              applicationId: app.id,
+              jobTitle: job.title,
+              companyName: job.company_name,
+              // The resume is fine; the version it must be audited against is not.
+              reason: 'no_pinned_master',
+            });
+            // The rest of the queue still loads.
+            continue;
+          }
+
+          // The tailor's own version, so "edited" can be DERIVED rather than stored. Null = D4.
+          const original = rebuildOriginal(app.tailor_refs, master, version);
+          // The row as loaded, with the keyword list made safe for the adapter; master_version left as stored.
+          const application = { ...app, selected_jd_keywords: app.selected_jd_keywords || [] } as ApplicationRow;
+
+          const diff = buildResumeDiff({ application, job, resolved, master, original });
 
           diffs.push(diff);
           // Same row, same snapshot: the preview can never show a different resume than the diff.
           snapshots.set(app.id, resolved);
+          // The stamp this snapshot was read at; the first edit must present it.
+          stamps.set(app.id, String(app.updated_at));
+          // Kept so a save rebuilds this exact diff with the new resume.
+          rowSources.set(app.id, {
+            application,
+            job,
+            master,
+            original,
+            // Any stored letter, even empty-but-present, was written before the edit.
+            hasCoverLetter: app.cover_letter !== null && app.cover_letter !== undefined,
+          });
         }
 
         setQueue(diffs);
         // Published with the queue so a rendered row always has its snapshot.
         setResumes(snapshots);
+        // Same pass, so every rendered row can be rebuilt after a save.
+        setSources(rowSources);
+        // The refs start from the same load, so the first edit and approval read what is on screen.
+        latestResumes.current = new Map(snapshots);
+        // Same, for the diffs the bucket re-check reads.
+        latestDiffs.current = new Map(diffs.map((diff) => [diff.applicationId, diff]));
+        // And the stamps, from the same read.
+        latestStamps.current = stamps;
 
         /* Published in the same pass, so the banner and the buckets can
-
            never disagree about what this read found. */
-
         setUnreviewable(refused);
       } finally {
         if (live) setLoading(false);
@@ -327,6 +447,8 @@ export function ApprovalQueuePage(): ReactElement {
     ids: readonly string[],
     to: 'approved' | 'dropped_filter',
     detail: Readonly<Record<string, unknown>> = {},
+    // The batch button's promise: only rows that are STILL Bucket A when their turn comes.
+    requireBucketA = false,
   ): Promise<void> {
     /* No client means no database. Say so instead of optimistically clearing
        rows the operator would then believe were submitted. */
@@ -337,21 +459,86 @@ export function ApprovalQueuePage(): ReactElement {
 
     const moved: string[] = [];
     const failed: string[] = [];
+    // Rows left alone because they changed (or were busy) after the click; named, never silent.
+    const skipped: string[] = [];
 
-    for (const id of ids) {
-      /* `human` is not decoration: the guard reads it to decide whether this
-         edge is legal at all, and no other agent value opens this one. */
-      const { error } = await supabase.rpc('advance_application_status', {
-        p_application_id: id,
-        p_to_status: to,
-        p_agent: 'human',
-        p_detail: detail,
-      });
-      if (error) {
-        failed.push(id);
-      } else {
-        moved.push(id);
+    // Rows already being settled by an earlier click are not sent twice.
+    const mine = ids.filter((id) => !settlingRef.current.has(id));
+    // Locked BEFORE the first await, so no edit can start on these rows mid-approval.
+    for (const id of mine) settlingRef.current.add(id);
+    // Mirrored into state so every affected DiffView disables its controls.
+    setSettling(new Set(settlingRef.current));
+
+    // Approvals not sent because the row changed elsewhere since this tab loaded or saved it.
+    const changed: string[] = [];
+    // Approvals not sent because the freshness read itself failed.
+    const unverified: string[] = [];
+
+    try {
+      for (const id of mine) {
+        /* Fixes 2b/3, the CROSS-TAB hole, checked PER ROW, right before this row's RPC, for EVERY
+           approval (batch and individual). Until 2026-10-08 one read covered a whole batch, so an
+           edit landing between that read and row N's RPC was approved as clean, and individual
+           approvals were not checked at all. Rejects skip it: dropping a row needs no clean diff.
+           ponytail: still a read-then-write window of one round trip; closing it needs the RPC to
+           take the expected updated_at, which is a migration. */
+        if (to === 'approved') {
+          // The stamp this tab's diff describes; without one there is nothing to compare.
+          const stamp = latestStamps.current.get(id);
+          // Never throws; a missing stamp counts as unverifiable rather than slipping through.
+          const check = stamp === undefined ? { kind: 'unverifiable' as const } : await confirmFresh(supabase, id, stamp);
+          // Changed elsewhere: redraw what is stored so the operator sees the other tab's words.
+          if (check.kind === 'changed') {
+            // Only when the re-read produced a row; a vanished row has nothing to draw.
+            if (check.stored !== undefined) adoptStored(id, check.stored);
+            // Named in the summary, never approved on the strength of the old diff.
+            changed.push(id);
+            // Next row.
+            continue;
+          }
+          // Could not ask: unverifiable means unapproved, because the promise is "what you saw".
+          if (check.kind === 'unverifiable') {
+            // Named in the summary so the operator retries it.
+            unverified.push(id);
+            // Next row.
+            continue;
+          }
+        }
+        // The diff as it is NOW (after any adoption above), not as it was when the button was clicked.
+        const latest = latestDiffs.current.get(id);
+        /* R2 at the moment of writing: a row edited into Bucket B after the batch snapshot, or with a
+           save still in flight in this tab, must not be approved as 'bucket_a_batch'. */
+        if (requireBucketA && (latest === undefined || deriveBucket(latest) !== 'A' || editing.current.has(id))) {
+          // Left in the queue for individual review.
+          skipped.push(id);
+          // Next row.
+          continue;
+        }
+        /* `human` is not decoration: the guard reads it to decide whether this
+           edge is legal at all, and no other agent value opens this one. */
+        const { error } = await supabase.rpc('advance_application_status', {
+          p_application_id: id,
+          p_to_status: to,
+          p_agent: 'human',
+          /* edited_lines and edited_refs (fix 3) from the LATEST diff, per row at send time: the
+             record must describe the words actually being approved, not a click-time snapshot.
+             Every approve path goes through here, so none can omit them. */
+          p_detail:
+            to === 'approved'
+              ? { ...detail, edited_lines: latest?.editCount ?? 0, edited_refs: editedRefs(latest) }
+              : detail,
+        });
+        if (error) {
+          failed.push(id);
+        } else {
+          moved.push(id);
+        }
       }
+    } finally {
+      // Unlocked whatever happened; moved rows leave the queue anyway, failed ones become editable again.
+      for (const id of mine) settlingRef.current.delete(id);
+      // And the controls re-render unlocked.
+      setSettling(new Set(settlingRef.current));
     }
 
     /* Only rows the DATABASE accepted leave the queue. Removing a failed row
@@ -375,6 +562,24 @@ export function ApprovalQueuePage(): ReactElement {
           : `Rejected ${moved.length} ${noun}.`,
       );
     }
+    // Skipped rows changed under the batch; they wait for an individual review instead.
+    if (skipped.length > 0) {
+      toast.error(
+        `${skipped.length} ${skipped.length === 1 ? 'application was' : 'applications were'} not batch-approved because ${skipped.length === 1 ? 'it was' : 'they were'} edited or still saving. Review ${skipped.length === 1 ? 'it' : 'them'} individually.`,
+      );
+    }
+    // Changed in another tab: what is stored is now on screen, and the operator must look again.
+    if (changed.length > 0) {
+      toast.error(
+        `${changed.length} ${changed.length === 1 ? 'application was' : 'applications were'} not approved because ${changed.length === 1 ? 'it' : 'they'} changed elsewhere since you opened ${changed.length === 1 ? 'it' : 'them'}. Review the current version.`,
+      );
+    }
+    // The check could not run; nothing was sent for these.
+    if (unverified.length > 0) {
+      toast.error(
+        `Could not confirm ${unverified.length} ${unverified.length === 1 ? 'application is' : 'applications are'} unchanged, so ${unverified.length === 1 ? 'it was' : 'they were'} not approved. Try again.`,
+      );
+    }
     if (failed.length > 0) {
       const noun = failed.length === 1 ? 'application' : 'applications';
       toast.error(
@@ -387,10 +592,12 @@ export function ApprovalQueuePage(): ReactElement {
      two buckets cannot drift into recording different things. It still ends in
      settle(), i.e. the advance_application_status RPC with p_agent 'human'.
      The decisions map is FORWARDED, not dropped: each entry is one flagged claim
-     the operator chose to keep or remove, and it travels into the RPC's p_detail
-     so the audit log records the reasoning rather than a bare verdict. Serialised
-     as an object because p_detail is jsonb and a Map has no JSON representation -
-     it would have arrived as {}. */
+     the operator chose to keep, and it travels into the RPC's p_detail so the
+     audit log records the reasoning rather than a bare verdict. Serialised as an
+     object because p_detail is jsonb and a Map has no JSON representation - it
+     would have arrived as {}. A CUT claim is not here: since 2026-10-06 cutting
+     removes the bullet from the saved resume, and edited_lines / edited_refs (added
+     by settle() from the latest diff at send time) record it. */
   function approveReviewed(
     // The one row being approved.
     applicationId: string,
@@ -403,9 +610,6 @@ export function ApprovalQueuePage(): ReactElement {
     void settle([applicationId], 'approved', {
       // What was decided, claim by claim.
       claim_decisions: Object.fromEntries(decisions),
-      /* Counted here rather than derived later: this is the number the button
-         showed the operator, so it is the number the record should reproduce. */
-      claims_removed: [...decisions.values()].filter((d: ClaimDecision) => d === 'remove').length,
       // Distinguishes an opened-and-read Bucket A row from the batch button.
       review_path: reviewPath,
     });
@@ -417,6 +621,146 @@ export function ApprovalQueuePage(): ReactElement {
   function rejectReviewed(applicationId: string, reason: string): void {
     // Same door as approval, other edge.
     void settle([applicationId], 'dropped_filter', { drop_reason: reason });
+  }
+
+  /* Put one row's resume on screen and in the refs, rebuilt against the SAME pinned master and
+     original as the load. The single place a row's displayed resume changes after load, so the
+     diff, preview, Download, bucket and stamp can never describe different versions. */
+  function adoptRow(applicationId: string, resume: ResolvedResume, updatedAt: string): void {
+    // The load inputs; static after load, so the render closure is safe here.
+    const source = sources.get(applicationId);
+    // A row this page never loaded has nothing to rebuild.
+    if (source === undefined) return;
+    // Same adapter, same pinned master, same original: only the resume differs.
+    const next = buildResumeDiff({
+      application: source.application,
+      job: source.job,
+      resolved: resume,
+      master: source.master,
+      original: source.original,
+    });
+    // The refs move first and synchronously, so the very next edit or approval reads this.
+    latestResumes.current.set(applicationId, resume);
+    // Same, for the bucket re-check and edited_lines / edited_refs.
+    latestDiffs.current.set(applicationId, next);
+    // The stamp the next edit must present.
+    latestStamps.current.set(applicationId, updatedAt);
+    // The diff on screen now describes what is stored; an edited row moves to Bucket B by derivation.
+    setQueue((previous) => previous.map((diff) => (diff.applicationId === applicationId ? next : diff)));
+    // The preview and Download render the snapshot, so they follow too.
+    setResumes((previous) => new Map(previous).set(applicationId, resume));
+  }
+
+  /* Show what the DATABASE holds after a write we could not confirm or that was refused (fix 1,
+     fix 2a). Showing the operator's unsaved version here is how the UI used to drift from the DB. */
+  function adoptStored(applicationId: string, stored: StoredRow): void {
+    // Approved or rejected elsewhere: it is no longer in this queue.
+    if (stored.status !== 'awaiting_approval') {
+      // Leaves the screen like any settled row.
+      setSettled((previous) => new Set(previous).add(applicationId));
+      // Nothing to draw.
+      return;
+    }
+    // A stored value that is not a resume cannot be reviewed; refuse it by name, never render it.
+    if (!isResumeShape(stored.resume)) {
+      // The job's names, for the refused list.
+      const job = sources.get(applicationId)?.job;
+      // Out of the buckets...
+      setQueue((previous) => previous.filter((diff) => diff.applicationId !== applicationId));
+      // ...and into the refused list, where it can be rejected.
+      setUnreviewable((previous) => [
+        ...previous,
+        // What is stored is not a resume, so the cause is the same as a row loaded without one.
+        { applicationId, jobTitle: job?.title ?? 'unknown job', companyName: job?.company_name ?? 'unknown company', reason: 'no_tailored_resume' },
+      ]);
+      // Dropped from the refs so no batch or edit reads the old diff.
+      latestDiffs.current.delete(applicationId);
+      // Nothing more to draw.
+      return;
+    }
+    // The stored resume, rebuilt and shown.
+    adoptRow(applicationId, stored.resume, stored.updatedAt);
+  }
+
+  /* THE EDIT PATH: click -> pure edit -> saveTailoredEdit -> state replaced with the SAVED
+     resume (or, if the save is refused or unconfirmed, with what IS stored). Nothing is shown as
+     changed until the database has accepted it, so the preview, the Download and the score can
+     never describe a resume that was not stored. */
+  async function editRow(applicationId: string, action: EditAction): Promise<EditResult> {
+    // What this row's diff was built from.
+    const source = sources.get(applicationId);
+    // An approval or rejection is in flight; an edit now could land mid-approval.
+    if (settlingRef.current.has(applicationId)) return notSaved('this application is being approved or rejected.');
+    // One save at a time per row, or the second would start from the pre-save resume.
+    if (editing.current.has(applicationId)) return notSaved('another edit to this application is still saving.');
+    // The LATEST saved resume (ref, not render closure), so an edit never builds on an older one.
+    const current = latestResumes.current.get(applicationId);
+    // The stamp that resume was read or saved at.
+    const stamp = latestStamps.current.get(applicationId);
+    // Without these the row was never editable; the controls are not offered then.
+    if (source === undefined || current === undefined || stamp === undefined) return notSaved('this row is not loaded.');
+    // D4: no original means no honest "edited" and no Reset; refuse rather than guess.
+    if (source.original === null) return notSaved(EDIT_DISABLED_REASON);
+    // No client, no write; say so instead of pretending.
+    if (supabase === null) return notSaved('not connected to the database.');
+
+    /* The pure operation. Each returns a NEW resume, touching only one bullet's text or the
+       summary (R0), and refuses empty, oversized or unknown-ref edits before any write. */
+    const outcome =
+      action.kind === 'edit'
+        ? applyTextEdit(current, action.target, action.text)
+        : action.kind === 'remove'
+          ? removeBullet(current, action.target)
+          : resetTarget(current, source.original, action.target);
+    // A refused edit never reaches the network.
+    if (!outcome.ok) return notSaved(outcome.reason);
+
+    // Marked before the await, so a batch approval skips this row while it saves.
+    editing.current.add(applicationId);
+    // Declared outside the try so the result survives the finally.
+    let saved: Awaited<ReturnType<typeof saveTailoredEdit>>;
+    try {
+      // Resume first, history note second; see saveTailoredEdit. It never throws (fix 1).
+      saved = await saveTailoredEdit(supabase, {
+        // The row being edited.
+        applicationId,
+        // The whole new resume.
+        resume: outcome.resume,
+        // What it was computed from, for the R0 boundary check (fix 5).
+        previous: current,
+        // The tailor's version: the ground truth for refs and master_text.
+        original: source.original,
+        // Optimistic concurrency: refused if another tab changed the row (fix 2a).
+        expectedUpdatedAt: stamp,
+        // What changed, for the append-only log.
+        event: { kind: EVENT_KIND[action.kind], ref: editKey(action.target), before: outcome.before, after: outcome.after },
+      });
+    } finally {
+      // Released whatever happened, so a failure never strands the row as "saving".
+      editing.current.delete(applicationId);
+    }
+
+    if (!saved.ok) {
+      /* Unconfirmed or changed elsewhere: show what IS stored, never the operator's draft and
+         never the pre-save version, because either may now be false. */
+      if (saved.stored !== undefined) {
+        // Redraw from the database.
+        adoptStored(applicationId, saved.stored);
+        // Page-level notice, because the whole row may have changed, not just this line.
+        toast.error(saved.message);
+      }
+      // The line shows the reason under its (now stored) text.
+      /* 'unconfirmed' may in fact have landed, so it is NOT prefixed "Not saved"; its own message
+         says what is known. Every other reason is a definite refusal. */
+      return saved.reason === 'unconfirmed' ? { ok: false, reason: saved.message } : notSaved(saved.message);
+    }
+
+    // Saved: the new resume and the NEW stamp, so the next edit presents the right one.
+    adoptRow(applicationId, outcome.resume, saved.updatedAt);
+    // The edit IS saved; only the history note is missing, and the operator should know.
+    if (!saved.eventRecorded) toast.error('Your edit was saved, but it could not be added to the application history.');
+    // The line closes its editor and shows the saved text.
+    return { ok: true };
   }
 
   // Flip one id in a set-valued state; used by both Bucket A disclosures.
@@ -498,8 +842,8 @@ export function ApprovalQueuePage(): ReactElement {
           <div className="queue__refused-header">
             <h2 id="refused-heading" className="queue__bucket-heading">
               {pendingRefused.length}{' '}
-              {pendingRefused.length === 1 ? 'application was' : 'applications were'} queued
-              without a tailored resume
+              {pendingRefused.length === 1 ? 'application cannot' : 'applications cannot'} be
+              reviewed here
             </h2>
             <button
               type="button"
@@ -508,7 +852,12 @@ export function ApprovalQueuePage(): ReactElement {
                 void settle(
                   pendingRefused.map((r) => r.applicationId),
                   'dropped_filter',
-                  { reason: 'refused_unreviewed_tailoring' },
+                  /* One detail for the whole batch, so each row's TRUE cause rides along by id
+                     rather than one code being stamped on rows refused for different reasons. */
+                  {
+                    reason: 'refused_unreviewable',
+                    refusals: Object.fromEntries(pendingRefused.map((r) => [r.applicationId, REFUSAL[r.reason].code])),
+                  },
                 )
               }
             >
@@ -518,7 +867,8 @@ export function ApprovalQueuePage(): ReactElement {
           <p className="queue__bucket-note">
             Nothing compared these against your master profile, so this screen cannot
             tell you whether they are honest. They are held here rather than shown as
-            verified. Re-run tailoring for them, or reject them from the pipeline.
+            verified. Each one says why below. Re-run tailoring, restore the master version, or
+            reject them from the pipeline.
           </p>
           <ul className="queue__refused-list">
             {pendingRefused.map((row) => (
@@ -526,13 +876,16 @@ export function ApprovalQueuePage(): ReactElement {
                 <div className="queue__refused-info">
                   <span className="queue__refused-role">{row.jobTitle}</span>
                   <span className="queue__refused-company">{row.companyName}</span>
+                  {/* The cause, per row, because the fix differs by cause. */}
+                  <span className="queue__refused-company">{REFUSAL[row.reason].label}</span>
                 </div>
                 <button
                   type="button"
                   className="button button--secondary button--small"
                   onClick={() =>
                     void settle([row.applicationId], 'dropped_filter', {
-                      reason: 'refused_unreviewed_tailoring',
+                      // The row's own cause, so the log never records a reason it did not have.
+                      reason: REFUSAL[row.reason].code,
                     })
                   }
                 >
@@ -574,6 +927,14 @@ export function ApprovalQueuePage(): ReactElement {
                     onApprove={(decisions) => approveReviewed(diff.applicationId, decisions, 'bucket_b_review')}
                     /* The shared rejection path; see rejectReviewed. */
                     onReject={(reason) => rejectReviewed(diff.applicationId, reason)}
+                    /* Saves for real; see editRow. */
+                    onEdit={(action) => editRow(diff.applicationId, action)}
+                    /* D4: only when the tailor's original could not be rebuilt. */
+                    editDisabledReason={sources.get(diff.applicationId)?.original === null ? EDIT_DISABLED_REASON : null}
+                    /* So the diff can say the letter predates the edits. */
+                    hasCoverLetter={sources.get(diff.applicationId)?.hasCoverLetter === true}
+                    /* Locks edits and Approve while this row's approve/reject is in flight. */
+                    locked={settling.has(diff.applicationId)}
                   />
                   {/* The diff stays expanded (Bucket B is never collapsed); the
                       rendered document is an extra, opened on demand because it is tall. */}
@@ -690,6 +1051,14 @@ export function ApprovalQueuePage(): ReactElement {
                         onApprove={(decisions) => approveReviewed(diff.applicationId, decisions, 'bucket_a_review')}
                         /* Same rejection edge as Bucket B. */
                         onReject={(reason) => rejectReviewed(diff.applicationId, reason)}
+                        /* Same save path as Bucket B; an edit moves the row there (R2). */
+                        onEdit={(action) => editRow(diff.applicationId, action)}
+                        /* D4, as in Bucket B. */
+                        editDisabledReason={sources.get(diff.applicationId)?.original === null ? EDIT_DISABLED_REASON : null}
+                        /* Cover-letter note, as in Bucket B. */
+                        hasCoverLetter={sources.get(diff.applicationId)?.hasCoverLetter === true}
+                        /* Same lock as Bucket B, including during the batch. */
+                        locked={settling.has(diff.applicationId)}
                       />
                     </div>
                   ) : null}
@@ -703,8 +1072,8 @@ export function ApprovalQueuePage(): ReactElement {
                         <ResumePreview
                           applicationId={diff.applicationId}
                           tailoredProfile={resume}
-                          /* The PINNED version from the snapshot, not diff.masterVersion:
-                             the loader stamps the LATEST master onto every diff. */
+                          /* The PINNED version from the snapshot itself: it is the version
+                             the renderer resolved against, whatever the row column says. */
                           masterVersion={resume.master_version}
                           jobTitle={diff.jobTitle}
                           companyName={diff.companyName}
@@ -725,14 +1094,16 @@ export function ApprovalQueuePage(): ReactElement {
           <button
             type="button"
             className="button button--approve"
-            /* Bucket A carries no flagged claims by definition, so there are no
-               per-claim decisions to record - only the fact that this was the
-               batch path rather than an individual review. */
+            /* Bucket A carries no flagged claims and no operator edits by definition
+               (deriveBucket sends any edited row to B, R2), so there are no per-claim
+               decisions to record - only the fact that this was the batch path. */
             onClick={() =>
               void settle(
                 bucketA.map((diff) => diff.applicationId),
                 'approved',
                 { review_path: 'bucket_a_batch' },
+                // Re-checks each row's bucket at send time (R2), not at click time.
+                true,
               )
             }
           >

@@ -6,10 +6,10 @@
    Null here means the row offers no "View resume" at all; there is deliberately no fallback to
    the master, because showing the master under a row's name would claim it was tailored for it.
 
-   Copied, not imported, from approval/ApprovalQueuePage.tsx's isValidTailoredProfile: that file
-   is another session's partition and is mid-edit. Stricter on purpose in one place:
-   master_version is required here, because the preview is pinned to THAT version (not the
-   latest master) and cannot pick one honestly without it. */
+   Originally copied from approval/ApprovalQueuePage.tsx's isValidTailoredProfile, which was
+   deleted on 2026-10-06 in favour of approval/tailoredEdits.ts isResumeShape (a stricter check
+   of the same idea). Requires master_version on purpose: the preview is pinned to THAT version
+   (not the latest master) and cannot pick one honestly without it. */
 
 /* Type only: the frozen render input the preview takes. */
 import type { ResolvedResume } from '../../data/contract';

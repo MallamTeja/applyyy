@@ -454,6 +454,24 @@ button {
   box-shadow: 0 0 3px light-dark(rgba(22, 163, 74, 0.4), rgba(34, 197, 94, 0.6));
 }
 
+/* Edited by the operator (approval page, 2026-10-06). Deliberately NOT the green "clean" family:
+   edited wording was never audited, so it must not borrow the colour that means "traced". It uses
+   --accent, the same token as the edited lines in DiffView.css, so the badge and the lines read as
+   one state. color-mix over the token gives the wash and edge, so both themes follow the token
+   with no [data-theme] rule. */
+.status-badge--edited {
+  /* A faint wash of the accent, the same weight as the other badge backgrounds. */
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  /* Full accent for the label, matching "edited by you" on the lines. */
+  color: var(--accent);
+  /* A visible but quiet edge, like the other badge families. */
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+/* The dot carries the same accent so the badge reads as one colour at a glance. */
+.status-badge--edited .status-badge__dot {
+  background: var(--accent);
+}
+
 /* Action Required / Attention (e.g. awaiting_approval, blocked_needs_human, needs_verification, oa_pending) */
 .status-badge--awaiting_approval,
 .status-badge--oa_pending,

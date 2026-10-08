@@ -24,8 +24,23 @@
  * declaring them as domain types here would violate the seam's one rule. */
 
 /* Per-run provenance, as the renderer needs it. `traced` resolves to a real
- * master node, `fabricated` resolves to nothing. */
-export type TraceVerdict = 'traced' | 'fabricated';
+ * master node, `fabricated` resolves to nothing, `edited` is the operator's own
+ * wording (task 8, R1). `edited` is its own arm rather than a flavour of `traced`
+ * because nothing checked it against the master: the Auditor read the tailor's
+ * version, never this one, so counting it as traced would launder an unaudited
+ * sentence into "verified from master". */
+export type TraceVerdict = 'traced' | 'fabricated' | 'edited';
+
+/* What an edit on a line would write to. A closed union rather than a bare ref
+ * string, because the summary has no ref (ResolvedResume.summary is a bare
+ * string) and a magic 'summary' ref could collide with a real NodeId. Only these
+ * two arms exist because only bullet text and the summary are editable (D3);
+ * there is no arm that could name master_text, identity or a version (R0). */
+export type EditTarget =
+  /* One bullet, named by its ref - refs are unique across the resume, so the ref alone locates it. */
+  | { readonly kind: 'bullet'; readonly ref: string }
+  /* The top-level summary paragraph. */
+  | { readonly kind: 'summary' };
 
 /* Which review path this row takes (section 11). DERIVED from whether any
  * finding exists - the schema stream's own comment on `audit_findings` says
@@ -77,6 +92,25 @@ export interface DiffLine {
   readonly masterText: string | null;
   readonly masterNodeId: string;
   readonly tailoredRuns: readonly TailoredRun[];
+  /* Where an edit on this line would land. NULL for skills (D3: not editable yet)
+   * and for EVERY line when the original could not be rebuilt (D4): without the
+   * original there is no way to tell an edit from the tailor's text, so offering
+   * the control would create edits nobody could later recognise as edits. */
+  readonly editTarget: EditTarget | null;
+  /* DERIVED by comparing the stored resume with the rebuilt original, never stored:
+   * a stored flag could disagree with the text sitting next to it. */
+  readonly editState: 'original' | 'edited' | 'removed';
+  /* The tailor's text for this line, from the rebuilt original - what Reset
+   * restores and what the operator compares their edit against. NULL for skills,
+   * and when there is no original to read it from. */
+  readonly originalText: string | null;
+  /* Auditor claims made against the TAILOR's version of this line, which the
+   * operator has since replaced or removed. Kept separate from the fabricated runs
+   * on purpose: the text they quote is no longer on the resume, so blocking on them
+   * would block on nothing, but dropping them would hide that the operator edited
+   * precisely where the Auditor objected. Never flagged, never unlocated, never in
+   * collectFlaggedClaims. */
+  readonly supersededClaims: readonly string[];
 }
 
 /* Keyword coverage, section 18.7 - "so you can see whether the tailoring
@@ -98,6 +132,11 @@ export interface KeywordCoverage {
   readonly honestlyMatched: readonly string[];
   /* Keywords present only because a flagged claim supplied them. */
   readonly matchedByFabrication: readonly string[];
+  /* Keywords present only in the operator's own edited text - neither master-backed
+   * nor flagged. A third figure rather than folded into either: adding them to
+   * "honest" would credit unaudited wording as verified, and adding them to
+   * "fabrication" would accuse the operator of the tailor's offence. */
+  readonly matchedByEdit: readonly string[];
 }
 
 export interface ResumeDiff {
@@ -119,6 +158,10 @@ export interface ResumeDiff {
    * the bucket calculation, and still blocks approval until decided. Fail loud,
    * never fail clean. */
   readonly unlocatedClaims: readonly FlaggedClaim[];
+  /* How many lines differ from the rebuilt original (edited or removed). Counted
+   * once here so the bucket, the Review notice and the approval detail all read
+   * the same number rather than each re-deriving it. */
+  readonly editCount: number;
   readonly discoveredVia?: readonly string[] | null | undefined;
   readonly sourceRefs?: readonly import('../../data/contract').JobSourceRef[] | null | undefined;
   readonly employmentType?: string | null | undefined;
@@ -181,9 +224,15 @@ export function collectFlaggedClaims(diff: ResumeDiff): FlaggedClaim[] {
 
 /* Bucket B if ANY line carries an untraceable claim, Bucket A otherwise
  * (section 11). One function, called everywhere the bucket is displayed or
- * acted on, so the badge and the approve button can never disagree. */
+ * acted on, so the badge and the approve button can never disagree.
+ *
+ * An edited or removed line also forces B (R2). Bucket A means "the Auditor read
+ * exactly what will be sent and found nothing"; after an edit the Auditor read a
+ * DIFFERENT text, so its silence no longer covers this resume and the row must
+ * not ride the batch button. */
 export function deriveBucket(diff: ResumeDiff): ReviewBucket {
-  return collectFlaggedClaims(diff).length > 0 ? 'B' : 'A';
+  /* Either reason alone is enough; neither may be traded against the other. */
+  return collectFlaggedClaims(diff).length > 0 || diff.editCount > 0 ? 'B' : 'A';
 }
 
 /* Keyword coverage as a CLOSED UNION, so "nothing was measured" cannot be a number.
@@ -202,18 +251,26 @@ export type CoverageMeasure =
  * so the pair is directly comparable on screen. */
 export function coveragePercent(
   coverage: KeywordCoverage,
-  include: 'honest' | 'withFabrication',
+  include: 'honest' | 'withFabrication' | 'withEdits',
 ): CoverageMeasure {
   /* The denominator: how many JD keywords there were to match. */
   const total = coverage.jdKeywords.length;
   /* Nothing to divide by means nothing was measured; never a number, so never "0% Match". */
   if (total === 0) return { kind: 'unmeasured' };
 
-  /* Honest counts only what the master supports; withFabrication adds the flagged matches. */
-  const matched =
-    include === 'honest'
-      ? coverage.honestlyMatched.length
-      : coverage.honestlyMatched.length + coverage.matchedByFabrication.length;
+  /* Honest counts only what the master supports; each other figure adds exactly one
+     extra source on top of honest, so no figure ever mixes edits with fabrication. */
+  const extra =
+    include === 'withFabrication'
+      ? coverage.matchedByFabrication.length
+      : include === 'withEdits'
+        ? /* `?? []` because coverage objects built before task 8 (test fixtures, older
+             callers) carry no such field; absent means no edits were measured, which is
+             the truthful zero, and a TypeError would blank the whole bar. */
+          (coverage.matchedByEdit ?? []).length
+        : 0;
+  /* Honest is the base of every figure. */
+  const matched = coverage.honestlyMatched.length + extra;
 
   /* Rounded so the badge, bar and legend all show one integer. */
   return { kind: 'measured', percent: Math.round((matched / total) * 100) };
