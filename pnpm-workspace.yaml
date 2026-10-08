@@ -30,6 +30,14 @@ packages:
 # An override converts that into one number in one place.
 overrides:
   typescript: "5.9.3"
+  # Security pin, not a compatibility one: Dependabot #47 / GHSA-68fv-2mgg-jv7q
+  # (high, event-loop DoS via indexed source-map section offsets) affects
+  # >=1.0.0 <1.2.2. It arrives transitively via postcss (vite's CSS pipeline),
+  # whose own range already admits 1.2.2, so forcing the first patched version
+  # here closes the alert without touching any package.json. Exact, not a
+  # caret, for the same reason as typescript above: a range that floats changes
+  # on a lockfile refresh nobody asked for.
+  source-map-js: "1.2.2"
 
 # Dependencies permitted to run their install/build scripts. pnpm 11 blocks all
 # of them by default and the block is FATAL, not a warning: `pnpm --filter X run
