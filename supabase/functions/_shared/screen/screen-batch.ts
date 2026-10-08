@@ -41,6 +41,12 @@ import type { FilterRuleRow, JobInsert, JobRow } from "../contracts/shared-types
 // reach it — and widening this union would be the change that opens the hole. The type
 // carries the restriction the trigger cannot, which is the point: a caller must not be
 // able to write the wrong thing and have it compile.
+//
+// UPDATED 2026-10-08: "it does not fire on INSERT" is no longer the whole story. Migration
+// 20260917130000 (applied; live trigger `guard_status_insert`, BEFORE INSERT) refuses any
+// inserted status outside discovered/passed_filters/dropped_filter. That checks an
+// allowlist, not edges, and this union is still the narrower control for THIS module,
+// since it also excludes 'discovered'. Keep both.
 export type ScreenedInsertStatus = "passed_filters" | "dropped_filter";
 
 // One `applications` row, born already carrying its verdict.
@@ -134,11 +140,15 @@ export function toScreenableJob(row: JobInsert | JobRow): ScreenableJob {
 // Screen one batch and decide what each job's `applications` row should be born as.
 //
 // WHY THE ROW IS BORN AT ITS VERDICT rather than inserted at 'discovered' and then
-// transitioned: the transition guard fires only on UPDATE, and the legal source state
-// for both screener edges is 'deduped' — a state NOTHING in this repo ever writes, since
-// the Normalizer does not exist and the only producer is a manual dashboard button. An
-// insert-then-update design would therefore need a migration to invent an edge, and
-// would still be manufacturing a 'discovered' moment that never meaningfully existed.
+// transitioned: the legal source state for both screener edges is 'deduped', and the only
+// edge into it is discovered -> deduped, whose sole agent is 'normalizer'. The Normalizer
+// exists as its own function (supabase/functions/normalizer/index.ts advances discovered
+// -> deduped), but it runs separately. An insert-then-update design here would make the
+// scout impersonate it, or wait for it, just to reach a verdict already in hand. It would
+// also be manufacturing a 'discovered' moment that never meaningfully existed. INSERTs
+// are allowlisted to discovered/passed_filters/dropped_filter (20260917130000), and
+// ScreenedInsertStatus (:44) keeps this module to the last two. Corrected 2026-10-08:
+// this previously said nothing writes 'deduped' and that the Normalizer does not exist.
 // A posting the title blocklist rejected was never a candidate application; creating the
 // row already carrying its verdict is the truer record. See docs/screener/.
 export function planScreenedApplications(

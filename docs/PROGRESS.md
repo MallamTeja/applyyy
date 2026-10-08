@@ -70,12 +70,19 @@ Teja supplied. Nobody should treat that string as the verified DB password.
 
 ### Two of my runtime findings are no longer hypothetical — they are production state
 
-1. **`gemini_key_state` is empty on the remote** and `bootstrap_user_defaults`
-   has not been called. So the silent-stop bug *is* the current state of
+> **FALSE as of 2026-10-08 (and since at least 2026-09-18), kept struck so the claim
+> is not re-quoted:** `gemini_key_state` holds **40 rows** and `auth.users` holds **2**.
+> Regenerate, never quote:
+> `select (select count(*) from auth.users) as users, (select count(*) from public.gemini_key_state) as key_rows;`
+> (read-only, via `supabase db query --linked` or the Supabase MCP `execute_sql`).
+
+1. ~~**`gemini_key_state` is empty on the remote** and `bootstrap_user_defaults`
+   has not been called.~~ So the silent-stop bug *is* the current state of
    production: `claim_gemini_key()` returns `NULL` forever, every LLM agent
    releases its claim, and the pipeline reads as **merely idle**. No error, no
    failed run, nothing on the health page.
-2. **There is no Supabase Auth user yet**, so any real session gets **zero rows
+2. ~~**There is no Supabase Auth user yet**~~ *(FALSE as of 2026-10-08: 2 auth users;
+   query above)*, so any real session gets **zero rows
    from every table** — correct RLS behaviour, indistinguishable from an empty
    database. **Blocking prerequisite**, alongside the Actions secrets.
 
@@ -319,7 +326,8 @@ RLS proof was.
 The push is escalated to Teja framed as **"align the database with the files
 before the first sign-in"** — deliberately *not* as a production hotfix, because
 `bootstrap_user_defaults()` still has to be **called** by an authenticated
-session and there is no Auth user yet. Every insert in it is
+session and ~~there is no Auth user yet~~ *(FALSE as of 2026-10-08: 2 auth users;
+query in "Two of my runtime findings" above)*. Every insert in it is
 `on conflict do nothing`, so re-running the fixed version after the old one has
 run still works — which lowers this from "drop everything" to "cheap now, a
 diagnosis later."
@@ -499,6 +507,10 @@ tabulated in §2 of `SCHEMA_CONTRACT.md`.
 ## Rulings made today
 
 ### Naming: one credential, one name → **`APPLYY_APP_USER_*`**
+
+*(Annotated 2026-10-08: the live count is **2** auth users, not one; regenerate with
+`select count(*) from auth.users;`. The design rule below is unchanged, so a second user
+means the worker and the dashboard see disjoint rows unless both use the same pair.)*
 
 There is exactly **one** Supabase Auth user in this system, because RLS scopes
 every row by `auth.uid()` — a second auth user would be a second disjoint

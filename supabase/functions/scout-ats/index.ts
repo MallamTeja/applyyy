@@ -492,8 +492,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
           // only ever see what the Matcher saw.
           //
           // The row is BORN at its verdict rather than inserted at 'discovered' and then
-          // transitioned: the status guard fires only on UPDATE and its legal source
-          // state is 'deduped', which nothing in this repo ever writes. See docs/screener/.
+          // transitioned, because the verdict is already computed here. Reaching it through
+          // UPDATEs would take two guarded hops, discovered -> deduped (agent 'normalizer')
+          // and deduped -> verdict (agent 'screener'), so this function would have to act
+          // as the Normalizer, which runs separately (supabase/functions/normalizer/). The
+          // INSERT allowlist (20260917130000) admits passed_filters/dropped_filter for
+          // exactly this. 'discovered' remains only as the screener-unavailable fallback
+          // below, and the Normalizer picks those rows up. Corrected 2026-10-08: this
+          // previously said nothing writes 'deduped'. See docs/screener/.
           const appInserts = screenContext.ok
             ? (() => {
                 const plan = planScreenedApplications(
