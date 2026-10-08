@@ -403,6 +403,27 @@ describe('approval page wiring: per-row freshness (fixes 2b/3) and missing maste
     assert.doesNotMatch(missing, /return;/);
   });
 
+  it('item 6: an RPC with no answer is re-read, never counted as failed', () => {
+    // From the RPC result to the end of the per-row loop body.
+    const result = between('if (result.error === null) {', 'finally {');
+    // No answer is classified by the shared predicate.
+    assert.match(result, /const noAnswer = isNoAnswer\(result\.status, result\.error\);/);
+    // Only an error that is neither no-answer nor a guard refusal fails without a re-read.
+    assert.match(result, /if \(!noAnswer && !guardRefused\) \{\s*failed\.push\(id\);\s*continue;/);
+    // Both of those go to the re-read.
+    assert.match(result, /const outcome = await confirmSettle\(supabase, id, to\);/);
+    // Landed counts as moved, so the row leaves the queue instead of inviting a retry.
+    assert.match(result, /if \(outcome\.kind === 'landed'\)\s*moved\.push\(id\);/);
+    // Settled elsewhere: the stored row is adopted and its status named, never "not approved".
+    assert.match(result, /else if \(outcome\.kind === 'moved_elsewhere'\) \{\s*adoptStored\(id, outcome\.stored\);\s*settledElsewhere\.push\(outcome\.stored\.status\);/);
+    // After NO answer, "still awaiting" proves nothing: unconfirmed, never failed and never moved.
+    assert.match(result, /else if \(noAnswer\)\s*unconfirmed\.push\(id\);\s*else\s*failed\.push\(id\);/);
+    // And unconfirmed rows stay locked past the finally.
+    assert.match(page, /for \(const id of mine\)\s*if \(!unconfirmed\.includes\(id\)\)\s*settlingRef\.current\.delete\(id\);/);
+    // A thrown call takes the same path as a status-0 return.
+    assert.match(between('result = await supabase.rpc(', 'if (result.error === null) {'), /catch \{\s*result = \{ error: \{ code: '' \}, status: 0 \};/);
+  });
+
   it('7b: an unpinned or malformed pin refuses its own row before any master is fetched', () => {
     // From the classifier's no_pin branch to the resume shape gate that follows it.
     const pin = between("if (classifyTailored(app.tailored_profile) === 'no_pin') {", 'if (!isResumeShape(app.tailored_profile))');

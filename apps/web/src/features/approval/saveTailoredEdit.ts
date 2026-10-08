@@ -108,6 +108,46 @@ export async function confirmFresh(client: MinimalClient, applicationId: string,
   }
 }
 
+/* Item 6 (2026-10-08): THE definition of "the request got no answer", shared by the save and by the
+   page's approve/reject RPC so the two cannot drift. postgrest-js RETURNS a dropped fetch as
+   {status: 0, error.code: ''} rather than throwing; any error without a SQLSTATE is not a database
+   verdict either, so the write's fate is unknown and must be re-read, never reported as failed. */
+export function isNoAnswer(status: unknown, error: { code?: unknown } | null | undefined): boolean {
+  // Status 0 is the transport giving up before any HTTP response.
+  if (status === 0) return true;
+  // No error is an answer (success).
+  if (error === null || error === undefined) return false;
+  // A SQLSTATE is the database speaking; anything else is the network or a client bug.
+  return typeof error.code !== 'string' || error.code === '';
+}
+
+/* Item 6: what a no-answer status transition actually did, read back from the row. A closed union,
+   so the page handles each case by name: landed counts as done, not_landed is a safe retry,
+   moved_elsewhere means another tab settled it, unknown is said as unknown. */
+export type SettleCheck =
+  // The row is at the status we asked for: our call (or an identical one) went through.
+  | { readonly kind: 'landed' }
+  // Still awaiting approval: nothing happened, a retry is safe.
+  | { readonly kind: 'not_landed' }
+  // Some other status: not ours to count, and the page should show what is stored.
+  | { readonly kind: 'moved_elsewhere'; readonly stored: StoredRow }
+  // The re-read failed too; never guessed.
+  | { readonly kind: 'unknown' };
+
+// Never throws (readBack cannot), because it is awaited inside settle()'s locked per-row loop.
+export async function confirmSettle(client: MinimalClient, applicationId: string, to: string): Promise<SettleCheck> {
+  // The same never-throwing re-read the save uses.
+  const stored = await readBack(client, applicationId);
+  // Unreadable: say so rather than pick an answer.
+  if (stored === undefined) return { kind: 'unknown' };
+  // At the target status: done.
+  if (stored.status === to) return { kind: 'landed' };
+  // Untouched: the transition did not happen.
+  if (stored.status === 'awaiting_approval') return { kind: 'not_landed' };
+  // Anywhere else: someone else moved it.
+  return { kind: 'moved_elsewhere', stored };
+}
+
 /* Exported so the page and the tests share one wording, and so each branch's promise is checkable:
    a message that says "showing" or "reloaded" must only go out when there IS a stored row adopted. */
 export const SAVE_MESSAGES = {
@@ -248,7 +288,7 @@ export async function saveTailoredEdit(
 
   /* D1: postgrest-js CATCHES a failed fetch and RETURNS it (status 0, code ''), so the catch above
      never sees a real network drop. No SQLSTATE means the database never answered: unknown, not refused. */
-  const noAnswer = httpStatus === 0 || (updateError !== null && (typeof updateError.code !== 'string' || updateError.code === ''));
+  const noAnswer = isNoAnswer(httpStatus, updateError);
   // Same path as a throw, so both shapes of "the answer was lost" re-read.
   if (noAnswer) return resolveUnknown(client, args);
   // A refused write with a SQLSTATE: the outcome is known, so no re-read; said in words.

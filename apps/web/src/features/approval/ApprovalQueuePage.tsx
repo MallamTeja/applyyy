@@ -63,7 +63,8 @@ import {
 } from './tailoredEdits';
 // The one write path for an edit: resume first, history note second.
 // confirmFresh: the per-row cross-tab check every approval crosses right before its RPC.
-import { confirmFresh, saveTailoredEdit } from './saveTailoredEdit';
+// isNoAnswer + confirmSettle: a lost RPC response is re-read, never reported as failed (item 6).
+import { confirmFresh, confirmSettle, isNoAnswer, saveTailoredEdit } from './saveTailoredEdit';
 import type { EditEventKind, StoredRow } from './saveTailoredEdit';
 // The submitted resume and its master side by side, rendered by the worker's own renderer,
 // so every row can be SEEN before it is approved. Shared with the pipeline history page.
@@ -497,6 +498,10 @@ export function ApprovalQueuePage(): ReactElement {
     const changed: string[] = [];
     // Approvals not sent because the freshness read itself failed.
     const unverified: string[] = [];
+    // Sent, but the answer was lost and the re-read failed too: outcome unknown (item 6).
+    const unconfirmed: string[] = [];
+    // Stored statuses of rows another tab or the worker settled first (item 6), named in the summary.
+    const settledElsewhere: string[] = [];
 
     try {
       for (const id of mine) {
@@ -540,27 +545,70 @@ export function ApprovalQueuePage(): ReactElement {
         }
         /* `human` is not decoration: the guard reads it to decide whether this
            edge is legal at all, and no other agent value opens this one. */
-        const { error } = await supabase.rpc('advance_application_status', {
-          p_application_id: id,
-          p_to_status: to,
-          p_agent: 'human',
-          /* edited_lines and edited_refs (fix 3) from the LATEST diff, per row at send time: the
-             record must describe the words actually being approved, not a click-time snapshot.
-             Every approve path goes through here, so none can omit them. */
-          p_detail:
-            to === 'approved'
-              ? { ...detail, edited_lines: latest?.editCount ?? 0, edited_refs: editedRefs(latest) }
-              : detail,
-        });
-        if (error) {
-          failed.push(id);
-        } else {
-          moved.push(id);
+        // The RPC's whole result: the status is needed to tell "refused" from "no answer" (item 6).
+        let result: { error: { code?: unknown } | null; status?: unknown };
+        try {
+          result = await supabase.rpc('advance_application_status', {
+            p_application_id: id,
+            p_to_status: to,
+            p_agent: 'human',
+            /* edited_lines and edited_refs (fix 3) from the LATEST diff, per row at send time: the
+               record must describe the words actually being approved, not a click-time snapshot.
+               Every approve path goes through here, so none can omit them. */
+            p_detail:
+              to === 'approved'
+                ? { ...detail, edited_lines: latest?.editCount ?? 0, edited_refs: editedRefs(latest) }
+                : detail,
+          });
+        } catch {
+          // A thrown call is no answer too: its fate is unknown, exactly like a status-0 return.
+          result = { error: { code: '' }, status: 0 };
         }
+        // Accepted: the row leaves the queue.
+        if (result.error === null) {
+          moved.push(id);
+          // Next row.
+          continue;
+        }
+        /* Item 6: an error is only a FAILURE when the database refused for its own reasons. Two kinds
+           need the row re-read first:
+           - NO ANSWER (status 0 / no SQLSTATE): the call may have landed with its response lost;
+           - a GUARD REFUSAL (42501/23514, status_transition_guard.sql:217,235,245): often a retry of
+             a call that DID land, which the guard now refuses because the row already moved.
+           Reporting either as "failed" sent the operator into a retry loop on a settled row. */
+        const noAnswer = isNoAnswer(result.status, result.error);
+        // The guard's own SQLSTATEs; anything else (e.g. P0002 no such row) is a plain failure.
+        const guardRefused = result.error.code === '42501' || result.error.code === '23514';
+        // A refusal for any other reason needs no re-read.
+        if (!noAnswer && !guardRefused) {
+          // The database said no.
+          failed.push(id);
+          // Next row.
+          continue;
+        }
+        // What the row says now.
+        const outcome = await confirmSettle(supabase, id, to);
+        // At the asked-for status: it went through (this call or an earlier one), so it leaves the queue.
+        if (outcome.kind === 'landed') moved.push(id);
+        // Another tab (or the worker) settled it: show what is stored and NAME that status.
+        else if (outcome.kind === 'moved_elsewhere') {
+          // adoptStored removes a no-longer-awaiting row from the queue.
+          adoptStored(id, outcome.stored);
+          // Its own toast, never the "not approved" one: the row may well BE approved.
+          settledElsewhere.push(outcome.stored.status);
+        }
+        /* Still awaiting, or unreadable. After a refusal that is a definite failure. After NO
+           answer it proves nothing: the original call may still commit after this read, so it is
+           said as unknown and the row stays locked until reload (see the finally below). */
+        else if (noAnswer) unconfirmed.push(id);
+        // Refused, and nothing moved: a real failure, safe to retry.
+        else failed.push(id);
       }
     } finally {
-      // Unlocked whatever happened; moved rows leave the queue anyway, failed ones become editable again.
-      for (const id of mine) settlingRef.current.delete(id);
+      /* Unlocked whatever happened (moved rows leave the queue anyway, failed ones become editable
+         again) - EXCEPT unconfirmed rows: their call may still land, so Approve/Reject stay disabled
+         until a reload shows the truth, instead of inviting a retry the guard would refuse (item 6). */
+      for (const id of mine) if (!unconfirmed.includes(id)) settlingRef.current.delete(id);
       // And the controls re-render unlocked.
       setSettling(new Set(settlingRef.current));
     }
@@ -593,9 +641,24 @@ export function ApprovalQueuePage(): ReactElement {
       );
     }
     // Changed in another tab: what is stored is now on screen, and the operator must look again.
+    /* Item 6: settled by another tab or the worker before this click counted. Says WHAT it became,
+       because "not approved" would be false for a row another tab approved. */
+    if (settledElsewhere.length > 0) {
+      // Plain words for the statuses an operator knows; anything else is shown as stored.
+      const words = [...new Set(settledElsewhere.map((status) => (status === 'approved' ? 'approved' : status === 'dropped_filter' ? 'rejected' : status)))];
+      toast.error(
+        `${settledElsewhere.length} ${settledElsewhere.length === 1 ? 'application had' : 'applications had'} already been ${words.join(' or ')} elsewhere, so this click changed nothing.`,
+      );
+    }
     if (changed.length > 0) {
       toast.error(
         `${changed.length} ${changed.length === 1 ? 'application was' : 'applications were'} not approved because ${changed.length === 1 ? 'it' : 'they'} changed elsewhere since you opened ${changed.length === 1 ? 'it' : 'them'}. Review the current version.`,
+      );
+    }
+    // Sent with no answer and no readable row afterwards: neither "done" nor "failed" is known.
+    if (unconfirmed.length > 0) {
+      toast.error(
+        `Could not confirm whether ${unconfirmed.length} ${unconfirmed.length === 1 ? 'application was' : 'applications were'} recorded: the connection dropped. ${unconfirmed.length === 1 ? 'It stays' : 'They stay'} locked; reload the page to see what was stored.`,
       );
     }
     // The check could not run; nothing was sent for these.

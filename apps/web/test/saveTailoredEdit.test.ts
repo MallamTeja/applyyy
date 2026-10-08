@@ -598,3 +598,56 @@ describe('confirmFresh', () => {
     assert.deepEqual(await fresh('throw'), { kind: 'unverifiable' });
   });
 });
+
+/* Item 6 (2026-10-08): an approve/reject RPC whose response is lost. postgrest-js RETURNS a network
+ * drop as {status:0, error.code:''} instead of throwing, so a landed approval used to read as
+ * "failed": the operator retried, and the retry hit a transition error on a row already approved.
+ * The page now re-reads such a row, and these hold the two pieces it calls. */
+describe('isNoAnswer: the one definition of "the request got no answer"', () => {
+  it('status 0, or an error with no SQLSTATE, is no answer', () => {
+    // The exact shape postgrest-js returns on a dropped fetch.
+    assert.equal(save.isNoAnswer(0, { code: '' }), true);
+    // A code-less error on any status is still not a database verdict.
+    assert.equal(save.isNoAnswer(500, { code: '' }), true);
+    // Missing code entirely.
+    assert.equal(save.isNoAnswer(undefined, {}), true);
+    // Status 0 on its OWN means no answer, even with no error object: red-on-revert showed every
+    // other case here also carried code '', so the status rule was unguarded.
+    assert.equal(save.isNoAnswer(0, null), true);
+  });
+
+  it('a real SQLSTATE, or success, is an answer', () => {
+    // The guard refusing: the database spoke.
+    assert.equal(save.isNoAnswer(403, { code: '42501' }), false);
+    // No error at all.
+    assert.equal(save.isNoAnswer(200, null), false);
+  });
+});
+
+// One settle re-read through the same fake client the save tests use.
+const settled = (reselect: Answer, to: 'approved' | 'dropped_filter' = 'approved') =>
+  save.confirmSettle(fakeClient({ reselect }).client, 'app-1', to);
+
+describe('confirmSettle: did a no-answer transition land?', () => {
+  it('stored at the target status -> landed', async () => {
+    // The approval went through; only the response was lost.
+    assert.equal((await settled({ data: { tailored_profile: NEXT, updated_at: NEW_STAMP, status: 'approved' }, error: null })).kind, 'landed');
+  });
+
+  it('still awaiting approval -> not_landed', async () => {
+    // Nothing happened; a retry is safe.
+    assert.equal((await settled({ data: { tailored_profile: NEXT, updated_at: LOADED_STAMP, status: 'awaiting_approval' }, error: null })).kind, 'not_landed');
+  });
+
+  it('some other status -> moved_elsewhere, carrying what is stored', async () => {
+    // Rejected in another tab while this approval was in flight.
+    const r = await settled({ data: { tailored_profile: NEXT, updated_at: NEW_STAMP, status: 'dropped_filter' }, error: null });
+    // Not ours, and not retryable; the page adopts the stored row.
+    assert.deepEqual(r, { kind: 'moved_elsewhere', stored: { resume: NEXT, updatedAt: NEW_STAMP, status: 'dropped_filter' } });
+  });
+
+  it('an unreadable row -> unknown, never guessed', async () => {
+    // The re-read dropped too.
+    assert.equal((await settled({ data: null, error: { message: 'TypeError: Failed to fetch', code: '' } })).kind, 'unknown');
+  });
+});
