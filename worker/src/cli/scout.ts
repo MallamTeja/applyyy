@@ -11,6 +11,8 @@ import { getAdapter, supportedProviders, toJobInsert, type JobInsertContext } fr
 // THE ONE ON CRON (.github/workflows/scout.yml:61 -> package.json:13), so this import is
 // what actually puts the cascade in front of Teja's queue.
 import { planScreenedApplications } from '../../../supabase/functions/_shared/screen/screen-batch.ts';
+// Same formatter as the edge functions, so every screening run writes warnings one way.
+import { withRuleWarnings } from '../../../supabase/functions/_shared/screen/run-summary.ts';
 // The Screener's database context, and the adapter that fetches it.
 import { loadScreenContext } from '../../../supabase/functions/_shared/screen/context.ts';
 import { supabaseScreenQueries } from '../../../supabase/functions/_shared/screen/supabase-queries.ts';
@@ -441,8 +443,10 @@ async function main(): Promise<void> {
     rows_in: totalDiscovered,
     rows_out: totalApplications,
     error_count: dbErrors.length,
-    // Capped so one bad night cannot write an unbounded text blob into the row.
-    error_detail: dbErrors.length > 0 ? dbErrors.slice(0, 20).join('\n') : null,
+    // Capped so one bad night cannot write an unbounded text blob into the row. The rule
+    // warnings ride along, labelled, so they reach the run row and not only this console
+    // (B1, 2026-10-08). error_count above is unchanged: a warning is not an error.
+    error_detail: withRuleWarnings(dbErrors.length > 0 ? dbErrors.slice(0, 20).join('\n') : null, screenWarnings),
   });
 
   // Non-zero exit too, so the Actions tick is red — the run row alone is only

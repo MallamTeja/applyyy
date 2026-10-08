@@ -26,6 +26,8 @@ import { persistScreenVerdict } from "../_shared/screen/persist-verdict.ts";
 import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 // Shared CORS headers, plus the boundary that keeps them on an uncaught 500.
 import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
+// Persists the cascade's "rule skipped" warnings into the run row (B1, 2026-10-08).
+import { withRuleWarnings } from "../_shared/screen/run-summary.ts";
 
 // Default batch processing size per run.
 const DEFAULT_BATCH_SIZE = 50;
@@ -226,8 +228,10 @@ Deno.serve(withErrorBoundary("screener", async (req: Request): Promise<Response>
       .update({
         // Derived from the counters, never hard-coded: see runStatus above.
         status: runStatus,
-        // The failure summary, so the health page says WHY and not just how many.
-        error_detail: errorDetail,
+        // The failure summary, so the health page says WHY and not just how many, plus the
+        // labelled rule warnings, which were only ever in the HTTP response (B1, 2026-10-08).
+        // error_count stays failedCount: a warning is not an error.
+        error_detail: withRuleWarnings(errorDetail, warnings),
         finished_at: new Date().toISOString(),
         rows_in: apps.length,
         rows_out: passedCount,

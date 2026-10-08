@@ -19,6 +19,8 @@ import { planScreenedApplications } from "../_shared/screen/screen-batch.ts";
 // The Screener's database context, and the adapter that fetches it.
 import { loadScreenContext } from "../_shared/screen/context.ts";
 import { supabaseScreenQueries } from "../_shared/screen/supabase-queries.ts";
+// Persists the cascade's "rule skipped" warnings into the run row (B1, 2026-10-08).
+import { withRuleWarnings } from "../_shared/screen/run-summary.ts";
 import type { AtsProvider, JobInsert } from "../_shared/contracts/shared-types.ts";
 // The liveness guards and the fingerprint dedupe. Pure, so the rules that stop a bad poll
 // wiping the inventory are tested in liveness.test.ts rather than trusted from here.
@@ -685,10 +687,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
         // The first few reasons; enough to diagnose without unbounded text.
         // Board failures first, then liveness refusals in their own labelled segment, so a
         // refusal can never be mistaken for one of the error_count failures.
-        error_detail: [
+        // Then the cascade's rule warnings, labelled the same way (B1, 2026-10-08): this scout
+        // screens most rows, and its warnings were only in the HTTP response.
+        error_detail: withRuleWarnings([
           ...failedBoards.slice(0, 5).map((s) => `${s.provider}/${s.board}: ${s.error ?? "unknown"}`),
           ...(livenessRefusals.length > 0 ? [`liveness_refused: ${livenessRefusals.slice(0, 5).join(", ")}`] : []),
-        ].join("; ") || null,
+        ].join("; ") || null, screenWarnings),
         finished_at: new Date().toISOString(),
         // rows_in is what we looked at, rows_out is what we created. Kept as two
         // numbers because "polled 40 boards, created 0 applications" is the early
