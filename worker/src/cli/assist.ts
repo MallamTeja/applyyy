@@ -20,6 +20,8 @@ import type { SupabaseLike } from '../supabase-gateway.ts';
 import { runAssisted } from '../assist/assisted-submit.ts';
 // The real database port for the flow.
 import { createSupabaseAssistGateway } from '../assist/supabase-assist-gateway.ts';
+// The machine-agent proof header, the same builder the edge functions use.
+import { AGENT_KEY_ENV_VAR, agentKeyHeaders } from '../../../supabase/functions/_shared/db/agent-key.ts';
 
 /** Read a required environment variable or fail loudly at startup. */
 // Plain function: three call sites share it and nothing else needs the logic.
@@ -93,6 +95,10 @@ async function main(): Promise<void> {
   };
   // ANON key + the signed-in user's JWT, never a service-role key: RLS applies as usual.
   const client = sdk.createClient(supabaseUrl, anonKey, {
+    // Assist parks the row as 'applier' (approved -> applying -> blocked_needs_human), which
+    // needs the agent key once its hash is seeded (20261008160000). Read from the local
+    // APPLYY_AGENT_KEY env; unset means no header, which is today's behaviour.
+    global: { headers: agentKeyHeaders(process.env[AGENT_KEY_ENV_VAR]) },
     // No session file on disk: this is a credential, and the process is short-lived.
     auth: { persistSession: false, autoRefreshToken: false },
   });

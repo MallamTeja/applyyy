@@ -146,6 +146,10 @@ jobs:
           APPLYY_APP_USER_EMAIL: ${{ secrets.APPLYY_APP_USER_EMAIL }}
           # Same account as the email above; scoped here for the reason in the step comment.
           APPLYY_APP_USER_PASSWORD: ${{ secrets.APPLYY_APP_USER_PASSWORD }}
+          # Proof that this caller is a machine agent, so the database lets it advance status
+          # as 'applier' (20261008160000). Unset is safe until the hash is seeded; once seeded,
+          # a missing secret makes every applier transition fail closed with 42501.
+          APPLYY_AGENT_KEY: ${{ secrets.APPLYY_AGENT_KEY }}
           # AES-GCM key for the browser storageState held in Supabase Storage. The
           # state itself never lands in the repo (§10 defense 4). No code reads it
           # yet (no process.env read in worker/src as of 2026-10-05); kept here, on

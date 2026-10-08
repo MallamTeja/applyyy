@@ -30,6 +30,8 @@
 // range re-resolves on a redeploy nobody triggered, so the build would change for
 // someone who edited nothing — the hardest kind of break to diagnose.
 import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2.58.0";
+// The machine-agent proof header, shared with the worker so the name cannot drift.
+import { AGENT_KEY_ENV_VAR, agentKeyHeaders } from "./agent-key.ts";
 
 // Supabase injects these two into every function's environment automatically, so they
 // are the one pair Teja never has to set by hand.
@@ -111,6 +113,10 @@ export async function createAppUserClient(): Promise<DbClientResult> {
   // in an isolate that is about to be discarded, and leaving it on makes the client
   // reach for a `localStorage` that does not exist.
   const db = createClient(url, anonKey, {
+    // The agent key, on every request: this client is how every edge-function agent reaches
+    // advance_application_status, and the database refuses a machine p_agent without it once
+    // the hash is seeded (20261008160000). Unset secret = no header = today's behaviour.
+    global: { headers: agentKeyHeaders(readEnv(AGENT_KEY_ENV_VAR)) },
     auth: {
       // Nothing to persist in a stateless isolate.
       persistSession: false,

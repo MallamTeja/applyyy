@@ -15,6 +15,9 @@ import { createPlaywrightPage, SUBMISSION_IMPLEMENTED } from '../playwright-page
 // why it must never be handed one of the form pages.
 import { createResumeRenderer } from '../resume-renderer.ts';
 import { resolveSubmissionMode } from '../submission-mode.ts';
+// The machine-agent proof header, the same builder the edge functions use (relative path,
+// as this worker already imports other _shared modules, so no install or lockfile write).
+import { AGENT_KEY_ENV_VAR, agentKeyHeaders } from '../../../supabase/functions/_shared/db/agent-key.ts';
 
 /** Read a required environment variable or fail loudly at startup. */
 function required(name: string): string {
@@ -70,6 +73,10 @@ async function main(): Promise<void> {
   // on its own; all authority comes from the signed-in user's JWT below, so
   // every query runs under exactly the same RLS policies as the dashboard.
   const client = sdk.createClient(supabaseUrl, anonKey, {
+    // The applier advances status as 'applier', which the database refuses without the agent
+    // key once its hash is seeded (20261008160000). From the APPLYY_AGENT_KEY Actions secret;
+    // unset means no header, which is today's behaviour.
+    global: { headers: agentKeyHeaders(process.env[AGENT_KEY_ENV_VAR]) },
     auth: {
       // A CI runner has no browser storage and the process is thrown away after
       // the run, so persisting a session would write a credential to disk for
