@@ -23,10 +23,13 @@ import type { MasterProfile } from "../_shared/contracts/shared-types.ts";
 // disagree about what a valid pin is; its closed union has no "use the latest" branch.
 import { collectPins, resolvePinnedMaster } from "../_shared/audit/pinned-master.ts";
 
-// Every status at which a tailored resume exists and nothing has been sent yet. A letter
-// is useful from `tailored` until a human approves; reading across all four (rather than
-// only `tailored`) means a row that moves on before this function runs is not skipped.
-export const COVER_LETTER_STATUSES = ["tailored", "audit_clean", "audit_flagged", "awaiting_approval"] as const;
+// Every status at which a tailored resume exists and the row has NOT yet reached the human.
+// Reading across all three (rather than only `tailored`) means a row the auditor moves on
+// before this function runs is not skipped.
+// `awaiting_approval` is deliberately EXCLUDED (2026-10-08): the letter write bumps
+// updated_at, so a letter landing during review would make the open approval tab report
+// "changed elsewhere" (PT409) over an identical diff. Letters are generated before review.
+export const COVER_LETTER_STATUSES = ["tailored", "audit_clean", "audit_flagged"] as const;
 
 // Postgres errors as supabase-js reports them; only the message is used.
 type DbError = { message: string } | null;
@@ -54,7 +57,10 @@ export interface CoverLetterClient {
     // The one write.
     update(values: Record<string, unknown>): {
       eq(column: string, value: string): {
-        is(column: string, value: null): PromiseLike<{ error: DbError }>;
+        is(column: string, value: null): {
+          // The status guard: the row must still be at a generating status when written.
+          in(column: string, values: readonly string[]): PromiseLike<{ error: DbError }>;
+        };
       };
     };
   };
@@ -121,9 +127,10 @@ export async function runCoverLetterBatch(
     .select("id, status, tailored_profile, tailor_refs, jobs (title, company_name, description_raw)")
     // See COVER_LETTER_STATUSES.
     .in("status", COVER_LETTER_STATUSES)
-    // Excluded in the DATABASE, not by the planner: the three live `awaiting_approval`
-    // orphans have a null profile, and skipping them after `.limit()` would let them
-    // fill a small batch on every run while real rows starve behind them.
+    // Excluded in the DATABASE, not by the planner: a row with a null profile skipped after
+    // `.limit()` would fill a small batch on every run while real rows starve behind it.
+    // (First written for the `awaiting_approval` orphans, which the status list above no
+    // longer reads; the guard stays for any generating-status row that lacks a profile.)
     .not("tailored_profile", "is", null)
     // The idempotency key.
     .is("cover_letter", null)
@@ -190,7 +197,10 @@ export async function runCoverLetterBatch(
         .eq("id", job.applicationId)
         // Guarded on the queue predicate, so an overlapping run cannot overwrite a
         // letter written between this run's read and its write.
-        .is("cover_letter", null);
+        .is("cover_letter", null)
+        // And on the status: the auditor can move a row to awaiting_approval between this
+        // run's read and its write, and a write landing then is the PT409 this list prevents.
+        .in("status", COVER_LETTER_STATUSES);
       // A failed write is a failure, not a success with a log line.
       if (writeError) {
         failures.push({ applicationId: job.applicationId, error: writeError.message });

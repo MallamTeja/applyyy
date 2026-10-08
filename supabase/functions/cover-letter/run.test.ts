@@ -101,12 +101,16 @@ function recordingClient(rows: unknown[] = [ROW]) {
         // The row filter.
         eq: (c: string, v: string) => ({
           // The overwrite guard; terminal link.
-          is: (c2: string, v2: null) => {
-            // One record per write, with both filters.
-            calls.updates.push({ values, filters: [[c, v], [c2, v2]] });
-            // A successful write.
-            return Promise.resolve({ error: null });
-          },
+          is: (c2: string, v2: null) => ({
+            // The status guard (2026-10-08): a letter is written only while the row is still at
+            // a generating status, never once it reached the human. Terminal link.
+            in: (c3: string, v3: readonly string[]) => {
+              // One record per write, with all three filters.
+              calls.updates.push({ values, filters: [[c, v], [c2, v2], [c3, v3]] });
+              // A successful write.
+              return Promise.resolve({ error: null });
+            },
+          }),
         }),
       }),
     }),
@@ -167,7 +171,7 @@ test("batch: a good reply writes ONLY the two cover-letter columns and makes no 
   assert.equal(calls.rpc.length, 0);
   // Exactly the two columns — no status, no block_detail, no audit_findings.
   assert.deepEqual(calls.updates, [
-    { values: { cover_letter: LETTER, cover_letter_generated_at: "2026-10-04T00:00:00.000Z" }, filters: [["id", "app-1"], ["cover_letter", null]] },
+    { values: { cover_letter: LETTER, cover_letter_generated_at: "2026-10-04T00:00:00.000Z" }, filters: [["id", "app-1"], ["cover_letter", null], ["status", COVER_LETTER_STATUSES]] },
   ]);
   // The queue spans all four pre-approval statuses and excludes rows already lettered.
   assert.deepEqual(calls.queue, [
@@ -307,4 +311,13 @@ test("pin: a loader failure fails the run rather than writing letters from anoth
   assert.equal(prompts.length, 0);
   // ...and nothing written.
   assert.equal(calls.updates.length, 0);
+});
+
+test("no letter is generated or written once a row reaches awaiting_approval", () => {
+  // WHY: the write bumps updated_at, so a letter landing while Teja reviews would make his
+  // open approval tab report "changed elsewhere" (PT409) over an identical diff. Letters are
+  // generated BEFORE review; the queue read and the write guard both use this list.
+  assert.equal((COVER_LETTER_STATUSES as readonly string[]).includes("awaiting_approval"), false);
+  // And every status that still precedes review stays, so no generating row is dropped.
+  assert.deepEqual([...COVER_LETTER_STATUSES], ["tailored", "audit_clean", "audit_flagged"]);
 });
