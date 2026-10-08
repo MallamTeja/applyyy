@@ -127,8 +127,8 @@ export function isNoAnswer(status: unknown, error: { code?: unknown } | null | u
 export type SettleCheck =
   // The row is at the status we asked for: our call (or an identical one) went through.
   | { readonly kind: 'landed' }
-  // Still awaiting approval: nothing happened, a retry is safe.
-  | { readonly kind: 'not_landed' }
+  // Still awaiting approval: nothing happened. Carries the row, so a PT409 (stale stamp) can redraw it.
+  | { readonly kind: 'not_landed'; readonly stored: StoredRow }
   // Some other status: not ours to count, and the page should show what is stored.
   | { readonly kind: 'moved_elsewhere'; readonly stored: StoredRow }
   // The re-read failed too; never guessed.
@@ -143,9 +143,33 @@ export async function confirmSettle(client: MinimalClient, applicationId: string
   // At the target status: done.
   if (stored.status === to) return { kind: 'landed' };
   // Untouched: the transition did not happen.
-  if (stored.status === 'awaiting_approval') return { kind: 'not_landed' };
+  if (stored.status === 'awaiting_approval') return { kind: 'not_landed', stored };
   // Anywhere else: someone else moved it.
   return { kind: 'moved_elsewhere', stored };
+}
+
+/* Item 4 (2026-10-08): the advance_application_status arguments, built in ONE pure place so a test
+   can prove the stamp's bytes. Migration 20261008130000 added p_expected_updated_at: a stale stamp is
+   refused with PT409 under the row lock, which closes the read-then-write window confirmFresh left.
+   The stamp is the STRING PostgREST returned - Postgres compares timestamptz to the MICROSECOND and a
+   JS Date keeps milliseconds, so one Date round-trip would make every gated approval stale. */
+export function buildSettleArgs(
+  // The row being moved.
+  applicationId: string,
+  // approved or dropped_filter, the two human edges out of awaiting_approval.
+  to: 'approved' | 'dropped_filter',
+  // What the record says about this decision.
+  detail: Readonly<Record<string, unknown>>,
+  // updated_at exactly as loaded or last saved; never parsed.
+  stamp: string,
+): Record<string, unknown> {
+  // The fields every move carries; p_agent 'human' is what makes the approval edge legal at all.
+  const args: Record<string, unknown> = { p_application_id: applicationId, p_to_status: to, p_agent: 'human', p_detail: detail };
+  // Only approvals are gated: rejecting a row that changed elsewhere is still a legitimate decision,
+  // and leaving the key out lets the RPC's DEFAULT NULL skip the check.
+  if (to === 'approved') args['p_expected_updated_at'] = stamp;
+  // Handed straight to supabase.rpc.
+  return args;
 }
 
 /* Exported so the page and the tests share one wording, and so each branch's promise is checkable:

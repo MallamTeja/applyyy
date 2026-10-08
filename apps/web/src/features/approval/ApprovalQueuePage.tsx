@@ -63,8 +63,9 @@ import {
 } from './tailoredEdits';
 // The one write path for an edit: resume first, history note second.
 // confirmFresh: the per-row cross-tab check every approval crosses right before its RPC.
-// isNoAnswer + confirmSettle: a lost RPC response is re-read, never reported as failed (item 6).
-import { confirmFresh, confirmSettle, isNoAnswer, saveTailoredEdit } from './saveTailoredEdit';
+// isNoAnswer + confirmSettle: a lost RPC response is re-read, never reported as failed (item 6);
+// buildSettleArgs: the RPC arguments, with the stamp passed through byte-for-byte (item 4).
+import { buildSettleArgs, confirmFresh, confirmSettle, isNoAnswer, saveTailoredEdit } from './saveTailoredEdit';
 import type { EditEventKind, StoredRow } from './saveTailoredEdit';
 // The submitted resume and its master side by side, rendered by the worker's own renderer,
 // so every row can be SEEN before it is approved. Shared with the pipeline history page.
@@ -401,7 +402,9 @@ export function ApprovalQueuePage(): ReactElement {
           // Same row, same snapshot: the preview can never show a different resume than the diff.
           snapshots.set(app.id, resolved);
           // The stamp this snapshot was read at; the first edit must present it.
-          stamps.set(app.id, String(app.updated_at));
+          /* Only a real string: String(undefined) would be the stamp "undefined", sent as if it were
+             a timestamp. Without one the row has no stamp, so it can never be approved (unverifiable). */
+          if (typeof app.updated_at === 'string') stamps.set(app.id, app.updated_at);
           // Kept so a save rebuilds this exact diff with the new resume.
           rowSources.set(app.id, {
             application,
@@ -509,11 +512,12 @@ export function ApprovalQueuePage(): ReactElement {
            approval (batch and individual). Until 2026-10-08 one read covered a whole batch, so an
            edit landing between that read and row N's RPC was approved as clean, and individual
            approvals were not checked at all. Rejects skip it: dropping a row needs no clean diff.
-           ponytail: still a read-then-write window of one round trip; closing it needs the RPC to
-           take the expected updated_at, which is a migration. */
+           confirmFresh catches a change BEFORE sending; the RPC's p_expected_updated_at (item 4,
+           migration 20261008130000) refuses one that lands in between, under the row lock, as PT409. */
+        /* The stamp this tab's diff describes. Hoisted (item 4) so the RPC gates on the SAME string
+           confirmFresh checked below, not a second read of the ref. */
+        const stamp = latestStamps.current.get(id);
         if (to === 'approved') {
-          // The stamp this tab's diff describes; without one there is nothing to compare.
-          const stamp = latestStamps.current.get(id);
           // Never throws; a missing stamp counts as unverifiable rather than slipping through.
           const check = stamp === undefined ? { kind: 'unverifiable' as const } : await confirmFresh(supabase, id, stamp);
           // Changed elsewhere: redraw what is stored so the operator sees the other tab's words.
@@ -548,18 +552,22 @@ export function ApprovalQueuePage(): ReactElement {
         // The RPC's whole result: the status is needed to tell "refused" from "no answer" (item 6).
         let result: { error: { code?: unknown } | null; status?: unknown };
         try {
-          result = await supabase.rpc('advance_application_status', {
-            p_application_id: id,
-            p_to_status: to,
-            p_agent: 'human',
-            /* edited_lines and edited_refs (fix 3) from the LATEST diff, per row at send time: the
-               record must describe the words actually being approved, not a click-time snapshot.
-               Every approve path goes through here, so none can omit them. */
-            p_detail:
+          result = await supabase.rpc(
+            'advance_application_status',
+            // Built in one tested place, so the stamp reaches Postgres byte-for-byte (item 4).
+            buildSettleArgs(
+              id,
+              to,
+              /* edited_lines and edited_refs (fix 3) from the LATEST diff, per row at send time: the
+                 record must describe the words actually being approved, not a click-time snapshot.
+                 Every approve path goes through here, so none can omit them. */
               to === 'approved'
                 ? { ...detail, edited_lines: latest?.editCount ?? 0, edited_refs: editedRefs(latest) }
                 : detail,
-          });
+              // Always defined for an approval (a missing stamp was refused above); unused for a reject.
+              stamp ?? '',
+            ),
+          );
         } catch {
           // A thrown call is no answer too: its fate is unknown, exactly like a status-0 return.
           result = { error: { code: '' }, status: 0 };
@@ -578,7 +586,9 @@ export function ApprovalQueuePage(): ReactElement {
            Reporting either as "failed" sent the operator into a retry loop on a settled row. */
         const noAnswer = isNoAnswer(result.status, result.error);
         // The guard's own SQLSTATEs; anything else (e.g. P0002 no such row) is a plain failure.
-        const guardRefused = result.error.code === '42501' || result.error.code === '23514';
+        // PT409 (item 4): the RPC's own stale-stamp refusal - another tab changed the row in between.
+        const staleStamp = result.error.code === 'PT409';
+        const guardRefused = staleStamp || result.error.code === '42501' || result.error.code === '23514';
         // A refusal for any other reason needs no re-read.
         if (!noAnswer && !guardRefused) {
           // The database said no.
@@ -589,7 +599,14 @@ export function ApprovalQueuePage(): ReactElement {
         // What the row says now.
         const outcome = await confirmSettle(supabase, id, to);
         // At the asked-for status: it went through (this call or an earlier one), so it leaves the queue.
-        if (outcome.kind === 'landed') moved.push(id);
+        /* At the asked-for status. After a PT409 our call is KNOWN not to have landed, so another tab
+           made this move: named as settled elsewhere, never claimed as "Approved 1" by this click. */
+        if (outcome.kind === 'landed') {
+          // Stale stamp: someone else's identical move.
+          if (staleStamp) settledElsewhere.push(to);
+          // Otherwise this call (or an earlier one of ours) went through.
+          else moved.push(id);
+        }
         // Another tab (or the worker) settled it: show what is stored and NAME that status.
         else if (outcome.kind === 'moved_elsewhere') {
           // adoptStored removes a no-longer-awaiting row from the queue.
@@ -600,6 +617,15 @@ export function ApprovalQueuePage(): ReactElement {
         /* Still awaiting, or unreadable. After a refusal that is a definite failure. After NO
            answer it proves nothing: the original call may still commit after this read, so it is
            said as unknown and the row stays locked until reload (see the finally below). */
+        // Stale stamp and still awaiting: another tab's edit won; show it and ask for a fresh review.
+        else if (staleStamp && outcome.kind === 'not_landed') {
+          // The newer stored row replaces the diff the operator was about to approve.
+          adoptStored(id, outcome.stored);
+          // Reported with the other cross-tab changes: "not approved ... review the current version".
+          changed.push(id);
+        }
+        // Stale stamp but the re-read failed: we know the row changed, not to what. Retry runs confirmFresh first.
+        else if (staleStamp) unverified.push(id);
         else if (noAnswer) unconfirmed.push(id);
         // Refused, and nothing moved: a real failure, safe to retry.
         else failed.push(id);

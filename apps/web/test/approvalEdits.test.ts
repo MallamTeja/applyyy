@@ -374,7 +374,26 @@ describe('approval page wiring: per-row freshness (fixes 2b/3) and missing maste
     // And it precedes the one RPC that approves.
     assert.ok(check < loop.indexOf("rpc('advance_application_status'"), 'the freshness check must run before the RPC');
     // Gated on approval only, never on requireBucketA, so individual approvals are checked too.
-    assert.match(loop, /if \(to === 'approved'\) \{\s*const stamp = latestStamps\.current\.get\(id\);/);
+    assert.match(loop, /const stamp = latestStamps\.current\.get\(id\);\s*if \(to === 'approved'\) \{/);
+  });
+
+  it('item 4: the RPC is gated on the SAME stamp, and a PT409 redraws the row as changed elsewhere', () => {
+    // The per-row loop.
+    const loop = between('for (const id of mine) {', 'finally {');
+    // The arguments come from the tested builder, with the hoisted stamp: no Date, no second read.
+    assert.match(loop, /rpc\('advance_application_status', buildSettleArgs\(id, to, [\s\S]*?, stamp \?\? ''\)\)/);
+    // No Date anywhere in the loop that could reformat the stamp.
+    assert.doesNotMatch(loop, /new Date\(|Date\.parse\(/);
+    // PT409 is one of the refusals that are re-read.
+    assert.match(loop, /const staleStamp = result\.error\.code === 'PT409';/);
+    // A stale stamp with nothing landed adopts the stored row and is reported as changed.
+    assert.match(loop, /else if \(staleStamp && outcome\.kind === 'not_landed'\) \{\s*adoptStored\(id, outcome\.stored\);\s*changed\.push\(id\);/);
+    // After a PT409 our call did not land, so a "landed" re-read is another tab's move, never "Approved 1".
+    assert.match(loop, /if \(outcome\.kind === 'landed'\) \{\s*if \(staleStamp\)\s*settledElsewhere\.push\(to\);/);
+    // And an unreadable re-read after PT409 is "could not confirm unchanged", not a sign-in failure.
+    assert.match(loop, /else if \(staleStamp\)\s*unverified\.push\(id\);\s*else if \(noAnswer\)/);
+    // A missing loaded stamp is never stored as the string "undefined".
+    assert.match(page, /if \(typeof app\.updated_at === 'string'\)\s*stamps\.set\(app\.id, app\.updated_at\);/);
   });
 
   it('a changed or unverifiable row is skipped, never approved', () => {
@@ -413,7 +432,7 @@ describe('approval page wiring: per-row freshness (fixes 2b/3) and missing maste
     // Both of those go to the re-read.
     assert.match(result, /const outcome = await confirmSettle\(supabase, id, to\);/);
     // Landed counts as moved, so the row leaves the queue instead of inviting a retry.
-    assert.match(result, /if \(outcome\.kind === 'landed'\)\s*moved\.push\(id\);/);
+    assert.match(result, /if \(outcome\.kind === 'landed'\) \{\s*if \(staleStamp\)\s*settledElsewhere\.push\(to\);\s*else\s*moved\.push\(id\);/);
     // Settled elsewhere: the stored row is adopted and its status named, never "not approved".
     assert.match(result, /else if \(outcome\.kind === 'moved_elsewhere'\) \{\s*adoptStored\(id, outcome\.stored\);\s*settledElsewhere\.push\(outcome\.stored\.status\);/);
     // After NO answer, "still awaiting" proves nothing: unconfirmed, never failed and never moved.

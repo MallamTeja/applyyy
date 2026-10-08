@@ -651,3 +651,45 @@ describe('confirmSettle: did a no-answer transition land?', () => {
     assert.equal((await settled({ data: null, error: { message: 'TypeError: Failed to fetch', code: '' } })).kind, 'unknown');
   });
 });
+
+/* Item 4 (2026-10-08): advance_application_status takes p_expected_updated_at
+ * (migration 20261008130000) and refuses a stale stamp with PT409. The stamp is compared as
+ * timestamptz in Postgres, which keeps MICROSECONDS; a JS Date keeps milliseconds. So the string
+ * PostgREST handed us must reach the RPC byte-for-byte - one trip through Date and EVERY gated
+ * approval would be refused as stale. */
+describe('buildSettleArgs: the RPC arguments, with the stamp passed through untouched', () => {
+  // A real-shaped PostgREST timestamptz with six fractional digits.
+  const MICRO = '2026-10-08T09:57:12.123456+00:00';
+
+  it('an approval carries the stamp string exactly as loaded', () => {
+    // Built for an approval.
+    const args = save.buildSettleArgs('app-1', 'approved', { review_path: 'bucket_b_review' }, MICRO);
+    // Same string, same bytes: not re-serialised, not truncated to milliseconds.
+    assert.equal(args.p_expected_updated_at, MICRO);
+    // Proves the trap this guards against: a Date round-trip would NOT be equal.
+    assert.notEqual(new Date(MICRO).toISOString(), MICRO);
+  });
+
+  it('every other argument is what the guard requires', () => {
+    // The fixed fields of the human approval edge.
+    const args = save.buildSettleArgs('app-1', 'approved', { a: 1 }, MICRO);
+    // Row, target and the human agent the guard checks.
+    assert.deepEqual({ ...args, p_expected_updated_at: undefined }, { p_application_id: 'app-1', p_to_status: 'approved', p_agent: 'human', p_detail: { a: 1 }, p_expected_updated_at: undefined });
+  });
+
+  it('a reject sends no stamp: dropping a row that changed is still a legitimate decision', () => {
+    // Built for a rejection.
+    const args = save.buildSettleArgs('app-1', 'dropped_filter', {}, MICRO);
+    // Absent, so the RPC's DEFAULT NULL skips the stamp check.
+    assert.equal('p_expected_updated_at' in args, false);
+  });
+});
+
+describe('confirmSettle carries the stored row when nothing landed', () => {
+  it('not_landed includes what is stored, so a PT409 can redraw the newer row', async () => {
+    // Still awaiting, with a newer stamp: someone edited it.
+    const r = await settled({ data: { tailored_profile: NEXT, updated_at: NEW_STAMP, status: 'awaiting_approval' }, error: null });
+    // The page adopts this instead of approving the old diff.
+    assert.deepEqual(r, { kind: 'not_landed', stored: { resume: NEXT, updatedAt: NEW_STAMP, status: 'awaiting_approval' } });
+  });
+});

@@ -137,8 +137,12 @@ describe('approval queue: Bucket A rows open', () => {
     assert.match(bucketA, /approveReviewed\(diff\.applicationId, decisions, 'bucket_a_review'\)/);
     // And that helper ends in settle(..., 'approved'), i.e. advance_application_status as 'human'.
     assert.match(page, /function approveReviewed[\s\S]*?void settle\(\[applicationId\], 'approved'/);
-    // The RPC call itself still names the human agent.
-    assert.match(page, /p_agent: 'human'/);
+    /* The RPC still names the human agent. Since item 4 (2026-10-08) the arguments are built by
+       buildSettleArgs in saveTailoredEdit.ts (unit-tested there, p_agent included), so this holds
+       both halves: the page sends the builder's output, and the builder names 'human'. */
+    assert.match(page, /rpc\(\s*'advance_application_status',[\s\S]*?buildSettleArgs\(/);
+    // The builder's own source names the human agent.
+    assert.match(source('features/approval/saveTailoredEdit.ts'), /p_agent: 'human'/);
   });
 
   it('a Bucket A row can preview its resume with the pinned master version', () => {
