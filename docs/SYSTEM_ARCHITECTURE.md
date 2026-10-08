@@ -258,8 +258,6 @@ every push to `main`.
 | No live declared-vs-graph diff test | `grep -rln application_status_transitions --include=*.test.ts .` |
 | `email_events.thread_id` never written | `grep -n thread_id supabase/functions/email-tracker-intake/index.ts` |
 | `experience_ceiling` / `degree_mismatch` cannot fire (JD fields never populated); skips are recorded in `agent_runs.error_detail` | `select count(*) filter (where min_experience_years is not null) from jobs` |
-| Screener's `already_applied` checks a history that includes the row itself (masked today by the earlier tech gate) | `_shared/screen/supabase-queries.ts` `applicationHistory()`; `select drop_reason, count(*) from applications where status='dropped_filter' group by 1` |
-| `bootstrap_user_defaults()` has no caller; a new signup gets no defaults | `grep -rn "bootstrap_user_defaults" apps worker supabase/functions` |
 | Every transition writes two `application_events` rows (RPC + `log_status_change` trigger) | `select application_id, count(*) from application_events group by 1 order by 2 desc limit 5` |
 | Nothing alerts on a failed Vercel deploy | `grep -in vercel .github/workflows/*.yml` |
 | Where rows sit | `select status, count(*) from applications group by 1 order by 1` |

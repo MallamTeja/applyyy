@@ -22,8 +22,22 @@ const NOW = new Date("2026-09-17T12:00:00.000Z");
 function client(responses: Record<string, { data: unknown[] | null; error: { message: string } | null }>) {
   return {
     from(table: string) {
+      // This table's canned response, or a legitimately empty one.
+      const response = responses[table] ?? { data: [], error: null };
       return {
-        select: () => Promise.resolve(responses[table] ?? { data: [], error: null }),
+        // Awaitable directly (unfiltered tables), and offering `.in()` like the
+        // supabase-js builder so the status-filtered history read can run.
+        select: () =>
+          Object.assign(Promise.resolve(response), {
+            // Applies the predicate as Postgres would; rows without the column drop out,
+            // so canned history rows must carry a committed `status`.
+            in: (column: string, values: readonly string[]) =>
+              Promise.resolve(
+                response.data === null
+                  ? response
+                  : { ...response, data: response.data.filter((row) => values.includes((row as Record<string, string>)[column]!)) },
+              ),
+          }),
       };
     },
   };
@@ -84,14 +98,24 @@ test("nested job rows are flattened into fingerprint and company slug", async ()
   const queries = supabaseScreenQueries(
     client({
       applications: {
-        data: [{ created_at: "2026-09-16T00:00:00.000Z", jobs: { fingerprint: "fp-1", company_slug: "zomato" } }],
+        // `applied`, so the row survives the committed-status filter and the test stays
+        // about flattening. `applied_at` set, so the commit stamp is flattened too.
+        data: [
+          {
+            status: "applied",
+            approved_at: "2026-09-15T00:00:00.000Z",
+            applied_at: "2026-09-16T00:00:00.000Z",
+            jobs: { fingerprint: "fp-1", company_slug: "zomato" },
+          },
+        ],
         error: null,
       },
     }),
     NOW,
   );
   assert.deepEqual((await queries.applicationHistory()).rows, [
-    { fingerprint: "fp-1", company_slug: "zomato", created_at: "2026-09-16T00:00:00.000Z" },
+    // applied_at wins over approved_at: submission is the later, precise commit event.
+    { fingerprint: "fp-1", company_slug: "zomato", committed_at: "2026-09-16T00:00:00.000Z" },
   ]);
 });
 
@@ -102,7 +126,8 @@ test("nested job rows are flattened into fingerprint and company slug", async ()
 test("an application with no joined job is skipped rather than emitted undefined", async () => {
   const queries = supabaseScreenQueries(
     client({
-      applications: { data: [{ created_at: "2026-09-16T00:00:00.000Z", jobs: null }], error: null },
+      // `applied`, so the null-job skip — not the status filter — is what removes it.
+      applications: { data: [{ status: "applied", created_at: "2026-09-16T00:00:00.000Z", jobs: null }], error: null },
     }),
     NOW,
   );

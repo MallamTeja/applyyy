@@ -55,7 +55,6 @@ seeded; until then they `raise warning` and allow the call.
 - `experience_ceiling` and `degree_mismatch` can never fire: nothing populates
   `jobs.min_experience_years` / `requires_advanced_degree`. Their skips are recorded in
   `agent_runs.error_detail` (`_shared/screen/run-summary.ts`) and shown on the Health page.
-- Nothing calls `bootstrap_user_defaults()`, so a new signup gets no rules.
 - Every status transition writes two `application_events` rows: one from the RPC and one
   from the `log_status_change` trigger.
 

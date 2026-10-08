@@ -44,8 +44,12 @@ export interface ApplicationHistoryRow {
   readonly fingerprint: string;
   // Feeds the per-company weekly cap.
   readonly company_slug: string;
-  // Decides whether this one falls inside the trailing week.
-  readonly created_at: string;
+  // WHEN TEJA COMMITTED: `applied_at ?? approved_at`, coalesced by the adapter that knows
+  // the columns. Decides whether this one falls inside the trailing week. RENAMED from
+  // `created_at` (2026-10-08): that column is DISCOVERY time, and windowing on it let a
+  // job found last month and approved today escape this week's cap. Null when neither
+  // stamp exists, which the loader counts as this week (fail closed).
+  readonly committed_at: string | null;
 }
 
 // The four reads the Screener needs.
@@ -65,7 +69,8 @@ export interface ScreenQueries {
   filterRules(): Promise<ScreenQueryResult<FilterRuleRow>>;
   // Slugs currently blocked.
   blockedCompanies(): Promise<ScreenQueryResult<{ readonly company_slug: string }>>;
-  // Everything already applied to, with enough detail to serve both dependent rules.
+  // Every application Teja has COMMITTED to (a committed status; a `failed` row only if
+  // it was ever approved), with enough detail to serve both dependent rules.
   applicationHistory(): Promise<ScreenQueryResult<ApplicationHistoryRow>>;
   // Stage 0's config. Teja's decision of 2026-09-17 put the tech definition in these
   // existing columns rather than in a new FilterRuleType, so the gate reads them
@@ -103,6 +108,22 @@ export type LoadResult =
 // Seven days, named so the window arithmetic reads as intent rather than as a magic
 // number. §18.5's cap is explicitly per WEEK.
 const TRAILING_WINDOW_MS = 7 * 86_400_000;
+
+// The shape PostgREST serialises a timestamptz in: date, `T`, time, optional fraction,
+// then `Z` or a ±hh:mm offset. Checked BEFORE `Date.parse` because that parser is
+// lenient: `Date.parse("-5")` is year −5, which would read as "long ago" and quietly
+// drop a row out of the cap's window. No strict ISO helper existed in `_shared`.
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/;
+
+// Epoch ms for a well-formed timestamp, or null for anything else.
+function strictTimestampMs(value: string | null): number | null {
+  // Not a string, or not the expected shape: we don't know when it was.
+  if (typeof value !== "string" || !ISO_TIMESTAMP.test(value)) return null;
+  // The right shape can still be an impossible date (month 13); NaN catches that.
+  const ms = Date.parse(value);
+  // Only a finite instant is an answer.
+  return Number.isFinite(ms) ? ms : null;
+}
 
 // Fetch everything the cascade needs that is not on the job row.
 //
@@ -154,15 +175,16 @@ export async function loadScreenContext(queries: ScreenQueries, now: Date): Prom
   for (const row of historyResult.rows) {
     // Unconditional: applying is permanent regardless of when it happened.
     appliedFingerprints.add(row.fingerprint);
-    // The stored timestamp.
-    const createdAt = Date.parse(row.created_at);
-    // AN UNPARSEABLE DATE MUST NOT SILENTLY COUNT AS THIS WEEK. `Date.parse` is lenient
-    // enough to accept things nobody intended, and a NaN comparison is always false —
-    // which would exclude it anyway, but by accident rather than on purpose. Checked
-    // explicitly so the intent is readable and cannot be "fixed" into the wrong answer.
-    if (!Number.isFinite(createdAt)) continue;
+    // The commit instant, or null when it is missing or not a real timestamp.
+    const committedAt = strictTimestampMs(row.committed_at);
+    // A MISSING OR MALFORMED COMMIT TIME COUNTS AS THIS WEEK — fail closed. The two
+    // errors are not symmetric: an unstamped row never ages out, so it over-counts that
+    // company EVERY week (reachable only via a legacy or hand-edited row: the guard
+    // stamps approved_at on the only road into a committed status); under-counting lets
+    // the cap be blown past. So only a provably old
+    // commitment leaves the window.
     // Outside the window: it still counts as applied, just not against this week.
-    if (createdAt < windowStart) continue;
+    if (committedAt !== null && committedAt < windowStart) continue;
     // Inside the window: increment this company's tally.
     applicationsThisWeekByCompany.set(row.company_slug, (applicationsThisWeekByCompany.get(row.company_slug) ?? 0) + 1);
   }

@@ -72,8 +72,10 @@ test("application history yields both applied fingerprints and weekly counts", a
         Promise.resolve({
           rows: [
             // Inside the trailing week, so it counts toward the cap.
-            { fingerprint: "fp-old", company_slug: "zomato", created_at: "2026-09-15T12:00:00.000Z" },
-            { fingerprint: "fp-older", company_slug: "zomato", created_at: "2026-09-16T12:00:00.000Z" },
+            // committed_at = applied_at ?? approved_at (renamed from created_at, which is
+            // discovery time). A null one now COUNTS: see application-history-status.test.ts.
+            { fingerprint: "fp-old", company_slug: "zomato", committed_at: "2026-09-15T12:00:00.000Z" },
+            { fingerprint: "fp-older", company_slug: "zomato", committed_at: "2026-09-16T12:00:00.000Z" },
           ],
           error: null,
         }),
@@ -91,7 +93,7 @@ test("an application older than a week counts as applied but not toward the week
     queries({
       applicationHistory: () =>
         Promise.resolve({
-          rows: [{ fingerprint: "fp-ancient", company_slug: "zomato", created_at: "2026-08-01T12:00:00.000Z" }],
+          rows: [{ fingerprint: "fp-ancient", company_slug: "zomato", committed_at: "2026-08-01T12:00:00.000Z" }],
           error: null,
         }),
     }),
