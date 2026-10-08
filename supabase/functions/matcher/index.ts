@@ -67,6 +67,8 @@ import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 import { decideScoreThreshold } from "../_shared/match/score-threshold.ts";
 // Per-invocation deadline: plans each Gemini call from the time left and stops between rows.
 import { createDeadline, deadlineNote, runBatchWithDeadline, shortenedBudgetNote, type CallOptions } from "../_shared/agent/deadline.ts";
+// The status-guarded score write; extracted so its guard is unit-tested (write-score.test.ts).
+import { writeMatchScore } from "./write-score.ts";
 
 // Default batch limit for one invocation to preserve key pool quota.
 // Controls how many application rows are processed per function call.
@@ -340,6 +342,9 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // Rows below the threshold moved to dropped_filter. Kept apart from scoredCount so
   // rows_out still means "rows handed to the Tailor".
   let droppedCount = 0;
+  // Rows a faster overlapping run moved off passed_filters before our score write landed.
+  // Neither scored nor failed by THIS run, so they get their own counter.
+  let skippedStaleCount = 0;
   // Initialize array holding individual application row processing failure records.
   // Captures per-row errors without halting whole batch execution.
   const failures: Array<{ applicationId: string; error: string }> = [];
@@ -410,27 +415,31 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
 
         // STEP 1: Persist match_score and match_reasoning payload onto applications table row FIRST.
         // Enforces payload-before-status-transition rule to avoid orphaned statuses.
-        const { error: patchError } = await db
-          // Target applications table for payload update.
-          .from("applications")
-          // Update numeric match_score and text match_reasoning columns.
-          .update({
-            match_score: matchScore.score,
-            match_reasoning: matchScore.reasoning,
-            // The drop reason rides in the SAME write as the score, as persistScreenVerdict
-            // does it: a dropped row always says why. CLEARED (null, not omitted) on advance:
-            // if an earlier run wrote a drop and its RPC then failed, a retry that now scores
-            // >= the floor would otherwise leave that stale reason on a `scored` row.
-            drop_reason: threshold.kind === "drop" ? threshold.reason : null,
-          })
-          // Match specific application row identifier.
-          .eq("id", row.id);
+        // Guarded on status = passed_filters inside writeMatchScore, so a losing duplicate run
+        // cannot overwrite a row a faster run already scored (see write-score.ts).
+        const written = await writeMatchScore(db, row.id, {
+          match_score: matchScore.score,
+          match_reasoning: matchScore.reasoning,
+          // The drop reason rides in the SAME write as the score, as persistScreenVerdict
+          // does it: a dropped row always says why. CLEARED (null, not omitted) on advance:
+          // if an earlier run wrote a drop and its RPC then failed, a retry that now scores
+          // >= the floor would otherwise leave that stale reason on a `scored` row.
+          drop_reason: threshold.kind === "drop" ? threshold.reason : null,
+        });
 
         // Check if application payload database update encountered error.
-        if (patchError) {
+        if (written.kind === "error") {
           // Push error details to failures array and skip status transition.
-          failures.push({ applicationId: row.id, error: patchError.message });
+          failures.push({ applicationId: row.id, error: written.message });
           // Continue loop to next application row without advancing status.
+          return;
+        }
+        // Another run moved this row first: nothing was written, so there is nothing to
+        // advance — calling the RPC would only fail on an illegal edge and read as an error.
+        if (written.kind === "skipped_stale") {
+          // Counted apart from failures: losing a race is expected, not broken.
+          skippedStaleCount += 1;
+          // No status move for a row that is no longer ours.
           return;
         }
 
@@ -499,7 +508,10 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // Joined so neither hides the other. Null only when there were no failures AND no stop, so a
   // stale reason never sits beside a clean run. A stop alone gives status `succeeded`,
   // error_count 0 and a `deadline:` note: that prefix is how the health page tells it apart.
-  const errorDetail = [failureDetail, stopNote].filter((x) => x !== null).join(" | ") || null;
+  // agent_runs has no skip column, so a lost race is a note beside the others (like the
+  // deadline note): visible on the health page, never counted in error_count.
+  const staleNote = skippedStaleCount > 0 ? `skipped_stale: ${skippedStaleCount} row(s) already moved by another run` : null;
+  const errorDetail = [failureDetail, stopNote, staleNote].filter((x) => x !== null).join(" | ") || null;
 
   // Check if valid agent run identifier exists for this execution.
   if (runId) {
@@ -544,6 +556,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     scored: scoredCount,
     // Count dropped below the threshold, so the caller sees the gate working.
     dropped: droppedCount,
+    // Rows another run took first; not failures, and not scored by this run.
+    skipped_stale: skippedStaleCount,
     // Total count of Gemini API calls executed.
     gemini_calls: geminiCallsCount,
     // Array of individual application row failure objects.
