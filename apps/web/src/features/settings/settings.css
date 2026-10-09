@@ -2361,3 +2361,120 @@
   /* Danger token so the hover edge themes with the text. */
   border-color: var(--fabricated);
 }
+
+/* ---- Eligibility answers (EligibilityAnswers.tsx) ----
+ * Semantic tokens only: they theme via light-dark(), and [data-theme='dark']
+ * overrides are dead here (docs/ui/theming-convention.md). */
+
+/* Stacked fields, because each one carries a status, a hint and its own Save. */
+.eligibility__list {
+  /* Column flow keeps every field full width on phones too. */
+  display: flex;
+  /* One direction: fields read top to bottom like a form. */
+  flex-direction: column;
+  /* Separation without per-field margins. */
+  gap: var(--gap-3);
+}
+
+/* One question: a bordered card so its Save visibly belongs to it. */
+.eligibility__field {
+  /* Same hairline as the settings table, so the section reads as part of the page. */
+  border: 1px solid var(--rule);
+  /* Matches the control radius used across answer-bank inputs. */
+  border-radius: var(--radius-control);
+  /* Breathing room around the input. */
+  padding: var(--gap-3);
+  /* Same panel ground as the bool buttons. */
+  background: var(--panel);
+}
+
+/* Label left, status badge right; wraps on narrow screens instead of overflowing. */
+.eligibility__head {
+  /* Row layout for label + badge. */
+  display: flex;
+  /* Wrap so a long GitLab label pushes the badge down, not off-screen. */
+  flex-wrap: wrap;
+  /* Badge sits at the far edge. */
+  justify-content: space-between;
+  /* Vertically centred against a multi-line label. */
+  align-items: center;
+  /* Gap only matters once wrapped. */
+  gap: var(--gap-2);
+}
+
+/* The question text, as prominent as the table's prompt column. */
+.eligibility__label {
+  /* Readable body size. */
+  font-size: var(--size-sm);
+  /* Weight marks it as the prompt, not the hint. */
+  font-weight: 600;
+  /* Primary ink. */
+  color: var(--text-primary);
+}
+
+/* Status badge base; colour comes from the state modifier below. */
+.eligibility__status {
+  /* Small, like the needs-human badge. */
+  font-size: var(--size-xs);
+  /* Badge weight. */
+  font-weight: 600;
+  /* Pill padding. */
+  padding: 2px 8px;
+  /* Pill shape. */
+  border-radius: 999px;
+  /* Border colour follows currentColor, so each modifier sets one property. */
+  border: 1px solid currentColor;
+  /* Never wraps mid-label. */
+  white-space: nowrap;
+}
+
+/* Saved by Teja: the success token, the only state the worker acts on. */
+.eligibility__status--attested {
+  /* Success ink themes via light-dark(). */
+  color: var(--traced);
+}
+
+/* A row exists but a machine wrote it: warning, since the worker will not use it. */
+.eligibility__status--unattested {
+  /* Warning token, readable on both grounds. */
+  color: var(--signal);
+}
+
+/* Nothing saved, and the derived (read-only) note: neutral, not alarming. */
+.eligibility__status--unsaved,
+.eligibility__status--derived {
+  /* Muted ink: informational only. */
+  color: var(--text-muted);
+}
+
+/* One-line explanations under a field. */
+.eligibility__hint {
+  /* Small print. */
+  font-size: var(--size-xs);
+  /* Secondary, so it does not compete with the input. */
+  color: var(--text-muted);
+  /* Tight to the input above it. */
+  margin: 4px 0 0;
+}
+
+/* The read-only company list. */
+.eligibility__companies {
+  /* Small, like the hints around it. */
+  font-size: var(--size-xs);
+  /* Primary ink: these are facts, not hints. */
+  color: var(--text-primary);
+  /* Room above, default list indent kept for bullets. */
+  margin: 4px 0 0;
+}
+
+/* EEO sub-heading inside the Eligibility section: smaller than the section title. */
+.eligibility__subtitle {
+  /* One step below the group title. */
+  font-size: var(--size-sm);
+  /* Heading weight. */
+  font-weight: 600;
+  /* Primary ink, theming via tokens. */
+  color: var(--text-primary);
+  /* Space above separates it from the eligibility cards. */
+  margin: var(--gap-3) 0 0;
+}

@@ -20,25 +20,18 @@ import { normaliseKey, resolveProfileAnswer } from './profile-answers.ts';
 // Re-exported so existing and future callers can reach the normaliser from the planner.
 export { normaliseKey };
 
-// Legal / self-disclosure / consent question fragments, matched as SUBSTRINGS of the
-// normalised label. Substring is deliberate: over-matching sends more questions to the
-// human, which is the safe direction. Checked FIRST, before the bank or the profile, so even
-// a stored answer cannot auto-fill these. It must not catch factual questions such as
-// "current country of residence" or "primary programming language" (hence no bare "age").
-// Judgement items (relocation, pronouns, salary expectation) are NOT legal disclosures and
-// stay answerable from the bank.
-const HUMAN_ONLY_FRAGMENTS: readonly string[] = [
-  // Work authorisation, sponsorship and immigration status.
-  'sponsor', 'visa', 'work_authori', 'authorized_to_work', 'authorised_to_work',
-  'right_to_work', 'eligible_to_work', 'allowed_to_work', 'work_permit', 'immigration',
-  'citizen', 'nationality', 'located_in',
-  // Contractual restrictions and prior-employer relationships.
-  'employment_agreement', 'post_employment', 'non_compete', 'restrictive_covenant',
-  'previously_worked', 'worked_at', 'worked_for', 'consulted_for', 'former_employee',
-  // Protected-class self-identification (EEO); 'disab' also catches "disabled".
-  // 'caste' because Indian forms ask it in place of (or beside) race.
-  'gender', 'race', 'caste', 'ethnicity', 'hispanic', 'latino', 'veteran', 'disab', 'sexual_orientation',
-  'transgender', 'lgbt', 'religio', 'marital', 'pregnan', 'date_of_birth', 'your_age', 'what_is_your_age',
+// Questions only Teja may ever answer himself, matched against the normalised label.
+// Checked FIRST, before eligibility, the bank or the profile, so no stored answer, attested
+// or not, can reach them. Over-matching sends more questions to the human, which is the safe
+// direction. It must not catch factual questions such as "current country of residence" or
+// "primary programming language" (hence no bare "age"). Judgement items (relocation,
+// pronouns, salary expectation) are NOT disclosures and stay answerable from the bank.
+// SUBSTRING fragments: long enough that a hit inside another word is still a disclosure.
+const NEVER_FRAGMENTS: readonly string[] = [
+  // (Protected-class self-identification moved to EEO_FRAGMENTS on 2026-10-09: answerable
+  // from Teja's attested answers only. Everything still listed here stays never-automatic.)
+  // Age and date of birth in every phrasing seen ("Birth date", "Date of birth", "Your age").
+  'date_of_birth', 'birth', 'your_age', 'what_is_your_age',
   // Criminal history, clearance and consent to checks.
   'criminal', 'convicted', 'felony', 'conviction', 'security_clearance',
   'background_check', 'drug_test',
@@ -48,6 +41,115 @@ const HUMAN_ONLY_FRAGMENTS: readonly string[] = [
   // or swearing to something is a decision only Teja can make, so a bank row must not make it.
   'consent', 'certify', 'attest',
 ];
+// WHOLE-TOKEN fragments: too short for substring ("dob" is inside "adobe", "sex" inside
+// "essex"), so they refuse only as a separate word.
+const NEVER_TOKENS: readonly string[] = ['dob', 'sex'];
+
+// Voluntary self-identification (EEO): gender, race, veteran status and their relatives.
+// Until 2026-10-09 these were NEVER answered. Teja then ruled (14:19, via the orchestrator)
+// that they may be answered, but ONLY from his own browser-attested answers, never guessed
+// and never defaulted to "Decline". A label in this territory is answered only through
+// one EEO_TEMPLATES match; anything else (another phrasing, a related question such as
+// "gender identity" or "marital status") goes to Teja. These fields are optional on every
+// form seen, and an optional refusal is silent, so an unanswered one is LEFT BLANK.
+// SUBSTRING fragments: over-matching ("embrace" holds "race") only refuses, the safe side.
+const EEO_FRAGMENTS: readonly string[] = [
+  'gender', 'race', 'caste', 'ethnic', 'hispanic', 'latino', 'veteran', 'disab', 'sexual_orientation',
+  'transgender', 'lgbt', 'religio', 'marital', 'pregnan',
+];
+
+// The EEO questions Teja may answer in the console, as they are labelled on the Greenhouse
+// form (GitLab 8775507002, labels from the fixture, options from the public job API). Each
+// whole normalised label maps to the ONE answer_bank key the console writes for it; the
+// stored text is typed verbatim, so it must be one of the form's options exactly.
+const EEO_TEMPLATES: ReadonlyArray<{ readonly key: string; readonly pattern: RegExp }> = [
+  // "Gender": Male / Female / Decline To Self Identify.
+  { key: 'eeo_gender', pattern: /^gender$/ },
+  // "Are you Hispanic/Latino?": asked before race on Greenhouse forms.
+  { key: 'eeo_hispanic_latino', pattern: /^are_you_hispanic_latino$/ },
+  // "Race": shown when Hispanic/Latino is "No"; the other two are its known phrasings.
+  { key: 'eeo_race', pattern: /^(?:race|race_ethnicity|please_identify_your_race)$/ },
+  // "Veteran Status": the three VEVRAA choices.
+  { key: 'eeo_veteran_status', pattern: /^veteran_status$/ },
+];
+
+// Every label that touches eligibility at all. A label with any of these is handled ONLY by
+// the anchored templates below: it never falls through to the plain bank lookup or the
+// profile, so an unattested row keyed to the label can't fill it. A label in this territory
+// that matches no template (negations, other subjects, work authorisation, citizenship,
+// visa type...) goes to Teja.
+const ELIGIBILITY_FRAGMENTS: readonly string[] = [
+  // Location and sponsorship.
+  'located_in', 'sponsor', 'visa', 'h_1b', 'immigration', 'citizen', 'nationality',
+  // Work authorisation in its common phrasings; none of these has a stored-answer type yet.
+  'work_authori', 'authorized_to_work', 'authorised_to_work', 'right_to_work', 'eligible_to_work',
+  'allowed_to_work', 'permitted_to_work', 'work_permit',
+  // Contractual restrictions.
+  'employment_agreement', 'post_employment', 'non_compete', 'non_solicit', 'restrictive_covenant',
+  // Prior relationships with the employer.
+  'previously_worked', 'worked_at', 'worked_for', 'consulted_for', 'former_employee', 'employed_by',
+];
+
+// The eligibility questions Teja ruled answerable on 2026-10-09.
+type EligibilityCategory = 'located_in' | 'sponsorship' | 'employment_restrictions' | 'previously_worked';
+
+// The restriction nouns one restrictions question may name, singular or plural.
+const RESTRICTION_NOUN =
+  '(?:employment_agreements?|post_employment_restrictions?|non_compete(?:_agreements?)?|restrictive_covenants?)';
+
+// ANCHORED TEMPLATES, matched against the WHOLE normalised label (^...$). This is the
+// guarantee that the wrong answer can't be expressed: a label is answered only when it IS
+// one of these shapes, so polarity flips ("Are you NOT located in India?", "...WITHOUT
+// sponsorship?"), other subjects ("Is your company located in...", "Has a family member
+// worked at...") and compound questions ("...located in India and authorized to work in
+// the US?") match nothing and go to Teja. A capture group, where present, is compared for
+// EQUALITY with Teja's stored value; it is never searched for a substring.
+// Add a phrasing here only after seeing it on a real form, with a test.
+const ELIGIBILITY_TEMPLATES: ReadonlyArray<{ readonly category: EligibilityCategory; readonly pattern: RegExp }> = [
+  // "Are you (currently) located in India?" → the country, compared to located_in_country.
+  { category: 'located_in', pattern: /^are_you_(?:currently_)?located_in_([a-z0-9]+(?:_[a-z0-9]+)*)$/ },
+  // "Will you now or in the future require sponsorship for a visa to remain in your current
+  // location?" and its shorter forms. Answer "Yes" iff visa_sponsorship_required is true.
+  {
+    category: 'sponsorship',
+    pattern:
+      // The "...to remain in your current location" suffix is REQUIRED. Teja's "No" (he's in
+      // India, needs no sponsorship there) is true only for that scope; an unscoped "Do you
+      // need visa sponsorship?" on a US role is likely a "Yes", so it goes to him.
+      /^(?:will|do|would)_you_(?:now_or_in_the_future_)?(?:require|need)_(?:visa_)?sponsorship(?:_for_a_visa)?_to_remain_in_your_current_location(?:_now_or_in_the_future)?$/,
+  },
+  // "Are you subject to any employment agreements and/or post-employment restrictions with
+  // your current employer or a past employer?" "Yes" means subject, so "None" stored → "No".
+  {
+    category: 'employment_restrictions',
+    pattern: new RegExp(
+      `^are_you_subject_to_any_${RESTRICTION_NOUN}(?:_(?:and_or|or|and)_${RESTRICTION_NOUN})?` +
+        '(?:_with_your_current_employer_or_a_past_employer|_with_your_current_or_former_employers?|_with_any_current_or_former_employer)?$',
+    ),
+  },
+  // "Have you (ever) (previously) worked at / for / been employed by (or consulted for)
+  // <company>?" or "Are you a former employee of <company>?" → the company, compared to the
+  // job's employer.
+  {
+    category: 'previously_worked',
+    pattern:
+      /^(?:have_you_(?:ever_)?(?:previously_)?(?:worked_at|worked_for|been_employed_by)(?:_or_consulted_for)?|are_you_a_former_employee_of)_([a-z0-9]+(?:_[a-z0-9]+)*)$/,
+  },
+];
+
+// The answer_bank keys the console's "Eligibility answers" section writes. Shared by name
+// with apps/web (answerBankStore.ts), so renaming one side silently breaks the other.
+const LOCATED_IN_KEY = 'located_in_country';
+const SPONSORSHIP_KEY = 'visa_sponsorship_required';
+const RESTRICTIONS_KEY = 'employment_restrictions';
+
+// Trailing legal-form tokens dropped before comparing company names, so "GitLab Inc." and
+// "GitLab" are the same employer. Deliberately short: anything more aggressive (dropping
+// "technologies", "labs") would merge distinct companies, and a wrong "Yes" is a false
+// statement on an application.
+const COMPANY_SUFFIXES: ReadonlySet<string> = new Set([
+  'inc', 'llc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'pvt', 'private', 'gmbh', 'plc',
+]);
 
 /** One field the planner is confident it may fill, and the value to type. */
 export interface PlannedFill {
@@ -76,8 +178,10 @@ export interface FillBlocker {
     | 'no_answer'
     // A bank row exists but is marked needs_human.
     | 'awaiting_human_answer'
-    // A legal/self-disclosure question (visa, authorisation, EEO...). NEVER auto-filled, even
-    // with a bank row: only Teja may assert these facts on a real application.
+    // A question only Teja may answer here: a consent / criminal / pay-history / age
+    // question (never auto-filled, even with a bank row), or an EEO or eligibility question
+    // whose answer he hasn't saved and attested in the console (or whose wording matches no
+    // known template).
     | 'human_only'
     // A bank row exists but its value is not a non-empty string or finite number. Typing it
     // would turn missing data into an answer (e.g. the literal text "null").
@@ -109,11 +213,150 @@ function answerText(value: unknown): string | null {
   return trimmed === '' ? null : trimmed;
 }
 
+/** The text with accents removed ("é" → "e"), so normaliseKey keeps the letter. */
+function foldAccents(text: string): string {
+  // NFKD splits "é" into "e" plus a combining mark, and \p{M} drops the mark. One helper for
+  // labels, companies and countries, so all three meet in the same shape ("Consént" →
+  // "consent", "Nestlé" → "nestle") instead of each normalising accents differently.
+  return text.normalize('NFKD').replace(/\p{M}/gu, '');
+}
+
+/** A company (or country) name as underscore-joined tokens, legal suffixes stripped; '' if blank. */
+function normaliseCompany(name: string): string {
+  // Same fold and normaliser as labels, so "Nestlé" in the experience meets "Nestle" in the
+  // job row instead of normalising to "nestl" and producing a false "No".
+  const tokens = normaliseKey(foldAccents(name)).split('_').filter((token) => token !== '');
+  // Strip suffixes from the END only: "Co-op Ltd" keeps "co_op".
+  while (tokens.length > 1 && COMPANY_SUFFIXES.has(tokens[tokens.length - 1]!)) tokens.pop();
+  // Joined back in the label normaliser's shape.
+  return tokens.join('_');
+}
+
+/** True when `needle` appears in `haystack` as whole underscore-separated tokens. */
+function containsTokens(haystack: string, needle: string): boolean {
+  // Padding with '_' makes "git" fail to match inside "gitlab": whole tokens only.
+  return needle !== '' && `_${haystack}_`.includes(`_${needle}_`);
+}
+
+/** The attested bank row for a canonical key, or the reason it can't be used. */
+function attestedRow(
+  byKey: ReadonlyMap<string, AnswerBankRow>,
+  collisions: ReadonlyMap<string, readonly [string, string]>,
+  key: string,
+): AnswerBankRow | FillBlocker['reason'] {
+  // Two rows claim the key: which one Teja meant is unknowable.
+  if (collisions.has(key)) return 'ambiguous_answer_key';
+  // The row as the console saved it, if any.
+  const row = byKey.get(key);
+  // Never answered: only Teja can, so it goes to him.
+  if (row === undefined) return 'human_only';
+  // A placeholder row is not an answer.
+  if (row.needs_human) return 'awaiting_human_answer';
+  // STRICT true: the column comes from select('*') and is not in the shared TS type yet, so
+  // anything but a real boolean true (missing, null, "true") is "not attested". A row a
+  // machine wrote is stamped false by the trigger (20261009160000) and refused here.
+  if ((row as { readonly attested_by_human?: unknown }).attested_by_human !== true) return 'human_only';
+  // Attested by Teja and not a placeholder: usable.
+  return row;
+}
+
+/**
+ * The "Yes"/"No" for one eligibility question already matched to an anchored template, or
+ * the reason to refuse. Never a third value: each branch can only copy Teja's stored answer
+ * or derive from his own master profile.
+ */
+function answerEligibility(
+  category: EligibilityCategory,
+  // The template's capture (country or company), already in normalised-key form; '' if none.
+  captured: string,
+  byKey: ReadonlyMap<string, AnswerBankRow>,
+  collisions: ReadonlyMap<string, readonly [string, string]>,
+  profile: MasterProfile | null,
+  employerName: string | null,
+): { readonly value: 'Yes' | 'No'; readonly source: PlannedFill['source'] } | FillBlocker['reason'] {
+  // Previously worked at <employer>: Teja's ruling (2026-10-09) is "use my resume experience
+  // section". This is NOT a refusal by design; do not "fix" it into one. Yes iff the employer
+  // is in his experience, No iff it is absent, and anything uncertain goes to him.
+  if (category === 'previously_worked') {
+    // Which employer this application is for comes from the caller (the job's company).
+    const employer = normaliseCompany(employerName ?? '');
+    // The question must name exactly that employer, compared for equality, not containment.
+    if (employer === '' || normaliseCompany(captured) !== employer) return 'human_only';
+    // No profile loaded: absence of evidence is not evidence of absence.
+    if (profile === null) return 'human_only';
+    // jsonb of unknown shape: a non-array experience is unreadable, not empty.
+    const experience: unknown = (profile as { readonly experience?: unknown }).experience;
+    if (!Array.isArray(experience)) return 'human_only';
+    // Every entry's normalised company. A malformed entry yields '' and is refused below:
+    // skipping it would let missing data become a "No" (CLAUDE.md §6).
+    const companies = experience.map((entry: unknown) =>
+      // Only a plain object with a string company counts as a readable entry.
+      entry !== null && typeof entry === 'object' && typeof (entry as { company?: unknown }).company === 'string'
+        ? normaliseCompany((entry as { company: string }).company)
+        : '',
+    );
+    // One unreadable entry and the history is incomplete: Teja decides.
+    if (companies.includes('')) return 'human_only';
+    // An exact employer match: he worked there.
+    if (companies.includes(employer)) return { value: 'Yes', source: 'profile' };
+    // A partial overlap ("Aczen" vs "Aczen Technologies") might be the same company or not.
+    // A wrong answer either way is a false statement, so Teja decides.
+    // Also a spacing variant ("Git Lab" vs "GitLab"): equal once the separators go, so it
+    // may well be the same company, and a "No" there would be false.
+    const squash = (value: string): string => value.split('_').join('');
+    if (
+      companies.some(
+        (company) =>
+          containsTokens(company, employer) || containsTokens(employer, company) || squash(company) === squash(employer),
+      )
+    ) {
+      return 'human_only';
+    }
+    // Not in his experience at all (including an empty experience list): per the ruling, No.
+    return { value: 'No', source: 'profile' };
+  }
+
+  // The other three come from one attested bank row each.
+  const key = category === 'located_in' ? LOCATED_IN_KEY : category === 'sponsorship' ? SPONSORSHIP_KEY : RESTRICTIONS_KEY;
+  const row = attestedRow(byKey, collisions, key);
+  // Not usable: pass the reason through.
+  if (typeof row === 'string') return row;
+
+  // Visa sponsorship: a STRICT boolean. "no" as text, null or a number is malformed, and
+  // reading it leniently would turn bad data into an answer (CLAUDE.md §6).
+  if (category === 'sponsorship') {
+    if (typeof row.answer_value !== 'boolean') return 'invalid_answer';
+    // true = needs sponsorship = "Yes"; false = "No".
+    return { value: row.answer_value ? 'Yes' : 'No', source: 'answer_bank' };
+  }
+
+  // The other two hold text.
+  const text = answerText(row.answer_value);
+  // Blank or non-text is not an answer.
+  if (text === null) return 'invalid_answer';
+
+  // Located in: "Yes" only when the asked country EQUALS the stored one. The system never
+  // says "No": another country, or a stored value that doesn't normalise, goes to Teja.
+  if (category === 'located_in') {
+    // Both sides in the label normaliser's shape; equality, so "IN" can't match "Germany".
+    const country = normaliseCompany(text);
+    return country !== '' && normaliseCompany(captured) === country ? { value: 'Yes', source: 'answer_bank' } : 'human_only';
+  }
+
+  // Employment restrictions: only an explicit "None"/"No" means "No". Any described
+  // restriction is a "Yes" that needs details, so it goes to Teja.
+  const lowered = text.toLowerCase();
+  return lowered === 'none' || lowered === 'no' ? { value: 'No', source: 'answer_bank' } : 'human_only';
+}
+
 export function planFill(
   fields: readonly FormField[],
   answers: readonly AnswerBankRow[],
   // Defaulted to null so every pre-profile caller keeps compiling and simply gets no profile fills.
   profile: MasterProfile | null = null,
+  // The company this application is for, from the job row. Used only to answer "previously
+  // worked at <company>"; null (every caller that doesn't pass it) makes that question refuse.
+  employerName: string | null = null,
 ): FillPlan {
   // Index the bank once by normalised key; a linear scan per field would be
   // quadratic on forms that already carry 20+ questions.
@@ -154,21 +397,97 @@ export function planFill(
 
     // Look the question up by its human label, which is the only stable identifier on
     // forms whose ids are opaque (question_36622854002).
-    const key = normaliseKey(formField.label);
+    // Accents are folded first (NFKD, then the combining marks dropped), so "Consént" still
+    // hits 'consent' instead of normalising to "cons_nt". A bank key with accents then fails
+    // to meet the label and refuses as no_answer: the safe direction.
+    const key = normaliseKey(foldAccents(formField.label));
 
-    // DENYLIST FIRST: legal and self-disclosure facts are only ever asserted by Teja himself,
-    // so no stored answer may reach them.
-    if (HUMAN_ONLY_FRAGMENTS.some((fragment) => key.includes(fragment))) {
+    // NEVER FIRST: EEO, criminal, pay-history and consent questions are only ever answered
+    // by Teja himself, so nothing below (attested or not) may reach them.
+    if (
+      NEVER_FRAGMENTS.some((fragment) => key.includes(fragment)) ||
+      // Whole tokens only for the short ones ("dob", "sex"): see NEVER_TOKENS.
+      NEVER_TOKENS.some((token) => containsTokens(key, token))
+    ) {
       refuse('human_only');
       continue;
     }
 
     // A checkbox has no safe text value, and the live filler throws on it late, after other
-    // fields were already typed. Refusing here keeps the failure early and visible.
+    // fields were already typed, which parks the whole application even for an optional
+    // field. So it is refused BEFORE the EEO and eligibility answers too (a "Gender"
+    // checkbox with an attested answer would otherwise get a fill that can only fail).
     if (formField.kind === 'checkbox') {
       refuse('human_only');
       continue;
     }
+
+    // EEO NEXT: answered only from Teja's attested eeo_* row via one whole-label template.
+    if (EEO_FRAGMENTS.some((fragment) => key.includes(fragment))) {
+      // The templates that match the WHOLE label.
+      const eeo = EEO_TEMPLATES.filter(({ pattern }) => pattern.test(key));
+      // None (another phrasing, a related question) or several: Teja answers; left blank
+      // on an optional field because refuse() is silent there.
+      if (eeo.length !== 1) {
+        refuse('human_only');
+        continue;
+      }
+      // The attested row for that question, or why there isn't a usable one. No row means
+      // he hasn't answered it, and the field stays blank: never a guess, never "Decline".
+      const row = attestedRow(byKey, collisions, eeo[0]!.key);
+      if (typeof row === 'string') {
+        refuse(row);
+        continue;
+      }
+      // Only non-empty text is an answer; the console stores one of the option strings.
+      const text = answerText(row.answer_value);
+      if (text === null) {
+        refuse('invalid_answer');
+        continue;
+      }
+      // Verbatim, and it must be one of the form's own options when they're known here
+      // (a react-select's options are checked strictly at fill time instead).
+      if (formField.options !== undefined && !formField.options.includes(text)) {
+        refuse('no_matching_option');
+        continue;
+      }
+      // Copied exactly as Teja saved it.
+      fills.push({ id: formField.id, value: text, kind: formField.kind, source: 'answer_bank' });
+      continue;
+    }
+
+    // ELIGIBILITY NEXT: a label that touches eligibility at all is answered ONLY through an
+    // anchored template, and never falls through to the plain bank or the profile, where an
+    // unattested row keyed to this label would otherwise fill it.
+    if (ELIGIBILITY_FRAGMENTS.some((fragment) => key.includes(fragment))) {
+      // Which templates match the WHOLE label; each match carries its capture (or '').
+      const matches = ELIGIBILITY_TEMPLATES.flatMap(({ category, pattern }) => {
+        // exec, not test: the capture is the country or company to compare.
+        const hit = pattern.exec(key);
+        return hit === null ? [] : [{ category, captured: hit[1] ?? '' }];
+      });
+      // No template (a negation, another subject, work authorisation...) or more than one:
+      // only Teja can answer it.
+      if (matches.length !== 1) {
+        refuse('human_only');
+        continue;
+      }
+      // The one template's Yes/No, or why it can't be given.
+      const answer = answerEligibility(matches[0]!.category, matches[0]!.captured, byKey, collisions, profile, employerName);
+      if (typeof answer === 'string') {
+        refuse(answer);
+        continue;
+      }
+      // Same exact-option rule as every other fill: a select must offer "Yes"/"No" verbatim.
+      if (formField.options !== undefined && !formField.options.includes(answer.value)) {
+        refuse('no_matching_option');
+        continue;
+      }
+      // Copied from Teja's own answer or his own profile; nothing composed.
+      fills.push({ id: formField.id, value: answer.value, kind: formField.kind, source: answer.source });
+      continue;
+    }
+
 
     // Decided below by exactly one source; `let` because the branches assign it.
     let value: string;

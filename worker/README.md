@@ -3,8 +3,10 @@
 The GitHub Actions half of `applyy`. Claims `approved` applications, fills real
 ATS forms, screenshots them, and — once Teja explicitly enables it — submits.
 
-**Status: 62 tests green, `tsc --noEmit` exit 0. Nothing has ever been
-submitted, and no code in this package is capable of submitting.**
+**Status: submission is implemented and OFF by default.** A run sends nothing
+unless `DRY_RUN` is exactly `"false"`; see §2. Check the current gates with
+`./node_modules/.bin/tsc --noEmit -p .` and `./node_modules/.bin/vitest run`
+rather than trusting a number written here.
 
 ---
 
@@ -29,27 +31,31 @@ Everything in this package is shaped by minimising that window:
 
 ---
 
-## 2. Why nothing can submit today
+## 2. When the worker submits, and when it cannot
 
-Three independent layers, and the third does not depend on the first two:
+Submission is implemented (2026-10-09, on Teja's ruling that the system submits
+by itself after his approval). Whether a given run sends anything is decided by
+three layers, and every one defaults to **not** sending:
 
 | Layer | Mechanism |
 |---|---|
-| Workflow | `apply.yml` resolves a scheduled run (no inputs) to `DRY_RUN: 'true'` |
+| Workflow | `apply.yml` resolves a scheduled run (no inputs) to `DRY_RUN: 'true'`. A manual `dry_run=false` dispatch must also name ONE application (`apply_only_id`), or the step exits before the worker starts |
 | Gate | `submission-mode.ts` returns `submits: false` for *everything* except the exact string `"false"` |
-| Capability | `playwright-page.ts`'s `submit()` throws `SubmissionNotEnabledError` — **the operation is not implemented** |
+| Scope | `APPLY_ONLY_ID` limits a run to one application; a set-but-blank value stops the run rather than widening it to the queue |
 
-The third matters most: three layers of a gate are only as good as the gate, but
-a capability that does not exist cannot be reached by any bug in any layer.
-Implementing submission is one function and it is Teja's call after the §18.6
-trust period.
+`page.submit()` has exactly one call site (`apply-one.ts`), after the dry-run
+exit. What it returns is a closed union (`SubmitResult`), and only a page that
+positively shows THIS job's confirmation (same origin, the form's own path +
+`/confirmation`, a "thank you for applying" heading) becomes `applied`.
+Anything unrecognised is `unconfirmed`: no status write, never retried, and the
+sweeper routes the row to `needs_verification` for Teja to check by hand. A row
+is parked as "blocked" after the click only when no request that could have
+carried the application left the page.
 
-`DRY_RUN` is also **structurally incapable of touching the status graph**.
-`approved → applying` is the only edge out of `approved`, so a dry run that
-advanced anything would consume the queue to prove it could have applied.
-Instead it releases the claim and leaves the row at `approved` — which is what
-makes the trust period work: after three days of screenshots, the *same rows*
-are still there when the flag flips.
+`DRY_RUN` is **structurally incapable of moving a row forward**. It releases
+the claim and leaves the row at `approved` (after recording the screenshot and
+resume paths), which is what makes the dry-run review work: the *same rows* are
+still there when the flag flips.
 
 ---
 
@@ -148,7 +154,7 @@ src/
   apply-one.ts          one application, start to finish
   claim-loop.ts         the batched run — DO NOT split into a job matrix
   supabase-gateway.ts   the domain port implemented over Supabase
-  playwright-page.ts    the browser port; submit() deliberately throws
+  playwright-page.ts    the browser port; submit() clicks once and reports what the page showed
   extract-fields.ts     accessibility-tree field extraction
   plan-fill.ts          constraint #4 — copy an answer or block, no third branch
   fixture-server.ts     localhost static server for saved forms
@@ -208,7 +214,12 @@ fixture is: it proves something different from a real capture.
 
 ## 6. Not done, stated as not done
 
-- **Real submission is unimplemented.** Gated on Teja after §18.6.
+- **No real application has been submitted yet.** The first one is a local,
+  watched run (`APPLY_ONLY_ID` + `HEADED=1`) after one local dry run, on Teja's
+  explicit go. Only then does the cron's `DRY_RUN` default change, as a separate step.
+- **Greenhouse's confirmation page is unverified.** If its route or heading differs
+  from what `playwright-page.ts` expects, a real success reads as `unconfirmed`
+  (the safe direction) and is checked against the confirmation email.
 - **`keepalive.yml` is disabled**, pending his explicit approval — it is the only
   workflow with `contents: write` and it force-pushes. Its presence is not
   consent.

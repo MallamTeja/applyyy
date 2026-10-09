@@ -75,6 +75,14 @@ export interface ClaimLoopInput {
   // How many rows to claim per round trip. Small batches keep the lease short
   // so a crash strands little; the loop simply claims again.
   readonly batchSize?: number;
+  // APPLY_ONLY_ID: when set, this run works on that ONE application and nothing
+  // else. Any other row the claim hands back is released untouched (still
+  // `approved`), and the run ends as soon as the target has been processed.
+  // Exists for the first real submissions, where "exactly this one employer" is
+  // the whole point and a newly approved row must not ride along. Already
+  // validated as a UUID by the caller; absent means the normal whole-queue run.
+  // `| undefined` because the CLI passes its parse result through as-is.
+  readonly onlyApplicationId?: string | undefined;
 }
 
 /** What the run did, for the log and for `agent_runs`. */
@@ -89,6 +97,33 @@ export interface RunSummary {
   // Always populated, because "we did 12 today" must be distinguishable from
   // "the queue only had 12" and from "the kill switch was off" (§14).
   readonly stoppedReason: string;
+}
+
+// A canonical UUID, case-insensitive: the only shape an application id has.
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * APPLY_ONLY_ID, validated by SHAPE before it can mean anything.
+ *
+ * ONLY an absent variable means "no filter". A variable that is SET must be a
+ * UUID, blank included, or the run STOPS. Blank is the dangerous case: a local
+ * `APPLY_ONLY_ID=$ID` with `$ID` empty, or an Actions `${{ }}` expanding to
+ * nothing, is someone who meant to name one application. Reading it as "no
+ * filter" would turn a one-application run into a whole-queue submit, which is
+ * §6's fail-open exactly. (Unlike `required` in cli/apply.ts, where blank and
+ * absent are rightly the same: both mean "missing" there, and both stop.)
+ */
+export function parseOnlyApplicationId(raw: string | undefined): string | undefined {
+  // Absent: the normal whole-queue run. The one input that widens the scope.
+  if (raw === undefined) return undefined;
+  // Trimmed, so a stray space from a shell does not fail an otherwise valid id.
+  const id = raw.trim();
+  // Not a UUID: refuse to run rather than guess what was meant.
+  if (!UUID_SHAPE.test(id)) {
+    throw new Error(`APPLY_ONLY_ID must be an application UUID; got ${JSON.stringify(raw)}. Refusing to run.`);
+  }
+  // Lower-cased, because Postgres prints uuids lower-case and the filter compares strings.
+  return id.toLowerCase();
 }
 
 export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary> {
@@ -117,6 +152,12 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
   const seen = new Set<string>();
   // Re-claimed rows whose lease we keep until the end; see the re-claim guard.
   const held: string[] = [];
+  // Rows claimed while APPLY_ONLY_ID names a different one. HELD like the above,
+  // not released on sight: a released row is the oldest unclaimed one again, so
+  // the next claim would hand it straight back instead of reaching the target.
+  const notTargeted: string[] = [];
+  // Set once the targeted application has been processed, to end the run there.
+  let targetDone = false;
 
   /**
    * Both gates, in one place so the before-claim and before-each-application
@@ -215,12 +256,25 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
       // forms until the 55-minute budget runs out, every day. A row seen
       // earlier in this run is HELD (its fresh lease is kept, so the next claim
       // skips it and reaches new work) and released once, at the end.
-      const fresh = rows.filter((row) => !seen.has(row.id));
+      const unseen = rows.filter((row) => !seen.has(row.id));
       // Recorded before any work, so a row that throws is never retried either.
       for (const row of rows) {
         if (seen.has(row.id)) held.push(row.id);
         else seen.add(row.id);
       }
+      // THE APPLY_ONLY_ID FILTER, applied to the claimed page and nowhere else, so
+      // a non-target row is never navigated to, filled, or advanced. Its lease is
+      // kept (so the next claim moves past it) and released at the end.
+      const fresh = input.onlyApplicationId === undefined
+        ? unseen
+        // Only the target survives; everything else is set aside for release.
+        : unseen.filter((row) => {
+            // The one row this run exists for.
+            if (row.id === input.onlyApplicationId) return true;
+            // Any other: parked in the release list, never processed.
+            notTargeted.push(row.id);
+            return false;
+          });
 
       for (const [index, row] of fresh.entries()) {
         // BOTH GATES, checked again before EACH application rather than once
@@ -263,8 +317,34 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
           // A leaked page keeps Chromium alive and the job billing until its
           // timeout — a real cost against a budget measured in whole minutes.
           await page.close();
+          // Whatever happened to it, the targeted row has had its one attempt.
+          if (row.id === input.onlyApplicationId) targetDone = true;
         }
       }
+
+      // APPLY_ONLY_ID: the target has been processed, so the run is over. Without
+      // this the loop would keep claiming, and holding, every other approved row.
+      if (targetDone) {
+        // APPENDED, not assigned: if the target threw, the error text already in
+        // stoppedReason is the one fact the operator needs, and must survive.
+        stoppedReason = errors > 0
+          ? `${stoppedReason}; APPLY_ONLY_ID ${input.onlyApplicationId} processed; run ends here`
+          : `APPLY_ONLY_ID ${input.onlyApplicationId} processed; run ends here`;
+        break;
+      }
+    }
+
+    // APPLY_ONLY_ID with a target that was never processed. Two different stories,
+    // told apart so "nothing happened" is never misread: a gate (budget, kill
+    // switch) stopped the run after the target was claimed, or the queue never
+    // handed it to us at all (not `approved`, not ours, or leased elsewhere).
+    if (input.onlyApplicationId !== undefined && !targetDone) {
+      // `seen` holds every claimed id, so it says whether the target was ever claimed.
+      stoppedReason = seen.has(input.onlyApplicationId)
+        // Claimed, then a gate stopped the run; the gate's reason is kept.
+        ? `${stoppedReason}; APPLY_ONLY_ID ${input.onlyApplicationId} was claimed but not processed (released, still approved)`
+        // Never claimed.
+        : `APPLY_ONLY_ID ${input.onlyApplicationId} was never claimed (not approved, or leased elsewhere); nothing applied`;
     }
 
     // Give back every re-claimed row exactly once. Held rather than released
@@ -274,7 +354,24 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
       await gateway.releaseClaim(id, 'already processed earlier in this run');
     }
 
+    // Give back every row the APPLY_ONLY_ID filter set aside, untouched and still
+    // `approved`: release only, never an advance, so the filter cannot move a row.
+    for (const id of notTargeted) {
+      await gateway.releaseClaim(id, `APPLY_ONLY_ID: not the targeted application (${input.onlyApplicationId})`);
+    }
+
     return summarise();
+  } catch (error) {
+    // A throw OUTSIDE the per-application catch: the claim itself refused (42501
+    // once the agent key is seeded and missing), the sweep failed, or the profile
+    // read did. Counted here so closeRun below records `failed` with the reason;
+    // without it the run rejected yet its agent_runs row read `succeeded`, 0
+    // errors — a refused run looking like a clean one on the health page.
+    errors += 1;
+    // The reason the health page shows, replacing whatever the loop had so far.
+    stoppedReason = `run failed: ${error instanceof Error ? error.message : String(error)}`;
+    // Rethrown unchanged, so the CLI still exits non-zero.
+    throw error;
   } finally {
     // Closed in `finally` so an unexpected throw still leaves an accurate row.
     // A run opened and never closed shows as permanently "running", which reads

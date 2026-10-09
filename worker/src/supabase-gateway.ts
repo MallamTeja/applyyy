@@ -201,9 +201,11 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
       // failed read throws instead of looking like dead rows. `disappeared_at?` is optional in the
       // cast because the key can be absent at runtime, and the loop below tests its PRESENCE.
       const jobs = unwrap(
-        await client.from('jobs').select('id, apply_url, disappeared_at').in('id', jobIds),
+        // company_name rides the same read: the planner needs it to answer "previously worked at
+        // <company>?", and a second round trip per batch would buy nothing.
+        await client.from('jobs').select('id, apply_url, disappeared_at, company_name').in('id', jobIds),
         'claimApplications: read jobs.apply_url',
-      ) as Array<{ id: string; apply_url: string | null; disappeared_at?: string | null }> | null;
+      ) as Array<{ id: string; apply_url: string | null; disappeared_at?: string | null; company_name?: string | null }> | null;
       // Keyed by job id so each claimed row finds its URL in one lookup.
       const urlByJobId = new Map((jobs ?? []).map((job) => [job.id, job.apply_url]));
       // Keyed the same way, whole record kept so the loop can test key PRESENCE.
@@ -273,6 +275,10 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
           // and a human sees why. `??` rather than a bare read so `undefined`
           // (column absent from the payload) and SQL NULL mean the same thing.
           tailoredProfile: row.tailored_profile ?? null,
+          // The employer's name, for the planner's "previously worked at <company>" check.
+          // Null when absent, never "": the planner REFUSES that question on null, which is
+          // the safe answer when we do not know who the employer is.
+          employerName: jobById.get(row.job_id)?.company_name?.trim() || null,
         }),
       );
     },

@@ -30,6 +30,14 @@ on:
         # Defaults to the safe value so an operator who clicks straight through
         # cannot submit by accident (constraint #15).
         default: 'true'
+      # Limits the run to ONE application (worker/src/claim-loop.ts). REQUIRED for a
+      # live run (dry_run "false"): the step below refuses a live run without it, so
+      # a manual dispatch can never submit the whole approved queue by accident.
+      apply_only_id:
+        description: 'Application UUID to process, alone. Required when dry_run is "false".'
+        required: false
+        # Empty means "whole queue", which only a DRY run may use.
+        default: ''
 
 # Least privilege: the applier reads the repo and talks to Supabase over the
 # network. It never needs to write back here, so it gets no write token at all.
@@ -121,7 +129,26 @@ jobs:
       # (§18.1) and exits immediately if it is off, so stopping everything never
       # requires deleting this cron or revoking a key at 2am.
       - name: Run the applier
-        run: pnpm --filter '@applyy/worker' run apply
+        # Two guards before the worker starts, both in shell because a workflow
+        # `env:` key cannot be conditionally omitted:
+        # 1. A LIVE run must name one application. Without this, dry_run "false"
+        #    would submit every approved row in one go.
+        # 2. APPLY_ONLY_ID is exported ONLY when an id was given. The worker treats a
+        #    set-but-blank value as an error (so a blank `$ID` never widens a local
+        #    run), and scheduled runs supply no inputs at all, so passing the input
+        #    straight through would make every cron run fail.
+        run: |
+          # Guard 1: refuse a whole-queue live submit, before anything is claimed.
+          if [ "$DRY_RUN" = "false" ] && [ -z "$ONLY_ID" ]; then
+            # Annotated as an error so the reason shows on the run page, not only in the log.
+            echo "::error::dry_run=false requires apply_only_id (one application per live run)."
+            # Non-zero, so the run is red rather than a silent no-op.
+            exit 1
+          fi
+          # Guard 2: set the filter only when there is one.
+          if [ -n "$ONLY_ID" ]; then export APPLY_ONLY_ID="$ONLY_ID"; fi
+          # The applier itself, unchanged.
+          pnpm --filter '@applyy/worker' run apply
         # Step-scoped: the ONLY step that reads any of these (apply.ts:51-54,
         # submission-mode.ts:56), so no action or install script can see them.
         env:
@@ -131,6 +158,9 @@ jobs:
           # refuses anything that is not the exact string "false", so a typo here
           # fails closed rather than submitting (see worker/src/submission-mode.ts).
           DRY_RUN: ${{ inputs.dry_run == 'false' && 'false' || 'true' }}
+          # The raw input, read only by the shell guards above. Not named APPLY_ONLY_ID,
+          # so an empty value never reaches the worker as "set but blank".
+          ONLY_ID: ${{ inputs.apply_only_id }}
           # Supabase connection. Secrets, never committed (constraint #11).
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           # The anon key is public-by-design and carries no privilege on its own;

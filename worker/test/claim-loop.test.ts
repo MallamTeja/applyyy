@@ -8,7 +8,7 @@
 // and fits. Splitting this loop into a matrix of parallel jobs is the obvious
 // speed-up and it multiplies the billed minutes by 35.
 import { describe, expect, it, vi } from 'vitest';
-import { runApplierBatch, type RunGateway } from '../src/claim-loop.ts';
+import { parseOnlyApplicationId, runApplierBatch, type RunGateway } from '../src/claim-loop.ts';
 import type { ApplicationPage } from '../src/apply-one.ts';
 import type { AnswerBankRow } from '@applyy/shared-types';
 
@@ -25,7 +25,8 @@ function stubPage(): ApplicationPage & { close(): Promise<void> } {
     attachFile: async () => {},
     screenshot: async () => new Uint8Array([1]),
     detectBlocker: async () => null,
-    submit: async () => {},
+    // A confirmed page: the only SubmitResult that may become `applied`.
+    submit: async () => ({ kind: 'confirmed', evidence: 'test' }) as const,
     // True so the loop's submit-mode tests model a page that can send.
     submissionImplemented: true,
     close: async () => {},
@@ -55,9 +56,11 @@ function fakeGateway(overrides: Partial<RunGateway> = {}) {
       // attachment planner proceeds without one — which is also the case these
       // tests want, since they are about pacing and not about resumes.
       tailoredProfile: null;
+      // Unknown employer: the stub form never asks "previously worked at", so null is harmless.
+      employerName: null;
     }>
   > = [
-    [{ id: 'app-1', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null }],
+    [{ id: 'app-1', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null }],
     [],
   ];
   const closed: Array<Record<string, unknown>> = [];
@@ -297,6 +300,8 @@ describe('runApplierBatch', () => {
           status: 'approved' as const,
           applyUrl: 'http://127.0.0.1:1/a.html',
           tailoredProfile: null,
+          // No employer: these tests are about pacing, never about eligibility questions.
+          employerName: null,
         }));
       },
       releaseClaim: async (id) => {
@@ -336,8 +341,8 @@ describe('runApplierBatch', () => {
         return reads <= 2;
       },
       claimApplications: async () => [
-        { id: 'app-1', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null },
-        { id: 'app-2', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null },
+        { id: 'app-1', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null },
+        { id: 'app-2', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null },
       ],
       releaseClaim: async (id, reason) => {
         releases.push({ id, reason });
@@ -357,5 +362,211 @@ describe('runApplierBatch', () => {
     expect(summary.stoppedReason).toMatch(/kill switch/i);
     // The second was released untouched, with the reason it never started.
     expect(releases).toContainEqual({ id: 'app-2', reason: expect.stringMatching(/^not started: kill switch/) });
+  });
+});
+
+/**
+ * APPLY_ONLY_ID: a run scoped to ONE application.
+ *
+ * Exists for the first real submissions, where "exactly this employer" is the
+ * whole point. The failure it guards is a newly approved row riding along on a
+ * run that was meant to send one application: an irreversible send nobody chose.
+ */
+describe('APPLY_ONLY_ID', () => {
+  // The one application the run is scoped to. Lower-case, as parseOnlyApplicationId returns it.
+  const target = '11111111-1111-4111-8111-111111111111';
+  // Rows that must never be touched.
+  const otherA = '22222222-2222-4222-8222-222222222222';
+  const otherB = '33333333-3333-4333-8333-333333333333';
+
+  /**
+   * A queue that behaves like the real claim RPC: oldest unleased rows first,
+   * release returns a row to the pool. Scripted batches would hide exactly the
+   * "released row comes straight back" behaviour the filter has to survive.
+   */
+  function queueGateway(queue: string[]) {
+    // Rows currently leased to this run.
+    const leased = new Set<string>();
+    // Every release, with its reason, to show non-targets were handed back untouched.
+    const releases: Array<{ id: string; reason: string }> = [];
+    // Every status write, BY ROW, so a non-target advance is visible.
+    const advances: Array<{ id: string; to: string }> = [];
+    // Claim calls, bounded so a loop that never ends fails fast.
+    let claims = 0;
+    const { gateway, calls } = fakeGateway({
+      claimApplications: async (_by, limit) => {
+        // Counted for the "run ends here" assertion.
+        claims += 1;
+        // A hard ceiling: an unbounded claim loop is a failure mode here too.
+        if (claims > 20) throw new Error('claim loop did not terminate');
+        // FIFO over unleased rows, like `claimed_by is null order by created_at`.
+        const picked = queue.filter((id) => !leased.has(id)).slice(0, limit);
+        // Leased on hand-out, exactly as the RPC does.
+        for (const id of picked) leased.add(id);
+        // Each row's applyUrl names it, so page navigations identify the row.
+        return picked.map((id) => ({ id, status: 'approved' as const, applyUrl: `http://127.0.0.1:1/${id}`, tailoredProfile: null, employerName: null }));
+      },
+      // Recorded per row so the assertions can say WHICH row moved.
+      advanceStatus: async (id, to) => {
+        // Only the target may ever appear here.
+        advances.push({ id, to });
+      },
+      // Release unleases, so a released row is claimable again (the real behaviour).
+      releaseClaim: async (id, reason) => {
+        // Back in the pool.
+        leased.delete(id);
+        // With the reason, for the "not the targeted application" assertion.
+        releases.push({ id, reason });
+      },
+    });
+    // The gateway, its logs, and a live view of the claim count.
+    return { gateway, calls, releases, advances, leased, claimCount: () => claims };
+  }
+
+  /** A page opener that records every URL any page was sent to. */
+  function recordingPages() {
+    // Every navigation across every page: the proof a row was (or was not) worked on.
+    const visited: string[] = [];
+    // Opens a stub page whose goto is recorded.
+    const openPage = async () => ({
+      // Everything else from the shared stub.
+      ...stubPage(),
+      // The only override: remember where the page went.
+      goto: async (url: string) => {
+        // Recorded before anything else could fail.
+        visited.push(url);
+      },
+    });
+    // The opener and its log.
+    return { openPage, visited };
+  }
+
+  it('APPLY_ONLY_ID: a non-target claimed row is released, never applied', async () => {
+    // The non-target is OLDER, so the claim hands it out first. It must be held,
+    // not navigated to, not filled, not advanced, and given back at the end.
+    const { gateway, releases, advances, leased } = queueGateway([otherA, target]);
+    // Records every navigation.
+    const { openPage, visited } = recordingPages();
+
+    // Live mode, the case the filter exists for; batch of one forces two claims.
+    await runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false' }, clock: frozenClock, batchSize: 1, onlyApplicationId: target });
+
+    // Only the target's page was ever opened.
+    expect(visited).toEqual([`http://127.0.0.1:1/${target}`]);
+    // Only the target moved through the status graph.
+    expect(advances.map((a) => a.id)).toEqual([target, target]);
+    // The non-target was released with the filter's reason, still untouched.
+    expect(releases).toContainEqual({ id: otherA, reason: expect.stringMatching(/^APPLY_ONLY_ID: not the targeted application/) });
+    // And nothing is left leased: tomorrow's run can still claim it.
+    expect(leased.has(otherA)).toBe(false);
+  });
+
+  it('APPLY_ONLY_ID: run ends after the target is processed', async () => {
+    // Without the stop, the loop would keep claiming (and holding) every other
+    // approved row until the queue or the budget ran out.
+    const { gateway, claimCount, releases } = queueGateway([target, otherA, otherB]);
+    // Records every navigation.
+    const { openPage, visited } = recordingPages();
+
+    // Batch of one, so "ends here" is distinguishable from "the batch ended".
+    const summary = await runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false' }, clock: frozenClock, batchSize: 1, onlyApplicationId: target });
+
+    // One claim, one application: the rows behind it were never even claimed.
+    expect(claimCount()).toBe(1);
+    // Only the target was worked on.
+    expect(visited).toEqual([`http://127.0.0.1:1/${target}`]);
+    // Nothing else was ever leased, so nothing else needed releasing.
+    expect(releases).toEqual([]);
+    // The run says why it stopped.
+    expect(summary.stoppedReason).toMatch(/processed; run ends here/);
+    // And the target was actually sent (non-vacuity for "ended early").
+    expect(summary.submitted).toBe(1);
+  });
+
+  it('APPLY_ONLY_ID: target never claimed → stoppedReason says so', async () => {
+    // The target is not in the queue (not approved, or leased elsewhere). The
+    // run must say so explicitly, or "nothing happened" reads as "queue empty".
+    const { gateway, releases } = queueGateway([otherA]);
+    // Records every navigation.
+    const { openPage, visited } = recordingPages();
+
+    // Live mode; the only claimable row is not the target.
+    const summary = await runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false' }, clock: frozenClock, onlyApplicationId: target });
+
+    // Nothing worked on at all.
+    expect(visited).toEqual([]);
+    expect(summary.claimed).toBe(0);
+    // The reason names the miss.
+    expect(summary.stoppedReason).toMatch(/was never claimed/);
+    // The row it did claim was handed back.
+    expect(releases.map((r) => r.id)).toEqual([otherA]);
+  });
+
+  it('parseOnlyApplicationId: rejects a non-UUID, accepts and lower-cases a UUID, undefined is unset', () => {
+    // A typo read as "no filter" would turn a one-application run into a
+    // whole-queue submit (§6's fail-open), so anything not UUID-shaped throws.
+    expect(() => parseOnlyApplicationId('app-1')).toThrow(/must be an application UUID/);
+    // A UUID with a trailing character is not a UUID.
+    expect(() => parseOnlyApplicationId(`${target}x`)).toThrow();
+    // Accepted, trimmed and lower-cased (Postgres prints uuids lower-case).
+    expect(parseOnlyApplicationId(`  ${target.toUpperCase()} `)).toBe(target);
+    // Only a truly absent variable means the whole queue.
+    expect(parseOnlyApplicationId(undefined)).toBeUndefined();
+  });
+
+  it('parseOnlyApplicationId: blank is refused, not read as no filter', () => {
+    // An Actions input that expanded to nothing was MEANT to name one
+    // application. Reading it as "no filter" would turn a one-row run into a
+    // whole-queue submit, so blank is an error, not an absence.
+    expect(() => parseOnlyApplicationId('')).toThrow();
+    // Whitespace-only is the same mistake with a stray space.
+    expect(() => parseOnlyApplicationId('   ')).toThrow();
+  });
+});
+
+describe('agent key enforcement', () => {
+  it('agent key refused: claim error stops the run before any application is touched', async () => {
+    // The agent key is enforced live: without a valid x-applyy-agent-key the
+    // claim RPC raises 42501. That must end the run BEFORE any employer page is
+    // opened or any row moves, since nothing was leased to us to move.
+    const refusal = Object.assign(
+      // The exact message shape the RPC raises.
+      new Error('claim_applications requires a valid x-applyy-agent-key header (missing); refusing'),
+      // The Postgres code, as supabase-js carries it.
+      { code: '42501' },
+    );
+    // Every page open, which must stay at zero.
+    const openPage = vi.fn(async () => stubPage());
+    const { gateway, calls, closed } = fakeGateway({
+      // Rejects like the live gateway does when the RPC refuses.
+      claimApplications: async () => {
+        // Recorded so the test can show the claim was reached at all.
+        calls.push('claim');
+        throw refusal;
+      },
+    });
+
+    // Live mode, the case where a silent continue would matter most.
+    await expect(
+      runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false' }, clock: frozenClock }),
+    ).rejects.toThrow(/x-applyy-agent-key/);
+
+    // The claim was attempted (non-vacuity), and nothing came after it.
+    expect(calls).toContain('claim');
+    // No employer page was opened.
+    expect(openPage).not.toHaveBeenCalled();
+    // No row moved and no lease was touched.
+    expect(calls.filter((c) => c.startsWith('advance:') || c === 'release')).toEqual([]);
+    // The run row is still closed by the finally block.
+    expect(calls).toContain('closeRun');
+    // Recorded as a FAILED run naming the refusal. A throw outside the per-row
+    // catch used to close as 'succeeded' with error_count 0, so the health page
+    // showed a refused run as a clean success.
+    expect(closed[0]).toMatchObject({
+      status: 'failed',
+      error_count: 1,
+      rows_in: 0,
+      error_detail: expect.stringMatching(/^run failed: .*x-applyy-agent-key/),
+    });
   });
 });

@@ -22,8 +22,12 @@ import type { ReactElement } from 'react';
 import { PageHeader } from '../../app/PageHeader';
 import { useToast } from '../../app/Toast';
 import { AddQuestionModal } from './AddQuestionModal';
+// Own file so this page's table stays readable; it shares the page's loaded bank.
+import { EligibilityAnswers } from './EligibilityAnswers';
 import {
   deleteCustomBankQuestion,
+  // Read only for its keys: EEO rows are kept out of the table.
+  EEO_QUESTIONS,
   formatAnswerPreview,
   loadAnswerBank,
   saveBankAnswer,
@@ -31,6 +35,9 @@ import {
 import type { BankQuestion, QuestionCategory } from './answerBankStore';
 
 import './settings.css';
+
+// The EEO keys, as a Set for the table filter's per-row lookup.
+const EEO_KEYS = new Set(EEO_QUESTIONS.map((q) => q.key));
 
 type ExtendedCategoryFilter = QuestionCategory | 'needs_attention';
 
@@ -95,6 +102,9 @@ export function AnswerBankPage(): ReactElement {
   // Filtered view
   const filtered = useMemo(() => {
     return questions.filter((q) => {
+      // EEO answers are edited only in the Eligibility section's exact-option selects; the
+      // table's single_select editor would offer a free-text box the form would refuse.
+      if (EEO_KEYS.has(q.key)) return false;
       if (activeCategory === 'needs_attention') {
         if (!q.needsHuman) return false;
       } else if (activeCategory !== 'all') {
@@ -622,6 +632,18 @@ export function AnswerBankPage(): ReactElement {
           </table>
         </div>
       </section>
+
+      {/* Eligibility answers: the worker answers these only from rows Teja saved; Save re-reads the bank so the shown state is the DB's. */}
+      <EligibilityAnswers
+        /* The same loaded bank as the table, so both views show one state. */
+        questions={questions}
+        /* While loading, the section must not claim "Not saved yet". */
+        loading={loading}
+        /* A failed read blocks saves; the section disables its buttons to match. */
+        loadError={loadError}
+        /* Re-read after a save so "Saved by you" comes from the DB's attested flag, not a guess. */
+        onSaved={() => void fetchBank()}
+      />
 
       {/* Add Custom Question Modal */}
       <AddQuestionModal

@@ -274,7 +274,9 @@ export async function runAssisted(deps: AssistDeps): Promise<AssistOutcome> {
       if (gateway.fetchLatestProfile === undefined) console.warn('[assisted-submit] gateway has no fetchLatestProfile; profile fills disabled');
       // Profile read alongside the bank so factual fields (email, phone, links) can be copied.
       // Null default so an absent method means no profile fills, the safe direction.
-      const plan = planFill(fields, await gateway.fetchAnswers(), (await gateway.fetchLatestProfile?.()) ?? null);
+      // The company as the 4th argument, so "previously worked at <company>?" can be answered
+      // here exactly as in the unattended path; omitted, that required question refuses.
+      const plan = planFill(fields, await gateway.fetchAnswers(), (await gateway.fetchLatestProfile?.()) ?? null, row.company);
       // Blockers are listed as unfilled so the human knows which questions are theirs.
       // Each blocker is a question the bank cannot answer, so it is the human's to do.
       for (const blocker of plan.blockers) unfilled.push(blocker.label);

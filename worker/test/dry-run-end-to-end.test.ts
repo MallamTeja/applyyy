@@ -82,6 +82,8 @@ test('a full dry-run batch fills, screenshots and submits NOTHING', async () => 
         // That distinction matters for the assertion below: no resume is
         // produced here because the FORM blocks, not because the row was empty.
         tailoredProfile: syntheticResume,
+        // The captured form is GitLab's, so that is the employer it is checked against.
+        employerName: 'GitLab',
       },
     ],
     [],

@@ -400,7 +400,8 @@ describe('createSupabaseGateway.claimApplications', () => {
     // The claimed row carries `job_id` and no `apply_url` — the real wire shape.
     const { client, jobQueries } = claimClient(
       [{ id: 'app-1', job_id: 'job-1', tailored_profile: null }],
-      { data: [{ id: 'job-1', apply_url: 'https://boards.example/apply/1', disappeared_at: null }], error: null },
+      // company_name padded on purpose: the gateway must trim it before the planner compares names.
+      { data: [{ id: 'job-1', apply_url: 'https://boards.example/apply/1', disappeared_at: null, company_name: ' GitLab ' }], error: null },
     );
     const gateway = createSupabaseGateway(client, { userId: 'u1' });
 
@@ -408,10 +409,12 @@ describe('createSupabaseGateway.claimApplications', () => {
 
     // The URL must come from the join; '' here is the bug.
     expect(claimed).toEqual([
-      { id: 'app-1', status: 'approved', applyUrl: 'https://boards.example/apply/1', tailoredProfile: null },
+      // employerName is the trimmed jobs.company_name, the planner's "previously worked at" input.
+      { id: 'app-1', status: 'approved', applyUrl: 'https://boards.example/apply/1', tailoredProfile: null, employerName: 'GitLab' },
     ]);
     // Asked for by id, for exactly the claimed rows' jobs.
-    expect(jobQueries).toEqual([{ columns: 'id, apply_url, disappeared_at', column: 'id', ids: ['job-1'] }]);
+    // company_name rides the same read, so the employer costs no extra round trip.
+    expect(jobQueries).toEqual([{ columns: 'id, apply_url, disappeared_at, company_name', column: 'id', ids: ['job-1'] }]);
   });
 
   it('releases, and never returns, a row whose job has no apply_url', async () => {

@@ -94,7 +94,8 @@ function setup(opts: { row?: AssistRow | null; answer?: string | null; gotoFails
     submit,
     // Unused by the flow; present only to satisfy the full page port.
     screenshot: async () => new Uint8Array(),
-    // False, matching the real page while SUBMISSION_IMPLEMENTED is false.
+    // False ON PURPOSE, whatever the real page can do (SUBMISSION_IMPLEMENTED is true since
+    // 2026-10-09): the assisted flow must never send, so its fake page claims it cannot.
     submissionImplemented: false,
   };
   // Captures what the human would have seen.

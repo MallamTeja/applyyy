@@ -19,9 +19,11 @@ import {
   type ApplierGateway,
   type ArtifactPaths,
   type ResumeRenderer,
+  type SubmitResult,
 } from '../src/apply-one.ts';
 import type { FormField } from '../src/extract-fields.ts';
-import type { AnswerBankRow, ResolvedResume } from '@applyy/shared-types';
+// MasterProfile for the employer-wiring tests, which hand the planner a work history.
+import type { AnswerBankRow, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 // The pinned snapshot the resume is rendered FROM. A real ResolvedResume rather
 // than a stub, so a renderer that actually reads it behaves as it will in
 // production.
@@ -47,7 +49,9 @@ const answers = [
 function fakePage(overrides: Partial<ApplicationPage> = {}) {
   // The single most important spy in the repo: whether a real submission was
   // attempted. Every test below asserts on this.
-  const submit = vi.fn(async () => {});
+  // Defaults to a CONFIRMED page, the only result that may become `applied`;
+  // the tests for every other SubmitResult override it explicitly.
+  const submit = vi.fn(async (): Promise<SubmitResult> => ({ kind: 'confirmed', evidence: 'test' }));
   const page: ApplicationPage = {
     goto: async () => {},
     extractFields: async () => answerableForm,
@@ -119,6 +123,8 @@ const row = {
   status: 'approved',
   applyUrl: 'http://127.0.0.1:1/form.html',
   tailoredProfile: syntheticResume,
+  // The employer the planner checks "previously worked at" against; any real name works here.
+  employerName: 'GitLab',
 } as const;
 
 /** A form that asks for a resume, exactly as the real Greenhouse DOM presents it. */
@@ -203,6 +209,8 @@ describe('applyToOne', () => {
     const { page } = fakePage({
       submit: async () => {
         observed.push('submit');
+        // A confirmed page, so the run proceeds to the `applied` write under test.
+        return { kind: 'confirmed', evidence: 'test' } as const;
       },
     });
     const gateway: ApplierGateway = {
@@ -254,7 +262,10 @@ describe('applyToOne', () => {
     const outcome = await applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
 
     expect(submit).not.toHaveBeenCalled();
-    expect(transitions).toEqual(['applying', 'blocked_needs_human']);
+    // ONE write, straight from `approved` (M3): a pre-fill park never enters
+    // the non-idempotent `applying` state. The guard refuses an illegal edge, so
+    // reaching this write at all proves `approved -> blocked_needs_human` was it.
+    expect(transitions).toEqual(['blocked_needs_human']);
     expect(outcome.kind).toBe('blocked');
   });
 
@@ -279,7 +290,10 @@ describe('applyToOne', () => {
     });
 
     expect(submit).not.toHaveBeenCalled();
-    expect(transitions).toEqual(['applying', 'blocked_needs_human']);
+    // ONE write, straight from `approved` (M3): a pre-fill park never enters
+    // the non-idempotent `applying` state. The guard refuses an illegal edge, so
+    // reaching this write at all proves `approved -> blocked_needs_human` was it.
+    expect(transitions).toEqual(['blocked_needs_human']);
     expect(outcome.kind).toBe('blocked');
   });
 
@@ -344,6 +358,8 @@ describe('applyToOne — the resume', () => {
       },
       submit: async () => {
         observed.push('submit');
+        // A confirmed page, so the sequence runs all the way to `applied`.
+        return { kind: 'confirmed', evidence: 'test' } as const;
       },
     });
     const gateway: ApplierGateway = {
@@ -376,16 +392,20 @@ describe('applyToOne — the resume', () => {
       },
     });
 
-    // Everything learnable happens while the row is still `approved`; the window
-    // between `applying` and `applied` contains the submit and nothing else.
+    // Everything learnable happens while the row is still `approved`, the
+    // evidence write included; the window between `applying` and `applied`
+    // holds the submit and the bounded confirmation screenshot, nothing else.
     expect(observed).toEqual([
       'fill',
       'render',
       'upload_resume',
       'attach',
       'screenshot',
+      'set_paths',
       'applying',
       'submit',
+      // The confirmation page, captured best-effort after a confirmed submit.
+      'screenshot',
       'applied',
     ]);
   });
@@ -549,7 +569,10 @@ describe('applyToOne — the resume', () => {
     });
 
     expect(renderer.rendered).toHaveLength(0);
-    expect(transitions).toEqual(['applying', 'blocked_needs_human']);
+    // ONE write, straight from `approved` (M3): a pre-fill park never enters
+    // the non-idempotent `applying` state. The guard refuses an illegal edge, so
+    // reaching this write at all proves `approved -> blocked_needs_human` was it.
+    expect(transitions).toEqual(['blocked_needs_human']);
     expect(outcome.kind).toBe('blocked');
   });
 
@@ -575,7 +598,10 @@ describe('applyToOne — the resume', () => {
     // Nothing rendered, nothing sent, and the row is with a human.
     expect(renderer.rendered).toHaveLength(0);
     expect(submit).not.toHaveBeenCalled();
-    expect(transitions).toEqual(['applying', 'blocked_needs_human']);
+    // ONE write, straight from `approved` (M3): a pre-fill park never enters
+    // the non-idempotent `applying` state. The guard refuses an illegal edge, so
+    // reaching this write at all proves `approved -> blocked_needs_human` was it.
+    expect(transitions).toEqual(['blocked_needs_human']);
     expect(outcome.kind).toBe('blocked');
     // The blocker names the reason, so the queue shows WHY rather than just that.
     if (outcome.kind === 'blocked') {
@@ -781,12 +807,13 @@ describe('applyToOne — a fill the page rejects', () => {
 
     // Nothing may be submitted for a form that could not be filled.
     expect(submit).not.toHaveBeenCalled();
-    // The human queue is reached through applying, the only edge that leads there.
-    expect(advances.map((a) => a.to)).toEqual(['applying', 'blocked_needs_human']);
+    // ONE write, straight from `approved` (M3): a fill that never completed
+    // must not pass through `applying`, where a crash reads as a possible send.
+    expect(advances.map((a) => a.to)).toEqual(['blocked_needs_human']);
     // The outcome kind is what the claim loop counts as parked rather than errored.
     expect(outcome.kind).toBe('blocked');
     // The RPC rejects a park without a block_reason, and the label (not "q1") is what the human reads.
-    expect(advances[1]?.detail).toMatchObject({ block_reason: 'unanswerable_question', unanswered: ['Country'] });
+    expect(advances[0]?.detail).toMatchObject({ block_reason: 'unanswerable_question', unanswered: ['Country'] });
   });
 
   it('rethrows any other error unchanged', async () => {
@@ -833,5 +860,241 @@ describe('applyToOne — a fill the page rejects', () => {
       expect(outcome.wouldSubmit).toBe(false);
       expect(outcome.blockers.map((b) => b.label)).toEqual(['Country']);
     }
+  });
+});
+
+/**
+ * What the page SHOWED after the click, mapped to the status write.
+ *
+ * submit() used to return void, so "the promise resolved" was read as "sent".
+ * These tests pin the mapping from each SubmitResult to exactly one write (or
+ * none), because the wrong mapping is either a false `applied` that cannot be
+ * walked back, or a sent application parked as if it never went out.
+ */
+describe('applyToOne — the submit result', () => {
+  /** A gateway that records every advance WITH its detail, plus the call order. */
+  function resultGateway(uploadScreenshot?: ApplierGateway['uploadScreenshot']) {
+    // Each advance with its detail, so block_reason and the evidence keys can be asserted.
+    const advances: Array<{ to: string; detail: Record<string, unknown> | undefined }> = [];
+    // Every gateway call in order, so "paths before applying" is a sequence, not two facts.
+    const ordered: string[] = [];
+    // Counts uploads so each gets a distinct path and the confirmation one is identifiable.
+    let uploads = 0;
+    const gateway: ApplierGateway = {
+      // Records both the order and the detail of every status write.
+      advanceStatus: async (_id, to, _agent, detail) => {
+        // The sequence entry names the target status.
+        ordered.push(`advance:${to}`);
+        // The detail is kept for the field-level assertions.
+        advances.push({ to, detail });
+      },
+      // Recorded, though no live-submit branch should release.
+      releaseClaim: async () => {
+        // A release here would be a bug the order assertion would show.
+        ordered.push('release');
+      },
+      // Distinct path per call: the 1st is the filled form, the 2nd the confirmation page.
+      uploadScreenshot:
+        uploadScreenshot ??
+        (async () => {
+          // Counted so the two screenshots cannot be confused in an assertion.
+          uploads += 1;
+          // Numbered path, so the test can tell WHICH upload a detail points at.
+          return `screens/app-1-${uploads}.png`;
+        }),
+      // The resume upload is not under test; the default form asks for none.
+      uploadResume: async () => 'resumes/app-1.pdf',
+      // Recorded into the same sequence as the advances.
+      setArtifactPaths: async () => {
+        // Its position relative to `advance:applying` is the property under test.
+        ordered.push('set_paths');
+      },
+    };
+    // The gateway plus both logs.
+    return { gateway, advances, ordered };
+  }
+
+  it('applyToOne: unconfirmed submit writes no status after applying', async () => {
+    // The page gave no positive proof either way, so this is the same unknown
+    // as a throw: `applied` would be a lie and `blocked`/`failed` would claim it
+    // did not send. Only the sweeper -> needs_verification -> human may decide.
+    const { page } = fakePage({ submit: async () => ({ kind: 'unconfirmed', detail: 'timed out' }) });
+    // Fresh recording gateway for this case.
+    const { gateway, advances } = resultGateway();
+
+    // DRY_RUN false so the real submit path runs.
+    const outcome = await applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+
+    // Entered `applying` and wrote NOTHING after it.
+    expect(advances.map((a) => a.to)).toEqual(['applying']);
+    // Reported as unknown, carrying the page's own description for the log.
+    expect(outcome).toEqual({ kind: 'submit_outcome_unknown', error: 'unconfirmed: timed out' });
+  });
+
+  it('applyToOne: rejected_by_form parks at blocked_needs_human with the labels', async () => {
+    // The form refused in the browser, so nothing left the page and a human can
+    // safely fix the named fields. Parking is correct; "unknown" would strand a
+    // provably-unsent application in `applying` for a manual employer check.
+    const { page } = fakePage({ submit: async () => ({ kind: 'rejected_by_form', labels: ['Email', 'Phone'] }) });
+    // Fresh recording gateway for this case.
+    const { gateway, advances } = resultGateway();
+
+    // DRY_RUN false so the real submit path runs.
+    const outcome = await applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+
+    // Through `applying`, the only edge into the human queue.
+    expect(advances.map((a) => a.to)).toEqual(['applying', 'blocked_needs_human']);
+    // The labels the form flagged are what the human reads on the dashboard.
+    expect(advances[1]?.detail).toMatchObject({
+      block_reason: 'unanswerable_question',
+      unanswered: ['Email', 'Phone'],
+      submit_result: 'rejected_by_form',
+    });
+    // Counted as parked by the claim loop, not as an error or an unknown.
+    expect(outcome.kind).toBe('blocked');
+  });
+
+  it('applyToOne: challenge parks as captcha', async () => {
+    // Invisible reCAPTCHA escalated after the click. Constraint #5: never
+    // solved, always a human's job; the form was not sent, so park it.
+    const { page } = fakePage({ submit: async () => ({ kind: 'challenge', reason: 'captcha' }) });
+    // Fresh recording gateway for this case.
+    const { gateway, advances } = resultGateway();
+
+    // DRY_RUN false so the real submit path runs.
+    const outcome = await applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+
+    // Parked through the one legal edge.
+    expect(advances.map((a) => a.to)).toEqual(['applying', 'blocked_needs_human']);
+    // The reason the page reported, and which post-click case it was.
+    expect(advances[1]?.detail).toMatchObject({ block_reason: 'captcha', submit_result: 'challenge' });
+    // The outcome's reason matches the row's, so the run summary agrees with the DB.
+    expect(outcome).toMatchObject({ kind: 'blocked', reason: 'captcha' });
+  });
+
+  it('applyToOne: confirmed writes applied with confirmation_evidence', async () => {
+    // The ONLY path to `applied`. The event must say WHY the system believed it
+    // was sent (the matched page features) and point at the confirmation page.
+    const evidence = 'url=https://x/jobs/1/confirmation heading="Thank you for applying"';
+    // A page that positively confirmed.
+    const { page } = fakePage({ submit: async () => ({ kind: 'confirmed', evidence }) });
+    // Fresh recording gateway; its uploads are numbered.
+    const { gateway, advances } = resultGateway();
+
+    // DRY_RUN false so the real submit path runs.
+    const outcome = await applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+
+    // Into `applying`, then `applied`, nothing else.
+    expect(advances.map((a) => a.to)).toEqual(['applying', 'applied']);
+    // The evidence verbatim, the filled-form screenshot (upload 1) and the
+    // confirmation screenshot (upload 2), each under its own key.
+    expect(advances[1]?.detail).toMatchObject({
+      confirmation_evidence: evidence,
+      screenshot_storage_path: 'screens/app-1-1.png',
+      confirmation_screenshot_path: 'screens/app-1-2.png',
+    });
+    // Counted as submitted by the claim loop.
+    expect(outcome.kind).toBe('submitted');
+  });
+
+  it('applyToOne: confirmation screenshot failure still writes applied', async () => {
+    // The application has GONE. A failed photo of that fact must not stop the
+    // row saying so, or a sent application sits at `applying` and a human is
+    // sent to check an employer site for something we already know.
+    let calls = 0;
+    // First upload (the filled form) succeeds; the second (confirmation) throws.
+    const { gateway, advances } = resultGateway(async () => {
+      // Counted so only the post-confirmation capture fails.
+      calls += 1;
+      // The second call is the confirmation capture.
+      if (calls === 2) throw new Error('storage 503');
+      // The pre-submit screenshot works normally.
+      return 'screens/app-1-1.png';
+    });
+    // A confirmed page (the fake's default), the only path to the capture.
+    const { page } = fakePage();
+
+    // DRY_RUN false so the real submit path runs.
+    const outcome = await applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+
+    // The capture really was attempted twice (non-vacuity for the throw).
+    expect(calls).toBe(2);
+    // Still `applied`, with the missing evidence recorded as null.
+    expect(advances.map((a) => a.to)).toEqual(['applying', 'applied']);
+    // Null, never a stale or fabricated path.
+    expect(advances[1]?.detail).toMatchObject({ confirmation_screenshot_path: null });
+    // And the run counts it as sent.
+    expect(outcome.kind).toBe('submitted');
+  });
+
+  it('applyToOne: setArtifactPaths runs before approved→applying on a live submit', async () => {
+    // The evidence write used to live on the dry-run exit only, so a REAL
+    // submission left the storage-path columns NULL. It must also land while
+    // the row is still `approved`: a network write inside the applying window
+    // is one more way to strand a row there.
+    const { page } = fakePage();
+    // Fresh recording gateway with the ordered log.
+    const { gateway, ordered } = resultGateway();
+
+    // DRY_RUN false so the live branch is the one asserted.
+    await applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+
+    // Exactly once, before `applying`, and no release on a live submit.
+    expect(ordered).toEqual(['set_paths', 'advance:applying', 'advance:applied']);
+  });
+});
+
+// ---- The employer name reaches the planner -------------------------------------
+//
+// planFill answers "previously worked at <company>?" only when it is told WHICH
+// company the application is for. applyToOne is the one place that knows (the
+// claimed row's employerName, read from jobs.company_name), so a wiring slip here
+// would silently turn GitLab's required question back into a refusal. These two
+// tests pin the wiring itself; plan-fill's own tests own the matching rules.
+describe('applyToOne — the employer name reaches the planner', () => {
+  // The exact required question on GitLab's form, as a yes/no group.
+  const workedQ: FormField = {
+    id: 'q-worked',
+    label: 'Have you previously worked at or consulted for GitLab?',
+    kind: 'radio_group',
+    required: true,
+    options: ['Yes', 'No'],
+  };
+  // A work history without GitLab in it, so the rule's answer is "No" from the profile.
+  // Cast because only `experience[].company` is read by that rule.
+  const profile = { experience: [{ id: 'e0', company: 'Aczen Technologies' }] } as unknown as MasterProfile;
+
+  it('applyToOne: employerName "GitLab" lets the previously-worked question be answered', async () => {
+    // The only field on the form, so any blocker below can only be this one.
+    const { page } = fakePage({ extractFields: async () => [workedQ] });
+    // Dry run (env unset): the outcome reports viability without moving the row.
+    const outcome = await applyToOne({
+      row: { ...row, employerName: 'GitLab' },
+      page,
+      gateway: fakeGateway().gateway,
+      answers: [],
+      profile,
+      env: {},
+      renderResume: fakeRenderer().render,
+    });
+    // Viable, with nothing blocking: the employer reached the planner.
+    expect(outcome).toMatchObject({ kind: 'dry_run_complete', wouldSubmit: true, blockers: [] });
+  });
+
+  it('applyToOne: a null employerName refuses the previously-worked question', async () => {
+    // Same form and profile; only the employer is unknown.
+    const { page } = fakePage({ extractFields: async () => [workedQ] });
+    // Dry run again, so the comparison with the test above is like for like.
+    const outcome = await applyToOne({
+      row: { ...row, employerName: null },
+      page,
+      gateway: fakeGateway().gateway,
+      answers: [],
+      profile,
+      env: {},
+      renderResume: fakeRenderer().render,
+    });
+    // Not viable: the question went to a human because the employer was unknown.
+    expect(outcome).toMatchObject({ kind: 'dry_run_complete', wouldSubmit: false });
   });
 });

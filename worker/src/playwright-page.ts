@@ -7,29 +7,15 @@ import type { Page } from 'playwright';
 import type { BlockReason } from '@applyy/shared-types';
 import { extractFields } from './extract-fields.ts';
 import type { ClosableApplicationPage } from './claim-loop.ts';
-// The one document shape that crosses into a real employer's form.
-import type { AttachedFile } from './apply-one.ts';
+// The one document shape that crosses into a real employer's form, and the one
+// answer shape that comes back from submitting it.
+import type { AttachedFile, SubmitResult } from './apply-one.ts';
 
-/**
- * Thrown if anything ever reaches the submit path before Teja has approved it.
- *
- * A distinct, loudly-named type so it cannot be mistaken for a site error in a
- * log — this is a policy stop, not a failure of the page.
- */
-export class SubmissionNotEnabledError extends Error {
-  constructor() {
-    super(
-      'real submission is NOT implemented: it is gated on Teja\'s explicit approval ' +
-        'and the §18.6 dry-run trust period. See PROJECT_PLAN.md constraints #15 and #16.',
-    );
-    this.name = 'SubmissionNotEnabledError';
-  }
-}
-
-// Exported so the composition root can warn at startup when an operator opts
-// in to submission that this build cannot perform. One constant, so the page and
-// the warning can never disagree about it.
-export const SUBMISSION_IMPLEMENTED = false;
+// Exported so the composition root can say at startup whether this build can
+// send anything. One constant, so the page and the log can never disagree.
+// True since 2026-10-09 (Teja's ruling: the system submits by itself). DRY_RUN
+// still defaults to dry at every layer; this says only that the build CAN.
+export const SUBMISSION_IMPLEMENTED = true;
 
 /**
  * Selectors that indicate a wall we must not try to get past.
@@ -38,12 +24,23 @@ export const SUBMISSION_IMPLEMENTED = false;
  * anti-bot mechanism. Detection exists to ROUTE TO A HUMAN, never to work
  * around — so this list grows when we find new walls, and nothing downstream of
  * it ever attempts a solve.
+ *
+ * INVISIBLE reCAPTCHA IS DELIBERATELY NOT A WALL. Greenhouse loads it on every
+ * board (GOOGLE_RECAPTCHA_INVISIBLE_KEY in the page). It asks the human nothing;
+ * it scores the browser when Submit is pressed and only becomes a wall if Google
+ * then shows a challenge. Counting its always-present anchor iframe as a captcha
+ * would park every Greenhouse application before a single field was read. The
+ * escalation is still caught: VISIBLE_CHALLENGE_SELECTORS runs after the click.
+ * Matching invisible ones out is done in the selector, not by a visibility test,
+ * so a checkbox widget hidden in a collapsed section is still a wall.
  */
 const BLOCKER_SELECTORS: ReadonlyArray<readonly [string, BlockReason]> = [
-  // Google reCAPTCHA, both the visible widget and the challenge iframe.
-  ['iframe[src*="recaptcha"]', 'captcha'],
-  ['.g-recaptcha', 'captcha'],
-  // hCaptcha, used by Cloudflare-fronted boards.
+  // Google reCAPTCHA's widget iframe, except the invisible variant's anchor.
+  ['iframe[src*="recaptcha"][src*="/anchor"]:not([src*="size=invisible"])', 'captcha'],
+  // The classic checkbox container, except one declared invisible.
+  ['.g-recaptcha:not([data-size="invisible"])', 'captcha'],
+  // hCaptcha, used by Cloudflare-fronted boards. Its invisible mode is rare and
+  // unconfirmed on any board we target, so every hCaptcha frame stays a wall.
   ['iframe[src*="hcaptcha"]', 'captcha'],
   ['.h-captcha', 'captcha'],
   // Cloudflare's interstitial challenge.
@@ -53,6 +50,170 @@ const BLOCKER_SELECTORS: ReadonlyArray<readonly [string, BlockReason]> = [
   // create any, so this is a human's job.
   ['input[type="password"]', 'login_required'],
 ];
+
+/**
+ * A challenge the user would have to answer, tested for VISIBILITY.
+ *
+ * Used before the fill (a challenge already on screen) and after the click
+ * (invisible reCAPTCHA escalating). Visibility is the right test here, unlike
+ * above: reCAPTCHA pre-renders its challenge frame hidden, and only showing it
+ * means Google is actually asking.
+ */
+const VISIBLE_CHALLENGE_SELECTORS: readonly string[] = [
+  // reCAPTCHA's challenge frame ("bframe"), standard and enterprise endpoints.
+  'iframe[src*="recaptcha"][src*="/bframe"]',
+  // Any frame titled as a challenge, whichever provider drew it.
+  'iframe[title*="challenge" i]',
+  // hCaptcha's challenge frame, for the same post-click escalation.
+  'iframe[src*="hcaptcha"][src*="challenge"]',
+];
+
+/**
+ * THE SHAPE OF A CONFIRMATION, asserted positively (§6).
+ *
+ * Both must hold: the URL is THIS job's confirmation route (same origin, and the
+ * form's own path plus `/confirmation`), and a heading thanks the applicant.
+ * Either alone could be something else (a marketing "thank you" banner, another
+ * job's confirmation, a redirect to a page that merely contains "confirmation"),
+ * and a false "applied" is the one wrong answer that cannot be walked back — so
+ * anything short of both is `unconfirmed`.
+ */
+// Greenhouse's route after a successful application: the job's own path plus
+// /confirmation, optionally with a trailing slash. Matched against the path
+// derived from the form's URL (see expectedConfirmationPath), never on its own.
+const CONFIRMATION_SUFFIX = '/confirmation';
+// The heading text Greenhouse shows on that page. Case-insensitive, nothing else loosened.
+const CONFIRMATION_HEADING = /thank you for applying/i;
+
+// How long to watch the page after the click before declaring the outcome unknown.
+// A real Greenhouse submit is a reCAPTCHA token fetch plus one POST: seconds.
+// Long enough for a slow board; short enough that a hung page fails fast.
+const SUBMIT_OUTCOME_TIMEOUT_MS = 45_000;
+// How often the page is re-read while waiting. A cheap DOM read, so a quarter second.
+const SUBMIT_POLL_INTERVAL_MS = 250;
+// How long a "nothing was sent" answer (form rejection, visible challenge) must hold,
+// with no request that could carry the application, before it is believed. Longer than
+// an invisible-reCAPTCHA token round trip, which is what can delay a real send.
+const REJECTION_SETTLE_MS = 5_000;
+// Request types that can carry form data whatever their method (see submit()).
+const SEND_CAPABLE_TYPES: ReadonlySet<string> = new Set(['xhr', 'fetch', 'document', 'ping', 'eventsource']);
+// ponytail: WebSocket frames are invisible here (Chromium reports sockets as `websocket`
+// events, never as requests). No target board submits over a socket; if one ever does,
+// subscribe to context `websocket` + `framesent` and count frames as sends.
+
+/**
+ * Whether a request is the CAPTCHA PROVIDER's own traffic, not the employer's.
+ *
+ * A request from the page after the click is the application leaving, unless it
+ * is reCAPTCHA scoring the browser (its `/recaptcha/` endpoints on Google or
+ * recaptcha.net, and its assets on gstatic) or hCaptcha. Matched on host AND,
+ * for Google's shared domains, on the `/recaptcha/` path: `docs.google.com/forms`
+ * or `script.google.com` can carry a real application and must count as a send.
+ * Exact host comparison on a parsed URL, so `evilgoogle.com` or a lookalike
+ * subdomain of an employer domain is never exempt.
+ */
+function isCaptchaTraffic(url: string): boolean {
+  // Unparseable URLs are NOT exempt: an unknown request counts as possibly the send.
+  let parsed: URL;
+  try {
+    // Host lower-cased by the URL parser already.
+    parsed = new URL(url);
+  } catch {
+    // Treat as employer traffic, the cautious reading.
+    return false;
+  }
+  // Read once for the checks below.
+  const host = parsed.hostname;
+  // Google's shared hosts are exempt ONLY on reCAPTCHA's own path.
+  const recaptchaPath = parsed.pathname.startsWith('/recaptcha/');
+  // reCAPTCHA's API endpoints (anchor, bframe, reload, userverify).
+  if (['www.google.com', 'google.com', 'www.recaptcha.net', 'recaptcha.net'].includes(host) && recaptchaPath) return true;
+  // reCAPTCHA's static assets, served from gstatic under the same path.
+  if ((host === 'gstatic.com' || host.endsWith('.gstatic.com')) && recaptchaPath) return true;
+  // hCaptcha serves nothing but captchas, so its whole domain is exempt.
+  return host === 'hcaptcha.com' || host.endsWith('.hcaptcha.com');
+}
+
+/**
+ * The only path this form's confirmation may have: the form's own path plus
+ * `/confirmation`. Null when the form's URL is ITSELF a confirmation route,
+ * because then "we are on a confirmation page" says nothing about this click.
+ */
+function expectedConfirmationPath(startUrl: string): string | null {
+  // The form's path without a trailing slash, so both spellings compare equal.
+  const startPath = new URL(startUrl).pathname.replace(/\/$/, '');
+  // Already a confirmation page before we clicked: no confirmation can be proved.
+  if (startPath.endsWith(CONFIRMATION_SUFFIX)) return null;
+  // The one acceptable destination.
+  return `${startPath}${CONFIRMATION_SUFFIX}`;
+}
+
+/** The heading on the page that thanks the applicant, or null. Runs in the browser. */
+function readConfirmationHeading(pattern: { source: string; flags: string }): string | null {
+  // RegExp cannot cross into the page, so it is rebuilt from its parts.
+  const re = new RegExp(pattern.source, pattern.flags);
+  // Headings only: a "thank you" in a footer or cookie banner is not a confirmation.
+  for (const heading of Array.from(document.querySelectorAll('h1, h2, h3'))) {
+    // Trimmed text, the same normalisation every other label here gets.
+    const text = heading.textContent?.trim() ?? '';
+    // First matching heading is the evidence.
+    if (re.test(text)) return text;
+  }
+  // No heading matched.
+  return null;
+}
+
+/**
+ * The labels of every field the form has marked invalid. Runs in the browser.
+ *
+ * Two sources, because two different things can refuse a submit in the browser:
+ * - `aria-invalid="true"`, the attribute Greenhouse's form script sets on a
+ *   field it rejected;
+ * - the browser's OWN constraint validation (`:invalid`, e.g. an empty
+ *   `required`), which stops a click before any request and leaves no
+ *   attribute behind. Without this a natively-blocked click looked like a hang
+ *   and ended `unconfirmed` for an application that provably never left.
+ *   Only in forms without `novalidate`, where the browser actually enforces it.
+ * The label resolution mirrors the extractor's order (aria-label,
+ * aria-labelledby, <label for>, wrapping <label>) so the names the human sees
+ * match the names the planner used.
+ */
+function readInvalidFieldLabels(): string[] {
+  // Every field flagged by script, plus every field the browser itself would
+  // refuse in an enforcing form. Controls only: `:invalid` also matches the
+  // form and its fieldsets, which are containers, not questions.
+  const flagged = document.querySelectorAll<HTMLElement>(
+    '[aria-invalid="true"], form:not([novalidate]) :is(input, select, textarea):invalid',
+  );
+  // One selector list returns each element once, in document order, so a field
+  // that is both script-flagged and natively invalid is already named only once.
+  const invalid = Array.from(flagged);
+  // One label per flagged field.
+  return invalid.map((el) => {
+    // An explicit accessible name wins.
+    const aria = el.getAttribute('aria-label')?.trim();
+    // Present and non-empty: use it.
+    if (aria) return aria;
+    // Then the elements the field says label it.
+    const labelledBy = (el.getAttribute('aria-labelledby') ?? '')
+      // Space-separated ids.
+      .split(/\s+/)
+      // Each id's text, if the element exists.
+      .map((id) => (id ? document.getElementById(id)?.textContent?.trim() ?? '' : ''))
+      // Drop the empties.
+      .filter(Boolean)
+      // One name.
+      .join(' ');
+    // Present: use it.
+    if (labelledBy) return labelledBy;
+    // Then a <label for>. CSS.escape is valid here: this runs in the browser.
+    const forLabel = el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.textContent?.trim() : '';
+    // Present: use it.
+    if (forLabel) return forLabel;
+    // Then a wrapping <label>, and finally the id, so a label is never blank.
+    return el.closest('label')?.textContent?.trim() || el.id || el.tagName.toLowerCase();
+  });
+}
 
 /**
  * A selector for one element by id, built without `CSS.escape`.
@@ -135,7 +296,57 @@ function readCombobox(args: { inputId: string; mark: boolean }): {
   return { resolved: true, texts: found.map((option) => option.textContent?.trim() ?? ''), shown };
 }
 
-export function createPlaywrightPage(page: Page): ClosableApplicationPage {
+/** The value raceDeadline resolves to when time ran out first. A unique symbol, so no read can return it. */
+const DEADLINE_PASSED: unique symbol = Symbol("deadline passed");
+
+/**
+ * Resolve to the work's value, or to DEADLINE_PASSED after `ms`, whichever is first.
+ * Never rejects on the timer's account, and always clears its timer.
+ */
+async function raceDeadline<T>(work: Promise<T>, ms: number): Promise<T | typeof DEADLINE_PASSED> {
+  // Kept so the timer can be cleared when the work wins.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // First to settle wins; the timer branch only ever resolves.
+    return await Promise.race([
+      // The page read being bounded.
+      work,
+      // The deadline, as a resolved sentinel rather than an error.
+      new Promise<typeof DEADLINE_PASSED>((resolve) => {
+        // Started inside the executor so the handle exists before the race settles.
+        timer = setTimeout(() => resolve(DEADLINE_PASSED), ms);
+      }),
+    ]);
+  } finally {
+    // Cleared either way, so a finished run never waits out a stale timer.
+    clearTimeout(timer);
+  }
+}
+
+/** Tunables for tests. Production passes nothing and gets the constants above. */
+export interface PlaywrightPageOptions {
+  // How long submit() watches for an outcome. A test of the hang case sets it low
+  // so it does not sit through 45 real seconds.
+  readonly submitOutcomeTimeoutMs?: number;
+  // How long a "nothing was sent" answer must hold. Tests set it low for speed.
+  readonly rejectionSettleMs?: number;
+}
+
+export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions = {}): ClosableApplicationPage {
+  // The deadline submit() uses: the test override, or the production constant.
+  const submitOutcomeTimeoutMs = options.submitOutcomeTimeoutMs ?? SUBMIT_OUTCOME_TIMEOUT_MS;
+  // The settle window submit() uses: the test override, or the production constant.
+  const rejectionSettleMs = options.rejectionSettleMs ?? REJECTION_SETTLE_MS;
+  /** Whether any challenge frame is on screen now. Shared by detectBlocker and submit. */
+  async function visibleChallenge(): Promise<boolean> {
+    for (const selector of VISIBLE_CHALLENGE_SELECTORS) {
+      // `.first().isVisible()` resolves false when nothing matches, and never waits.
+      if (await page.locator(selector).first().isVisible()) return true;
+    }
+    // No challenge frame is showing.
+    return false;
+  }
+
   return {
     async goto(url: string) {
       // `domcontentloaded` rather than `networkidle`: ATS boards keep analytics
@@ -364,26 +575,227 @@ export function createPlaywrightPage(page: Page): ClosableApplicationPage {
         // on to fill a form that can never be submitted.
         if ((await page.locator(selector).count()) > 0) return reason;
       }
+      // A challenge already on screen, from a provider whose frames are not in
+      // the list above or from invisible reCAPTCHA escalating on page load.
+      if (await visibleChallenge()) return 'captcha';
       return null;
     },
 
-    async submit(): Promise<never> {
-      // DELIBERATELY UNIMPLEMENTED, and this is the current state of the repo
-      // by design rather than by omission: there is NO code anywhere in the
-      // codebase that can send an application to a real employer. DRY_RUN
-      // defaults to dry-run at three independent layers, so this is
-      // unreachable in normal operation — but leaving it unimplemented means
-      // the guarantee does not depend on those layers being correct.
-      //
-      // Implementing it is one function, and it is Teja's call to make after
-      // the §18.6 trust period, not a peer's.
-      throw new SubmissionNotEnabledError();
+    async submit(): Promise<SubmitResult> {
+      // THE ONE CODE PATH THAT SENDS AN APPLICATION. Reached only from
+      // applyToOne, only when DRY_RUN is exactly "false", only after the row is
+      // `applying`. Everything here is ordered so that every case it cannot
+      // positively recognise as a confirmation comes back `unconfirmed`.
+
+      // EXACTLY ONE VISIBLE submit control INSIDE A FORM, or no click at all. Two
+      // would mean we cannot know which one sends the application (a "save draft"
+      // beside "submit"); zero means this is not the form we filled. Scoped to
+      // forms so an unrelated page-level button cannot be the one clicked, and
+      // visible-only so a hidden control cannot stall the click into a timeout
+      // that would read as an unknown outcome for an application never sent.
+      const buttons = page.locator('form button[type="submit"]:visible, form input[type="submit"]:visible');
+      // Counted, not assumed: a plain locator would click the first of several.
+      const buttonCount = await buttons.count();
+      // Not exactly one: refuse before touching anything.
+      if (buttonCount !== 1) {
+        // Nothing was clicked, so this is safe to park as a form-shape problem.
+        return { kind: 'not_attempted', reason: 'unsupported_form', detail: `expected 1 visible submit control in a form, found ${buttonCount}` };
+      }
+
+      // A field the form ALREADY marks invalid would make the click a rejection
+      // at best. Checked before the click, so no click is spent learning it.
+      const invalidBefore = await page.evaluate(readInvalidFieldLabels);
+      // Any flagged field: park without clicking, naming the fields.
+      if (invalidBefore.length > 0) {
+        // Same answer shape as a post-click rejection, but nothing was attempted.
+        return { kind: 'not_attempted', reason: 'unanswerable_question', detail: `invalid before submit: ${invalidBefore.join('; ')}` };
+      }
+
+      // Where we were, so "no navigation" can be told apart from "navigated".
+      const startUrl = page.url();
+      // This job's own confirmation path, or null if the form URL already is one
+      // (in which case no confirmation can be proved, and the loop never confirms).
+      const confirmationPath = expectedConfirmationPath(startUrl);
+      // The form's origin; a confirmation on any other origin is not this form's.
+      const startOrigin = new URL(startUrl).origin;
+
+      // WHAT LEFT THE PAGE after the click. "Blocked" is a claim that nothing was
+      // sent, so it must be proved, not inferred from the page's look. A request
+      // counts as a possible send if it is not the captcha provider's AND it is
+      // either a non-GET (a POST of the form) or a type that can carry data with
+      // any method: xhr/fetch (an async submit, even a GET with query
+      // parameters), document (a form GET navigating, even back to the same URL),
+      // ping (sendBeacon), eventsource. Analytics beacons also land here; that only
+      // turns a provable "blocked" into `unconfirmed`, the safe direction.
+      // Recorded from just before the click so nothing it causes is missed.
+      const employerWrites: string[] = [];
+      // The page's whole browser context, not the page alone: a `target="_blank"` form or a
+      // window.open submit sends from a POPUP, which page-level events never see. Each
+      // application gets its own context (browser.newPage), so nothing else shares it.
+      const context = page.context();
+      // One listener for the whole wait; removed in `finally` so it cannot outlive this call.
+      const onRequest = (request: { method(): string; url(): string; resourceType(): string }) => {
+        // Either half makes it a possible carrier of the application.
+        const canCarry = request.method() !== 'GET' || SEND_CAPABLE_TYPES.has(request.resourceType());
+        // Captcha scoring is the one exempt traffic.
+        if (canCarry && !isCaptchaTraffic(request.url())) {
+          // Kept as "METHOD type url" so the unknown outcome's detail names what went out.
+          employerWrites.push(`${request.method()} ${request.resourceType()} ${request.url()}`);
+        }
+      };
+      // Attached BEFORE the click: a request fired by the click itself is the one that matters most.
+      context.on('request', onRequest);
+
+      try {
+        // THE CLICK. noWaitAfter: Playwright must not decide when the page is
+        // "done"; the loop below does, with its own positive test.
+        await buttons.click({ noWaitAfter: true });
+
+        // Poll until a recognisable outcome or the deadline. A loop of cheap reads
+        // rather than one waitFor, because three different outcomes are watched at once.
+        const deadline = Date.now() + submitOutcomeTimeoutMs;
+        // The last page description seen, reported if nothing was recognised.
+        let lastSeen = 'no observation';
+
+        /**
+         * ONE LOOK AT THE PAGE: a final outcome, a "nothing was sent" outcome that
+         * must first survive the settle window (`pending`), or a description.
+         * A function so the loop can bound it as a whole (see the race below).
+         */
+        const observe = async (): Promise<SubmitResult | { readonly pending: SubmitResult } | string> => {
+          // 1. CONFIRMED: both halves of the positive shape (see CONFIRMATION_SUFFIX).
+          const url = page.url();
+          // Parsed once; the path alone, so a query string or fragment cannot fake or hide it.
+          const parsed = new URL(url);
+          // Same origin AND exactly this job's confirmation path (trailing slash tolerated).
+          const pathOk = confirmationPath !== null
+            && parsed.origin === startOrigin
+            && parsed.pathname.replace(/\/$/, '') === confirmationPath;
+          // The heading is read only on the confirmation route, saving a DOM read per poll.
+          const heading = pathOk
+            ? await page.evaluate(readConfirmationHeading, { source: CONFIRMATION_HEADING.source, flags: CONFIRMATION_HEADING.flags })
+            : null;
+          // The route, the heading, AND evidence that something left the page. The
+          // last is free insurance: a page that shows "thank you" without any
+          // request after our click did not get an application from us.
+          if (pathOk && heading !== null && employerWrites.length > 0) {
+            // Evidence quotes exactly what matched, for the `applied` event.
+            return { kind: 'confirmed', evidence: `url=${url} heading="${heading}"` };
+          }
+
+          // 2. CHALLENGED: invisible reCAPTCHA escalated to a question for a human.
+          if (await visibleChallenge()) {
+            // Something reached the employer: the send may have happened.
+            if (employerWrites.length > 0) {
+              return { kind: 'unconfirmed', detail: `challenge shown after ${employerWrites.join(', ')}` };
+            }
+            // Nothing sent YET. Pending, not final: see the settle window below.
+            return { pending: { kind: 'challenge', reason: 'captcha' } };
+          }
+
+          // 3. REJECTED IN THE BROWSER: still on the form, fields now flagged.
+          // Only while the URL is unchanged: after a navigation, flags on some
+          // other page say nothing about whether this form was sent.
+          if (url === startUrl) {
+            // The fields the form refused, by the names the human knows them by.
+            const invalid = await page.evaluate(readInvalidFieldLabels);
+            // Flagged fields AFTER a send: server-side errors on an application that
+            // may have been stored. Unknown, never "blocked".
+            if (invalid.length > 0 && employerWrites.length > 0) {
+              return { kind: 'unconfirmed', detail: `fields flagged (${invalid.join('; ')}) after ${employerWrites.join(', ')}` };
+            }
+            // Flagged with nothing sent YET. Pending, not final: see the settle window.
+            if (invalid.length > 0) return { pending: { kind: 'rejected_by_form', labels: invalid } };
+          }
+
+          // Nothing recognised yet; described, in case nothing ever is.
+          return `url=${url}${pathOk ? ' (confirmation path, no thank-you heading)' : ''}`;
+        };
+
+        // THE SETTLE WINDOW for "nothing was sent" answers. One look is not proof: a
+        // validate-on-blur script can flag a field the instant Submit takes focus,
+        // while the form's own handler is still waiting on the reCAPTCHA token and
+        // POSTs a moment later. Answering "blocked" on that first look would park a
+        // SENT application for a human, who would then submit it again by hand. So a
+        // pending answer must hold, unchanged and with no send seen, for the whole
+        // window; any send in the meantime turns it into `unconfirmed` (observe's
+        // other branches), and a deadline inside the window does the same.
+        let pending: { readonly result: SubmitResult; readonly since: number } | null = null;
+
+        while (Date.now() < deadline) {
+          // EVERY LOOK IS RACED AGAINST THE TIME LEFT. A single page read can block
+          // indefinitely (measured: isVisible() during a navigation whose request
+          // never completes), and the deadline was only checked between looks, so
+          // one stuck read made submit() hang until the job timeout instead of
+          // answering `unconfirmed`. The abandoned read settles later, harmlessly:
+          // its rejection is caught below, so it is never unhandled.
+          const step = await raceDeadline(
+            // A read that fails mid-navigation is just "not yet", described as such.
+            observe().catch((error: unknown) => `page read failed: ${error instanceof Error ? error.message : String(error)}`),
+            // What is left of the budget; never negative.
+            Math.max(0, deadline - Date.now()),
+          );
+          // The deadline won: stop looking, and say why in the unknown outcome.
+          if (step === DEADLINE_PASSED) {
+            // Recorded so the human verifying it knows the page stopped answering.
+            lastSeen = `${lastSeen}; then a page read did not return before the deadline`;
+            break;
+          }
+          if (typeof step === 'string') {
+            // A plain description: whatever was pending has cleared, so its clock resets.
+            pending = null;
+            // Kept, in case nothing is ever recognised.
+            lastSeen = step;
+          } else if ('pending' in step) {
+            // A "nothing sent" answer. Start its clock, or restart it if the answer changed kind.
+            if (pending === null || pending.result.kind !== step.pending.kind) {
+              pending = { result: step.pending, since: Date.now() };
+            } else if (Date.now() - pending.since >= rejectionSettleMs) {
+              // Held for the whole window with no send seen. A window only proves "nothing
+              // YET": a handler still awaiting a slow reCAPTCHA token could POST after it.
+              // So the answer is made TRUE BY CONSTRUCTION: every further request from this
+              // context is aborted from here on (the page is closed after the status write
+              // and never used again), and only then is the log read one final time.
+              // The page too, not only the context: Playwright runs page routes before
+              // context routes, and the most recently registered page route first, so this
+              // seal wins over any route already on the page. The context seal covers popups.
+              await page.route('**/*', (route) => route.abort());
+              // Every other page this context opens (a target="_blank" submit, a popup).
+              await context.route('**/*', (route) => route.abort());
+              // Anything that slipped out while the seal was being installed shows up here.
+              if (employerWrites.length > 0) {
+                // A send raced the seal: unknown, never "nothing was sent".
+                return { kind: 'unconfirmed', detail: `${step.pending.kind} held ${rejectionSettleMs}ms, then ${employerWrites.join(', ')}` };
+              }
+              // Sealed with nothing sent: now the answer is proof, and stays true.
+              return step.pending;
+            }
+            // Described in case the deadline arrives mid-window.
+            lastSeen = `${step.pending.kind} seen, waiting ${rejectionSettleMs}ms for any late send`;
+          } else {
+            // A final outcome (confirmed, or unconfirmed after a send): done.
+            return step;
+          }
+          // Wait a beat before the next look. A plain timer, not page.waitForTimeout,
+          // so even the pause cannot depend on a page that has stopped responding.
+          await new Promise((resolve) => setTimeout(resolve, SUBMIT_POLL_INTERVAL_MS));
+        }
+
+        // THE DEADLINE PASSED WITH NOTHING PROVED. The click happened, so this is
+        // the unknown case: never `failed`, never `applied`, never retried.
+        return {
+          kind: 'unconfirmed',
+          // Names what went out, so the human verifying it knows whether a send happened.
+          detail: `no confirmation within ${submitOutcomeTimeoutMs}ms; last seen ${lastSeen}; requests that could carry it: ${employerWrites.join(', ') || 'none'}`,
+        };
+      } finally {
+        // Detached on every exit, so a later page action is never recorded against this submit.
+        context.off('request', onRequest);
+      }
     },
 
-    // Declared false alongside the throw above, so applyToOne learns BEFORE
-    // `approved -> applying` that nothing can be sent and takes the dry-run
-    // exit. Without it, DRY_RUN=false parked every viable row at `applying`
-    // as an unknown outcome. Flip both together, never one alone.
+    // Read by applyToOne BEFORE `approved -> applying`. True now that submit()
+    // above is real; it and that implementation change together, never apart.
     submissionImplemented: SUBMISSION_IMPLEMENTED,
 
     async close() {

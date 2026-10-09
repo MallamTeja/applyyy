@@ -130,6 +130,70 @@ test('assist leaves exactly the six eligibility/personal questions to the human'
   expect(plan.canProceed).toBe(false);
 });
 
+test('with attested eligibility answers and an employer name, blockers 1-6 are answered', async () => {
+  // Same extraction; this case varies only the bank, the profile and the employer.
+  const fields = await extractFields(page);
+  // Non-vacuity, as above: an empty extraction would make "no blockers" pass for nothing.
+  expect(fields.length).toBeGreaterThan(10);
+  // Every row attested, so this case exercises the eligibility rules, not the attestation gate.
+  const attestedBank = [
+    // The two live name rows, as in the first test.
+    { question_key: 'first_name', answer_value: 'Asha' },
+    // Same.
+    { question_key: 'last_name', answer_value: 'Rao' },
+    // The country the located_in rule matches against the label.
+    { question_key: 'located_in_country', answer_value: 'India' },
+    // Strict boolean, as the sponsorship rule demands.
+    { question_key: 'visa_sponsorship_required', answer_value: false },
+    // The one text that maps to "No".
+    { question_key: 'employment_restrictions', answer_value: 'None' },
+    // Blocker 6's plain bank row, keyed to the normalised label.
+    { question_key: 'what_is_your_primary_programming_language_and_or_framework', answer_value: 'TypeScript' },
+    // Blocker 5's plain bank row.
+    { question_key: 'please_share_links_of_any_open_source_projects_you_own_or_have_made_contributions_to', answer_value: 'https://github.com/asha' },
+    // EEO answers Teja attested in his browser; read only via the eeo_* keys, never the label's own key.
+    { question_key: 'eeo_gender', answer_value: 'Male' },
+    // Must equal a Greenhouse option text exactly at fill time.
+    { question_key: 'eeo_hispanic_latino', answer_value: 'No' },
+    // GitLab's real option text, verbatim.
+    { question_key: 'eeo_veteran_status', answer_value: 'I am not a protected veteran' },
+  ].map((r) => ({ ...r, needs_human: false, answer_type: 'text', attested_by_human: true })) as unknown as AnswerBankRow[];
+  // The same identity plus an employer history that does NOT include GitLab.
+  const withHistory = {
+    ...profile,
+    // "Aczen Technologies" also proves a near-name is not mistaken for GitLab.
+    experience: [{ id: 'e1', company: 'Aczen Technologies' }, { id: 'e2', company: 'Student Tribe' }],
+  } as unknown as MasterProfile;
+  // The 4-argument call assist.ts is expected to make, with the posting's company.
+  const plan = planFill(fields, attestedBank, withHistory, 'GitLab');
+  // Fills keyed by LABEL: the question ids are opaque, and the label is what Teja reads.
+  const labelOf = new Map(fields.map((f) => [f.id, f.label]));
+  // label -> [value, source], for exact comparison below.
+  const byLabel = Object.fromEntries(plan.fills.map((f) => [labelOf.get(f.id), [f.value, f.source]]));
+  // Blocker 1: the stored country appears in the label.
+  expect(byLabel['Are you located in India?']).toEqual(['Yes', 'answer_bank']);
+  // Blocker 2: "None" stored.
+  expect(byLabel['Are you subject to any employment agreements and/or post-employment restrictions with your current employer or a past employer?']).toEqual(['No', 'answer_bank']);
+  // Blocker 3: false stored.
+  expect(byLabel['Will you now or in the future require sponsorship for a visa to remain in your current location?']).toEqual(['No', 'answer_bank']);
+  // Blocker 4: GitLab is not in the history, so No, from the profile.
+  expect(byLabel['Have you previously worked at or consulted for GitLab?']).toEqual(['No', 'profile']);
+  // Blocker 5: the text row, verbatim.
+  expect(byLabel['Please share links of any open source projects you own or have made contributions to']).toEqual(['https://github.com/asha', 'answer_bank']);
+  // Blocker 6: same.
+  expect(byLabel['What is your primary programming language and/or framework?']).toEqual(['TypeScript', 'answer_bank']);
+  // EEO fills by DOM id (gender, hispanic_ethnicity, veteran_status in the fixture): verbatim, from the bank.
+  const byId = Object.fromEntries(plan.fills.map((f) => [f.id, [f.value, f.source]]));
+  // Gender template: ^gender$.
+  expect(byId.gender).toEqual(['Male', 'answer_bank']);
+  // Hispanic template: ^are_you_hispanic_latino$.
+  expect(byId.hispanic_ethnicity).toEqual(['No', 'answer_bank']);
+  // Veteran template: ^veteran_status$.
+  expect(byId.veteran_status).toEqual(['I am not a protected veteran', 'answer_bank']);
+  // Whatever remains, exactly: measured 2026-10-09 against the landed source, nothing does.
+  expect(plan.blockers.map((b) => [b.label, b.reason])).toEqual([]);
+});
+
 test('assist attaches the resume to the Resume input, not the Cover Letter one', async () => {
   // Both file inputs are labelled "Attach" on this form, so only the id tells them apart.
   const fields = await extractFields(page);

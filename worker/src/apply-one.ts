@@ -70,7 +70,10 @@ export interface ApplicationPage {
   detectBlocker(): Promise<BlockReason | null>;
   // THE IRREVERSIBLE OPERATION. Called from exactly one place, behind
   // resolveSubmissionMode, and never in dry-run.
-  submit(): Promise<void>;
+  // Returns what the PAGE showed afterwards, never a bare "it resolved": a click
+  // that returns proves only that a click happened. See SubmitResult for why
+  // every case other than a positively-shaped confirmation means "not known".
+  submit(): Promise<SubmitResult>;
   // Whether `submit` can send anything at all. Asked BEFORE `approved ->
   // applying`, because a submit that throws "not implemented" after that edge
   // is indistinguishable from one that died mid-request: the row is parked at
@@ -78,6 +81,32 @@ export interface ApplicationPage {
   // Required, not optional, so a page that forgets it does not compile.
   readonly submissionImplemented: boolean;
 }
+
+/**
+ * What the page showed after `submit`, as the ONLY input to the status write.
+ *
+ * A CLOSED UNION, so "submitted" cannot be represented by anything except a
+ * confirmation the page positively showed. The failure the old `Promise<void>`
+ * invited is §6's: a resolved promise read as "sent". Here the absence of proof
+ * is its own case (`unconfirmed`) and it writes nothing, so a page that merely
+ * stopped changing can never become an `applied` row.
+ */
+export type SubmitResult =
+  // The page showed the board's confirmation. `evidence` says exactly what was
+  // matched, so the `applied` event records why the system believed it.
+  | { readonly kind: 'confirmed'; readonly evidence: string }
+  // The form refused the submit in the browser (fields marked invalid, no
+  // navigation). Nothing left the page, so this is safely a human's question.
+  | { readonly kind: 'rejected_by_form'; readonly labels: readonly string[] }
+  // A visible anti-bot challenge appeared. Constraint #5: never solved, so the
+  // row goes to a human. Like the rejection, the form was not sent.
+  | { readonly kind: 'challenge'; readonly reason: BlockReason }
+  // The page was not in a state where a click could be safe (no single submit
+  // control, or fields already invalid), so NOTHING was clicked at all.
+  | { readonly kind: 'not_attempted'; readonly reason: BlockReason; readonly detail: string }
+  // Anything else: a timeout, an unfamiliar page, a navigation that does not
+  // look like a confirmation. The click happened and its result is unknown.
+  | { readonly kind: 'unconfirmed'; readonly detail: string };
 
 /** One document handed to a file input, as the employer's page will receive it. */
 export interface AttachedFile {
@@ -168,6 +197,10 @@ export interface ClaimedApplication {
   // attachment planner decides whether the absence actually stops this
   // application, which depends on whether the form asks for a document at all.
   readonly tailoredProfile: ResolvedResume | null;
+  // `jobs.company_name`, for exactly one planner question: "have you previously worked
+  // at <company>?". REQUIRED (nullable, not optional) so no construction site can forget
+  // it; null means "unknown employer", on which the planner refuses that question.
+  readonly employerName: string | null;
 }
 
 /** Everything one application needs, injected. */
@@ -266,7 +299,9 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
   // Constraint #4 lives here: the planner can copy a human's answer or report a
   // blocker, and has no third branch that invents a value.
   // The profile rides into the planner, the one place that decides what may be typed.
-  const plan = planFill(fields, answers, profile);
+  // The employer rides in as the 4th argument, the only way "previously worked at
+  // <company>?" can be answered; without it that required question always refuses.
+  const plan = planFill(fields, answers, profile, row.employerName);
 
   // WHERE THE RESUME GOES, decided before anything is typed and while the row is
   // still `approved`. Pure and browser-free: the form has already been read, so
@@ -387,44 +422,40 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
   // been sent — including the attached filename the ATS echoes back.
   const screenshotPath = await gateway.uploadScreenshot(row.id, await page.screenshot());
 
+  // THE EVIDENCE WRITE, for EVERY branch below: dry run, park and real submit.
+  //
+  // Uploading an artifact returns a path and does nothing else. This call is
+  // what makes the row point at it. It used to live inside the dry-run exit
+  // only, so a REAL submission left `resume_storage_path` and
+  // `screenshot_storage_path` NULL: `advance_application_status` writes
+  // `p_detail` into an event, not into those columns. Hoisted here, before the
+  // branch, so the one run that actually sends something records what it sent.
+  //
+  // A BARE UPDATE BEHIND THIS CALL, deliberately NOT guardedAdvance. Coupling
+  // "record where the file went" to "move the row" was the original defect; a
+  // dry run may not move anything. The database agrees:
+  // `guard_status_transition()` returns early on
+  // `new.status is not distinct from old.status`, and its own comment names
+  // "an agent writing a score or a storage path" as the case it is exempting.
+  //
+  // WHILE THE ROW IS STILL `approved` AND LEASED, and both halves matter. Before
+  // releaseClaim, because the lease is what makes the row ours to write: a
+  // release first would let the next run write its paths underneath ours. And
+  // before `approved -> applying`, because a network write inside the
+  // non-idempotent window is one more way to strand a row there.
+  await gateway.setArtifactPaths(row.id, {
+    resumePath,
+    screenshotPath,
+    // Persisted to `applications.resume_sha256` (added in
+    // 20260911114300_add_resume_sha256_to_applications.sql; the gateway's
+    // setArtifactPaths writes it). The digest is what proves WHICH bytes the
+    // stored path holds, so a review can check it against approval.
+    resumeSha256: resume?.sha256 ?? null,
+  });
+
   // ---- The dry-run exit. No status write of any kind beyond this point -----
 
   if (!mode.submits) {
-    // THE EVIDENCE WRITE, and the single most important line on this path.
-    //
-    // Uploading an artifact returns a path and does nothing else. Until this
-    // call existed, the ONLY place either path reached the row was the
-    // `applying -> applied` detail eighty lines below — inside a status
-    // transition a dry run returns before ever reaching. DRY_RUN is absolute
-    // (constraint #16), so execution ALWAYS stops here, which made
-    // `resume_storage_path` and `screenshot_storage_path` permanently empty in
-    // the only mode this system can run in: real bytes sitting in storage,
-    // unreferenced by the row they belong to, and a §18.6 review with no way to
-    // get from an application to the screenshot that is supposed to justify it.
-    //
-    // A BARE UPDATE BEHIND THIS CALL, deliberately NOT guardedAdvance. Coupling
-    // "record where the file went" to "move the row" IS the defect; a dry run
-    // may not move anything, and an evidence write that requires a transition
-    // can therefore never happen during the trust period. The database agrees:
-    // `guard_status_transition()` returns early on
-    // `new.status is not distinct from old.status`, and its own comment names
-    // "an agent writing a score or a storage path" as the case it is exempting.
-    //
-    // BEFORE releaseClaim, not after, and that ordering is load-bearing: the
-    // lease is what makes this row ours to write. Releasing first would open a
-    // window in which the next run claims the row and writes its own paths
-    // underneath ours — a lost update whose only symptom is evidence pointing
-    // at the wrong file.
-    await gateway.setArtifactPaths(row.id, {
-      resumePath,
-      screenshotPath,
-      // Persisted to `applications.resume_sha256` (added in
-      // 20260911114300_add_resume_sha256_to_applications.sql; the gateway's
-      // setArtifactPaths writes it). The digest is what proves WHICH bytes the
-      // stored path holds, so the dry-run review can check it against approval.
-      resumeSha256: resume?.sha256 ?? null,
-    });
-
     // Hand the row back still `approved`, so the next run — or the first run
     // after the flag is flipped — picks up exactly the same queue.
     await gateway.releaseClaim(row.id, `dry_run: ${mode.reason}`);
@@ -445,10 +476,11 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
 
   // ---- Past here the run is authorised to submit ---------------------------
 
-  // A blocked application still enters `applying` first, because
-  // `applying -> blocked_needs_human` is the only edge that reaches the human
-  // queue. The two writes are adjacent with nothing between them, so the
-  // dangerous window stays as small as the graph permits.
+  // A blocker found BEFORE any click goes straight to the human queue, in ONE
+  // write: `approved -> blocked_needs_human` (status-flow.ts; migration
+  // 20260910190000). It used to travel through `applying`, and a crash between
+  // those two writes stranded a never-sent row there, where the sweeper routes it
+  // to needs_verification and a human hand-checks an application that never left.
   if (!wouldSubmit) {
     // §8.6: a reason code, not a new status. A captcha and an unanswerable
     // question need the identical operator action, so they share a handler and
@@ -458,12 +490,6 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
     await guardedAdvance(gateway, {
       applicationId: row.id,
       from: 'approved',
-      to: 'applying',
-      agent: ACTING_AGENT,
-    });
-    await guardedAdvance(gateway, {
-      applicationId: row.id,
-      from: 'applying',
       to: 'blocked_needs_human',
       agent: ACTING_AGENT,
       detail: {
@@ -478,7 +504,9 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
     return { kind: 'blocked', reason, blockers };
   }
 
-  // ---- THE NON-IDEMPOTENT WINDOW. Opens here, closes four lines down -------
+  // ---- THE NON-IDEMPOTENT WINDOW. Opens here; closes at the first status ---
+  // ---- write below. Nothing between the two may touch the network except --
+  // ---- the click itself, and the bounded confirmation capture. ------------
 
   await guardedAdvance(gateway, {
     applicationId: row.id,
@@ -487,8 +515,11 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
     agent: ACTING_AGENT,
   });
 
+  // What the page showed after the click. Declared outside the try so the
+  // branches below read one definite value.
+  let result: SubmitResult;
   try {
-    await page.submit();
+    result = await page.submit();
   } catch (error) {
     // DELIBERATELY NO STATUS WRITE. A submit that threw has an unknown outcome:
     // the request may have reached the employer and only the response been
@@ -503,27 +534,68 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
     };
   }
 
+  // NO PROOF, NO WRITE. Exactly the same answer as a throw, for exactly the same
+  // reason: the click happened and nothing positive came back. This is the
+  // branch every unfamiliar page lands in, which is the direction to fail.
+  if (result.kind === 'unconfirmed') {
+    // The detail is the page's own description of what it saw, kept for the log.
+    return { kind: 'submit_outcome_unknown', error: `unconfirmed: ${result.detail}` };
+  }
+
+  // NOTHING LEFT THE PAGE: the form refused in the browser, a challenge appeared,
+  // or no click was made at all. Each is a human's job, and each is safe to say
+  // so about, because the application provably was not sent. Same park as a
+  // pre-fill blocker, through the one edge into the human queue.
+  if (result.kind !== 'confirmed') {
+    // Each kind maps to its own row-level reason; a form rejection is a question
+    // the form wanted answered differently, so it shares the answer reason.
+    const reason: BlockReason = result.kind === 'rejected_by_form' ? 'unanswerable_question' : result.reason;
+    // The labels the form flagged, or the page's explanation when no field did.
+    const unanswered = result.kind === 'rejected_by_form' ? [...result.labels] : [result.kind === 'not_attempted' ? result.detail : result.kind];
+    await guardedAdvance(gateway, {
+      applicationId: row.id,
+      from: 'applying',
+      to: 'blocked_needs_human',
+      agent: ACTING_AGENT,
+      detail: {
+        block_reason: reason,
+        screenshot_storage_path: screenshotPath,
+        // Names what stopped it, so the dashboard shows the work, not just the fact.
+        unanswered,
+        // Which post-click case it was, so a reviewer can tell "the form said no"
+        // from "Google asked a question" without opening the screenshot.
+        submit_result: result.kind,
+      },
+    });
+    // The page-level blockers are not field-level FillBlockers, so none are listed.
+    return { kind: 'blocked', reason, blockers: [] };
+  }
+
+  // A CONFIRMED SUBMIT. The confirmation page itself is the last piece of proof,
+  // so it is captured — but BEST-EFFORT and BOUNDED: the application has gone,
+  // and no failure to photograph that fact may stop the row saying so. A hang or
+  // throw here would otherwise leave a sent application sitting at `applying`.
+  // LOGGED BEFORE ANY WRITE. If the `applied` write below fails (network, token,
+  // agent key), the row is swept to needs_verification and this line in the run
+  // log is the only record that the worker SAW a confirmation, which turns
+  // Teja's hand-check from "did it go out?" into "the log says it did".
+  console.log(`[applyy] ${row.id}: submission CONFIRMED — ${result.evidence}`);
+
+  const confirmationScreenshotPath = await captureBounded(async () =>
+    // Uploaded under a fresh timestamped path, so it never replaces the filled form.
+    gateway.uploadScreenshot(row.id, await page.screenshot()),
+  );
+
   await guardedAdvance(gateway, {
     applicationId: row.id,
     from: 'applying',
     to: 'applied',
     agent: ACTING_AGENT,
-    // !! THIS DETAIL DOES NOT POPULATE THE COLUMNS OF THE SAME NAME. !!
-    //
-    // Verified in supabase/migrations/20260909235100_queue_and_pool_functions
-    // .sql: `advance_application_status` updates only `status` and the three
-    // lease fields, then inserts `p_detail` VERBATIM as a `note` row in
-    // `application_events`. So these keys land in an event's jsonb blob and
-    // `applications.resume_storage_path` / `.screenshot_storage_path` stay NULL
-    // even on a successful real submission — not only in dry run. The names
-    // matching the columns is what makes that easy to miss.
-    //
-    // NOT FIXED HERE, deliberately: this path is unreachable while DRY_RUN is
-    // absolute (constraint #16), so changing it would be an untested edit to
-    // the one code path that can reach a real employer. The dry-run path calls
-    // `gateway.setArtifactPaths` for exactly this reason; extending that call
-    // to cover this branch is a decision for whoever lifts the flag, and it is
-    // recorded here so they are not the first to discover it.
+    // This detail becomes an `application_events` note, NOT the columns of the
+    // same names (`advance_application_status` inserts `p_detail` verbatim). The
+    // columns were already written by setArtifactPaths above, while the row was
+    // still `approved`; these keys repeat them in the event so the record that
+    // says "sent" also says what was sent.
     detail: {
       screenshot_storage_path: screenshotPath,
       // WHAT WAS SENT, recorded in the same write that asserts it was sent, so
@@ -533,8 +605,47 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
       // something on the resume.
       resume_storage_path: resumePath,
       resume_sha256: resume?.sha256 ?? null,
+      // WHY the system believes it was sent: the exact page features matched.
+      confirmation_evidence: result.evidence,
+      // The confirmation page as it looked, or null if capturing it failed.
+      confirmation_screenshot_path: confirmationScreenshotPath,
     },
   });
 
   return { kind: 'submitted' };
+}
+
+// How long the post-confirmation capture may take before it is abandoned. Long
+// enough for a full-page screenshot and one storage upload on a slow runner.
+const CONFIRMATION_CAPTURE_TIMEOUT_MS = 15_000;
+
+/**
+ * Run an evidence capture that must never decide an outcome.
+ *
+ * Resolves to its value, or to null on a throw or after the timeout. Used only
+ * AFTER a confirmed submit, where the one thing that matters is writing
+ * `applied`; a capture that could throw or hang would turn a sent application
+ * into a stranded one.
+ */
+async function captureBounded(capture: () => Promise<string>): Promise<string | null> {
+  // The timer handle, so it can be cleared and not keep the process alive.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // Whichever settles first: the capture, or the timeout's null.
+    return await Promise.race([
+      // A rejection is caught below and becomes null.
+      capture(),
+      // Resolves (never rejects) to null, so a timeout reads as "no evidence".
+      new Promise<null>((resolve) => {
+        // Started inside the executor so the handle is set before the race runs.
+        timer = setTimeout(() => resolve(null), CONFIRMATION_CAPTURE_TIMEOUT_MS);
+      }),
+    ]);
+  } catch {
+    // Missing evidence is reported as null, never as a failure of the submit.
+    return null;
+  } finally {
+    // Always cleared, or a finished run would wait out the timer before exiting.
+    clearTimeout(timer);
+  }
 }
