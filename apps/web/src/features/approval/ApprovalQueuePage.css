@@ -238,3 +238,22 @@
   /* Off the card's own border, so the ring is not lost against the hairline. */
   outline-offset: 2px;
 }
+
+/* --- Stale-click notice ------------------------------------------------ */
+
+/* Shown on a card whose Approve was refused because the row changed elsewhere. Accent, not the
+   alarm color: it is a status ("look again"), not an error, and it must not read as a fabrication. */
+.queue__stale-notice {
+  /* Tinted panel from the theme-aware tokens (light-dark() inside them), never a [data-theme] rule. */
+  background: var(--accent-subtle);
+  /* A full border so it stands out on both the card and the plain Bucket A row. */
+  border: 1px solid var(--accent);
+  /* Same corner language as the cards it sits in. */
+  border-radius: var(--radius-sheet);
+  /* Room around the sentence so it reads as a panel, not a stray line; spacing tokens, so it follows the scale. */
+  padding: var(--gap-2) var(--gap-3);
+  /* Separated from the card content below it, by the same scale step the cards use. */
+  margin: 0 0 var(--gap-3);
+  /* Body text color: the tint carries the signal, the words stay fully legible. */
+  color: var(--text-primary);
+}

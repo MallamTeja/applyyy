@@ -73,14 +73,15 @@ describe('announcementFor (the page-level announcement text)', () => {
 
 describe('ApprovalQueuePage wiring for a cross-bucket save', () => {
   it('has exactly one page-level polite status region, rendering the announcement', () => {
-    // Every status region on the page itself (DiffView's own are in DiffView.tsx).
-    const regions = page.match(/role="status"/g) ?? [];
-    // Exactly one: a second would double-announce.
-    assert.equal(regions.length, 1);
-    // It is the visually hidden polite one, and it renders the announcement state.
+    // The HIDDEN page-level announcer specifically. Visible per-card stale notices are also
+    // role="status" (approvalStaleClick.test.ts), so counting every status region would conflate the two.
+    const announcer = '<p className="visually-hidden" role="status" aria-live="polite">';
+    // Exactly one announcer: a second would double-announce every edit.
+    assert.equal(page.split(announcer).length - 1, 1);
+    // And it renders the announcement state.
     assert.match(page, /<p className="visually-hidden" role="status" aria-live="polite">\s*\{announcement\}\s*<\/p>/);
     // Mounted in the main return BEFORE either bucket, so no bucket change can unmount it.
-    assert.ok(page.indexOf('role="status"') < page.indexOf('aria-labelledby="bucket-b-heading"'), 'the region must sit outside and above the buckets');
+    assert.ok(page.indexOf(announcer) < page.indexOf('aria-labelledby="bucket-b-heading"'), 'the announcer must sit outside and above the buckets');
   });
 
   it('editRow clears the announcement before the save and sets it from the outcome after', () => {

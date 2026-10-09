@@ -191,12 +191,35 @@ function announcementFor(
   return `${what} This application is back in the verified batch.`;
 }
 
+/* The stale notice's id, referenced by its card's aria-describedby. Built in one place, like cardId. */
+function staleNoticeId(applicationId: string): string {
+  // Prefixed so it cannot collide with app-card-, review- or preview- ids on the same page.
+  return `stale-notice-${applicationId}`;
+}
+
 /* The focus target for one application's card, in either bucket. ONE builder so the id the effect
    looks up and the id the markup carries cannot drift apart. */
 function cardId(applicationId: string): string {
   // Prefixed so it can never collide with the review-/preview- region ids of the same row.
   return `app-card-${applicationId}`;
 }
+
+/* The card-level words for an Approve that was refused because the row changed under it (a newer
+   updated_at from confirmFresh, a PT409 from the RPC, or a batch row that left Bucket A). Added
+   2026-10-08: Teja's first real approval "did nothing" - the fresh row was adopted, nothing was
+   approved, and the only signal was a toast that had already faded. One constant so the page and
+   its test cannot drift. Rejects never need their own wording: they carry no stamp gate
+   (buildSettleArgs omits p_expected_updated_at for dropped_filter), so they are never refused as stale. */
+const STALE_CLICK_MESSAGE = 'This application changed since you opened it. Review the latest version, then click Approve again.';
+
+/* The batch skipped a row because the operator's OWN edit to it is still saving. Nothing changed
+   elsewhere, so STALE_CLICK_MESSAGE ("this application changed") would be untrue here; the truthful
+   next step is to wait for the save, review, then approve individually. */
+const SAVING_SKIP_MESSAGE = 'Your edit is still saving, so this was not batch-approved. When it has saved, review it, then approve it.';
+
+/* confirmFresh re-read no row at all (deleted, or hidden by RLS): there is no "latest version" to
+   review, so the stale wording would send the operator looking for something that is not there. */
+const GONE_MESSAGE = 'This application is no longer available to you. Reload the page to see the current queue.';
 
 /* D4, in words: why the controls are missing, so it does not read as a bug. */
 const EDIT_DISABLED_REASON =
@@ -293,6 +316,37 @@ export function ApprovalQueuePage(): ReactElement {
   /* The row whose card should take focus once the save that moved it has rendered. Set ONLY on a
      bucket move: an in-bucket save keeps DiffView mounted, and its own focus return handles it. */
   const [pendingFocusId, setPendingFocusId] = useState<string | null>(null);
+  /* Per-row "your click was refused because the row changed" notices, keyed by application id.
+     Page state (not DiffView state) so it survives the remount an adoption that moves the row
+     between buckets causes, and stays on the card until the operator acts on that row again. */
+  const [staleNotices, setStaleNotices] = useState<ReadonlyMap<string, string>>(new Map());
+
+  /* Put a stale-refusal notice on one row's card and move focus there, so a refused click is never
+     silent. Functional update: settle() runs across awaits, and its render closure is stale.
+     `focus` defaults to true (a single-row click focuses its card); a batch passes false for every
+     refused row after the first, so focus lands once instead of jumping to the last card. */
+  function noteStale(applicationId: string, message: string = STALE_CLICK_MESSAGE, { focus = true }: { focus?: boolean } = {}): void {
+    // A new Map every time (never mutate), so React sees the change and the old map stays valid.
+    setStaleNotices((previous) => new Map(previous).set(applicationId, message));
+    // Reuses the bucket-move focus effect (the card id exists in both buckets), unless the caller already focused one.
+    if (focus) setPendingFocusId(applicationId);
+  }
+
+  /* Drop one row's notice when the operator acts on it again, so a repeat refusal re-announces
+     (a status region only speaks on a change) and a successful retry leaves no stale warning behind. */
+  function clearStale(applicationId: string): void {
+    // Functional + copy, as in noteStale; a no-op copy is skipped so an unrelated click costs no render.
+    setStaleNotices((previous) => {
+      // Nothing showing for this row: keep the same map, so React bails out of the render.
+      if (!previous.has(applicationId)) return previous;
+      // A copy without this row's notice.
+      const next = new Map(previous);
+      // The removal itself, on the copy.
+      next.delete(applicationId);
+      // Handed back as the new state.
+      return next;
+    });
+  }
 
   /* Runs after the commit that drew the moved card in its new bucket, so the element exists.
      Without it focus falls to <body> when the old card unmounts. */
@@ -564,6 +618,10 @@ export function ApprovalQueuePage(): ReactElement {
     // The batch button's promise: only rows that are STILL Bucket A when their turn comes.
     requireBucketA = false,
   ): Promise<void> {
+    /* A new Approve/Reject on these rows retires their old stale notice FIRST, before any await, so
+       a second stale refusal is a fresh change to the status region and is announced again. */
+    for (const id of ids) clearStale(id);
+
     /* No client means no database. Say so instead of optimistically clearing
        rows the operator would then believe were submitted. */
     if (supabase === null) {
@@ -591,6 +649,9 @@ export function ApprovalQueuePage(): ReactElement {
     const unconfirmed: string[] = [];
     // Stored statuses of rows another tab or the worker settled first (item 6), named in the summary.
     const settledElsewhere: string[] = [];
+    /* Whether this settle already moved focus to a refused card. A batch can refuse several rows;
+       focusing each in turn would leave focus on the LAST one and skip past the first notice. */
+    let focusedOne = false;
 
     try {
       for (const id of mine) {
@@ -612,6 +673,22 @@ export function ApprovalQueuePage(): ReactElement {
             if (check.stored !== undefined) adoptStored(id, check.stored);
             // Named in the summary, never approved on the strength of the old diff.
             changed.push(id);
+            /* STALE PATH 1: said ON the card (and focused), because the toast alone read as "did nothing".
+               Only when a fresh row was adopted and is still awaiting: that is the "latest version" the
+               words point at. A row now approved/rejected elsewhere was removed by adoptStored (no card). */
+            if (check.stored?.status === 'awaiting_approval') {
+              // The newer stored version is on screen now; ask for a review of it.
+              noteStale(id, STALE_CLICK_MESSAGE, { focus: !focusedOne });
+              // Later refusals in this settle keep focus here.
+              focusedOne = true;
+            }
+            // Vanished (no row re-read): nothing adopted, so the old card may still show; say it is gone.
+            else if (check.stored === undefined && latestDiffs.current.has(id)) {
+              // Truthful wording: there is no newer version to review, only a reload to do.
+              noteStale(id, GONE_MESSAGE, { focus: !focusedOne });
+              // Same focus-once rule.
+              focusedOne = true;
+            }
             // Next row.
             continue;
           }
@@ -630,6 +707,14 @@ export function ApprovalQueuePage(): ReactElement {
         if (requireBucketA && (latest === undefined || deriveBucket(latest) !== 'A' || editing.current.has(id))) {
           // Left in the queue for individual review.
           skipped.push(id);
+          /* STALE PATH 2: the batch refused a row; the card says why. No card when the row left the
+             queue (latest undefined), so the summary toast is the only place left to say it. */
+          if (latest !== undefined) {
+            // The operator's own save is still in flight: "changed" would be untrue, so say "still saving".
+            noteStale(id, editing.current.has(id) ? SAVING_SKIP_MESSAGE : STALE_CLICK_MESSAGE, { focus: !focusedOne });
+            // Later refusals in this batch keep focus on this first card.
+            focusedOne = true;
+          }
           // Next row.
           continue;
         }
@@ -709,8 +794,15 @@ export function ApprovalQueuePage(): ReactElement {
           adoptStored(id, outcome.stored);
           // Reported with the other cross-tab changes: "not approved ... review the current version".
           changed.push(id);
+          // STALE PATH 3: PT409 with the newer row adopted; the card says why nothing was approved.
+          noteStale(id, STALE_CLICK_MESSAGE, { focus: !focusedOne });
+          // Focus-once, as on the other two paths.
+          focusedOne = true;
         }
         // Stale stamp but the re-read failed: we know the row changed, not to what. Retry runs confirmFresh first.
+        /* No card notice here on purpose: nothing was adopted, so "review the latest version" would
+           point at a version not on screen. The "could not confirm" toast asks for a retry, and the
+           retry's confirmFresh adopts the newer row and raises the notice (STALE PATH 1). */
         else if (staleStamp) unverified.push(id);
         else if (noAnswer) unconfirmed.push(id);
         // Refused, and nothing moved: a real failure, safe to retry.
@@ -764,7 +856,7 @@ export function ApprovalQueuePage(): ReactElement {
     }
     if (changed.length > 0) {
       toast.error(
-        `${changed.length} ${changed.length === 1 ? 'application was' : 'applications were'} not approved because ${changed.length === 1 ? 'it' : 'they'} changed elsewhere since you opened ${changed.length === 1 ? 'it' : 'them'}. Review the current version.`,
+        `${changed.length} ${changed.length === 1 ? 'application was' : 'applications were'} not approved because ${changed.length === 1 ? 'it' : 'they'} changed elsewhere since you opened ${changed.length === 1 ? 'it' : 'them'}. Review the latest version, then click Approve again.`,
       );
     }
     // Sent with no answer and no readable row afterwards: neither "done" nor "failed" is known.
@@ -886,6 +978,8 @@ export function ApprovalQueuePage(): ReactElement {
      changed until the database has accepted it, so the preview, the Download and the score can
      never describe a resume that was not stored. */
   async function editRow(applicationId: string, action: PageEditAction): Promise<EditResult> {
+    // Editing IS reviewing the latest version, which is what the stale notice asked for, so it retires.
+    clearStale(applicationId);
     // What this row's diff was built from.
     const source = sources.get(applicationId);
     // An approval or rejection is in flight; an edit now could land mid-approval.
@@ -1166,7 +1260,17 @@ export function ApprovalQueuePage(): ReactElement {
                   tabIndex={-1}
                   /* What a screen reader says on landing here: the same words as the card's title. */
                   aria-label={`${diff.jobTitle} at ${diff.companyName}`}
+                  /* Focus lands here after a stale refusal; the description makes a screen reader read the
+                     notice WITH the card's name, since a live region inserted already filled is not reliably spoken. */
+                  aria-describedby={staleNotices.has(diff.applicationId) ? staleNoticeId(diff.applicationId) : undefined}
                 >
+                  {/* A refused stale Approve, said at the TOP of the card the focus lands on. A status,
+                      not an alert: nothing failed, the operator just has newer words to read. */}
+                  {staleNotices.get(diff.applicationId) !== undefined ? (
+                    <p className="queue__stale-notice" id={staleNoticeId(diff.applicationId)} role="status" aria-live="polite">
+                      {staleNotices.get(diff.applicationId)}
+                    </p>
+                  ) : null}
                   <DiffView
                     diff={diff}
                     /* The shared approval path; see approveReviewed for why the
@@ -1254,7 +1358,16 @@ export function ApprovalQueuePage(): ReactElement {
                   tabIndex={-1}
                   /* Same accessible name as the Bucket B card, so the row is announced the same either side. */
                   aria-label={`${diff.jobTitle} at ${diff.companyName}`}
+                  /* Focus lands here after a stale refusal; the description makes a screen reader read the
+                     notice WITH the card's name, since a live region inserted already filled is not reliably spoken. */
+                  aria-describedby={staleNotices.has(diff.applicationId) ? staleNoticeId(diff.applicationId) : undefined}
                 >
+                  {/* Same notice as Bucket B, at the top of the row so it shows even with Review closed. */}
+                  {staleNotices.get(diff.applicationId) !== undefined ? (
+                    <p className="queue__stale-notice" id={staleNoticeId(diff.applicationId)} role="status" aria-live="polite">
+                      {staleNotices.get(diff.applicationId)}
+                    </p>
+                  ) : null}
                   <div className="queue__clean-line">
                     <span className="queue__clean-job">
                       {diff.jobTitle} at {diff.companyName}
