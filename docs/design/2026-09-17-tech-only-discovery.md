@@ -279,6 +279,28 @@ Cost of the looser default: a handful of Gemini calls on titles the classifier
 did not recognise. Cost of the tighter default: silent starvation that is
 indistinguishable from "no jobs today."
 
+> **Amendment, 2026-10-09 (Teja, option (d)).** The third branch above is narrowed.
+> It now holds only when the user has configured **no titles and no keywords**.
+> Once either list has an entry, **matches neither** → **drop**, with
+> `drop_reason = 'tech_gate_unclassified'` (an excluded term keeps `tech_gate`).
+>
+> *Why:* the cost estimate above ("a handful of Gemini calls") did not survive
+> contact with real boards. Measured live on 2026-10-09, 6636 of 6662
+> `passed_filters` rows (99.6%) had matched nothing, about 3155 of them sales,
+> partnerships, GTM or support roles. A user who has listed what they hunt for
+> has given an answer, and a posting matching none of it is a no. The
+> empty-config case keeps the original pass-and-warn, because that is the
+> starvation case this section was protecting.
+>
+> The matcher now re-applies the same gate (`screenTechRole`, not a copy) to
+> each `passed_filters` row before any Gemini call, against the user's
+> *current* config, and drops a rejected row through its own
+> `passed_filters → dropped_filter` edge. That prunes the existing backlog at
+> zero Gemini cost, with no one-off bulk write. Code:
+> [tech-gate.ts](../../supabase/functions/_shared/screen/tech-gate.ts),
+> [tech-pregate.ts](../../supabase/functions/matcher/tech-pregate.ts).
+> The text above is kept as the 2026-09-17 record.
+
 ### Recording the drop
 
 A dropped job keeps its `jobs` row and transitions its `applications` row to a

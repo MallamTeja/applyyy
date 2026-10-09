@@ -13,11 +13,17 @@
 // an unrecognised title is MISSING INFORMATION, not a negative verdict. It passes, and
 // it warns. That mirrors the three-outcome RuleVerdict cascade.ts already uses, where a
 // rule that cannot be evaluated warns rather than drops.
+//
+// AMENDED: Teja's 2026-10-09 ruling (option (d)) amending the 2026-09-17 design: with
+// titles or keywords configured, a non-match is a drop (tech_gate_unclassified); pass+warn
+// only when both are empty. Measured live, 99.6% of passed_filters rows had reached the
+// matcher through the old pass branch, so it was the rule, not the exception. The tests
+// that pinned the old branch are FLIPPED below, deliberately, not deleted.
 import { test } from "node:test";
 // Strict, so `drop: false` never quietly compares equal to undefined.
 import assert from "node:assert/strict";
 // Extension-suffixed specifier so this runs under Deno and `node --test` alike.
-import { screenTechRole, type TechGatePreferences } from "./tech-gate.ts";
+import { screenTechRole, toTechGatePreferences, type TechGatePreferences } from "./tech-gate.ts";
 
 // A realistic preference set, shaped like the `search_preferences` row it is read from.
 const PREFS: TechGatePreferences = {
@@ -26,23 +32,73 @@ const PREFS: TechGatePreferences = {
   excludedKeywords: ["sales", "marketing", "recruiter", "ops"],
 };
 
-// --- the inverted default, written first because it is the whole point --------------
+// No titles, no keywords, no exclusions: the one config under which the old pass+warn
+// branch survives the 2026-10-09 amendment.
+const EMPTY: TechGatePreferences = { titles: [], keywords: [], excludedKeywords: [] };
 
-// THE TEST THAT MATTERS MOST. A clearly technical title that matches none of the
-// configured patterns must PASS and warn — never drop. Teja's configured titles cannot
-// enumerate every real engineering role, and the ones they miss are exactly the ones a
-// tightened default would silently delete.
-test("an unrecognised but plausible title passes and warns rather than dropping", () => {
+// --- the unclassified branch, written first because it is the whole point ------------
+
+// FLIPPED per Teja's 2026-10-09 ruling (option (d)) amending the 2026-09-17 design: with
+// titles or keywords configured, a non-match is a drop (tech_gate_unclassified); pass+warn
+// only when both are empty. This test used to assert a pass; a plausible-but-unlisted
+// title is now dropped, because the user's lists ARE the answer once they exist.
+test("an unrecognised title under a configured gate is dropped as tech_gate_unclassified", () => {
+  // "Site Reliability Engineer II" matches no PREFS title or keyword.
   const verdict = screenTechRole("Site Reliability Engineer II", null, PREFS);
-  assert.equal(verdict.drop, false);
-  // The warning is what makes the non-answer visible instead of silent.
-  assert.equal("warning" in verdict, true);
+  // Exact shape, so a wrong code or a leaked warning field both fail here.
+  assert.deepEqual(verdict, {
+    drop: true,
+    // Its own code, so these drops are countable and recoverable apart from exclusions.
+    code: "tech_gate_unclassified",
+    // The reason names the title, so a wrong drop is diagnosable from the log alone.
+    reason: '"Site Reliability Engineer II" matched no configured title or keyword',
+  });
 });
 
-// The same branch for a title nobody could classify. Still a pass — the gate has no
-// opinion, and a non-answer is not a rejection.
-test("a title matching nothing at all still passes", () => {
-  assert.equal(screenTechRole("Zephyr Wrangler", null, PREFS).drop, false);
+// FLIPPED, same ruling: the old pinned test ("a title matching nothing at all still
+// passes") now asserts the only case that still passes — an EMPTY config, where the gate
+// has nothing to judge by — and that it says so in a warning.
+test("a title matching nothing at all still passes, but only under an empty config, with a warning", () => {
+  // Nothing configured, so the classifier has no opinion; a non-answer is not a rejection.
+  const verdict = screenTechRole("Zephyr Wrangler", null, EMPTY);
+  // Exact shape: drop false AND the warning text that makes the gap visible.
+  assert.deepEqual(verdict, {
+    drop: false,
+    // The warning names the title and the reason it was not judged.
+    warning: '"Zephyr Wrangler" passed unclassified: no titles or keywords are configured',
+  });
+});
+
+// The counterpart of the test above: the same title under a configured gate drops.
+test("a title matching nothing at all is dropped once titles are configured", () => {
+  // Titles only, so the drop cannot be credited to keywords.
+  const prefs: TechGatePreferences = { titles: ["software engineer"], keywords: [], excludedKeywords: [] };
+  const verdict = screenTechRole("Zephyr Wrangler", null, prefs);
+  // Dropped, with the unclassified code rather than the exclusion code.
+  assert.equal(verdict.drop, true);
+  // Narrowed so the code is readable; the drop assertion above already failed otherwise.
+  assert.equal(verdict.drop && verdict.code, "tech_gate_unclassified");
+});
+
+// Keywords alone are a configuration too: hasTerms checks EITHER list.
+test("a non-match is dropped when only keywords are configured", () => {
+  // Keywords only, titles empty, so the titles list cannot be what triggered the drop.
+  const prefs: TechGatePreferences = { titles: [], keywords: ["react"], excludedKeywords: [] };
+  const verdict = screenTechRole("Zephyr Wrangler", "Herd zephyrs across the plains.", prefs);
+  // Dropped as unclassified.
+  assert.equal(verdict.drop && verdict.code, "tech_gate_unclassified");
+});
+
+// A list of only blank strings configures nothing, matching firstMatch, which skips
+// blanks. Otherwise a stray empty settings row would silently flip the gate to dropping.
+test("blank-only title and keyword lists count as empty, so a non-match passes and warns", () => {
+  // Whitespace entries only — what an un-trimmed settings field can save.
+  const prefs: TechGatePreferences = { titles: ["  "], keywords: ["  "], excludedKeywords: [] };
+  const verdict = screenTechRole("Zephyr Wrangler", null, prefs);
+  // Passes, because nothing usable was configured.
+  assert.equal(verdict.drop, false);
+  // And warns, because that empty config is the gap worth seeing.
+  assert.equal("warning" in verdict, true);
 });
 
 // A recognised title passes WITHOUT a warning, so the warning genuinely means
@@ -68,6 +124,19 @@ test("an excluded keyword drops the posting and names the term", () => {
 test("exclusion beats a target match, so Technical Recruiter is dropped", () => {
   const verdict = screenTechRole("Technical Recruiter", null, { ...PREFS, titles: ["technical"] });
   assert.equal(verdict.drop, true);
+  // The EXCLUSION code, not the unclassified one: the title did match, so only the
+  // exclusion can be why it dropped. Pins exclusions-first after the 2026-10-09 amendment.
+  assert.equal(verdict.drop && verdict.code, "tech_gate");
+});
+
+// Exclusions do not depend on titles/keywords being configured: an empty positive config
+// changes only the no-match branch, never the exclusion branch.
+test("exclusion still drops with empty titles and keywords", () => {
+  // Only exclusions configured.
+  const prefs: TechGatePreferences = { titles: [], keywords: [], excludedKeywords: ["sales"] };
+  const verdict = screenTechRole("Enterprise Sales Executive", null, prefs);
+  // Dropped as an exclusion, not passed with a warning.
+  assert.equal(verdict.drop && verdict.code, "tech_gate");
 });
 
 // --- word boundaries, and the false positive the prototype would have shipped --------
@@ -78,15 +147,49 @@ test("exclusion beats a target match, so Technical Recruiter is dropped", () => 
 // "MLOps Engineer", silently deleting the most in-demand roles Teja is hunting. Matching
 // on word boundaries is what separates the operations job from the engineering one.
 test("an excluded keyword does not match inside a longer word", () => {
+  // "engineer" added as a title so these titles are RECOGNISED: since 2026-10-09 an
+  // unrecognised title drops anyway, which would hide whether "ops" fired. A pass proves
+  // the exclusion did not match inside the word.
+  const prefs: TechGatePreferences = { ...PREFS, titles: ["engineer"] };
   // "ops" is excluded; "DevOps" must survive it.
-  assert.equal(screenTechRole("DevOps Engineer", null, PREFS).drop, false);
-  assert.equal(screenTechRole("MLOps Platform Engineer", null, PREFS).drop, false);
+  assert.equal(screenTechRole("DevOps Engineer", null, prefs).drop, false);
+  // Same for the other in-demand -Ops role.
+  assert.equal(screenTechRole("MLOps Platform Engineer", null, prefs).drop, false);
 });
 
 // The same boundary rule must not go too far the other way: a genuine standalone use of
 // the excluded term still drops.
 test("an excluded keyword still matches as a standalone word", () => {
-  assert.equal(screenTechRole("Business Ops Analyst", null, PREFS).drop, true);
+  // Full shape asserted, not just drop: this title also matches no PREFS title, so a bare
+  // drop:true would pass even if the exclusion never fired. The reason names the term.
+  const verdict = screenTechRole("Business Ops Analyst", null, PREFS);
+  // Exclusion code and the term in the reason.
+  assert.deepEqual(verdict, { drop: true, code: "tech_gate", reason: 'title or description matches excluded term "ops"' });
+});
+
+// Whole-word boundaries for a short abbreviation, the case a substring test gets most
+// wrong. Excluding "Sr" (seniority) must not delete a person's name or an unrelated word
+// that merely starts with those letters.
+test('excluded "Sr" drops Sr / Sr. titles but not Srinivas or Src', () => {
+  // "engineer" configured so the survivors pass as RECOGNISED rather than drop unclassified.
+  const prefs: TechGatePreferences = { titles: ["engineer"], keywords: [], excludedKeywords: ["Sr"] };
+  // "Srinivas" starts with Sr but continues with a word char: no trailing boundary.
+  assert.deepEqual(screenTechRole("Srinivas Software Engineer", null, prefs), { drop: false });
+  // Same for "Src".
+  assert.deepEqual(screenTechRole("Src Platform Engineer", null, prefs), { drop: false });
+  // "Sr." — the "." after "Sr" is a non-word char, so \b holds and the exclusion fires.
+  // Full shape, so the drop is the exclusion and not something else.
+  assert.deepEqual(screenTechRole("Sr. Software Engineer", null, prefs), {
+    drop: true,
+    // Exclusion wins over the "engineer" title match.
+    code: "tech_gate",
+    // The configured term, verbatim.
+    reason: 'title or description matches excluded term "Sr"',
+  });
+  // "Sr" followed by a space: the plain case.
+  const plain = screenTechRole("Sr Software Engineer", null, prefs);
+  // Exclusion code, despite the "engineer" title match.
+  assert.equal(plain.drop && plain.code, "tech_gate");
 });
 
 // The counterpart trap, inherited from cascade.ts's own hard-won comment: an
@@ -130,4 +233,31 @@ test("unconfigured preferences pass everything and say so", () => {
   const verdict = screenTechRole("Enterprise Sales Executive", null, empty);
   assert.equal(verdict.drop, false);
   assert.equal("warning" in verdict, true);
+});
+
+// --- toTechGatePreferences: the one mapping every caller shares ------------------------
+
+// A user with no search_preferences row is a normal state, not a read failure: it maps to
+// an empty config (which then passes+warns), never to a throw.
+test("toTechGatePreferences maps a missing row (undefined or null) to empty lists", () => {
+  // What a PostgREST maybeSingle() gives for no row.
+  assert.deepEqual(toTechGatePreferences(null), EMPTY);
+  // What an optional chain upstream can give.
+  assert.deepEqual(toTechGatePreferences(undefined), EMPTY);
+});
+
+// Nullable columns are read like a missing row, and the snake_case column name is mapped
+// to the camelCase field here, once.
+test("toTechGatePreferences maps null columns to [] and renames excluded_keywords", () => {
+  // All three columns null: same as no row.
+  assert.deepEqual(toTechGatePreferences({ titles: null, keywords: null, excluded_keywords: null }), EMPTY);
+  // Populated columns pass through, excluded_keywords landing in excludedKeywords.
+  assert.deepEqual(toTechGatePreferences({ titles: ["a"], keywords: null, excluded_keywords: ["b"] }), {
+    // Carried verbatim.
+    titles: ["a"],
+    // Null became [].
+    keywords: [],
+    // Renamed field.
+    excludedKeywords: ["b"],
+  });
 });

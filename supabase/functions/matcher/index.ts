@@ -74,6 +74,10 @@ import { createDeadline, deadlineNote, runBatchWithDeadline, shortenedBudgetNote
 // The status-guarded score write and the stamp-guarded status move; extracted so both guards
 // are unit-tested (write-score.test.ts).
 import { advanceScoredRow, writeMatchScore } from "./write-score.ts";
+// Stage 0 re-applied before scoring, so a row the screener would now drop costs no Gemini call.
+import { withTechPreGate } from "./tech-pregate.ts";
+// The one mapper from a search_preferences row to the gate's config.
+import { toTechGatePreferences } from "../_shared/screen/tech-gate.ts";
 
 // Default batch limit for one invocation to preserve key pool quota.
 // Controls how many application rows are processed per function call.
@@ -267,6 +271,24 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // Tracks master profile version used for scoring alignment.
   const masterVersion: number = masterRow.version;
 
+  // The user's CURRENT title/keyword config, for the pre-gate below (Teja, 2026-10-09).
+  // RLS scopes the read to this user's single row.
+  const { data: preferencesRow, error: preferencesError } = await db
+    // Where stage 0's config lives.
+    .from("search_preferences")
+    // Only the three lists the gate reads.
+    .select("titles, keywords, excluded_keywords")
+    // One row per user; none is a normal state (an empty config).
+    .maybeSingle();
+  // A FAILED read stops the run before any Gemini call. Reading it as "no config" would
+  // turn an error into an answer: an empty config passes everything to scoring.
+  if (preferencesError) {
+    // Same 503 shape as the master-profile read above.
+    return await failRun(503, "preferences_unreadable", preferencesError.message);
+  }
+  // A missing row and null columns both map to empty lists, exactly as the screener maps them.
+  const techGatePreferences = toTechGatePreferences(preferencesRow);
+
   // Resolve batch size limit from URL search parameters limit parameter string.
   // Clamps batch size within safe operating bounds.
   const batchSize = resolveBatchSize(new URL(req.url).searchParams.get("limit"));
@@ -355,6 +377,9 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // landed (step 1), or written after it so our stamped move was refused (step 2, PT409).
   // Neither scored nor failed by THIS run, so they get their own counter.
   let skippedStaleCount = 0;
+  // Rows the pre-gate dropped before scoring (excluded term, or no configured title/keyword
+  // matched). Apart from droppedCount, which counts score-floor drops that DID cost a call.
+  let techGateDroppedCount = 0;
   // Initialize array holding individual application row processing failure records.
   // Captures per-row errors without halting whole batch execution.
   const failures: Array<{ applicationId: string; error: string }> = [];
@@ -364,7 +389,33 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // The deadline check lives in runBatchWithDeadline and runs only BETWEEN rows, so a row is
   // never stopped between its payload write and its status RPC. Unreached rows stay at
   // passed_filters and the next run picks them up; they are not failures.
-  const batch = await runBatchWithDeadline(rows ?? [], async (row, call) => {
+  // The scorer below is wrapped by the pre-gate: it is reached ONLY for rows stage 0 lets
+  // through, so a row the gate drops never gets a Gemini call (tech-pregate.test.ts proves
+  // it with a spy). Rows the gate handles itself are counted in onGated.
+  const batch = await runBatchWithDeadline(rows ?? [], withTechPreGate(
+    db,
+    // The config read above; re-judges the backlog against today's lists.
+    techGatePreferences,
+    // Title and body from the embedded job; null when the embed is missing, so the pre-gate
+    // reports it instead of judging an empty title as "matched nothing".
+    (row) => {
+      // Same embedded-relation cast the scorer uses.
+      const job = row.jobs as unknown as { title?: string; description_raw?: string | null } | null;
+      // Missing data stays missing.
+      if (job === null) return null;
+      // Only the two fields the gate reads.
+      return { title: job.title ?? "", descriptionRaw: job.description_raw ?? null };
+    },
+    // Counted by kind, so each lands in the same place a scorer outcome of that kind would.
+    (row, outcome) => {
+      // A pre-gate drop moved the row: progress, not failure.
+      if (outcome.kind === "dropped") techGateDroppedCount += 1;
+      // Another run got there first: the existing lost-race counter.
+      else if (outcome.kind === "skipped_stale") skippedStaleCount += 1;
+      // A failed drop write: recorded like any other row failure.
+      else failures.push({ applicationId: row.id, error: outcome.message });
+    },
+    async (row, call) => {
     // Hand this row's planned timeout/retries to callLlm through the closure above.
     callBudget = call;
       // Cast embedded job relation object to structured job fields interface.
@@ -507,7 +558,7 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
           error: (err instanceof Error ? err.message : String(err)) + shortenedBudgetNote(call),
         });
       }
-  }, { deadline, targeted: applicationId !== null });
+  }), { deadline, targeted: applicationId !== null });
 
   // HONEST FINAL STATUS. `failed` when there was work, none of it moved, and errors
   // explain why: the live matcher run seen 2026-10-04 (rows_in 10, rows_out 0,
@@ -515,7 +566,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // Mixed results stay `succeeded` with error_count set: `agent_run_status` has no
   // `partial` (enums.sql:190), and an empty queue (rows_in 0) is idle, not broken.
   // A batch where every row was DROPPED moved every row, so it counts as progress, not failure.
-  const runStatus = (rows ?? []).length > 0 && scoredCount + droppedCount === 0 && failures.length > 0 ? "failed" : "succeeded";
+  // Pre-gate drops moved their rows too, so they count as progress alongside the other two.
+  const runStatus = (rows ?? []).length > 0 && scoredCount + droppedCount + techGateDroppedCount === 0 && failures.length > 0 ? "failed" : "succeeded";
   // The first few DISTINCT reasons, capped: ten rows failing the same way is one fact,
   // and error_detail is a health-page line, not a log. This is the FAILURE half only; a
   // deadline stop adds its own note below, so error_detail can be non-null with error_count 0.
@@ -531,7 +583,9 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // agent_runs has no skip column, so a lost race is a note beside the others (like the
   // deadline note): visible on the health page, never counted in error_count.
   const staleNote = skippedStaleCount > 0 ? `skipped_stale: ${skippedStaleCount} row(s) lost a race to another run` : null;
-  const errorDetail = [failureDetail, stopNote, staleNote].filter((x) => x !== null).join(" | ") || null;
+  // Pre-gate drops are not errors either; a note, so Health shows the backlog being pruned.
+  const preGateNote = techGateDroppedCount > 0 ? `tech_gate_dropped: ${techGateDroppedCount} row(s) dropped by the pre-gate before scoring` : null;
+  const errorDetail = [failureDetail, stopNote, staleNote, preGateNote].filter((x) => x !== null).join(" | ") || null;
 
   // Check if valid agent run identifier exists for this execution.
   if (runId) {
@@ -578,6 +632,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     dropped: droppedCount,
     // Rows another run took first; not failures, and not scored by this run.
     skipped_stale: skippedStaleCount,
+    // Rows the pre-gate dropped before scoring, at zero Gemini cost.
+    tech_gate_dropped: techGateDroppedCount,
     // Total count of Gemini API calls executed.
     gemini_calls: geminiCallsCount,
     // Array of individual application row failure objects.

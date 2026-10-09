@@ -251,18 +251,45 @@ test("a technical posting passes the gate and is still screened by the cascade",
   assert.equal(planned.inserts[0]!.drop_reason, "title_blocklist");
 });
 
-// THE INVERTED DEFAULT, asserted at the planner level rather than only in the gate's own
-// unit tests — because this is the layer that decides whether the warning survives to
-// somewhere an operator can see it.
-test("an unclassified posting passes the gate and surfaces a warning", () => {
+// FLIPPED per Teja's 2026-10-09 ruling (option (d)) amending the 2026-09-17 design: with
+// titles or keywords configured, a non-match is a drop (tech_gate_unclassified); pass+warn
+// only when both are empty. This test used to pin the pass+warn branch under TECH_PREFS.
+// Asserted at the planner level because this is the layer that turns the verdict's code
+// into the drop_reason column and the run summary's ruleType.
+test("an unclassified posting under a configured gate is born dropped as tech_gate_unclassified", () => {
   const planned = planScreenedApplications(
-    [{ jobId: "job-8", row: { ...BASE_ROW, title: "Site Reliability Specialist" } }],
+    // Matches none of TECH_PREFS' titles or keywords, and none of its exclusions.
+    [{ jobId: "job-8", row: { ...BASE_ROW, title: "Site Reliability Specialist", description_raw: null } }],
+    // No cascade rules, so stage 0 is the only thing that can drop it.
     [],
     BASE_CONTEXT,
     TECH_PREFS,
   );
+  // One row, recorded rather than omitted, carrying the gate's own code.
+  assert.deepEqual(planned.inserts, [{ job_id: "job-8", status: "dropped_filter", drop_reason: "tech_gate_unclassified" }]);
+  // The run summary attributes it to the same code, so the two can be counted together.
+  assert.equal(planned.dropped.length, 1);
+  // ruleType mirrors drop_reason; a mismatch would split one drop across two names.
+  assert.equal(planned.dropped[0]!.ruleType, "tech_gate_unclassified");
+  // Dropped, so no "passed unclassified" warning should claim otherwise.
+  assert.doesNotMatch(planned.warnings.join(" "), /passed unclassified/);
+});
+
+// The surviving half of the old branch: with NOTHING configured the gate has no opinion,
+// so the posting passes and the empty config is reported as a warning.
+test("an unclassified posting under an empty gate passes and surfaces a warning", () => {
+  const planned = planScreenedApplications(
+    // Same title as above; only the preferences differ.
+    [{ jobId: "job-9", row: { ...BASE_ROW, title: "Site Reliability Specialist" } }],
+    // No cascade rules, so the status is stage 0's alone.
+    [],
+    BASE_CONTEXT,
+    OPEN_PREFS,
+  );
+  // Passed through to the matcher.
   assert.equal(planned.inserts[0]!.status, "passed_filters");
-  assert.match(planned.warnings.join(" "), /matched no configured title or keyword/);
+  // The warning survives to the run summary, where an operator can see the empty config.
+  assert.match(planned.warnings.join(" "), /passed unclassified/);
 });
 
 // --- single-row targeting (?application_id=) parity ---------------------------------

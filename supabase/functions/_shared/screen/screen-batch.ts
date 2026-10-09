@@ -178,17 +178,20 @@ export function planScreenedApplications(
     // database lookup. Cheapest-first is the cascade's own organising principle applied
     // one level up.
     const techVerdict = screenTechRole(entry.row.title, entry.row.description_raw ?? null, preferences);
-    // An unclassified title warns and passes. Collected regardless of the verdict, since
-    // the warning is the only signal that the gate had no opinion about a posting.
+    // An unclassified title warns and passes ONLY when no titles or keywords are configured
+    // (Teja, 2026-10-09); with a config it is a drop instead. Collected regardless of the
+    // verdict, since the warning is the only signal that the gate had no config to judge by.
     if ("warning" in techVerdict) warnings.add(techVerdict.warning);
 
     // A stage-0 rejection short-circuits the cascade entirely.
     if (techVerdict.drop) {
       // `drop_reason` NAMES THE STAGE rather than one of the nine rules. Stage 0 is
       // deliberately outside the cascade, so attributing its drop to a `FilterRuleType`
-      // would be a lie the dashboard would then repeat back to Teja.
-      inserts.push({ job_id: entry.jobId, status: "dropped_filter", drop_reason: "tech_gate" });
-      dropped.push({ jobId: entry.jobId, title: entry.row.title, ruleType: "tech_gate", reason: techVerdict.reason });
+      // would be a lie the dashboard would then repeat back to Teja. The gate supplies the
+      // code itself (`tech_gate` for an excluded term, `tech_gate_unclassified` for a title
+      // matching nothing configured), so the two are never spelled here.
+      inserts.push({ job_id: entry.jobId, status: "dropped_filter", drop_reason: techVerdict.code });
+      dropped.push({ jobId: entry.jobId, title: entry.row.title, ruleType: techVerdict.code, reason: techVerdict.reason });
       continue;
     }
 

@@ -23,6 +23,17 @@
 //     matches neither              -> PASS, and warn
 // The third branch is the change. An unrecognised title is a case the classifier has no
 // opinion about, and a non-answer must never be recorded as a rejection.
+//
+// AMENDED BY TEJA, 2026-10-09 (option (d), recorded in the design doc's amendment note):
+// the third branch now depends on whether the user configured anything.
+//     titles AND keywords both empty -> PASS, and warn   (unchanged: nothing to judge by)
+//     either one configured          -> DROP, code `tech_gate_unclassified`
+// WHY: the 2026-09-17 rule priced the pass branch at "a few Gemini calls", assuming an
+// unrecognised title is the exception. Measured live on 2026-10-09 it was the rule:
+// 6636 of 6662 passed_filters rows (99.6%) matched nothing, about 3155 of them sales,
+// partnerships, GTM or support roles. Once a user has said what they hunt for, a title
+// matching none of it IS an answer. The empty-config case keeps the old branch because
+// that is the one the starvation argument was really about: a new user with no lists.
 
 // The config, read from `search_preferences` (supporting_tables.sql:178-183). Named
 // rather than passed as three loose arrays so a caller cannot transpose two of them —
@@ -43,11 +54,47 @@ export interface TechGatePreferences {
 export type TechGateVerdict =
   // Recognised as relevant. Nothing to report.
   | { readonly drop: false }
-  // Not recognised either way. Passes, because a non-answer is not a rejection, and
-  // warns, because an unclassified posting is a gap in the configuration worth seeing.
+  // Not recognised, and the user configured no titles or keywords to recognise it BY.
+  // Passes, because with an empty config there is no answer to give, and warns, because
+  // the empty config is the gap worth seeing.
   | { readonly drop: false; readonly warning: string }
-  // Rejected by an excluded term.
-  | { readonly drop: true; readonly reason: string };
+  // Rejected. `code` is what lands in applications.drop_reason, closed to the two stage-0
+  // outcomes so a caller cannot invent a third spelling; `reason` is the prose for logs.
+  | { readonly drop: true; readonly code: TechGateDropCode; readonly reason: string };
+
+// The two ways stage 0 rejects. Distinct codes, so a drop for an excluded term and a drop
+// for matching nothing configured can be counted apart, and the second can be recovered
+// wholesale if the config was what was wrong.
+export type TechGateDropCode = "tech_gate" | "tech_gate_unclassified";
+
+// Map a `search_preferences` row (or its absence) to the gate's config. Exported so every
+// caller maps it the same way; `?? []` treats a missing row and a null column alike, as
+// "nothing configured" — a missing row is a normal state, not a read failure. A FAILED
+// read must never reach this function: the caller has to stop instead, or an error would
+// be read as an empty config and silently pass everything.
+export function toTechGatePreferences(
+  // The row as PostgREST returns it, or undefined/null when the user has none.
+  row: {
+    readonly titles: readonly string[] | null;
+    readonly keywords: readonly string[] | null;
+    readonly excluded_keywords: readonly string[] | null;
+  } | null | undefined,
+): TechGatePreferences {
+  return {
+    // Role titles; null column or no row means none.
+    titles: row?.titles ?? [],
+    // Keywords; same rule.
+    keywords: row?.keywords ?? [],
+    // Column name differs from the field name; mapped here once.
+    excludedKeywords: row?.excluded_keywords ?? [],
+  };
+}
+
+// True when a list has at least one usable entry. Blank strings do not count, matching
+// `firstMatch`, which skips them: a list of only "  " configures nothing.
+function hasTerms(terms: readonly string[]): boolean {
+  return terms.some((term) => term.trim() !== "");
+}
 
 // Build the matcher for one configured term.
 //
@@ -111,7 +158,9 @@ export function screenTechRole(
   // own example of how fine this line is.
   const excluded = firstMatch(preferences.excludedKeywords, haystack);
   // A genuine rejection, naming the term so a wrong drop is diagnosable.
-  if (excluded !== undefined) return { drop: true, reason: `title or description matches excluded term "${excluded}"` };
+  if (excluded !== undefined) {
+    return { drop: true, code: "tech_gate", reason: `title or description matches excluded term "${excluded}"` };
+  }
 
   // Then the positive match. Titles and keywords are treated alike because a posting
   // titled "Product Engineer" that mentions React is as relevant as one titled
@@ -120,12 +169,23 @@ export function screenTechRole(
   // Recognised. No warning, so the warning below keeps meaning something.
   if (matched !== undefined) return { drop: false };
 
-  // THE INVERTED BRANCH. Nothing matched in either direction, which means the classifier
-  // has no opinion — not that the answer is no. It passes, and it says so. The cost of
-  // this looseness is a few Gemini calls on titles nobody configured for; the cost of the
-  // tight default is silent starvation that reads as "no jobs today".
+  // Nothing matched. What that MEANS depends on whether anything was configured to match.
+  // A user with titles or keywords has stated what they hunt for, so a posting matching
+  // none of it is rejected — with its own code, so these drops are countable and, if the
+  // config turns out too narrow, recoverable as a set (Teja, 2026-10-09).
+  if (hasTerms(preferences.titles) || hasTerms(preferences.keywords)) {
+    return {
+      drop: true,
+      code: "tech_gate_unclassified",
+      reason: `"${title}" matched no configured title or keyword`,
+    };
+  }
+
+  // THE EMPTY-CONFIG BRANCH, kept from 2026-09-17. No titles and no keywords means the
+  // classifier has no opinion — not that the answer is no. It passes, and it says so,
+  // because the tight default here would be silent starvation that reads as "no jobs today".
   return {
     drop: false,
-    warning: `"${title}" matched no configured title or keyword; passed unclassified`,
+    warning: `"${title}" passed unclassified: no titles or keywords are configured`,
   };
 }
