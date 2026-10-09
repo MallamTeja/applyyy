@@ -432,3 +432,48 @@
   /* Same corner radius as the tabs above it. */
   border-radius: var(--radius-sm);
 }
+
+/* "Send through pipeline" results (2026-10-08). Above the grid because a settled row leaves
+   `discovered` and the reload removes its card; this strip is where its verdict stays readable. */
+.discovery__send-results {
+  /* Stacked lines, one per send, newest first. */
+  display: flex;
+  /* Vertical: each result is a sentence, not a chip. */
+  flex-direction: column;
+  /* Left-aligned so the Clear button keeps its natural width. */
+  align-items: flex-start;
+  /* Same rhythm as the cards' own rows. */
+  gap: var(--gap-2);
+}
+
+/* Empty (the usual state): out of .discovery's flex flow, so it takes no gap slot and the page looks
+   as it did before the feature. Not display:none, which drops it from the accessibility tree and makes
+   the first result mount a fresh live region, the lost announcement the always-mounted div prevents.
+   React renders an empty list as no nodes at all, so :empty really matches. */
+.discovery__send-results:empty {
+  /* Absolute boxes are not flex items, so the parent's gap skips it. */
+  position: absolute;
+}
+
+/* One send: the job's name, then the agents' verdict beside it. */
+.discovery__send-result {
+  /* Name and sentence on one line when they fit, wrapped when they do not. */
+  display: flex;
+  /* Long titles wrap instead of overflowing on a narrow screen. */
+  flex-wrap: wrap;
+  /* Baseline, so the bold name and the smaller sentence share a text line. */
+  align-items: baseline;
+  /* Separates the name from the sentence without punctuation. */
+  gap: var(--gap-2);
+}
+
+/* In the card footer the send block sits beside the Apply link, so the drawer's own top rule
+   and padding (which separate it from a meta row there) would draw a second line here. */
+.job-card__footer .drawer__send {
+  /* The footer already draws the rule. */
+  border-top: 0;
+  /* The footer already pads. */
+  padding-top: 0;
+  /* Right side of the footer row, so the step list grows under the button, not under the link. */
+  align-items: flex-end;
+}

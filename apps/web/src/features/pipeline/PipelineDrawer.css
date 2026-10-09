@@ -218,7 +218,9 @@
   margin-left: auto;
 }
 
-/* "Send through pipeline" (2026-10-08), passed_filters cards only. Tokens only, no theme
+/* "Send through pipeline" (2026-10-08). Shared by the drawer's passed_filters cards and, since the
+   16:08 ruling, every Discovered card (DiscoveredJobsPage.css overrides only its footer placement),
+   so a change here restyles both. Tokens only, no theme
    selector: a dark-theme attribute rule never matches for a system-preference user here. */
 .drawer__send {
   /* Button, reason and progress stack in reading order. */

@@ -9,16 +9,22 @@
  *   - View Tabs: Matched Tech Jobs, All Discovered, and Filtered Out
  *   - Fast client-side search across title, company, locations, and descriptions
  *
- * THIS PAGE CREATES DISCOVERED ROWS; IT NEVER ADVANCES ONE. The Scout modal upserts
- * jobs and applications at status `discovered`, and that is the page's whole write
- * surface. The one-click fast path that used to advance a row six statuses to the
+ * THIS PAGE CREATES DISCOVERED ROWS; IT NEVER WRITES A STATUS ITSELF. The Scout modal
+ * upserts jobs and applications at status `discovered`, and that is the page's whole
+ * write surface. The one-click fast path that used to advance a row six statuses to the
  * approval queue was deleted on 2026-09-17 by Teja's ruling: it named six agents and
- * ran none of them, two of those agents have never been written, and the rows it
- * produced were read downstream as audited and safe to batch-approve. Status
- * transitions belong to the pipeline agents. A new affordance here needs a new ruling.
+ * ran none of them, and the rows it produced were read downstream as audited and safe
+ * to batch-approve. Status transitions belong to the pipeline agents.
+ *
+ * The one affordance that moves a row, the per-card "Send through pipeline", exists by
+ * a NEW ruling (Teja, 2026-10-08 16:08). It is honest where the fast path was not: it
+ * passes THIS row's id to the DEPLOYED normalizer, screener, matcher, tailor and auditor
+ * (?application_id=, see features/pipeline/rowPipeline.ts), and each function advances
+ * the row with its own agent key under RLS. The browser invokes and re-reads; it writes
+ * no status. Any other affordance here still needs its own ruling.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { Link } from 'react-router-dom';
 
@@ -40,12 +46,31 @@ import {
   setTechOnlyPreference,
 } from '../settings/filtersStore.ts';
 import type { FilterRuleConfig } from '../settings/filtersStore.ts';
+// The drawer's per-row button, reused so both lanes share one lock, one step list and one set of sentences.
+import { OutcomeNote, SendThroughPipeline } from '../pipeline/DrawerAppCard.tsx';
+// Type only: one finished run's answer, kept here after the card unmounts on reload.
+import type { SendResult } from '../pipeline/DrawerAppCard.tsx';
+// The five-agent chain for a discovered row, and the id shape check the engine also enforces.
+import { DISCOVERED_STEPS, isApplicationId } from '../pipeline/rowPipeline.ts';
+// The real invoke/read deps, or null on an unconfigured machine (the button then explains itself).
+import { liveRowPipelineDeps } from '../pipeline/rowPipelineDeps.ts';
 
 import './DiscoveredJobsPage.css';
 
 /* Rows fetched for browser-side cascade evaluation. Totals come from a count query,
    never from this list's length. */
 const LIST_CAP = 300;
+
+/* The job's name for the send button's accessible name and the results strip. The page already
+   treats company_name as optional (getCompanyCooldownInfo, the search filter), and a template string
+   would print a missing one as "undefined — Engineer". Only the parts that are real, non-blank text;
+   neither part -> a stated placeholder, never an empty name. */
+function jobLabel(job: JobRow): string {
+  // Each part kept only when it is a string with visible characters.
+  const parts = [job.company_name, job.title].filter((p): p is string => typeof p === 'string' && p.trim() !== '');
+  // The joined name, or a placeholder that says the data was missing.
+  return parts.length > 0 ? parts.join(' — ') : 'Untitled job';
+}
 
 interface DiscoveredItem {
   readonly applicationId?: string;
@@ -81,16 +106,39 @@ export function DiscoveredJobsPage(): ReactElement {
   /* The exact number of rows at `discovered`, from a count query. The list below is
      capped at LIST_CAP rows, so its length undercounts; this is the honest total. */
   const [discoveredTotal, setDiscoveredTotal] = useState<number | null>(null);
+  /* Outcomes of "Send through pipeline", newest first. Held HERE, not on the card: a settled
+     row has left `discovered`, so the reload removes its card and the card's own note with it.
+     Without this, "Dropped by the screener" would flash and vanish. */
+  const [sendResults, setSendResults] = useState<readonly { readonly applicationId: string; readonly label: string; readonly result: SendResult }[]>([]);
 
-  /* Load discovered jobs & filter rules */
-  const loadData = useCallback(async () => {
+  /* Which loadData call is the latest. Loads overlap (a send settling while another reload is in
+     flight) and can resolve out of order; a stale response applied last would re-show a row that has
+     already advanced as `discovered`, with a live button. Only the newest call writes state. */
+  const loadSeq = useRef(0);
+
+  /* Load discovered jobs & filter rules. silent=true is the settle path after a per-card send: it
+     skips the loading swap, which would replace the whole grid (scroll jumps to the top). It does not
+     keep every card: a row another run has already moved past `discovered` leaves the list, and that
+     card's step list with it. Its run, lock and onSettled still finish, and its outcome lands in the
+     results strip, so only the per-step progress view is lost. */
+  const loadData = useCallback(async (silent = false) => {
+    // Claims "latest"; any older call still awaiting now applies nothing.
+    const seq = ++loadSeq.current;
+    // Re-checked after every await, since a newer call can start during any of them.
+    const stale = (): boolean => seq !== loadSeq.current;
     try {
-      setLoading(true);
-      // A retry starts clean; a stale banner over fresh rows would be its own lie.
-      setLoadError(null);
+      // The visible reload only; a silent refresh keeps the grid (and its cards) mounted.
+      if (!silent) {
+        // Swaps the grid for the "Evaluating" message.
+        setLoading(true);
+        // A retry starts clean; a stale banner over fresh rows would be its own lie.
+        setLoadError(null);
+      }
 
       // Load filter rules
       const rules = await loadFilterRules();
+      // A newer load owns the page now.
+      if (stale()) return;
       setFilterRules(rules);
       // A failed rules read returns NO rules, so every job would read as "matched".
       // Say so instead of presenting an unfiltered list as a filtered one.
@@ -121,6 +169,8 @@ export function DiscoveredJobsPage(): ReactElement {
           // Same predicate as the list, so the two numbers describe the same set.
           .eq('status', 'discovered'),
       ]);
+      // The out-of-order case this guard exists for: drop a response a newer load superseded.
+      if (stale()) return;
 
       // A failed read is an error state. The old code fell back to EVERY jobs row
       // regardless of status (and on a second failure, returned silently), so an
@@ -147,6 +197,8 @@ export function DiscoveredJobsPage(): ReactElement {
           });
         }
       }
+      // Cleared here too, because a silent refresh did not clear it at the start.
+      setLoadError(null);
       setItems(mapped);
       // A failed count is not fatal to the list; fall back to "unknown" rather than the capped length.
       setDiscoveredTotal(countResult.error ? null : countResult.count);
@@ -156,10 +208,14 @@ export function DiscoveredJobsPage(): ReactElement {
         setLoadError(`Filter rules failed to load (${rulesError}); the Matched / Filtered Out split below ignores your rules.`);
       }
     } catch (e) {
+      // A superseded call's failure is not the page's state any more.
+      if (stale()) return;
       // A thrown failure is the same error state as a returned one.
       setLoadError(e instanceof Error ? e.message : 'Failed to load discovered jobs.');
     } finally {
-      setLoading(false);
+      // Only the latest call ends loading; a stale one finishing first must not hide the spinner
+      // of the load that is still running.
+      if (!stale()) setLoading(false);
     }
   }, []);
 
@@ -479,6 +535,37 @@ export function DiscoveredJobsPage(): ReactElement {
         </p>
       )}
 
+      {/* Results of per-card sends. Polite live region, so an outcome is announced without
+          interrupting. A plain div, not a named section: it is not a landmark, so an empty one adds
+          nothing to landmark navigation. Kept mounted even when empty because a live region that
+          mounts WITH its first content is often not announced; while empty, the CSS takes it out of the
+          page's flex flow (.discovery__send-results:empty), so it adds no gap. */}
+      <div className="discovery__send-results" aria-live="polite">
+        {sendResults.map(({ applicationId, label, result }) => (
+          /* One row per send: which job, then the agents' own verdict (and the queue link when ready). */
+          <div key={applicationId} className="discovery__send-result">
+            {/* The card is gone after the reload, so the job is named here. */}
+            <strong>{label}</strong>
+            {/* The shared sentence, worded for the discovered lane's start status. */}
+            <OutcomeNote outcome={result.outcome} httpStatus={result.httpStatus} errorText={result.errorText} steps={DISCOVERED_STEPS} />
+          </div>
+        ))}
+        {/* Clearing is local only; the rows themselves are wherever the agents put them. */}
+        {sendResults.length > 0 && (
+          <button
+            /* Not a submit: the page has no form around it. */
+            type="button"
+            /* The page's existing small-button look. */
+            className="chip-btn"
+            /* Empties the strip; nothing is written anywhere. */
+            onClick={() => setSendResults([])}
+          >
+            {/* The button's accessible name. */}
+            Clear results
+          </button>
+        )}
+      </div>
+
       {/* Grid of Job Cards */}
       {loading ? (
         <div className="discovery__empty">
@@ -494,7 +581,7 @@ export function DiscoveredJobsPage(): ReactElement {
         </div>
       ) : (
         <div className="discovery__grid">
-          {filteredItems.map(({ job, passed, dropReason }) => (
+          {filteredItems.map(({ applicationId, job, passed, dropReason }) => (
             <article key={job.id} className={`job-card ${!passed ? 'job-card--dropped' : ''}`}>
               {/* If dropped, display clear reason banner */}
               {!passed && dropReason && (
@@ -585,13 +672,44 @@ export function DiscoveredJobsPage(): ReactElement {
                   <span>Apply Link ↗</span>
                 </a>
 
-                {/* NO per-card pipeline button, deliberately. The one that sat here was
-                    labelled "Tailor & Queue" but opened the generic PipelineRunModal, which
-                    takes no job id — so it ran the whole pipeline over every eligible row,
-                    not this card. A button on a card claims to act on that card. The
-                    honest single entry point is the "Run pipeline" button in the page
-                    header. (Before that, this slot held the deleted fast path that forged
-                    six agent transitions; see the file header.) */}
+                {/* Per-card "Send through pipeline" (Teja's ruling, 2026-10-08 16:08). A button
+                    on a card claims to act on that card, and this one does: it passes THIS
+                    row's applicationId to the deployed agents. The "Tailor & Queue" button that
+                    once sat here opened the generic PipelineRunModal, which takes no job id, so
+                    it ran every eligible row; the header's "Run pipeline" keeps that batch job.
+                    (Before that, this slot held the deleted fast path that forged six agent
+                    transitions; see the file header.) This page still writes no status: each
+                    function advances the row with its own agent key under RLS.
+                    Shown on EVERY tab, Filtered Out included: those rows are still
+                    `discovered`, and the Matched / Filtered Out split is this page's local
+                    preview, not the screener. The deployed screener is the authority, and the
+                    outcome note says "Dropped by the screener" when it disagrees with the
+                    preview. Only a real-shaped id gets a button: a row without one cannot be
+                    addressed, and the engine would refuse it anyway. */}
+                {isApplicationId(applicationId) && (
+                  <SendThroughPipeline
+                    /* The row the agents act on; also the per-row lock key. */
+                    applicationId={applicationId}
+                    /* Null on an unconfigured machine: the button disables with a reason. */
+                    deps={liveRowPipelineDeps}
+                    /* All five agents: a discovered row needs dedupe and screening first. */
+                    steps={DISCOVERED_STEPS}
+                    /* The row has usually left `discovered`, so reload; keep the outcome above
+                       the grid because the reload unmounts this card. */
+                    /* Names the job, so twenty buttons do not share one accessible name. */
+                    label={jobLabel(job)}
+                    onSettled={(result) => {
+                      // null: a refused click (another run holds the row, and ITS settle reloads),
+                      // or a throw the engine and deps are written never to make, which the card
+                      // reports itself. No result to keep, and no reload owed by this click.
+                      if (result === null) return;
+                      // Newest first, one entry per row, so a re-send replaces its old line.
+                      setSendResults((prev) => [{ applicationId, label: jobLabel(job), result }, ...prev.filter((r) => r.applicationId !== applicationId)]);
+                      // Silent: the row leaves the grid without the loading swap.
+                      void loadData(true);
+                    }}
+                  />
+                )}
               </div>
             </article>
           ))}

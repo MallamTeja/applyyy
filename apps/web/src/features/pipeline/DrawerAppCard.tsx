@@ -3,7 +3,9 @@
    card's one decision ("does this row offer View resume?") needs a test that can reach it.
 
    2026-10-08: also carries "Send through pipeline" for the passed_filters lane. The real deps
-   live in rowPipelineDeps.ts and arrive as a prop, so this file still imports no client. */
+   live in rowPipelineDeps.ts and arrive as a prop, so this file still imports no client.
+   Later the same day SendThroughPipeline was exported for DiscoveredJobsPage's cards, with the
+   lane's step list as a prop (Teja's ruling, 2026-10-08 16:08). */
 
 /* Type only: the element type the component returns. */
 import type { ReactElement } from 'react';
@@ -20,7 +22,7 @@ import { SourceBadge } from '../../app/SourceBadge.tsx';
 /* The pure per-row engine (another worker's file; imported, never edited). The browser only
    INVOKES agents through its deps; every status change is the deployed agent's own write.
    With its extension, like SourceBadge above: other tests' load hooks only try .tsx. */
-import { PASSED_FILTERS_STEPS, runRowPipeline } from './rowPipeline.ts';
+import { PASSED_FILTERS_STEPS, STEP_INPUT_STATUS, runRowPipeline } from './rowPipeline.ts';
 /* Types only: the engine's contract, so a new outcome kind or stop reason fails to compile here. */
 import type { PipelineStep, RowPipelineDeps, RowPipelineOutcome, StepEvent, StopReason } from './rowPipeline.ts';
 
@@ -92,9 +94,9 @@ export function isRowInFlight(applicationId: string): boolean {
 
 /* Human names for the steps, closed over PipelineStep so a new step fails to compile. */
 const STEP_LABEL: Record<PipelineStep, string> = {
-  /* Not shown in this lane, but the record must be total. */
+  /* Dedupes the row against your other jobs; shown only in the Discovered lane. */
   normalizer: 'Normalizer',
-  /* Not shown in this lane either. */
+  /* Screens deduped rows to passed_filters or dropped_filter; shown only in the Discovered lane. */
   screener: 'Screener',
   /* Scores the row (Gemini). */
   matcher: 'Matcher',
@@ -146,25 +148,40 @@ const STOP_MESSAGE: Record<StopReason, (step: string, finalStatus: string | null
 /* One honest sentence per outcome kind. A mapped type over the union, so each entry receives its
    own narrowed outcome and a new kind in rowPipeline.ts fails to compile until it has a sentence. */
 export const OUTCOME_MESSAGE: {
-  readonly [K in RowPipelineOutcome['kind']]: (outcome: Extract<RowPipelineOutcome, { kind: K }>, httpStatus: number | null, errorText: string | null) => string;
+  readonly [K in RowPipelineOutcome['kind']]: (
+    outcome: Extract<RowPipelineOutcome, { kind: K }>,
+    httpStatus: number | null,
+    errorText: string | null,
+    /* The lane's step list: only not_startable reads it, to name the status the lane starts from. */
+    steps: readonly PipelineStep[],
+  ) => string;
 } = {
   /* The engine refused before any call; nothing was spent. */
   invalid_id: () => "Nothing was run: this row's id is not a valid application id.",
   /* The first read failed; nothing was invoked, so nothing was spent. */
   status_unreadable: () => "Nothing was run: this row's status could not be read.",
-  /* The row moved lanes since the drawer loaded; these three agents would be the wrong ones. */
-  not_startable: (o) => `Nothing was run: the row is now at ${o.finalStatus}, not passed_filters.`,
+  /* The row moved lanes since the list loaded. The expected status comes from the lane's first step
+     (discovered for the Discovered page, passed_filters for the drawer), so it is true for both. */
+  not_startable: (o, _http, _err, steps) =>
+    /* An empty list has no start status; "this lane's start" is then the only true wording. */
+    `Nothing was run: the row is now at ${o.finalStatus}, not ${steps[0] === undefined ? "this lane's start" : STEP_INPUT_STATUS[steps[0]].join(' or ')}.`,
   /* OutcomeNote renders the queue link beside this sentence. */
   /* Flagged audits reach awaiting_approval too, so the sentence points at the findings. */
   ready_for_approval: () => 'Ready for your approval: check any audit findings in the queue',
-  /* The matcher is the only agent in this lane that drops; any other dropper is named. */
+  /* Always opens "Dropped by the <agent>" (orchestrator ruling, 2026-10-08 17:31): on the Discovered
+     page's Filtered Out tab the drop must read as the deployed agent's verdict, never as this page's
+     local filter preview being wrong. No reason text is quoted because none reaches the card: the
+     re-read selects only `status` (rowPipelineDeps.ts liveRead), and the outcome carries no body. */
   dropped: (o) =>
-    /* Branch on the step, never on the status text, so the sentence names who dropped it. */
+    /* Branch on the step, never on the status text alone, so the sentence names who dropped it. */
     o.atStep === 'matcher'
       ? /* The matcher's floor is a code constant (_shared/match/score-threshold.ts), not a user setting. */
-        "The matcher dropped this job (it scored below the matcher's advance floor)"
-      : /* Unexpected in this lane, so it names the step and the exact status. */
-        `The ${STEP_LABEL[o.atStep].toLowerCase()} dropped this job (${o.finalStatus}).`,
+        "Dropped by the matcher: it scored below the matcher's advance floor"
+      : /* dropped_duplicate IS the reason: a fingerprint match against another of your jobs rows. */
+        o.atStep === 'normalizer' && o.finalStatus === 'dropped_duplicate'
+        ? 'Dropped by the normalizer: a duplicate of another job already in your list (dropped_duplicate)'
+        : /* The screener, or any other agent: the agent and the exact status, with no guessed cause. */
+          `Dropped by the ${STEP_LABEL[o.atStep].toLowerCase()} (${o.finalStatus}).`,
   /* The tailor marks failed for TWO causes (validator refusal, or an unusable posting it never sent
      to the model: tailor/index.ts tailor_input_unusable); the sentence must be true for both. */
   failed: (o) =>
@@ -187,11 +204,13 @@ export function describeOutcome(
   httpStatus: number | null,
   // The function's own error words (deps body.error); optional so plain outcomes need not pass it.
   errorText: string | null = null,
+  // The lane's steps; defaults to the drawer's lane so existing callers keep their sentences.
+  steps: readonly PipelineStep[] = PASSED_FILTERS_STEPS,
 ): string {
   /* Widened view of the entry for this kind. */
-  const sentence = OUTCOME_MESSAGE[outcome.kind] as (o: RowPipelineOutcome, http: number | null, err: string | null) => string;
+  const sentence = OUTCOME_MESSAGE[outcome.kind] as (o: RowPipelineOutcome, http: number | null, err: string | null, s: readonly PipelineStep[]) => string;
   /* Text only; callers render it as a text node. */
-  return sentence(outcome, httpStatus, errorText);
+  return sentence(outcome, httpStatus, errorText, steps);
 }
 
 /* D8 (review, 2026-10-08): the lock discipline in ONE tested place. Claims the row synchronously
@@ -215,6 +234,28 @@ export async function withRowLock<T>(
   }
 }
 
+/* Review fix (2026-10-08): the "settle AFTER release" ordering in ONE tested place, beside the lock it
+   orders against. A caller's settle usually reloads its list; called while the row is still held, the
+   reloaded card would render its button disabled with nothing left to re-enable it. Runs settle exactly
+   once on every path (ran, refused, or threw), and only after withRowLock's finally released the row. */
+export async function withRowLockThenSettle<T>(
+  // The row the lock is keyed on.
+  applicationId: string,
+  // The run; only called when the lock was claimed.
+  fn: () => Promise<T>,
+  // The caller's after-hook; it reads whatever the run recorded, so it takes no arguments here.
+  settle: () => void,
+): Promise<{ readonly started: false } | { readonly started: true; readonly value: T }> {
+  // finally OUTSIDE the awaited lock, so the release has already happened when settle runs.
+  try {
+    // The lock helper owns claim and release; this function only adds the after-hook.
+    return await withRowLock(applicationId, fn);
+  } finally {
+    // Once, on every path.
+    settle();
+  }
+}
+
 /* Shown when a click lands on a row the lock already holds, so the refusal is not silent. */
 export const ALREADY_RUNNING_MESSAGE = 'This row is already being sent through the pipeline.';
 
@@ -227,6 +268,8 @@ export function OutcomeNote({
   httpStatus,
   /* The function's own error words, also only for invoke_error. */
   errorText = null,
+  /* The lane's steps, for the not_startable sentence; the drawer's lane when omitted. */
+  steps = PASSED_FILTERS_STEPS,
 }: {
   /* What the engine returned. */
   readonly outcome: RowPipelineOutcome;
@@ -234,12 +277,14 @@ export function OutcomeNote({
   readonly httpStatus: number | null;
   /* The function's own error words, when a call failed. */
   readonly errorText?: string | null;
+  /* Optional so existing callers render exactly as before. */
+  readonly steps?: readonly PipelineStep[];
 }): ReactElement {
   /* One paragraph, so the sentence and its link are announced together by the live region. */
   return (
     <p className="drawer__send-outcome">
       {/* Text node only; the sentence never goes through innerHTML. */}
-      {describeOutcome(outcome, httpStatus, errorText)}
+      {describeOutcome(outcome, httpStatus, errorText, steps)}
       {/* The link is the action this whole run exists to reach. */}
       {outcome.kind === 'ready_for_approval' && (
         <>
@@ -256,24 +301,53 @@ export function OutcomeNote({
   );
 }
 
-/* The button, the step list and the result for one row. The card renders it only in SEND_LANE. */
-function SendThroughPipeline({
+/* One finished run's answer: the outcome plus the facts its sentence may need. Exported so a page
+   that unmounts the card on refresh (DiscoveredJobsPage) can keep showing the result itself. */
+export interface SendResult {
+  /* What the engine returned. */
+  readonly outcome: RowPipelineOutcome;
+  /* The last invoke's HTTP status, for the invoke_error sentence. */
+  readonly httpStatus: number | null;
+  /* The function's own error words, when a call failed. */
+  readonly errorText: string | null;
+}
+
+/* The button, the step list and the result for one row. The drawer card renders it only in
+   SEND_LANE with PASSED_FILTERS_STEPS; DiscoveredJobsPage renders it with DISCOVERED_STEPS.
+   Exported (2026-10-08) so both lanes share one lock, one progress list and one set of sentences. */
+export function SendThroughPipeline({
   /* Lock key and the id every invoke carries. */
   applicationId,
   /* Injected, so this component never touches the client itself. */
   deps,
+  /* The lane's agents, in order: the only thing that differs between the two lanes. */
+  steps,
+  /* The caller's refresh hook; the drawer passes none. */
+  onSettled,
+  /* Names the job in the button's accessible name; the drawer passes none. */
+  label,
 }: {
   /* The row to send; also the lock key. */
   readonly applicationId: string;
   /* Null disables the button with a visible reason. */
   readonly deps: RowPipelineDeps | null;
+  /* Required, so no caller silently gets the wrong lane's agents by default. */
+  readonly steps: readonly PipelineStep[];
+  /* Called once a click has been handled and the lock is released: with the result, or null when
+     there is none (a refused click or an unexpected throw). The row has usually left its lane by
+     then, so a list page reloads here, and that reload may unmount this card. */
+  readonly onSettled?: (result: SendResult | null) => void;
+  /* e.g. "Acme — Engineer". On a page of many cards, identical button names leave a screen-reader
+     user unable to tell which job a button sends; omitted, the visible text stays the name. */
+  readonly label?: string;
 }): ReactElement {
   /* True while THIS card's run is going; the module lock covers other instances. */
   const [running, setRunning] = useState(false);
-  /* Null until the first run, so an idle card shows no step list at all. */
-  const [steps, setSteps] = useState<Readonly<Partial<Record<PipelineStep, StepDisplay>>> | null>(null);
+  /* Null until the first run, so an idle card shows no step list at all. Named progress, not
+     steps, so it cannot be confused with the steps prop (the list of agents to run). */
+  const [progress, setProgress] = useState<Readonly<Partial<Record<PipelineStep, StepDisplay>>> | null>(null);
   /* The engine's answer plus the HTTP status its sentence may need; null before and during a run. */
-  const [result, setResult] = useState<{ readonly outcome: RowPipelineOutcome; readonly httpStatus: number | null; readonly errorText: string | null } | null>(null);
+  const [result, setResult] = useState<SendResult | null>(null);
   /* Client-side notes the engine never produces (lock refusal, unexpected throw). */
   const [note, setNote] = useState<string | null>(null);
 
@@ -281,65 +355,79 @@ function SendThroughPipeline({
   async function start(): Promise<void> {
     /* The button is disabled in this case; this guards a programmatic click too. */
     if (deps === null) return;
-    /* The mandatory lock, through the one tested helper: a second click, a remount, or another card
-       for this id gets started:false and nothing runs. */
-    const run = await withRowLock(applicationId, async () => {
-      /* Disables this card's button for the run. */
-      setRunning(true);
-      /* Cleared so a previous outcome is not read as this run's. */
-      setResult(null);
-      /* Cleared for the same reason. */
-      setNote(null);
-      /* Every step shown as waiting until the engine reports on it. */
-      setSteps({ matcher: 'waiting', tailor: 'waiting', auditor: 'waiting' });
-      /* The outcome does not carry an HTTP status, so the last invoke's is remembered here. */
-      let lastHttpStatus: number | null = null;
-      /* Nor the function's own error words (describeInvokeError's text, carried in body.error). */
-      let lastErrorText: string | null = null;
-      /* Pass-through deps that only observe; the engine sees exactly what the real deps return. */
-      const observed: RowPipelineDeps = {
-        /* Records the status and error text, then hands back the untouched result. */
-        invoke: async (step, id) => {
-          /* The real call, through the injected deps. */
-          const res = await deps.invoke(step, id);
-          /* Kept for the invoke_error sentence. */
-          lastHttpStatus = res.httpStatus;
-          /* A string error only: the body is data from the network, so its shape is checked. */
-          const error = typeof res.body === 'object' && res.body !== null ? (res.body as { error?: unknown }).error : undefined;
-          /* Reset on every call, so a later success never carries an earlier failure's words. */
-          lastErrorText = res.ok || typeof error !== 'string' ? null : error;
-          /* Unchanged, so the engine decides as it would without the wrapper. */
-          return res;
-        },
-        /* Reads go straight through. */
-        readStatus: (id) => deps.readStatus(id),
-      };
-      /* Re-enabled in finally however the run ends; the lock itself is released by withRowLock. */
-      try {
-        /* The engine runs the three agents in order and re-reads the row after each. */
-        const outcome = await runRowPipeline(observed, applicationId, PASSED_FILTERS_STEPS, (event) =>
-          /* Functional update: events arrive between awaits and must not overwrite each other. */
-          setSteps((prev) => ({ ...(prev ?? {}), [event.step]: event.phase })),
-        );
-        /* The honest sentence comes from the outcome, with the call's own words when it failed. */
-        setResult({ outcome, httpStatus: lastHttpStatus, errorText: lastErrorText });
-      } catch (err) {
-        /* The engine and deps are written never to throw; if one does, say so plainly. */
-        setNote(`The run ended with an unexpected error: ${err instanceof Error ? err.message : String(err)}`);
-      } finally {
-        /* Re-enables this card's button. */
-        setRunning(false);
-        /* A click refused DURING this run left "already being sent"; it is stale once the run ends.
-           Only that note is cleared, so an unexpected-error note from the catch above survives. */
-        setNote((current) => (current === ALREADY_RUNNING_MESSAGE ? null : current));
-      }
-    });
+    /* What onSettled receives; stays null unless the engine answered. */
+    let settled: SendResult | null = null;
+    /* The mandatory lock plus the settle ordering, through the one tested helper: a second click, a
+       remount, or another card for this id gets started:false and nothing runs; onSettled fires once,
+       after the release, on every path. */
+    const run = await withRowLockThenSettle(
+      // The row this card sends.
+      applicationId,
+      // The run itself, under the lock.
+      async () => {
+        /* Disables this card's button for the run. */
+        setRunning(true);
+        /* Cleared so a previous outcome is not read as this run's. */
+        setResult(null);
+        /* Cleared for the same reason. */
+        setNote(null);
+        /* Every step of THIS lane shown as waiting until the engine reports on it. */
+        setProgress(Object.fromEntries(steps.map((step) => [step, 'waiting'])));
+        /* The outcome does not carry an HTTP status, so the last invoke's is remembered here. */
+        let lastHttpStatus: number | null = null;
+        /* Nor the function's own error words (describeInvokeError's text, carried in body.error). */
+        let lastErrorText: string | null = null;
+        /* Pass-through deps that only observe; the engine sees exactly what the real deps return. */
+        const observed: RowPipelineDeps = {
+          /* Records the status and error text, then hands back the untouched result. */
+          invoke: async (step, id) => {
+            /* The real call, through the injected deps. */
+            const res = await deps.invoke(step, id);
+            /* Kept for the invoke_error sentence. */
+            lastHttpStatus = res.httpStatus;
+            /* A string error only: the body is data from the network, so its shape is checked. */
+            const error = typeof res.body === 'object' && res.body !== null ? (res.body as { error?: unknown }).error : undefined;
+            /* Reset on every call, so a later success never carries an earlier failure's words. */
+            lastErrorText = res.ok || typeof error !== 'string' ? null : error;
+            /* Unchanged, so the engine decides as it would without the wrapper. */
+            return res;
+          },
+          /* Reads go straight through. */
+          readStatus: (id) => deps.readStatus(id),
+        };
+        /* Re-enabled in finally however the run ends; the lock itself is released by withRowLock. */
+        try {
+          /* The engine runs this lane's agents in order and re-reads the row after each. */
+          const outcome = await runRowPipeline(observed, applicationId, steps, (event) =>
+            /* Functional update: events arrive between awaits and must not overwrite each other. */
+            setProgress((prev) => ({ ...(prev ?? {}), [event.step]: event.phase })),
+          );
+          /* Kept for onSettled as well as for this card's own note. */
+          settled = { outcome, httpStatus: lastHttpStatus, errorText: lastErrorText };
+          /* The honest sentence comes from the outcome, with the call's own words when it failed. */
+          setResult(settled);
+        } catch (err) {
+          /* The engine and deps are written never to throw; if one does, say so plainly. */
+          setNote(`The run ended with an unexpected error: ${err instanceof Error ? err.message : String(err)}`);
+        } finally {
+          /* Re-enables this card's button. */
+          setRunning(false);
+          /* A click refused DURING this run left "already being sent"; it is stale once the run ends.
+             Only that note is cleared, so an unexpected-error note from the catch above survives. */
+          setNote((current) => (current === ALREADY_RUNNING_MESSAGE ? null : current));
+        }
+      },
+      // Read at settle time, so it carries this run's result (or null when there was none).
+      () => onSettled?.(settled),
+    );
     /* The row was held elsewhere: say why nothing happened, instead of a silent no-op. */
     if (!run.started) setNote(ALREADY_RUNNING_MESSAGE);
   }
 
   /* Disabled while this card runs, while another instance holds the lock, or with no client. */
   const disabled = running || isRowInFlight(applicationId) || deps === null;
+  /* One source for the button text, so the aria-label can begin with exactly what is shown. */
+  const visibleText = running ? 'Sending through pipeline…' : 'Send through pipeline';
   /* Note: isRowInFlight is read at render, so another card's run shows here on its next render. */
   /* One block under the meta row, so the run reads as its own section of the card. */
   return (
@@ -355,29 +443,39 @@ function SendThroughPipeline({
         aria-busy={running}
         /* void: the promise is handled inside start(); nothing here awaits it. */
         onClick={() => void start()}
+        /* Names the agents one click runs (each one may spend Gemini quota), before anyone clicks. */
+        title={`Runs the deployed ${steps.map((step) => STEP_LABEL[step]).join(' → ')} for this row`}
+        /* Only with a label: undefined renders no attribute, so the drawer's name is its visible text.
+           Starts WITH the visible text (WCAG 2.5.3 label-in-name), so a voice user saying "click Send
+           through pipeline" still hits it; the job after the colon makes each card's name unique. */
+        aria-label={label === undefined ? undefined : `${visibleText}: ${label}`}
       >
         {/* The idle label is unique to this feature: the live-deploy sentinel. */}
-        {running ? 'Sending through pipeline…' : 'Send through pipeline'}
+        {visibleText}
       </button>
       {/* The reason a disabled button would otherwise leave unexplained. */}
       {deps === null && <span className="drawer__send-reason">Supabase is not configured, so the agents cannot be called.</span>}
-      {/* Polite: progress is announced without interrupting the operator. */}
+      {/* Polite: progress is announced without interrupting the operator. Always live, so the lock
+          refusal and the unexpected-throw notes below are announced on every page too (review fix,
+          2026-10-09: with the region dropped, those two reached no live region on the Discovered page). */}
       <div className="drawer__send-progress" aria-live="polite">
         {/* Absent until the first run, so an idle card stays compact. */}
-        {steps !== null && (
+        {progress !== null && (
           <ol className="drawer__send-steps">
-            {/* The engine's own step list, so the UI shows exactly the agents it runs. */}
-            {PASSED_FILTERS_STEPS.map((step) => (
+            {/* The same list the engine was given, so the UI shows exactly the agents it runs. */}
+            {steps.map((step) => (
               /* data-state drives the colour; the text says the same thing for screen readers. */
-              <li key={step} className="drawer__send-step" data-state={steps[step] ?? 'waiting'}>
+              <li key={step} className="drawer__send-step" data-state={progress[step] ?? 'waiting'}>
                 {/* "Matcher: running" — a text node, never markup from the engine. */}
-                {STEP_LABEL[step]}: {steps[step] ?? 'waiting'}
+                {STEP_LABEL[step]}: {progress[step] ?? 'waiting'}
               </li>
             ))}
           </ol>
         )}
-        {/* The outcome sentence and, on success, the queue link. */}
-        {result !== null && <OutcomeNote outcome={result.outcome} httpStatus={result.httpStatus} errorText={result.errorText} />}
+        {/* The outcome sentence and, on success, the queue link. Not here when the caller takes
+            onSettled: that caller (DiscoveredJobsPage) shows and announces the outcome in its own live
+            strip, which outlives this card, and two live regions would read the same sentence twice. */}
+        {result !== null && onSettled === undefined && <OutcomeNote outcome={result.outcome} httpStatus={result.httpStatus} errorText={result.errorText} steps={steps} />}
         {/* Lock refusal or an unexpected throw. */}
         {note !== null && <p className="drawer__send-outcome">{note}</p>}
       </div>
@@ -448,7 +546,7 @@ export function DrawerAppCard({
       {/* Only the passed_filters lane: other lanes are either not on this three-agent path or
           already past it, and running matcher/tailor/auditor there would be wrong. */}
       {sendThroughPipeline !== undefined && sendThroughPipeline.status === SEND_LANE && (
-        <SendThroughPipeline applicationId={app.id} deps={sendThroughPipeline.deps} />
+        <SendThroughPipeline applicationId={app.id} deps={sendThroughPipeline.deps} steps={PASSED_FILTERS_STEPS} />
       )}
     </article>
   );

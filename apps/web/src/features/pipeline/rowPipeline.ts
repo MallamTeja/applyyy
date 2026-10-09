@@ -1,4 +1,5 @@
-// Pure per-row pipeline engine behind the Pipeline drawer's "Send through pipeline" button.
+// Pure per-row pipeline engine behind "Send through pipeline" (the Pipeline drawer's
+// passed_filters cards and, since 2026-10-08, every Discovered job card).
 //
 // WHY this file exists: the button runs the REAL deployed agents for ONE application, in order,
 // by invoking each edge function with ?application_id=. The functions advance the status
@@ -19,10 +20,10 @@ export type PipelineStep = 'normalizer' | 'screener' | 'matcher' | 'tailor' | 'a
 // The status each step's queue selects. Keyed by the full union so the Record forces an entry
 // for every step; the arrays are the statuses the deployed function will act on.
 export const STEP_INPUT_STATUS: Readonly<Record<PipelineStep, readonly string[]>> = {
-  // discovered -> deduped | dropped_duplicate. Listed now so DISCOVERED_STEPS is data, even
-  // though the function does not accept application_id yet.
+  // discovered -> deduped | dropped_duplicate. Targetable with ?application_id= since 1821881:
+  // the row is deduped against every OTHER jobs row of the same user, not only itself.
   normalizer: ['discovered'],
-  // deduped -> passed_filters | dropped_filter; same not-yet-targetable caveat as above.
+  // deduped -> passed_filters | dropped_filter | failed (missing_job_record); targetable since 1821881.
   screener: ['deduped'],
   // passed_filters -> scored | dropped_filter (same as run-one.ts:18).
   matcher: ['passed_filters'],
@@ -33,12 +34,13 @@ export const STEP_INPUT_STATUS: Readonly<Record<PipelineStep, readonly string[]>
   auditor: ['tailored', 'audit_clean', 'audit_flagged'],
 };
 
-// What the drawer button runs today: the three agents that accept application_id. Equal to
+// What the drawer's passed_filters button runs: the three agents after screening. Equal to
 // run-one's STEPS, which the parity test asserts.
 export const PASSED_FILTERS_STEPS: readonly PipelineStep[] = ['matcher', 'tailor', 'auditor'];
 
-// The full chain for a Discovered row. Not wired to any button yet: normalizer and screener
-// do not accept application_id until another peer lands that change.
+// The full chain for a Discovered row, run by the per-card button on DiscoveredJobsPage (Teja's
+// ruling, 2026-10-08 16:08). Possible because normalizer and screener accept ?application_id=
+// since commit 1821881 (malformed id -> 400; unknown uuid -> 200 found:0, read as no_progress).
 export const DISCOVERED_STEPS: readonly PipelineStep[] = ['normalizer', 'screener', 'matcher', 'tailor', 'auditor'];
 
 // Same regex as run-one.ts:27, which is the shape the edge functions enforce server-side.
@@ -206,8 +208,13 @@ export async function runRowPipeline(
   return classifyTerminal(current, lastInvoked) ?? { kind: 'stopped', atStep: lastInvoked, reason: 'no_progress', finalStatus: current };
 }
 
-// True when the function answered 200 with its kill switch off (status:"skipped_disabled").
+// True when the function answered 200 with its kill switch off. Two spellings exist: most agents
+// say status:"skipped_disabled", but the SCREENER says status:"halted_by_kill_switch"
+// (screener/index.ts:131). Missing the second made a halted screener read as no_progress.
+// data/pipelineRunner.ts:107 accepts the same two spellings for the batch runner.
 function isSkippedDisabled(body: unknown): boolean {
   // Same loose object view as bodyReportsFailure; a non-object body cannot carry the field.
-  return typeof body === 'object' && body !== null && (body as { status?: unknown }).status === 'skipped_disabled';
+  const status = typeof body === 'object' && body !== null ? (body as { status?: unknown }).status : undefined;
+  // Exact matches only: any other status text is not a halt and falls to the later checks.
+  return status === 'skipped_disabled' || status === 'halted_by_kill_switch';
 }

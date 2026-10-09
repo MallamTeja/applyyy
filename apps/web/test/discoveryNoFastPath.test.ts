@@ -115,4 +115,98 @@ describe('what the page must still do', () => {
       'the card footer triggers the deployed agent pipeline modal to process discovered jobs',
     );
   });
+
+  // Teja's ruling 2026-10-08 16:08: each card sends ITS row through the deployed agents. The
+  // positive shape is asserted, so the button cannot quietly fall back to the drawer's 3-step list.
+  it('renders the per-card SendThroughPipeline over the full discovered chain', async () => {
+    // Scoped to the ONE element: from its opening tag up to the first `/>` that closes it, with no
+    // other `<` in between, so a steps={DISCOVERED_STEPS} elsewhere in the file cannot satisfy it.
+    // (`[^>]*` would stop at the `=>` of the onSettled arrow, hence the `<`-free span instead.)
+    const element = source.match(/<SendThroughPipeline\b[^<]*?\/>/)?.[0] ?? '';
+    // The shared component, with this lane's five-agent list, inside that element.
+    assert.match(element, /\bsteps=\{DISCOVERED_STEPS\}/, 'the card must send its row through DISCOVERED_STEPS');
+  });
+
+  it('never writes to applications directly', async () => {
+    // Every write call in the page, as code: `.update(` / `.insert(` / `.upsert(` with an open paren.
+    const writes = source.match(/\.(update|insert|upsert|delete)\(/g) ?? [];
+    // Positive shape: the page's write surface is the Scout modal and the agents, so it has none.
+    // Comments describing the deleted fast path use words, not calls, so they cannot trip this.
+    assert.deepEqual(writes, [], 'status changes belong to the deployed agents, never to this page');
+  });
+
+  it('still selects id and status with the joined job', async () => {
+    // The card needs the real application id for the button; status stays per the orchestrator rule.
+    assert.ok(source.includes(".select('id, status, job:job_id(*)')"), 'the discovered query must keep id, status and the job join');
+  });
+});
+
+/* A slow load resolving AFTER a newer one must not overwrite the newer state: it would
+ * re-show an advanced row as `discovered`, with a live Send button, from a stale snapshot.
+ * loadData claims a sequence number and re-checks it after every await. These tests pin
+ * that shape, scoped to the loadData body so a guard elsewhere in the page cannot satisfy them.
+ */
+describe('loadData request-sequence guard', () => {
+  // The loadData body only, with `//` comment lines dropped, so prose such as
+  // "re-checked after every await" can neither satisfy nor trip an assertion.
+  const loadDataCode = (): string => {
+    // The opening of the callback; its absence means the function was renamed or removed.
+    const start = source.indexOf('const loadData = useCallback(');
+    // Fail loudly here instead of slicing from -1 and testing the wrong text.
+    assert.ok(start !== -1, 'loadData must still be declared as a useCallback');
+    // The first empty-deps close after the opening is loadData's own (the effect uses [loadData]).
+    const end = source.indexOf('}, []);', start);
+    // Same reason: an unmatched close would make every check below vacuous.
+    assert.ok(end !== -1, 'loadData must close with an empty dependency list');
+    // Split on \r?\n because the page is CRLF; drop whole-line comments, keep code.
+    return source
+      .slice(start, end)
+      .split(/\r?\n/)
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n');
+  };
+
+  it('claims a sequence from a ref and compares against it', () => {
+    // Read once so both assertions see the same slice.
+    const body = loadDataCode();
+    // The claim: incrementing the ref makes this call the latest and every older call stale.
+    assert.match(body, /const seq = \+\+loadSeq\.current;/, 'loadData must claim a sequence number from loadSeq');
+    // The comparison every guard below calls.
+    assert.match(body, /const stale = \(\): boolean => seq !== loadSeq\.current;/, 'stale() must compare the claimed seq to the ref');
+  });
+
+  it('every await in loadData is followed by the stale guard before any state write', () => {
+    // Read once so the counts and the checks describe the same text.
+    const body = loadDataCode();
+    // Every await as code (comment lines are already gone), by position.
+    const awaits = [...body.matchAll(/\bawait\b/g)].map((m) => m.index ?? 0);
+    // Without awaits the loop below passes vacuously, so require that it has something to check.
+    assert.ok(awaits.length > 0, 'loadData must contain awaits for this guard to mean anything');
+    // An await is guarded when the stale check comes before the next setX( call after it.
+    const guarded = awaits.filter((at) => {
+      // Everything after this await.
+      const rest = body.slice(at);
+      // The next React state write, if any.
+      const nextSetter = rest.search(/\bset[A-Z]\w*\(/);
+      // The next stale guard, if any.
+      const nextGuard = rest.indexOf('if (stale()) return;');
+      // A guard must exist, and must win the race to the next state write.
+      return nextGuard !== -1 && (nextSetter === -1 || nextGuard < nextSetter);
+    });
+    // Equal counts: one unguarded await is exactly the out-of-order overwrite this exists to stop.
+    assert.equal(guarded.length, awaits.length, 'an await in loadData reaches a state write without `if (stale()) return;`');
+  });
+
+  it('the catch bails first when stale and finally only ends loading for the latest call', () => {
+    // Read once so both blocks come from the same slice.
+    const body = loadDataCode();
+    // The catch block's first code statement, after its opening brace.
+    const catchFirst = body.match(/catch \(\w+\) \{\s*([^\n]*)/)?.[1]?.trim();
+    // A superseded call's error must not become the page's error.
+    assert.equal(catchFirst, 'if (stale()) return;', 'the catch block must open with the stale guard');
+    // The finally block's statements, up to the end of the slice.
+    const finallyBlock = body.match(/finally \{([\s\S]*)$/)?.[1] ?? '';
+    // A stale call ending first must not hide the spinner of the load still running.
+    assert.match(finallyBlock, /if \(!stale\(\)\) setLoading\(false\);/, 'setLoading(false) in finally must be guarded by !stale()');
+  });
 });

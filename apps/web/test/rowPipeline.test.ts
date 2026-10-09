@@ -432,6 +432,19 @@ describe('runRowPipeline: stops', () => {
     assert.deepEqual(f.events.at(-1), { step: 'matcher', phase: 'stopped', statusAfter: 'passed_filters' });
   });
 
+  // The screener spells its kill switch differently (screener/index.ts:131); without this it read
+  // as no_progress ("did not move"), which hides that the whole pipeline is switched off.
+  it('a screener halted_by_kill_switch body is stopped/halted', async () => {
+    // Discovered lane: the normalizer dedupes, then the screener answers with its own spelling.
+    const f = makeFake('discovered', { normalizer: { to: 'deduped' }, screener: { body: { status: 'halted_by_kill_switch', message: 'off', processed: 0 } } });
+    // Run the full discovered chain.
+    const out = await rp.runRowPipeline(f.deps, ID, rp.DISCOVERED_STEPS, f.onEvent);
+    // Halted at the screener, with the row where the normalizer left it.
+    assert.deepEqual(out, { kind: 'stopped', atStep: 'screener', reason: 'halted', finalStatus: 'deduped' });
+    // Nothing after the screener ran.
+    assert.deepEqual(f.steps(), ['normalizer', 'screener']);
+  });
+
   // A batch reply naming this row as failed, with the row not terminal: stop on the body.
   for (const body of [{ failures: [{ id: ID, reason: 'gemini 503' }] }, { success: false }]) {
     // Both triggers of bodyReportsFailure.
@@ -521,6 +534,18 @@ describe('runRowPipeline: discovered rows (the step list is data)', () => {
     assert.deepEqual(out, { kind: 'dropped', finalStatus: 'dropped_duplicate', atStep: 'normalizer' });
     // Nothing after it.
     assert.deepEqual(f.steps(), ['normalizer']);
+  });
+
+  // The screener is the real filter for this lane; its drop must end the run before any Gemini spend.
+  it('a screener drop is dropped/dropped_filter at screener, and matcher/tailor/auditor never run', async () => {
+    // Normalizer passes, screener drops; HAPPY scripts the rest so a wrongful invoke would show.
+    const f = makeFake('discovered', { normalizer: { to: 'deduped' }, screener: { to: 'dropped_filter' }, ...HAPPY });
+    // Run.
+    const out = await rp.runRowPipeline(f.deps, ID, rp.DISCOVERED_STEPS, f.onEvent);
+    // Attributed to the screener, not to a matcher that never ran.
+    assert.deepEqual(out, { kind: 'dropped', finalStatus: 'dropped_filter', atStep: 'screener' });
+    // Only the first two agents were called.
+    assert.deepEqual(f.steps(), ['normalizer', 'screener']);
   });
 });
 
