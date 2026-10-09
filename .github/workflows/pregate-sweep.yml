@@ -1,0 +1,269 @@
+# Runs the matcher's Gemini-free pre-gate sweep (`?mode=pregate_only`) over the whole
+# passed_filters backlog, page by page, on demand.
+# Exists because the app-user credentials live only in this repo's Actions secrets
+# (set 2026-09-11 for apply.yml), not on the operator's PC; same reason run-one.yml exists.
+# The sweep DROPS rows (tech_gate_dropped) and drops are one-way, so every abort below
+# fails CLOSED: any response we cannot read exactly stops the run rather than paging on.
+name: applyy pre-gate sweep
+
+# Manual trigger ONLY. Teja ruled no scheduler for this (2026-10-09): a sweep that drops
+# rows must run when someone is watching the log, never at a cron's whim.
+on:
+  workflow_dispatch:
+    # The one input: rehearse without touching anything.
+    inputs:
+      # Prints the plan (URL, caps, stop rules) and exits before sign-in, so the
+      # dispatcher can check the run's shape without spending a single request.
+      dry_count_only:
+        # Shown in the Actions UI beside the checkbox.
+        description: 'Print the plan only; no sign-in, no matcher call'
+        # A boolean input renders as a checkbox, so there is no free text to validate.
+        type: boolean
+        # Default is the real sweep: the dispatcher opts INTO the rehearsal, not out of the run.
+        default: false
+
+# Read-only token. The job never checks out code or writes to the repo; it only talks
+# to Supabase with its own credentials.
+permissions:
+  # Nothing else is granted; contents:read is the floor GitHub allows.
+  contents: read
+
+# One sweep at a time: two concurrent sweeps would page the same backlog and race
+# each other's drops, doubling the work for no gain.
+concurrency:
+  # A fixed key, because a sweep has no per-row scope to key on.
+  group: pregate-sweep
+  # Never cancel mid-sweep: a queued second run waits instead.
+  cancel-in-progress: false
+
+# A single job: pages are sequential (each cursor comes from the last page).
+jobs:
+  # Named for what it does, so the Actions list is readable.
+  sweep:
+    # Same runner image as the other workflows. Its preinstalled Node (>= 20) has
+    # global fetch, which is all this job needs: no checkout, no install, no third-party action.
+    runs-on: ubuntu-latest
+    # 40 pages at the matcher's own wall-clock deadline fit well inside this; the cap
+    # exists so a hung request cannot burn the monthly Actions minutes.
+    timeout-minutes: 30
+    # Steps run top to bottom; a non-zero exit stops the job.
+    steps:
+      # The whole sweep in one step, so the secrets exist ONLY here. No `uses:` step runs
+      # in this job at all, so no third-party action ever sees the password.
+      - name: Sweep passed_filters through the pre-gate
+        # Node ESM from stdin. The quoted 'JS' delimiter stops bash expanding anything
+        # inside, so the script text is exactly what is written here.
+        run: |
+          # Fail on any error, unset variable or failed pipe stage.
+          set -euo pipefail
+          # Node reads the module from stdin; --input-type=module enables top-level await.
+          node --input-type=module <<'JS'
+          // Caps. Hard limits so a cursor that never reaches the end cannot loop forever.
+          // 40 pages x 500 rows = 20,000 rows per run, far above the backlog.
+          const PAGE_CAP = 40;
+          // One clean pass plus two retry passes for rows that errored.
+          const PASS_CAP = 3;
+          // The matcher caps at 500 (PREGATE_ONLY_MAX_BATCH); asking for more is silently clamped.
+          const LIMIT = 500;
+          // The same anchored rule the matcher applies to after_id (application-id.ts:19).
+          const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+          // Abort: one place that prints the reason and exits red. Never prints a secret,
+          // because no caller passes one in.
+          function abort(reason) {
+            // ::error:: surfaces the reason on the run summary, not only in the log.
+            console.log(`::error::ABORT: ${reason}`);
+            // Non-zero so the run shows red, never green-with-nothing-done.
+            process.exit(1);
+          }
+
+          // Reads an env var and refuses an empty one: a missing secret is an empty string
+          // in Actions, and an empty URL or key must not become a request.
+          function required(name) {
+            // Read once.
+            const value = process.env[name] ?? '';
+            // Empty means the secret is not set; stop before any network call.
+            if (value === '') abort(`missing ${name}`);
+            // Non-empty from here on.
+            return value;
+          }
+
+          // The rehearsal: the checkbox arrives as the string 'true' or 'false'.
+          const dryCountOnly = process.env.DRY_COUNT_ONLY === 'true';
+          // Origin only, trailing slash removed, so the URLs below never get a double slash.
+          // Not required() in dry mode: the plan must print even before secrets exist.
+          const base = (process.env.SUPABASE_URL ?? '').replace(/\/+$/, '');
+
+          // The plan, printed on every run so the log always states the rules it ran under.
+          console.log(`plan: POST ${base || '<SUPABASE_URL>'}/functions/v1/matcher?mode=pregate_only&limit=${LIMIT}[&after_id=<cursor>]`);
+          // The stop rules, verbatim, so a reader of the log can check the run against them.
+          console.log(`plan: page cap ${PAGE_CAP}, pass cap ${PASS_CAP}; stop when a pass ends done=true with 0 summed unjudged_errors`);
+          // The abort rules, likewise.
+          console.log('plan: abort on non-2xx, non-JSON, missing/ill-typed fields, gemini_calls>0, status=skipped_disabled, or a cursor that does not advance');
+          // The rehearsal ends here, before sign-in.
+          if (dryCountOnly) {
+            // Says plainly that nothing was called, so a green dry run is not mistaken for a sweep.
+            console.log('dry_count_only: plan printed; no sign-in, no matcher call made.');
+            // Green: the rehearsal did what it was asked.
+            process.exit(0);
+          }
+
+          // Real run: every credential must be present.
+          const url = required('SUPABASE_URL');
+          // The ANON key: all authority comes from the app user's JWT, never this key.
+          const anonKey = required('SUPABASE_ANON_KEY');
+          // The app user the matcher's authorizeCaller() requires (gates.ts:69).
+          const email = required('APPLYY_APP_USER_EMAIL');
+          // Masked by GitHub; never logged here.
+          const password = required('APPLYY_APP_USER_PASSWORD');
+          // Refuse a non-https URL: the password must never travel in clear text.
+          if (!url.startsWith('https://')) abort('SUPABASE_URL is not https');
+          // The email is a secret too; GitHub masks registered secrets, this makes it explicit.
+          console.log(`::add-mask::${email}`);
+          // Per-request ceiling. Above the edge function's own wall clock (~150s), so a
+          // normal slow page finishes; a hung socket rejects and the run exits red.
+          const REQUEST_TIMEOUT_MS = 180_000;
+
+          // Sign in over the Auth REST endpoint: the same session run-one.ts gets from
+          // signInWithPassword, without installing supabase-js.
+          const authRes = await fetch(`${base}/auth/v1/token?grant_type=password`, {
+            // GoTrue's password grant is a POST.
+            method: 'POST',
+            // The gateway wants the anon key; the body is JSON.
+            headers: { apikey: anonKey, 'content-type': 'application/json' },
+            // JSON.stringify escapes the values, so no credential can break the body.
+            body: JSON.stringify({ email, password }),
+            // A hung sign-in rejects instead of holding the job to timeout-minutes.
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          });
+          // Read as text first: an error page must not crash the parse and hide the status.
+          const authText = await authRes.text();
+          // Only the status is logged; the body may echo the email.
+          if (!authRes.ok) abort(`sign-in failed: HTTP ${authRes.status}`);
+          // Parsed inside try: a soft-200 HTML page is a failure, not a session.
+          let session;
+          // JSON or abort.
+          try { session = JSON.parse(authText); } catch { abort('sign-in returned non-JSON'); }
+          // The token must be a non-empty string; anything else is not a session.
+          const token = typeof session?.access_token === 'string' ? session.access_token : '';
+          // Never continue unauthenticated.
+          if (token === '') abort('sign-in returned no access_token');
+          // Mask the JWT before anything could print it.
+          console.log(`::add-mask::${token}`);
+
+          // Strict shape check of one page (CLAUDE.md §6: never ask a lenient parser whether
+          // it gave up). Returns the page or aborts. Field types per matcher index.ts:688-724.
+          function readPage(httpStatus, text) {
+            // Any non-2xx stops the run: 400 bad params, 401/403 auth, 409, 503, 500.
+            if (httpStatus < 200 || httpStatus > 299) abort(`matcher HTTP ${httpStatus}: ${text.slice(0, 200)}`);
+            // Parsed or abort: a platform timeout page is not a sweep result.
+            let body;
+            // JSON or abort.
+            try { body = JSON.parse(text); } catch { abort(`matcher returned non-JSON: ${text.slice(0, 120)}`); }
+            // Must be an object, not null, an array or a scalar.
+            if (body === null || typeof body !== 'object' || Array.isArray(body)) abort('matcher body is not an object');
+            // The kill switch answers 200 with no sweep fields; named before the shape check
+            // so the log says WHY rather than "missing done".
+            if (body.status === 'skipped_disabled') abort(`matcher is disabled: ${body.detail ?? ''}`);
+            // done must be a real boolean; null or absent is "unknown", which stops the run.
+            if (typeof body.done !== 'boolean') abort('done is missing or not a boolean');
+            // Both counters must be non-negative integers.
+            for (const key of ['unjudged_errors', 'gemini_calls', 'rows_in', 'tech_gate_dropped', 'pregate_survivors']) {
+              // Number.isInteger refuses NaN, strings and floats in one check.
+              if (!Number.isInteger(body[key]) || body[key] < 0) abort(`${key} is missing or not a non-negative integer`);
+            }
+            // The cursor is null or a UUID; anything else would be sent back as after_id.
+            if (body.next_after_id !== null && !(typeof body.next_after_id === 'string' && UUID.test(body.next_after_id))) {
+              // Named so the operator can see what came back.
+              abort(`next_after_id is neither null nor a UUID: ${String(body.next_after_id).slice(0, 60)}`);
+            }
+            // The sweep must be Gemini-free. Any call means the mode was not honoured.
+            if (body.gemini_calls > 0) abort(`gemini_calls=${body.gemini_calls}; a pre-gate sweep must make none`);
+            // Shape is proven; the caller may now read the fields.
+            return body;
+          }
+
+          // Pages spent across ALL passes; the hard cap counts these.
+          let pages = 0;
+          // Totals for the final summary line.
+          let totalDropped = 0;
+          // Rows processed across the run, for the summary.
+          let totalRowsIn = 0;
+
+          // One pass is a walk from the start of the backlog to done (or to a restart).
+          for (let pass = 1; pass <= PASS_CAP; pass += 1) {
+            // Every pass starts with no cursor: the matcher reads from the lowest id.
+            let afterId = null;
+            // Errors summed over this pass's pages; a page-level done:true ignores earlier
+            // pages' errors (index.ts:715-717), so the loop must add them up itself.
+            let passErrors = 0;
+            // Whether this pass reached done:true (versus a restart signal).
+            let passDone = false;
+
+            // Page loop, bounded by the global page cap.
+            while (true) {
+              // Hard cap: stop red rather than spin on a backlog that never ends.
+              if (pages >= PAGE_CAP) abort(`page cap ${PAGE_CAP} reached without a clean pass`);
+              // Counted before the request so a failing request still counts.
+              pages += 1;
+              // after_id is omitted on the first page: an empty after_id= is a 400.
+              const query = `mode=pregate_only&limit=${LIMIT}${afterId ? `&after_id=${afterId}` : ''}`;
+              // The page request: empty POST, app-user JWT plus anon key (run-one.ts:149-163).
+              const res = await fetch(`${base}/functions/v1/matcher?${query}`, {
+                // The matcher reads no body; the method is POST like every other caller.
+                method: 'POST',
+                // The token is masked; these headers are never logged.
+                headers: { authorization: `Bearer ${token}`, apikey: anonKey },
+                // A rejected (timed-out) request throws at top level: Node exits 1, fail closed.
+                signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+              });
+              // Text first, so readPage can quote a non-JSON body.
+              const page = readPage(res.status, await res.text());
+
+              // Summed per pass; this is the number the retry decision reads.
+              passErrors += page.unjudged_errors;
+              // Run totals for the summary.
+              totalDropped += page.tech_gate_dropped;
+              // Same.
+              totalRowsIn += page.rows_in;
+              // One line per page in the log: counts and cursor only, never a secret.
+              console.log(`pass ${pass} page ${pages}: after_id=${afterId ?? '-'} rows_in=${page.rows_in} dropped=${page.tech_gate_dropped} survivors=${page.pregate_survivors} unjudged_errors=${page.unjudged_errors} gemini_calls=${page.gemini_calls} status=${page.status} done=${page.done} next_after_id=${page.next_after_id ?? 'null'}`);
+
+              // End of the backlog with a clean last page: the pass is over.
+              if (page.done) { passDone = true; break; }
+              // done:false with no cursor: the matcher says restart from the start
+              // (tech-pregate.ts:174, :177-179). Ends this pass; the next one starts fresh.
+              if (page.next_after_id === null) break;
+              // A cursor that did not move means the deadline stopped the page before it
+              // processed a row; re-sending it would spin. Stop red instead.
+              if (page.next_after_id === afterId) abort(`cursor did not advance past ${afterId}`);
+              // Advance to the next page.
+              afterId = page.next_after_id;
+            }
+
+            // The only success: a pass that reached done with zero errors across all its pages.
+            if (passDone && passErrors === 0) {
+              // The summary line the orchestrator reads.
+              console.log(`CLEAN: pass ${pass} ended done=true with 0 unjudged_errors; pages=${pages} rows_in=${totalRowsIn} dropped=${totalDropped}`);
+              // Green.
+              process.exit(0);
+            }
+            // Otherwise another pass re-judges survivors (free) and retries the errored rows.
+            console.log(`pass ${pass} not clean (done=${passDone}, unjudged_errors=${passErrors}); starting another pass`);
+          }
+
+          // Every pass used and none was clean: red, so a human looks at the errors.
+          abort(`pass cap ${PASS_CAP} reached without a clean pass; pages=${pages} dropped=${totalDropped}`);
+          JS
+        # Credentials exist ONLY for this step: the same secret names run-one.yml uses.
+        env:
+          # The rehearsal flag, passed through env, never interpolated into the script.
+          DRY_COUNT_ONLY: ${{ inputs.dry_count_only }}
+          # Public project URL, stored as a secret for parity with apply.yml.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          # The ANON key: authority comes from the app user's JWT.
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # The app user the matcher authorizes.
+          APPLYY_APP_USER_EMAIL: ${{ secrets.APPLYY_APP_USER_EMAIL }}
+          # Masked in logs by GitHub; never echoed by this workflow.
+          APPLYY_APP_USER_PASSWORD: ${{ secrets.APPLYY_APP_USER_PASSWORD }}
