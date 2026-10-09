@@ -489,9 +489,32 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
         // Read the scoped options and tag them, so the click below never queries page-wide.
         const menu = await page.evaluate(readCombobox, { inputId: id, mark: true });
         // Position of the exact match; indexOf is strict equality, never "closest".
-        const index = menu.texts.indexOf(wanted);
-        // No scope (neither aria link nor an isolated widget) or no exact match: fail closed.
-        if (!menu.resolved || index < 0) {
+        // THE PHONE COUNTRY PICKER. Greenhouse labels its dial-code options
+        // `${country} +${dialCode}` ("India +91") while the planner knows only the country
+        // ("India"), and after a pick the box shows just "+91". So an option also qualifies when
+        // it is EXACTLY the wanted text, one space, "+", and 1-4 digits, nothing before or after.
+        // startsWith on the whole wanted text plus " +" is anchored at both ends of the name:
+        // "Indiana +1" and "British Indian Ocean Territory +246" can never qualify for "India".
+        const dialSuffix = (text: string): string | null => {
+          // The exact prefix this rule allows: the whole wanted text, a space, a plus.
+          const prefix = `${wanted} +`;
+          // Anything else is not a dial-code label for this country.
+          if (!text.startsWith(prefix)) return null;
+          // What follows the "+" must be the dial code alone.
+          const digits = text.slice(prefix.length);
+          // 1-4 ASCII digits and nothing more ("+91 (mobile)" and "+12345" are refused).
+          return /^[0-9]{1,4}$/.test(digits) ? `+${digits}` : null;
+        };
+        // Every option that qualifies, by exact text or by the dial rule, with its position.
+        const candidates = menu.texts
+          // Kept with the index so the click below targets the right tagged option.
+          .map((text, position) => ({ text, position, dial: text === wanted ? null : dialSuffix(text) }))
+          // Exact text, or a dial-code label of exactly this country.
+          .filter((option) => option.text === wanted || option.dial !== null);
+        // EXACTLY ONE, or nothing: two qualifying options means we cannot know which is meant.
+        const picked = candidates.length === 1 ? candidates[0] : undefined;
+        // No scope (neither aria link nor an isolated widget) or no single match: fail closed.
+        if (!menu.resolved || picked === undefined) {
           // Leave the widget as we found it: close the menu and drop the half-typed text.
           // Closes the menu so it cannot stay open and capture a later click.
           await target.press('Escape');
@@ -505,17 +528,24 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
         try {
           // Click by tag: only options inside this widget's scope carry it.
           // Targets only the option tagged inside this widget's scope.
-          await page.locator(`[data-applyyy-opt="${index}"]`).click();
+          await page.locator(`[data-applyyy-opt="${picked.position}"]`).click();
         } finally {
           // Markers are scaffolding; never leave them behind, whether or not the click worked.
           await clearOptionTags();
         }
         // READ BACK what the widget now displays: a click can land on the wrong thing or be
-        // swallowed, and nothing else would notice. Anything but the exact wanted text fails.
+        // swallowed, and nothing else would notice. Anything but what we clicked fails.
         const after = await page.evaluate(readCombobox, { inputId: id, mark: false });
-        // The shown value must equal what we meant to choose, character for character.
+        // The clicked option's full text, character for character; or, ONLY for a dial-code
+        // pick, exactly its "+NN" (the picker displays the code alone).
+        // The "+NN" alone proves a pick ONLY if the box showed something else before: dial codes
+        // are shared (+1 US/Canada, +44 UK/Jersey), so a swallowed click on "Canada +1" over a
+        // US default would read back "+1" unchanged. Unchanged = unproven = park.
+        const readbackOk =
+          after.shown === picked.text ||
+          (picked.dial !== null && after.shown === picked.dial && before.shown !== picked.dial);
         // ALWAYS a plain Error: a click landed, so the widget may now hold an answer nobody chose.
-        if (after.shown !== wanted) throw noMatch(false);
+        if (!readbackOk) throw noMatch(false);
         // Verified; done.
         return;
       }
