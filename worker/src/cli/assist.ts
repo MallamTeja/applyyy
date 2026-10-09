@@ -24,12 +24,19 @@ import { createSupabaseAssistGateway } from '../assist/supabase-assist-gateway.t
 import { AGENT_KEY_ENV_VAR, agentKeyHeaders } from '../../../supabase/functions/_shared/db/agent-key.ts';
 
 /** Read a required environment variable or fail loudly at startup. */
-// Plain function: three call sites share it and nothing else needs the logic.
+// Plain function: several call sites share it and nothing else needs the logic.
 function required(name: string): string {
   // Read at call time so a missing variable names itself in the error.
   const value = process.env[name];
   // Empty and absent are the same failure; a blank secret is the realistic mistake.
-  if (!value) throw new Error(`${name} is not set.`);
+  // Same message shape as cli/apply.ts, so both entry points read alike in a terminal.
+  if (!value) {
+    // Names the variable first, then where it belongs and the rule that keeps it out of git.
+    throw new Error(
+      `${name} is not set. The assist CLI needs it; set it in your local shell before running assist. ` +
+        'Secrets are configured in the repository settings, never committed (constraint #11).',
+    );
+  }
   // Non-empty by the check above, so callers need no further guarding.
   return value;
 }
@@ -75,6 +82,12 @@ function askStdin(question: string): Promise<string | null> {
 async function main(): Promise<void> {
   // First, so a usage error costs no network call and no browser.
   const applicationId = parseId(process.argv.slice(2));
+  // THE AGENT KEY, required since applyy_internal.agent_key was seeded (2026-10-09), exactly
+  // as cli/apply.ts requires it. Without it the database refuses every 'applier' call
+  // (claim, advance, release) with 42501. Checked here, before sign-in and before a browser
+  // opens, so the error names the missing variable instead of a refusal from deep inside the
+  // flow. Nothing has been claimed yet, so this stop cannot strand a row.
+  required(AGENT_KEY_ENV_VAR);
   // The project endpoint.
   const supabaseUrl = required('SUPABASE_URL');
   // Public key; real authority comes from the user's JWT below.
@@ -97,7 +110,7 @@ async function main(): Promise<void> {
   const client = sdk.createClient(supabaseUrl, anonKey, {
     // Assist parks the row as 'applier' (approved -> applying -> blocked_needs_human), which
     // needs the agent key once its hash is seeded (20261008160000). Read from the local
-    // APPLYY_AGENT_KEY env; unset means no header, which is today's behaviour.
+    // APPLYY_AGENT_KEY env, which main() has already required above, so the header is present.
     global: { headers: agentKeyHeaders(process.env[AGENT_KEY_ENV_VAR]) },
     // No session file on disk: this is a credential, and the process is short-lived.
     auth: { persistSession: false, autoRefreshToken: false },

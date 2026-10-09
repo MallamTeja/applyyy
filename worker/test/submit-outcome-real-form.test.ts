@@ -219,6 +219,160 @@ describe('submit() on the real Greenhouse form', () => {
     }
   });
 
+  test('a Gusto-style \'Thanks for applying!\' heading with the standard title confirms', async () => {
+    // REAL GREENHOUSE WORDING. Gusto's confirmation shows "Thanks for applying!"
+    // in its h1 while the page title keeps the standard "Thank you for applying".
+    // A heading-only /thank you for applying/ check parks a SENT application as
+    // unknown, so the title (or the "thanks" heading) must be able to confirm.
+    const { raw, port, actionHits } = await openForm();
+    try {
+      // The form submits for real once validation is out of the way.
+      await allowNativeSubmit(raw);
+      // The board answers the submit with a redirect to this job's confirmation.
+      await onSubmit(raw, redirectTo(CONFIRMATION_PATH));
+      // The confirmation exactly as Gusto renders it: standard title, informal heading.
+      await servePath(raw, CONFIRMATION_PATH, '<title>Thank you for applying</title><h1>Thanks for applying!</h1>');
+
+      // The real adapter's click and poll.
+      const result = await port.submit();
+
+      // Confirmed: right path, a real send, and a recognised thank-you.
+      expect(result.kind).toBe('confirmed');
+      // The evidence still names the URL it matched, for the audit trail.
+      if (result.kind === 'confirmed') expect(result.evidence).toContain(CONFIRMATION_PATH);
+      // Non-vacuity: the form really was sent once.
+      expect(actionHits).toHaveLength(1);
+    } finally {
+      // Closed even on failure, so a stuck page cannot hold the browser open.
+      await raw.close();
+    }
+  });
+
+  test('the title alone without an employer request is NOT confirmed', async () => {
+    // THE EMPLOYER-WRITE GUARD. Path and title can both be faked client-side
+    // with no request leaving the page (pushState plus a title change), so the
+    // new title check must not stand in for proof that something was sent.
+    // The short deadline: the outcome is the timeout.
+    const { raw, port, actionHits } = await openForm(1500);
+    try {
+      // Validation off, so the listener below is what handles the click.
+      await allowNativeSubmit(raw);
+      // A submit handler that fakes a confirmation without any network traffic.
+      await raw.evaluate((confirmationPath) => {
+        // The one form on the page, by its captured id.
+        const form = document.getElementById('application-form') as HTMLFormElement;
+        // Runs on the adapter's real click, standing in for a SPA's submit handler.
+        form.addEventListener('submit', (event) => {
+          // No navigation, so no request: the send never happens.
+          event.preventDefault();
+          // pushState changes the URL without a request, giving the right path.
+          history.pushState(null, '', confirmationPath);
+          // And the right title, so only the employer-write check can refuse.
+          document.title = 'Thank you for applying';
+        });
+      }, CONFIRMATION_PATH);
+
+      // Polls until the short deadline.
+      const result = await port.submit();
+
+      // Nothing was sent, so nothing can be confirmed.
+      expect(result.kind).toBe('unconfirmed');
+      // Non-vacuity: the page really did reach this job's confirmation path...
+      expect(new URL(raw.url()).pathname).toBe(CONFIRMATION_PATH);
+      // ...with the standard thank-you title...
+      expect(await raw.title()).toBe('Thank you for applying');
+      // ...and the form was provably never submitted.
+      expect(actionHits).toHaveLength(0);
+    } finally {
+      // Always closed.
+      await raw.close();
+    }
+  });
+
+  test('a wrong path with the right title is NOT confirmed', async () => {
+    // The title check must not widen the path rule: a thank-you title on
+    // ANOTHER job's confirmation is still not proof that THIS form was sent.
+    const otherConfirmation = '/gitlab/jobs/1111/confirmation';
+    // The short deadline: the outcome is the timeout.
+    const { raw, port } = await openForm(1500);
+    try {
+      // The form submits for real once validation is out of the way.
+      await allowNativeSubmit(raw);
+      // Redirected to another job's confirmation...
+      await onSubmit(raw, redirectTo(otherConfirmation));
+      // ...carrying the title but no heading, so only the title can match and only the path can refuse.
+      await servePath(raw, otherConfirmation, '<title>Thank you for applying</title><p>Your application was received.</p>');
+
+      // Polls until the short deadline.
+      const result = await port.submit();
+
+      // Not this job's confirmation, so unknown.
+      expect(result.kind).toBe('unconfirmed');
+      // Non-vacuity: the page really did reach the other confirmation...
+      expect(new URL(raw.url()).pathname).toBe(otherConfirmation);
+      // ...and it really carried the thank-you title.
+      expect(await raw.title()).toBe('Thank you for applying');
+    } finally {
+      // Always closed.
+      await raw.close();
+    }
+  });
+
+  test('the standard title alone, after a real send, confirms and says so', async () => {
+    // PINS THE TITLE HALF on its own. The Gusto test above carries both a title and
+    // a "Thanks" heading, so it stays green if either half is removed; this page has
+    // no heading at all, so only the title fallback can confirm it.
+    const { raw, port, actionHits } = await openForm();
+    try {
+      // The form submits for real once validation is out of the way.
+      await allowNativeSubmit(raw);
+      // The board answers the submit with a redirect to this job's confirmation.
+      await onSubmit(raw, redirectTo(CONFIRMATION_PATH));
+      // An employer whose rich text has no heading: the template title is the only signal.
+      await servePath(raw, CONFIRMATION_PATH, '<title>Thank you for applying</title><p>We will be in touch.</p>');
+
+      // The real adapter's click and poll.
+      const result = await port.submit();
+
+      // Confirmed by the title.
+      expect(result.kind).toBe('confirmed');
+      // The evidence names the title as its source, so the `applied` event is auditable.
+      if (result.kind === 'confirmed') expect(result.evidence).toContain('title="Thank you for applying"');
+      // Non-vacuity: the form really was sent once.
+      expect(actionHits).toHaveLength(1);
+    } finally {
+      // Closed even on failure, so a stuck page cannot hold the browser open.
+      await raw.close();
+    }
+  });
+
+  test('a "Thanks for applying!" heading under a non-template title confirms by heading', async () => {
+    // PINS THE WIDENED HEADING on its own. The title here is not Greenhouse's
+    // template, so only /thank(s| you) for applying/ on the h1 can confirm it.
+    const { raw, port, actionHits } = await openForm();
+    try {
+      // The form submits for real once validation is out of the way.
+      await allowNativeSubmit(raw);
+      // The board answers the submit with a redirect to this job's confirmation.
+      await onSubmit(raw, redirectTo(CONFIRMATION_PATH));
+      // An employer-branded title, with the informal heading.
+      await servePath(raw, CONFIRMATION_PATH, '<title>Acme Careers</title><h1>Thanks for applying!</h1>');
+
+      // The real adapter's click and poll.
+      const result = await port.submit();
+
+      // Confirmed by the heading.
+      expect(result.kind).toBe('confirmed');
+      // The evidence names the heading as its source, quoted exactly.
+      if (result.kind === 'confirmed') expect(result.evidence).toContain('heading="Thanks for applying!"');
+      // Non-vacuity: the form really was sent once.
+      expect(actionHits).toHaveLength(1);
+    } finally {
+      // Closed even on failure, so a stuck page cannot hold the browser open.
+      await raw.close();
+    }
+  });
+
   test('submit: inline validation with no navigation → rejected_by_form', async () => {
     // The live Greenhouse form validates in JS: it cancels the submit and flags
     // the fields with aria-invalid. Nothing left the page, so this is a human's

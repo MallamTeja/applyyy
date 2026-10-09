@@ -10,6 +10,9 @@ import type { ClosableApplicationPage } from './claim-loop.ts';
 // The one document shape that crosses into a real employer's form, and the one
 // answer shape that comes back from submitting it.
 import type { AttachedFile, SubmitResult } from './apply-one.ts';
+// A VALUE import: fill() throws it when a no-match left the control provably empty, the one
+// case the caller may degrade to "left blank". No cycle: apply-one.ts never imports this file.
+import { OptionNotFoundError } from './apply-one.ts';
 
 // Exported so the composition root can say at startup whether this build can
 // send anything. One constant, so the page and the log can never disagree.
@@ -71,19 +74,26 @@ const VISIBLE_CHALLENGE_SELECTORS: readonly string[] = [
 /**
  * THE SHAPE OF A CONFIRMATION, asserted positively (§6).
  *
- * Both must hold: the URL is THIS job's confirmation route (same origin, and the
- * form's own path plus `/confirmation`), and a heading thanks the applicant.
+ * All three must hold: the URL is THIS job's confirmation route (same origin, and the
+ * form's own path plus `/confirmation`), and a heading or the page title thanks
+ * the applicant; plus, at the call site, a request left the page after the click.
  * Either alone could be something else (a marketing "thank you" banner, another
  * job's confirmation, a redirect to a page that merely contains "confirmation"),
  * and a false "applied" is the one wrong answer that cannot be walked back — so
- * anything short of both is `unconfirmed`.
+ * anything short of all three is `unconfirmed`.
  */
 // Greenhouse's route after a successful application: the job's own path plus
 // /confirmation, optionally with a trailing slash. Matched against the path
 // derived from the form's URL (see expectedConfirmationPath), never on its own.
 const CONFIRMATION_SUFFIX = '/confirmation';
-// The heading text Greenhouse shows on that page. Case-insensitive, nothing else loosened.
-const CONFIRMATION_HEADING = /thank you for applying/i;
+// The heading on that page is the EMPLOYER's own rich text, so its wording varies:
+// GitLab says "Thank you for applying", Gusto says "Thanks for applying!". Both forms
+// are accepted; anything that does not thank the applicant for APPLYING still fails.
+const CONFIRMATION_HEADING = /thank(s| you) for applying/i;
+// The page <title> is Greenhouse's own template, the same on every board checked
+// (8 of 8, Gusto included), so it is the stable signal. Anchored at the start: a title
+// that merely mentions applying somewhere is not the confirmation template.
+const CONFIRMATION_TITLE = /^thank you for applying/i;
 
 // How long to watch the page after the click before declaring the outcome unknown.
 // A real Greenhouse submit is a reCAPTCHA token fetch plus one POST: seconds.
@@ -148,18 +158,33 @@ function expectedConfirmationPath(startUrl: string): string | null {
   return `${startPath}${CONFIRMATION_SUFFIX}`;
 }
 
-/** The heading on the page that thanks the applicant, or null. Runs in the browser. */
-function readConfirmationHeading(pattern: { source: string; flags: string }): string | null {
-  // RegExp cannot cross into the page, so it is rebuilt from its parts.
-  const re = new RegExp(pattern.source, pattern.flags);
+/**
+ * The text on the page that thanks the applicant, as ready-made evidence
+ * (`heading="..."` or `title="..."`), or null. Runs in the browser.
+ *
+ * Either source is enough for the TEXT half of the confirmation; the route and the
+ * employer-request checks around it are what make the whole answer safe.
+ */
+function readConfirmationText(patterns: {
+  heading: { source: string; flags: string };
+  title: { source: string; flags: string };
+}): string | null {
+  // RegExp cannot cross into the page, so each is rebuilt from its parts.
+  const headingRe = new RegExp(patterns.heading.source, patterns.heading.flags);
+  // Same reason for the title pattern.
+  const titleRe = new RegExp(patterns.title.source, patterns.title.flags);
   // Headings only: a "thank you" in a footer or cookie banner is not a confirmation.
   for (const heading of Array.from(document.querySelectorAll('h1, h2, h3'))) {
     // Trimmed text, the same normalisation every other label here gets.
     const text = heading.textContent?.trim() ?? '';
-    // First matching heading is the evidence.
-    if (re.test(text)) return text;
+    // First matching heading is the evidence; JSON.stringify quotes it unambiguously.
+    if (headingRe.test(text)) return `heading=${JSON.stringify(text)}`;
   }
-  // No heading matched.
+  // document.title is already whitespace-collapsed and trimmed by the browser.
+  const title = document.title;
+  // Greenhouse's template title: the fallback when the employer reworded the heading.
+  if (titleRe.test(title)) return `title=${JSON.stringify(title)}`;
+  // Neither source thanked the applicant.
   return null;
 }
 
@@ -260,11 +285,14 @@ function readCombobox(args: { inputId: string; mark: boolean }): {
   texts: string[];
   // The widget's displayed value after a pick, read back so a misclick cannot pass silently.
   shown: string | null;
+  // True ONLY on the positive shape of an empty react-select (see below). A missing value
+  // element is NOT emptiness: it may just be a value this reader cannot see.
+  empty: boolean;
 } {
   // The control we were asked to fill; gone from the DOM means nothing can be resolved.
   const input = document.getElementById(args.inputId);
   // Report "unresolved" rather than throwing, so the caller can fail closed with its own error.
-  if (!input) return { resolved: false, texts: [], shown: null };
+  if (!input) return { resolved: false, texts: [], shown: null, empty: false };
   // The widget = the highest ancestor (max 6 up) that still holds ONLY this combobox, so it
   // can never swallow a sibling widget and its menu.
   let widget: Element = input;
@@ -286,14 +314,26 @@ function readCombobox(args: { inputId: string; mark: boolean }): {
   // The displayed single value (react-select's `*-single-value`), read from OUR widget only.
   const shown =
     widget.querySelector('[class*="single-value"], [class*="singleValue"]')?.textContent?.trim() ?? null;
+  // EMPTY, asserted positively, because a skip submits whatever the widget holds:
+  // react-select renders its placeholder only while nothing is chosen...
+  const empty =
+    widget.querySelector('[class*="placeholder"]') !== null &&
+    // ...no single value is displayed...
+    !shown &&
+    // ...no multi-select chips (isMulti renders `*-multi-value`, which `shown` never sees)...
+    widget.querySelector('[class*="multi-value"], [class*="multiValue"]') === null &&
+    // ...the text input itself carries no value (a plain ARIA combobox keeps its answer here)...
+    (input as HTMLInputElement).value === '' &&
+    // ...and every hidden input in the widget, the value a named react-select really submits, is blank.
+    Array.from(widget.querySelectorAll<HTMLInputElement>('input[type="hidden"]')).every((hidden) => hidden.value === '');
   // An explicit link to a menu that is not rendered (yet) is unresolved, not "empty".
-  if (!scope) return { resolved: false, texts: [], shown };
+  if (!scope) return { resolved: false, texts: [], shown, empty };
   // Option elements strictly inside the resolved scope.
   const found = Array.from(scope.querySelectorAll('[role="option"]'));
   // Tag them so the caller can click by position without any page-wide option query.
   if (args.mark) found.forEach((option, index) => option.setAttribute('data-applyyy-opt', String(index)));
   // Visible text per option, trimmed like every other label in this worker.
-  return { resolved: true, texts: found.map((option) => option.textContent?.trim() ?? ''), shown };
+  return { resolved: true, texts: found.map((option) => option.textContent?.trim() ?? ''), shown, empty };
 }
 
 /** The value raceDeadline resolves to when time ran out first. A unique symbol, so no read can return it. */
@@ -381,8 +421,17 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
       // Exact-match only, everywhere below: a near-miss answer ("Ind" for "India") must fail
       // loudly rather than submit a different true-looking answer in Teja's name (constraint #3).
       const wanted = value.trim();
-      // One error shape for every choice control, so callers can match on the prefix.
-      const noMatch = () => new Error(`no_matching_option: ${id}: "${value}"`);
+      // One message for every choice control, so callers can match on the prefix. The CLASS
+      // carries the stronger claim: OptionNotFoundError only when the control was provably
+      // EMPTY, because a caller that skips the field submits whatever the control already
+      // holds (a pre-selected default would be an answer nobody chose). Anything less certain
+      // is a plain Error, which parks the row for a human.
+      const noMatch = (provablyEmpty: boolean) => {
+        // Same text either way, so existing message-matching callers and tests are unaffected.
+        const message = `no_matching_option: ${id}: "${value}"`;
+        // Only proven emptiness earns the class that may degrade to "left blank".
+        return provablyEmpty ? new OptionNotFoundError(message) : new Error(message);
+      };
       // Removes the option tags readCombobox leaves behind; used on every exit path.
       const clearOptionTags = () =>
         // Runs in the browser: a single sweep removes every tag left by readCombobox.
@@ -391,14 +440,24 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
         );
 
       if (live.tag === 'select') {
-        // Option texts as the user sees them; the same trim the extractor applies.
-        const texts = await target.evaluate((el) =>
-          // Same text rule as the extractor, so planner and filler see identical options.
-          Array.from((el as HTMLSelectElement).options).map((option) => option.text.trim()),
-        );
+        // Option texts plus whether the select currently holds a real answer, in one read.
+        const { texts, empty } = await target.evaluate((el) => {
+          // Typed view for options / selectedOptions / value.
+          const select = el as HTMLSelectElement;
+          // What the form would submit right now if this field were skipped.
+          const current = select.selectedOptions[0];
+          // Plain data only: this object crosses back from the browser.
+          return {
+            // Same text rule as the extractor, so planner and filler see identical options.
+            texts: Array.from(select.options).map((option) => option.text.trim()),
+            // Empty = nothing selected, an empty value ("Select..."), or a disabled placeholder.
+            // A multi-select submits EVERY selected option, so only "none selected" is empty there.
+            empty: select.multiple ? select.selectedOptions.length === 0 : !current || select.value === '' || current.disabled,
+          };
+        });
         // Confirm the exact match BEFORE selectOption, which would otherwise throw a timeout
         // rather than our named error, and never fall back to a partial match.
-        if (!texts.includes(wanted)) throw noMatch();
+        if (!texts.includes(wanted)) throw noMatch(empty);
         // Safe now: the label is known to exist, so this selects exactly that option.
         await target.selectOption({ label: wanted });
         // Done; nothing else applies to a native select.
@@ -406,6 +465,11 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
       }
 
       if (live.role === 'combobox') {
+        // What the widget shows BEFORE we touch it: typing below changes the input, so this is
+        // the only moment its emptiness can be read honestly.
+        const before = await page.evaluate(readCombobox, { inputId: id, mark: false });
+        // readCombobox's positive empty shape (placeholder, no value anywhere), never a bare null read.
+        const wasEmpty = before.empty;
         // Opens the menu; react-select renders its options only while open.
         await target.click();
         // Typing filters the list, so the wanted option is on screen even in a long list.
@@ -435,7 +499,8 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
           await target.fill('');
           // A failed attempt must leave the DOM untouched.
           await clearOptionTags();
-          throw noMatch();
+          // Nothing was clicked, so the widget still holds what it held before we typed.
+          throw noMatch(wasEmpty);
         }
         try {
           // Click by tag: only options inside this widget's scope carry it.
@@ -449,7 +514,8 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
         // swallowed, and nothing else would notice. Anything but the exact wanted text fails.
         const after = await page.evaluate(readCombobox, { inputId: id, mark: false });
         // The shown value must equal what we meant to choose, character for character.
-        if (after.shown !== wanted) throw noMatch();
+        // ALWAYS a plain Error: a click landed, so the widget may now hold an answer nobody chose.
+        if (after.shown !== wanted) throw noMatch(false);
         // Verified; done.
         return;
       }
@@ -502,17 +568,20 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
                 // Tag it for the locator below; the first exact match wins.
                 member.setAttribute('data-applyyy-pick', '');
                 // Stop at the first exact match; labels in one group should be unique.
-                return true;
+                return { found: true, anyChecked: false };
               }
             }
-            // No option matched exactly; the caller turns this into no_matching_option.
-            return false;
+            // No option matched exactly; the caller turns this into no_matching_option, and
+            // needs to know whether a skip would submit an already-checked answer.
+            // ZERO members is not "none checked": a lone unnamed radio outside any group resolves
+            // to no members, and may itself be checked. Unknown is reported as not-empty.
+            return { found: false, anyChecked: members.length === 0 || members.some((member) => member.checked) };
           },
           // Serialisable arguments handed to the in-page function above.
           { groupId: id, exact: wanted },
         );
-        // Nothing was tagged, nothing was clicked.
-        if (!found) throw noMatch();
+        // Nothing was tagged, nothing was clicked; empty only if no member was already checked.
+        if (!found.found) throw noMatch(!found.anyChecked);
         // The single tagged radio.
         const pick = page.locator('[data-applyyy-pick]');
         try {
@@ -671,16 +740,22 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
           const pathOk = confirmationPath !== null
             && parsed.origin === startOrigin
             && parsed.pathname.replace(/\/$/, '') === confirmationPath;
-          // The heading is read only on the confirmation route, saving a DOM read per poll.
-          const heading = pathOk
-            ? await page.evaluate(readConfirmationHeading, { source: CONFIRMATION_HEADING.source, flags: CONFIRMATION_HEADING.flags })
+          // The thank-you text is read only on the confirmation route, saving a DOM read per poll.
+          const thanks = pathOk
+            ? await page.evaluate(readConfirmationText, {
+              // Plain {source, flags} pairs: a RegExp does not survive serialisation into the page.
+              heading: { source: CONFIRMATION_HEADING.source, flags: CONFIRMATION_HEADING.flags },
+              // Same for the title template.
+              title: { source: CONFIRMATION_TITLE.source, flags: CONFIRMATION_TITLE.flags },
+            })
             : null;
-          // The route, the heading, AND evidence that something left the page. The
-          // last is free insurance: a page that shows "thank you" without any
-          // request after our click did not get an application from us.
-          if (pathOk && heading !== null && employerWrites.length > 0) {
-            // Evidence quotes exactly what matched, for the `applied` event.
-            return { kind: 'confirmed', evidence: `url=${url} heading="${heading}"` };
+          // The route, the thank-you text, AND evidence that something left the page.
+          // The last is NOT optional: a plain GET of /confirmation renders the same
+          // thank-you page (measured live), so route + text alone prove nothing about
+          // our click. Only a request after the click ties the page to an application.
+          if (pathOk && thanks !== null && employerWrites.length > 0) {
+            // Evidence quotes exactly what matched (heading= or title=), for the `applied` event.
+            return { kind: 'confirmed', evidence: `url=${url} ${thanks}` };
           }
 
           // 2. CHALLENGED: invisible reCAPTCHA escalated to a question for a human.
@@ -709,7 +784,10 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
           }
 
           // Nothing recognised yet; described, in case nothing ever is.
-          return `url=${url}${pathOk ? ' (confirmation path, no thank-you heading)' : ''}`;
+          // On the route, the detail says which half is missing: the text, or the request.
+          const onRoute = thanks === null ? ' (confirmation path, no thank-you heading or title)' : ` (confirmation path, ${thanks}, but no request left the page after the click)`;
+          // Off the route, the URL alone describes it.
+          return `url=${url}${pathOk ? onRoute : ''}`;
         };
 
         // THE SETTLE WINDOW for "nothing was sent" answers. One look is not proof: a

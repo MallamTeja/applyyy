@@ -19,6 +19,9 @@ name: applyy applier (daily batch)
 on:
   # One scheduled run per day. 02:30 UTC = 08:00 IST, so the overnight ATS
   # postings are picked up and the freshness window (§13) is used well.
+  # A scheduled run is DRY unless the repository variable APPLYY_CRON_LIVE is
+  # exactly 'true' (see DRY_RUN below). Teja sets that variable himself, after a
+  # local proof; until it exists, cron fills and screenshots without submitting.
   schedule:
     - cron: '30 2 * * *'
   # Manual trigger, needed for the §18.6 trust period where Teja watches a run.
@@ -64,7 +67,7 @@ jobs:
     # including third-party actions and the dependency install scripts that
     # `pnpm install` runs (pnpm-workspace.yaml allowBuilds enables esbuild's and
     # playwright's postinstall). None of those need the app-user password; only
-    # "Run the applier" reads these (worker/src/cli/apply.ts:51-54), so that step
+    # "Run the applier" reads these (worker/src/cli/apply.ts:77-81), so that step
     # is now the only place they exist.
 
     steps:
@@ -131,15 +134,17 @@ jobs:
       - name: Run the applier
         # Two guards before the worker starts, both in shell because a workflow
         # `env:` key cannot be conditionally omitted:
-        # 1. A LIVE run must name one application. Without this, dry_run "false"
-        #    would submit every approved row in one go.
+        # 1. A LIVE MANUAL run must name one application. Without this, dry_run
+        #    "false" would submit every approved row in one go. Scheduled runs are
+        #    exempt: a live cron run (APPLYY_CRON_LIVE) is bounded instead by
+        #    APPLY_MAX_SUBMITS and the worker's circuit breaker (claim-loop.ts).
         # 2. APPLY_ONLY_ID is exported ONLY when an id was given. The worker treats a
         #    set-but-blank value as an error (so a blank `$ID` never widens a local
         #    run), and scheduled runs supply no inputs at all, so passing the input
         #    straight through would make every cron run fail.
         run: |
-          # Guard 1: refuse a whole-queue live submit, before anything is claimed.
-          if [ "$DRY_RUN" = "false" ] && [ -z "$ONLY_ID" ]; then
+          # Guard 1: refuse a whole-queue live MANUAL submit, before anything is claimed.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ] && [ -z "$ONLY_ID" ]; then
             # Annotated as an error so the reason shows on the run page, not only in the log.
             echo "::error::dry_run=false requires apply_only_id (one application per live run)."
             # Non-zero, so the run is red rather than a silent no-op.
@@ -149,15 +154,25 @@ jobs:
           if [ -n "$ONLY_ID" ]; then export APPLY_ONLY_ID="$ONLY_ID"; fi
           # The applier itself, unchanged.
           pnpm --filter '@applyy/worker' run apply
-        # Step-scoped: the ONLY step that reads any of these (apply.ts:51-54,
+        # Step-scoped: the ONLY step that reads any of these (apply.ts:77-81,
         # submission-mode.ts:56), so no action or install script can see them.
         env:
-          # THE SAFETY DEFAULT. A scheduled run supplies no inputs, so this resolves
-          # to 'true' and the run fills forms and screenshots without submitting.
-          # Only an explicit manual "false" flips it. The worker's gate additionally
-          # refuses anything that is not the exact string "false", so a typo here
-          # fails closed rather than submitting (see worker/src/submission-mode.ts).
-          DRY_RUN: ${{ inputs.dry_run == 'false' && 'false' || 'true' }}
+          # THE SAFETY DEFAULT: 'true' unless one of exactly two opt-ins holds.
+          # 1. A manual run whose dry_run input is the exact string "false".
+          # 2. A SCHEDULED run while the repository variable APPLYY_CRON_LIVE is the
+          #    exact string 'true'. An unset or misspelt variable compares unequal,
+          #    so cron stays dry; a manual run never reads the variable at all.
+          # The worker's gate additionally refuses anything that is not the exact
+          # string "false", so a typo here fails closed rather than submitting (see
+          # worker/src/submission-mode.ts).
+          DRY_RUN: ${{ (inputs.dry_run == 'false' || (github.event_name == 'schedule' && vars.APPLYY_CRON_LIVE == 'true')) && 'false' || 'true' }}
+          # Which trigger started this run; read only by Guard 1, which applies to
+          # manual runs alone.
+          EVENT_NAME: ${{ github.event_name }}
+          # The per-run cap on real submit attempts (submitted + outcome unknown),
+          # parsed strictly by the worker (claim-loop.ts parseMaxSubmits). It bounds
+          # a live cron run, which names no apply_only_id.
+          APPLY_MAX_SUBMITS: '3'
           # The raw input, read only by the shell guards above. Not named APPLY_ONLY_ID,
           # so an empty value never reaches the worker as "set but blank".
           ONLY_ID: ${{ inputs.apply_only_id }}

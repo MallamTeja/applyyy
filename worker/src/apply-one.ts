@@ -23,7 +23,8 @@
 // MasterProfile is type-only: the planner needs the shape of identity facts, not a runtime dependency.
 import type { AgentName, AnswerBankRow, BlockReason, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 import { guardedAdvance, type StatusWriter } from './guarded-advance.ts';
-import { planFill, type FillBlocker } from './plan-fill.ts';
+// isEeoQuestion: the planner's own EEO test, reused by the fill loop's optional-EEO degrade.
+import { isEeoQuestion, planFill, type FillBlocker } from './plan-fill.ts';
 import { resolveSubmissionMode, type SubmissionEnv } from './submission-mode.ts';
 import type { FormField } from './extract-fields.ts';
 // Which file input receives the resume, or why none can. Pure and browser-free,
@@ -41,6 +42,24 @@ import type { RenderedResume } from './render-resume-pdf.ts';
 // This worker's identity in the status graph. Named once so no call site can
 // quietly claim to be a different agent and slip through an edge it may not use.
 const ACTING_AGENT: AgentName = 'applier';
+
+/**
+ * A choice control offered none of the wanted option, AND the filler selected nothing.
+ *
+ * Declared here, beside the ApplicationPage port it belongs to, so the live filler and the
+ * test fakes throw one class. The message keeps the `no_matching_option:` prefix, so every
+ * caller that matches on the message still treats it as a form gap.
+ * The CLASS is the stronger claim: the control provably holds NO value. Two things, both
+ * required: this fill selected nothing, AND the control was already empty (no pre-selected
+ * default, no earlier react-select value, no checked radio), because a blank-skip submits
+ * whatever the control holds. A plain Error with the same message means either may be false
+ * (e.g. the readback found a different value shown), so the field may hold an answer nobody
+ * chose. Only this class may degrade to "left blank"; the filler must check emptiness first.
+ */
+export class OptionNotFoundError extends Error {
+  // A named error, so stack traces and logs say which kind of failure this was.
+  override name = 'OptionNotFoundError';
+}
 
 /**
  * The browser operations this module needs.
@@ -350,11 +369,29 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
         const message = error instanceof Error ? error.message : '';
         // Rethrow keeps unknown failures loud instead of disguising them as questions for the human.
         if (!message.startsWith('no_matching_option:') && !message.startsWith('checkbox_not_autofilled:')) throw error;
+        // The extracted field this fill was planned for; undefined if it vanished from the list.
+        const field = fields.find((candidate) => candidate.id === fill.id);
+        // OPTIONAL EEO, PROVABLY UNTOUCHED: leave it blank and keep going (2026-10-09). An EEO
+        // question is voluntary, so a blank one costs nothing, whereas parking would hold the
+        // whole application over a question the employer does not require. All three tests must
+        // hold. The class proves nothing was selected (a plain Error may mean a wrong option is
+        // showing). `required === false`, strictly, so a vanished field is treated as required.
+        // The EEO test is the planner's own, so only attested EEO answers ever reach here.
+        if (
+          error instanceof OptionNotFoundError &&
+          field?.required === false &&
+          isEeoQuestion(field.label)
+        ) {
+          // Logged, so the run's record shows which voluntary question went unanswered and why.
+          console.warn(`[applyy] ${row.id}: optional EEO field "${field.label}" left blank; ${message}`);
+          // Next fill: no blocker, no park, and nothing guessed in this field's place.
+          continue;
+        }
         // Without this the error reached the claim loop, which counted it and left the row
         // `approved`, so it failed identically every run and never reached the human.
         // The label (not the opaque DOM id) is what the human needs to see.
         // Falls back to the id so the blocker is never blank even if the field vanished from the list.
-        const label = fields.find((candidate) => candidate.id === fill.id)?.label ?? fill.id;
+        const label = field?.label ?? fill.id;
         // Pushed into the shared list so the park path and the dry-run report both see it.
         blockers.push({ id: fill.id, label, reason: 'no_matching_option' });
         // Not viable any more: this gates the resume attach, the dry-run report and the park path.

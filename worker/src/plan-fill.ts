@@ -151,6 +151,18 @@ const COMPANY_SUFFIXES: ReadonlySet<string> = new Set([
   'inc', 'llc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'pvt', 'private', 'gmbh', 'plc',
 ]);
 
+/** True when a label sits in EEO (voluntary self-identification) territory. */
+// Exported for apply-one.ts, which may leave an OPTIONAL EEO field blank when the live form
+// offers none of Teja's saved option. One predicate, so the fill loop's "is this EEO?" can
+// never drift from the planner's: the same fold, the same normaliser, the same fragments.
+export function isEeoQuestion(label: string): boolean {
+  // Normalised exactly as planFill normalises a label before its EEO branch.
+  const key = normaliseKey(foldAccents(label));
+  // Substring fragments, like the planner: over-matching only widens a "leave blank" that is
+  // itself gated on the field being optional, so it can never turn into an answer.
+  return EEO_FRAGMENTS.some((fragment) => key.includes(fragment));
+}
+
 /** One field the planner is confident it may fill, and the value to type. */
 export interface PlannedFill {
   // DOM id, used to build the selector at fill time.

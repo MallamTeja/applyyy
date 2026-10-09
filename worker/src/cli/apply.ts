@@ -8,7 +8,8 @@
 import { chromium } from 'playwright';
 // The APPLY_ONLY_ID parser lives beside the loop that consumes it, so it is testable
 // without importing this file (which runs main() on import).
-import { parseOnlyApplicationId, runApplierBatch } from '../claim-loop.ts';
+// parseMaxSubmits too, so the cap is announced (and a bad one refused) before sign-in.
+import { parseMaxSubmits, parseOnlyApplicationId, runApplierBatch } from '../claim-loop.ts';
 import { createSupabaseGateway, type SupabaseLike } from '../supabase-gateway.ts';
 // The constant is read at startup so an operator opt-in this build cannot honour
 // is announced, not discovered row by row.
@@ -58,6 +59,9 @@ async function main(): Promise<void> {
   // Announced next to the mode, because "which rows can this run touch" is the
   // second most important fact about it.
   console.log(`[applyy] scope: ${onlyApplicationId === undefined ? 'whole approved queue' : `ONLY application ${onlyApplicationId}`}`);
+  // The third fact about a run: how many real attempts it may make. Parsed here as well as in
+  // the loop so a bad value stops the run before sign-in, with the reason in the first lines.
+  console.log(`[applyy] submit cap: ${parseMaxSubmits(process.env['APPLY_MAX_SUBMITS'])} attempts per run (APPLY_MAX_SUBMITS)`);
 
   // HEADED=1 shows the browser window. Exact string, like DRY_RUN, so no
   // truthiness rule widens it. For runs on Teja's machine, where a visible

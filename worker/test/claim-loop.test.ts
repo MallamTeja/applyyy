@@ -8,7 +8,7 @@
 // and fits. Splitting this loop into a matrix of parallel jobs is the obvious
 // speed-up and it multiplies the billed minutes by 35.
 import { describe, expect, it, vi } from 'vitest';
-import { parseOnlyApplicationId, runApplierBatch, type RunGateway } from '../src/claim-loop.ts';
+import { parseMaxSubmits, parseOnlyApplicationId, runApplierBatch, type RunGateway } from '../src/claim-loop.ts';
 import type { ApplicationPage } from '../src/apply-one.ts';
 import type { AnswerBankRow } from '@applyy/shared-types';
 
@@ -568,5 +568,279 @@ describe('agent key enforcement', () => {
       rows_in: 0,
       error_detail: expect.stringMatching(/^run failed: .*x-applyy-agent-key/),
     });
+  });
+});
+
+/**
+ * The per-run submit cap (APPLY_MAX_SUBMITS) and the live-run circuit breaker.
+ *
+ * Both bound the damage ONE unattended live run can do. The cap limits how many
+ * real applications go out; the breaker stops the run at the first outcome that
+ * would repeat for every row (an unconfirmed submit, a captcha), so one bad IP
+ * cannot park the whole queue at needs_verification for Teja to hand-check.
+ */
+describe('submit cap and circuit breaker', () => {
+  /** Ids app-1..app-n, oldest first, so the claim order is predictable. */
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => `app-${i + 1}`);
+
+  /**
+   * A queue that behaves like the real claim RPC (oldest unleased first, release
+   * unleases), recording releases and status writes BY ROW. Scripted batches would
+   * hide the dry-run "released row comes straight back" behaviour test 4 relies on.
+   */
+  function capQueueGateway(queue: string[]) {
+    // Rows currently leased to this run.
+    const leased = new Set<string>();
+    // Every release with its reason, to show unstarted rows were handed back.
+    const releases: Array<{ id: string; reason: string }> = [];
+    // Every status write by row, so an unprocessed row moving would be visible.
+    const advances: Array<{ id: string; to: string }> = [];
+    // Claim calls, bounded so a loop that never ends fails fast.
+    let claims = 0;
+    const { gateway, calls } = fakeGateway({
+      claimApplications: async (_by, limit) => {
+        // Recorded in `calls` too, so the startup test can assert it never ran.
+        calls.push('claim');
+        // Counted for the termination ceiling.
+        claims += 1;
+        // An unbounded claim loop is a failure mode, not a timeout.
+        if (claims > 20) throw new Error('claim loop did not terminate');
+        // FIFO over unleased rows, like `claimed_by is null order by created_at`.
+        const picked = queue.filter((id) => !leased.has(id)).slice(0, limit);
+        // Leased on hand-out, exactly as the RPC does.
+        for (const id of picked) leased.add(id);
+        // applyUrl names the row, so page navigations identify which row was worked on.
+        return picked.map((id) => ({ id, status: 'approved' as const, applyUrl: `http://127.0.0.1:1/${id}`, tailoredProfile: null, employerName: null }));
+      },
+      // Per row, so the assertions can say WHICH rows moved.
+      advanceStatus: async (id, to) => {
+        // Only processed rows may appear here.
+        advances.push({ id, to });
+      },
+      // Release unleases, so a released row is claimable again (the real behaviour).
+      releaseClaim: async (id, reason) => {
+        // Back in the pool.
+        leased.delete(id);
+        // With the reason, for the "not started" assertions.
+        releases.push({ id, reason });
+      },
+    });
+    // The gateway and its logs.
+    return { gateway, calls, releases, advances, leased };
+  }
+
+  /**
+   * A page opener whose submit result and blocker are scripted per opened page
+   * (1-based), recording every URL navigated to.
+   */
+  function scriptedPages(script: {
+    submit?: (n: number) => { kind: 'confirmed'; evidence: string } | { kind: 'unconfirmed'; detail: string };
+    blocker?: (n: number) => 'captcha' | null;
+    // True for a page whose navigation throws AFTER being recorded, modelling a crash mid-row.
+    gotoThrows?: (n: number) => boolean;
+  } = {}) {
+    // Every navigation: the proof a row was (or was not) worked on.
+    const visited: string[] = [];
+    // How many pages have been opened, which is the page's script index.
+    let opened = 0;
+    const openPage = async () => {
+      // This page's 1-based number, captured so its methods use their own slot.
+      const n = ++opened;
+      return {
+        // Everything not scripted comes from the shared stub.
+        ...stubPage(),
+        // Recorded before anything else could fail.
+        goto: async (url: string) => {
+          visited.push(url);
+          // Thrown after the push, so the visit is still on record for the assertions.
+          if (script.gotoThrows?.(n)) throw new Error('boom');
+        },
+        // Scripted blocker; null (no blocker) unless the test says otherwise.
+        detectBlocker: async () => script.blocker?.(n) ?? null,
+        // Scripted result; confirmed unless the test says otherwise.
+        submit: async () => script.submit?.(n) ?? ({ kind: 'confirmed', evidence: 'test' } as const),
+      };
+    };
+    // The opener and its navigation log.
+    return { openPage, visited };
+  }
+
+  /** The URL the queue gateway gives a row, for asserting navigations. */
+  const url = (id: string) => `http://127.0.0.1:1/${id}`;
+
+  it('submissions stop at APPLY_MAX_SUBMITS', async () => {
+    // Five approved rows, a cap of two: the run must send two and stop claiming.
+    const { gateway, releases, advances } = capQueueGateway(ids(5));
+    // Every page confirms, so nothing but the cap can stop the run.
+    const { openPage, visited } = scriptedPages();
+
+    // Live, with an explicit cap below the queue length.
+    const summary = await runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false', APPLY_MAX_SUBMITS: '2' }, clock: frozenClock });
+
+    // Exactly the cap went out.
+    expect(summary.submitted).toBe(2);
+    // Only the first two employers' pages were ever opened.
+    expect(visited).toEqual([url('app-1'), url('app-2')]);
+    // The three rows behind them never moved through the status graph.
+    expect(advances.filter((a) => !['app-1', 'app-2'].includes(a.id))).toEqual([]);
+    // They were claimed in the same batch, so they are handed back untouched with the cap's reason.
+    expect(releases).toEqual(
+      ['app-3', 'app-4', 'app-5'].map((id) => ({ id, reason: expect.stringMatching(/^not started: APPLY_MAX_SUBMITS reached/) })),
+    );
+    // And the run says why it ended.
+    expect(summary.stoppedReason).toMatch(/APPLY_MAX_SUBMITS reached/);
+  });
+
+  it('submissions stop at the default cap of 3 when APPLY_MAX_SUBMITS is absent', async () => {
+    // Absent means the deliberate small default, never "unlimited".
+    const { gateway } = capQueueGateway(ids(5));
+    // Every page confirms.
+    const { openPage, visited } = scriptedPages();
+
+    // Live, no cap variable at all.
+    const summary = await runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false' }, clock: frozenClock });
+
+    // DEFAULT_MAX_SUBMITS, not the queue length.
+    expect(summary.submitted).toBe(3);
+    // Only three employers were visited.
+    expect(visited).toHaveLength(3);
+    // Stopped by the cap, not by draining the queue.
+    expect(summary.stoppedReason).toMatch(/APPLY_MAX_SUBMITS reached/);
+  });
+
+  it('a blank or non-integer APPLY_MAX_SUBMITS throws at startup', async () => {
+    // Every lenient reading of these is a cap nobody chose: Number('') is 0,
+    // parseInt('3abc') is 3, Number('1e3') is a thousand (CLAUDE.md §6).
+    for (const raw of ['', '  ', '0', '-1', '1.5', '1e3', 'abc', '3abc']) {
+      // A fresh gateway per value, so each assertion sees only its own calls.
+      const { gateway, calls } = capQueueGateway(ids(2));
+      // Any page open would mean the run started; it must not.
+      const openPage = vi.fn(async () => stubPage());
+
+      // Rejects with the shape error, naming the variable.
+      await expect(
+        runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false', APPLY_MAX_SUBMITS: raw }, clock: frozenClock }),
+      ).rejects.toThrow(/APPLY_MAX_SUBMITS must be a positive integer/);
+      // Nothing opened: no run row, so no "failed" run for a config typo.
+      expect(calls, `openRun for ${JSON.stringify(raw)}`).not.toContain('openRun');
+      // Nothing claimed: no lease taken that would need releasing.
+      expect(calls, `claim for ${JSON.stringify(raw)}`).not.toContain('claim');
+      // And no employer page touched.
+      expect(openPage).not.toHaveBeenCalled();
+    }
+
+    // Absent is the default.
+    expect(parseMaxSubmits(undefined)).toBe(3);
+    // A valid value with shell whitespace is accepted, trimmed.
+    expect(parseMaxSubmits(' 4 ')).toBe(4);
+  });
+
+  it('the first unknown outcome stops further claims', async () => {
+    // An unconfirmed submit is the outcome a low reCAPTCHA score produces on EVERY
+    // row; continuing would park the whole queue at needs_verification.
+    const { gateway, releases, advances } = capQueueGateway(ids(3));
+    // The first page's submit comes back without proof.
+    const { openPage, visited } = scriptedPages({
+      submit: (n) => (n === 1 ? { kind: 'unconfirmed', detail: 'no confirmation text' } : { kind: 'confirmed', evidence: 'test' }),
+    });
+
+    // Live, with a cap high enough that only the breaker can stop it.
+    const summary = await runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false', APPLY_MAX_SUBMITS: '10' }, clock: frozenClock });
+
+    // The one unknown outcome is counted, and nothing was confirmed sent.
+    expect(summary.outcomeUnknown).toBe(1);
+    expect(summary.submitted).toBe(0);
+    // Only the first employer was visited.
+    expect(visited).toEqual([url('app-1')]);
+    // The other two never moved.
+    expect(advances.filter((a) => a.id !== 'app-1')).toEqual([]);
+    // They were released untouched, with the breaker's reason.
+    expect(releases).toEqual(
+      ['app-2', 'app-3'].map((id) => ({ id, reason: expect.stringMatching(/^not started: circuit breaker/) })),
+    );
+    // And the run says the breaker ended it.
+    expect(summary.stoppedReason).toMatch(/circuit breaker/);
+  });
+
+  it('a captcha stops further claims in a live run', async () => {
+    // A captcha on one form means the next form on this IP will very likely challenge too.
+    const { gateway, releases } = capQueueGateway(ids(3));
+    // A captcha wall on the first page only.
+    const { openPage, visited } = scriptedPages({ blocker: (n) => (n === 1 ? 'captcha' : null) });
+
+    // Live, cap well above the queue.
+    const summary = await runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false', APPLY_MAX_SUBMITS: '10' }, clock: frozenClock });
+
+    // The captcha row was blocked, and nothing else was attempted.
+    expect(summary.blocked).toBe(1);
+    expect(summary.submitted).toBe(0);
+    // Only the first employer was visited.
+    expect(visited).toEqual([url('app-1')]);
+    // The rest were handed back untouched.
+    expect(releases.map((r) => r.id)).toEqual(['app-2', 'app-3']);
+    // The breaker is named as the reason.
+    expect(summary.stoppedReason).toMatch(/circuit breaker/);
+  });
+
+  it('a dry run ignores the breaker', async () => {
+    // A dry run sends nothing, so neither the cap nor the breaker has anything to protect.
+    const { gateway, leased } = capQueueGateway(ids(3));
+    // Captcha on every page: in a live run this would trip the breaker on row one.
+    const { openPage, visited } = scriptedPages({ blocker: () => 'captcha' });
+
+    // Dry (no DRY_RUN=false), and a cap of 1 to prove a dry run is not capped either.
+    const summary = await runApplierBatch({ gateway, openPage, renderResume, env: { APPLY_MAX_SUBMITS: '1' }, clock: frozenClock });
+
+    // All three rows were worked through.
+    expect(summary.dryRun).toBe(3);
+    // Each employer's page was visited exactly once.
+    expect(visited).toEqual(ids(3).map(url));
+    // Neither stop mechanism fired.
+    expect(summary.stoppedReason).not.toMatch(/circuit breaker/);
+    expect(summary.stoppedReason).not.toMatch(/APPLY_MAX_SUBMITS/);
+    // And every row was handed back, still approved.
+    expect(leased.size).toBe(0);
+  });
+
+  it('a thrown error stops further claims in a live run', async () => {
+    // A throw in a live run may have happened anywhere, the click included; the next
+    // row would most likely hit the same fault, so the run must stop, not press on.
+    const { gateway, releases, advances } = capQueueGateway(ids(3));
+    // The first page crashes on navigation.
+    const { openPage, visited } = scriptedPages({ gotoThrows: (n) => n === 1 });
+
+    // Live, cap well above the queue, so only the breaker can stop it.
+    const summary = await runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false', APPLY_MAX_SUBMITS: '10' }, clock: frozenClock });
+
+    // The one error is counted.
+    expect(summary.errors).toBe(1);
+    // Only the first employer was visited.
+    expect(visited).toEqual([url('app-1')]);
+    // The other two never moved through the status graph.
+    expect(advances.filter((a) => a.id !== 'app-1')).toEqual([]);
+    // They were released untouched, with the breaker's reason.
+    expect(releases).toEqual(
+      ['app-2', 'app-3'].map((id) => ({ id, reason: expect.stringMatching(/^not started: circuit breaker/) })),
+    );
+    // The run names the error as the reason it ended.
+    expect(summary.stoppedReason).toMatch(/circuit breaker: error on/);
+  });
+
+  it('a thrown error in a dry run does not stop the run', async () => {
+    // A dry run sends nothing, so one broken page must not cost the rest of the trust-period log.
+    const { gateway } = capQueueGateway(ids(3));
+    // The same crash on the first page.
+    const { openPage, visited } = scriptedPages({ gotoThrows: (n) => n === 1 });
+
+    // Dry: no DRY_RUN=false.
+    const summary = await runApplierBatch({ gateway, openPage, renderResume, env: {}, clock: frozenClock });
+
+    // Every employer was still visited.
+    expect(visited).toEqual(ids(3).map(url));
+    // One error, and the other two completed as dry runs.
+    expect(summary.errors).toBe(1);
+    expect(summary.dryRun).toBe(2);
+    // The breaker did not fire.
+    expect(summary.stoppedReason).not.toMatch(/circuit breaker/);
   });
 });

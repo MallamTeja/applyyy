@@ -24,7 +24,8 @@ import {
 import { canStartAnotherApplication, type RunWindowLimits } from './run-window.ts';
 // Type-only so the claim loop gains no runtime dependency on the profile module.
 import type { AnswerBankRow, MasterProfile } from '@applyy/shared-types';
-import type { SubmissionEnv } from './submission-mode.ts';
+// The value import is for the circuit breaker, which acts only in a run that asked to submit.
+import { resolveSubmissionMode, type SubmissionEnv } from './submission-mode.ts';
 
 // This worker's identity, used for both the run row and the claim marker.
 const ACTING_AGENT: AgentName = 'applier';
@@ -126,8 +127,44 @@ export function parseOnlyApplicationId(raw: string | undefined): string | undefi
   return id.toLowerCase();
 }
 
+// The per-run submit cap when APPLY_MAX_SUBMITS is absent. Small on purpose: the first
+// unattended live runs should be able to cost Teja at most a handful of applications.
+export const DEFAULT_MAX_SUBMITS = 3;
+
+/**
+ * APPLY_MAX_SUBMITS, validated by SHAPE: a positive integer in plain digits, or the run stops.
+ *
+ * Only ABSENT means the default. A SET value that is blank, zero, negative, fractional or
+ * not a number throws, because the lenient readers turn it into a cap nobody chose:
+ * Number('') is 0, parseInt('3abc') is 3, Number('1e9') is a billion (CLAUDE.md §6).
+ */
+export function parseMaxSubmits(raw: string | undefined): number {
+  // Absent: the deliberate small default.
+  if (raw === undefined) return DEFAULT_MAX_SUBMITS;
+  // Trimmed, so a stray space from a shell does not fail an otherwise valid number.
+  const text = raw.trim();
+  // Digits only, no leading zero: rules out '', '0', '-1', '1.5', '1e3' and '0x10' in one test.
+  if (!/^[1-9][0-9]*$/.test(text)) {
+    throw new Error(`APPLY_MAX_SUBMITS must be a positive integer; got ${JSON.stringify(raw)}. Refusing to run.`);
+  }
+  // Safe now: a short digit string with no sign, exponent or fraction.
+  const value = Number(text);
+  // A digit string past 2^53 would round to a different number; refuse it rather than guess.
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`APPLY_MAX_SUBMITS is too large; got ${JSON.stringify(raw)}. Refusing to run.`);
+  }
+  // A positive, exactly represented integer.
+  return value;
+}
+
 export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary> {
   const { gateway, openPage, env, clock, renderResume } = input;
+  // THE PER-RUN SUBMIT CAP, parsed BEFORE the run row opens, so a bad value stops the run
+  // with nothing opened and nothing claimed (a startup failure, not a mid-run one).
+  const maxSubmits = parseMaxSubmits(env['APPLY_MAX_SUBMITS']);
+  // Whether this run asked to submit. The breaker below acts only then; a dry run never
+  // submits, so an unconfirmed or captcha outcome cannot happen there and must not stop it.
+  const live = resolveSubmissionMode(env).submits;
   // Default the run start to now, so a caller that does not care gets the whole
   // budget rather than accidentally starting mid-window.
   const runStartedAtEpochSeconds = input.runStartedAtEpochSeconds ?? clock();
@@ -158,6 +195,27 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
   const notTargeted: string[] = [];
   // Set once the targeted application has been processed, to end the run there.
   let targetDone = false;
+  // THE CIRCUIT BREAKER's reason, set by the first outcome that says "this run cannot tell
+  // whether, or cannot even, submit". Null until then. A reCAPTCHA scoring a datacenter IP
+  // low makes EVERY submit unconfirmed; without this one run would park the whole queue at
+  // needs_verification, each row needing Teja to check an employer site by hand.
+  let breakerReason: string | null = null;
+
+  /** Why to stop before the next application on this run's own budget, or null to go on. */
+  // Separate from gateBeforeNextApplication: that gate is about time and auth, this one is
+  // about how many real attempts this run has already made and whether it should keep making them.
+  function submitBudgetStop(): string | null {
+    // The breaker wins: a tripped run stops even below its cap.
+    if (breakerReason !== null) return breakerReason;
+    // Unknown outcomes COUNT toward the cap: each may well have been sent.
+    const attempts = submitted + outcomeUnknown;
+    // At the cap: stop claiming. Dry runs never reach it (both counters stay 0).
+    if (attempts >= maxSubmits) {
+      return `APPLY_MAX_SUBMITS reached (${attempts} of ${maxSubmits} submit attempts); stopped claiming`;
+    }
+    // Under the cap and the breaker untripped.
+    return null;
+  }
 
   /**
    * Both gates, in one place so the before-claim and before-each-application
@@ -236,7 +294,9 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
     claiming: for (;;) {
       // The run-window gate before claiming, so an exhausted budget claims
       // nothing it would only have to hand back.
-      const beforeClaim = await gateBeforeNextApplication(false);
+      // The submit budget first: a capped or tripped run must not even claim, since every
+      // claimed row would only be released again.
+      const beforeClaim = submitBudgetStop() ?? (await gateBeforeNextApplication(false));
       // A string is the reason to stop; null means carry on.
       if (beforeClaim !== null) {
         stoppedReason = beforeClaim;
@@ -280,7 +340,9 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
         // BOTH GATES, checked again before EACH application rather than once
         // per batch: the kill switch must stop the run between two employers'
         // forms, not after up to four more of them.
-        const beforeRow = await gateBeforeNextApplication(true);
+        // The submit budget too, so a cap or breaker reached mid-batch releases the rest of the
+        // batch untouched through the same path below, instead of attempting another employer.
+        const beforeRow = submitBudgetStop() ?? (await gateBeforeNextApplication(true));
         if (beforeRow !== null) {
           stoppedReason = beforeRow;
           // The rest of this batch is leased to us and untouched; hand it back
@@ -305,6 +367,22 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
           else if (outcome.kind === 'blocked') blocked += 1;
           else if (outcome.kind === 'dry_run_complete') dryRun += 1;
           else outcomeUnknown += 1;
+
+          // TRIP THE BREAKER on the first outcome that would repeat for every row: an
+          // unconfirmed or failed submit (we cannot tell whether it went out), or a captcha
+          // (the next form on this IP will very likely challenge too). Only in a live run;
+          // a dry run's outcomes are dry_run_complete and must not stop it.
+          if (live && breakerReason === null) {
+            // The unknown outcome: the most expensive kind, each one a manual check for Teja.
+            if (outcome.kind === 'submit_outcome_unknown') {
+              breakerReason = `circuit breaker: submit outcome unknown for ${row.id} (${outcome.error}); no further claims this run`;
+            // A captcha, before or after the submit click.
+            } else if (outcome.kind === 'blocked' && outcome.reason === 'captcha') {
+              breakerReason = `circuit breaker: captcha on ${row.id}; no further claims this run`;
+            }
+            // Logged at the moment it trips, so the run log says why it ended early.
+            if (breakerReason !== null) console.warn(`[claim-loop] ${breakerReason}`);
+          }
         } catch (error) {
           // One application failing must not end the run: the other 34 are
           // still worth doing, and the row it failed on keeps its lease and is
@@ -313,6 +391,19 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
           stoppedReason = `continued after error: ${
             error instanceof Error ? error.message : String(error)
           }`;
+          // A THROW IN A LIVE RUN TRIPS THE BREAKER TOO. From here the loop cannot tell a
+          // throw before `applying` from one after it, e.g. the `applied` write failing after
+          // a confirmed send: the application went out, yet neither `submitted` nor
+          // `outcomeUnknown` moved, so the cap alone would let the run keep submitting.
+          // Stopping is the side that cannot over-send; the row itself is swept later.
+          if (live && breakerReason === null) {
+            // The reason names the row and the error, so the log says why the run ended early.
+            breakerReason = `circuit breaker: error on ${row.id} in a live run (${
+              error instanceof Error ? error.message : String(error)
+            }); no further claims this run`;
+            // Logged at the moment it trips, like the outcome-based trips above.
+            console.warn(`[claim-loop] ${breakerReason}`);
+          }
         } finally {
           // A leaked page keeps Chromium alive and the job billing until its
           // timeout — a real cost against a budget measured in whole minutes.

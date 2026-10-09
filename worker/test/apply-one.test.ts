@@ -15,6 +15,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   applyToOne,
+  // The typed "provably selected nothing" error, the only one that may leave an optional EEO field blank.
+  OptionNotFoundError,
   type ApplicationPage,
   type ApplierGateway,
   type ArtifactPaths,
@@ -1096,5 +1098,154 @@ describe('applyToOne — the employer name reaches the planner', () => {
     });
     // Not viable: the question went to a human because the employer was unknown.
     expect(outcome).toMatchObject({ kind: 'dry_run_complete', wouldSubmit: false });
+  });
+});
+
+// An optional EEO question whose attested answer matches none of the page's options. Parking
+// the whole application for a question the employer itself marks optional costs a real
+// application; leaving it blank answers it exactly as "decline to answer" would. Only a filler
+// that PROVES it selected nothing (OptionNotFoundError) earns the skip: a plain Error with the
+// same message means a click may have landed on the wrong option, which a human must see.
+describe('applyToOne — optional EEO option mismatch', () => {
+  /** The gender field (optional unless a test says otherwise) followed by a required text field. */
+  function eeoForm(genderRequired: boolean): FormField[] {
+    // No `options`, so the planner defers option checking to fill time and plans the fill.
+    return [
+      // 'Gender' matches the EEO template /^gender$/, so it is read from the eeo_gender key.
+      { id: 'gender', label: 'Gender', kind: 'combobox', required: genderRequired },
+      // Placed AFTER gender so a recorded fill proves the loop continued past the skip.
+      { id: 'first_name', label: 'First Name', kind: 'text', required: true },
+    ];
+  }
+
+  // EEO answers must be attested by the human, or the planner refuses to use them at all.
+  const eeoAnswers = [
+    // The attested gender answer the page will fail to find among its options.
+    { question_key: 'eeo_gender', answer_value: 'Male', needs_human: false, answer_type: 'text', attested_by_human: true },
+    // The plain answer for the required field that must still be filled after the skip.
+    { question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text' },
+  ] as unknown as AnswerBankRow[];
+
+  /** A page whose fill throws `error` for the gender field only and records every fill id in order. */
+  function mismatchPage(form: FormField[], error: Error) {
+    // Every id the loop tried to fill, in order, so "continued past gender" is observable.
+    const filled: string[] = [];
+    // The shared fake, so submit and every other port behave as in the rest of this file.
+    const { page, submit } = fakePage({
+      // The form under test instead of the default one-field form.
+      extractFields: async () => form,
+      // Records first, then throws, so a rejected fill still appears in the order log.
+      fill: async (id) => {
+        // Recorded before the throw: the attempt itself is part of the sequence.
+        filled.push(id);
+        // Only the gender field is rejected; every other fill succeeds.
+        if (id === 'gender') throw error;
+      },
+    });
+    // The page plus both logs the assertions read.
+    return { page, submit, filled };
+  }
+
+  it('an optional EEO option mismatch leaves the field blank and does not park', async () => {
+    // The typed error: the filler proved nothing was selected, so blank is the honest state.
+    const { page, submit, filled } = mismatchPage(
+      // Optional gender, the only case allowed to skip.
+      eeoForm(false),
+      // The exact message the live filler throws, as the typed class.
+      new OptionNotFoundError('no_matching_option: gender: "Male"'),
+    );
+    // The plain fake records the status writes in order.
+    const { gateway, transitions } = fakeGateway();
+
+    // DRY_RUN false so a park, if one happened, would be a real status write the test can see.
+    await applyToOne({ row, page, gateway, answers: eeoAnswers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+
+    // No blocked_needs_human: the skip kept the application viable all the way to applied.
+    expect(transitions).toEqual(['applying', 'applied']);
+    // The application actually went out, exactly once.
+    expect(submit).toHaveBeenCalledTimes(1);
+    // The loop did not break at gender: the required field after it was still typed.
+    expect(filled).toEqual(['gender', 'first_name']);
+  });
+
+  it('a required field mismatch still parks', async () => {
+    // A required question cannot be left blank: the form would refuse it, so a human decides.
+    const { page, submit } = mismatchPage(
+      // Required gender, so the skip must NOT apply even though the label is EEO.
+      eeoForm(true),
+      // The same typed error as the skip case, so only `required` differs.
+      new OptionNotFoundError('no_matching_option: gender: "Male"'),
+    );
+    // The plain fake records the status writes in order.
+    const { gateway, transitions } = fakeGateway();
+
+    // DRY_RUN false so the real park path runs.
+    const outcome = await applyToOne({ row, page, gateway, answers: eeoAnswers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+
+    // One write, straight to the human queue.
+    expect(transitions).toEqual(['blocked_needs_human']);
+    // Nothing goes out for a form with an unanswered required question.
+    expect(submit).not.toHaveBeenCalled();
+    // The claim loop counts this as parked, not errored.
+    expect(outcome.kind).toBe('blocked');
+  });
+
+  it('an optional EEO mismatch thrown as a plain Error still parks', async () => {
+    // A plain Error is the readback path: a click may have landed and a WRONG option may show,
+    // which is worse than blank and must not be submitted unseen.
+    const { page, submit } = mismatchPage(
+      // Optional gender, so only the error TYPE separates this from the skip case.
+      eeoForm(false),
+      // Same message, untyped: the message alone must never earn the skip.
+      new Error('no_matching_option: gender: "Male"'),
+    );
+    // The plain fake records the status writes in order.
+    const { gateway, transitions } = fakeGateway();
+
+    // DRY_RUN false so the real park path runs.
+    const outcome = await applyToOne({ row, page, gateway, answers: eeoAnswers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+
+    // Parked for the human, as before this change.
+    expect(transitions).toEqual(['blocked_needs_human']);
+    // A possibly-wrong EEO answer never goes out.
+    expect(submit).not.toHaveBeenCalled();
+    // Counted as parked by the claim loop.
+    expect(outcome.kind).toBe('blocked');
+  });
+
+  it('an optional NON-EEO option mismatch still parks', async () => {
+    // Optional but not EEO: an employer question left blank may still cost the application,
+    // so the skip is scoped to the declinable demographic questions only.
+    const countryForm: FormField[] = [
+      // Optional combobox with no options, so the fill is planned and rejected at fill time.
+      { id: 'country', label: 'Country', kind: 'combobox', required: false },
+    ];
+    // A plain bank row is enough: non-EEO answers need no attestation.
+    const countryAnswers = [
+      // The value the page will fail to find among its options.
+      { question_key: 'country', answer_value: 'India', needs_human: false, answer_type: 'text' },
+    ] as unknown as AnswerBankRow[];
+    // The typed error, so only the label separates this from the skip case.
+    const { page, submit } = fakePage({
+      // The one-field non-EEO form.
+      extractFields: async () => countryForm,
+      // Rejects the country value exactly as the filler would after proving no selection.
+      fill: async () => {
+        // Typed, so a skip that ignored the EEO check would wrongly pass here.
+        throw new OptionNotFoundError('no_matching_option: country: "India"');
+      },
+    });
+    // The plain fake records the status writes in order.
+    const { gateway, transitions } = fakeGateway();
+
+    // DRY_RUN false so the real park path runs.
+    const outcome = await applyToOne({ row, page, gateway, answers: countryAnswers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+
+    // Parked for the human.
+    expect(transitions).toEqual(['blocked_needs_human']);
+    // Nothing goes out.
+    expect(submit).not.toHaveBeenCalled();
+    // Counted as parked by the claim loop.
+    expect(outcome.kind).toBe('blocked');
   });
 });
