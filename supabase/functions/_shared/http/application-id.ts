@@ -29,9 +29,16 @@ export type ApplicationIdParam =
 
 // Classifies the request's `application_id` query parameter.
 export function parseApplicationIdParam(params: URLSearchParams): ApplicationIdParam {
+  // The one rule, applied to this parameter name.
+  return parseUuidParam(params, "application_id");
+}
+
+// The same closed classification for ANY uuid-valued query parameter (e.g. the matcher's
+// pre-gate sweep cursor `after_id`), so a second parameter never grows a second regex.
+export function parseUuidParam(params: URLSearchParams, name: string): ApplicationIdParam {
   // get() returns null ONLY when the key is missing; an empty value comes back as "".
-  const raw = params.get("application_id");
-  // Missing key is the one case that means "no target".
+  const raw = params.get(name);
+  // Missing key is the one case that means "absent".
   if (raw === null) return { kind: "absent" };
   // Everything else must match exactly; "" fails the pattern and so lands in invalid.
   return UUID_PATTERN.test(raw) ? { kind: "valid", id: raw } : { kind: "invalid" };

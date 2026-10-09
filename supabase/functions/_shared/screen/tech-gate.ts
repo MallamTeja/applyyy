@@ -162,10 +162,13 @@ export function screenTechRole(
     return { drop: true, code: "tech_gate", reason: `title or description matches excluded term "${excluded}"` };
   }
 
-  // Then the positive match. Titles and keywords are treated alike because a posting
-  // titled "Product Engineer" that mentions React is as relevant as one titled
-  // "Frontend Developer" — the config names two ways of describing one interest.
-  const matched = firstMatch(preferences.titles, haystack) ?? firstMatch(preferences.keywords, haystack);
+  // Then the positive match. A posting titled "Product Engineer" that mentions React is as
+  // relevant as one titled "Frontend Developer", so a KEYWORD may match the title or the
+  // description head. A configured TITLE term matches the job TITLE ONLY (Teja, 2026-10-09,
+  // amending the 09-17 rule that treated both alike): measured live, 111 rows passed only
+  // because a title term like "Developer" or "Software Engineer" sat in the body — "work
+  // with our developers" — 74 of them sales, finance or business roles.
+  const matched = firstMatch(preferences.titles, title) ?? firstMatch(preferences.keywords, haystack);
   // Recognised. No warning, so the warning below keeps meaning something.
   if (matched !== undefined) return { drop: false };
 

@@ -67,7 +67,8 @@ import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 // Shared CORS headers, plus the boundary that keeps them on an uncaught 500.
 import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 // The shared `?application_id=` parser, so all five pipeline agents refuse a bad id identically.
-import { parseApplicationIdParam } from "../_shared/http/application-id.ts";
+// parseUuidParam is the same rule, reused for the sweep's after_id cursor.
+import { parseApplicationIdParam, parseUuidParam } from "../_shared/http/application-id.ts";
 // The score threshold: decides advance (-> scored), drop (-> dropped_filter) or refuse. Pure,
 // so its boundaries are table-tested in match/score-threshold.test.ts rather than only here.
 import { decideScoreThreshold } from "../_shared/match/score-threshold.ts";
@@ -77,7 +78,7 @@ import { createDeadline, deadlineNote, runBatchWithDeadline, shortenedBudgetNote
 // are unit-tested (write-score.test.ts).
 import { advanceScoredRow, writeMatchScore } from "./write-score.ts";
 // Stage 0 re-applied before scoring, so a row the screener would now drop costs no Gemini call.
-import { withTechPreGate } from "./tech-pregate.ts";
+import { nextSweepCursor, parseMatcherMode, PREGATE_ONLY_MAX_BATCH, selectScorer, withTechPreGate, type MatcherMode } from "./tech-pregate.ts";
 // The one mapper from a search_preferences row to the gate's config.
 import { toTechGatePreferences } from "../_shared/screen/tech-gate.ts";
 
@@ -120,6 +121,8 @@ function resolveBatchSize(
   // The raw query parameter string extracted from request URL search parameters.
   // Null when query parameter was not provided by caller.
   raw: string | null,
+  // The ceiling for this run: MAX_BATCH_SIZE when scoring, higher for a Gemini-free sweep.
+  max: number = MAX_BATCH_SIZE,
 ): number {
   // If raw parameter is absent or null, return default batch size constant.
   if (raw === null) return DEFAULT_BATCH_SIZE;
@@ -130,7 +133,7 @@ function resolveBatchSize(
   if (!Number.isInteger(parsed) || parsed < 1) return DEFAULT_BATCH_SIZE;
   // Return minimum of parsed integer value and maximum batch size ceiling limit.
   // Caps execution length to protect LLM quota pool.
-  return Math.min(parsed, MAX_BATCH_SIZE);
+  return Math.min(parsed, max);
 }
 
 // Register primary Deno HTTP server request listener callback.
@@ -182,6 +185,34 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   }
   // Null means "no target": the unchanged whole-queue behaviour.
   const applicationId: string | null = target.kind === "valid" ? target.id : null;
+
+  // `?mode=pregate_only`: the one-off Gemini-free sweep (Teja, 2026-10-09). Parsed and
+  // refused here, before the run row, like application_id: a typo must neither leave a
+  // failed run behind nor fall back to a normal run that spends Gemini quota.
+  const parsedMode = parseMatcherMode(new URL(req.url).searchParams);
+  // Unknown mode: refused with a named reason.
+  if (parsedMode.kind === "invalid") {
+    // Same 400 shape as the application_id refusal above.
+    return jsonResponse(400, { success: false, error: "invalid_mode", detail: "mode must be absent or pregate_only" });
+  }
+  // Narrowed to the closed union.
+  const mode: MatcherMode = parsedMode;
+  // `?after_id=<uuid>`: the sweep's keyset cursor. Survivors stay at passed_filters, so an
+  // oldest-first read would return the same survivors every run and never progress; paging
+  // by id past the last row seen does. Same uuid rule as application_id.
+  const cursor = parseUuidParam(new URL(req.url).searchParams, "after_id");
+  // A malformed cursor is refused, never treated as "start from the beginning".
+  if (cursor.kind === "invalid") {
+    // Named, so the operator sees which parameter was wrong.
+    return jsonResponse(400, { success: false, error: "invalid_after_id", detail: "after_id must be a UUID" });
+  }
+  // The cursor only means something to a sweep; a scoring run keeps its oldest-first queue.
+  if (cursor.kind === "valid" && mode.kind !== "pregate_only") {
+    // Refused rather than ignored: silently dropping a parameter the caller sent is a fail-open.
+    return jsonResponse(400, { success: false, error: "after_id_requires_pregate_only", detail: "after_id is only valid with mode=pregate_only" });
+  }
+  // Null on the first page of a sweep.
+  const afterId: string | null = cursor.kind === "valid" ? cursor.id : null;
 
   // Open an agent run tracking row in agent_runs table before executing work.
   // Ensures telemetry presence even if execution encounters unhandled crash.
@@ -293,7 +324,12 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
 
   // Resolve batch size limit from URL search parameters limit parameter string.
   // Clamps batch size within safe operating bounds.
-  const batchSize = resolveBatchSize(new URL(req.url).searchParams.get("limit"));
+  // A sweep makes no Gemini call per row, so it may take a far larger page than scoring may.
+  const batchSize = resolveBatchSize(
+    new URL(req.url).searchParams.get("limit"),
+    // 500 for the Gemini-free sweep; the unchanged 25 when scoring.
+    mode.kind === "pregate_only" ? PREGATE_ONLY_MAX_BATCH : MAX_BATCH_SIZE,
+  );
 
   // `applicationId` was parsed and validated above, before the run row was opened.
   // Query applications table for candidate applications sitting at status 'passed_filters'.
@@ -308,8 +344,12 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     // Narrow to the one requested row; the status filter stays, so a wrong-status id yields
     // zero rows. An empty match object is a no-op when untargeted.
     .match(applicationId !== null ? { id: applicationId } : {})
-    // Order applications by creation timestamp ascending for FIFO processing queue order.
-    .order("created_at", { ascending: true })
+    // The sweep's keyset cursor: only ids after the last one a previous page saw. The nil
+    // uuid on a first page (and on every scoring run) is below every real v4 id, so the
+    // filter is then always true; one chain instead of two, which keeps tsc off TS2589.
+    .gt("id", afterId ?? "00000000-0000-0000-0000-000000000000")
+    // Scoring: oldest first (FIFO). Sweep: by id, the order the cursor pages in.
+    .order(mode.kind === "pregate_only" ? "id" : "created_at", { ascending: true })
     // Limit returned rows to calculated batch size ceiling.
     .limit(batchSize);
 
@@ -384,6 +424,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // Rows the pre-gate dropped before scoring (excluded term, or no configured title/keyword
   // matched). Apart from droppedCount, which counts score-floor drops that DID cost a call.
   let techGateDroppedCount = 0;
+  // Sweep only: rows the gate passed and left at passed_filters for a later scoring run.
+  let preGateSurvivorCount = 0;
   // Initialize array holding individual application row processing failure records.
   // Captures per-row errors without halting whole batch execution.
   const failures: Array<{ applicationId: string; error: string }> = [];
@@ -419,7 +461,9 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
       // A failed drop write: recorded like any other row failure.
       else failures.push({ applicationId: row.id, error: outcome.message });
     },
-    async (row, call) => {
+    // In a sweep, selectScorer returns a survivor counter that never reaches the scorer below,
+    // so the sweep makes zero Gemini calls (tech-pregate.test.ts proves it with a spy).
+    selectScorer(mode, async (row, call) => {
     // Hand this row's planned timeout/retries to callLlm through the closure above.
     callBudget = call;
       // Cast embedded job relation object to structured job fields interface.
@@ -562,7 +606,30 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
           error: (err instanceof Error ? err.message : String(err)) + shortenedBudgetNote(call),
         });
       }
-  }), { deadline, targeted: applicationId !== null });
+  }, () => {
+    // Counted for the run summary; the row itself is not touched.
+    preGateSurvivorCount += 1;
+  })), { deadline, targeted: applicationId !== null });
+  // The sweep cursor, computed by the tested pure function from what was PROCESSED, so the
+  // response never claims "done" while rows are unjudged (see nextSweepCursor).
+  const cursorOut = nextSweepCursor({
+    // In id order, as the sweep read them.
+    rowIds: (rows ?? []).map((r) => r.id),
+    // The page size asked for.
+    batchSize,
+    // Finished rows, from the batch runner itself.
+    processed: batch.processed,
+    // The deadline, not the page end, stopped it.
+    stoppedEarly: batch.stoppedEarly,
+    // Where this page started.
+    afterId,
+    // Gate errors on this page: they keep the sweep from claiming done (see nextSweepCursor).
+    errors: failures.length,
+  });
+  // Reported only for a sweep; a scoring run has no cursor.
+  const sweepDone = mode.kind === "pregate_only" && cursorOut.done;
+  // The after_id for the next call; null when done.
+  const nextAfterId = cursorOut.nextAfterId;
 
   // HONEST FINAL STATUS. `failed` when there was work, none of it moved, and errors
   // explain why: the live matcher run seen 2026-10-04 (rows_in 10, rows_out 0,
@@ -589,7 +656,10 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   const staleNote = skippedStaleCount > 0 ? `skipped_stale: ${skippedStaleCount} row(s) lost a race to another run` : null;
   // Pre-gate drops are not errors either; a note, so Health shows the backlog being pruned.
   const preGateNote = techGateDroppedCount > 0 ? `tech_gate_dropped: ${techGateDroppedCount} row(s) dropped by the pre-gate before scoring` : null;
-  const errorDetail = [failureDetail, stopNote, staleNote, preGateNote].filter((x) => x !== null).join(" | ") || null;
+  // A sweep says so on Health, with its survivors, so it is never mistaken for a scoring run
+  // that scored nothing.
+  const sweepNote = mode.kind === "pregate_only" ? `pregate_only sweep: ${preGateSurvivorCount} survivor(s) left at passed_filters` : null;
+  const errorDetail = [failureDetail, stopNote, staleNote, preGateNote, sweepNote].filter((x) => x !== null).join(" | ") || null;
 
   // Check if valid agent run identifier exists for this execution.
   if (runId) {
@@ -638,6 +708,15 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     skipped_stale: skippedStaleCount,
     // Rows the pre-gate dropped before scoring, at zero Gemini cost.
     tech_gate_dropped: techGateDroppedCount,
+    // Which run this was; a sweep also reports its survivors and where to resume.
+    mode: mode.kind,
+    // Sweep only: the cursor protocol the operator loops on until done is true.
+    ...(mode.kind === "pregate_only"
+      // unjudged_errors: rows the cursor moved past whose gate errored. The operator's loop
+      // sums it across pages; a non-zero total means one more pass from the start (no
+      // after_id). next_after_id null with done false also means "restart from the start".
+      ? { pregate_survivors: preGateSurvivorCount, unjudged_errors: failures.length, next_after_id: nextAfterId, done: sweepDone }
+      : {}),
     // Total count of Gemini API calls executed.
     gemini_calls: geminiCallsCount,
     // Array of individual application row failure objects.

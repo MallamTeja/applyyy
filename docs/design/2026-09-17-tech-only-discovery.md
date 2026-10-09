@@ -300,6 +300,19 @@ indistinguishable from "no jobs today."
 > [tech-gate.ts](../../supabase/functions/_shared/screen/tech-gate.ts),
 > [tech-pregate.ts](../../supabase/functions/matcher/tech-pregate.ts).
 > The text above is kept as the 2026-09-17 record.
+>
+> **Amendment 2, 2026-10-09 (Teja, handoff §4.1).** "Titles and keywords are
+> treated alike" is narrowed: a configured **title** term now matches the job
+> **title only**; **keywords** still match the title or the first 300 characters
+> of the description. *Why:* measured live, 111 `passed_filters` rows passed only
+> because a title term ("Developer", "Software Engineer") sat in the body — "work
+> with our developers" — 74 of them sales, finance or business roles. Cost,
+> accepted: 37 engineering-shaped titles that matched only through the body
+> (DevOps, Platform, Release, Support Engineer…) now need their own title term.
+>
+> A one-off **`mode=pregate_only`** matcher run (Teja, 2026-10-09) sweeps the
+> unscored backlog with the same gate and makes no Gemini call: rejected rows
+> drop as above, survivors stay at `passed_filters` for a normal scoring run.
 
 ### Recording the drop
 

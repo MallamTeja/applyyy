@@ -90,6 +90,95 @@ export async function preGateRow(
   return { kind: "dropped", code: verdict.code, reason: verdict.reason };
 }
 
+// --- pre-gate-only sweep mode (Teja, 2026-10-09: one-off sweep of the unscored backlog) ----
+//
+// WHY A MODE, NOT A SQL STATEMENT: the gate's matching rules (conditional word boundaries,
+// title-only title terms, the 300-char description head, blank skipping) live in
+// screenTechRole. A SQL sweep would be a second hand-written copy that drifts. This mode runs
+// the SAME preGateRow over the backlog and simply never scores: a row the gate passes is left
+// at passed_filters, untouched, for a normal run to score later.
+
+// How the matcher treats a row the gate lets through. Closed: there is no third behaviour.
+export type MatcherMode =
+  // Normal run: gate, then score with Gemini.
+  | { readonly kind: "score" }
+  // Sweep: gate only; survivors are counted and left in place, Gemini is never called.
+  | { readonly kind: "pregate_only" };
+
+// The sweep moves rows with no Gemini call each, so it may take far more than the scoring
+// cap of 25 per run: ~2 DB round-trips per row fits ~500 in the 120 s deadline.
+export const PREGATE_ONLY_MAX_BATCH = 500;
+
+// Classify `?mode=`. Absent is a normal run; anything other than the one known value is a
+// refusal, never a silent fall-back to scoring (a typo must not spend Gemini quota).
+export function parseMatcherMode(params: URLSearchParams): MatcherMode | { readonly kind: "invalid" } {
+  // null only when the key is missing; "" is present-but-wrong.
+  const raw = params.get("mode");
+  // No mode asked for: the unchanged normal run.
+  if (raw === null) return { kind: "score" };
+  // The one sweep spelling.
+  if (raw === "pregate_only") return { kind: "pregate_only" };
+  // Anything else, including "", is refused by the caller with a 400.
+  return { kind: "invalid" };
+}
+
+// Pick the per-row handler the gate hands survivors to. In sweep mode it is a counter that
+// can NEVER reach the scorer — the scorer is the only code that calls Gemini — so "a sweep
+// spends no quota" is a property of this function, checked by a spy in the tests.
+export function selectScorer<R, C>(
+  // Which run this is.
+  mode: MatcherMode,
+  // The real Gemini scorer.
+  score: (row: R, call: C) => Promise<void>,
+  // Told about each row the gate passed during a sweep, so the run can report the count.
+  onSurvivor: (row: R) => void,
+): (row: R, call: C) => Promise<void> {
+  // Normal run: the real scorer, unchanged.
+  if (mode.kind === "score") return score;
+  // Sweep: count the survivor and leave the row exactly as it was.
+  return async (row) => {
+    onSurvivor(row);
+  };
+}
+
+// THE SWEEP CURSOR, pure so its one dangerous answer is tested. "Done" must never be claimed
+// while rows are unjudged — an operator loop that stops early would leave the backlog half
+// swept and believe it finished. So it is computed from what was PROCESSED, not what was read:
+//   - stopped early (deadline): resume after the last processed row, or where this page
+//     began if none was; never done, since the unreached rows are still unjudged;
+//   - a full page, all processed: resume after its last row; not done, more may follow;
+//   - a short page, all processed: done, nothing follows.
+export function nextSweepCursor(page: {
+  // Ids of the rows this page read, in cursor (id) order.
+  readonly rowIds: readonly string[];
+  // The page size asked for; a page this full may have more behind it.
+  readonly batchSize: number;
+  // How many of rowIds were processed to completion.
+  readonly processed: number;
+  // True when the deadline, not the end of the page, ended the batch.
+  readonly stoppedEarly: boolean;
+  // The cursor this page started from; null on the first page.
+  readonly afterId: string | null;
+  // Rows on this page whose gate ERRORED. They count as processed (the batch runner counts
+  // a row once its handler returns), so the cursor moves past them while they are still
+  // unjudged at passed_filters (reviewer finding, 2026-10-09).
+  readonly errors: number;
+}): { readonly done: true; readonly nextAfterId: null } | { readonly done: false; readonly nextAfterId: string | null } {
+  // The end of the backlog was reached with every row read actually processed...
+  const reachedEnd = !page.stoppedEarly && page.processed === page.rowIds.length && page.rowIds.length < page.batchSize;
+  // ...and none of them errored: only then is the sweep complete.
+  if (reachedEnd && page.errors === 0) return { done: true, nextAfterId: null };
+  // The end was reached but some rows errored: NOT done. Restart from the beginning (null),
+  // which re-judges survivors at no cost (no writes, no Gemini) and retries the errored rows.
+  // Claiming done here would leave them unjudged and the operator believing it finished.
+  if (reachedEnd) return { done: false, nextAfterId: null };
+  // Otherwise resume after the last row actually finished; with none finished, resume where
+  // this page began (null = from the start), so no row is ever skipped unjudged.
+  const lastProcessed = page.processed > 0 ? page.rowIds[page.processed - 1] : undefined;
+  // Not done: the caller must call again with this after_id.
+  return { done: false, nextAfterId: lastProcessed ?? page.afterId };
+}
+
 // Wrap the matcher's per-row scorer so the gate runs first and the scorer — the only code
 // that calls Gemini — is reached ONLY for rows the gate lets through. Built as a wrapper,
 // not an `if` inside the scorer, so "no Gemini call for a dropped row" is a property of the

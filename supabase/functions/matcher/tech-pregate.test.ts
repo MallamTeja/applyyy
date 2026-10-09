@@ -12,7 +12,7 @@ import { test } from "node:test";
 // Strict, so null and undefined are not conflated.
 import assert from "node:assert/strict";
 // Units under test.
-import { preGateRow, withTechPreGate, type PreGateOutcome } from "./tech-pregate.ts";
+import { nextSweepCursor, parseMatcherMode, preGateRow, selectScorer, withTechPreGate, type PreGateOutcome } from "./tech-pregate.ts";
 // The shared config type, so a fixture cannot drift from what the gate reads.
 import type { TechGatePreferences } from "../_shared/screen/tech-gate.ts";
 // The client shape the fake must satisfy.
@@ -316,4 +316,123 @@ test("matcher pre-gate: a throw inside the gate is contained to its row", async 
   assert.equal(gated[0].kind, "error");
   // ...and the scorer was not reached.
   assert.equal(scoreCalls, 0);
+});
+
+// --- pre-gate-only sweep mode (Teja, 2026-10-09: one-off sweep of the unscored backlog) ----
+
+test("matcher pre-gate-only mode: the Gemini scorer is never called, even for rows the gate passes", async () => {
+  // THE PROPERTY the sweep is approved on: zero Gemini calls. The scorer is the only caller.
+  const { db, updates } = fakeRow();
+  // Spy standing in for the Gemini-calling scorer.
+  let scoreCalls = 0;
+  // Survivors the sweep counts instead of scoring.
+  let survivors = 0;
+  const handler = withTechPreGate<Row, string>(
+    db,
+    PREFS,
+    readJob,
+    // Not reached for a passing row.
+    () => {},
+    // The wiring index.ts uses: selectScorer decides who gets a survivor.
+    selectScorer<Row, string>({ kind: "pregate_only" }, async () => {
+      scoreCalls++;
+    }, () => {
+      survivors++;
+    }),
+  );
+  // A row the gate PASSES: in a normal run this is exactly the row that would be scored.
+  await handler({ id: "a1", job: ENGINEER }, "call-1");
+  // Never scored, so no Gemini call...
+  assert.equal(scoreCalls, 0);
+  // ...counted as a survivor instead...
+  assert.equal(survivors, 1);
+  // ...and left exactly as it was: no write to the row.
+  assert.equal(updates.length, 0);
+});
+
+test("selectScorer in score mode returns the real scorer, unchanged", async () => {
+  // A normal run must keep scoring every row the gate passes.
+  const scorer = async () => {};
+  // Identity, not a wrapper: nothing may change for a normal run.
+  assert.equal(selectScorer({ kind: "score" }, scorer, () => {}), scorer);
+});
+
+test("parseMatcherMode: absent scores, pregate_only sweeps, anything else is refused", () => {
+  // No mode: the unchanged normal run.
+  assert.deepEqual(parseMatcherMode(new URLSearchParams("")), { kind: "score" });
+  // The one sweep spelling.
+  assert.deepEqual(parseMatcherMode(new URLSearchParams("mode=pregate_only")), { kind: "pregate_only" });
+  // A typo must never fall back to a normal run that spends Gemini quota.
+  assert.deepEqual(parseMatcherMode(new URLSearchParams("mode=pregate-only")), { kind: "invalid" });
+  // Present but empty is not absent.
+  assert.deepEqual(parseMatcherMode(new URLSearchParams("mode=")), { kind: "invalid" });
+  // Case matters: no lenient parser deciding what was meant.
+  assert.deepEqual(parseMatcherMode(new URLSearchParams("mode=PREGATE_ONLY")), { kind: "invalid" });
+});
+
+test("sweep cursor: a deadline stop is never reported as done", () => {
+  // Two of three rows processed, then the deadline: the third is still unjudged.
+  const out = nextSweepCursor({ rowIds: ["a", "b", "c"], batchSize: 500, processed: 2, stoppedEarly: true, afterId: null, errors: 0 });
+  // Claiming done here would leave the backlog half swept, silently.
+  assert.deepEqual(out, { done: false, nextAfterId: "b" });
+});
+
+test("sweep cursor: a deadline stop before any row resumes where the page began", () => {
+  // Nothing processed: resume from the same cursor, never skip ahead.
+  const out = nextSweepCursor({ rowIds: ["a", "b"], batchSize: 500, processed: 0, stoppedEarly: true, afterId: "z0", errors: 0 });
+  // Same starting point; not done.
+  assert.deepEqual(out, { done: false, nextAfterId: "z0" });
+});
+
+test("sweep cursor: a full page continues after its last row; a short page is done", () => {
+  // A full page may have more behind it.
+  assert.deepEqual(nextSweepCursor({ rowIds: ["a", "b"], batchSize: 2, processed: 2, stoppedEarly: false, afterId: null, errors: 0 }), { done: false, nextAfterId: "b" });
+  // A short page fully processed is the end of the backlog.
+  assert.deepEqual(nextSweepCursor({ rowIds: ["a"], batchSize: 2, processed: 1, stoppedEarly: false, afterId: "x", errors: 0 }), { done: true, nextAfterId: null });
+  // An empty page is done too.
+  assert.deepEqual(nextSweepCursor({ rowIds: [], batchSize: 2, processed: 0, stoppedEarly: false, afterId: "x", errors: 0 }), { done: true, nextAfterId: null });
+});
+
+test("sweep cursor: a final page with gate errors is NOT done, and restarts from the beginning", () => {
+  // The end of the backlog was reached, but one row's gate errored: the cursor already moved
+  // past it, so it is unjudged at passed_filters. "done" here would hide it (reviewer finding).
+  const out = nextSweepCursor({ rowIds: ["a", "b"], batchSize: 500, processed: 2, stoppedEarly: false, afterId: "x", errors: 1 });
+  // Not done; null means "one more pass from the start", which retries the errored row.
+  assert.deepEqual(out, { done: false, nextAfterId: null });
+});
+
+test("matcher wiring: after_id is validated, and refused without pregate_only, before the run row", async () => {
+  // A refactor that moved these checks after the agent_runs insert, or dropped the
+  // "after_id needs pregate_only" branch, must go red here (reviewer nit).
+  const { readFileSync } = await import("node:fs");
+  // The handler source, resolved relative to this file.
+  const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  // Where the run row is opened.
+  const runAt = source.indexOf(`.from("agent_runs")`);
+  // The cursor's uuid check and the mode-coupling refusal, by their response codes.
+  const cursorAt = source.indexOf(`parseUuidParam(new URL(req.url).searchParams, "after_id")`);
+  // The refusal that keeps a scoring run from silently ignoring a cursor.
+  const couplingAt = source.indexOf(`"after_id_requires_pregate_only"`);
+  // All three found, so the order checks cannot pass vacuously.
+  assert.ok(runAt > 0 && cursorAt > 0 && couplingAt > 0, `run ${runAt}, cursor ${cursorAt}, coupling ${couplingAt}`);
+  // Both refusals happen before any run row exists.
+  assert.ok(cursorAt < runAt && couplingAt < runAt, `cursor ${cursorAt} / coupling ${couplingAt} after run ${runAt}`);
+});
+
+test("matcher wiring: the scorer goes through selectScorer(mode, …), and the mode is parsed before the run row", async () => {
+  // index.ts (Deno.serve, jsr: imports) cannot be imported under node, so its wiring is read
+  // as source. POSITIVE shape (CLAUDE.md §6): the calls must be present and in order.
+  const { readFileSync } = await import("node:fs");
+  // Resolved relative to this test file, independent of the cwd.
+  const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  // The sweep's zero-Gemini property only holds if the scorer is routed through selectScorer.
+  assert.match(source, new RegExp(String.raw`selectScorer\(mode, async \(row, call\) =>`));
+  // The mode is parsed (and a bad one refused) before the agent_runs row is opened.
+  const parseAt = source.indexOf("parseMatcherMode(");
+  // Where the run row is opened.
+  const runAt = source.indexOf(`.from("agent_runs")`);
+  // Both found, so the order check cannot pass vacuously...
+  assert.ok(parseAt > 0 && runAt > 0, `parseMatcherMode at ${parseAt}, agent_runs at ${runAt}`);
+  // ...and in the right order.
+  assert.ok(parseAt < runAt, `mode parsed at ${parseAt}, after agent_runs opened at ${runAt}`);
 });

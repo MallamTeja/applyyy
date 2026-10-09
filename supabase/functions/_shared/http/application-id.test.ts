@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 // Resolved from this file, so the suite reads the right handlers whatever the runner's cwd.
 import { fileURLToPath } from "node:url";
 // Unit under test.
-import { parseApplicationIdParam } from "./application-id.ts";
+import { parseApplicationIdParam, parseUuidParam } from "./application-id.ts";
 
 // A real-shaped UUID, reused so the valid cases differ only in case.
 const UUID = "3f2b8c1e-9a4d-4e6f-8b7a-0c1d2e3f4a5b";
@@ -84,4 +84,17 @@ test("tailor: application_id is validated before the agent_runs row is opened", 
 test("auditor: application_id is validated before the agent_runs row is opened", () => {
   // Moved above the insert (it used to refuse via failRun); reverting the move must turn this red.
   assertValidatedBeforeRunOpened("auditor");
+});
+
+test("parseUuidParam applies the same rule to any parameter name (the sweep's after_id)", () => {
+  // A second uuid parameter must not grow a second regex: same three answers, by name.
+  const uuid = "2c7ae03e-1201-4379-be10-9446674821de";
+  // Valid under the name asked for.
+  assert.deepEqual(parseUuidParam(new URLSearchParams(`after_id=${uuid}`), "after_id"), { kind: "valid", id: uuid });
+  // Absent only when THAT key is missing, even if another uuid param is present.
+  assert.deepEqual(parseUuidParam(new URLSearchParams(`application_id=${uuid}`), "after_id"), { kind: "absent" });
+  // Present but empty is invalid, never "start from the beginning".
+  assert.deepEqual(parseUuidParam(new URLSearchParams("after_id="), "after_id"), { kind: "invalid" });
+  // Junk is invalid.
+  assert.deepEqual(parseUuidParam(new URLSearchParams("after_id=last"), "after_id"), { kind: "invalid" });
 });

@@ -224,6 +224,29 @@ test("a keyword found only in the description counts as a match", () => {
   assert.equal("warning" in verdict, false);
 });
 
+// TITLE TERMS MATCH THE TITLE ONLY (Teja, 2026-10-09, handoff §4.1). Measured live: 111
+// passed_filters rows passed only because a TITLE term ("Developer", "Software Engineer")
+// appeared in the description head — "you'll work with our software engineers" — 74 of
+// them non-engineering (Account Executive, Finance, Business Development). A title term
+// describes the role's title, so the body no longer counts for it; keywords (above) still do.
+test("a configured title term found only in the description does not count as a match", () => {
+  // A sales role whose body names the team it sells alongside.
+  const verdict = screenTechRole("Enterprise Account Executive", "Partner closely with our software engineer team.", PREFS);
+  // Not recognised by the title, and no keyword in the body: dropped as unclassified.
+  assert.deepEqual(verdict, {
+    drop: true,
+    code: "tech_gate_unclassified",
+    reason: '"Enterprise Account Executive" matched no configured title or keyword',
+  });
+});
+
+test("a configured title term in the title still matches, whatever the body says", () => {
+  // The positive half: moving title terms to the title must not lose real titles.
+  const verdict = screenTechRole("Software Engineer, Payments", "We sell to banks.", PREFS);
+  // Recognised by the title alone; no warning.
+  assert.deepEqual(verdict, { drop: false });
+});
+
 // THE UNCONFIGURED CASE, and it fails open ON PURPOSE — the same direction every rule in
 // cascade.ts fails. With `search_preferences` currently unseeded for every user (the
 // bootstrap transaction rolls back on a bad column name), an unconfigured gate that
