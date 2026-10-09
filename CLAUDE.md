@@ -140,14 +140,16 @@ robots rules"; a null-check passes `'{}'`.)
 - Every migration carries a comment saying **why it exists**. That's what stops someone
   "simplifying" it back into the bug.
 
-**Open security gap (re-verified 2026-10-09):** browser, edge and worker all call as the same
-`authenticated` app user, so `auth.uid()` cannot tell a browser from an agent. The only
+**Agent vs browser (re-verified 2026-10-09 22:40 IST):** browser, edge and worker all call as the
+same `authenticated` app user, so `auth.uid()` cannot tell a browser from an agent. The only
 discriminator is the `x-applyy-agent-key` header, checked by `applyy_internal.agent_key_state()`
-inside `advance_application_status`, `claim_applications` and `release_application_claim`.
-**While `applyy_internal.agent_key` is empty the check only warns**, so a browser can still
-claim `auditor`/`applier`. Seeding the key closes it. `sweep_stale_claims()` has no key check at all.
-`anon` has no EXECUTE on these. Re-check:
-`select oid::regprocedure, has_function_privilege('anon',oid,'execute'), position('agent_key_state' in prosrc)>0 from pg_proc where proname in ('advance_application_status','sweep_stale_claims')`.
+inside `advance_application_status`, `claim_applications`, `release_application_claim` and
+`sweep_stale_claims`. **The key IS seeded** (since 2026-10-09 ~13:40 IST), so a request without the
+right key is refused (42501). An EMPTY key table would only warn, and `delete from
+applyy_internal.agent_key` is the deliberate kill switch that reopens that hole. The
+`answer_bank.attested_by_human` trigger reads the same state: "no key header" = human. Remaining
+gap: any holder of Teja's JWT who omits the header is treated as human. `anon` has no EXECUTE on these. Re-check:
+`select oid::regprocedure, has_function_privilege('anon',oid,'execute'), position('agent_key_state' in prosrc)>0 from pg_proc where proname in ('advance_application_status','sweep_stale_claims','claim_applications','release_application_claim')` plus `select count(*) from applyy_internal.agent_key` (expect 1).
 
 ## 8. Code conventions
 

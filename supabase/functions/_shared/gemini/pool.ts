@@ -55,9 +55,11 @@ const MAX_KEY_INDEX = 99;
 //     healing, and must NOT be logged as unusual. A health page that cries wolf about
 //     ordinary quota behaviour is a page Teja stops reading — which is the same
 //     failure mode as an over-eager human-review queue.
-//   - NO KEYS CONFIGURED AT ALL. `bootstrap_user_defaults()` does not seed
-//     `gemini_key_state` and nothing else in the repo writes to it, so on a fresh
-//     account this is the actual state. Every agent then dutifully releases its claim
+//   - NO KEYS CONFIGURED AT ALL. A new account IS seeded: the signup trigger runs
+//     `applyy_internal.seed_user_defaults` (20261008180000), which writes 20
+//     `gemini_key_state` rows with only keys 1-11 enabled (20261009150000). So this state
+//     now means the seed failed (the trigger turns that into a WARNING, not an error) or
+//     every row was disabled by hand. Every agent then dutifully releases its claim
 //     and the pipeline **looks merely idle with no error anywhere** — precisely the
 //     silent stop §14 exists to prevent. This one needs a human, immediately.
 export type KeyClaim =

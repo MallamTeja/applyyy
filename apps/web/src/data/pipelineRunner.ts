@@ -118,6 +118,15 @@ export function classifyResponse(agent: PipelineAgentId, data: unknown): Omit<Pi
   const shape = RESPONSE_SHAPES[agent];
   // Require at least one moved-field to be a real number: a body with none is not this agent's shape.
   if (!shape.moved.some((field) => typeof body[field] === 'number')) {
+    // ...EXCEPT the explicit "nothing to do" answer an agent gives when its input status is
+    // empty: {success: true, processed: 0}. Shape-checked, not truthiness-checked: success
+    // must be literally true and processed must be the integer 0, so "0", NaN, -1 or 0.5
+    // stay unrecognised (CLAUDE.md §6). processed > 0 with no move-field is also refused:
+    // work happened that this body cannot report, so "0 moved" would be a false summary.
+    if (body['success'] === true && Number.isInteger(body['processed']) && body['processed'] === 0) {
+      // A finished run that had nothing to move: succeeded, not "Pipeline Did Not Complete".
+      return { status: 'succeeded', moved: 0, message: 'Nothing to do: 0 row(s) at its input status.' };
+    }
     // Fail closed — a renamed field must not silently read as "0 moved, all good".
     return { status: 'failed', moved: 0, message: `Unrecognised response shape: ${JSON.stringify(body)}` };
   }

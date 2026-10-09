@@ -28,16 +28,16 @@ of `supabase/functions/**` for what exists.
 
 | # | Agent | Runs on | Calls Gemini? | State |
 |---|---|---|---|---|
-| 1 | **Scout-ATS** | Edge Function, cron | no | **logic built, no entrypoint** |
-| 2 | **Scout-Aggregator** | Edge Function, cron | no | **not built** |
-| 3 | **Normalizer** | Edge Function, cron | no | **logic built, no entrypoint** |
-| 4 | **Screener** | Edge Function, cron | **no — deliberately** | **logic built, no entrypoint** |
-| 5 | **Matcher** | Edge Function, cron | **yes** | **logic partly built, no entrypoint** |
-| 6 | **Tailor** | Edge Function, cron | **yes** | **logic built, no entrypoint** |
-| 7 | **Auditor** | Edge Function, cron | **yes** | **not built** |
+| 1 | **Scout-ATS** | Edge Function, on demand; the worker's scout CLI also runs on GitHub Actions every 6 h (`scout.yml`) | no | **logic built, no entrypoint** |
+| 2 | **Scout-Aggregator** | Edge Function, on demand | no | **not built** |
+| 3 | **Normalizer** | Edge Function, on demand | no | **logic built, no entrypoint** |
+| 4 | **Screener** | Edge Function, on demand | **no — deliberately** | **logic built, no entrypoint** |
+| 5 | **Matcher** | Edge Function, on demand | **yes** | **logic partly built, no entrypoint** |
+| 6 | **Tailor** | Edge Function, on demand | **yes** | **logic built, no entrypoint** |
+| 7 | **Auditor** | Edge Function, on demand | **yes** | **not built** |
 | 8 | **Applier** | GitHub Actions + Playwright | no | **BUILT AND RUNS** (dry-run only) |
 | 9 | **Tracker** | Edge Function, **push** | yes (classification) | **intake LIVE & VERIFIED END-TO-END**, classifier not built |
-| 10 | **Sweeper** | database function, cron | no | **BUILT** (SQL, live) |
+| 10 | **Sweeper** | database function, on demand | no | **BUILT** (SQL, live) |
 | 11 | **Keepalives** ×2 | Actions cron / DB query | no | **one built but disabled, one implicit** |
 | — | **`human`** | you, in the dashboard | no | the most powerful identity in the system |
 
@@ -45,7 +45,13 @@ of `supabase/functions/**` for what exists.
 **one live endpoint** (the Tracker's email intake), and nine agents' worth of
 shared logic with nothing wired to call it. **Superseded 2026-10-08:** the State
 column above is historical — every Edge Function agent now has an entrypoint; see
-`../SYSTEM_ARCHITECTURE.md` §2.
+`../SYSTEM_ARCHITECTURE.md` §2. **Corrected 2026-10-09:** the "Runs on" column used to
+say "cron" for the Edge Function agents and the Sweeper. They run **on demand only**
+(the console's pipeline button, or `run-one.yml`): Teja ruled no scheduler, and
+`pg_cron` is not installed (`select * from pg_extension where extname='pg_cron'` is
+empty). The only schedules are GitHub Actions crons: `scout.yml` (every 6 h),
+`apply.yml` (daily, dry by default) and `keepalive.yml`. Regenerate the list with
+`grep -n "cron:" .github/workflows/*.yml`.
 
 That last point is the real state of the project and it is better news than it
 sounds — see §5.

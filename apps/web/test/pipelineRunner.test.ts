@@ -111,4 +111,25 @@ describe('classifyResponse', () => {
     // A renamed field must not read as "0 moved, all good".
     assert.equal(classifyResponse('auditor', { success: true }).status, 'failed');
   });
+
+  it('a {success:true, processed:0} body is a completed no-op, not unrecognised', () => {
+    // An agent with nothing at its input status answers this; it is a finished run, not an error.
+    const result = classifyResponse('tailor', { success: true, processed: 0 });
+    // Succeeded, with nothing moved, and a message that says so instead of "Unrecognised".
+    assert.deepEqual(result, { status: 'succeeded', moved: 0, message: 'Nothing to do: 0 row(s) at its input status.' });
+  });
+
+  it("processed:'0' (a string) is still rejected", () => {
+    // A lenient read would call "0" zero; only a real integer 0 proves the queue was empty.
+    assert.equal(classifyResponse('tailor', { success: true, processed: '0' }).status, 'failed');
+  });
+
+  it('a no-op body with a non-integer or non-zero processed is still rejected', () => {
+    // NaN, a fraction and a negative are not counts.
+    for (const processed of [Number.NaN, 0.5, -1]) assert.equal(classifyResponse('auditor', { success: true, processed }).status, 'failed');
+    // processed:3 with no move-field means work happened that this body cannot report.
+    assert.equal(classifyResponse('auditor', { success: true, processed: 3 }).status, 'failed');
+    // Without success:true it is not the no-op shape either.
+    assert.equal(classifyResponse('auditor', { processed: 0 }).status, 'failed');
+  });
 });
