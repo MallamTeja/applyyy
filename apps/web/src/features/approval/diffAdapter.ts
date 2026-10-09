@@ -667,13 +667,16 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
        * copied out of the pinned master by typed code, so any keyword present
        * in a traced run is honestly matched. */
       honestlyMatched: application.selected_jd_keywords.filter((keyword) =>
-        keywordAppearsInTracedText(keyword, lines),
+        /* QA item 3 (2026-10-08): a printed certification/achievement title is honest too. */
+        keywordAppearsInTracedText(keyword, lines) || keywordAppearsInPrintedCredentials(keyword, resolved, master),
       ),
       /* Keywords that appear ONLY inside a flagged claim. This is the number
        * that stops the coverage figure rewarding fabrication. */
       matchedByFabrication: application.selected_jd_keywords.filter(
         (keyword) =>
           !keywordAppearsInTracedText(keyword, lines) &&
+          /* Already honest via a credential: never double-counted as purchased. */
+          !keywordAppearsInPrintedCredentials(keyword, resolved, master) &&
           keywordAppearsInFlaggedText(keyword, lines),
       ),
       /* Keywords that appear ONLY in the operator's edited text: not master-backed, not
@@ -681,6 +684,8 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
       matchedByEdit: application.selected_jd_keywords.filter(
         (keyword) =>
           !keywordAppearsInTracedText(keyword, lines) &&
+          /* Honest via a credential wins over "from your edits", same as traced text does. */
+          !keywordAppearsInPrintedCredentials(keyword, resolved, master) &&
           !keywordAppearsInFlaggedText(keyword, lines) &&
           keywordAppearsInEditedText(keyword, lines),
       ),
@@ -733,6 +738,8 @@ export function addableByKeyword(
   for (const keyword of keywords) {
     /* Present in any run already: nothing to add for it. */
     if (keywordAppearsInTracedText(keyword, lines) || keywordAppearsInFlaggedText(keyword, lines) || keywordAppearsInEditedText(keyword, lines)) continue;
+    /* Present in a printed certification/achievement title: honest already, nothing to offer. */
+    if (keywordAppearsInPrintedCredentials(keyword, resolved, master)) continue;
     /* The single shared rule picks the skill; null is a real answer ("not in your master"). */
     const skill = addableSkillFor(keyword, resolved, master);
     /* Only ref and name cross to the UI: the page re-reads the master on Add, never trusting these. */
@@ -770,6 +777,51 @@ export function keywordAppearsInTracedText(
         keywordAppearsIn(keyword, run.text),
     ),
   );
+}
+
+/* Does this JD keyword appear in a PRINTED certification or achievement title? (QA item 3,
+ * 2026-10-08: "SQL and Relational Databases" printed under Certifications, yet SQL read missing.)
+ *
+ * Counted as honest (master-traced) because nothing in it can be the operator's or the tailor's
+ * words: only `label` and `description` are read, which the validator copies verbatim from the
+ * master, which the edit boundary freezes (tailoredEdits' hidden-section rule refuses any change
+ * to an achievement/certification entry), and which are compared here against the PINNED master
+ * node by ref - a stored string that differs from the master earns nothing. Bullets are left out:
+ * they are bullet text the Auditor can flag, and the diff does not walk these sections, so a
+ * flagged one would be credited honest. "Printed" means the section is named in section_order,
+ * exactly as render-resume-html.ts decides; a selected-but-unprinted section (the live row's
+ * achievements) is not on the resume and earns nothing. Exported for test/printedCredentialsCoverage.test.ts. */
+export function keywordAppearsInPrintedCredentials(
+  /* One JD keyword, matched by the producer's rule like every other coverage figure. */
+  keyword: string,
+  /* The stored resume: which credentials it selected and which sections it prints. */
+  resolved: ResolvedResume,
+  /* The pinned master, the only source a credential string may be trusted from. */
+  master: MasterProfile,
+): boolean {
+  /* Both credential kinds share the {id,label,description} shape on each side. */
+  return (['certifications', 'achievements'] as const).some((section) => {
+    /* Not printed: the renderer skips any section section_order does not name. Array guard
+       because a legacy row may carry no section_order; then nothing is provably printed. */
+    if (!Array.isArray(resolved.section_order) || !resolved.section_order.includes(section)) return false;
+    /* Tolerates an absent array on an old row, read as "no credentials". */
+    const entries = Array.isArray(resolved[section]) ? resolved[section] : [];
+    /* Any one printed entry is enough. */
+    return entries.some((entry) => {
+      /* The master node by ref; the stored entry alone is not trusted. */
+      /* Array guard: a minimal master without this section must read as "no credit", not throw
+         inside buildResumeDiff, which now calls this for every keyword. */
+      const node = (Array.isArray(master[section]) ? master[section] : []).find((m) => m.id === entry.ref);
+      /* A ref the master lacks is not master-traced. */
+      if (node === undefined) return false;
+      /* Only strings that equal the master's AND are what got printed. */
+      return [entry.label === node.label ? node.label : null, entry.description !== null && entry.description === (node.description ?? null) ? node.description : null]
+        /* Drop the halves that did not match, and absent descriptions. */
+        .filter((text): text is string => typeof text === 'string')
+        /* Same word-bounded producer rule as the traced side. */
+        .some((text) => keywordAppearsIn(keyword, text));
+    });
+  });
 }
 
 /* Does this JD keyword appear only inside something the Auditor flagged?

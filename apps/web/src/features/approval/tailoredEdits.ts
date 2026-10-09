@@ -260,34 +260,49 @@ export function resetTarget(current: ResolvedResume, original: ResolvedResume, t
  * Every skill these functions emit is built from a master node, field for field; there is no
  * parameter through which a caller could supply a name or a category. */
 
+/* A skill-ish phrase reduced to the TOKENS that name it, for "do these denote the same thing?".
+ * Lowercased; split on anything that is not a letter, digit, '+' or '#' (so "C++" and "C#" stay
+ * themselves, never "c"); and one alias: a trailing "js" token is dropped, so "React" = "React.js"
+ * and "Node" = "Node.js". Deliberately NOT "reactjs": that is one token, and the producer rule does
+ * not find "ReactJS" in "React.js" either, so adding React.js would not clear that miss. */
+function skillTokens(phrase: string): string {
+  /* Tokens in order; empty pieces from leading/trailing punctuation are dropped. */
+  const tokens = phrase.toLowerCase().split(/[^a-z0-9+#]+/).filter((token) => token !== '');
+  /* The ".js" alias only when something precedes it: a bare "JS" keyword stays "js", never "". */
+  if (tokens.length > 1 && tokens[tokens.length - 1] === 'js') tokens.pop();
+  /* Joined so equality of the whole token sequence is one string compare. */
+  return tokens.join(' ');
+}
+
 /* The unselected master skill that would supply a missing JD keyword, or null if the master
- * has none. Matching is the TAILOR's word-bounded rule in both directions - keyword inside the
- * skill name ("React" in "React Native") or name inside the keyword ("Kafka" in "Apache Kafka"),
- * never a raw substring ("SQL" does NOT match "PostgreSQL") - plus a plain case-insensitive
- * equality so "go" still finds a master skill spelled "Go". Deterministic:
- * the first qualifying skill in MASTER order, so the same row always offers the same skill. */
+ * has none. Rule (changed 2026-10-08, QA s6): the keyword and the skill name must DENOTE THE SAME
+ * THING - equal token sequences (skillTokens) - AND adding the skill must actually clear the miss
+ * by the producer's rule (keywordAppearsIn(keyword, name)), with no case-insensitive shortcut
+ * (that let "Go" offer a skill spelled "go" that the producer still reads as missing). The old rule was a word-bounded substring in BOTH directions, which
+ * failed open (CLAUDE.md §6): "SQL Server" offered "SQL" (adding SQL leaves SQL Server missing),
+ * and a generic word offered a specific skill ("Engineering" -> Prompt Engineering, "Calling" ->
+ * Tool Calling & Guardrails). Token equality subsumes the old "C" in "C++" guard: "c++" != "c".
+ * Deterministic: the first qualifying skill in MASTER order. */
 export function addableSkillFor(keyword: string, resume: ResolvedResume, master: MasterProfile): ResolvedSkill | null {
   /* A blank keyword would match vacuously; it is never a reason to offer a skill. */
   if (keyword.trim() === '') return null;
   /* Refs already printed, so a skill the resume has is never offered twice. */
   const onResume = new Set(resume.skills.map((skill) => skill.ref));
-  /* Lowercased once for the equality test below. */
-  const lowered = keyword.trim().toLowerCase();
+  /* The keyword's identity, computed once rather than per master skill. */
+  const wanted = skillTokens(keyword);
   /* Master order is the tie-break, so `find` (first hit) is the whole rule. */
   const hit = master.skills.find(
     (skill) =>
       /* Already on the resume: adding it again would be a duplicate the validator refuses. */
       !onResume.has(skill.id) &&
-      /* Same word, whatever the case. */
-      (skill.name.trim().toLowerCase() === lowered ||
-        /* The keyword, by its own (possibly case-sensitive) producer rule, inside the name. */
-        keywordAppearsIn(keyword, skill.name) ||
-        /* The name, as a bounded literal, inside the keyword. Review fix (2026-10-08): only for a
-           name of 3+ characters and a keyword with no '+' or '#'. The word boundary is "not a
-           letter or digit", so "C" was found in "C++" and "C#" (the '+'/'#' ends the word) and
-           adding "C" would hide the offer while "C++" stays missing. Short names ("Go", "R")
-           still match by the equality and forward branches above. */
-        (skill.name.trim().length >= 3 && !/[+#]/.test(keyword) && keywordAppearsIn(skill.name, keyword))),
+      /* Same thing by name: same tokens, so neither side may be a fragment of the other. */
+      skillTokens(skill.name) === wanted &&
+      /* AND the add provably clears the miss by the producer's own rule - "CI-CD" vs "CI/CD"
+         tokenize alike, yet the latter would not count. No case-insensitive shortcut (review
+         2026-10-09): case-sensitive vocabulary terms ("Go", "AI", "RAG") would be offered a
+         lowercase skill the producer then still reads as missing. Non-vocabulary words already
+         match case-insensitively inside keywordAppearsIn, so "go"/"Go" needs no extra branch. */
+      keywordAppearsIn(keyword, skill.name),
   );
   /* No master skill supplies it: the UI says "Not in your master profile". */
   if (hit === undefined) return null;

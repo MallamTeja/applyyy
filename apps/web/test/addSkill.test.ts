@@ -193,15 +193,17 @@ describe('addableSkillFor', () => {
   it('returns the unselected master skill whose name matches the keyword, copied exactly', () => {
     // Case-insensitive: a lower-case JD keyword still finds "Docker".
     assert.deepEqual(fn('addableSkillFor')('docker', original(), MASTER), DOCKER);
-    // Keyword contains the name ("name in keyword"), word-bounded.
-    assert.deepEqual(fn('addableSkillFor')('Docker Compose', original(), MASTER), DOCKER);
+    // Contract changed 2026-10-09 (QA s6): a keyword merely CONTAINING the name is a different
+    // thing ("Docker Compose" is not Docker), so the old "name in keyword" branch is gone.
+    assert.equal(fn('addableSkillFor')('Docker Compose', original(), MASTER), null);
     // The other unselected skill is found too.
     assert.deepEqual(fn('addableSkillFor')('Kubernetes', original(), MASTER), K8S);
   });
 
-  it('picks the first match in master order when several skills match', () => {
-    // Both Docker and Kubernetes are named; Docker sits earlier in master.skills.
-    assert.deepEqual(fn('addableSkillFor')('Docker on Kubernetes', original(), MASTER), DOCKER);
+  it('a keyword naming several skills offers none of them (no fragment match)', () => {
+    // Under token equality neither Docker nor Kubernetes IS "Docker on Kubernetes"; offering
+    // one would leave the keyword missing, so null (CLAUDE.md §6: ambiguity is never a yes).
+    assert.equal(fn('addableSkillFor')('Docker on Kubernetes', original(), MASTER), null);
   });
 
   it('returns null for a skill already on the resume, a non-word-bounded fragment, or no master skill', () => {
@@ -598,11 +600,13 @@ describe('review fix 1: addableSkillFor never offers a short skill found inside 
     assert.equal(fn('addableSkillFor')('C#', original(), onlyC), null);
   });
 
-  it('positive controls: equality still finds "C++", and the reverse branch still finds Docker in "Docker Compose"', () => {
+  it('positive controls: equality still finds "C++" and "Docker"; "Docker Compose" finds nothing', () => {
     // Exact (case-insensitive) equality is untouched by the guard, so the real skill is offered.
     assert.deepEqual(fn('addableSkillFor')('c++', original(), withC), { ref: 'skill-cpp', name: 'C++', category: 'Languages' });
-    // Reverse branch only (keyword is not inside "Docker"): proves the branch is not dead.
-    assert.deepEqual(fn('addableSkillFor')('Docker Compose', original(), withC), DOCKER);
+    // Equal tokens still offer the skill, so the null below is the rule, not a dead function.
+    assert.deepEqual(fn('addableSkillFor')('Docker', original(), withC), DOCKER);
+    // The old reverse branch is gone by design (2026-10-09): a containing keyword is a different thing.
+    assert.equal(fn('addableSkillFor')('Docker Compose', original(), withC), null);
   });
 });
 

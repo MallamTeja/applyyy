@@ -691,6 +691,10 @@ function Line({
   const [savingHere, setSavingHere] = useState<boolean>(false);
   // The last failed save's reason, shown under the line.
   const [error, setError] = useState<string | null>(null);
+  /* The text of a REFUSED edit save (e.g. "Changed elsewhere; reloaded."). The editor closes so the
+     reloaded stored text shows, but the operator's typing must not be lost (QA item 4): this keeps
+     it so one click can put it back into the editor, on top of whatever is stored now. */
+  const [unsavedDraft, setUnsavedDraft] = useState<string | null>(null);
   // The clickable text, so focus can come back to it when the editor closes.
   const textButtonRef = useRef<HTMLButtonElement | null>(null);
   /* The tailored paragraph of a line with NO text button (skills, a removed bullet): where focus
@@ -727,6 +731,8 @@ function Line({
   function openEditor(): void {
     // Start from what is saved, never from an old draft.
     setDraftText(storedText);
+    // Choosing to edit afresh answers the kept draft, so its offer must not reappear on Cancel.
+    setUnsavedDraft(null);
     // Open the editor.
     setIsEditing(true);
   }
@@ -774,6 +780,8 @@ function Line({
     if (onEdit === null) return;
     // A new attempt clears the old failure.
     setError(null);
+    // ...and any draft kept from it: this attempt either saves it or keeps its own below.
+    setUnsavedDraft(null);
     // Marks this line as the one saving.
     setSavingHere(true);
     // The page builds the new resume and writes it.
@@ -785,6 +793,23 @@ function Line({
     closeEditor();
     // A refused save is named, so the operator knows the PDF did not change.
     if (!result.ok) setError(result.reason);
+    // Only a typed edit has words to lose; Reset and Remove carry none.
+    if (!result.ok && action.kind === 'edit') setUnsavedDraft(action.text);
+  }
+
+  /* Puts a refused draft back into the editor. It is NOT re-sent: the stored text may have changed
+     under it, so the operator reads the reloaded line first and saves deliberately. */
+  function reopenUnsavedDraft(): void {
+    // Nothing kept (the button is not rendered then anyway).
+    if (unsavedDraft === null) return;
+    // The editor starts from the operator's words instead of the stored text.
+    setDraftText(unsavedDraft);
+    // Handed over to the editor, so the offer disappears.
+    setUnsavedDraft(null);
+    // The error is answered by reopening; a fresh one comes if the next save fails too.
+    setError(null);
+    // Open the editor.
+    setIsEditing(true);
   }
 
   return (
@@ -970,6 +995,20 @@ function Line({
             {/* Rendered as given: the page says "Not saved" only when that is known to be true. */}
             {error}
           </p>
+        ) : null}
+        {/* A refused typed edit stays one click away, only where the editor can still open. */}
+        {unsavedDraft !== null && textTarget !== null && !isEditing ? (
+          <button
+            type="button"
+            className="line__edit-trigger line__restore-draft"
+            // One write at a time per resume, like every other control on the line.
+            disabled={busy}
+            onClick={reopenUnsavedDraft}
+          >
+            Re-open my unsaved edit
+            {/* Spoken only: which line, since several lines could each hold a refused draft. */}
+            <span className="visually-hidden"> ({lineName})</span>
+          </button>
         ) : null}
 
         <Provenance line={line} />

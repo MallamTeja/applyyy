@@ -235,23 +235,27 @@ function ResumePane({ heading, frameTitle, fileStem, preview }: ResumePaneProps)
       <div className="resume-preview__bar">
         <h3 className="resume-preview__heading">{heading}</h3>
         <span className="resume-preview__actions">
-          {/* Zoom affects the frame only; both downloads stay at the template's own size. */}
-          <span className="resume-preview__zoom" role="group" aria-label="Preview zoom">
+          {/* Zoom affects the frame only; both downloads stay at the template's own size. Every
+              control below appends its pane's heading to its name: the tailored and master panes
+              sit side by side, and two identical "Zoom in" names leave a screen reader guessing (QA 5a). */}
+          <span className="resume-preview__zoom" role="group" aria-label={`Preview zoom, ${heading}`}>
             {/* Smaller page: more of the resume in view. */}
-            <button type="button" className="button button--secondary button--small" aria-label="Zoom out" onClick={() => stepZoom(-0.1)}>−</button>
+            <button type="button" className="button button--secondary button--small" aria-label={`Zoom out, ${heading}`} onClick={() => stepZoom(-0.1)}>−</button>
             {/* Back to "page width fills the box", and shows the current percentage. */}
-            <button type="button" className="button button--secondary button--small" aria-label={`Fit page width, now ${Math.round(zoom * 100)}%`} onClick={() => setChosenZoom('fit')}>
+            <button type="button" className="button button--secondary button--small" aria-label={`Fit page width, now ${Math.round(zoom * 100)}%, ${heading}`} onClick={() => setChosenZoom('fit')}>
               {/* The applied zoom, so the operator knows what they are looking at. */}
               {Math.round(zoom * 100)}%
             </button>
             {/* Larger page: easier to read a line closely. */}
-            <button type="button" className="button button--secondary button--small" aria-label="Zoom in" onClick={() => stepZoom(0.1)}>+</button>
+            <button type="button" className="button button--secondary button--small" aria-label={`Zoom in, ${heading}`} onClick={() => stepZoom(0.1)}>+</button>
           </span>
           <button
             type="button"
             className="button button--secondary button--small"
             /* Honest about the mechanism: this opens the browser's dialog. */
             title="Opens your browser's print dialog - choose “Save as PDF”"
+            /* Visible words first, so the name contains what is seen (WCAG 2.5.3), then the pane. */
+            aria-label={`Download PDF, ${heading}`}
             /* Prints the FRAME's document, whose <title> is the default filename. */
             onClick={() => frameRef.current?.contentWindow?.print()}
           >
@@ -263,6 +267,8 @@ function ResumePane({ heading, frameTitle, fileStem, preview }: ResumePaneProps)
             className="button button--secondary button--small"
             /* The exact artefact, for when a print driver alters the layout. */
             title="Saves the exact rendered resume as an HTML file"
+            /* Same pane suffix as Download PDF, for the same reason. */
+            aria-label={`Download HTML, ${heading}`}
             onClick={() => downloadHtml(preview.html)}
           >
             {/* Plain label: it is the HTML file. */}
