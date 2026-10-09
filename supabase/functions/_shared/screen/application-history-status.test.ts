@@ -58,14 +58,19 @@ function fakeClient(rowsForApplications: Array<Record<string, unknown>> = APPLIC
       // Only `applications` carries rows; the other three reads are legitimately empty.
       const rows: Array<Record<string, unknown>> = table === "applications" ? rowsForApplications : [];
       return {
-        select: () =>
+        // `options` is read because the history read asks for `{ count: "exact" }` to
+        // detect a max_rows cut; supabase-js answers count null when it was not asked.
+        select: (_columns: string, options?: { count?: string }) =>
           // A real Promise (awaitable, like the builder) with `.in()` bolted on.
-          Object.assign(Promise.resolve({ data: rows, error: null }), {
+          Object.assign(Promise.resolve({ data: rows, error: null, count: options?.count === "exact" ? rows.length : null }), {
             in(column: string, values: readonly string[]) {
               // Record before filtering, so the args are assertable even if empty.
               inCalls.push([column, values]);
               // Keep only rows whose column value is in the list, as Postgres would.
-              return Promise.resolve({ data: rows.filter((row) => values.includes(row[column] as string)), error: null });
+              const kept = rows.filter((row) => values.includes(row[column] as string));
+              // count is the FILTERED total, as the server counts after the predicate; these
+              // fixtures stay under 1000 rows, so count equals data.length (a complete read).
+              return Promise.resolve({ data: kept, error: null, count: options?.count === "exact" ? kept.length : null });
             },
           }),
       };

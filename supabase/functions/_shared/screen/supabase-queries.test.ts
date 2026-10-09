@@ -20,6 +20,11 @@ const NOW = new Date("2026-09-17T12:00:00.000Z");
 
 // A client double: one canned response per table, recorded by name.
 function client(responses: Record<string, { data: unknown[] | null; error: { message: string } | null }>) {
+  // What supabase-js puts in `count`: the server total when `{ count: "exact" }` was asked
+  // (these fixtures are tiny, so the total is data.length), else null as the real client does.
+  // An error response carries no count, so a count check can never mask its message.
+  const countOf = (data: unknown[] | null, options?: { count?: string }) =>
+    options?.count === "exact" && data !== null ? data.length : null;
   return {
     from(table: string) {
       // This table's canned response, or a legitimately empty one.
@@ -27,15 +32,23 @@ function client(responses: Record<string, { data: unknown[] | null; error: { mes
       return {
         // Awaitable directly (unfiltered tables), and offering `.in()` like the
         // supabase-js builder so the status-filtered history read can run.
-        select: () =>
-          Object.assign(Promise.resolve(response), {
+        // `options` is read because the history read now requests an exact count.
+        select: (_columns: string, options?: { count?: string }) =>
+          // The unfiltered await gets the count too, matching the real builder.
+          Object.assign(Promise.resolve({ ...response, count: countOf(response.data, options) }), {
             // Applies the predicate as Postgres would; rows without the column drop out,
             // so canned history rows must carry a committed `status`.
             in: (column: string, values: readonly string[]) =>
               Promise.resolve(
                 response.data === null
-                  ? response
-                  : { ...response, data: response.data.filter((row) => values.includes((row as Record<string, string>)[column]!)) },
+                  ? // No data: count null, exactly as supabase-js reports a failed read.
+                    { ...response, count: null }
+                  : (() => {
+                      // Filter first: the server counts rows AFTER the predicate.
+                      const kept = response.data.filter((row) => values.includes((row as Record<string, string>)[column]!));
+                      // Complete read, so count matches what was returned.
+                      return { ...response, data: kept, count: countOf(kept, options) };
+                    })(),
               ),
           }),
       };

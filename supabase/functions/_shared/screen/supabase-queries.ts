@@ -57,8 +57,10 @@ export const COMMITTED_STATUSES = [
   "failed",
 ] as const satisfies readonly ApplicationStatus[];
 
-// One postgrest response, as far as this module reads it.
-type QueryResponse = { data: unknown[] | null; error: { message: string } | null };
+// One postgrest response, as far as this module reads it. `count` is present only when
+// the read asked for `{ count: "exact" }`: the TOTAL matching rows on the server, which
+// can exceed `data.length` when max_rows cut the page. supabase-js sends null otherwise.
+type QueryResponse = { data: unknown[] | null; error: { message: string } | null; count?: number | null };
 
 // The minimum a client must offer to serve these reads.
 //
@@ -74,7 +76,9 @@ type QueryResponse = { data: unknown[] | null; error: { message: string } | null
 export interface SelectableClient {
   from(table: string): {
     // Awaitable as-is, and narrowable with `.in()` — the supabase-js builder is both.
-    select(columns: string): PromiseLike<QueryResponse> & {
+    // `options.count` is supabase-js's own option; only the history read passes it, to
+    // prove its single page is the whole set (see `applicationHistory`).
+    select(columns: string, options?: { count: "exact" }): PromiseLike<QueryResponse> & {
       // A server-side `status IN (values)`, resolving to the same response shape. The
       // column is the literal "status" because that is the only column this port
       // filters. Matching supabase-js's generic `in<ColumnName>` against this overflows
@@ -116,6 +120,39 @@ function toResult<T>(response: QueryResponse, map: (rows: unknown[]) => readonly
   if (response.data === null) return { rows: null, error: "query returned no data and no error" };
   // A real result, including a legitimately empty one.
   return { rows: map(response.data), error: null };
+}
+
+// Refuse a history page that is not the whole set; null means "complete, carry on".
+//
+// WHY: PostgREST cuts every read at max_rows (1000) WITHOUT an error. A user with 1001
+// committed applications would get 1000, and already_applied and the weekly cap would
+// UNDERCOUNT. That is a fail-open (CLAUDE.md §6). The server's exact count is compared to the rows
+// received, and any mismatch, or a missing count, is a named error rather than an answer.
+//
+// WHY NOT A `.range()` PAGE LOOP: paging needs a stable `.order()`, and a row inserted or
+// deleted between pages shifts the offsets: its own silent miss or duplicate. One page
+// plus a count has no such window. ponytail: the read now REFUSES above 1000 committed
+// rows per user (live count 0); add an ordered page loop if a user ever gets near that.
+function checkComplete(response: QueryResponse): ScreenQueryResult<never> | null {
+  // A query error or missing data is toResult's to report, with its original message.
+  if (response.error !== null || response.data === null) return null;
+  // No count means completeness can't be proven: fail closed, never assume "all of it".
+  // Number.isInteger, not typeof: postgrest-js parseInt()s Content-Range, so a "0-n/*"
+  // header yields NaN, which IS typeof "number" and would mis-name the guard below.
+  if (!Number.isInteger(response.count)) {
+    // Named so agent_runs.error_detail says exactly which guard fired.
+    return { rows: null, error: "history_count_unavailable: the server returned no exact count, so the history cannot be proven complete" };
+  }
+  // Fewer rows than the server counted: max_rows cut the page.
+  if (response.count !== response.data.length) {
+    // Both numbers, so the operator sees the size of the gap.
+    return {
+      rows: null,
+      error: `history_truncated: ${response.count} committed rows on the server, ${response.data.length} returned (PostgREST max_rows)`,
+    };
+  }
+  // The page is the whole set.
+  return null;
 }
 
 // Build the four reads against a live client.
@@ -169,15 +206,16 @@ export function supabaseScreenQueries(client: { from(table: string): unknown }, 
         // The join the cascade needs, narrowed by Postgres to committed statuses.
         // `status, approved_at` ride along so a pre-approval `failed` can be dropped below;
         // `applied_at, approved_at` are the commit stamps the weekly window runs on.
-        // ponytail: one unpaged read; committed rows above PostgREST max_rows (1000)
-        // would truncate silently. Live committed count is 0 today. Upgrade path: a
-        // `.range()` page loop, or `count: 'exact'` to detect the cut.
+        // `count: "exact"` makes PostgREST report the TOTAL rows matching this filter, so
+        // the one page can be proven complete (see `checkComplete`).
         db
           .from("applications")
-          .select("status, approved_at, applied_at, jobs(fingerprint, company_slug)")
+          .select("status, approved_at, applied_at, jobs(fingerprint, company_slug)", { count: "exact" })
           .in("status", COMMITTED_STATUSES),
       ).then(
         (response) =>
+          // A partial history is refused before any row is mapped: see `checkComplete`.
+          checkComplete(response) ??
           toResult(response, (rows) =>
             (rows as HistoryRow[])
               // A failed row that was never approved was never sent: not an application.
