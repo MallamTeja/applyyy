@@ -98,17 +98,16 @@ export const HUMAN_FALLBACK_LANES: readonly StatusTransition[] =
  *                     from `nextStatuses(status, 'human')`, but the control is
  *                     disabled because no write path exists yet. The operator
  *                     can SEE what is stuck and still cannot move it.
- *   'operable'        The control performs the transition. NOTHING IS AT THIS
- *                     LEVEL TODAY, and this enum member exists precisely so
- *                     that fact is representable and countable rather than
- *                     implied by silence.
+ *   'operable'        The control performs the transition.
  *
- * The write path is the single dependency for all of it: no screen in this
- * console writes to `applications`, deliberately, because
- * `awaiting_approval -> approved` is human-only and is one of only two edges
- * into `approved` (constraint #15) - so the write path is the submit gate, and
- * it gets built and reviewed on purpose rather than as a side effect of
- * wiring a table. */
+ * The write path was the single dependency for all of it, and it was built on
+ * purpose rather than as a side effect of wiring a table, because
+ * `awaiting_approval -> approved` is human-only and one of only two edges into
+ * `approved` (constraint #15). It is `advance_application_status` with
+ * p_agent 'human': the Approval queue has used it since 2026-10-08, and the
+ * System health recovery queues since 2026-10-09
+ * (features/health/advanceRecovery.ts). Statuses no screen writes from yet
+ * stay 'affordance_only', so the count below still says what is missing. */
 export type ScreenReadiness = 'not_built' | 'affordance_only' | 'operable';
 
 /* One claim: which screen owns a status, and how far that screen actually got. */
@@ -143,10 +142,15 @@ const SCREENS_BY_SOURCE_STATUS: Readonly<
    * downstream is. Rejecting is a modelled edge too
    * (`awaiting_approval -> dropped_filter`, "a human is the last filter in the
    * cascade"), not an ad-hoc state write. */
-  awaiting_approval: { screen: 'Approval queue', readiness: 'affordance_only' },
+  /* Operable since 2026-10-08: ApprovalQueuePage approves and rejects through
+   * advance_application_status with a PT409-guarded stamp. */
+  awaiting_approval: { screen: 'Approval queue', readiness: 'operable' },
 
   /* Reject-and-re-tailor, human-only so no automated retry loop burns Gemini
-   * quota rewriting the same flagged bullet. */
+   * quota rewriting the same flagged bullet. STILL affordance_only, checked
+   * 2026-10-09: no screen sends `audit_flagged -> tailored` (the Approval
+   * queue lists awaiting_approval rows only), so claiming it would be the
+   * false all-clear this file exists to prevent. */
   audit_flagged: { screen: 'Approval queue, send back for re-tailoring', readiness: 'affordance_only' },
 
   /* --- The pipeline board --------------------------------------------- */
@@ -175,27 +179,68 @@ const SCREENS_BY_SOURCE_STATUS: Readonly<
    * Shared with the sweeper, so it is not human-only - but if the sweeper has
    * quietly stopped, a person must be able to move the row, and submission is
    * the one non-idempotent action in the system. */
-  applying: { screen: 'System health, stuck-submission queue', readiness: 'affordance_only' },
+  applying: { screen: 'System health, stuck-submission queue', readiness: 'operable' },
 
   /* The row that decides whether an application went out. Its edge back to
    * `approved` is human-only by design: a machine must never conclude that a
    * possibly-submitted application was not submitted, because concluding
    * wrongly sends a second one and violates constraint #7. Needs the
    * screenshot as evidence and a deliberate, hard-to-misclick control. */
-  needs_verification: { screen: 'System health, needs-verification queue', readiness: 'affordance_only' },
+  /* Operable for -> applied and -> failed only: -> approved is held per edge in
+   * HELD_HUMAN_EDGES below, because under automatic submission it re-arms a
+   * real send. */
+  needs_verification: { screen: 'System health, needs-verification queue', readiness: 'operable' },
 
   /* The captcha and anti-bot lane. Nothing here circumvents them
    * (constraint #5) - the worker screenshots the wall and parks the row, and
    * the operator finishes the application by hand. Because Actions has no
    * human present, this is a normal part of the day rather than a failure,
    * which is why it gets a real queue instead of an error log. */
-  blocked_needs_human: { screen: 'System health, blocked queue', readiness: 'affordance_only' },
+  blocked_needs_human: { screen: 'System health, blocked queue', readiness: 'operable' },
 
   /* The only edge out of `failed` leads to verification rather than back to
    * the queue: a row that failed near the submit boundary must be checked by a
    * person before anything moves it again. */
-  failed: { screen: 'System health, failed rows', readiness: 'affordance_only' },
+  failed: { screen: 'System health, failed rows', readiness: 'operable' },
 };
+
+/* Edges deliberately kept OFF on a screen that is otherwise operable, each with
+ * the sentence the button shows instead of firing.
+ *
+ * WHY PER EDGE: readiness is claimed per source status, and needs_verification
+ * has three human moves of which two are safe to offer and one is not. Without
+ * this list the only choices were to over-claim the status (counting the
+ * dangerous move as operable) or to under-claim it (leaving the two safe moves
+ * dead). A held edge counts as INOPERABLE below, so the coverage numbers stay
+ * honest either way. */
+export const HELD_HUMAN_EDGES: ReadonlyArray<{
+  // The source status of the held move.
+  readonly from: ApplicationStatus;
+  // The target status of the held move.
+  readonly to: ApplicationStatus;
+  // Rendered next to the disabled button, so the operator sees why.
+  readonly reason: string;
+}> = [
+  {
+    from: 'needs_verification',
+    to: 'approved',
+    /* 2026-10-09: submission is moving to fully automatic, so a row back at
+     * approved is picked up and SENT again. One click here would be a second
+     * application if the first one landed (constraint #7). Off until Teja
+     * rules on it. */
+    reason: 'Held: would re-arm a real submission; Teja has not ruled.',
+  },
+];
+
+/* The reason a human edge is held, or null when it is not. The recovery
+ * queues ask this per button; null is the only answer that lets one fire. */
+export function heldReason(
+  from: ApplicationStatus,
+  to: ApplicationStatus,
+): string | null {
+  // Exact edge match; a held edge never matches by source status alone.
+  return HELD_HUMAN_EDGES.find((edge) => edge.from === from && edge.to === to)?.reason ?? null;
+}
 
 /* Human-reachable edges whose source status no screen claims.
  *
@@ -238,21 +283,27 @@ export const INOPERABLE_HUMAN_CONTROLS: readonly StatusTransition[] =
   HUMAN_REACHABLE_LANES.filter(
     (transition) =>
       SCREENS_BY_SOURCE_STATUS[transition.from]?.readiness ===
-      'affordance_only',
+        'affordance_only' ||
+      /* A held edge on an operable screen is shown and disabled, which is
+         exactly this bucket's definition - so it is counted here, never as
+         operable. */
+      (SCREENS_BY_SOURCE_STATUS[transition.from]?.readiness === 'operable' &&
+        heldReason(transition.from, transition.to) !== null),
   );
 
 /* Human-reachable edges a person can actually traverse in this console today.
  *
- * THE NON-VACUITY COUNTERPART to the two lists above, and it is currently
- * EMPTY - which is the honest state and is why it is exported rather than
- * assumed. A coverage report that only ever counts problems cannot be
- * distinguished from one whose predicate is inverted; a report that also counts
- * successes can. When the write path lands, this number rising is the
- * measurement that says so. */
+ * THE NON-VACUITY COUNTERPART to the two lists above. It was empty until the
+ * write path landed (Approval queue 2026-10-08, recovery queues 2026-10-09);
+ * this number rising is the measurement that says so. A coverage report that
+ * only ever counts problems cannot be distinguished from one whose predicate
+ * is inverted; a report that also counts successes can. */
 export const OPERABLE_HUMAN_CONTROLS: readonly StatusTransition[] =
   HUMAN_REACHABLE_LANES.filter(
     (transition) =>
-      SCREENS_BY_SOURCE_STATUS[transition.from]?.readiness === 'operable',
+      SCREENS_BY_SOURCE_STATUS[transition.from]?.readiness === 'operable' &&
+      // A held edge is shown but cannot fire, so it is not operable.
+      heldReason(transition.from, transition.to) === null,
   );
 
 /* Where the operator performs the human transitions out of a status, for

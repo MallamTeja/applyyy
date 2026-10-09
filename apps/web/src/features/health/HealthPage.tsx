@@ -42,7 +42,10 @@ import { PageHeader } from '../../app/PageHeader';
 /* The agent roster and the run-outcome vocabulary come from the schema, so an
    agent added upstream appears here with no edit - an agent this page forgot to
    list is an agent whose death nobody would notice. */
-import { AGENT_NAMES, nextStatuses } from '../../data/contract';
+import { AGENT_NAMES } from '../../data/contract';
+/* The four recovery panels list their stuck rows with working moves through this one component
+   (2026-10-09), so the moves are built from the graph in one place rather than four. */
+import { RecoveryQueue } from './RecoveryQueue';
 /* The coverage check, imported rather than recomputed. Its own file explains
    why the predicate is `.includes('human')` and not `=== ['human']`, and why
    one list of gaps was not enough: a status claimed by a screen nobody wrote
@@ -56,7 +59,6 @@ import {
   MISSING_HUMAN_CONTROLS,
   OPERABLE_HUMAN_CONTROLS,
   UNBUILT_HUMAN_CONTROLS,
-  isHumanOnlyLane,
 } from '../../data/humanLanes';
 /* Freshness is DERIVED, not measured here: the cadences, the age arithmetic and
    the verdict ladder all live in one pure module with a test per branch. A
@@ -590,7 +592,8 @@ function GeminiPoolPanel(): ReactElement {
  * inoperable, and actually operable - and the four numbers sum to the graph's
  * own total, which is what makes the report auditable rather than assertable.
  *
- * The operable count is currently zero and is shown anyway. A report that only
+ * The operable count is shown even when it is zero (it was, until the write
+ * path landed on 2026-10-08/09). A report that only
  * ever counts problems cannot be told apart from one whose predicate is
  * inverted; a report that also counts successes can.
  */
@@ -668,8 +671,9 @@ function ControlCoveragePanel(): ReactElement {
               <td>
                 A screen shows the move, built from{' '}
                 <span className="identifier">nextStatuses(status, 'human')</span>,
-                but the button is disabled because no write path exists yet. All
-                of these wait on ONE dependency, not one each.
+                but the button cannot fire: either no screen writes from that
+                status yet, or the move is held on purpose (shown with its
+                reason beside the button).
               </td>
             </tr>
 
@@ -758,7 +762,6 @@ function ControlCoveragePanel(): ReactElement {
  * Stale leases where the worker died mid-submission.
  * Human or sweeper advances to `needs_verification`. */
 function StuckSubmissionQueuePanel(): ReactElement {
-  const moves = nextStatuses('applying', 'human');
   return (
     <section className="panel" aria-label="Stuck submission recovery queue">
       <h2 className="panel__title">Stuck Submission Recovery (<span className="identifier">applying</span>)</h2>
@@ -767,30 +770,8 @@ function StuckSubmissionQueuePanel(): ReactElement {
         died mid-submit. If the automated Sweeper is inactive, the operator can manually
         advance the stalled submission to verification.
       </p>
-      <div className="table-wrap">
-        <table className="table">
-          <thead>
-            <tr>
-              <th scope="col">Source Status</th>
-              <th scope="col">Available Human Transition</th>
-              <th scope="col">Operator Recovery Control (Affordance)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {moves.map((target) => (
-              <tr key={`applying->${target}`}>
-                <th scope="row" className="table__id">applying</th>
-                <td>&rarr; <span className="identifier">{target}</span></td>
-                <td>
-                  <button type="button" className="health-recovery-button" disabled title="Affordance only: write path is disabled until explicit human trust sign-off">
-                    Advance to {target}
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {/* The stuck rows with working moves (2026-10-09); was a disabled edge list. */}
+      <RecoveryQueue status="applying" verb={(to) => `Advance to ${to}`} />
     </section>
   );
 }
@@ -799,7 +780,6 @@ function StuckSubmissionQueuePanel(): ReactElement {
  * Human-only gate back to `approved` or to `applied` or `failed`.
  * A machine must never guess if an application landed. */
 function NeedsVerificationQueuePanel(): ReactElement {
-  const moves = nextStatuses('needs_verification', 'human');
   return (
     <section className="panel" aria-label="Needs verification queue">
       <h2 className="panel__title">Needs Verification Queue (<span className="identifier">needs_verification</span>)</h2>
@@ -807,37 +787,11 @@ function NeedsVerificationQueuePanel(): ReactElement {
         Human gate for questionable submissions. Requires manual inspection of the ATS
         confirmation or screenshot. Moves to <span className="identifier">applied</span> if confirmed,
         <span className="identifier">approved</span> to retry submission, or <span className="identifier">failed</span>.
+        The retry (<span className="identifier">approved</span>) is held: under automatic submission it
+        would send the application again.
       </p>
-      <div className="table-wrap">
-        <table className="table">
-          <thead>
-            <tr>
-              <th scope="col">Target Transition</th>
-              <th scope="col">Classification</th>
-              <th scope="col">Operator Recovery Control (Affordance)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {moves.map((target) => (
-              <tr key={`needs_verification->${target}`}>
-                <th scope="row" className="table__id">&rarr; {target}</th>
-                <td>
-                  {isHumanOnlyLane('needs_verification', target) ? (
-                    <span className="identifier">Human Only</span>
-                  ) : (
-                    <span className="identifier">Fallback</span>
-                  )}
-                </td>
-                <td>
-                  <button type="button" className="health-recovery-button" disabled title="Affordance only: write path is disabled until explicit human trust sign-off">
-                    Mark as {target}
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {/* -> approved renders disabled with its reason (humanLanes.ts HELD_HUMAN_EDGES). */}
+      <RecoveryQueue status="needs_verification" verb={(to) => `Mark as ${to}`} />
     </section>
   );
 }
@@ -845,7 +799,6 @@ function NeedsVerificationQueuePanel(): ReactElement {
 /* Blocked Queue: status `blocked_needs_human`
  * Captcha, Cloudflare, or anti-bot challenge parked applications. */
 function BlockedQueuePanel(): ReactElement {
-  const moves = nextStatuses('blocked_needs_human', 'human');
   return (
     <section className="panel" aria-label="Blocked queue">
       <h2 className="panel__title">Blocked, Needs Operator Action (<span className="identifier">blocked_needs_human</span>)</h2>
@@ -853,34 +806,20 @@ function BlockedQueuePanel(): ReactElement {
         Applications parked when hitting anti-bot walls, captchas, or custom portal auth.
         Constraint #5 strictly prohibits automated bypass; finish manually and record outcome.
       </p>
-      <div className="table-wrap">
-        <table className="table">
-          <thead>
-            <tr>
-              <th scope="col">Target Transition</th>
-              <th scope="col">Resolution Meaning</th>
-              <th scope="col">Operator Recovery Control (Affordance)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {moves.map((target) => (
-              <tr key={`blocked_needs_human->${target}`}>
-                <th scope="row" className="table__id">&rarr; {target}</th>
-                <td>
-                  {target === 'applied' && 'Application submitted manually by operator in browser'}
-                  {target === 'dropped_filter' && 'Abandoned: disqualified or unwanted portal requirements'}
-                  {target === 'failed' && 'Fatal obstacle or unresolvable submission error'}
-                </td>
-                <td>
-                  <button type="button" className="health-recovery-button" disabled title="Affordance only: write path is disabled until explicit human trust sign-off">
-                    Resolve as {target}
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {/* The three resolutions keep their meanings, now beside working buttons. */}
+      <RecoveryQueue
+        status="blocked_needs_human"
+        verb={(to) => `Resolve as ${to}`}
+        meaning={(to) =>
+          to === 'applied'
+            ? 'Submitted manually by you in the browser'
+            : to === 'dropped_filter'
+              ? 'Abandoned: disqualified or unwanted portal requirements'
+              : to === 'failed'
+                ? 'Fatal obstacle or unresolvable submission error'
+                : null
+        }
+      />
     </section>
   );
 }
@@ -888,7 +827,6 @@ function BlockedQueuePanel(): ReactElement {
 /* Failed Rows Recovery: status `failed`
  * Submissions that crashed or threw fatal errors. Moves to `needs_verification`. */
 function FailedRowsPanel(): ReactElement {
-  const moves = nextStatuses('failed', 'human');
   return (
     <section className="panel" aria-label="Failed rows queue">
       <h2 className="panel__title">Failed Submission Recovery (<span className="identifier">failed</span>)</h2>
@@ -897,30 +835,8 @@ function FailedRowsPanel(): ReactElement {
         The only edge out leads to <span className="identifier">needs_verification</span> so an operator
         reviews failure diagnostics before re-queueing.
       </p>
-      <div className="table-wrap">
-        <table className="table">
-          <thead>
-            <tr>
-              <th scope="col">Source Status</th>
-              <th scope="col">Available Human Transition</th>
-              <th scope="col">Operator Recovery Control (Affordance)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {moves.map((target) => (
-              <tr key={`failed->${target}`}>
-                <th scope="row" className="table__id">failed</th>
-                <td>&rarr; <span className="identifier">{target}</span></td>
-                <td>
-                  <button type="button" className="health-recovery-button" disabled title="Affordance only: write path is disabled until explicit human trust sign-off">
-                    Send to {target}
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {/* One move out: back to verification, never straight to a retry. */}
+      <RecoveryQueue status="failed" verb={(to) => `Send to ${to}`} />
     </section>
   );
 }

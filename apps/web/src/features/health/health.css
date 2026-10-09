@@ -361,10 +361,108 @@
   color: var(--text-primary);
 }
 
-/* Every one of these is disabled: the write path is not built. The styling says
-   so plainly, because a control that looks live but does nothing is worse than
-   a visibly dead one. */
+/* Disabled now means held on purpose, or locked while a move is in flight (the
+   write path landed 2026-10-09). The styling still says so plainly, because a
+   control that looks live but does nothing is worse than a visibly dead one. */
 .health-recovery-button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+/* RecoveryQueue: the moves for one row, one per line, so a held move's reason
+   sits under its own button rather than drifting next to a neighbour's. */
+.recovery__moves {
+  /* Stacked: the reason text needs the cell's full width to stay readable. */
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-1);
+}
+
+/* One move: the button and its optional reason or meaning on one wrapping line. */
+.recovery__move {
+  /* Wraps on a phone instead of forcing the table wider than the screen. */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--gap-2);
+}
+
+/* The row label wraps, unlike the agent-name cells .table__id was made for:
+   a job title is prose, and one long title on a nowrap line widened the whole
+   table past a phone screen. */
+.recovery__label {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Long monospace verbs ("Advance to needs_verification") may wrap inside the
+   button rather than set the column's minimum width. */
+.recovery__move .health-recovery-button {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Phones: one row becomes a block - label, then its moves - so nothing in a
+   recovery queue depends on scrolling sideways to be found. */
+@media (max-width: 600px) {
+  .recovery__table thead {
+    /* The two column headings say nothing a stacked block needs. */
+    display: none;
+  }
+  .recovery__table tr,
+  .recovery__table th,
+  .recovery__table td {
+    /* Each cell takes the full width, one under the other. */
+    display: block;
+  }
+  .recovery__table th {
+    /* The rule moves to under the moves, so a row reads as one unit. */
+    border-bottom: 0;
+  }
+}
+
+/* The row's stamp under its label: its own line, small and allowed to break
+   anywhere, so a long microsecond timestamp never widens the table on a phone. */
+.recovery__stamp {
+  display: block;
+  font-size: var(--size-xs);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* Why a move is off. Secondary text, never the alarm colour: held is a
+   decision, not a fault. */
+.recovery__held,
+.recovery__why {
+  font-size: var(--size-xs);
+  color: var(--text-secondary);
+}
+
+/* The outcome strip above a queue: plain list, no bullets, newest first. */
+.recovery__notes {
+  list-style: none;
+  margin: 0 0 var(--gap-2);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-1);
+}
+
+/* One outcome line, ruled on the left so it reads as a log entry. */
+.recovery__note {
+  font-size: var(--size-sm);
+  padding: var(--gap-1) var(--gap-2);
+  border-left: 3px solid var(--rule-strong);
+}
+
+/* A move that landed: the traced (verified) tokens, which already carry light-dark(). */
+.recovery__note--ok {
+  border-left-color: var(--traced);
+  background: var(--traced-wash);
+}
+
+/* Anything else (stale, refused, unknown): the fabricated (attention) tokens, also themed. */
+.recovery__note--warn {
+  border-left-color: var(--fabricated);
+  background: var(--fabricated-wash);
 }

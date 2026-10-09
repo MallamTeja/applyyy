@@ -33,6 +33,7 @@ import {
   OPERABLE_HUMAN_CONTROLS,
   UNBUILT_HUMAN_CONTROLS,
   controlReadiness,
+  heldReason,
   humanControlLocation,
   isHumanOnlyLane,
 } from '../src/data/humanLanes.ts';
@@ -150,29 +151,60 @@ test('an unclaimed status and an unbuilt screen are not the same bucket', () => 
   }
 });
 
-test('every claimed status has a screen with affordance controls', () => {
-  /* All submit-boundary and human recovery queues (applying, needs_verification,
-     blocked_needs_human, failed) now have operator recovery panels on System health.
-     UNBUILT_HUMAN_CONTROLS is now zero, meaning no status is invisible to the operator. */
+test('the recovery statuses and the approval gate are operable; audit_flagged is not', () => {
+  /* The write path landed (Approval queue 2026-10-08, recovery queues 2026-10-09). The old tripwire
+     here asserted "nothing is operable" and was meant to fail when this happened; this is its
+     replacement, pinning the new truth status by status so an over-claim fails by name. */
   assert.equal(UNBUILT_HUMAN_CONTROLS.length, 0);
-  for (const status of ['applying', 'needs_verification', 'blocked_needs_human', 'failed'] as const) {
-    assert.equal(controlReadiness(status), 'affordance_only');
-    assert.notEqual(humanControlLocation(status), null);
+  // Every queue that now sends advance_application_status as 'human'.
+  for (const status of ['awaiting_approval', 'applying', 'needs_verification', 'blocked_needs_human', 'failed'] as const) {
+    // Readiness is the claim the panel counts.
+    assert.equal(controlReadiness(status), 'operable', status);
+    // And an operable status must have a named place to perform the move.
+    assert.notEqual(humanControlLocation(status), null, status);
   }
+  /* No screen sends audit_flagged -> tailored yet; claiming it would be the false all-clear this
+     module exists to prevent. */
+  assert.equal(controlReadiness('audit_flagged'), 'affordance_only');
 });
 
-test('nothing is operable yet, and that is asserted rather than assumed', () => {
-  /* No screen in this console writes to `applications`, deliberately: the write
-     path IS the submit gate, because `awaiting_approval -> approved` is
-     human-only and one of only two edges into `approved` (constraint #15). So
-     it gets built and reviewed on purpose rather than as a side effect of
-     wiring a table.
-     WHEN THAT LANDS, THIS TEST FAILS - which is the point. It is a tripwire on
-     a claim the panel makes, not a permanent expectation. */
-  assert.equal(OPERABLE_HUMAN_CONTROLS.length, 0);
-  for (const lane of HUMAN_REACHABLE_LANES) {
-    assert.notEqual(controlReadiness(lane.from), 'operable');
-  }
+test('heldReason holds needs_verification -> approved and nothing else out of needs_verification', () => {
+  /* -> approved re-arms a real submission under automatic sending, so it must answer with a reason. */
+  assert.notEqual(heldReason('needs_verification', 'approved'), null);
+  /* The accept twin: an exact-edge match, so the safe sibling move from the same source still fires.
+     A heldReason that matched by source alone would kill both. */
+  assert.equal(heldReason('needs_verification', 'applied'), null);
+});
+
+test('OPERABLE_HUMAN_CONTROLS is exactly the edges the approval and recovery queues send', () => {
+  /* Listed, not just counted: a count can stay right while one edge swaps for another. The list is
+     read from the graph as of 2026-10-09; a new human edge out of an operable status lands here and
+     must be added on purpose, which is the review this test forces. */
+  const expected = [
+    'awaiting_approval->approved',
+    'awaiting_approval->dropped_filter',
+    'applying->needs_verification',
+    'needs_verification->applied',
+    'needs_verification->failed',
+    'blocked_needs_human->applied',
+    'blocked_needs_human->dropped_filter',
+    'blocked_needs_human->failed',
+    'failed->needs_verification',
+  ];
+  // Sorted on both sides so order in the graph does not matter, only membership.
+  assert.deepEqual(OPERABLE_HUMAN_CONTROLS.map(key).sort(), [...expected].sort());
+  // Stated as a number too, because the panel shows the number.
+  assert.equal(OPERABLE_HUMAN_CONTROLS.length, 9);
+});
+
+test('the held edge is counted inoperable and never operable', () => {
+  /* A held edge sits on an operable screen, so a filter on readiness alone would count it operable -
+     the over-claim HELD_HUMAN_EDGES exists to prevent. */
+  const held = 'needs_verification->approved';
+  // Shown and disabled: the inoperable bucket's definition.
+  assert.ok(INOPERABLE_HUMAN_CONTROLS.map(key).includes(held));
+  // And therefore not in the operable count.
+  assert.ok(!OPERABLE_HUMAN_CONTROLS.map(key).includes(held));
 });
 
 test('every human-reachable status is either unclaimed or has a readiness', () => {

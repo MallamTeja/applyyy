@@ -129,7 +129,7 @@ export function isNoAnswer(status: unknown, error: { code?: unknown } | null | u
 export type SettleCheck =
   // The row is at the status we asked for: our call (or an identical one) went through.
   | { readonly kind: 'landed' }
-  // Still awaiting approval: nothing happened. Carries the row, so a PT409 (stale stamp) can redraw it.
+  // Still at the source status (awaiting_approval unless the caller names another): nothing happened. Carries the row, so a PT409 (stale stamp) can redraw it.
   | { readonly kind: 'not_landed'; readonly stored: StoredRow }
   // Some other status: not ours to count, and the page should show what is stored.
   | { readonly kind: 'moved_elsewhere'; readonly stored: StoredRow }
@@ -137,7 +137,19 @@ export type SettleCheck =
   | { readonly kind: 'unknown' };
 
 // Never throws (readBack cannot), because it is awaited inside settle()'s locked per-row loop.
-export async function confirmSettle(client: MinimalClient, applicationId: string, to: string): Promise<SettleCheck> {
+export async function confirmSettle(
+  // Any client with the chained read readBack uses (the page's supabase, or a test double).
+  client: MinimalClient,
+  // The row whose move is being confirmed.
+  applicationId: string,
+  // The status the move asked for.
+  to: string,
+  /* Where the move started (2026-10-09). Defaults to the approval queue's only source so its calls
+     stay unchanged; the System health recovery queues (features/health/advanceRecovery.ts) start from
+     applying / needs_verification / blocked_needs_human / failed, and "still at the source" is what
+     tells not_landed apart from moved_elsewhere, so it must be the real source, never assumed. */
+  from: string = 'awaiting_approval',
+): Promise<SettleCheck> {
   // The same never-throwing re-read the save uses.
   const stored = await readBack(client, applicationId);
   // Unreadable: say so rather than pick an answer.
@@ -145,7 +157,7 @@ export async function confirmSettle(client: MinimalClient, applicationId: string
   // At the target status: done.
   if (stored.status === to) return { kind: 'landed' };
   // Untouched: the transition did not happen.
-  if (stored.status === 'awaiting_approval') return { kind: 'not_landed', stored };
+  if (stored.status === from) return { kind: 'not_landed', stored };
   // Anywhere else: someone else moved it.
   return { kind: 'moved_elsewhere', stored };
 }
