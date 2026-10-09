@@ -6,9 +6,13 @@
  * and the worker trusts only true. So for these questions the thing that matters is not
  * the value but WHO wrote it, and this section shows that state per field.
  *
- * THE ONE RULE THIS FILE KEEPS: nothing here writes except the Save button's onClick.
- * Suggestions (Teja's 2026-10-09 rulings, and values derived from his master profile)
- * only prefill a draft. Auto-saving them would stamp a machine's guess as his answer.
+ * THE ONE RULE THIS FILE KEEPS: nothing here writes except a Save button's onClick (a
+ * field's own Save, or "Save all answers"). Suggestions (Teja's 2026-10-09 rulings, and
+ * values derived from his master profile) only prefill a draft. Auto-saving them would
+ * stamp a machine's guess as his answer.
+ *
+ * The decisions (what a field shows, what may be saved, what Save all writes) live in
+ * answerBankView.ts as pure functions, so node:test pins them without a DOM.
  */
 
 // State for drafts and the profile read; an effect for the one-time profile load.
@@ -28,8 +32,6 @@ import {
   ELIGIBILITY_KEYS,
   // Row flag to badge state, kept pure in the store so it is tested.
   attestationState,
-  // Decides whether an EEO choice may be saved ("Not answered" never may).
-  isSaveableEeoAnswer,
   // The existing save path: one payload shape and one read-error guard for every save.
   saveBankAnswer,
   // Pure, tested derivation of the open-source links suggestion.
@@ -39,17 +41,33 @@ import {
 } from './answerBankStore';
 // Types only: the badge-state union and the question shape.
 import type { AttestationState, BankQuestion } from './answerBankStore';
+// The pure view rules this section renders from; tested in test/answerBankView.test.ts.
+import {
+  // Which writes "Save all answers" makes: only fields that differ from Teja's stored answer.
+  planSaveAll,
+  // Whether a value is a real answer; shared by both Save buttons so they cannot disagree.
+  isSaveableValue,
+  // Runs the planned writes one by one through saveBankAnswer and reports each outcome.
+  saveAllPlanned,
+  // Draft, else saved value, else suggestion; a yes/no shows no suggestion as a selection.
+  shownValue,
+  // Trims text the way it is stored, since the worker compares "None" exactly.
+  valueToSave,
+} from './answerBankView';
+// Type only: one field's Save-all outcome, held in state for the results list.
+import type { SaveResult } from './answerBankView';
 // The existing master-profile read; it never throws, failures come back as a value.
 import { loadCurrentMasterProfile } from './masterStore';
 // Its result union, held in state as-is so every outcome renders honestly.
 import type { LoadOutcome } from './masterStore';
 
-/* Label per save state; a Record so adding a state is a compile error until labelled. */
+/* Label per save state; a Record so adding a state is a compile error until labelled.
+ * Plain words for a non-technical reader: "attested" was jargon (2026-10-09 render check). */
 const STATE_LABEL: Record<AttestationState, string> = {
-  // The only state the worker acts on.
-  attested: 'Saved by you',
-  // A row exists but a machine wrote it, so the worker will ask Teja instead.
-  unattested: 'Saved, not attested',
+  // The only state the worker acts on; the tick is decoration, the words carry the meaning.
+  attested: 'Saved by you ✓',
+  // A row exists but was not saved from this browser, so the worker will not use it until Teja saves.
+  unattested: 'Needs your save',
   // No row: the field shows a suggestion at most.
   unsaved: 'Not saved yet',
 };
@@ -76,6 +94,10 @@ export function EligibilityAnswers({ questions, loading, loadError, onSaved }: P
   const [drafts, setDrafts] = useState<Record<string, unknown>>({});
   // Which key is mid-save, to disable its button against double clicks.
   const [savingKey, setSavingKey] = useState<string | null>(null);
+  // True while "Save all answers" runs, so no field Save can interleave with it.
+  const [savingAll, setSavingAll] = useState<boolean>(false);
+  // The last Save all's per-field outcomes, listed under the button; null before any run.
+  const [saveAllResults, setSaveAllResults] = useState<readonly SaveResult[] | null>(null);
 
   // Read the master profile once on mount. A read only: no write happens here.
   useEffect(() => {
@@ -115,10 +137,8 @@ export function EligibilityAnswers({ questions, loading, loadError, onSaved }: P
     return q.defaultValue;
   };
 
-  // The value the input shows: the draft, else the saved value, else the suggestion.
-  const shown = (q: BankQuestion): unknown =>
-    // `in` rather than `??`, so a draft deliberately set to '' or false is kept.
-    q.key in drafts ? drafts[q.key] : attestationState(q) === 'unsaved' ? suggestion(q) : q.value;
+  // The value the input shows; the rule (and why a yes/no shows no suggestion) is in answerBankView.
+  const shown = (q: BankQuestion): unknown => shownValue(q, drafts, suggestion(q));
 
   // Records a keystroke or toggle as a draft. Never writes.
   const setDraft = (key: string, value: unknown): void => {
@@ -130,18 +150,17 @@ export function EligibilityAnswers({ questions, loading, loadError, onSaved }: P
   const save = async (q: BankQuestion): Promise<void> => {
     // Disable this field's button while the request is out.
     setSavingKey(q.key);
+    // An older Save all list would now describe a state this save changes, so drop it.
+    setSaveAllResults(null);
     // The store's own read-error guard still applies inside saveBankAnswer.
     try {
-      // Trimmed for text, because the worker compares "None" exactly.
-      const raw = shown(q);
-      // Booleans pass through untouched.
-      const value = typeof raw === 'string' ? raw.trim() : raw;
-      // The EEO definition for this key, when it is one.
-      const eeo = EEO_QUESTIONS.find((e) => e.key === q.key);
-      // Second line of defence behind the disabled button: never store "Not answered" or an off-list string.
-      if (eeo !== undefined && !isSaveableEeoAnswer(eeo, value)) {
+      // Trimmed for text, because the worker compares "None" exactly; booleans pass through.
+      const value = valueToSave(shown(q));
+      // Second line of defence behind the disabled button: never store a blank, an unpicked
+      // yes/no, "Not answered" or an off-list EEO string.
+      if (!isSaveableValue(q, value)) {
         // Say why nothing happened.
-        toast.error('Pick one of the listed answers, or leave it unanswered.');
+        toast.error('Pick or type an answer first, or leave it unanswered.');
         // No write; finally re-enables the button.
         return;
       }
@@ -194,6 +213,77 @@ export function EligibilityAnswers({ questions, loading, loadError, onSaved }: P
   // Unique company names in document order, for the read-only "previously worked at" note.
   const companies = profile === null ? [] : [...new Set(profile.experience.map((e) => e.company.trim()))];
 
+  // Every editable field with the value it shows, eligibility first then EEO, in screen order.
+  const entries = [
+    // The eligibility cards.
+    ...fields.map((q) => ({ question: q, value: shown(q) })),
+    // The EEO cards; the loaded row carries the attested state.
+    ...eeoFields.map(({ loaded }) => ({ question: loaded, value: shown(loaded) })),
+  ];
+  // What "Save all answers" would write right now; empty means the button has nothing to do.
+  const planned = planSaveAll(entries);
+  // Unsaved typing or picking, as opposed to a suggestion nobody touched: only this warns on leave.
+  const hasUnsavedEdits = planned.some((p) => p.question.key in drafts);
+
+  // Warn before closing or reloading the tab while edits are unsaved. Cheap: one listener,
+  // registered only while there is something to lose. In-app route changes are not covered.
+  useEffect(() => {
+    // Nothing typed and unsaved: no listener, so leaving never nags.
+    if (!hasUnsavedEdits) return;
+    // The browser shows its own generic prompt; custom text is ignored by modern browsers.
+    const onBeforeUnload = (e: BeforeUnloadEvent): void => {
+      // The standard way to ask for the prompt.
+      e.preventDefault();
+      // Legacy browsers need returnValue set as well.
+      e.returnValue = '';
+    };
+    // Registered while edits are pending.
+    window.addEventListener('beforeunload', onBeforeUnload);
+    // Removed as soon as they are saved or the section unmounts.
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+    // Re-evaluated whenever the pending-edits answer changes.
+  }, [hasUnsavedEdits]);
+
+  /* "Save all answers": one click for every changed field. Each field still goes through
+   * saveBankAnswer, so each row gets its own upsert and the trigger stamps each one. */
+  const saveAll = async (): Promise<void> => {
+    // Blocks every Save button until the run finishes.
+    setSavingAll(true);
+    // Clears the previous run's list, so a stale result is never read as this run's.
+    setSaveAllResults(null);
+    // finally guarantees the buttons come back even on an unexpected throw.
+    try {
+      // Sequential writes, one result per field; errors come back as values.
+      const results = await saveAllPlanned(planned);
+      // Shown under the button: which fields saved and which did not.
+      setSaveAllResults(results);
+      // The keys that saved, so only their drafts are dropped.
+      const savedKeys = new Set(results.filter((r) => r.ok).map((r) => r.key));
+      // The value each planned key was saved with, to spot a field edited while the run was out.
+      const savedValue = new Map(planned.map((p) => [p.question.key, p.value]));
+      // Drop a draft only when it saved AND still equals what was saved; a failed field, or one
+      // typed into mid-run, keeps its draft so Teja's newer input is never silently replaced.
+      setDrafts((prev) =>
+        // Rebuilt from the latest drafts (functional update), not the render's copy.
+        Object.fromEntries(
+          // Keep the entry unless it is exactly the value that just landed.
+          Object.entries(prev).filter(([k, v]) => !(savedKeys.has(k) && valueToSave(v) === savedValue.get(k))),
+        ),
+      );
+      // How many did not save.
+      const failed = results.length - savedKeys.size;
+      // One summary toast; the per-field detail is in the list.
+      if (failed === 0) toast.success(`Saved ${results.length} answer${results.length === 1 ? '' : 's'}`);
+      // Partial or total failure is an error, never a quiet success.
+      else toast.error(`${failed} of ${results.length} answers were not saved. See the list below.`);
+      // Re-read only when something landed, so the badges come from the DB.
+      if (savedKeys.size > 0) onSaved();
+    } finally {
+      // Re-enable every Save button.
+      setSavingAll(false);
+    }
+  };
+
   // One settings-group section, so it sits in the page like the table section above it.
   return (
     <section /* Existing settings-group styling, so no new section chrome is invented. */ className="settings-group">
@@ -232,10 +322,12 @@ export function EligibilityAnswers({ questions, loading, loadError, onSaved }: P
             const state = attestationState(q);
             // The current input value.
             const value = shown(q);
-            // Disabled while this key saves or while the read is failed.
-            const disabled = savingKey === q.key || loadError !== null;
+            // Disabled while this key or Save all is saving, while the read is failed, or with no real answer to save.
+            const disabled = savingKey === q.key || savingAll || loadError !== null || !isSaveableValue(q, valueToSave(value));
             // The input's id, so the label is programmatically tied to it.
             const inputId = `eligibility-${q.key}`;
+            // The label's own id, so the yes/no group can name itself after it (a <label for> cannot label a div).
+            const labelId = `${inputId}-label`;
             // The card itself; keyed by question_key, which is unique per user.
             return (
               <div
@@ -247,7 +339,17 @@ export function EligibilityAnswers({ questions, loading, loadError, onSaved }: P
                 {/* Label and state badge share a row so the state is read with the question. */}
                 <div className="eligibility__head">
                   {/* A real label element, so clicking it focuses the input and readers announce it. */}
-                  <label htmlFor={inputId} className="eligibility__label">
+                  <label
+                    /* Ties the label to its input; for the yes/no group, aria-labelledby below does the naming. */
+                    htmlFor={inputId}
+                    /* Referenced by the yes/no group's aria-labelledby. */
+                    id={labelId}
+                    /* Prompt styling. */
+                    className="eligibility__label"
+                    /* The worker's exact key as a hover tooltip: hidden from plain view (it overflowed a phone screen
+                       and means nothing to a non-technical reader), still there for debugging. */
+                    title={q.key}
+                  >
                     {/* The same text that is saved as question_text, so Teja attests to what he read. */}
                     {q.asks}
                   </label>
@@ -257,18 +359,17 @@ export function EligibilityAnswers({ questions, loading, loadError, onSaved }: P
                     {STATE_LABEL[state]}
                   </span>
                 </div>
-                {/* The exact key, because the worker matches on it and Teja debugs by it. */}
-                <span className="identifier">{q.key}</span>
-
                 {/* Boolean: the two existing yes/no buttons, styled as in the table. */}
                 {q.type === 'boolean' ? (
                   <div
                     /* The table's yes/no layout, reused. */
                     className="answer-bank__bool-group"
-                    /* Same id scheme as the text inputs, so the label's htmlFor resolves. */
+                    /* Same id scheme as the text inputs. */
                     id={inputId}
                     /* Groups the two buttons as one control for assistive tech. */
                     role="group"
+                    /* The group's accessible name is the question; without this it was announced unnamed. */
+                    aria-labelledby={labelId}
                   >
                     {/* Yes: sets the draft only; nothing is written until Save. */}
                     <button
@@ -332,8 +433,10 @@ export function EligibilityAnswers({ questions, loading, loadError, onSaved }: P
                 {/* Says out loud that a prefilled value is a suggestion, not an answer. */}
                 {state === 'unsaved' && (
                   <p className="eligibility__hint">
-                    {/* Names the exact action that makes it count, so nothing is assumed saved. */}
-                    Suggested value. Not used until you click Save.
+                    {/* A yes/no shows no pre-selection, so its suggestion is named in words; text fields are prefilled. */}
+                    {q.type === 'boolean'
+                      ? `Suggested: ${q.defaultValue === true ? 'Yes' : 'No'}. Pick an answer, then Save.`
+                      : 'Suggested value. Not used until you click Save or Save all answers.'}
                   </p>
                 )}
                 {/* The worker's exact rule, so Teja knows what "None" buys him. */}
@@ -422,7 +525,7 @@ export function EligibilityAnswers({ questions, loading, loadError, onSaved }: P
             // Draft, else the saved text, else '' (the "Not answered" choice). Never a default.
             const value = String(shown(loaded) ?? '');
             // Save only for an exact option string; "Not answered" can never be saved.
-            const saveable = isSaveableEeoAnswer(eeo, value);
+            const saveable = isSaveableValue(loaded, value);
             // Tied to the label for focus and screen readers.
             const inputId = `eligibility-${eeo.key}`;
             // The card.
@@ -436,7 +539,14 @@ export function EligibilityAnswers({ questions, loading, loadError, onSaved }: P
                 {/* Label and state badge on one row. */}
                 <div className="eligibility__head">
                   {/* A real label for the select. */}
-                  <label htmlFor={inputId} className="eligibility__label">
+                  <label
+                    /* Ties the label to the select. */
+                    htmlFor={inputId}
+                    /* Prompt styling. */
+                    className="eligibility__label"
+                    /* The worker's exact key as a tooltip, hidden from plain view like the cards above. */
+                    title={eeo.key}
+                  >
                     {/* Saved as question_text. */}
                     {eeo.asks}
                   </label>
@@ -446,8 +556,6 @@ export function EligibilityAnswers({ questions, loading, loadError, onSaved }: P
                     {STATE_LABEL[state]}
                   </span>
                 </div>
-                {/* The exact key the worker matches on. */}
-                <span className="identifier">{eeo.key}</span>
                 {/* A native select: exact strings only, no free text the form could refuse. */}
                 <select
                   /* Tied to the label above. */
@@ -487,7 +595,7 @@ export function EligibilityAnswers({ questions, loading, loadError, onSaved }: P
                     /* Same look as every other Save. */
                     className="answer-bank__btn-save"
                     /* Blocked for "Not answered", mid-save, and while the read is failed. */
-                    disabled={!saveable || savingKey === eeo.key || loadError !== null}
+                    disabled={!saveable || savingKey === eeo.key || savingAll || loadError !== null}
                     /* The loaded question carries the attested state; the store saves it. */
                     onClick={() => void save(loaded)}
                   >
@@ -498,6 +606,52 @@ export function EligibilityAnswers({ questions, loading, loadError, onSaved }: P
               </div>
             );
           })}
+
+          {/* One button for the whole section: writes only the fields that differ from Teja's stored answers. */}
+          <div /* Bar layout lives in settings.css. */ className="eligibility__save-all">
+            <button
+              /* Not a submit: the click handler is the write path. */
+              type="button"
+              /* The primary button style, so it reads as the section's main action. */
+              className="btn-primary"
+              /* Nothing to write, a run in flight, or a failed read: nothing to click. */
+              disabled={planned.length === 0 || savingAll || savingKey !== null || loadError !== null}
+              /* The user's click is the attestation for every listed field; void because results render below. */
+              onClick={() => void saveAll()}
+            >
+              {/* The count tells Teja how many answers this click will store. */}
+              {savingAll ? 'Saving...' : `Save all answers (${planned.length})`}
+            </button>
+            {/* Says why the button is idle, so a disabled button is never a mystery. */}
+            {planned.length === 0 && !savingAll && (
+              <span className="eligibility__hint">
+                {/* True only when every shown answer is already stored as Teja's, or is blank. */}
+                Nothing new to save.
+              </span>
+            )}
+          </div>
+          {/* Permanent polite live region: screen readers announce content added to an existing region,
+              not a region mounted together with its content. */}
+          <div aria-live="polite">
+          {/* Per-field outcome of the last Save all. */}
+          {saveAllResults !== null && saveAllResults.length > 0 && (
+            <ul className="eligibility__results">
+              {/* One line per field, in screen order. */}
+              {saveAllResults.map((r) => (
+                // question_key is unique within one run.
+                <li
+                  /* Unique per run. */
+                  key={r.key}
+                  /* Success or failure ink, from semantic tokens. */
+                  className={r.ok ? 'eligibility__result--ok' : 'eligibility__result--bad'}
+                >
+                  {/* Words carry the outcome, so it does not depend on colour. */}
+                  {r.ok ? `Saved: ${r.asks}` : `Not saved: ${r.asks} (${r.error ?? 'unknown error'})`}
+                </li>
+              ))}
+            </ul>
+          )}
+          </div>
         </div>
       )}
     </section>

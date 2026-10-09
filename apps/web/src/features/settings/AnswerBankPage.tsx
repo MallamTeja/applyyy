@@ -26,18 +26,15 @@ import { AddQuestionModal } from './AddQuestionModal';
 import { EligibilityAnswers } from './EligibilityAnswers';
 import {
   deleteCustomBankQuestion,
-  // Read only for its keys: EEO rows are kept out of the table.
-  EEO_QUESTIONS,
   formatAnswerPreview,
   loadAnswerBank,
   saveBankAnswer,
 } from './answerBankStore';
 import type { BankQuestion, QuestionCategory } from './answerBankStore';
+// Which rows the table leaves out (EEO keys and the legacy gender/disability seeds), and why, in one tested place.
+import { isTableHiddenKey } from './answerBankView';
 
 import './settings.css';
-
-// The EEO keys, as a Set for the table filter's per-row lookup.
-const EEO_KEYS = new Set(EEO_QUESTIONS.map((q) => q.key));
 
 type ExtendedCategoryFilter = QuestionCategory | 'needs_attention';
 
@@ -102,9 +99,10 @@ export function AnswerBankPage(): ReactElement {
   // Filtered view
   const filtered = useMemo(() => {
     return questions.filter((q) => {
-      // EEO answers are edited only in the Eligibility section's exact-option selects; the
-      // table's single_select editor would offer a free-text box the form would refuse.
-      if (EEO_KEYS.has(q.key)) return false;
+      // EEO answers are edited only in the Eligibility section's exact-option selects, and the
+      // legacy gender/disability_status seeds are never read by the worker. Both are hidden
+      // here (UI only; no row is deleted). The reasons sit on TABLE_HIDDEN_KEYS.
+      if (isTableHiddenKey(q.key)) return false;
       if (activeCategory === 'needs_attention') {
         if (!q.needsHuman) return false;
       } else if (activeCategory !== 'all') {

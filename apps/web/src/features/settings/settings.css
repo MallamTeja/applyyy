@@ -2288,6 +2288,15 @@
   opacity: 0.9;
 }
 
+/* A disabled Save looked identical to an enabled one (2026-10-09 render check), so an
+ * unpicked yes/no or "Not answered" field seemed saveable. Faded, with a no-entry cursor. */
+.answer-bank__btn-save:disabled {
+  /* Visibly inactive on both themes, without a new colour token. */
+  opacity: 0.45;
+  /* Tells a mouse user the click will do nothing. */
+  cursor: not-allowed;
+}
+
 .answer-bank__btn-cancel {
   background: var(--panel);
   color: var(--text-secondary);
@@ -2477,4 +2486,38 @@
   color: var(--text-primary);
   /* Space above separates it from the eligibility cards. */
   margin: var(--gap-3) 0 0;
+}
+
+/* "Save all answers" bar at the end of the section. */
+.eligibility__save-all {
+  /* Button and its idle note side by side. */
+  display: flex;
+  /* Wraps under the button on a phone instead of overflowing. */
+  flex-wrap: wrap;
+  /* Note centred against the button. */
+  align-items: center;
+  /* Space between button and note. */
+  gap: var(--gap-2);
+}
+
+/* Per-field outcomes of the last Save all. */
+.eligibility__results {
+  /* Small print, like the hints. */
+  font-size: var(--size-xs);
+  /* Tight under the bar, default indent kept for bullets. */
+  margin: 0;
+  /* Long labels wrap rather than widen the page. */
+  overflow-wrap: anywhere;
+}
+
+/* A field that saved: success token, themes via light-dark(). */
+.eligibility__result--ok {
+  /* Same ink as the "Saved by you" badge. */
+  color: var(--traced);
+}
+
+/* A field that did not save: danger token, themes via light-dark(). */
+.eligibility__result--bad {
+  /* Same danger ink the page uses for delete hover. */
+  color: var(--fabricated);
 }
