@@ -208,7 +208,7 @@ describe('outcome sentences for the discovered lane', () => {
 
   it('a matcher drop names the matcher and its advance floor', () => {
     // The outcome for a row scored below the code-constant floor.
-    const text = card.describeOutcome({ kind: 'dropped', finalStatus: 'dropped_filter', atStep: 'matcher' }, null);
+    const text = card.describeOutcome({ kind: 'dropped', finalStatus: 'dropped_filter', atStep: 'matcher', matcherDrop: { kind: 'low_score', score: 31 } }, null);
     // Agent named first, then the reason.
     assert.match(text, /^Dropped by the matcher: .*advance floor/);
   });

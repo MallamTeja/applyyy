@@ -262,3 +262,17 @@ describe('rowPipeline parity with worker/src/cli/run-one.ts', () => {
     assert.deepEqual(r.outcome, { kind: 'stopped', atStep: 'matcher', reason: 'invoke_error', finalStatus: 'passed_filters' });
   });
 });
+
+/* The browser mirrors the matcher's advance floor so a "scored N, below the floor of F" sentence is
+ * never claimed for a score at or above it. A mirror drifts, so it is pinned to the real constant,
+ * imported from the Deno module the same way other web tests reach supabase/functions/_shared. */
+describe('matcher floor parity with supabase/functions/_shared/match/score-threshold.ts', () => {
+  it('MATCHER_ADVANCE_FLOOR equals the deployed MATCH_ADVANCE_FLOOR', async () => {
+    // The real constant, by relative path, so a move or a change breaks this test.
+    const real = await import('../../../supabase/functions/_shared/match/score-threshold.ts');
+    // The browser's mirror.
+    const mirror = await import('../src/features/pipeline/rowPipeline.ts');
+    // One number, two homes, pinned together.
+    assert.equal(mirror.MATCHER_ADVANCE_FLOOR, real.MATCH_ADVANCE_FLOOR);
+  });
+});

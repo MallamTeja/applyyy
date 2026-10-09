@@ -68,7 +68,9 @@
 
 .discovery__grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  /* min(360px, 100%): on a phone the grid is narrower than 360px (326px at 390px wide), and a bare
+     360px minimum forced a column wider than its container, scrolling the whole page sideways. */
+  grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr));
   gap: var(--gap-4);
 }
 
@@ -476,4 +478,37 @@
   padding-top: 0;
   /* Right side of the footer row, so the step list grows under the button, not under the link. */
   align-items: flex-end;
+}
+
+/* Lane switch (Discovered | Ready to tailor). Reuses .discovery__tab-btn for the buttons, so this
+   only lays them out in a row above the cascade header. */
+.discovery__lanes {
+  /* One row of buttons, like the view tabs. */
+  display: flex;
+  /* Narrow screens wrap rather than scroll sideways. */
+  flex-wrap: wrap;
+  /* Same spacing as .discovery__view-tabs, so the two rows read as one system. */
+  gap: var(--gap-2);
+}
+
+/* "Sorts the 300 loaded of 6661 rows": small and muted, a caveat beside the select, not a heading. */
+.discovery__sort-scope {
+  /* Matches .discovery__meta-count, the other caveat text in this row. */
+  font-size: 0.85rem;
+  /* Muted token: themed via light-dark(), readable in both modes. */
+  color: var(--text-muted);
+}
+
+/* Load more sits centred under the grid, where the list ends. */
+.discovery__load-more {
+  /* Centres the single button. */
+  display: flex;
+  /* Horizontal centring. */
+  justify-content: center;
+}
+
+/* An approximate posted date: italic, so an estimate never reads with the weight of a fact. */
+.job-pill--approx {
+  /* Italic carries "estimate" without a colour that would need its own dark-mode pair. */
+  font-style: italic;
 }

@@ -31,6 +31,38 @@ describe('PipelineDrawer reads the score column that exists', () => {
     assert.doesNotMatch(code, /\bfit_score\b/);
   });
 
+  it('the heading goes through drawerHeading with the listed row count, never the bare count', () => {
+    // The tested helper, fed the rows actually listed.
+    assert.match(code, /drawerHeading\(\{ count: liveCount \?\? count, shown: state\.kind === 'rows' \? state\.rows\.length : 0, conclusive: isConclusive\(state\) \}\)/);
+    // The old template that implied every row was listed is gone.
+    assert.doesNotMatch(code, /`\$\{count\} Application/);
+  });
+
+  it('a settled run silently reloads the list behind a request-sequence guard', () => {
+    // The card gets an onSettled that reloads silently.
+    assert.match(code, /onSettled: \(result\) => \{[\s\S]*?void loadRows\(true\);/);
+    // Each read takes a number; only the latest may write.
+    assert.match(code, /const seq = \+\+readSeqRef\.current;/);
+    // The silent path skips the loading reset.
+    assert.match(code, /if \(!silent\) \{\s*setLoading\(true\);/);
+  });
+
+  it('a null settle (refused or locked click, nothing ran) does not reload the list', () => {
+    // The early return comes before any reload, so a click that ran nothing costs no read.
+    assert.match(code, /onSettled: \(result\) => \{\s*if \(result === null\)\s*return;\s*setSendResults/);
+  });
+
+  it('the silent re-read fetches an exact HEAD count for the lane under the sequence guard', () => {
+    // An exact count, no rows, for this lane only.
+    assert.match(code, /\.select\('id', \{ count: 'exact', head: true \}\)\s*\.eq\('status', status\)/);
+    // A stale count read writes nothing.
+    assert.match(code, /head: true[\s\S]*?if \(!isLatest\(\)\)\s*return;\s*setLiveCount\(/);
+    // Only a finite, non-negative number is kept; anything else falls back to null (the board floor).
+    assert.match(code, /setLiveCount\(!countError && typeof exact === 'number' && Number\.isInteger\(exact\) && exact >= 0 \? exact : null\)/);
+    // The heading uses the live count when present, else the board's.
+    assert.match(code, /drawerHeading\(\{ count: liveCount \?\? count,/);
+  });
+
   it('maps the score only when it is a finite number', () => {
     // Shape check, not `?? null`: a string or NaN must not print as "Match: NaN%".
     assert.match(code, /score: typeof row\.match_score === 'number' && Number\.isFinite\(row\.match_score\) \? row\.match_score : null/);

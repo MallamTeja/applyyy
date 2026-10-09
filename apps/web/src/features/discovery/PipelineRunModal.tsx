@@ -1,10 +1,21 @@
-import { useState } from 'react';
+/* The bulk "Run pipeline (all eligible rows)" dialog. Since 2026-10-09 (Teja's ruling) the run fires
+ * only after the operator types CONFIRM_PHRASE: the dialog first states how many rows each agent can
+ * take and that the Matcher and Tailor spend Gemini calls. Every start goes through
+ * startIfConfirmed (pipelineRunConfirm.ts), which test/pipelineRunConfirm.test.ts proves invokes
+ * nothing on empty or mismatched text. */
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { runFullPipeline } from '../../data/pipelineRunner';
 // The whole result, not just the steps: `ok` is what decides success vs failure framing.
 import type { PipelineRunResult } from '../../data/pipelineRunner';
+// The browser client, or null when unconfigured; used only for the read-only HEAD counts.
+import { supabase } from '../../data/supabase.ts';
+// The typed-confirmation gate, the count reader, and the sentences the confirm step shows.
+import { CONFIRM_PHRASE, GEMINI_WARNING, canStartRun, confirmSummary, readWaitingCounts, startIfConfirmed } from './pipelineRunConfirm.ts';
+// Type only: the per-agent waiting counts record.
+import type { WaitingCounts } from './pipelineRunConfirm.ts';
 
 import './PipelineRunModal.css';
 
@@ -22,8 +33,46 @@ export function PipelineRunModal({ onClose, onRefresh }: PipelineRunModalProps):
   const [result, setResult] = useState<PipelineRunResult | null>(null);
   // Steps of the last run, read off the result so there is one source of truth.
   const steps = result?.steps ?? [];
+  // What the operator has typed into the confirmation box; the run unlocks only on CONFIRM_PHRASE.
+  const [typed, setTyped] = useState<string>('');
+  // Rows waiting at each agent's input statuses, from HEAD counts; null until the first read lands
+  // (the Run button stays locked until then), and null per agent when that agent's count is unknown.
+  const [counts, setCounts] = useState<WaitingCounts | null>(null);
+  // False after unmount, so a slow count cannot write into a closed dialog.
+  const mounted = useRef(true);
+
+  // Reads every agent's waiting count. Read-only; never hard-coded, because the queues change with
+  // every scout and every sweep. readWaitingCounts contains each failure to its own agent (null).
+  const loadCounts = useCallback(async (): Promise<void> => {
+    // One HEAD count per agent, through the tested reader.
+    const next = await readWaitingCounts(async (statuses) => {
+      // No client: the count is unknown, and the summary says so.
+      if (supabase === null) return null;
+      // head:true returns only the count; the same statuses that agent's queue selects.
+      const { count, error } = await supabase.from('applications').select('id', { count: 'exact', head: true }).in('status', [...statuses]);
+      // A failed count is null, never 0: "nothing waiting" would be a false claim.
+      return error ? null : count;
+    });
+    // The dialog closed meanwhile; nothing to update.
+    if (mounted.current) setCounts(next);
+  }, []);
+
+  // On open: read the counts; on close: stop later reads from writing.
+  useEffect(() => {
+    // Re-arms after a StrictMode remount, which runs the cleanup once in development.
+    mounted.current = true;
+    // The first read; the Run button unlocks when it lands.
+    void loadCounts();
+    // Cleanup marks this dialog closed.
+    return () => {
+      // Read by loadCounts before it writes.
+      mounted.current = false;
+    };
+  }, [loadCounts]);
 
   const handleStart = async (): Promise<void> => {
+    // A retry is another bulk Gemini spend, so the phrase must be typed again for it.
+    setTyped('');
     setRunning(true);
     // Clear the previous outcome so a Retry does not show stale success/failure framing.
     setResult(null);
@@ -48,11 +97,18 @@ export function PipelineRunModal({ onClose, onRefresh }: PipelineRunModalProps):
       // Refresh even on failure: earlier steps may have moved rows before a later one failed.
       onRefresh();
       setRunning(false);
+      // The run moved rows between queues, so the counts shown for a Retry must be re-read.
+      void loadCounts();
     }
   };
 
   return (
-    <div className="pipeline-modal-backdrop" onClick={running ? undefined : onClose}>
+    <div
+      className="pipeline-modal-backdrop"
+      onClick={running ? undefined : onClose}
+      /* Escape closes (never starts) the dialog, and not mid-run, matching the disabled Close button. */
+      onKeyDown={(e) => { if (e.key === 'Escape' && !running) onClose(); }}
+    >
       {/* role/aria-modal so screen readers announce it as a dialog, labelled by its title. */}
       <div
         className="pipeline-modal"
@@ -119,6 +175,47 @@ export function PipelineRunModal({ onClose, onRefresh }: PipelineRunModalProps):
             </div>
           </div>
 
+          {/* The confirm step: what the run will send and spend, then the typed phrase that unlocks it. */}
+          <div className="pipeline-modal__status-box">
+            {/* Same label style as the status box below. */}
+            <div className="pipeline-modal__status-label">Before you run</div>
+            {/* The counts load after the dialog opens; until then, say so rather than show a number. */}
+            {counts === null ? (
+              /* Not a number yet: an honest "counting" instead of a 0 that would read as "nothing to do". */
+              <p className="pipeline-modal__status-text">Counting the rows waiting for each agent…</p>
+            ) : (
+              /* One line per agent, from the HEAD counts; an unreadable count says "unknown". */
+              confirmSummary(counts).split('\n').map((line) => (
+                /* One paragraph per summary line; each line is unique, so it is its own key. */
+                <p key={line} className="pipeline-modal__status-text">{line}</p>
+              ))
+            )}
+            {/* The spend warning, always shown: it does not depend on the counts, so it must not wait for them. */}
+            <p className="pipeline-modal__status-text">{GEMINI_WARNING}</p>
+            {/* A real label, so the input is named for screen readers and clickable. */}
+            <label className="pipeline-modal__status-text" htmlFor="pipeline-run-confirm">
+              Type <strong>{CONFIRM_PHRASE}</strong> to enable the run:
+            </label>
+            <input
+              /* Tied to the label above. */
+              id="pipeline-run-confirm"
+              /* Reuses the page's search-box look; no new CSS. */
+              className="discovery__search-input"
+              /* Plain text; autocomplete would offer the phrase back and defeat the point of typing it. */
+              type="text"
+              /* No browser suggestions, same reason. */
+              autoComplete="off"
+              /* Focus lands here, so Escape and typing both work without a click. */
+              autoFocus
+              /* Controlled: the buttons read this value. */
+              value={typed}
+              /* Every keystroke re-evaluates the gate. */
+              onChange={(e) => setTyped(e.target.value)}
+              /* Locked during a run, so the phrase cannot be edited under a running batch. */
+              disabled={running}
+            />
+          </div>
+
           {/* Failure gets role=alert so a screen reader announces it; the --error modifier is
               a hook for styling (no rule exists yet — CSS is outside this change's partition). */}
           <div
@@ -176,12 +273,15 @@ export function PipelineRunModal({ onClose, onRefresh }: PipelineRunModalProps):
               >
                 Close
               </button>
-              {/* Retry re-runs the whole pipeline; each agent only picks up rows still at its source status. */}
+              {/* Retry re-runs the whole pipeline; each agent only picks up rows still at its source status.
+                  It is a bulk run too, so it sits behind the same typed gate. */}
               <button
                 type="button"
                 className="button button--primary"
-                onClick={() => void handleStart()}
-                disabled={running}
+                /* Through the gate on every click: the phrase was cleared when the last run started. */
+                onClick={() => startIfConfirmed(typed, counts !== null, () => void handleStart())}
+                /* Off while running, before the counts load, and until the phrase is retyped exactly. */
+                disabled={running || !canStartRun(typed, counts !== null)}
               >
                 {running ? 'Processing Pipeline...' : 'Retry'}
               </button>
@@ -196,11 +296,15 @@ export function PipelineRunModal({ onClose, onRefresh }: PipelineRunModalProps):
               >
                 Cancel
               </button>
+              {/* Disabled until the phrase matches; the click still goes through the gate, so a
+                  re-enabled button (devtools, a future refactor) cannot skip it. */}
               <button
                 type="button"
                 className="button button--primary"
-                onClick={() => void handleStart()}
-                disabled={running}
+                /* The same gate as Retry, so the two buttons cannot drift apart. */
+                onClick={() => startIfConfirmed(typed, counts !== null, () => void handleStart())}
+                /* Counts must be loaded too: the operator sees what will be sent before it can be sent. */
+                disabled={running || !canStartRun(typed, counts !== null)}
               >
                 {running ? 'Processing Pipeline...' : '⚡ Run Pipeline Now'}
               </button>

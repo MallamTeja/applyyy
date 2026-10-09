@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+/* useCallback (2026-10-09): one loader shared by the open effect and the post-run refresh. */
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import type { ApplicationStatus } from '../../data/contract';
@@ -16,6 +17,12 @@ import { classifyRead, describeEmptyState, isConclusive } from '../../data/readS
 import { InterviewPrepPanel } from './InterviewPrepPanel';
 /* The card, split out so its one decision (offer View resume or not) is testable without a client. */
 import { DrawerAppCard, type DrawerAppItem } from './DrawerAppCard';
+/* The heading wording (pure, tested), the outcome sentence the drawer now shows itself once it takes
+   onSettled, and that result's type. */
+import { OutcomeNote, drawerHeading, type SendResult } from './DrawerAppCard';
+
+/* Rows per read. A lane can hold thousands, so the heading must say when this is not all of them. */
+const DRAWER_PAGE_SIZE = 25;
 /* Shape check on tailored_profile: anything that is not a real snapshot becomes null, never a guess. */
 import { readResumeSnapshot } from './resumeSnapshot';
 /* The real invoke/read deps for "Send through pipeline"; null when Supabase is unconfigured. */
@@ -53,6 +60,13 @@ export function PipelineDrawer({
   /* The row whose resume is open, or null. One at a time: the preview is a full-width
      side-by-side, so two would not fit and would not be comparable anyway. */
   const [viewing, setViewing] = useState<DrawerAppItem | null>(null);
+  /* Finished "Send through pipeline" runs, newest first. Held HERE, not on the card: the refresh
+     after a run drops the row from this lane, which unmounts its card and its outcome with it. */
+  const [sendResults, setSendResults] = useState<readonly { readonly applicationId: string; readonly label: string; readonly result: SendResult }[]>([]);
+  /* The lane's exact count, re-read on each post-run refresh. The `count` prop is the board's and is
+     never refetched here, so after a run it goes stale. Null = not read (or the read failed): the
+     heading then falls back to the board's count, never to a number nobody read. */
+  const [liveCount, setLiveCount] = useState<number | null>(null);
   /* The overlay's Close button, focused on open so keyboard users land INSIDE the modal
      rather than behind its scrim (aria-modal promises they cannot reach what is behind). */
   const closeResumeRef = useRef<HTMLButtonElement | null>(null);
@@ -81,32 +95,42 @@ export function PipelineDrawer({
     }
   }, [viewing]);
 
-  useEffect(() => {
-    let active = true;
+  /* REQUEST SEQUENCE (2026-10-09). The list is now read more than once per status: on open, and
+     again each time a "Send through pipeline" run settles. Two reads can overlap and finish out of
+     order, so each read takes a number and only the LATEST one may write state. The effect cleanup
+     bumps it too, which is what the old per-effect `active` flag did for a closed drawer. */
+  const readSeqRef = useRef(0);
+
+  /* One read of this lane. silent=true is the post-run refresh: the list stays on screen while it
+     loads (no "Loading" flash replacing every card), and only the answer replaces it. */
+  const loadRows = useCallback(async (silent: boolean): Promise<void> => {
+    /* This read's number; any later read makes it stale. */
+    const seq = ++readSeqRef.current;
+    /* Checked after every await: a stale read writes nothing. */
+    const isLatest = (): boolean => seq === readSeqRef.current;
 
     /* No client means no query was attempted, so there is nothing to report but
        the configuration. The classifier says so without a round trip. */
-    if (supabase === null) {
+    const client = supabase;
+    if (client === null) {
       setLoading(false);
       return;
     }
 
-    async function fetchStatusRows() {
-      /* Narrowed for TypeScript; the null case returned above. */
-      const client = supabase;
-      if (client === null) return;
-
+    /* A silent refresh keeps the current list and error on screen until its answer arrives. */
+    if (!silent) {
       setLoading(true);
       /* Cleared per attempt so a failure against one status does not persist
          onto the next status the operator opens. */
       setError(null);
+    }
 
       try {
         /* SESSION FIRST, matching useApplicationCounts.ts:88-105. Querying
            without one produces an empty result that is indistinguishable from a
            real empty result, so the honest answer is cheaper AND truer. */
         const { data: sessionData } = await client.auth.getSession();
-        if (!active) return;
+        if (!isLatest()) return;
 
         const hasSession = sessionData.session !== null;
         setSignedIn(hasSession);
@@ -125,14 +149,15 @@ export function PipelineDrawer({
           .select('id, created_at, match_score, tailored_profile, jobs:job_id(title, company_name, discovered_via, source_refs)')
           .eq('status', status)
           .order('created_at', { ascending: false })
-          .limit(25);
+          /* One page; the heading says "showing N of M" when the lane holds more (drawerHeading). */
+          .limit(DRAWER_PAGE_SIZE);
 
-        /* A STALE RESPONSE IS NOT A FAILURE. `!active` means the drawer closed or
-           the status changed while this was in flight. The previous code folded
-           this into the same branch as `error` and wrote an empty array — state
-           written on behalf of a request nobody is waiting for, to a component
-           that may already be unmounted. */
-        if (!active) return;
+        /* A STALE RESPONSE IS NOT A FAILURE. A stale read means the drawer closed,
+           the status changed, or a newer refresh started while this was in flight.
+           The previous code folded this into the same branch as `error` and wrote
+           an empty array — state written on behalf of a request nobody is waiting
+           for, to a component that may already be unmounted. */
+        if (!isLatest()) return;
 
         /* THE SWALLOWED READ, which was the reported bug. This was previously
            `setRows([])`, so an outage and a genuinely empty status produced
@@ -155,6 +180,26 @@ export function PipelineDrawer({
         }));
 
         setRows(mapped);
+        /* A successful silent refresh clears an earlier refresh's error, since it skipped the reset above. */
+        setError(null);
+        /* Post-run only: the lane just changed, so the board's count prop is stale. */
+        if (silent) {
+          /* Its own try: a failed COUNT must not mark the list, which did load, as failed. */
+          try {
+            /* HEAD + exact: a number with no rows, for this lane, scoped by RLS like the list. */
+            const { count: exact, error: countError } = await client
+              .from('applications')
+              .select('id', { count: 'exact', head: true })
+              .eq('status', status);
+            /* Same sequence guard as the list: a newer read owns the state. */
+            if (!isLatest()) return;
+            /* Only a real non-negative integer is a count; anything else is "not read" (board floor). */
+            setLiveCount(!countError && typeof exact === 'number' && Number.isInteger(exact) && exact >= 0 ? exact : null);
+          } catch {
+            /* A thrown count read is not read either, unless a newer read has taken over. */
+            if (isLatest()) setLiveCount(null);
+          }
+        }
       } catch (cause) {
         /* THERE WAS NO CATCH AT ALL — only try/finally. A THROWN failure (offline,
            DNS, a CORS rejection, a malformed row breaking the .map above) escaped
@@ -163,18 +208,25 @@ export function PipelineDrawer({
            produced the quietest UI: a tidy "No applications", with the error
            visible only in a console nobody has open. A returned `error` and a
            thrown exception are different mechanisms; the old code handled one. */
-        if (!active) return;
+        if (!isLatest()) return;
         setError(cause instanceof Error ? cause.message : String(cause));
       } finally {
-        if (active) setLoading(false);
+        /* Only the latest read ends the loading state; a stale one must not clear a newer one's. */
+        if (isLatest()) setLoading(false);
       }
-    }
-
-    void fetchStatusRows();
-    return () => {
-      active = false;
-    };
+    /* status is the only input the query reads; a new status is a new loader. */
   }, [status]);
+
+  /* Load on open and on every status change; the cleanup makes any in-flight read stale. */
+  useEffect(() => {
+    /* A full (non-silent) read: the operator just opened this lane. */
+    void loadRows(false);
+    /* Bumping the sequence is the "this drawer stopped listening" signal. */
+    return () => {
+      /* Any read still in flight now fails isLatest() and writes nothing. */
+      readSeqRef.current += 1;
+    };
+  }, [loadRows]);
 
   // Handle ESC key
   useEffect(() => {
@@ -235,7 +287,9 @@ export function PipelineDrawer({
                 Dropping the number rather than showing 0: zero would be the same
                 falsehood in the other direction. */}
             <h2 className="drawer__title">
-              {isConclusive(state) ? `${count} Application${count === 1 ? '' : 's'}` : 'Applications'}
+              {/* "Showing N of M" whenever this page is not the whole lane (2026-10-09). */}
+              {/* The lane's live count after a run, else the board's (floored by drawerHeading at the rows shown). */}
+              {drawerHeading({ count: liveCount ?? count, shown: state.kind === 'rows' ? state.rows.length : 0, conclusive: isConclusive(state) })}
             </h2>
           </div>
           <button
@@ -271,6 +325,20 @@ export function PipelineDrawer({
               <p className="drawer__summary">
                 Active application records currently in <span className="identifier">{status}</span> status.
               </p>
+
+              {/* The finished runs' sentences, outliving their cards. Always mounted and polite, so a
+                  result is announced when it arrives rather than when the region first appears. */}
+              <div className="drawer__send-results" aria-live="polite">
+                {/* One line per row sent, newest first. */}
+                {sendResults.map(({ applicationId, label, result }) => (
+                  <div key={applicationId} className="drawer__send-result">
+                    {/* Names the job, since its card may be gone from the list by now. */}
+                    <strong className="drawer__send-result-label">{label}</strong>
+                    {/* The same sentence and queue link the card would have shown. */}
+                    <OutcomeNote outcome={result.outcome} httpStatus={result.httpStatus} errorText={result.errorText} />
+                  </div>
+                ))}
+              </div>
 
           {/* ORDER IS THE FIX, and it is the whole bug. On a failed read BOTH
               conditions are true — the list is empty precisely BECAUSE we could
@@ -308,7 +376,31 @@ export function PipelineDrawer({
             state.rows.map((app) => (
               /* The card owns the View resume decision; the drawer only owns which row is open. */
               /* The card decides from `status` whether to offer "Send through pipeline" (passed_filters only). */
-              <DrawerAppCard key={app.id} app={app} onViewResume={openResume} sendThroughPipeline={{ status, deps: liveRowPipelineDeps }} />
+              /* onSettled: keep the outcome here, then silently re-read the lane so the finished row leaves it. */
+              <DrawerAppCard
+                /* Stable per row, so a silent refresh keeps the cards that stay in the lane mounted. */
+                key={app.id}
+                /* The row this card draws. */
+                app={app}
+                /* The drawer owns the resume overlay. */
+                onViewResume={openResume}
+                sendThroughPipeline={{
+                  /* The lane; the card shows the button only in passed_filters. */
+                  status,
+                  /* The real deps, or null when Supabase is unconfigured. */
+                  deps: liveRowPipelineDeps,
+                  /* Called after the lock is released, so the reloaded card is never stuck disabled. */
+                  onSettled: (result) => {
+                    /* Null is a refused/locked click (nothing ran) or a throw; the card shows that note
+                       itself, and nothing moved, so no reload (same as the Discovered page). */
+                    if (result === null) return;
+                    /* Newest first, one line per row: a re-send replaces that row's older line. */
+                    setSendResults((prev) => [{ applicationId: app.id, label: `${app.company} — ${app.role}`, result }, ...prev.filter((r) => r.applicationId !== app.id)]);
+                    /* Silent: the list stays up; the sequence guard drops any older read still in flight. */
+                    void loadRows(true);
+                  },
+                }}
+              />
             ))
           )}
             </>

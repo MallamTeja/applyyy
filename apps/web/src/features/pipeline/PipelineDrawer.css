@@ -281,3 +281,32 @@
   /* Signal colour marks where to look, without the alarm palette. */
   color: var(--signal-strong);
 }
+
+/* Finished runs' outcomes (2026-10-09), shown above the list because the refresh after a run
+   removes that row's card from the lane. */
+.drawer__send-results {
+  /* One line per run, stacked newest first. */
+  display: flex;
+  /* Vertical, in reading order. */
+  flex-direction: column;
+  /* Same rhythm as the send block inside a card. */
+  gap: var(--gap-2);
+}
+
+/* One finished run: the job, then its sentence. */
+.drawer__send-result {
+  /* The label and the sentence read as one item. */
+  display: flex;
+  /* Label above the sentence. */
+  flex-direction: column;
+  /* Tight: they belong together. */
+  gap: 2px;
+}
+
+/* The job the sentence is about, since its card may be gone. */
+.drawer__send-result-label {
+  /* Helper size, like the sentence under it. */
+  font-size: var(--size-xs);
+  /* Full ink, so the job is what the eye finds first. */
+  color: var(--text-primary);
+}

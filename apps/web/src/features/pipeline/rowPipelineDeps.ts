@@ -5,7 +5,8 @@
    supabase.ts both have import-time weight; DrawerAppCard.tsx stays importable with no client,
    which is why it was split out of the drawer in the first place.
 
-   What this file may do is deliberately narrow: INVOKE an edge function and READ one status.
+   What this file may do is deliberately narrow: INVOKE an edge function and READ one row (its status,
+   and since 2026-10-09 its match_score, so a matcher drop can name its real cause).
    It never writes a status. Commit 75a75a0 deleted a browser button that forged six transitions;
    every transition here is made by the deployed agent itself, and the database re-read is the
    only thing the UI believes. */
@@ -26,7 +27,7 @@ import { supabase } from '../../data/supabase.ts';
    ("excessively deep"), and a cast would hide a real mismatch. So the chain is written once,
    against the real typed client, in liveRowPipelineDeps below. */
 export interface RowPipelineClient extends FunctionsInvoker {
-  /* applications.status for one id; maybeSingle-shaped so "no row" is data:null, not an error.
+  /* applications.status and match_score for one id; maybeSingle-shaped so "no row" is data:null, not an error.
      PromiseLike, because PostgREST builders are thenables, not Promises. */
   readStatusRow(applicationId: string): PromiseLike<{ data: unknown; error: unknown }>;
 }
@@ -80,6 +81,23 @@ export function makeRowPipelineDeps(client: RowPipelineClient): RowPipelineDeps 
         return null;
       }
     },
+    /* The same one-row read, for match_score; the engine calls it once, only after a matcher drop. */
+    async readMatchScore(applicationId: string): Promise<{ readonly value: unknown } | null> {
+      /* A thrown read is unread, the same as an error result. */
+      try {
+        /* Same query as readStatus: one select carries both columns. */
+        const { data, error } = await client.readStatusRow(applicationId);
+        /* An error, or no row, is unread: never a NULL score, which would claim the pre-gate. */
+        if (error || typeof data !== 'object' || data === null) return null;
+        /* The KEY must be present: a missing column is not a NULL column (repo CLAUDE.md §6). */
+        if (!('match_score' in data)) return null;
+        /* Raw; the engine's classifyMatcherDrop validates the shape. */
+        return { value: (data as { match_score: unknown }).match_score };
+      } catch {
+        /* Same channel as an error result. */
+        return null;
+      }
+    },
   };
 }
 
@@ -100,6 +118,7 @@ export const liveRowPipelineDeps: RowPipelineDeps | null =
 function liveRead(applicationId: string): PromiseLike<{ data: unknown; error: unknown }> {
   /* Unreachable when null (liveRowPipelineDeps is null then), but checked so this never throws. */
   if (supabase === null) return Promise.resolve({ data: null, error: new Error('Supabase is not configured') });
-  /* Only the status column, only this row; RLS keeps it to the signed-in user's rows. */
-  return supabase.from('applications').select('status').eq('id', applicationId).maybeSingle();
+  /* Status plus match_score (2026-10-09: tells the pre-gate's NULL from a low score), only this row;
+     RLS keeps it to the signed-in user's rows. */
+  return supabase.from('applications').select('status, match_score').eq('id', applicationId).maybeSingle();
 }

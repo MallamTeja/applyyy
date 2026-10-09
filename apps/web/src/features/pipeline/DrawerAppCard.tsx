@@ -22,9 +22,9 @@ import { SourceBadge } from '../../app/SourceBadge.tsx';
 /* The pure per-row engine (another worker's file; imported, never edited). The browser only
    INVOKES agents through its deps; every status change is the deployed agent's own write.
    With its extension, like SourceBadge above: other tests' load hooks only try .tsx. */
-import { PASSED_FILTERS_STEPS, STEP_INPUT_STATUS, runRowPipeline } from './rowPipeline.ts';
+import { MATCHER_ADVANCE_FLOOR, PASSED_FILTERS_STEPS, STEP_INPUT_STATUS, runRowPipeline } from './rowPipeline.ts';
 /* Types only: the engine's contract, so a new outcome kind or stop reason fails to compile here. */
-import type { PipelineStep, RowPipelineDeps, RowPipelineOutcome, StepEvent, StopReason } from './rowPipeline.ts';
+import type { MatcherDropCause, PipelineStep, RowPipelineDeps, RowPipelineOutcome, StepEvent, StopReason } from './rowPipeline.ts';
 
 /* One row as the drawer maps it from the query. Moved here with the card so the type and
    its only renderer live together. */
@@ -55,6 +55,9 @@ export interface SendThroughPipelineProp {
   readonly status: string;
   /* The real deps (liveRowPipelineDeps), or null on an unconfigured machine: button disabled. */
   readonly deps: RowPipelineDeps | null;
+  /* OPTIONAL (2026-10-09): forwarded to SendThroughPipeline, so the drawer can reload its list once a
+     run settles. A caller that passes it owns showing the outcome (the card stops rendering it). */
+  readonly onSettled?: (result: SendResult | null) => void;
 }
 
 /* The only lane the button belongs to: PASSED_FILTERS_STEPS are exactly the three agents that
@@ -145,6 +148,22 @@ const STOP_MESSAGE: Record<StopReason, (step: string, finalStatus: string | null
   status_unreadable: (step) => `Stopped after the ${step}: the row's status could not be read back.`,
 };
 
+/* The matcher's drop sentence, one per cause. The pre-gate wording covers BOTH ways the gate drops
+   (supabase/functions/_shared/screen/tech-gate.ts screenTechRole): an excluded keyword in the title or
+   the head of the description, or, once titles/keywords are configured, a match against none of them. */
+function describeMatcherDrop(cause: MatcherDropCause | undefined): string {
+  /* match_score NULL: the gate cleared it and dropped the row before the scorer ran. Optional
+     chaining, because an absent cause (deps without the score read) must fall to "unknown". */
+  if (cause?.kind === 'pre_gate') {
+    /* "No Gemini call" is the gate's design: the scorer is wrapped and never reached for a dropped row. */
+    return "Dropped by the matcher's pre-gate: the posting matched one of your excluded keywords, or none of your target titles and keywords. No Gemini call was made.";
+  }
+  /* A real score below the floor; the floor is a code constant, not a user setting. */
+  if (cause?.kind === 'low_score') return `Dropped by the matcher: it scored ${cause.score}, below the matcher's advance floor of ${MATCHER_ADVANCE_FLOOR}.`;
+  /* Unknown: neither cause is claimed. */
+  return 'Dropped by the matcher.';
+}
+
 /* One honest sentence per outcome kind. A mapped type over the union, so each entry receives its
    own narrowed outcome and a new kind in rowPipeline.ts fails to compile until it has a sentence. */
 export const OUTCOME_MESSAGE: {
@@ -170,13 +189,14 @@ export const OUTCOME_MESSAGE: {
   ready_for_approval: () => 'Ready for your approval: check any audit findings in the queue',
   /* Always opens "Dropped by the <agent>" (orchestrator ruling, 2026-10-08 17:31): on the Discovered
      page's Filtered Out tab the drop must read as the deployed agent's verdict, never as this page's
-     local filter preview being wrong. No reason text is quoted because none reaches the card: the
-     re-read selects only `status` (rowPipelineDeps.ts liveRead), and the outcome carries no body. */
+     local filter preview being wrong. No body text is quoted because the outcome carries none. The
+     matcher has TWO drop causes (2026-10-09); the engine reads match_score to tell them apart, and
+     only the cause it read is claimed (describeMatcherDrop). */
   dropped: (o) =>
     /* Branch on the step, never on the status text alone, so the sentence names who dropped it. */
     o.atStep === 'matcher'
-      ? /* The matcher's floor is a code constant (_shared/match/score-threshold.ts), not a user setting. */
-        "Dropped by the matcher: it scored below the matcher's advance floor"
+      ? /* The cause the engine read, or none. */
+        describeMatcherDrop(o.matcherDrop)
       : /* dropped_duplicate IS the reason: a fingerprint match against another of your jobs rows. */
         o.atStep === 'normalizer' && o.finalStatus === 'dropped_duplicate'
         ? 'Dropped by the normalizer: a duplicate of another job already in your list (dropped_duplicate)'
@@ -254,6 +274,47 @@ export async function withRowLockThenSettle<T>(
     // Once, on every path.
     settle();
   }
+}
+
+/* The step list once the engine has answered. The engine emits "done" whenever a step MOVED the row,
+   but the after-loop verdict can still be "stopped" there: the auditor moves tailored -> audit_flagged
+   and its second hop to awaiting_approval fails. The list then said "Auditor: done" beside "Stopped at
+   the auditor". The outcome is the final word, so its step is shown stopped. Pure, so it is tested. */
+export function settleProgress(
+  // The per-step states the events produced.
+  progress: Readonly<Partial<Record<PipelineStep, StepDisplay>>>,
+  // The engine's verdict.
+  outcome: RowPipelineOutcome,
+): Readonly<Partial<Record<PipelineStep, StepDisplay>>> {
+  // Only a stop names a step that may disagree; every other verdict leaves the list as reported.
+  return outcome.kind === 'stopped' ? { ...progress, [outcome.atStep]: 'stopped' } : progress;
+}
+
+/* The drawer's heading. The drawer loads one page of a lane that can hold thousands (6661
+   passed_filters rows on 2026-10-09), so a bare count would imply every row is listed. */
+export function drawerHeading({
+  // The board's count for the lane, from a different query than the drawer's own.
+  count,
+  // How many rows the drawer actually listed.
+  shown,
+  // isConclusive(state): without a conclusive read the drawer has no standing to print a number.
+  conclusive,
+}: {
+  // See above.
+  readonly count: number;
+  // See above.
+  readonly shown: number;
+  // See above.
+  readonly conclusive: boolean;
+}): string {
+  // No number at all rather than a wrong one.
+  if (!conclusive) return 'Applications';
+  // The list is the floor: an older board count may lag behind what was just listed.
+  const total = Math.max(count, shown);
+  // A partial list says so.
+  if (shown < total) return `Showing ${shown} of ${total} applications`;
+  // Everything is listed, so the count is the list.
+  return `${total} Application${total === 1 ? '' : 's'}`;
 }
 
 /* Shown when a click lands on a row the lock already holds, so the refusal is not silent. */
@@ -336,7 +397,9 @@ export function SendThroughPipeline({
   /* Called once a click has been handled and the lock is released: with the result, or null when
      there is none (a refused click or an unexpected throw). The row has usually left its lane by
      then, so a list page reloads here, and that reload may unmount this card. */
-  readonly onSettled?: (result: SendResult | null) => void;
+  /* `| undefined` (2026-10-09) so the drawer card can forward its own optional prop as-is under
+     exactOptionalPropertyTypes; undefined behaves exactly like omitting it. */
+  readonly onSettled?: ((result: SendResult | null) => void) | undefined;
   /* e.g. "Acme — Engineer". On a page of many cards, identical button names leave a screen-reader
      user unable to tell which job a button sends; omitted, the visible text stays the name. */
   readonly label?: string;
@@ -377,6 +440,8 @@ export function SendThroughPipeline({
         let lastHttpStatus: number | null = null;
         /* Nor the function's own error words (describeInvokeError's text, carried in body.error). */
         let lastErrorText: string | null = null;
+        /* Captured once, so the optional method's presence is checked and used on the same value. */
+        const readScore = deps.readMatchScore;
         /* Pass-through deps that only observe; the engine sees exactly what the real deps return. */
         const observed: RowPipelineDeps = {
           /* Records the status and error text, then hands back the untouched result. */
@@ -394,6 +459,9 @@ export function SendThroughPipeline({
           },
           /* Reads go straight through. */
           readStatus: (id) => deps.readStatus(id),
+          /* Passed through only when the real deps have it, so the engine sees the same optional
+             contract; dropping it here would silently make every matcher drop "unknown". */
+          ...(readScore === undefined ? {} : { readMatchScore: (id: string) => readScore.call(deps, id) }),
         };
         /* Re-enabled in finally however the run ends; the lock itself is released by withRowLock. */
         try {
@@ -402,6 +470,8 @@ export function SendThroughPipeline({
             /* Functional update: events arrive between awaits and must not overwrite each other. */
             setProgress((prev) => ({ ...(prev ?? {}), [event.step]: event.phase })),
           );
+          /* The list must say what the note says: a run that ended short at a "done" step shows it stopped. */
+          setProgress((prev) => (prev === null ? prev : settleProgress(prev, outcome)));
           /* Kept for onSettled as well as for this card's own note. */
           settled = { outcome, httpStatus: lastHttpStatus, errorText: lastErrorText };
           /* The honest sentence comes from the outcome, with the call's own words when it failed. */
@@ -546,7 +616,18 @@ export function DrawerAppCard({
       {/* Only the passed_filters lane: other lanes are either not on this three-agent path or
           already past it, and running matcher/tailor/auditor there would be wrong. */}
       {sendThroughPipeline !== undefined && sendThroughPipeline.status === SEND_LANE && (
-        <SendThroughPipeline applicationId={app.id} deps={sendThroughPipeline.deps} steps={PASSED_FILTERS_STEPS} />
+        <SendThroughPipeline
+          /* The row this card draws. */
+          applicationId={app.id}
+          /* Injected; null disables the button with a reason. */
+          deps={sendThroughPipeline.deps}
+          /* The three post-screening agents, the only ones this lane may run. */
+          steps={PASSED_FILTERS_STEPS}
+          /* Undefined keeps the old behaviour: the card shows its own outcome. */
+          onSettled={sendThroughPipeline.onSettled}
+          /* Unique per card, so a screen reader can tell the drawer's buttons apart. */
+          label={`${app.company} — ${app.role}`}
+        />
       )}
     </article>
   );

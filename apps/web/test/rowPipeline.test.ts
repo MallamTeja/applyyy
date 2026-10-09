@@ -598,3 +598,95 @@ describe('runRowPipeline: no I/O beyond deps', () => {
     assert.deepEqual(out, { kind: 'ready_for_approval', finalStatus: 'awaiting_approval' });
   });
 });
+
+/* Matcher drop cause (2026-10-09). The matcher drops a passed_filters row two ways, both ending at
+ * dropped_filter: its PRE-GATE (no Gemini call, match_score cleared to NULL) and a LOW SCORE (score
+ * written, below the floor). The card used to call both "scored below the floor", which is false for
+ * the pre-gate. The engine now reads match_score once, only for a matcher drop, and only through the
+ * optional deps.readMatchScore, so every existing fake (which lacks it) behaves exactly as before. */
+describe('runRowPipeline: matcher drop cause', () => {
+  // Runs a matcher drop with a scripted score read; the read's argument is recorded.
+  async function dropWith(read: (id: string) => Promise<{ readonly value: unknown } | null>) {
+    // The matcher drops the row, as both pre-gate and low score do.
+    const f = makeFake('passed_filters', { ...HAPPY, matcher: { to: 'dropped_filter' } });
+    // Every id the score read was asked for.
+    const asked: string[] = [];
+    // The fake's deps plus the optional score read.
+    const deps = { ...f.deps, readMatchScore: (id: string) => { asked.push(id); return read(id); } };
+    // Run the drawer's lane.
+    const out = await rp.runRowPipeline(deps, ID, rp.PASSED_FILTERS_STEPS, f.onEvent);
+    // Both, so a test can check the cause and that the right row was read.
+    return { out, asked };
+  }
+
+  it('a NULL match_score on a matcher drop is the pre-gate', async () => {
+    // The pre-gate clears the score before moving the row.
+    const { out, asked } = await dropWith(async () => ({ value: null }));
+    // The cause rides on the dropped outcome.
+    assert.deepEqual(out, { kind: 'dropped', finalStatus: 'dropped_filter', atStep: 'matcher', matcherDrop: { kind: 'pre_gate' } });
+    // Read exactly once, for this row.
+    assert.deepEqual(asked, [ID]);
+  });
+
+  it('a score below the floor on a matcher drop is a low score, carrying the score', async () => {
+    // A real low score.
+    const { out } = await dropWith(async () => ({ value: 31 }));
+    // The value in hand, so the sentence may quote it.
+    assert.deepEqual(out, { kind: 'dropped', finalStatus: 'dropped_filter', atStep: 'matcher', matcherDrop: { kind: 'low_score', score: 31 } });
+  });
+
+  it('an unreadable score is unknown, never a guess', async () => {
+    // The read failed.
+    const { out } = await dropWith(async () => null);
+    // Neither cause is claimed.
+    assert.deepEqual(out, { kind: 'dropped', finalStatus: 'dropped_filter', atStep: 'matcher', matcherDrop: { kind: 'unknown' } });
+  });
+
+  it('a thrown score read is unknown, and the drop itself survives', async () => {
+    // A deps bug must not turn a known drop into an error.
+    const { out } = await dropWith(async () => { throw new Error('boom'); });
+    // Still the drop, with no cause claimed.
+    assert.deepEqual(out, { kind: 'dropped', finalStatus: 'dropped_filter', atStep: 'matcher', matcherDrop: { kind: 'unknown' } });
+  });
+
+  // Malformed data must never become an answer: only a real NULL means pre-gate.
+  for (const [label, value] of [
+    ['a string', '31'],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['a negative', -1],
+    ['above 100', 101],
+    ['undefined (column missing)', undefined],
+    ['an object', {}],
+    ['a score at or above the floor', 80],
+  ] as const) {
+    it(`malformed score is not pre-gate: ${label} is unknown`, async () => {
+      // The malformed value, as a read that "succeeded".
+      const { out } = await dropWith(async () => ({ value }));
+      // Unknown, never pre_gate and never low_score.
+      assert.deepEqual(out, { kind: 'dropped', finalStatus: 'dropped_filter', atStep: 'matcher', matcherDrop: { kind: 'unknown' } });
+    });
+  }
+
+  it('a screener drop never reads the score', async () => {
+    // The screener drops the row; the matcher never runs.
+    const f = makeFake('discovered', { normalizer: { to: 'deduped' }, screener: { to: 'dropped_filter' }, ...HAPPY });
+    // A read that must not happen.
+    const deps = { ...f.deps, readMatchScore: async () => { throw new Error('must not read'); } };
+    // Run the full chain.
+    const out = await rp.runRowPipeline(deps, ID, rp.DISCOVERED_STEPS, f.onEvent);
+    // Unchanged screener outcome, with no cause field.
+    assert.deepEqual(out, { kind: 'dropped', finalStatus: 'dropped_filter', atStep: 'screener' });
+  });
+
+  it('the terminal override path (failure body, row dropped) also carries the cause', async () => {
+    // The matcher drops the row and lists a failure in the same 200.
+    const f = makeFake('passed_filters', { ...HAPPY, matcher: { to: 'dropped_filter', body: { failures: ['x'] } } });
+    // A pre-gate drop.
+    const deps = { ...f.deps, readMatchScore: async () => ({ value: null }) };
+    // Run.
+    const out = await rp.runRowPipeline(deps, ID, rp.PASSED_FILTERS_STEPS, f.onEvent);
+    // Same cause on the in-loop path.
+    assert.deepEqual(out, { kind: 'dropped', finalStatus: 'dropped_filter', atStep: 'matcher', matcherDrop: { kind: 'pre_gate' } });
+  });
+});

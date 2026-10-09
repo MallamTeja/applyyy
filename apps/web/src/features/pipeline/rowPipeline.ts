@@ -80,6 +80,37 @@ export interface RowPipelineDeps {
   invoke(step: PipelineStep, applicationId: string): Promise<InvokeResult>;
   // Reads the row's current status; null means it could not be read (missing, RLS, error).
   readStatus(applicationId: string): Promise<string | null>;
+  // OPTIONAL (2026-10-09): applications.match_score, read once and only after a matcher drop, so the
+  // card can tell the pre-gate (NULL) from a low score. Optional, so deps without it (every test
+  // fake, the parity adapter) keep their exact outcomes. Raw value inside { value }; null = unread.
+  readMatchScore?(applicationId: string): Promise<{ readonly value: unknown } | null>;
+}
+
+// The matcher's advance floor, MIRRORED from supabase/functions/_shared/match/score-threshold.ts
+// (a Deno module the browser bundle does not import). rowPipelineParity.test.ts pins the two.
+export const MATCHER_ADVANCE_FLOOR = 45;
+
+// Why the matcher dropped a row. Closed, so the card must word each cause.
+export type MatcherDropCause =
+  // match_score NULL: the pre-gate cleared it and dropped the row before any Gemini call.
+  | { readonly kind: 'pre_gate' }
+  // A real score below the floor, so the sentence may quote it.
+  | { readonly kind: 'low_score'; readonly score: number }
+  // Unread or malformed: neither cause may be claimed.
+  | { readonly kind: 'unknown' };
+
+/** Maps a match_score read to a cause. Only an actual NULL is the pre-gate (repo CLAUDE.md §6). */
+export function classifyMatcherDrop(read: { readonly value: unknown } | null): MatcherDropCause {
+  // No read at all: unknown, never a guess.
+  if (read === null) return { kind: 'unknown' };
+  // Strict null, so undefined (column missing) is not mistaken for the pre-gate's cleared score.
+  if (read.value === null) return { kind: 'pre_gate' };
+  // The positive shape: a finite number on the 0-100 scale, below the floor (else not a low-score drop).
+  const v = read.value;
+  // typeof first so a string like "31" never coerces into a score.
+  if (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < MATCHER_ADVANCE_FLOOR) return { kind: 'low_score', score: v };
+  // Anything else contradicts both causes, so neither is claimed.
+  return { kind: 'unknown' };
 }
 
 // Progress events, one stream per run, so the drawer can render each step's state live.
@@ -107,7 +138,8 @@ export type RowPipelineOutcome =
   // The only outcome that sends the operator to the approval queue.
   | { readonly kind: 'ready_for_approval'; readonly finalStatus: 'awaiting_approval' }
   // An agent legitimately filtered the row out; atStep is the agent that did it.
-  | { readonly kind: 'dropped'; readonly finalStatus: 'dropped_filter' | 'dropped_duplicate'; readonly atStep: PipelineStep }
+  // matcherDrop is present only for a matcher drop whose deps could read the score.
+  | { readonly kind: 'dropped'; readonly finalStatus: 'dropped_filter' | 'dropped_duplicate'; readonly atStep: PipelineStep; readonly matcherDrop?: MatcherDropCause }
   // An agent moved the row to failed; atStep is the agent that did it.
   | { readonly kind: 'failed'; readonly finalStatus: 'failed'; readonly atStep: PipelineStep }
   // The run stopped at a non-terminal status; reason says why.
@@ -124,6 +156,17 @@ function classifyTerminal(status: string | null, atStep: PipelineStep): RowPipel
   if (status === 'failed') return { kind: 'failed', finalStatus: status, atStep };
   // Anything else is not an end state, so the caller decides how to report it.
   return null;
+}
+
+// Adds the cause to a matcher drop; every other outcome passes through untouched. Applied at both
+// places classifyTerminal is returned, so the in-loop override and the after-loop verdict agree.
+async function withMatcherDropCause(deps: RowPipelineDeps, applicationId: string, outcome: RowPipelineOutcome | null): Promise<RowPipelineOutcome | null> {
+  // Only the matcher's drop has two causes; a deps without the read keeps the old outcome exactly.
+  if (outcome?.kind !== 'dropped' || outcome.atStep !== 'matcher' || outcome.finalStatus !== 'dropped_filter' || deps.readMatchScore === undefined) return outcome;
+  // One read, no retry; a throw must not turn a known drop into an error, so it reads as unread.
+  const read = await deps.readMatchScore(applicationId).catch(() => null);
+  // The drop stands; only its cause is added.
+  return { ...outcome, matcherDrop: classifyMatcherDrop(read) };
 }
 
 /** Runs the steps in order for one application; see RowPipelineOutcome for the verdicts. */
@@ -177,7 +220,7 @@ export async function runRowPipeline(
       emit({ step, phase: 'stopped', statusAfter: next });
       // TERMINAL OVERRIDES STOP: if the row reached an end state, that is the truth, even when
       // the body also listed failures (e.g. a tailor that refused a row and marked it failed).
-      return classifyTerminal(next, step) ?? { kind: 'stopped', atStep: step, reason, finalStatus: next };
+      return (await withMatcherDropCause(deps, applicationId, classifyTerminal(next, step))) ?? { kind: 'stopped', atStep: step, reason, finalStatus: next };
     }
     // A clean 200 whose re-read failed: we cannot tell whether the row moved, so stop.
     if (next === null) {
@@ -205,7 +248,7 @@ export async function runRowPipeline(
   // Classify by FINAL status. current only changes on 'done', so lastInvoked produced it.
   // A run that reached an intermediate status (e.g. audit_flagged without awaiting_approval)
   // falls through to no_progress at the last step that ran.
-  return classifyTerminal(current, lastInvoked) ?? { kind: 'stopped', atStep: lastInvoked, reason: 'no_progress', finalStatus: current };
+  return (await withMatcherDropCause(deps, applicationId, classifyTerminal(current, lastInvoked))) ?? { kind: 'stopped', atStep: lastInvoked, reason: 'no_progress', finalStatus: current };
 }
 
 // True when the function answered 200 with its kill switch off. Two spellings exist: most agents

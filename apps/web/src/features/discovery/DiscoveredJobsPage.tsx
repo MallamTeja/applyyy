@@ -22,6 +22,13 @@
  * (?application_id=, see features/pipeline/rowPipeline.ts), and each function advances
  * the row with its own agent key under RLS. The browser invokes and re-reads; it writes
  * no status. Any other affordance here still needs its own ruling.
+ *
+ * TWO LANES (2026-10-09). "Discovered" is the raw inventory above; "Ready to tailor" shows rows the
+ * deployed screener already moved to `passed_filters`, so the operator can browse them, pick the
+ * ones he wants, and send each through matcher -> tailor -> auditor. The lane -> {status, steps}
+ * mapping, the sort, the paging and the "N loaded of M" counters live in discoveredList.ts, where
+ * test/discoveredLanes.test.ts asserts them by value. Every count says how much is LOADED, because
+ * search, filters, tabs and sort all run in the browser over the loaded pages only.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -50,16 +57,18 @@ import type { FilterRuleConfig } from '../settings/filtersStore.ts';
 import { OutcomeNote, SendThroughPipeline } from '../pipeline/DrawerAppCard.tsx';
 // Type only: one finished run's answer, kept here after the card unmounts on reload.
 import type { SendResult } from '../pipeline/DrawerAppCard.tsx';
-// The five-agent chain for a discovered row, and the id shape check the engine also enforces.
-import { DISCOVERED_STEPS, isApplicationId } from '../pipeline/rowPipeline.ts';
+// The id shape check the engine also enforces; the step lists now come from the lane mapping.
+import { isApplicationId } from '../pipeline/rowPipeline.ts';
+// Type only: a step list, kept with each send result so its sentence names the lane it ran in.
+import type { PipelineStep } from '../pipeline/rowPipeline.ts';
 // The real invoke/read deps, or null on an unconfigured machine (the button then explains itself).
 import { liveRowPipelineDeps } from '../pipeline/rowPipelineDeps.ts';
+// The tested list logic: lanes, paging, sort, the date marker and the honest counter text.
+import { LANES, SORT_OPTIONS, appendUnique, hasMoreRows, isCurrentLane, keysetFilter, loadedOfText, pageLimit, postedDate, sortItems } from './discoveredList.ts';
+// Types for the lane switch, the load modes and the sort select.
+import type { Lane, LoadMode, SortKey } from './discoveredList.ts';
 
 import './DiscoveredJobsPage.css';
-
-/* Rows fetched for browser-side cascade evaluation. Totals come from a count query,
-   never from this list's length. */
-const LIST_CAP = 300;
 
 /* The job's name for the send button's accessible name and the results strip. The page already
    treats company_name as optional (getCompanyCooldownInfo, the search filter), and a template string
@@ -74,6 +83,8 @@ function jobLabel(job: JobRow): string {
 
 interface DiscoveredItem {
   readonly applicationId?: string;
+  // The application's created_at: the list's sort key, and Load more's keyset cursor.
+  readonly createdAt: string;
   readonly job: JobRow;
 }
 
@@ -88,7 +99,32 @@ export function DiscoveredJobsPage(): ReactElement {
   const [filterRules, setFilterRules] = useState<readonly FilterRuleConfig[]>([]);
   const [techOnly, setTechOnly] = useState<boolean>(() => getTechOnlyPreference());
   const [enforceCascade, setEnforceCascade] = useState<boolean>(true);
-  const [viewTab, setViewTab] = useState<'matched' | 'all' | 'dropped'>('matched');
+  // The tab the operator picked; on the ready lane it is overridden to 'all' (see viewTab below).
+  const [chosenTab, setViewTab] = useState<'matched' | 'all' | 'dropped'>('matched');
+  // Which inventory is shown; 'discovered' first, so the page opens as it always did.
+  const [lane, setLane] = useState<Lane>('discovered');
+  /* The lane on screen, readable by a loadData closure from an OLDER render. A Send's onSettled runs
+     the loadData of the render it was clicked in; if the operator switched lanes meanwhile, that
+     loadData must refuse (isCurrentLane) or it would load the old lane's rows under the new label.
+     Set at click time in switchLane, before React re-renders, so no window exists. */
+  const laneRef = useRef<Lane>('discovered');
+  // The lane switch: the ref first (in-flight closures see it at once), then the state (re-render + reload).
+  const switchLane = (key: Lane): void => {
+    // Synchronous, so a settle landing before the re-render is already refused.
+    laneRef.current = key;
+    // Rebuilds loadData for the new lane, whose effect runs the full load.
+    setLane(key);
+  };
+  // The lane's status and step list, from the one tested mapping.
+  const laneSpec = LANES[lane];
+  /* The Matched / Filtered Out split is this page's local preview of the screener. On the ready lane
+     the DEPLOYED screener has already passed every row, so re-judging them locally could only show a
+     second, weaker opinion as "Filtered Out". The ready lane therefore shows "All" only. */
+  const viewTab = lane === 'ready' ? 'all' : chosenTab;
+  // The client-side sort; 'newest' is the query's own order, so the default changes nothing.
+  const [sortKey, setSortKey] = useState<SortKey>('newest');
+  // True while a Load more page is in flight, so the button cannot fire twice for the same range.
+  const [loadingMore, setLoadingMore] = useState<boolean>(false);
 
   const [loading, setLoading] = useState<boolean>(true);
   const [search, setSearch] = useState<string>('');
@@ -103,13 +139,22 @@ export function DiscoveredJobsPage(): ReactElement {
   /* Why the last load failed, or null. A THIRD state beside "loading" and "rows":
      an outage must not render as an empty list or as somebody else's rows. */
   const [loadError, setLoadError] = useState<string | null>(null);
-  /* The exact number of rows at `discovered`, from a count query. The list below is
-     capped at LIST_CAP rows, so its length undercounts; this is the honest total. */
-  const [discoveredTotal, setDiscoveredTotal] = useState<number | null>(null);
+  /* The exact number of rows at the lane's status, from a count query. The list holds only the
+     loaded pages, so its length undercounts; this is the honest total. */
+  const [laneTotal, setLaneTotal] = useState<number | null>(null);
   /* Outcomes of "Send through pipeline", newest first. Held HERE, not on the card: a settled
-     row has left `discovered`, so the reload removes its card and the card's own note with it.
-     Without this, "Dropped by the screener" would flash and vanish. */
-  const [sendResults, setSendResults] = useState<readonly { readonly applicationId: string; readonly label: string; readonly result: SendResult }[]>([]);
+     row has left its lane, so the reload removes its card and the card's own note with it.
+     Without this, "Dropped by the screener" would flash and vanish. Each entry keeps the step list
+     it ran with, so its sentence stays right after a lane switch. */
+  const [sendResults, setSendResults] = useState<readonly { readonly applicationId: string; readonly label: string; readonly steps: readonly PipelineStep[]; readonly result: SendResult }[]>([]);
+  /* The loaded rows, readable inside loadData without making items a dependency (which would
+     rebuild loadData, and so rerun the load effect, on every page). Synced after each render. */
+  const itemsRef = useRef<readonly DiscoveredItem[]>([]);
+  // Keeps itemsRef current; Load more and the silent reload size their range from it.
+  useEffect(() => {
+    // The rendered rows are the ones the next range must continue from.
+    itemsRef.current = items;
+  }, [items]);
 
   /* Which loadData call is the latest. Loads overlap (a send settling while another reload is in
      flight) and can resolve out of order; a stale response applied last would re-show a row that has
@@ -120,19 +165,42 @@ export function DiscoveredJobsPage(): ReactElement {
      skips the loading swap, which would replace the whole grid (scroll jumps to the top). It does not
      keep every card: a row another run has already moved past `discovered` leaves the list, and that
      card's step list with it. Its run, lock and onSettled still finish, and its outcome lands in the
-     results strip, so only the per-step progress view is lost. */
-  const loadData = useCallback(async (silent = false) => {
+     results strip, so only the per-step progress view is lost.
+     mode 'more' is Load more: it fetches the next page and appends. It claims loadSeq like every
+     other load, so a lane switch (which reruns a full load) makes a slow page stale before it lands. */
+  const loadData = useCallback(async (mode: LoadMode = 'full') => {
+    // A load built for a lane the operator has left (a Send settling after a switch) does nothing,
+    // and returns BEFORE claiming a sequence, so it cannot supersede the current lane's load.
+    if (!isCurrentLane(lane, laneRef.current)) return;
     // Claims "latest"; any older call still awaiting now applies nothing.
     const seq = ++loadSeq.current;
     // Re-checked after every await, since a newer call can start during any of them.
     const stale = (): boolean => seq !== loadSeq.current;
+    // Rows to fetch: one page, or the whole loaded window on a silent reload, per the tested helper.
+    const limit = pageLimit(mode, itemsRef.current.length);
+    // The last loaded row in server order: Load more continues strictly after it.
+    const last = itemsRef.current[itemsRef.current.length - 1];
     try {
-      // The visible reload only; a silent refresh keeps the grid (and its cards) mounted.
-      if (!silent) {
+      // Load more keeps the grid and only marks its own button busy.
+      if (mode === 'more') setLoadingMore(true);
+      // The visible reload only; a silent refresh or a Load more keeps the grid (and its cards) mounted.
+      if (mode === 'full') {
         // Swaps the grid for the "Evaluating" message.
         setLoading(true);
         // A retry starts clean; a stale banner over fresh rows would be its own lie.
         setLoadError(null);
+        // The old lane's total must not sit under the new lane's label, nor survive a failed read.
+        setLaneTotal(null);
+        // Same for the old lane's cards.
+        setItems([]);
+      }
+      // The keyset cursor for Load more; null for every other mode (they start at the top).
+      const cursor = mode === 'more' && last?.applicationId !== undefined ? keysetFilter({ createdAt: last.createdAt, id: last.applicationId }) : null;
+      // Load more with no usable cursor would silently refetch page one as if it were page two.
+      if (mode === 'more' && cursor === null) {
+        // Said, not guessed; the loaded rows stay as they are.
+        setLoadError('Could not continue: the last loaded row has no readable sort key. Reload the page.');
+        return;
       }
 
       // Load filter rules
@@ -150,24 +218,30 @@ export function DiscoveredJobsPage(): ReactElement {
         return;
       }
 
-      // Both reads in parallel: the capped list and the exact total are independent.
+      // The list read, built in two steps so Load more can add its cursor.
+      let query = supabase
+        .from('applications')
+        // The job is joined because the cards render job fields; created_at is the keyset cursor.
+        .select('id, status, created_at, job:job_id(*)')
+        // The selected lane's inventory, and only that.
+        .eq('status', laneSpec.status);
+      // Load more: only rows after the last loaded one, so rows that left the lane cannot shift a page.
+      if (cursor !== null) query = query.or(cursor);
+      // Both reads in parallel: the paged list and the exact total are independent.
       const [listResult, countResult] = await Promise.all([
-        supabase
-          .from('applications')
-          // The job is joined because the cards render job fields, not application fields.
-          .select('id, status, job:job_id(*)')
-          // This page is the discovered inventory, and only that.
-          .eq('status', 'discovered')
-          // Newest first, so the cap drops the oldest.
+        query
+          // Newest found first, so unloaded pages are the oldest.
           .order('created_at', { ascending: false })
-          // Browser-side cascade evaluation needs the rows; the cap bounds payload size.
-          .limit(LIST_CAP),
+          // Unique tie-break, ascending to match keysetFilter's id.gt: bulk inserts share created_at.
+          .order('id', { ascending: true })
+          // One page (or the loaded window); browser-side evaluation needs the rows, the page bounds payload.
+          .limit(limit),
         supabase
           .from('applications')
           // head:true returns only the count, so the total costs no row payload.
           .select('id', { count: 'exact', head: true })
           // Same predicate as the list, so the two numbers describe the same set.
-          .eq('status', 'discovered'),
+          .eq('status', laneSpec.status),
       ]);
       // The out-of-order case this guard exists for: drop a response a newer load superseded.
       if (stale()) return;
@@ -177,7 +251,7 @@ export function DiscoveredJobsPage(): ReactElement {
       // outage rendered as a full, wrong list.
       if (listResult.error) {
         // The database's words, for diagnosis.
-        setLoadError(`Could not load discovered jobs: ${listResult.error.message}`);
+        setLoadError(`Could not load ${laneSpec.label} jobs: ${listResult.error.message}`);
         // Never show the previous load's rows under an error.
         setItems([]);
         return;
@@ -192,6 +266,8 @@ export function DiscoveredJobsPage(): ReactElement {
           mapped.push({
             // Real application id, so downstream actions address the real row.
             applicationId: app.id,
+            // The row's own sort key, kept for the next page's cursor.
+            createdAt: app.created_at,
             // The joined job row.
             job: app.job as unknown as JobRow,
           });
@@ -199,9 +275,10 @@ export function DiscoveredJobsPage(): ReactElement {
       }
       // Cleared here too, because a silent refresh did not clear it at the start.
       setLoadError(null);
-      setItems(mapped);
-      // A failed count is not fatal to the list; fall back to "unknown" rather than the capped length.
-      setDiscoveredTotal(countResult.error ? null : countResult.count);
+      // Load more appends (appendUnique is a belt-and-braces check; the cursor already excludes loaded rows); every other mode replaces.
+      setItems(mode === 'more' ? appendUnique(itemsRef.current, mapped) : mapped);
+      // A failed count is not fatal to the list; fall back to "unknown" rather than the loaded length.
+      setLaneTotal(countResult.error ? null : countResult.count);
       // Surface the rules failure after the list loaded, so the reason is visible beside the rows.
       if (rulesError !== null) {
         // States the consequence: the Matched/Filtered split is not trustworthy.
@@ -216,10 +293,14 @@ export function DiscoveredJobsPage(): ReactElement {
       // Only the latest call ends loading; a stale one finishing first must not hide the spinner
       // of the load that is still running.
       if (!stale()) setLoading(false);
+      // Same rule for the Load more button: a superseding load ends it in its own finally.
+      if (!stale()) setLoadingMore(false);
     }
-  }, []);
+  }, [lane]);
 
+  // First visit and every lane switch: loadData is rebuilt per lane, so this reruns a full load.
   useEffect(() => {
+    // Claims a new sequence, which also makes any in-flight Load more from the old lane stale.
     void loadData();
   }, [loadData]);
 
@@ -235,11 +316,15 @@ export function DiscoveredJobsPage(): ReactElement {
       const techCheck = isTechRole(item.job.title);
       const cascadeEval = evaluateJobMatch(item.job, filterRules, techOnly);
 
-      const passed = enforceCascade
-        ? cascadeEval.passed
-        : techOnly
-          ? techCheck.isTech
-          : true;
+      // The ready lane skips the local preview: the deployed screener already passed these rows,
+      // so no card there may carry a "Filtered" banner from a weaker, browser-side opinion.
+      const passed = lane === 'ready'
+        ? true
+        : enforceCascade
+          ? cascadeEval.passed
+          : techOnly
+            ? techCheck.isTech
+            : true;
 
       const dropReason = !techCheck.isTech
         ? `Non-tech role (${techCheck.reason})`
@@ -252,7 +337,7 @@ export function DiscoveredJobsPage(): ReactElement {
         dropReason,
       };
     });
-  }, [items, filterRules, techOnly, enforceCascade]);
+  }, [items, filterRules, techOnly, enforceCascade, lane]);
 
   /* Unique companies for filter dropdown */
   const uniqueCompanies = useMemo(() => {
@@ -319,49 +404,102 @@ export function DiscoveredJobsPage(): ReactElement {
     });
   }, [evaluatedItems, viewTab, search, selectedProvider, selectedArrangement, selectedType, selectedCompany]);
 
+  // The visible order: the filtered rows sorted by the chosen key (a copy; 'newest' keeps server order).
+  const sortedItems = useMemo(() => sortItems(filteredItems, sortKey), [filteredItems, sortKey]);
+  // The honest suffix every counter carries: how many rows the browser holds, of how many exist.
+  const loadedText = loadedOfText(items.length, laneTotal);
+
   return (
     <div className="page page--wide discovery">
       <PageHeader path="discovered" />
 
+      {/* Lane switch: which inventory the list, the count and the card's Send work on. Plain
+          toggle buttons with aria-pressed, because the view tabs below already own role="tablist". */}
+      {/* role=group + a label: the two buttons are announced as one "Job lane" choice. */}
+      <div className="discovery__lanes" role="group" aria-label="Job lane">
+        {/* Built from LANES, so a new lane needs no edit here and its steps cannot be mis-paired. */}
+        {(Object.keys(LANES) as Lane[]).map((key) => (
+          <button
+            /* One button per lane, keyed by the lane id. */
+            key={key}
+            /* Not a submit: the page has no form. */
+            type="button"
+            /* The tab look the page already has, so the switch needs no new visual language. */
+            className={`discovery__tab-btn ${lane === key ? 'discovery__tab-btn--active' : ''}`}
+            /* Tells assistive tech which lane is on. */
+            aria-pressed={lane === key}
+            /* Moves laneRef at once, then the state, whose rebuilt loadData reloads the new lane. */
+            onClick={() => switchLane(key)}
+          >
+            {/* The lane's name from the shared mapping. */}
+            {LANES[key].label}
+          </button>
+        ))}
+      </div>
+
       {/* Filter Cascade & Tech Constraint Control Bar */}
       <section className="discovery__cascade-header" aria-label="Filter rules and constraint controls">
         <div className="discovery__view-tabs" role="tablist">
-          <button
-            type="button"
-            className={`discovery__tab-btn ${viewTab === 'matched' ? 'discovery__tab-btn--active' : ''}`}
-            onClick={() => setViewTab('matched')}
-            role="tab"
-            aria-selected={viewTab === 'matched'}
-          >
-            {/* The tab is inline-flex with a gap, so "(", <strong> and ")" as separate
-                children each got a 6px gap: "( 0 )". One span keeps the count a single
-                flex item; all three tabs use this exact shape so they match. */}
-            🎯 Matched Tech Jobs <span>(<strong>{matchedCount}</strong>)</span>
-          </button>
+          {/* Matched / Filtered Out are the discovered lane's local screener preview; the ready lane
+              shows All only (see viewTab). */}
+          {lane === 'discovered' && (
+            <button
+              /* Not a submit: the page has no form. */
+              type="button"
+              /* Highlighted while it is the chosen view. */
+              className={`discovery__tab-btn ${viewTab === 'matched' ? 'discovery__tab-btn--active' : ''}`}
+              /* Client-side only: switching views re-filters the loaded rows, no new read. */
+              onClick={() => setViewTab('matched')}
+              /* Part of the tablist above, for assistive tech. */
+              role="tab"
+              /* Which tab is on, announced. */
+              aria-selected={viewTab === 'matched'}
+            >
+              {/* The tab is inline-flex with a gap, so "(", <strong> and ")" as separate
+                  children each got a 6px gap: "( 0 )". One span keeps the count a single
+                  flex item; all three tabs use this exact shape so they match. The count is over
+                  the LOADED rows only, and says so. */}
+              🎯 Matched Tech Jobs <span>(<strong>{matchedCount}</strong> of {items.length} loaded)</span>
+            </button>
+          )}
           <button
             type="button"
             className={`discovery__tab-btn ${viewTab === 'all' ? 'discovery__tab-btn--active' : ''}`}
             onClick={() => setViewTab('all')}
             role="tab"
             aria-selected={viewTab === 'all'}
+            /* The full counter on hover, since the tab shows only the exact total. */
+            title={loadedText}
           >
-            {/* The exact total from the count query; the capped list length is only a fallback. */}
-            📋 All Discovered <span>(<strong>{discoveredTotal ?? items.length}</strong>)</span>
+            {/* The exact total from the count query; "?" when it failed, never the loaded length. */}
+            📋 All {laneSpec.label} <span>(<strong>{laneTotal ?? '?'}</strong>)</span>
           </button>
-          <button
-            type="button"
-            className={`discovery__tab-btn ${viewTab === 'dropped' ? 'discovery__tab-btn--active-dropped' : ''}`}
-            onClick={() => setViewTab('dropped')}
-            role="tab"
-            aria-selected={viewTab === 'dropped'}
-            title="Jobs dropped due to non-tech title, senior experience, or location mismatch"
-          >
-            {/* Same single-span count shape as the other two tabs. */}
-            🚫 Filtered Out <span>(<strong>{droppedCount}</strong>)</span>
-          </button>
+          {/* Same lane rule as the Matched tab. */}
+          {lane === 'discovered' && (
+            <button
+              /* Not a submit: the page has no form. */
+              type="button"
+              /* Its own active colour, so "dropped" never looks like the good-news tab. */
+              className={`discovery__tab-btn ${viewTab === 'dropped' ? 'discovery__tab-btn--active-dropped' : ''}`}
+              /* Client-side only, like the Matched tab. */
+              onClick={() => setViewTab('dropped')}
+              /* Part of the tablist above. */
+              role="tab"
+              /* Which tab is on, announced. */
+              aria-selected={viewTab === 'dropped'}
+              /* What "filtered out" means here: the page's local preview, not the screener's verdict. */
+              title="Jobs dropped due to non-tech title, senior experience, or location mismatch"
+            >
+              {/* Same single-span count shape as the other two tabs, over the loaded rows. */}
+              🚫 Filtered Out <span>(<strong>{droppedCount}</strong> of {items.length} loaded)</span>
+            </button>
+          )}
         </div>
 
         <div className="discovery__toggle-group">
+          {/* The two preview toggles only change the Matched / Filtered split, which the ready lane
+              does not show; a toggle that changes nothing would be a false control. */}
+          {lane === 'discovered' && (<>
           <button
             type="button"
             className={`discovery__toggle-pill ${techOnly ? 'discovery__toggle-pill--active' : 'discovery__toggle-pill--inactive'}`}
@@ -379,6 +517,7 @@ export function DiscoveredJobsPage(): ReactElement {
           >
             {enforceCascade ? '⚡ Cascade Active' : '✕ Cascade (Off)'}
           </button>
+          </>)}
 
           <Link
             to="/filters"
@@ -439,12 +578,17 @@ export function DiscoveredJobsPage(): ReactElement {
       <section className="discovery__controls" aria-label="Job search and filters">
         <div className="discovery__search-row">
           <input
+            /* type=search: the browser's clear button and Escape-to-clear for free. */
             type="search"
+            /* The page's existing search look. */
             className="discovery__search-input"
             /* A placeholder is not a label; screen readers need this. */
-            aria-label="Search discovered jobs"
-            placeholder="Search discovered jobs by title, company, skills, or location..."
+            aria-label="Search loaded jobs"
+            /* Says "loaded": the search runs in the browser over the loaded pages, not the database. */
+            placeholder="Search the loaded jobs by title, company, skills, or location..."
+            /* Controlled, so a lane switch can keep or clear it deliberately. */
             value={search}
+            /* Filters the loaded rows on every keystroke; no network call, so no debounce is needed. */
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
@@ -507,21 +651,45 @@ export function DiscoveredJobsPage(): ReactElement {
             ))}
           </select>
 
+          {/* Sort select. Client-side over the loaded rows (PostgREST cannot order by a joined
+              column without a view), and the label beside it says exactly that. */}
+          <select
+            /* Same look as the filter selects beside it. */
+            className="discovery__filter-select"
+            /* The chosen key; 'newest' is the query's own order. */
+            value={sortKey}
+            /* The option values are exactly the SortKey union, from SORT_OPTIONS. */
+            onChange={(e) => setSortKey(e.target.value as SortKey)}
+            /* A select needs a name for screen readers. */
+            aria-label="Sort jobs"
+          >
+            {SORT_OPTIONS.map((o) => (
+              /* One option per tested sort key. */
+              <option key={o.key} value={o.key}>
+                {/* The option's visible label. */}
+                {o.label}
+              </option>
+            ))}
+          </select>
+          {/* The sort's scope, stated: it reorders only what is loaded. */}
+          <span className="discovery__sort-scope">Sorts the {loadedOfText(items.length, laneTotal)} rows</span>
+
           <span className="discovery__meta-count">
-            {/* Counter is hidden on a failed load: "Showing 0" would assert zero jobs during an outage. */}
+            {/* Counter is hidden on a failed load: "Showing 0" would assert zero jobs during an outage.
+                Every branch ends with the loaded-of-total text, so no count reads as complete. */}
             {loadError === null && (viewTab === 'matched' ? (
+              /* Matched: the local preview's pass count, then how much of the lane is loaded. */
               <span>
-                Showing <strong>{filteredItems.length}</strong> clean tech jobs ({droppedCount} dropped by filters)
+                Showing <strong>{filteredItems.length}</strong> clean tech jobs ({droppedCount} dropped by filters) · {loadedText}
               </span>
             ) : viewTab === 'dropped' ? (
               <span style={{ /* Danger token lightens in dark mode; #dc2626 was dim on a near-black ground. */ color: 'var(--fabricated)' }}>
-                Showing <strong>{filteredItems.length}</strong> dropped/irrelevant jobs
+                Showing <strong>{filteredItems.length}</strong> dropped/irrelevant jobs · {loadedText}
               </span>
             ) : (
+              /* All: just what is shown, then the loaded-of-total text. */
               <span>
-                Showing <strong>{filteredItems.length}</strong> of {discoveredTotal ?? items.length} total jobs
-                {/* Says when the cap is hiding rows, so the counts are not read as complete. */}
-                {discoveredTotal !== null && discoveredTotal > items.length && ` (newest ${items.length} loaded)`}
+                Showing <strong>{filteredItems.length}</strong> · {loadedText}
               </span>
             ))}
           </span>
@@ -541,13 +709,13 @@ export function DiscoveredJobsPage(): ReactElement {
           mounts WITH its first content is often not announced; while empty, the CSS takes it out of the
           page's flex flow (.discovery__send-results:empty), so it adds no gap. */}
       <div className="discovery__send-results" aria-live="polite">
-        {sendResults.map(({ applicationId, label, result }) => (
+        {sendResults.map(({ applicationId, label, steps, result }) => (
           /* One row per send: which job, then the agents' own verdict (and the queue link when ready). */
           <div key={applicationId} className="discovery__send-result">
             {/* The card is gone after the reload, so the job is named here. */}
             <strong>{label}</strong>
-            {/* The shared sentence, worded for the discovered lane's start status. */}
-            <OutcomeNote outcome={result.outcome} httpStatus={result.httpStatus} errorText={result.errorText} steps={DISCOVERED_STEPS} />
+            {/* The shared sentence, worded for the start status of the lane the send ran in. */}
+            <OutcomeNote outcome={result.outcome} httpStatus={result.httpStatus} errorText={result.errorText} steps={steps} />
           </div>
         ))}
         {/* Clearing is local only; the rows themselves are wherever the agents put them. */}
@@ -576,12 +744,13 @@ export function DiscoveredJobsPage(): ReactElement {
           <p>
             {viewTab === 'matched'
               ? 'No jobs match your active Tech constraint and Filter Cascade rules. Try adjusting your search or checking "Filtered Out" to inspect dropped postings.'
-              : 'No discovered jobs match your current criteria.'}
+              : `No loaded ${laneSpec.label} jobs match your current criteria.`}
           </p>
         </div>
       ) : (
         <div className="discovery__grid">
-          {filteredItems.map(({ applicationId, job, passed, dropReason }) => (
+          {/* The sorted copy; filtering decided WHICH rows, the sort decides their order. */}
+          {sortedItems.map(({ applicationId, job, passed, dropReason }) => (
             <article key={job.id} className={`job-card ${!passed ? 'job-card--dropped' : ''}`}>
               {/* If dropped, display clear reason banner */}
               {!passed && dropReason && (
@@ -618,6 +787,18 @@ export function DiscoveredJobsPage(): ReactElement {
                     {job.work_arrangement}
                   </span>
                 )}
+                {/* Posted date, with "≈" and a tooltip when the board gave no real publish date. */}
+                {(() => {
+                  // Text, tooltip and estimate flag from the tested helper.
+                  const posted = postedDate(job);
+                  // The approximate modifier sets it in italic, so an estimate never reads like a fact.
+                  return (
+                    <span className={`job-pill${posted.approximate ? ' job-pill--approx' : ''}`} title={posted.title}>
+                      {/* "Posted 2026-10-01" or "Posted ≈ 2026-10-01". */}
+                      {posted.text}
+                    </span>
+                  );
+                })()}
                 {job.location_raw && (
                   <span className="job-pill" title={job.location_raw}>
                     📍 {job.location_raw.length > 28 ? `${job.location_raw.slice(0, 26)}…` : job.location_raw}
@@ -692,8 +873,9 @@ export function DiscoveredJobsPage(): ReactElement {
                     applicationId={applicationId}
                     /* Null on an unconfigured machine: the button disables with a reason. */
                     deps={liveRowPipelineDeps}
-                    /* All five agents: a discovered row needs dedupe and screening first. */
-                    steps={DISCOVERED_STEPS}
+                    /* The lane's agents: all five for a discovered row (dedupe and screening first),
+                       matcher -> tailor -> auditor for a ready row the screener already passed. */
+                    steps={laneSpec.steps}
                     /* The row has usually left `discovered`, so reload; keep the outcome above
                        the grid because the reload unmounts this card. */
                     /* Names the job, so twenty buttons do not share one accessible name. */
@@ -704,15 +886,36 @@ export function DiscoveredJobsPage(): ReactElement {
                       // reports itself. No result to keep, and no reload owed by this click.
                       if (result === null) return;
                       // Newest first, one entry per row, so a re-send replaces its old line.
-                      setSendResults((prev) => [{ applicationId, label: jobLabel(job), result }, ...prev.filter((r) => r.applicationId !== applicationId)]);
-                      // Silent: the row leaves the grid without the loading swap.
-                      void loadData(true);
+                      // The lane's steps travel with the result, so its sentence survives a lane switch.
+                      setSendResults((prev) => [{ applicationId, label: jobLabel(job), steps: laneSpec.steps, result }, ...prev.filter((r) => r.applicationId !== applicationId)]);
+                      // Silent: the row leaves the grid without the loading swap; the loaded pages are re-read.
+                      void loadData('silent');
                     }}
                   />
                 )}
               </div>
             </article>
           ))}
+        </div>
+      )}
+
+      {/* Load more: the next page of this lane, appended. Hidden once every row is loaded, during a
+          full load, and after a failed one (an error state offers no "more" of anything). */}
+      {!loading && loadError === null && hasMoreRows(items.length, laneTotal) && (
+        <div className="discovery__load-more">
+          <button
+            /* Not a submit: the page has no form. */
+            type="button"
+            /* The page's existing small-button look. */
+            className="chip-btn"
+            /* One page at a time; a second click during the fetch would ask for the same range. */
+            disabled={loadingMore}
+            /* Goes through loadData so the sequence guard drops it if the lane changes meanwhile. */
+            onClick={() => void loadData('more')}
+          >
+            {/* States what is loaded, so the operator knows how far the list goes. */}
+            {loadingMore ? 'Loading…' : `Load more (${loadedText})`}
+          </button>
         </div>
       )}
 

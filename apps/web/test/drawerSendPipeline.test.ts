@@ -383,10 +383,140 @@ describe('outcome sentences stay true (review D1-D4)', () => {
 
   it('a matcher drop claims no user setting that does not exist', () => {
     // The floor is a code constant, not a user threshold.
-    const text = card.describeOutcome({ kind: 'dropped', atStep: 'matcher', finalStatus: 'dropped_filter' }, null);
+    const text = card.describeOutcome({ kind: 'dropped', atStep: 'matcher', finalStatus: 'dropped_filter', matcherDrop: { kind: 'low_score', score: 31 } }, null);
     // Names the matcher's own floor.
     assert.match(text, /matcher's advance floor/);
     // Never "your threshold".
     assert.doesNotMatch(text, /your threshold/);
+  });
+});
+
+/* Matcher drop sentences (2026-10-09). The pre-gate and a low score both end at dropped_filter;
+ * only the cause the engine read may be claimed. An unread cause gets the neutral sentence. */
+describe('matcher drop sentences: pre-gate vs low score vs unknown', () => {
+  // The base matcher drop, before a cause is attached.
+  const base = { kind: 'dropped', finalStatus: 'dropped_filter', atStep: 'matcher' } as const;
+
+  it('pre-gate drop says pre-gate and that no Gemini call was made', () => {
+    // A drop the pre-gate made, with match_score NULL.
+    const text = card.describeOutcome({ ...base, matcherDrop: { kind: 'pre_gate' } }, null);
+    // Names the stage that dropped it.
+    assert.match(text, /^Dropped by the matcher's pre-gate: /);
+    // True for both gate branches: an excluded term, or no configured title/keyword matched.
+    assert.match(text, /excluded keywords, or none of your target titles and keywords/);
+    // The cost fact the operator cares about.
+    assert.match(text, /No Gemini call was made\.$/);
+    // Never the score sentence, which is false here.
+    assert.doesNotMatch(text, /scored/);
+  });
+
+  it('low-score drop names the score and the floor', () => {
+    // A real low score, read back from the row.
+    const text = card.describeOutcome({ ...base, matcherDrop: { kind: 'low_score', score: 31 } }, null);
+    // The value in hand and the code-constant floor.
+    assert.equal(text, "Dropped by the matcher: it scored 31, below the matcher's advance floor of 45.");
+  });
+
+  it('unknown-score drop is the neutral sentence', () => {
+    // The score could not be read.
+    const text = card.describeOutcome({ ...base, matcherDrop: { kind: 'unknown' } }, null);
+    // No cause claimed.
+    assert.equal(text, 'Dropped by the matcher.');
+  });
+
+  it('a matcher drop with no cause read is the neutral sentence too', () => {
+    // An outcome from deps without readMatchScore.
+    const text = card.describeOutcome(base, null);
+    // Same as unknown: neither cause is claimed.
+    assert.equal(text, 'Dropped by the matcher.');
+  });
+});
+
+describe('real deps factory: readMatchScore', () => {
+  // A deps object over a client whose one read answers as scripted.
+  const depsOver = (read: () => PromiseLike<{ data: unknown; error: unknown }>) =>
+    // Invoke is never called by these tests.
+    depsModule.makeRowPipelineDeps({ functions: { invoke: async () => ({ data: null, error: null }) }, readStatusRow: read });
+
+  it('a NULL match_score is read as a real null', async () => {
+    // The pre-gate's row.
+    const deps = depsOver(() => Promise.resolve({ data: { status: 'dropped_filter', match_score: null }, error: null }));
+    // A found value of null.
+    assert.deepEqual(await deps.readMatchScore?.(ID), { value: null });
+  });
+
+  it('a numeric match_score is passed through raw for the engine to validate', async () => {
+    // A low-score row.
+    const deps = depsOver(() => Promise.resolve({ data: { status: 'dropped_filter', match_score: 31 }, error: null }));
+    // The raw value.
+    assert.deepEqual(await deps.readMatchScore?.(ID), { value: 31 });
+  });
+
+  it('a row without the column, an error, no row, or a throw is unreadable (null)', async () => {
+    // The column is absent: not a NULL, so never read as the pre-gate.
+    assert.equal(await depsOver(() => Promise.resolve({ data: { status: 'dropped_filter' }, error: null })).readMatchScore?.(ID), null);
+    // An RLS or network error.
+    assert.equal(await depsOver(() => Promise.resolve({ data: null, error: { message: 'rls' } })).readMatchScore?.(ID), null);
+    // No row at all.
+    assert.equal(await depsOver(() => Promise.resolve({ data: null, error: null })).readMatchScore?.(ID), null);
+    // A throwing read.
+    assert.equal(await depsOver(() => { throw new Error('boom'); }).readMatchScore?.(ID), null);
+  });
+
+  it('the live read selects match_score beside status', () => {
+    // The deps source, as written.
+    const src = readFileSync(fileURLToPath(new URL('../src/features/pipeline/rowPipelineDeps.ts', import.meta.url)), 'utf8');
+    // The one select, both columns.
+    assert.match(src, /\.select\('status, match_score'\)/);
+  });
+});
+
+/* The drawer loads at most 25 rows of a lane that can hold thousands; its header must not imply
+ * every row is listed. Pure, so the wording is tested without a client. */
+describe('drawerHeading: "showing N of M" whenever N < M', () => {
+  it('a truncated list says showing N of M', () => {
+    // 25 loaded of 6661 in the lane.
+    assert.equal(card.drawerHeading({ count: 6661, shown: 25, conclusive: true }), 'Showing 25 of 6661 applications');
+  });
+
+  it('a complete list prints the count', () => {
+    // Everything listed.
+    assert.equal(card.drawerHeading({ count: 3, shown: 3, conclusive: true }), '3 Applications');
+    // Singular.
+    assert.equal(card.drawerHeading({ count: 1, shown: 1, conclusive: true }), '1 Application');
+  });
+
+  it('more rows than the board count never prints a smaller number than is listed', () => {
+    // The board count comes from a different, older query.
+    assert.equal(card.drawerHeading({ count: 2, shown: 4, conclusive: true }), '4 Applications');
+  });
+
+  it('an inconclusive read prints no number', () => {
+    // No standing to repeat a count.
+    assert.equal(card.drawerHeading({ count: 6661, shown: 0, conclusive: false }), 'Applications');
+  });
+});
+
+/* A run that ends short of approval at a step the engine reported "done" (the auditor's second hop
+ * failed, leaving audit_flagged) must not show "Auditor: done" beside "Stopped at the auditor". */
+describe('settleProgress: the step list agrees with the outcome note', () => {
+  it('a stopped outcome marks its step stopped, even after a done event', () => {
+    // The auditor moved tailored -> audit_flagged (done), then the run ended there.
+    const progress = { matcher: 'skipped', tailor: 'skipped', auditor: 'done' } as const;
+    // The engine's after-loop verdict.
+    const settled = card.settleProgress(progress, { kind: 'stopped', atStep: 'auditor', reason: 'no_progress', finalStatus: 'audit_flagged' });
+    // Both now say "stopped" at the auditor.
+    assert.equal(settled.auditor, 'stopped');
+    // Other steps unchanged.
+    assert.equal(settled.matcher, 'skipped');
+  });
+
+  it('a non-stopped outcome leaves the list as the engine reported it', () => {
+    // A clean run.
+    const progress = { matcher: 'done', tailor: 'done', auditor: 'done' } as const;
+    // Ready for approval.
+    const settled = card.settleProgress(progress, { kind: 'ready_for_approval', finalStatus: 'awaiting_approval' });
+    // Same content.
+    assert.deepEqual(settled, progress);
   });
 });

@@ -118,13 +118,16 @@ describe('what the page must still do', () => {
 
   // Teja's ruling 2026-10-08 16:08: each card sends ITS row through the deployed agents. The
   // positive shape is asserted, so the button cannot quietly fall back to the drawer's 3-step list.
-  it('renders the per-card SendThroughPipeline over the full discovered chain', async () => {
+  it("renders the per-card SendThroughPipeline over the selected lane's chain", async () => {
     // Scoped to the ONE element: from its opening tag up to the first `/>` that closes it, with no
     // other `<` in between, so a steps={DISCOVERED_STEPS} elsewhere in the file cannot satisfy it.
     // (`[^>]*` would stop at the `=>` of the onSettled arrow, hence the `<`-free span instead.)
     const element = source.match(/<SendThroughPipeline\b[^<]*?\/>/)?.[0] ?? '';
-    // The shared component, with this lane's five-agent list, inside that element.
-    assert.match(element, /\bsteps=\{DISCOVERED_STEPS\}/, 'the card must send its row through DISCOVERED_STEPS');
+    // The shared component takes the lane's own list; discoveredLanes.test.ts pins that the discovered
+    // lane maps to DISCOVERED_STEPS and the ready lane to PASSED_FILTERS_STEPS.
+    assert.match(element, /\bsteps=\{laneSpec\.steps\}/, "the card must send its row through the selected lane's steps");
+    // laneSpec must be the LANES entry for the selected lane, not a local stand-in.
+    assert.ok(source.includes('const laneSpec = LANES[lane];'), 'laneSpec must come from the shared LANES mapping');
   });
 
   it('never writes to applications directly', async () => {
@@ -137,7 +140,60 @@ describe('what the page must still do', () => {
 
   it('still selects id and status with the joined job', async () => {
     // The card needs the real application id for the button; status stays per the orchestrator rule.
-    assert.ok(source.includes(".select('id, status, job:job_id(*)')"), 'the discovered query must keep id, status and the job join');
+    // created_at joins them because it is the keyset cursor for Load more.
+    assert.ok(source.includes(".select('id, status, created_at, job:job_id(*)')"), 'the discovered query must keep id, status and the job join');
+  });
+});
+
+describe('lane queries and paging', () => {
+  it("list and HEAD count both filter on the selected lane's status", () => {
+    // Two .eq calls on laneSpec.status: the list and the count describe the same set.
+    assert.equal(source.match(/\.eq\('status', laneSpec\.status\)/g)?.length, 2, 'both queries must filter on laneSpec.status');
+    // No hard-coded status filter left over from the single-lane page.
+    assert.equal(source.includes(".eq('status', 'discovered')"), false, 'a hard-coded discovered filter would ignore the lane switch');
+  });
+
+  it('pages by keyset on (created_at desc, id asc), not by offset', () => {
+    // The order keysetFilter mirrors: newest first, then id ascending as the unique tie-break.
+    assert.match(source, /\.order\('created_at', \{ ascending: false \}\)\s*(\/\/[^\n]*\s*)*\.order\('id', \{ ascending: true \}\)/, 'the list must order by created_at desc then id asc');
+    // Load more continues after the last loaded row; an offset would skip rows that left the lane.
+    assert.ok(source.includes('query = query.or(cursor);'), 'Load more must apply the keyset cursor');
+    // No offset paging left behind.
+    assert.equal(source.includes('.range('), false, 'offset paging skips rows that change status between pages');
+  });
+
+  it('a stale-lane load is refused before it claims a load sequence', () => {
+    // The first statement of loadData: a reload built for another lane (a Send settling after a
+    // switch) returns before ++loadSeq, so it cannot supersede the current lane's load.
+    assert.match(source, /const loadData = useCallback\(async \(mode: LoadMode = 'full'\) => \{\s*(\/\/[^\n]*\s*)*if \(!isCurrentLane\(lane, laneRef\.current\)\) return;\s*(\/\/[^\n]*\s*)*const seq = \+\+loadSeq\.current;/, 'loadData must check the lane before claiming a sequence');
+    // The ref moves at click time, before React re-renders, so an in-flight settle sees the new lane.
+    assert.ok(source.includes('laneRef.current = key;'), 'the lane switch must update laneRef synchronously');
+  });
+
+  it('a full load clears the old lane\'s total and rows before its first await', () => {
+    // The loadData text up to its first await.
+    const start = source.indexOf('const loadData = useCallback(');
+    // Everything before the first await as code (`= await `), so "every await" in a comment cannot end it early.
+    const head = source.slice(start, source.indexOf('= await ', start));
+    // Without these, the old lane's total and cards show under the new label, and stay on a failed read.
+    assert.ok(head.includes('setLaneTotal(null);') && head.includes('setItems([]);'), 'a full load must clear total and items before awaiting');
+  });
+
+  it('Load more renders only while hasMoreRows says rows remain', () => {
+    // The button's guard is the tested helper, so it hides when loaded === total.
+    assert.match(source, /hasMoreRows\(items\.length, laneTotal\) && \(/, 'Load more must be guarded by hasMoreRows');
+  });
+
+  it('the sort control states that it covers only the loaded rows', () => {
+    // A client sort over one page of thousands is honest only when it says so.
+    assert.match(source, /Sorts the \{loadedOfText\(items\.length, laneTotal\)\}/, 'the sort must say it covers the loaded rows');
+  });
+
+  it('a lane switch claims a new load sequence, so a slow Load more cannot append into the new lane', () => {
+    // Load more runs through loadData('more'), which claims loadSeq like every other load.
+    assert.ok(source.includes("void loadData('more')"), 'Load more must go through loadData so the sequence guard covers it');
+    // loadData is rebuilt per lane and the effect reruns it, which claims a newer sequence.
+    assert.match(source, /useEffect\(\(\) => \{\s*(\/\/[^\n]*\s*)*void loadData\(\);\s*\}, \[loadData\]\);/, 'the lane change must trigger a fresh loadData');
   });
 });
 
@@ -154,10 +210,10 @@ describe('loadData request-sequence guard', () => {
     const start = source.indexOf('const loadData = useCallback(');
     // Fail loudly here instead of slicing from -1 and testing the wrong text.
     assert.ok(start !== -1, 'loadData must still be declared as a useCallback');
-    // The first empty-deps close after the opening is loadData's own (the effect uses [loadData]).
-    const end = source.indexOf('}, []);', start);
+    // loadData depends on the lane only (the effect uses [loadData]), so this close is its own.
+    const end = source.indexOf('}, [lane]);', start);
     // Same reason: an unmatched close would make every check below vacuous.
-    assert.ok(end !== -1, 'loadData must close with an empty dependency list');
+    assert.ok(end !== -1, 'loadData must close with a [lane] dependency list');
     // Split on \r?\n because the page is CRLF; drop whole-line comments, keep code.
     return source
       .slice(start, end)
