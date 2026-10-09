@@ -140,9 +140,14 @@ robots rules"; a null-check passes `'{}'`.)
 - Every migration carries a comment saying **why it exists**. That's what stops someone
   "simplifying" it back into the bug.
 
-**Open security gap (verified 2026-10-08):** `advance_application_status` takes `p_agent`
-from the caller and sets it as the acting agent with no identity check, and EXECUTE is
-granted to `anon`/`authenticated`. A browser can claim to be `auditor` or `applier`.
+**Open security gap (re-verified 2026-10-09):** browser, edge and worker all call as the same
+`authenticated` app user, so `auth.uid()` cannot tell a browser from an agent. The only
+discriminator is the `x-applyy-agent-key` header, checked by `applyy_internal.agent_key_state()`
+inside `advance_application_status`, `claim_applications` and `release_application_claim`.
+**While `applyy_internal.agent_key` is empty the check only warns**, so a browser can still
+claim `auditor`/`applier`. Seeding the key closes it. `sweep_stale_claims()` has no key check at all.
+`anon` has no EXECUTE on these. Re-check:
+`select oid::regprocedure, has_function_privilege('anon',oid,'execute'), position('agent_key_state' in prosrc)>0 from pg_proc where proname in ('advance_application_status','sweep_stale_claims')`.
 
 ## 8. Code conventions
 
