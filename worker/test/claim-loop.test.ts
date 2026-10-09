@@ -8,7 +8,24 @@
 // and fits. Splitting this loop into a matrix of parallel jobs is the obvious
 // speed-up and it multiplies the billed minutes by 35.
 import { describe, expect, it, vi } from 'vitest';
-import { parseMaxSubmits, parseOnlyApplicationId, runApplierBatch, type RunGateway } from '../src/claim-loop.ts';
+import {
+  // The cap parser, tested directly below.
+  parseMaxSubmits,
+  // The APPLY_ONLY_ID parser, tested directly below.
+  parseOnlyApplicationId,
+  // Renamed: the local runApplierBatch below wraps it with a default robots check.
+  runApplierBatch as runApplierBatchRequired,
+  // Its shape types the wrapper, so the wrapper cannot drift from the real input.
+  type ClaimLoopInput,
+  // The fake gateway's contract.
+  type RunGateway,
+} from '../src/claim-loop.ts';
+
+// checkRobots is REQUIRED on the real loop. These tests are about claiming and pacing, so
+// they default to "allow"; a robots test passes its own (the spread lets it win).
+const runApplierBatch = (input: Omit<ClaimLoopInput, 'checkRobots'> & Partial<Pick<ClaimLoopInput, 'checkRobots'>>) =>
+  // The default never touches the network: it answers allow without fetching.
+  runApplierBatchRequired({ checkRobots: async () => ({ kind: 'allow', reason: 'test default', crawlDelayMs: null }), ...input });
 import type { ApplicationPage } from '../src/apply-one.ts';
 import type { AnswerBankRow } from '@applyy/shared-types';
 

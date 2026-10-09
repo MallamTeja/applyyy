@@ -134,6 +134,8 @@ test('a full dry-run batch fills, screenshots and submits NOTHING', async () => 
     openPage: async () => createPlaywrightPage(await browser.newPage()),
     // The real render path, not a stub: this is the wiring under test.
     renderResume: renderer.render,
+    // Allow without fetching: robots is not under test here (apply-one-robots.test.ts), and a real fetch would hit the network.
+    checkRobots: async () => ({ kind: 'allow', reason: 'e2e: robots not under test', crawlDelayMs: null }),
     // DRY_RUN deliberately unset — the same state a runner has when a workflow
     // references a secret that does not exist.
     env: {},

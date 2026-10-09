@@ -399,6 +399,13 @@ export const BLOCK_REASONS = [
   /** Submit was reached but the outcome could not be confirmed from the page. */
   'submission_unconfirmed',
   'other',
+  /**
+   * The job host's robots.txt refused the applier's product token, or gave no readable
+   * answer (fetch error, 5xx, an HTML soft-200). Parked BEFORE the page is opened, so
+   * nothing was sent. LAST because migration 20261009233000 APPENDS it to the enum, and
+   * declaration order must match (enum-parity.test.ts).
+   */
+  'robots_refused',
 ] as const;
 /** Union of every legal `applications.block_reason` value. */
 export type BlockReason = (typeof BLOCK_REASONS)[number];

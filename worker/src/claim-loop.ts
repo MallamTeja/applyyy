@@ -20,6 +20,10 @@ import {
   type ApplierGateway,
   type ClaimedApplication,
   type ResumeRenderer,
+  // The robots port the loop requires and hands through untouched.
+  type RobotsCheck,
+  // Only to type formatDryRunLine's argument as the dry-run arm.
+  type ApplyOutcome,
 } from './apply-one.ts';
 import { canStartAnotherApplication, type RunWindowLimits } from './run-window.ts';
 // Type-only so the claim loop gains no runtime dependency on the profile module.
@@ -67,6 +71,9 @@ export interface ClaimLoopInput {
   // document it renders on, so sharing the form's page would erase the form.
   // That is enforced where the renderer is built, not by convention here.
   readonly renderResume: ResumeRenderer;
+  // The robots.txt gate, passed straight through to applyToOne. REQUIRED: a loop that
+  // could be built without it would be an applier that never asks.
+  readonly checkRobots: RobotsCheck;
   readonly env: SubmissionEnv;
   // Epoch seconds. Injected rather than read from Date.now() so budget
   // behaviour can be tested at a boundary without fake timers.
@@ -94,6 +101,9 @@ export interface RunSummary {
   readonly blocked: number;
   readonly dryRun: number;
   readonly outcomeUnknown: number;
+  // Rows robots.txt kept us from opening. Its own tally: a certain no-send is neither a
+  // block a human must answer nor an unknown a human must check.
+  readonly robotsRefused: number;
   readonly errors: number;
   // Always populated, because "we did 12 today" must be distinguishable from
   // "the queue only had 12" and from "the kill switch was off" (§14).
@@ -157,8 +167,30 @@ export function parseMaxSubmits(raw: string | undefined): number {
   return value;
 }
 
+/**
+ * The one log line a dry run leaves: `[applyy] dry run <id>: wouldSubmit=<bool> blockers=<n> [<label>: <reason>, …]`.
+ *
+ * Exported and pure so the format is tested directly. Reads only the verdict and each
+ * blocker's label and reason: a label is the form's question text, never the answer.
+ */
+export function formatDryRunLine(
+  applicationId: string,
+  outcome: Extract<ApplyOutcome, { kind: 'dry_run_complete' }>,
+): string {
+  // "label: reason" per blocker, comma-separated, in the order the planner found them.
+  const listed = outcome.blockers.map((blocker) => `${blocker.label}: ${blocker.reason}`).join(', ');
+  // The count is printed even at zero, so "no blockers" is stated, not implied by absence.
+  return `[applyy] dry run ${applicationId}: wouldSubmit=${outcome.wouldSubmit} blockers=${outcome.blockers.length} [${listed}]`;
+}
+
+// Compile-time exhaustiveness; at runtime it throws, which the per-row catch counts as an error.
+function assertNever(value: never): never {
+  // Reached only if a value outside the union arrives, e.g. from an untyped caller.
+  throw new Error(`unhandled apply outcome: ${JSON.stringify(value)}`);
+}
+
 export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary> {
-  const { gateway, openPage, env, clock, renderResume } = input;
+  const { gateway, openPage, env, clock, renderResume, checkRobots } = input;
   // THE PER-RUN SUBMIT CAP, parsed BEFORE the run row opens, so a bad value stops the run
   // with nothing opened and nothing claimed (a startup failure, not a mid-run one).
   const maxSubmits = parseMaxSubmits(env['APPLY_MAX_SUBMITS']);
@@ -180,6 +212,8 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
   let blocked = 0;
   let dryRun = 0;
   let outcomeUnknown = 0;
+  // Counted apart from outcomeUnknown, so a robots refusal never reads as "maybe sent".
+  let robotsRefused = 0;
   let errors = 0;
   let stoppedReason = 'queue drained';
   // Distinguishes a deliberate no-op from a failure when the run is closed.
@@ -358,15 +392,26 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
         const page = await openPage();
         try {
           // The same profile object is reused for every row, which is the point of fetching it once.
-          const outcome = await applyToOne({ row, page, gateway, answers, profile, env, renderResume });
+          const outcome = await applyToOne({ row, page, gateway, answers, profile, env, renderResume, checkRobots });
 
           // Counted separately rather than collapsed into a success/failure
           // pair, because these four mean genuinely different things to the
           // person reading the health page.
           if (outcome.kind === 'submitted') submitted += 1;
           else if (outcome.kind === 'blocked') blocked += 1;
-          else if (outcome.kind === 'dry_run_complete') dryRun += 1;
-          else outcomeUnknown += 1;
+          // Counted AND described: a bare count cannot say whether the form was fully filled.
+          else if (outcome.kind === 'dry_run_complete') {
+            // One line per dry run: the verdict plus each blocker's label and reason.
+            dryRun += 1;
+            // Labels only (question text), never answer values or profile data.
+            console.log(formatDryRunLine(row.id, outcome));
+          }
+          // Not opened, so not sent: its own tally, and (below) it trips no breaker.
+          else if (outcome.kind === 'robots_refused') robotsRefused += 1;
+          // Named rather than a bare else, so a new outcome kind cannot be miscounted as unknown.
+          else if (outcome.kind === 'submit_outcome_unknown') outcomeUnknown += 1;
+          // Exhaustiveness: a new ApplyOutcome arm fails to compile here until it is counted.
+          else assertNever(outcome);
 
           // TRIP THE BREAKER on the first outcome that would repeat for every row: an
           // unconfirmed or failed submit (we cannot tell whether it went out), or a captcha
@@ -491,6 +536,8 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
       blocked,
       dryRun,
       outcomeUnknown,
+      // Reported beside outcomeUnknown so the run log separates "not sent" from "maybe sent".
+      robotsRefused,
       errors,
       stoppedReason,
     };

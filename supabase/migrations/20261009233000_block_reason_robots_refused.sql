@@ -1,0 +1,26 @@
+-- ============================================================================
+-- Add `robots_refused` to the `block_reason` enum.
+--
+-- WHY IT EXISTS. The worker now consults the job host's robots.txt BEFORE it
+-- opens an application page (worker/src/apply-one.ts, the robots gate). When
+-- the answer is "no", or is not a readable answer at all (fetch error, 5xx,
+-- an HTML soft-200 served as /robots.txt), a live run parks the row at
+-- `blocked_needs_human` and must say WHY in `block_reason`, which is this enum.
+--
+-- WHY A NEW VALUE RATHER THAN `other`. `other` would park the row with no
+-- reason the dashboard can filter or explain, and the operator action differs
+-- from every existing reason: no answer to add, no captcha to solve, the
+-- employer's host has asked automated clients to stay away (or could not tell
+-- us). A distinct reason is what lets a human see that and apply by hand.
+--
+-- WHY ITS OWN FILE. `add value` cannot be USED until its transaction commits,
+-- and the CLI wraps each migration in one; nothing here uses the value, and
+-- nothing else is bundled with it, so there is no partial-apply path.
+--
+-- `if not exists` makes a re-run a no-op. No BEFORE/AFTER: the value APPENDS,
+-- which is the order packages/shared-types BLOCK_REASONS mirrors (and the
+-- order enum-parity.test.ts asserts).
+-- ============================================================================
+
+-- Appended after 'other'; the TS mirror lists it last for the same reason.
+alter type public.block_reason add value if not exists 'robots_refused';

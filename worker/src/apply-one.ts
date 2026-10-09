@@ -2,7 +2,8 @@
 // that can cause anything to be sent to a real employer.
 //
 // THE ORDERING IS THE DESIGN. Everything that can be learned about a form is
-// learned while the row is still `approved`: navigate, detect anti-bot walls,
+// learned while the row is still `approved`: ask the host's robots.txt (before any
+// request to the page itself), navigate, detect anti-bot walls,
 // extract fields, plan the fill, type the values, screenshot. Only then does
 // the row enter `applying`, and it leaves again immediately after. The window
 // in which a crash produces an UNKNOWN real-world outcome therefore contains
@@ -38,10 +39,36 @@ import {
 // produces it, so the digest this file records cannot drift from the digest that
 // was computed over the bytes.
 import type { RenderedResume } from './render-resume-pdf.ts';
+// The robots gate, by RELATIVE path, not the bare '@applyy/master-robots' specifier: a bare
+// one needs a worker/package.json entry, which rewrites pnpm-lock.yaml. Same technique as
+// scripts/capture-fixture.ts; the package has no dependencies, so nothing needs installing.
+import { checkRobots, type RobotsCache, type RobotsVerdict } from '../../packages/master-robots/src/index.ts';
 
 // This worker's identity in the status graph. Named once so no call site can
 // quietly claim to be a different agent and slip through an edge it may not use.
 const ACTING_AGENT: AgentName = 'applier';
+
+// The RFC 9309 PRODUCT TOKEN robots.txt groups are matched against. Its own token, not
+// the scout's: a site may welcome discovery yet bar automated form submission, and one
+// shared token would make those two answers impossible to give.
+export const APPLIER_ROBOTS_TOKEN = 'applyy-applier';
+
+// The robots port: one URL in, the gate's closed verdict out. A function rather than
+// the gate itself so tests answer with a fake and never touch the network.
+export type RobotsCheck = (url: string) => Promise<RobotsVerdict>;
+
+/**
+ * The production robots check: master-robots' gate under the applier's token.
+ *
+ * One cache per run (the caller makes one check per batch), keyed by origin inside the
+ * gate, so a batch of rows on one board fetches its robots.txt once, not once per row.
+ */
+export function createRobotsCheck(): RobotsCheck {
+  // Owned here and nowhere else; the gate itself holds no global state.
+  const cache: RobotsCache = new Map();
+  // The token is fixed, so no caller can pass a User-Agent header by mistake.
+  return (url) => checkRobots(url, APPLIER_ROBOTS_TOKEN, { cache });
+}
 
 /**
  * A choice control offered none of the wanted option, AND the filler selected nothing.
@@ -241,6 +268,9 @@ export interface ApplyToOneInput {
   // right in every detail and never runs. Required means the compiler refuses
   // any call site that forgets it.
   readonly renderResume: ResumeRenderer;
+  // REQUIRED for the same reason as renderResume: an optional gate is a gate that can
+  // have no caller. Required means a call site that forgets it does not compile.
+  readonly checkRobots: RobotsCheck;
 }
 
 /**
@@ -276,6 +306,11 @@ export type ApplyOutcome =
       readonly reason: string;
     }
   | { readonly kind: 'submitted' }
+  // The host's robots.txt said no, could not be read, or said "come back later". The page
+  // was NEVER opened, so this is a certain no-send, not an unknown. `action` says what
+  // happened to the row: parked at blocked_needs_human (a live, definite refusal) or
+  // handed back untouched at `approved` (a dry run, a wait, or an indeterminate outage).
+  | { readonly kind: 'robots_refused'; readonly action: 'parked' | 'released'; readonly reason: string }
   | { readonly kind: 'blocked'; readonly reason: BlockReason; readonly blockers: readonly ApplicationBlocker[] }
   // The submit threw. We do NOT know whether it landed, so no status is
   // written and the sweeper is left to route the row to a human.
@@ -305,6 +340,53 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
       : requested;
 
   // ---- Everything below happens while the row is still `approved` ----------
+
+  // THE ROBOTS GATE, before goto, because goto IS the request robots.txt governs: a
+  // check after it would ask permission for a fetch already made. Only `allow` passes.
+  // Every other verdict, including "could not read the policy", stops here (fail closed).
+  const robots = await input.checkRobots(row.applyUrl);
+  // Anything but an explicit allow ends this application before the page opens.
+  if (robots.kind !== 'allow') {
+    // One readable line for the event log, naming the gate's machine fact (source or wait).
+    const reason =
+      robots.kind === 'refuse'
+        ? `robots.txt refused (${robots.source}): ${robots.reason}`
+        : `robots.txt asked to wait ${robots.waitMs}ms: ${robots.reason}`;
+    // A live refusal parks the row for a human, in ONE write, exactly like the pre-click
+    // blocker path below: approved -> blocked_needs_human. Nothing was opened or sent.
+    // EXCEPT `indeterminate` (timeout, 5xx, network drop): an outage, not an answer. Parking
+    // it would turn one flaky board into a manual task per row (Teja, 2026-10-09: no manual
+    // parks from a transient outage), so it is released below and asked again next run.
+    // Still fail-closed: the page is not opened either way.
+    if (robots.kind === 'refuse' && mode.submits && robots.source !== 'indeterminate') {
+      // The same guarded edge every other park uses, so the transition graph is enforced.
+      await guardedAdvance(gateway, {
+        applicationId: row.id,
+        from: 'approved',
+        to: 'blocked_needs_human',
+        agent: ACTING_AGENT,
+        detail: {
+          // The reason code the dashboard filters on (migration 20261009233000).
+          block_reason: 'robots_refused' satisfies BlockReason,
+          // Machine fact: policy | refused-by-host | indeterminate | not-robots-txt.
+          robots_source: robots.source,
+          // The gate's human-readable explanation, for the operator.
+          robots_reason: robots.reason,
+          // No page was opened, so there is no screenshot. Null is accepted: p_detail
+          // goes into the event only (see THE EVIDENCE WRITE below).
+          screenshot_storage_path: null,
+        },
+      });
+      // Parked: the row now waits for a human, who can apply by hand.
+      return { kind: 'robots_refused', action: 'parked', reason };
+    }
+    // A dry run never writes status, a wait is "not yet", and an indeterminate is "could
+    // not ask": none is a "no", so each hands the row back untouched at `approved`, and a
+    // later run asks again.
+    await gateway.releaseClaim(row.id, mode.submits ? reason : `dry_run: ${reason}`);
+    // Released: nothing written, nothing opened.
+    return { kind: 'robots_refused', action: 'released', reason };
+  }
 
   await page.goto(row.applyUrl);
 

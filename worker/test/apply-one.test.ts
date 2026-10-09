@@ -14,7 +14,9 @@
 // composite test that the aria-hidden regression turned out to be.
 import { describe, expect, it, vi } from 'vitest';
 import {
-  applyToOne,
+  // Renamed: the local applyToOne below wraps it with a default robots check.
+  applyToOne as applyToOneRequired,
+  type ApplyToOneInput,
   // The typed "provably selected nothing" error, the only one that may leave an optional EEO field blank.
   OptionNotFoundError,
   type ApplicationPage,
@@ -23,6 +25,13 @@ import {
   type ResumeRenderer,
   type SubmitResult,
 } from '../src/apply-one.ts';
+
+// The robots gate is REQUIRED on the real function. These tests are about the form, not
+// robots, so they get an "allow" by default; a test can still pass its own checkRobots.
+// Robots behaviour itself is tested in apply-one-robots.test.ts.
+const applyToOne = (input: Omit<ApplyToOneInput, 'checkRobots'> & Partial<Pick<ApplyToOneInput, 'checkRobots'>>) =>
+  // Spread last, so an explicit checkRobots in a test wins over the default.
+  applyToOneRequired({ checkRobots: async () => ({ kind: 'allow', reason: 'test default', crawlDelayMs: null }), ...input });
 import type { FormField } from '../src/extract-fields.ts';
 // MasterProfile for the employer-wiring tests, which hand the planner a work history.
 import type { AnswerBankRow, MasterProfile, ResolvedResume } from '@applyy/shared-types';
