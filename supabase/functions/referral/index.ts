@@ -26,6 +26,8 @@ import { createAppUserClient } from "../_shared/db/client.ts";
 // Import Gemini API transport helper with multi-key pool failover and token pacing.
 // Handles rate limits, transparent 429 key rotations, and token pacing automatically.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
+// The shared failure description (reason, status, short redacted detail).
+import { describeGeminiFailure } from "../_shared/gemini/failure-message.ts";
 // Caller auth and the fail-closed kill switch, shared with every agent that spends quota.
 import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 // Import shared contracts type re-exports for system schema stability.
@@ -450,9 +452,10 @@ Job Description Context: ${job.description_raw ? job.description_raw.slice(0, 10
         prompt: { systemInstruction, userContent, responseSchema },
       });
 
-      // A transport failure stores nothing; the reason code is safe to report.
+      // A transport failure stores nothing; reason, status and a capped, key-redacted detail
+      // are safe to report and tell one http_error from another.
       if (!outcome.ok) {
-        warnings.push(`Gemini call failed for ${app.id} (${outcome.reason}); nothing stored, will retry.`);
+        warnings.push(`Gemini call failed for ${app.id} (${describeGeminiFailure(outcome)}); nothing stored, will retry.`);
       } else {
         // Shape-validated; null for anything that is not all four non-blank strings.
         const parsed = parseReferralReply(outcome.data.candidates?.[0]?.content?.parts?.[0]?.text);

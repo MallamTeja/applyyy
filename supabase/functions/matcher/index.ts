@@ -49,6 +49,8 @@ import { createAppUserClient } from "../_shared/db/client.ts";
 // Import Gemini API transport middleware with key pool failover and token pacer.
 // Manages 429 retries, least-recently-used key rotation, and rate limiting.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
+// One failure line for every Gemini caller: reason, HTTP status, short redacted detail.
+import { formatGeminiFailure } from "../_shared/gemini/failure-message.ts";
 // Import Matcher scorer factory and prompt definitions.
 // Combines prompt formatting, candidate master profile context, and rubric scoring.
 import { createScorer, type ScorerPrompt } from "../_shared/match/scorer.ts";
@@ -353,7 +355,9 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
       // Check if Gemini API call execution or key claim failed.
       if (!outcome.ok) {
         // Throw Error object with detailed failure reason string to trigger retry branch.
-        throw new Error(`gemini_call_failed: ${outcome.reason}`);
+        // Reason AND status AND a capped, key-redacted detail, so the run's error_detail can
+        // tell a 400 from an all-keys-rejected 403 from a non-JSON 200 (all "http_error").
+        throw new Error(formatGeminiFailure(outcome));
       }
       // Extract generated text string from first candidate part in API response payload.
       const text = outcome.data.candidates?.[0]?.content?.parts?.[0]?.text;

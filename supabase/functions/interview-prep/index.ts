@@ -27,6 +27,8 @@ import { createAppUserClient } from "../_shared/db/client.ts";
 import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 // Gemini transport with key-pool failover. WHY: handles 429 rotation for us.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
+// WHY: the shared failure description (reason, status, short redacted detail).
+import { describeGeminiFailure } from "../_shared/gemini/failure-message.ts";
 // Prompt builder. WHY: fences the untrusted job text and carries the response schema.
 import { buildInterviewPrepPrompt } from "../_shared/interview-prep/prompt.ts";
 // The stored pack's type. WHY: the validated parse result must match it structurally.
@@ -240,8 +242,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
       const outcome = await generateGeminiContent(db, { prompt: promptPayload });
       // WHY: a failed call stores nothing; the next run retries.
       if (!outcome.ok) {
-        // WHY: the reason code is safe to report; `detail` stays in the log.
-        warnings.push(`Gemini call failed for ${app.id} (${outcome.reason}); nothing stored, will retry.`);
+        // WHY: reason, status and a capped, key-redacted detail are safe to report and tell one
+        // http_error from another; the full detail still goes to the log below.
+        warnings.push(`Gemini call failed for ${app.id} (${describeGeminiFailure(outcome)}); nothing stored, will retry.`);
         // WHY: the detail can carry upstream error bodies.
         console.warn("[interview-prep] gemini failure:", outcome.reason, outcome.detail);
       } else {

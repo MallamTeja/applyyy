@@ -18,6 +18,8 @@
 import { createAppUserClient } from "../_shared/db/client.ts";
 // Gemini key-pool transport with 429 rotation.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
+// The shared failure description (reason, status, short redacted detail), without its prefix.
+import { describeGeminiFailure } from "../_shared/gemini/failure-message.ts";
 // Caller auth and the fail-closed kill switch, shared by every agent that spends quota.
 import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 // Shared CORS headers, plus the boundary that keeps them on an uncaught 500.
@@ -158,10 +160,12 @@ Deno.serve(withErrorBoundary("applyy-cover-letter", async (req: Request): Promis
       async (prompt) => {
         // The pool call; never throws for an HTTP failure, returns a reason instead.
         const outcome = await generateGeminiContent(db, { prompt });
-        // Reason code only; `detail` can carry upstream bodies and stays in the log.
+        // Reason plus status plus a capped, key-redacted detail (describeGeminiFailure makes
+        // the detail safe to store); the full detail still goes to the log.
         if (!outcome.ok) {
           console.warn("[applyy-cover-letter] gemini failure:", outcome.reason, outcome.detail);
-          return { ok: false, reason: outcome.reason };
+          // run.ts adds the "gemini_call_failed: " prefix itself, so the unprefixed form here.
+          return { ok: false, reason: describeGeminiFailure(outcome) };
         }
         // The schema-constrained reply is in the first candidate's first part.
         return { ok: true, text: outcome.data.candidates?.[0]?.content?.parts?.[0]?.text };

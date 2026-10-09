@@ -325,13 +325,15 @@ export async function callGeminiWithFailover<T>(
         ? parseRetryAfterSeconds(execResult.rawResponse, execResult.errorBody)
         : null;
 
-      const errorText =
-        typeof execResult.errorBody === "object" && execResult.errorBody !== null
-          ? JSON.stringify(execResult.errorBody)
-          : execResult.statusText ?? "429 Too Many Requests";
+      // Built like every other last_error: status line plus Google's error status/message via
+      // withGoogleError, which redacts key shapes and caps at 200 chars. This branch used to
+      // store JSON.stringify(errorBody) raw and uncapped — the one stored write that skipped
+      // the redaction every other branch gets (reviewer finding N2, 2026-10-09). `||` (not
+      // `??`) on statusText: HTTP/2 yields "", which would leave "HTTP 429: " bare.
+      const errorText = withGoogleError(`HTTP 429: ${execResult.statusText || "Too Many Requests"}`, execResult.errorBody);
 
       // Tagged so a 429 names the model whose quota ran out (quotas are per model).
-      await reportResult(db, keyIndex, false, retryAfterSeconds, withModel(`HTTP 429: ${errorText}`, currentModel));
+      await reportResult(db, keyIndex, false, retryAfterSeconds, withModel(errorText, currentModel));
 
       options.onKeyRotated?.({
         fromKeyIndex: keyIndex,
@@ -373,6 +375,11 @@ export async function callGeminiWithFailover<T>(
     // LRU skips it and a human has time to look, then rotate to the next key. NO backoff sleep:
     // this is not an overload, so waiting buys nothing. Same maxRetries budget as everything else.
     // 400 is deliberately NOT here: a malformed request fails identically on every key.
+    // TODO(2026-10-09, not built): one 400 IS per-key — `API_KEY_INVALID` (an expired or deleted
+    // key; Google returns it as 400 INVALID_ARGUMENT). Today it falls to the terminal branch
+    // below with no rotation and no cooldown, so one dead key fails calls until the LRU moves on.
+    // The fix would match error.details[].reason === "API_KEY_INVALID" here and treat it like a
+    // 403. Left as a note on purpose (orchestrator's scope call); every other 400 stays terminal.
     if (execResult.status === 401 || execResult.status === 403) {
       const detail = withGoogleError(`HTTP ${execResult.status}: ${execResult.statusText || "Key rejected"}`, execResult.errorBody);
       // Tagged at the write only; `detail` itself stays untagged for the returned outcome.

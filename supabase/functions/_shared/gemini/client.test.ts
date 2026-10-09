@@ -1067,3 +1067,39 @@ test("only a 503 switches: a 429 (4xx) and a 500 stay on the primary, then the 5
   // The first three attempts stay on the primary; only the attempt after the 503 moves.
   assert.deepEqual(rig.models(), ["m-primary", "m-primary", "m-primary", "m-fallback"]);
 });
+
+test("429 last_error goes through withGoogleError: key shapes redacted, size bounded (review N2)", async () => {
+  // The 429 branch used to store JSON.stringify(errorBody) raw: every other branch redacts
+  // key shapes and caps at 200 chars, and last_error is shown on the Health page.
+  const reportCalls: Array<{ fn: string; args: unknown }> = [];
+  // Key 1 rate-limited, key 2 succeeds, as in the test above.
+  const db = fakeClient({ claimSequence: [{ data: 1, error: null }, { data: 2, error: null }], reportCalls });
+  // A FAKE key-shaped token built here, never a real key.
+  const fakeKey = "AIza" + "x".repeat(35);
+  // An upstream body echoing the key, plus a large details array a raw stringify would store whole.
+  const errorBody = {
+    error: { status: "RESOURCE_EXHAUSTED", message: `Quota exceeded for ${fakeKey}`, details: Array.from({ length: 50 }, (_, i) => ({ i, pad: "y".repeat(40) })) },
+  };
+  await callGeminiWithFailover(db, {
+    readKey: keysFrom({ 1: "k1", 2: "k2" }),
+    // No pacing delay; this test is about the stored text only.
+    pacer: new GeminiPacer({ minIntervalMs: 0, clock: createVirtualClock(1000) }),
+    maxRetries: 3,
+    // 429 on key 1 with the body above, success on key 2.
+    execute: async (_apiKey, keyIndex): Promise<GeminiExecutionResult<{ content: string }>> =>
+      keyIndex === 1
+        ? { ok: false, status: 429, statusText: "Too Many Requests", errorBody, rawResponse: new Response("", { status: 429 }) }
+        : { ok: true, data: { content: "ok" } },
+  });
+  // The failure report for key 1.
+  const failure = reportCalls.find((c) => c.fn === "report_gemini_result" && (c.args as { p_success: boolean }).p_success === false);
+  // It exists, or the assertions below would pass on nothing.
+  assert.ok(failure);
+  const stored = (failure.args as { p_error: string }).p_error;
+  // The status line leads, with Google's status/message in brackets, as on every other branch.
+  assert.ok(stored.startsWith("HTTP 429: Too Many Requests [RESOURCE_EXHAUSTED - Quota exceeded for [redacted-key]"), stored);
+  // The fake key never reaches the stored row.
+  assert.ok(!stored.includes("AIza"));
+  // Bounded: the 50-entry details array is not dumped (cap 200 + status line + model tag).
+  assert.ok(stored.length < 320, `stored ${stored.length} chars`);
+});

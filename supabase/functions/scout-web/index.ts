@@ -15,6 +15,8 @@ import { getAdapter } from "../_shared/ats/registry.ts";
 import { httpJson } from "../_shared/http/transport.ts";
 // Gemini with key failover; the model name is deliberately left to the client's default.
 import { generateGeminiContent, type GenerateGeminiOptions } from "../_shared/gemini/client.ts";
+// One failure line for every Gemini caller: reason, HTTP status, short redacted detail.
+import { describeGeminiFailure, formatGeminiFailure } from "../_shared/gemini/failure-message.ts";
 // The blanking guard scout-ats uses; keeps one upsert from erasing stored fields.
 import { planJobUpsertGroups } from "../_shared/screen/upsert-plan.ts";
 // The robots gate, reached by relative path (as master-robots itself reaches into
@@ -94,9 +96,13 @@ function makeSearch(db: Parameters<typeof generateGeminiContent>[0]): SearchFn {
     if (!outcome.ok && outcome.reason === "all_keys_cooling") throw new QuotaExhaustedError();
     // Gemini stayed overloaded or unreachable through every retry: its own class, because the
     // remedy ("try again in a few minutes") differs from both quota and a real failure.
-    if (!outcome.ok && outcome.reason === "upstream_unavailable") throw new UpstreamUnavailableError(outcome.detail ?? "no_detail");
+    // The shared description (status + capped, redacted detail), so this branch's error_detail
+    // goes through the same sanitising as every other Gemini failure line.
+    if (!outcome.ok && outcome.reason === "upstream_unavailable") throw new UpstreamUnavailableError(describeGeminiFailure(outcome));
     // Any other failure is thrown so the handler records a failed run, not an empty success.
-    if (!outcome.ok) throw new Error(`gemini_${outcome.reason}`);
+    // Same shared line as every other caller (reason, status, short redacted detail), so a
+    // failed scout-web run says WHICH http_error it was.
+    if (!outcome.ok) throw new Error(formatGeminiFailure(outcome));
     // First candidate only; absent means an empty answer, which the shape check will reject.
     const candidate = outcome.data.candidates?.[0];
     // All text parts joined; core.ts mines URLs from it.

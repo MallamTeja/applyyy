@@ -12,6 +12,8 @@
 
 // The Gemini key-pool transport.
 import { generateGeminiContent } from "../gemini/client.ts";
+// One failure line for every Gemini caller: reason, HTTP status, short redacted detail.
+import { formatGeminiFailure } from "../gemini/failure-message.ts";
 // The fenced prompt builder and its types.
 import { buildFollowUpNudgePrompt, type BuildPromptParams, type FollowUpNudgeDraft } from "./prompt.ts";
 // The pure shape check, kept where `node --test` can pin it.
@@ -40,8 +42,9 @@ export async function generateFollowUpNudge(db: GeminiDb, params: BuildPromptPar
     if (!result.ok) {
       // `detail` can carry upstream bodies, so it stays in the log.
       console.error("[follow-up] gemini failed:", result.reason, result.detail ?? "");
-      // The closed reason code is safe to report.
-      return { ok: false, error: `gemini_call_failed: ${result.reason}` };
+      // Reason plus status plus a detail that is capped and key-redacted, so it is safe to
+      // report while still telling one http_error from another.
+      return { ok: false, error: formatGeminiFailure(result) };
     }
     // Optional at every hop: a safety-blocked response can omit any of them.
     const draft = parseNudgeReply(result.data.candidates?.[0]?.content?.parts?.[0]?.text);

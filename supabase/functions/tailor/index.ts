@@ -25,6 +25,8 @@
 import { createAppUserClient } from "../_shared/db/client.ts";
 // The model transport, with key-pool claiming, 429 failover and pacing already handled.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
+// One failure line for every Gemini caller: reason, HTTP status, short redacted detail.
+import { formatGeminiFailure } from "../_shared/gemini/failure-message.ts";
 // Which rows may be tailored at all. The guard against tailoring an empty posting.
 import { planTailorBatch } from "../_shared/tailor/tailor-batch.ts";
 // The shared reader-side liveness helpers, so every reader that adopts them names a lost
@@ -251,7 +253,9 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
       // A pool or transport failure is not a tailoring verdict. Thrown so the row is
       // recorded as an error rather than being persisted as a refusal, which would
       // blame the model for a quota problem.
-      if (!outcome.ok) throw new Error(`gemini_call_failed: ${outcome.reason}`);
+      // The message carries the HTTP status and a capped, key-redacted detail, so a 400, an
+      // all-keys-rejected 403 and a non-JSON 200 (all "http_error") stay distinguishable.
+      if (!outcome.ok) throw new Error(formatGeminiFailure(outcome));
       // Optional chaining at every hop because `noUncheckedIndexedAccess` is on and each
       // of these may genuinely be absent in a safety-blocked response.
       const text = outcome.data.candidates?.[0]?.content?.parts?.[0]?.text;
