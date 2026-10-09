@@ -1,0 +1,33 @@
+-- WHY THIS MIGRATION EXISTS
+-- New functions in applyy_internal were still created PUBLIC-executable. 20261008160000:118-120
+-- tried to stop that with `alter default privileges in schema applyy_internal revoke execute on
+-- functions from public`, but that statement is a no-op: a per-schema default can only ADD to
+-- the global default, never remove a global grant (PostgreSQL docs, ALTER DEFAULT PRIVILEGES).
+-- The PUBLIC grant comes from the built-in global default, so it has to be revoked globally.
+-- 20261008190000 fixed the functions that existed then; this fixes every function created later.
+--
+-- WHY NO GRANTS ARE NEEDED ALONGSIDE IT
+-- Measured live 2026-10-09: role postgres has NO global function default row, and it has
+-- per-schema rows in `public` and `storage` that grant EXECUTE explicitly to anon,
+-- authenticated and service_role. Per-schema rows ADD to the global default, so after this
+-- revoke a NEW function in public or storage still gets those three grants, and every RPC the
+-- app calls (all as `authenticated`) keeps working. A NEW function in applyy_internal, which has
+-- no per-schema row, gets only its owner's EXECUTE and is not callable by anon or authenticated
+-- until a migration grants it on purpose (as 20261008160000 does for agent_key_state).
+-- Default privileges apply only at CREATE: no EXISTING function's ACL changes, and CREATE OR
+-- REPLACE keeps the ACL it already has.
+--
+-- CAVEAT: EXTENSIONS
+-- Extensions here are installed as postgres (49 extension functions are owned by it). A future
+-- `create extension` into a schema with no per-schema row (e.g. `extensions`) will ship its
+-- functions without PUBLIC EXECUTE. If a client role needs one, grant it explicitly in that
+-- same migration. The failure is loud (permission denied), never silent.
+--
+-- ROLLBACK
+--   alter default privileges for role postgres grant execute on functions to public;
+--
+-- Re-runnable: revoking a grant the default no longer holds is a no-op, not an error.
+-- Must run as postgres (or a member of it); `supabase db push` does.
+
+-- Functions created by postgres from now on no longer default to PUBLIC EXECUTE, in any schema.
+alter default privileges for role postgres revoke execute on functions from public;
