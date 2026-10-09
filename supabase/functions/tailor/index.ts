@@ -40,6 +40,8 @@ import type { MasterProfile } from "../_shared/contracts/shared-types.ts";
 import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 // Shared CORS headers, plus the boundary that keeps them on an uncaught 500.
 import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
+// The shared `?application_id=` parser, so all five pipeline agents refuse a bad id identically.
+import { parseApplicationIdParam } from "../_shared/http/application-id.ts";
 // Per-invocation deadline: plans each Gemini call from the time left and stops between rows.
 import { createDeadline, deadlineNote, runBatchWithDeadline, shortenedBudgetNote, type CallOptions } from "../_shared/agent/deadline.ts";
 
@@ -101,6 +103,20 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
   const caller = await authorizeCaller(req, db, connection.userId);
   // 401 for no/invalid session, 403 for someone else's — the verdict carries which.
   if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });
+
+  // Optional single-row target. Read from the URL so the CLI can push ONE application through
+  // without waiting for it to reach the head of an oldest-first queue.
+  const target = parseApplicationIdParam(new URL(req.url).searchParams);
+  // A malformed id is REFUSED, never ignored: ignoring it would fall back to the whole
+  // queue and process rows the caller did not ask for (the fail-open this repo forbids).
+  // Checked BEFORE the agent_runs insert, so a bad request leaves no run row behind:
+  // nothing ran, and a `failed` row would tell the health page the agent broke.
+  if (target.kind === "invalid") {
+    // 400 with a named reason, so the caller sees what was wrong with its input.
+    return jsonResponse(400, { success: false, error: "invalid_application_id", detail: "application_id must be a UUID" });
+  }
+  // Null means "no target": the unchanged whole-queue behaviour.
+  const applicationId: string | null = target.kind === "valid" ? target.id : null;
 
   // Open the run row BEFORE the work, so an uncatchable death leaves a visible stuck
   // run rather than no trace at all — the documented design in supporting_tables.sql.
@@ -179,17 +195,7 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
   // The work queue. `scored` is the Tailor's only legal source
   // (status_transition_guard.sql:116), so this select IS the edge, expressed as a query.
   const batchSize = resolveBatchSize(new URL(req.url).searchParams.get("limit"));
-  // Optional single-row target. Read from the URL so the CLI can push ONE application through
-  // without waiting for it to reach the head of an oldest-first queue.
-  const rawApplicationId = new URL(req.url).searchParams.get("application_id");
-  // A malformed id is REFUSED, never ignored: ignoring it would fall back to the whole
-  // queue and process rows the caller did not ask for (the fail-open this repo forbids).
-  if (rawApplicationId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawApplicationId)) {
-    // 400 with a named reason, so the caller sees what was wrong with the input.
-    return await failRun(400, "invalid_application_id", "application_id must be a UUID");
-  }
-  // Null means "no target": the unchanged whole-queue behaviour.
-  const applicationId: string | null = rawApplicationId;
+  // `applicationId` was parsed and validated above, before the run row was opened.
   const { data: rows, error: rowsError } = await db
     .from("applications")
     // The embedded resource is the posting itself. Fetched in one round trip rather than

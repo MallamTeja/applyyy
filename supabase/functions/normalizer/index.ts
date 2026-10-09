@@ -19,7 +19,7 @@ import {
 import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 // Shared CORS headers, plus the boundary that keeps them on an uncaught 500.
 import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
-// The shared `?application_id=` parser, so normalizer and screener refuse a bad id identically.
+// The shared `?application_id=` parser, so all five pipeline agents refuse a bad id identically.
 // The duplicate lookup, extracted so its fail-closed handling of a query error is unit-tested.
 import { createExistingJobLookup, type ExistingJobClient } from "../_shared/normalize/existing-job-lookup.ts";
 import { parseApplicationIdParam } from "../_shared/http/application-id.ts";

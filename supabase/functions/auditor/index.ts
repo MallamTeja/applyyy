@@ -38,6 +38,9 @@ import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 // Shared CORS headers, plus the boundary that keeps them on an uncaught 500
 import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 
+// The shared `?application_id=` parser, so all five pipeline agents refuse a bad id identically
+import { parseApplicationIdParam } from "../_shared/http/application-id.ts";
+
 // Default batch processing limit size for Auditor invocation
 const DEFAULT_BATCH_SIZE = 10;
 
@@ -123,6 +126,20 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
   // 401 for no/invalid session, 403 for someone else's — the verdict carries which
   if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });
 
+  // Optional single-row target. Read from the URL so the CLI can push ONE application through
+  // without waiting for it to reach the head of an oldest-first queue.
+  const target = parseApplicationIdParam(new URL(req.url).searchParams);
+  // A malformed id is REFUSED, never ignored: ignoring it would fall back to the whole
+  // queue and process rows the caller did not ask for (the fail-open this repo forbids).
+  // Checked BEFORE the agent_runs insert, so a bad request leaves no run row behind:
+  // nothing ran, and a `failed` row would tell the health page the agent broke.
+  if (target.kind === "invalid") {
+    // 400 with a named reason, so the caller sees what was wrong with its input.
+    return jsonResponse(400, { success: false, error: "invalid_application_id", detail: "application_id must be a UUID" });
+  }
+  // Null means "no target": the unchanged whole-queue behaviour.
+  const applicationId: string | null = target.kind === "valid" ? target.id : null;
+
   // Insert initial agent run record into agent_runs telemetry table
   const { data: runRow } = await db
     // Target agent_runs table
@@ -186,17 +203,7 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
   // Determine batch size limit from request URL parameter
   const batchSize = resolveBatchSize(limitParam);
 
-  // Optional single-row target. Read from the URL so the CLI can push ONE application through
-  // without waiting for it to reach the head of an oldest-first queue.
-  const rawApplicationId = new URL(req.url).searchParams.get("application_id");
-  // A malformed id is REFUSED, never ignored: ignoring it would fall back to the whole
-  // queue and process rows the caller did not ask for (the fail-open this repo forbids).
-  if (rawApplicationId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawApplicationId)) {
-    // 400 with a named reason, so the caller sees what was wrong with the input.
-    return await failRun(400, "invalid_application_id", "application_id must be a UUID");
-  }
-  // Null means "no target": the unchanged whole-queue behaviour.
-  const applicationId: string | null = rawApplicationId;
+  // `applicationId` was parsed and validated above, before the run row was opened.
   // Query the queue: fresh `tailored` rows, plus rows stranded between the two RPCs
   const { data: rows, error: rowsError } = await db
     // Target applications table

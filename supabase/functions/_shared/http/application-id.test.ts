@@ -1,4 +1,4 @@
-// Tests for the shared `?application_id=` parser, plus an ordering guard on the two handlers
+// Tests for the shared `?application_id=` parser, plus an ordering guard on all five handlers
 // that use it: the refusal must happen BEFORE the agent_runs row is opened.
 import { test } from "node:test";
 // Strict, so a missing `id` is not loosely equal to anything.
@@ -69,4 +69,19 @@ test("normalizer: application_id is validated before the agent_runs row is opene
 test("screener: application_id is validated before the agent_runs row is opened", () => {
   // The handler this change moved; reverting the move must turn this red.
   assertValidatedBeforeRunOpened("screener");
+});
+
+test("matcher: application_id is validated before the agent_runs row is opened", () => {
+  // Moved above the insert (it used to refuse via failRun); reverting the move must turn this red.
+  assertValidatedBeforeRunOpened("matcher");
+});
+
+test("tailor: application_id is validated before the agent_runs row is opened", () => {
+  // Moved above the insert (it used to refuse via failRun); reverting the move must turn this red.
+  assertValidatedBeforeRunOpened("tailor");
+});
+
+test("auditor: application_id is validated before the agent_runs row is opened", () => {
+  // Moved above the insert (it used to refuse via failRun); reverting the move must turn this red.
+  assertValidatedBeforeRunOpened("auditor");
 });

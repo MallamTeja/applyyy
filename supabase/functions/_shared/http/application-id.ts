@@ -5,8 +5,8 @@
 // WHERE they ran. The normalizer refused a bad id before opening its agent_runs row; the
 // screener refused it after, leaving a `failed` run that told the health page the agent broke
 // when only the request was wrong. One parser makes the rule one place to read.
-// Adopted so far by the normalizer and the screener only. Auditor, matcher and tailor still
-// carry their own inline copy and still refuse AFTER opening their run row.
+// Used by all five pipeline agents (normalizer, screener, matcher, tailor, auditor), each of
+// which refuses a bad id BEFORE opening its agent_runs row — application-id.test.ts guards the order.
 //
 // WHY A CLOSED UNION, not `string | null`: null already means "no target, whole queue", so a
 // parser that also returned null for garbage would turn a malformed id into a whole-queue run —
