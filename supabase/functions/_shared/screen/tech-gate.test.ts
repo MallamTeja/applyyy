@@ -164,7 +164,7 @@ test("an excluded keyword still matches as a standalone word", () => {
   // drop:true would pass even if the exclusion never fired. The reason names the term.
   const verdict = screenTechRole("Business Ops Analyst", null, PREFS);
   // Exclusion code and the term in the reason.
-  assert.deepEqual(verdict, { drop: true, code: "tech_gate", reason: 'title or description matches excluded term "ops"' });
+  assert.deepEqual(verdict, { drop: true, code: "tech_gate", reason: 'title matches excluded term "ops"' });
 });
 
 // Whole-word boundaries for a short abbreviation, the case a substring test gets most
@@ -184,7 +184,7 @@ test('excluded "Sr" drops Sr / Sr. titles but not Srinivas or Src', () => {
     // Exclusion wins over the "engineer" title match.
     code: "tech_gate",
     // The configured term, verbatim.
-    reason: 'title or description matches excluded term "Sr"',
+    reason: 'title matches excluded term "Sr"',
   });
   // "Sr" followed by a space: the plain case.
   const plain = screenTechRole("Sr Software Engineer", null, prefs);
@@ -245,6 +245,53 @@ test("a configured title term in the title still matches, whatever the body says
   const verdict = screenTechRole("Software Engineer, Payments", "We sell to banks.", PREFS);
   // Recognised by the title alone; no warning.
   assert.deepEqual(verdict, { drop: false });
+});
+
+// WHITESPACE IS NOT SIGNAL (2026-10-09, §6 fail-open found live). A board title arrived as
+// "Staff  Software Engineer" (two spaces) and slipped past the exclusion "Staff Software",
+// because the term's space was escaped literally and matched exactly one space. Every
+// whitespace run — doubled spaces, tabs, NBSP — now collapses to one space on BOTH sides.
+const SENIORITY: TechGatePreferences = { titles: ["software engineer"], keywords: [], excludedKeywords: ["Staff Software"] };
+
+test("a double-spaced title still hits a single-spaced exclusion phrase", () => {
+  // The live title shape that slipped through.
+  const verdict = screenTechRole("Staff  Software Engineer - Database Engineering", null, SENIORITY);
+  // Dropped by the exclusion, naming the configured term as written.
+  assert.deepEqual(verdict, { drop: true, code: "tech_gate", reason: 'title matches excluded term "Staff Software"' });
+});
+
+test("an NBSP or a tab in the title still hits a single-spaced exclusion phrase", () => {
+  // U+00A0 arrives from HTML-scraped boards; JS \s covers it, and it must not hide a term.
+  assert.equal(screenTechRole("Staff Software Engineer", null, SENIORITY).drop, true);
+  // A tab between the words is the same failure.
+  assert.equal(screenTechRole("Staff\tSoftware Engineer", null, SENIORITY).drop, true);
+});
+
+test("a double-spaced configured term still matches a single-spaced title", () => {
+  // The other side: a term typed with two spaces in the settings field must still match.
+  const prefs: TechGatePreferences = { titles: ["Software  Engineer"], keywords: [], excludedKeywords: [] };
+  // Recognised, no warning.
+  assert.deepEqual(screenTechRole("Software Engineer, Payments", null, prefs), { drop: false });
+});
+
+// EXCLUSIONS MATCH THE TITLE ONLY (Teja, 2026-10-09 15:07, reversing the 09-17 rule).
+// Live: "Cloud Operations Engineer" — a configured title — was dropped by the exclusion
+// "Head" found in its description: "…MongoDB is at the head of its disruption…". Bare
+// seniority words (Head, Lead, Staff, Manager) occur in ordinary company prose.
+const HEAD: TechGatePreferences = { titles: ["Cloud Operations Engineer"], keywords: [], excludedKeywords: ["Head"] };
+
+test("an excluded word found only in the description does not drop the row", () => {
+  // The live shape: the excluded word is company prose, not the role.
+  const verdict = screenTechRole("Cloud Operations Engineer", "MongoDB is at the head of its disruption.", HEAD);
+  // Recognised by its title and NOT dropped by the body's "head".
+  assert.deepEqual(verdict, { drop: false });
+});
+
+test("an excluded word in the title still drops", () => {
+  // The positive half: a seniority word in the title is exactly what exclusions are for.
+  const verdict = screenTechRole("Head of Cloud Operations Engineering", null, HEAD);
+  // Dropped by the exclusion, naming the term.
+  assert.deepEqual(verdict, { drop: true, code: "tech_gate", reason: 'title matches excluded term "Head"' });
 });
 
 // THE UNCONFIGURED CASE, and it fails open ON PURPOSE — the same direction every rule in

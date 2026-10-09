@@ -313,6 +313,17 @@ indistinguishable from "no jobs today."
 > A one-off **`mode=pregate_only`** matcher run (Teja, 2026-10-09) sweeps the
 > unscored backlog with the same gate and makes no Gemini call: rejected rows
 > drop as above, survivors stay at `passed_filters` for a normal scoring run.
+>
+> **Amendment 3, 2026-10-09 15:07 (Teja: "Title only").** **Excluded keywords**
+> now match the job **title only** as well. Only **keywords** still read the
+> first 300 characters of the description. *Why:* the configured title "Cloud
+> Operations Engineer" was dropped by the exclusion "Head" found in its body —
+> "…MongoDB is at the head of its disruption…". Bare seniority words (Head, Lead,
+> Staff, Manager) are ordinary company prose; in a title they describe the role.
+> The drop reason now reads `title matches excluded term "<t>"`. Same change set:
+> whitespace runs (doubled spaces, tabs, NBSP) collapse to one space on both the
+> text and each term before matching, after "Staff  Software Engineer" (two
+> spaces) slipped past the exclusion "Staff Software".
 
 ### Recording the drop
 

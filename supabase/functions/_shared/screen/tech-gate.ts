@@ -39,11 +39,13 @@
 // rather than passed as three loose arrays so a caller cannot transpose two of them —
 // swapping `titles` and `excludedKeywords` would invert the gate and still compile.
 export interface TechGatePreferences {
-  // Role titles being hunted.
+  // Role titles being hunted; matched against the job TITLE only (2026-10-09).
   readonly titles: readonly string[];
-  // Terms that make a posting more interesting; matched against the body too.
+  // Terms that make a posting more interesting; the ONLY list also matched against the
+  // description head.
   readonly keywords: readonly string[];
-  // The cheapest test in the cascade: terms that reject a posting outright.
+  // The cheapest test in the cascade: terms that reject a posting outright; matched against
+  // the job TITLE only (2026-10-09).
   readonly excludedKeywords: readonly string[];
 }
 
@@ -128,12 +130,29 @@ function termPattern(term: string): RegExp {
   return new RegExp(`${leading}${literal}${trailing}`, "i");
 }
 
+// Collapse every whitespace run to ONE space. JS `\s` covers spaces, tabs, newlines and the
+// Unicode spaces HTML-scraped boards carry (NBSP U+00A0 among them).
+// WHY (2026-10-09, a §6 fail-open found live): the title "Staff  Software Engineer" (two
+// spaces) slipped past the exclusion "Staff Software", because termPattern escapes a term's
+// space literally, so it matched exactly one space. Whitespace carries no meaning in a job
+// title, so both sides are normalised here, the one place every match routes through.
+function collapseWhitespace(text: string): string {
+  return text.replace(/\s+/g, " ");
+}
+
 // Does any configured term appear in the text? Returns the term that matched, so a
 // surprising verdict names its cause rather than merely asserting one.
 function firstMatch(terms: readonly string[], text: string): string | undefined {
+  // The text once, normalised; every term below is tested against this same string.
+  const normalisedText = collapseWhitespace(text);
   // Blank entries are skipped: an empty string compiles to a pattern matching
   // everything, which would drop or pass every posting depending on which list it sat in.
-  return terms.filter((term) => term.trim() !== "").find((term) => termPattern(term).test(text));
+  // Each term is normalised (and trimmed) before it is compiled, so "Software  Engineer"
+  // typed in the settings field matches a single-spaced title. The ORIGINAL term is
+  // returned, so a drop reason names the term as the user configured it.
+  return terms
+    .filter((term) => term.trim() !== "")
+    .find((term) => termPattern(collapseWhitespace(term).trim()).test(normalisedText));
 }
 
 // Decide whether one posting is worth screening further.
@@ -149,17 +168,23 @@ export function screenTechRole(
   descriptionRaw: string | null,
   preferences: TechGatePreferences,
 ): TechGateVerdict {
-  // Title plus the head of the body. Both are UNTRUSTED board text and are only ever
+  // Title plus the head of the body, read by KEYWORDS only since 2026-10-09 (titles and
+  // exclusions read the title alone). Both are UNTRUSTED board text and are only ever
   // matched against, never interpolated anywhere.
   const haystack = `${title} ${(descriptionRaw ?? "").slice(0, DESCRIPTION_MATCH_LIMIT)}`;
 
   // EXCLUSIONS FIRST, so a posting carrying both signals is rejected. "Technical
   // Recruiter" contains a technical word and is not a technical job — the design doc's
   // own example of how fine this line is.
-  const excluded = firstMatch(preferences.excludedKeywords, haystack);
+  // EXCLUSIONS READ THE TITLE ONLY (Teja, 2026-10-09 15:07, reversing the 09-17 rule that
+  // read the description head too). Live: the configured title "Cloud Operations Engineer"
+  // was dropped by the exclusion "Head" found in its body — "…MongoDB is at the head of its
+  // disruption…". Bare seniority words (Head, Lead, Staff, Manager) are ordinary company
+  // prose; in a TITLE they describe the role, which is what an exclusion is for.
+  const excluded = firstMatch(preferences.excludedKeywords, title);
   // A genuine rejection, naming the term so a wrong drop is diagnosable.
   if (excluded !== undefined) {
-    return { drop: true, code: "tech_gate", reason: `title or description matches excluded term "${excluded}"` };
+    return { drop: true, code: "tech_gate", reason: `title matches excluded term "${excluded}"` };
   }
 
   // Then the positive match. A posting titled "Product Engineer" that mentions React is as
