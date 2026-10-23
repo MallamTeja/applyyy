@@ -11,8 +11,11 @@
 --
 -- WHAT THIS NARROWS. 20260909234900_status_transition_guard.sql made every exit from
 -- `needs_verification` human-only, marked SAFETY-CRITICAL: an automated system must not
--- claim an application landed when it can't prove it. This migration keeps that rule for
--- every agent except `tracker`, and for every exit except `-> applied`. The tracker
+-- claim an application landed when it can't prove it. THAT RULE NOW STANDS UNTOUCHED:
+-- on 2026-10-23 10:44 IST Teja narrowed this migration (relayed by the orchestrator) to
+-- `applying -> applied` ONLY, because greenhouse.io signs for ALL its tenants — anyone can
+-- apply anywhere with Teja's email and generate a genuine receipt, so a receipt may close
+-- a minutes-old applying row but never clear the human-review lane. The tracker
 -- (supabase/functions/email-tracker-intake) only requests this move when ALL of these
 -- hold. They are enforced in its decide step and pinned by named tests:
 --   * the sender is an ATS vendor domain (greenhouse.io / greenhouse-mail.io),
@@ -33,35 +36,32 @@
 -- =============================================================================
 
 -- The worker still confirms its own submits; the tracker may now confirm one by receipt.
+-- `needs_verification -> applied` is DELIBERATELY ABSENT: it keeps its seeded human-only
+-- agents and note from 20260909234900 (Teja, 2026-10-23 — the multi-tenant-signer risk).
 update public.application_status_transitions set allowed_agents = array['applier', 'tracker']::public.agent_name[] where from_status = 'applying' and to_status = 'applied';
 
--- The one exit from needs_verification a machine may now take, and only the tracker.
-update public.application_status_transitions set allowed_agents = array['human', 'tracker']::public.agent_name[] where from_status = 'needs_verification' and to_status = 'applied';
-
--- The notes the console renders, rewritten to say who may now make each move.
+-- The note the console renders, rewritten to say who may now make the move.
 update public.application_status_transitions set note = 'Submission confirmed by the worker, or by the tracker from a DKIM/SPF-verified ATS receipt received after the submit.' where from_status = 'applying' and to_status = 'applied';
 
--- Same, for the human-review lane: a person, or a verified receipt.
-update public.application_status_transitions set note = 'Human checked the employer portal: it did go through. Or the tracker saw a DKIM/SPF-verified ATS receipt received after the submit.' where from_status = 'needs_verification' and to_status = 'applied';
-
--- Report what landed (CLAUDE.md §7): a WARNING, not an exception, if either edge is missing
+-- Report what landed (CLAUDE.md §7): a WARNING, not an exception, if the edge is missing
 -- or lacks the tracker, so the push log says so and a human decides.
 do $$
 declare
-  -- How many of the two edges now allow the tracker (expected 2).
+  -- Whether the one widened edge now allows the tracker (expected 1).
   v_ok integer;
 begin
-  -- Count the edges that exist AND allow 'tracker'.
+  -- Count the edge that exists AND allows 'tracker'; needs_verification -> applied must
+  -- NOT be counted — it stays human-only by the 2026-10-23 ruling.
   select count(*) into v_ok
     from public.application_status_transitions t
-   where (t.from_status::text, t.to_status::text) in (('applying', 'applied'), ('needs_verification', 'applied'))
+   where (t.from_status::text, t.to_status::text) = ('applying', 'applied')
      and 'tracker'::public.agent_name = any (t.allowed_agents);
-  -- Anything but 2 means the graph is not what this migration expected.
-  if v_ok <> 2 then
-    raise warning 'tracker_confirms_applied: % of 2 edges into applied allow the tracker', v_ok;
+  -- Anything but 1 means the graph is not what this migration expected.
+  if v_ok <> 1 then
+    raise warning 'tracker_confirms_applied: % of 1 edges into applied allow the tracker', v_ok;
   else
     -- The normal path, recorded in the push log.
-    raise notice 'tracker_confirms_applied: 2 of 2 edges into applied allow the tracker';
+    raise notice 'tracker_confirms_applied: 1 of 1 edge into applied allows the tracker';
   end if;
 end;
 $$;

@@ -350,7 +350,7 @@ test('status graph parity — the TS mirror matches the transitions seeded into 
   }
 
   // AGENT OVERRIDES, for the same reason as the notes: a later migration widens an edge's
-  // agents with an UPDATE (20261009235000 adds 'tracker' to two edges into `applied`).
+  // agents with an UPDATE (20261009235000 adds 'tracker' to `applying -> applied`).
   // Only the FULL-array form is recognised, so the parsed list is the whole truth for that
   // edge rather than a delta this test would have to replay.
   for (const match of MIGRATION_SQL.matchAll(
@@ -444,17 +444,17 @@ test('status graph parity — the TS mirror matches the transitions seeded into 
     assert.equal(backward.length, 7, `expected 7 backward edges, found ${backward.length}: ${backward.map(key).join(', ')}`);
 
     const machineWalkable = backward.filter((s) => s.agents.some((a) => a !== 'human'));
-    // TWO since 20261009235000 (Teja, 2026-10-09): `needs_verification -> applied` may be
-    // walked by the tracker, from a DKIM/SPF-verified ATS receipt received after the
-    // submit. Deliberately narrow: it only RECORDS that a submit landed, so it never
-    // re-enters the submit path. The dangerous reverse move, `needs_verification ->
-    // approved` (a resubmit), stays human-only, and the "every edge into `approved` is
-    // human-only" subtest above still enforces that.
+    // Back to ONE on 2026-10-23 (Teja): `needs_verification -> applied` returned to
+    // human-only. Greenhouse signs for ALL its tenants, so anyone applying anywhere with
+    // Teja's email generates a genuine receipt — a receipt may confirm a minutes-old
+    // `applying` row (a forward edge, not counted here) but never clear the human-review
+    // lane. `needs_verification -> approved` (a resubmit) stays human-only too, and the
+    // "every edge into `approved` is human-only" subtest above still enforces that.
     assert.deepEqual(
       machineWalkable.map((s) => `${key(s)} by ${s.agents.join('/')}`),
-      ['interview -> oa_pending by tracker/human', 'needs_verification -> applied by human/tracker'],
+      ['interview -> oa_pending by tracker/human'],
       'the set of backward edges an automated agent may walk has changed. Every reverse move except ' +
-        'the multi-round interview loop and the verified-receipt confirmation must be human-only.',
+        'the multi-round interview loop must be human-only.',
     );
   });
 

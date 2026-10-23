@@ -142,9 +142,10 @@ export const STATUS_TRANSITIONS: readonly StatusTransition[] = [
   { from: 'interview', to: 'rejected', allowedAgents: ['tracker', 'human'], note: 'Terminal, bad.' },
 
   // ---- Human-only recovery lanes -------------------------------------------
-  // The one exit from needs_verification a machine may take, and only the tracker, only from
-  // a verified receipt (20261009235000). ->approved and ->failed stay human-only.
-  { from: 'needs_verification', to: 'applied', allowedAgents: ['human', 'tracker'], note: 'Human checked the employer portal: it did go through. Or the tracker saw a DKIM/SPF-verified ATS receipt received after the submit.' },
+  // STILL human-only (Teja, 2026-10-23): greenhouse.io signs for ALL its tenants, so anyone
+  // applying anywhere with Teja's email generates a GENUINE receipt — a verified receipt may
+  // close a minutes-old `applying` row but must never clear the human-review lane.
+  { from: 'needs_verification', to: 'applied', allowedAgents: ['human'], note: 'Human checked the employer portal: it did go through.' },
   { from: 'needs_verification', to: 'approved', allowedAgents: ['human'], note: 'Human checked: it did NOT go through, so a resubmit is safe. HUMAN-ONLY BY DESIGN - the only way a row re-enters the submit path, and a machine must never decide that a possibly-submitted application was not submitted.' },
   { from: 'needs_verification', to: 'failed', allowedAgents: ['human'], note: 'Human gave up on this one.' },
   { from: 'blocked_needs_human', to: 'applied', allowedAgents: ['human'], note: 'Human finished the submission by hand.' },

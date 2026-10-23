@@ -203,14 +203,16 @@ Deno.serve(async (request: Request): Promise<Response> => {
   const updatedAtById = new Map<string, string>();
   // Exceptions from the client are treated the same as an error result.
   try {
-    // Statuses an employer email can still move. `applying` and `needs_verification` are
-    // here so a verified receipt can confirm a submit (receiptConfirmsApplied); they are
-    // also match candidates, so a receipt that names two rows of one company stays ambiguous.
+    // Statuses an employer email can still move. `applying` is here so a verified receipt
+    // can confirm a submit (receiptConfirmsApplied); it is also a match candidate, so a
+    // receipt that names two rows of one company stays ambiguous. `needs_verification` is
+    // DELIBERATELY absent (Teja, 2026-10-23): that lane is human-only, so its rows must
+    // not even be match candidates — a receipt for one is stored unmatched, nothing moves.
     const { data: appsData, error: appsError } = await client.db
       .from("applications")
       // `title` is read only by the receipt confirmation (titleNamedIn).
       .select("id, status, job_id, updated_at, jobs(company_name, company_slug, title)")
-      .in("status", ["applying", "needs_verification", "applied", "employer_screening", "oa_pending", "interview"]);
+      .in("status", ["applying", "applied", "employer_screening", "oa_pending", "interview"]);
     // An error result is a failed batch.
     if (appsError !== null) {
       // The detail goes to the log, not to the caller.

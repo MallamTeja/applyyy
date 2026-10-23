@@ -68,9 +68,10 @@ const OUT_OF_OFFICE = /\b(?:out\s+of\s+(?:the\s+)?office|automatic\s+reply|auto-
 // ORDER IS THE FIX (2026-10-04). The old version checked the parser's auto-reply flag
 // FIRST, and that flag matches "thank you for applying" — the opening line of most ATS
 // rejections. So "Thank you for applying… unfortunately we will not be moving forward"
-// became `application_received`, which maps to `employer_screening`: a rejection advanced
-// the application. Now: out-of-office first (never advances), then real outcomes, and the
-// receipt reading only when no outcome matched.
+// became `application_received`, which THEN mapped to `employer_screening` (since
+// 2026-10-23 a receipt maps to no status at all): a rejection advanced the application.
+// Now: out-of-office first (never advances), then real outcomes, and the receipt reading
+// only when no outcome matched.
 export function classifyMessage(message: DecidableMessage): MessageDecision {
   // Parse once; the classifier and the matcher both read the result.
   const parsed = parseEmail({ subject: message.subject, body: message.snippet, sender: message.from });
@@ -145,12 +146,18 @@ export function targetStatusFor(classification: EmailClassification): Applicatio
     case "rejection":
       // Terminal; legal from every active stage.
       return "rejected";
-    // Recruiter contact and an acknowledgement both mean the employer engaged; the graph
-    // labels `applied -> employer_screening` "Acknowledgement or recruiter contact".
+    // Recruiter contact means the employer engaged; the graph labels
+    // `applied -> employer_screening` "Acknowledgement or recruiter contact".
     case "recruiter_outreach":
-    case "application_received":
       // Only legal from applied; later stages make canTransition refuse it.
       return "employer_screening";
+    // A receipt moves NOTHING by classification (Teja, 2026-10-23): on an `applied` row it
+    // is recorded as an event and the status stays put — "we received your application" is
+    // not evidence of screening. Confirming a submit is the separate, guarded
+    // receiptConfirmsApplied path, which index.ts takes BEFORE this mapping.
+    case "application_received":
+      // Event only, no status move.
+      return null;
     // Offer.
     case "offer":
       // Only legal from interview.
@@ -295,19 +302,23 @@ export function matchApplication(
 // ---- Receipt confirmation: a verified ATS receipt marks a submitted row `applied` ----------
 //
 // Teja ruled (2026-10-09 23:24 IST) that a Greenhouse "application received" email may move
-// an application the worker tried to submit (`applying`, or `needs_verification` after the
-// sweep) to `applied`, with no human check. Every guard below is mandatory; a missing or
-// malformed input refuses (CLAUDE.md §6). Spoofing is the threat: anyone can send "Thank
-// you for applying to Acme", so the sender must be the ATS AND Gmail must say so.
+// an application the worker tried to submit to `applied`, with no human check — and
+// NARROWED it (2026-10-23 10:44 IST) to `applying` rows only: greenhouse.io signs for ALL
+// its tenants, so anyone applying anywhere with Teja's email generates a GENUINE receipt,
+// and a receipt may close a minutes-old applying row but never clear the human-review
+// lane (`needs_verification` stays human-only). Every guard below is mandatory; a missing
+// or malformed input refuses (CLAUDE.md §6). Spoofing is the threat: anyone can send
+// "Thank you for applying to Acme", so the sender must be the ATS AND Gmail must say so.
 
 // The ATS domains whose receipts may CONFIRM a submission. Deliberately separate from (and
 // narrower than) parser.ts's classification list: confirming is higher stakes than reading
 // a reply, so only the vendor Teja ruled on is here. Add one only with a verified DKIM sample.
 export const CONFIRMING_VENDOR_DOMAINS: readonly string[] = ["greenhouse.io", "greenhouse-mail.io"];
 
-// The statuses a receipt may confirm: rows the worker actually tried to submit. Never an
-// earlier status, so a receipt can't jump a row the system never sent past approval.
-export const CONFIRMABLE_STATUSES: readonly ApplicationStatus[] = ["applying", "needs_verification"];
+// The one status a receipt may confirm: a row mid-submit. Never an earlier status (a
+// receipt can't jump a row the system never sent past approval), and since 2026-10-23 never
+// `needs_verification` either — that lane is human-only (multi-tenant signer, see above).
+export const CONFIRMABLE_STATUSES: readonly ApplicationStatus[] = ["applying"];
 
 // The one authserv-id whose verdict is trusted. Gmail PREPENDS its own
 // Authentication-Results header; a sender can embed a forged one lower down, but it can't

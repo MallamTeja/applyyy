@@ -166,8 +166,8 @@ test("(g) GitLab-shaped emails each cause only their own outcome", () => {
     // Domain from the parser, as index.ts passes it.
     assert.equal(matchApplication(message, classifyMessage(message).senderDomain, candidates), "g1");
   }
-  // Receipt -> the existing receipt mapping (see report: this is the "acknowledged" gap).
-  assert.equal(moveFor(confirmation, "applied"), "employer_screening");
+  // Receipt on an applied row -> stored as an event, status stays put (Teja, 2026-10-23).
+  assert.equal(moveFor(confirmation, "applied"), null);
   // Rejection -> rejected.
   assert.equal(moveFor(rejection, "applied"), "rejected");
   // Invite -> interview.
@@ -254,7 +254,7 @@ test("'Unfortunately, we ... we wish you the best in your job search' alone move
   assert.equal(moveFor(message, "applied"), null);
 });
 
-// ---- 2026-10-09: a VERIFIED Greenhouse receipt confirms applying|needs_verification -> applied ----
+// ---- 2026-10-09 (narrowed 2026-10-23): a VERIFIED Greenhouse receipt confirms applying -> applied ----
 //
 // Teja's ruling: a receipt may close the submit loop automatically, but only when the sender is
 // authenticated (DKIM/SPF judged by Gmail's own MX), the email is newer than the row's latest entry
@@ -299,8 +299,9 @@ function confirmInput(overrides: Record<string, unknown> = {}) {
 test("CONFIRMING_VENDOR_DOMAINS and CONFIRMABLE_STATUSES are exactly the ruled sets", () => {
   // Only Greenhouse is ruled in; widening this list widens who can confirm a submit.
   assert.deepEqual([...receipt.CONFIRMING_VENDOR_DOMAINS], ["greenhouse.io", "greenhouse-mail.io"]);
-  // Only the two in-flight statuses; `applied` and later keep their old receipt mapping.
-  assert.deepEqual([...receipt.CONFIRMABLE_STATUSES], ["applying", "needs_verification"]);
+  // Only `applying` (Teja, 2026-10-23): needs_verification is human-only — Greenhouse
+  // signs for every tenant, so a genuine receipt is not proof THIS submit landed.
+  assert.deepEqual([...receipt.CONFIRMABLE_STATUSES], ["applying"]);
 });
 
 test("verifyReceiptSender: a passing dkim for a vendor subdomain verifies", () => {
@@ -381,11 +382,14 @@ test("receiptConfirmsApplied: no recorded entry into applying is refused", () =>
   assert.equal(receipt.receiptConfirmsApplied(confirmInput({ enteredApplyingAt: "not-a-date" })), false);
 });
 
-test("receiptConfirmsApplied: a receipt on an applied row is not a confirm (old mapping kept)", () => {
+test("a receipt on an applied row records the event and moves nothing", () => {
   // `applied` is not confirmable; the confirm path stays out of the way.
   assert.equal(receipt.receiptConfirmsApplied(confirmInput({ current: "applied" })), false);
-  // And the pre-existing receipt mapping on applied is untouched.
-  assert.equal(statusMoveFor(RECEIPT_DECISION, "applied"), "employer_screening");
+  // Ruling of 2026-10-23: a receipt maps to NO status — "we received your application" is
+  // not evidence of screening, so the row stays at applied and only the event is stored.
+  assert.equal(statusMoveFor(RECEIPT_DECISION, "applied"), null);
+  // A genuine recruiter reply still advances; only the receipt classification went inert.
+  assert.equal(statusMoveFor({ classification: "recruiter_outreach", confidence: 0.9 }, "applied"), "employer_screening");
 });
 
 test("a non-receipt email on an applying row does nothing", () => {
@@ -408,9 +412,12 @@ test("a valid receipt moves an applying row to applied", () => {
   assert.equal(receipt.receiptConfirmsApplied(confirmInput()), true);
 });
 
-test("a valid receipt moves a needs_verification row to applied", () => {
-  // Same, from the sweeper's parking status. Needs 'tracker' on needs_verification->applied.
-  assert.equal(receipt.receiptConfirmsApplied(confirmInput({ current: "needs_verification" })), true);
+test("a receipt cannot clear needs_verification", () => {
+  // The sweeper's parking lane stays human-only (Teja, 2026-10-23): a receipt that would
+  // pass every other gate is still refused, because anyone can apply anywhere with Teja's
+  // email and mint a genuine receipt — it proves Greenhouse sent mail, not that THIS
+  // uncertain submit landed.
+  assert.equal(receipt.receiptConfirmsApplied(confirmInput({ current: "needs_verification" })), false);
 });
 
 // ---- Review round (2026-10-09): wrong job, replayed receipt, two-address From ----------
