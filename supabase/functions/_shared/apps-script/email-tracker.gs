@@ -97,18 +97,28 @@ function applyyIngest() {
     var label = applyyEnsureLabel_();
     // Everything recent that this script has not already handed over.
     var threads = GmailApp.search(APPLYY_SEARCH_WINDOW + ' -label:' + APPLYY_LABEL, 0, APPLYY_MAX_THREADS);
-    // Nothing to do is the common case.
+    // Nothing to do is the common case — but a silent return here is indistinguishable
+    // from a dead trigger on the Supabase side, which is how the tracker once sat dark
+    // for a month (0 emails since 2026-09-11, noticed 2026-10-09). So the quiet path
+    // still POSTs an EMPTY batch as a heartbeat (2026-10-23): the contract accepts
+    // messages: [] as a legal no-op, and the intake records the check-in in agent_runs,
+    // which is what lets the health page tell "quiet mailbox" from "tracker broken".
     if (threads.length === 0) {
-      Logger.log('applyy: nothing new');
-      return { ok: true, threadsFound: 0, messagesIngested: 0, message: 'No new emails to ingest.' };
+      Logger.log('applyy: nothing new, sending heartbeat');
+      // Best-effort: a failed heartbeat changes nothing about mail handling, and the
+      // health page reads its ABSENCE as staleness, which is exactly right.
+      applyyPostBatch_([], config);
+      return { ok: true, threadsFound: 0, messagesIngested: 0, message: 'No new emails; heartbeat sent.' };
     }
     // Flatten threads to messages: a thread with three replies is three events, and
     // collapsing them would lose the rejection that arrived after the acknowledgement.
     var messages = applyyCollectMessages_(threads);
     // Guard against a thread whose messages are all older than the window.
     if (messages.length === 0) {
-      Logger.log('applyy: threads matched but no messages inside the window');
-      return { ok: true, threadsFound: threads.length, messagesIngested: 0, message: 'No recent messages in matched threads.' };
+      Logger.log('applyy: threads matched but no messages inside the window, sending heartbeat');
+      // Same heartbeat as the no-threads path, for the same reason.
+      applyyPostBatch_([], config);
+      return { ok: true, threadsFound: threads.length, messagesIngested: 0, message: 'No recent messages in matched threads; heartbeat sent.' };
     }
     // Send in chunks, labelling each chunk's threads only once it is safely stored.
     applyySendInChunks_(messages, config, label, APPLYY_BATCH_SIZE);

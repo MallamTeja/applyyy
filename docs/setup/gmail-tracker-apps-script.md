@@ -161,16 +161,26 @@ other silent deaths in this system (Supabase's 1-week idle pause and GitHub's
   look, and nothing tells you to look there.
 - Google quietly disables triggers on repeated failure — so a burst of Edge
   Function 500s can cost you the trigger, not just the messages.
-- The **System Health** dashboard page must surface "no `email_events` in N
-  hours" as a warning. Not built yet; check with `grep -rn email_events apps/web/src/features/health`. A tracker that stopped looks identical to a quiet inbox,
-  and you'd read silence as "no rejections yet."
+- The **System Health** dashboard's tracker row now works (built 2026-10-23, after a
+  month of silence — 0 emails since 2026-09-11 — read as a quiet inbox). Two halves:
+  the script POSTs an **empty batch as a heartbeat** when there is no new mail
+  (`applyyIngest`'s zero paths call `applyyPostBatch_([], config)`), and the intake
+  records **every authorized call in `agent_runs`** (agent `tracker`; a heartbeat is a
+  succeeded run with `rows_in` 0). The existing `AgentFreshnessPanel` cadence
+  (`agentFreshness.ts`, `staleAfterHours: 12`) then flags silence. What the warning CAN
+  assert: the script hasn't checked in (trigger dead, script broken, secret wrong, or
+  intake down). What it CANNOT assert: which of those it is — **Apps Script →
+  Executions** stays the place that says why. In on-demand Web App mode the heartbeat
+  only fires when a sync is requested, so staleness then means "nobody synced", not
+  "tracker broken" — the 15-minute trigger is what makes the signal trustworthy.
 
 ## Receipt confirmation — added 2026-10-09
 
 Teja ruled (2026-10-09 23:24 IST) that a verified ATS receipt may mark a submitted
-application `applied` with no human check. When the worker submits but can't see the
-confirmation page, the row stays `applying` (later `needs_verification`). A Greenhouse
-"application received" email then confirms it, but ONLY if ALL of these hold
+application `applied` with no human check — **narrowed 2026-10-23 10:44 IST to `applying`
+rows only**: `needs_verification` is human-only again (Greenhouse signs for every tenant,
+so a genuine receipt is not proof THIS submit landed). A Greenhouse "application
+received" email confirms an `applying` row, but ONLY if ALL of these hold
 (`supabase/functions/email-tracker-intake/decide.ts`, `verifyReceiptSender` and
 `receiptConfirmsApplied`; migration `20261009235000_tracker_confirms_applied.sql`):
 
@@ -190,6 +200,11 @@ Re-enabling polling reverses the earlier "on-demand only" choice; automatic conf
 needs it.
 
 ### Re-enable after a script change (Teja, in Gmail)
+
+> **Pending re-paste (2026-10-23):** the repo's `email-tracker.gs` now sends the
+> zero-mail heartbeat (see "What to check when it stops working"). The deployed copy
+> predates it, so the health row stays dark until this section is done once for the
+> whole batch of script changes.
 
 1. Open [script.google.com](https://script.google.com), signed in as `tejamallam00@gmail.com`,
    and open the applyy email-tracker project.

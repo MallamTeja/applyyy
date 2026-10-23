@@ -175,26 +175,59 @@ Deno.serve(async (request: Request): Promise<Response> => {
   // Destructure batch payload object and rejected items.
   const { batch, rejected } = validated;
 
-  // Check if message batch is empty (common periodic trigger check).
-  // Test if message array length is zero.
-  if (batch.messages.length === 0) {
-    // Return 202 Accepted response immediately to avoid database roundtrip.
-    // Emit 202 accepted response for empty batch.
-    return json(202, { accepted: 0, duplicates: 0, rejected: rejected.length, batch_id: batch.batch_id });
-  }
-
-  // Initialize RLS-authenticated Supabase database client instance.
-  // Create user-authenticated DB client instance.
+  // The client is created BEFORE the empty-batch exit (moved 2026-10-23): an empty batch
+  // is the Apps Script HEARTBEAT, and recording it is the entire point — the health
+  // page's tracker row stayed `never_run` forever because this function wrote no
+  // agent_runs row, so a dead trigger and a quiet mailbox looked identical (the 0-emails-
+  // since-2026-09-11 incident).
   const client = await createAppUserClient();
   // Check if database client initialization failed.
-  // Test client creation success flag.
   if (!client.ok) {
     // Log database connection failure details to server logs.
-    // Log DB client failure to console error.
     console.error(`[email-tracker-intake] database unavailable: ${client.reason}`);
-    // Return 500 Internal Server Error response.
-    // Emit internal server error response.
+    // 500 also for a heartbeat: a check-in that cannot land must not claim success.
     return json(500, { error: "storage unavailable" });
+  }
+
+  // THE TRACKER'S RUN ROW, opened as 'running' before any work (repo convention,
+  // supporting_tables.sql: a crash leaves a visible stuck run, which the reaper closes).
+  // rows_in = messages received this call; a heartbeat records 0.
+  const { data: runRow, error: runOpenError } = await client.db
+    .from("agent_runs")
+    .insert({ agent: "tracker", rows_in: batch.messages.length })
+    .select("id")
+    .single();
+  // Observability must never fail the batch: a failed open is logged and skipped.
+  if (runOpenError !== null) console.error(`[email-tracker-intake] agent_runs open failed: ${runOpenError.message}`);
+  // Null when the open failed; every close below then no-ops.
+  const runId: string | null = runRow?.id ?? null;
+  // Close the run row. Called before every exit after this point; never throws.
+  const closeRun = async (status: "succeeded" | "failed", rowsOut: number, errorDetail: string | null): Promise<void> => {
+    // No row to close (open failed): nothing to do.
+    if (runId === null) return;
+    // One update carries the verdict; error_count 1 on failure feeds the health page.
+    const { error } = await client.db
+      .from("agent_runs")
+      .update({
+        status,
+        finished_at: new Date().toISOString(),
+        rows_out: rowsOut,
+        ...(status === "failed" ? { error_count: 1 } : {}),
+        ...(errorDetail === null ? {} : { error_detail: errorDetail }),
+      })
+      .eq("id", runId);
+    // Same rule as the open: log, never throw.
+    if (error !== null) console.error(`[email-tracker-intake] agent_runs close failed: ${error.message}`);
+  };
+
+  // Check if message batch is empty: the heartbeat case, common by design (the trigger
+  // fires every 15 minutes whether or not mail arrived; since 2026-10-23 the script
+  // POSTs the empty batch instead of skipping, so this run row IS the liveness signal).
+  if (batch.messages.length === 0) {
+    // A recorded heartbeat is a succeeded run that moved nothing.
+    await closeRun("succeeded", 0, null);
+    // 202 as before; Apps Script treats anything else as transient failure.
+    return json(202, { accepted: 0, duplicates: 0, rejected: rejected.length, batch_id: batch.batch_id });
   }
 
   // Applications the tracker may move, with the job fields matching reads.
@@ -220,6 +253,8 @@ Deno.serve(async (request: Request): Promise<Response> => {
     if (appsError !== null) {
       // The detail goes to the log, not to the caller.
       console.error(`[email-tracker-intake] applications fetch error: ${appsError.message}`);
+      // The run row says why nothing landed.
+      await closeRun("failed", 0, `applications fetch error: ${appsError.message}`);
       // 500 = retry on the next trigger cycle.
       return json(500, { error: "applications unavailable" });
     }
@@ -233,6 +268,8 @@ Deno.serve(async (request: Request): Promise<Response> => {
   } catch (err) {
     // Same handling as an error result.
     console.error(`[email-tracker-intake] applications query exception: ${String(err)}`);
+    // Recorded like the error result above.
+    await closeRun("failed", 0, `applications query exception: ${String(err)}`);
     // 500 = retry.
     return json(500, { error: "applications unavailable" });
   }
@@ -287,6 +324,8 @@ Deno.serve(async (request: Request): Promise<Response> => {
       if (entriesError !== null) {
         // Detail to the log.
         console.error(`[email-tracker-intake] applying-entry lookup error: ${entriesError.message}`);
+        // The run row says why nothing landed.
+        await closeRun("failed", 0, `applying-entry lookup error: ${entriesError.message}`);
         // 500 = retry, and nothing has been written yet.
         return json(500, { error: "application history unavailable" });
       }
@@ -300,6 +339,8 @@ Deno.serve(async (request: Request): Promise<Response> => {
     } catch (err) {
       // Same handling as an error result.
       console.error(`[email-tracker-intake] applying-entry lookup exception: ${String(err)}`);
+      // Recorded like the error result above.
+      await closeRun("failed", 0, `applying-entry lookup exception: ${String(err)}`);
       // 500 = retry.
       return json(500, { error: "application history unavailable" });
     }
@@ -329,6 +370,8 @@ Deno.serve(async (request: Request): Promise<Response> => {
   if (insertError !== null) {
     // Detail to the log.
     console.error(`[email-tracker-intake] insert failed: ${insertError.message}`);
+    // The run row says why nothing landed.
+    await closeRun("failed", 0, `email_events upsert failed: ${insertError.message}`);
     // 500 = retry; no transition has run yet, so the retry is clean.
     return json(500, { error: "storage failed" });
   }
@@ -474,6 +517,9 @@ Deno.serve(async (request: Request): Promise<Response> => {
   const acceptedCount = newlyInserted.size;
   // Everything else in the batch was already stored.
   const duplicateCount = batch.messages.length - acceptedCount;
+
+  // The batch landed: rows_out = newly stored events (duplicates moved nothing new).
+  await closeRun("succeeded", acceptedCount, null);
 
   // 202 = processed; Apps Script marks the threads done.
   return json(202, {
