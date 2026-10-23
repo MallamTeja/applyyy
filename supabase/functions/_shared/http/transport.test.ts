@@ -25,10 +25,15 @@ import {
   HttpError,
   NetworkError,
   RetryAfterTooLongError,
+  RobotsDisallowedError,
   httpFetch,
   httpJson,
   httpText,
 } from "./index.ts";
+// The gate's cache type, so each robots test can hold its own isolated verdict cache —
+// the transport's module-level default cache outlives a test and would make later
+// tests inherit earlier verdicts for the same origin.
+import type { RobotsCache } from "../../../../packages/master-robots/src/index.ts";
 
 // Captured at module load, before any test can replace them. Restoring from a variable
 // captured inside a test would restore the previous test's stub, not the real global.
@@ -69,14 +74,33 @@ function instantTimers(): { delays: number[] } {
 // The stub serves index `min(calls, len-1)`, so the LAST entry repeats forever. That
 // is what lets a one-element script drive the exhaustion case: `[() => 500]` answers
 // 500 to all seven attempts without listing it seven times.
-function stubFetch(responses: Array<() => Response>): {
+function stubFetch(
+  responses: Array<() => Response>,
+  // How a request for /robots.txt is answered. The transport's gate (on by default)
+  // asks for it before the first real attempt; the default 404 means "no policy
+  // published", which RFC 9309 (and master-robots) reads as allow — so every pre-gate
+  // test keeps its exact call script and counts. Gate tests pass their own thunk.
+  robots: () => Response = () => new Response("", { status: 404 }),
+): {
   calls: number;
   inits: Array<RequestInit | undefined>;
+  robotsCalls: number;
 } {
   // One mutable record shared with the caller, for the same by-reference reason as
   // instantTimers: the assertions run after the awaited call has mutated it.
-  const state: { calls: number; inits: Array<RequestInit | undefined> } = { calls: 0, inits: [] };
+  const state: { calls: number; inits: Array<RequestInit | undefined>; robotsCalls: number } = { calls: 0, inits: [], robotsCalls: 0 };
   globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    // GATE traffic is answered AND COUNTED SEPARATELY, never against the script:
+    // mixing it in would shift every scripted index and make `calls` lie about the
+    // target's attempts — the number all the retry assertions are written against.
+    // Identified by the gate's own distinctive Accept header, NOT by the path alone:
+    // the policy-seam tests below legitimately fetch a /robots.txt URL as their
+    // TARGET (the transport treats no path specially), and a path-only check would
+    // swallow their scripted responses.
+    if (String(_url).endsWith("/robots.txt") && headerValue(init?.headers, "accept") === "text/plain, */*;q=0.1") {
+      state.robotsCalls++;
+      return robots();
+    }
     // Clamped so the script never runs off its own end.
     const index = Math.min(state.calls, responses.length - 1);
     // Incremented before the thunk runs, so a thunk that throws is still counted as an
@@ -104,7 +128,12 @@ function stubFetch(responses: Array<() => Response>): {
 // to exercise one accidentally exercise the other.
 function stubFetchThrowing(error: Error): { calls: number } {
   const state = { calls: 0 };
-  globalThis.fetch = (async () => {
+  globalThis.fetch = (async (_url: string | URL | Request) => {
+    // The gate's robots fetch must still SUCCEED (404 = no policy = allow) so these
+    // tests keep exercising the TARGET's network failure. Letting the robots fetch
+    // throw too would turn every one of them into a robots 'indeterminate' refusal and
+    // the network-error paths under test would never run.
+    if (String(_url).endsWith("/robots.txt")) return new Response("", { status: 404 });
     // Counted so the fail-fast assertion can prove exactly one attempt was made.
     state.calls++;
     throw error;
@@ -500,5 +529,98 @@ describe("identity", () => {
     // The spread-ordering assertion. Our identity header is written last precisely so a
     // caller cannot remove it by accident.
     assert.equal(headerValue(state.inits[0]?.headers, "User-Agent"), DEFAULT_USER_AGENT);
+  });
+});
+
+// --- THE ROBOTS GATE (on by default) -------------------------------------------------------
+// Closes docs/robots/2026-09-17-robots-gate-first-caller.md §6.1: the Deno-side fetch paths
+// were ungated — scout-web called checkRobots by convention, and a convention each caller
+// must remember is a comment, not a control. The gate now lives inside httpFetch itself.
+// Each test passes its own RobotsCache: the transport's module-level default cache outlives
+// a test, and a verdict cached for an origin in one test would short-circuit the next.
+describe("robots gate", () => {
+  // A fresh, isolated verdict cache per test — see the describe comment.
+  const freshCache = (): { robots: { cache: RobotsCache } } => ({ robots: { cache: new Map() } });
+
+  // A real, well-formed policy that forbids /private and allows everything else, served
+  // the way a live host would: 200 text/plain.
+  const policy = () =>
+    new Response("User-agent: *\nDisallow: /private", { status: 200, headers: { "content-type": "text/plain" } });
+
+  test("REGRESSION: refuses a URL whose robots.txt disallows the path, without contacting the target", async () => {
+    // Script would answer the target if it were ever asked; the point is that it is not.
+    const state = stubFetch([() => new Response("{}", { status: 200 })], policy);
+    // The typed refusal, so callers can branch on it rather than regex a message.
+    await assert.rejects(
+      httpFetch("https://example.test/private/page", freshCache()),
+      RobotsDisallowedError,
+    );
+    // THE LOAD-BEARING ASSERTION: the disallowed target was never fetched at all.
+    assert.equal(state.calls, 0);
+    // Non-vacuity: the gate really did consult robots.txt (zero would mean the test
+    // passed by some other refusal, not by the policy).
+    assert.equal(state.robotsCalls, 1);
+  });
+
+  test("an allowed path under the same policy still goes through", async () => {
+    const state = stubFetch([() => new Response("ok", { status: 200 })], policy);
+    // /public is not matched by `Disallow: /private`, so the fetch proceeds normally.
+    const response = await httpFetch("https://example.test/public/page", freshCache());
+    // The target answered: the gate blocks only what the policy forbids, nothing else.
+    assert.equal(response?.status, 200);
+    assert.equal(state.calls, 1);
+  });
+
+  test("a malformed robots response (soft-200 HTML error page) fails CLOSED", async () => {
+    // The canonical fail-open (CLAUDE.md §6): a host that serves an HTML error shell
+    // with status 200. A lenient reader parses it as "zero rules" and allows everything.
+    const state = stubFetch(
+      [() => new Response("{}", { status: 200 })],
+      () => new Response("<html><body>Oops, something went wrong</body></html>", { status: 200, headers: { "content-type": "text/html" } }),
+    );
+    const outcome = await httpFetch("https://example.test/anything", freshCache()).then(
+      () => null,
+      // Caught rather than assert.rejects so the error's FIELDS can be asserted below.
+      (err: unknown) => err,
+    );
+    // Refused, with the machine-readable source naming the soft-200 specifically.
+    assert.ok(outcome instanceof RobotsDisallowedError);
+    assert.equal(outcome.verdict, "refuse");
+    assert.equal(outcome.source, "not-robots-txt");
+    // And the target was never contacted.
+    assert.equal(state.calls, 0);
+  });
+
+  test("a User-Agent no product token can be derived from fails closed, before any network call", async () => {
+    // A garbage UA would otherwise silently match robots groups as "*" — the exact
+    // fail-open tokenFromUserAgentHeader exists to refuse.
+    const state = stubFetch([() => new Response("{}", { status: 200 })], policy);
+    await assert.rejects(
+      httpFetch("https://example.test/x", { userAgent: "???", ...freshCache() }),
+      RobotsDisallowedError,
+    );
+    // Neither the target NOR robots.txt was fetched: the refusal is pre-network.
+    assert.equal(state.calls, 0);
+    assert.equal(state.robotsCalls, 0);
+  });
+
+  test("robots: false opts out — no robots fetch is made", async () => {
+    // The documented escape hatch for a non-crawl caller; today only tests use it.
+    const state = stubFetch([() => new Response("ok", { status: 200 })], policy);
+    const response = await httpFetch("https://example.test/private/page", { robots: false });
+    // The otherwise-disallowed path went through, and robots.txt was never asked.
+    assert.equal(response?.status, 200);
+    assert.equal(state.robotsCalls, 0);
+  });
+
+  test("the verdict is cached per origin: two calls, one robots fetch", async () => {
+    const state = stubFetch([() => new Response("ok", { status: 200 })], policy);
+    // One cache shared across both calls, as the module-level default would be.
+    const shared = freshCache();
+    await httpFetch("https://example.test/public/a", shared);
+    await httpFetch("https://example.test/public/b", shared);
+    // Two target fetches, but the policy was fetched once and the verdict reused.
+    assert.equal(state.calls, 2);
+    assert.equal(state.robotsCalls, 1);
   });
 });

@@ -34,9 +34,17 @@
 // policy is injected and the mechanism is written once.
 
 // Typed failures. See errors.ts for why these are classes and not message strings.
-import { BotProtectionError, HttpError, NetworkError, RetryAfterTooLongError } from "./errors.ts";
+import { BotProtectionError, HttpError, NetworkError, RetryAfterTooLongError, RobotsDisallowedError } from "./errors.ts";
 // The one pure, exhaustively-testable piece of wire-format handling.
 import { parseRetryAfterMs } from "./retry-after.ts";
+// The robots.txt gate, by RELATIVE path exactly as scout-web/index.ts already imports it
+// (a bare '@applyy/master-robots' specifier would need a package.json entry and a
+// lockfile write). Gating lives HERE because this is the one function every Deno fetch
+// path crosses (docs/robots/2026-09-17-robots-gate-first-caller.md §6.1): a gate each
+// caller must remember to call is a comment, not a control. No recursion hazard: the
+// gate fetches robots.txt through its OWN default fetcher (bare global fetch), never
+// back through this transport.
+import { checkRobots, tokenFromUserAgentHeader, type RobotsCache } from "../../../../packages/master-robots/src/index.ts";
 
 // Identifies this tool honestly. Matches the string `scout-ats/index.ts` already
 // sends, so a board operator reading their logs sees one identity for this system
@@ -145,6 +153,14 @@ export interface HttpRequestOptions {
   readonly notFound?: NotFoundMode;
   // See RetryPolicy.
   readonly retry?: RetryPolicy;
+  // Robots gate control. ON BY DEFAULT: every request this transport sends is checked
+  // against the target's robots.txt first, and a non-allow verdict throws
+  // RobotsDisallowedError before the target is ever contacted. `false` opts out — only
+  // for a caller provably not crawling a third-party site (none exists today; the
+  // production callers are board harvesters, which is exactly what robots governs).
+  // `cache` overrides the module-level verdict cache; it exists for tests, which need
+  // isolation from each other, and for a caller that wants its own TTL scope.
+  readonly robots?: false | { readonly cache?: RobotsCache };
 }
 
 // Every option resolved to a concrete value.
@@ -274,12 +290,43 @@ function attemptSignal(timeoutMs: number, callerSignal: AbortSignal | undefined)
 //
 // Returns the `Response` on success. Returns null ONLY for a 404 under the 'null' or
 // 'empty' modes — see NotFoundMode. Throws HttpError or a subclass otherwise.
+// One robots-verdict cache per isolate, so a 40-board poll asks each origin once per
+// TTL instead of once per request. Verdicts, not bodies, are cached (master-robots'
+// CacheEntry holds the classified source), and the gate's own TTLs apply: 1h for a
+// real answer, 5min for a failure.
+const defaultRobotsCache: RobotsCache = new Map();
+
 export async function httpFetch(
   url: string,
   options: HttpRequestOptions = {},
 ): Promise<Response | null> {
   // One normalisation pass; everything below reads concrete values.
   const cfg = resolveConfig(options);
+
+  // THE ROBOTS GATE, BEFORE THE FIRST ATTEMPT. Checked once per call, not per retry:
+  // the verdict cannot change between attempts of the same call, and re-checking would
+  // multiply robots traffic by the retry budget.
+  if (options.robots !== false) {
+    // The gate matches robots groups against the PRODUCT TOKEN ("applyy-scout"), not
+    // the full User-Agent header; the conversion is the package's own, so the token
+    // can never drift from the header we actually send.
+    const productToken = tokenFromUserAgentHeader(cfg.userAgent);
+    // A null token FAILS CLOSED (CLAUDE.md §6): guessing one would silently select the
+    // wildcard group — the exact fail-open tokenFromUserAgentHeader refuses to commit.
+    if (productToken === null) {
+      throw new RobotsDisallowedError(url, "refuse", `cannot derive a robots product token from User-Agent ${JSON.stringify(cfg.userAgent)}; refusing rather than matching as "*"`, null);
+    }
+    // The verdict logic (shape-checked parse, soft-200 refusal, 4xx/5xx semantics) all
+    // lives in master-robots; this transport only acts on the verdict.
+    const verdict = await checkRobots(url, productToken, { cache: options.robots?.cache ?? defaultRobotsCache });
+    // Anything but an explicit allow refuses — 'wait' included, mirroring scout-web's
+    // own gate: a transport that slept here would spend an Edge Function's wall clock
+    // on one slow host's robots rate limit. crawlDelayMs on an allow is deliberately
+    // NOT enforced here: pacing across requests is the caller's loop, not one call's.
+    if (verdict.kind !== "allow") {
+      throw new RobotsDisallowedError(url, verdict.kind, verdict.reason, verdict.kind === "refuse" ? verdict.source : null);
+    }
+  }
   // The computed backoff, doubling each retry. Reassigned in the loop, which is why it
   // is `let` and lives outside it.
   let delay = cfg.baseDelayMs;

@@ -100,6 +100,41 @@ export class NetworkError extends Error {
   }
 }
 
+// The robots.txt gate refused this URL, so the transport never sent the request.
+//
+// WHY THIS IS SEPARATE FROM HttpError: there is no status from the TARGET — the target
+// was never contacted, which is the entire point. Inventing a status (0? 999?) would
+// hand callers a number they will eventually compare against a real range. Like
+// NetworkError, it stands alone and carries structured fields instead.
+//
+// WHY REFUSAL IS AN ERROR AND NOT A null/empty RETURN: a silent empty result reads as
+// "the board had nothing today", which hides a policy refusal inside a normal outcome —
+// exactly the missing-data-becomes-an-answer pattern (CLAUDE.md §6). A thrown, typed
+// refusal forces every caller to decide what a refusal means for ITS domain.
+export class RobotsDisallowedError extends Error {
+  // The URL the gate refused, for per-board diagnostics like every sibling error.
+  readonly url: string;
+  // 'refuse' = the policy (or its absence of an answer) forbids the fetch;
+  // 'wait' = the host rate-limited the robots fetch and asked us to come back.
+  // The union mirrors RobotsVerdict's non-allow arms so nothing is flattened away.
+  readonly verdict: "refuse" | "wait";
+  // The machine-readable RobotsSource kind behind a refusal (e.g. 'not-robots-txt',
+  // 'refused-by-host'), or null for a 'wait'. `null`, not optional: under
+  // `exactOptionalPropertyTypes` an optional field invites `undefined` writes, and a
+  // reader branching on it should see an explicit "no source" rather than a hole.
+  readonly source: string | null;
+
+  constructor(url: string, verdict: "refuse" | "wait", reason: string, source: string | null) {
+    // The gate's own reason is the message: it already names the rule or the failure
+    // (master-robots writes them for humans), so wrapping it would only add noise.
+    super(`robots.txt gate refused ${url}: ${reason}`);
+    this.name = "RobotsDisallowedError";
+    this.url = url;
+    this.verdict = verdict;
+    this.source = source;
+  }
+}
+
 // A server-supplied `Retry-After` longer than we are willing to wait.
 //
 // WHY THIS IS AN ERROR RATHER THAN A CLAMP — the tempting alternative is to wait the

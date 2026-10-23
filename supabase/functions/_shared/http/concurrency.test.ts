@@ -138,7 +138,11 @@ describe("the client shares one cap across its own requests", () => {
 
     // Four URLs against a cap of two — the shape of a watchlist poll.
     const client = createHttpClient({ maxConcurrent: 2 });
-    const running = [1, 2, 3, 4].map((n) => client.fetch(`https://example.test/${n}`));
+    // robots: false — this test counts raw fetch arrivals against the cap, and the
+    // transport's default robots gate would add its own (gated!) robots.txt request
+    // per origin, deadlocking the drain loop's arithmetic. Concurrency is the subject
+    // here; the gate has its own suite in transport.test.ts.
+    const running = [1, 2, 3, 4].map((n) => client.fetch(`https://example.test/${n}`, { robots: false }));
 
     // Yield enough turns for the admitted requests to reach the stubbed fetch.
     await Promise.resolve();
@@ -187,7 +191,8 @@ describe("the client shares one cap across its own requests", () => {
 
     const first = createHttpClient({ maxConcurrent: 1 });
     const second = createHttpClient({ maxConcurrent: 1 });
-    const running = [first.fetch("https://a.test/"), second.fetch("https://b.test/")];
+    // Same robots: false as above, for the same raw-arrival-counting reason.
+    const running = [first.fetch("https://a.test/", { robots: false }), second.fetch("https://b.test/", { robots: false })];
 
     await Promise.resolve();
     await Promise.resolve();

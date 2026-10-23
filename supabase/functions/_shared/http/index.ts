@@ -30,7 +30,7 @@ export {
 export type { HttpRequestOptions, NotFoundMode, RetryPolicy } from "./transport.ts";
 
 // The typed failures callers branch on with `instanceof`.
-export { BotProtectionError, HttpError, NetworkError, RetryAfterTooLongError } from "./errors.ts";
+export { BotProtectionError, HttpError, NetworkError, RetryAfterTooLongError, RobotsDisallowedError } from "./errors.ts";
 
 // The semaphore, exported because a caller that already has its own work queue may
 // want to bound something other than HTTP with the same primitive.
