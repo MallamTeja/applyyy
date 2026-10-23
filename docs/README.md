@@ -13,7 +13,7 @@ No row here carries a count: each living doc names the command that regenerates 
 | [SYSTEM_ARCHITECTURE.md](SYSTEM_ARCHITECTURE.md) | Current architecture: components, agents, status graph, security, deploys, known gaps |
 | [architecture/agents.md](architecture/agents.md) | Agent roster in depth — why each is shaped the way it is, transitions, Gemini cost, kill switch |
 | [architecture/graph-engineering.md](architecture/graph-engineering.md) | The repo's graphs (status, provenance, pipeline, hash chain) and their invariants |
-| [PROGRESS.md](PROGRESS.md) | "Current state" with regenerating commands, then the dated log |
+| [PROGRESS.md](PROGRESS.md) | "Current state" with regenerating commands + re-verified open items; the Sept 2026 dated log is archived at [status/2026-09-progress-log-archive.md](status/2026-09-progress-log-archive.md) |
 | [verification-traps.md](verification-traps.md) | Checks that report success for the wrong reason — read before trusting a green |
 | [line-endings-determinism.md](line-endings-determinism.md) | Why CRLF breaks byte-identical approval; the `.gitattributes` rule |
 | [setup/gmail-tracker-apps-script.md](setup/gmail-tracker-apps-script.md) | Email-tracker setup via Apps Script |

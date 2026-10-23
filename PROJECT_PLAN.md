@@ -142,8 +142,12 @@ statement that ~35/day is forced by the Actions budget is now false.
 
 The ceiling is real, but it rests on two entirely different reasons:
 
-- **Supply.** §13: a 3-day freshness window over ~50 watchlisted companies yields
-  **single digits per day**, not 35. Sustaining ~35/day inside that window needs
+- **Supply.** §13: a 3-day freshness window over ~~a ~50-board watchlist yields
+  **single digits per day**~~ *(premise re-dated 2026-10-24: the watchlist is now
+  **158 verified boards** since 2026-10-23 — regenerate with
+  `select ats_provider, count(*) from company_watchlist group by 1` — and the first
+  expanded harvest produced **+921 `passed_filters`**; still short of the 200–400
+  target below)*. Sustaining ~35/day inside that window needs
   roughly **200–400 ATS boards** plus the aggregators. Freshness and volume trade
   directly against each other.
 - **Deliberate choice.** Constraint #1 — quality over volume, on purpose.
@@ -698,7 +702,7 @@ So every job carries `posted_at` **plus** `posted_at_source ∈ {exact, derived,
 
 **Fix — cold-start guard:** the first poll of any new board marks everything `posted_at_source = unknown` and *excludes* it from the 3-day filter, so the freshness rule only applies to jobs whose newness you actually observed. Boards become trustworthy from their second poll onward.
 
-**Supply consequence:** 3-day window + fresher-only + a 50-company watchlist produces **single digits per day**, not 35. Freshness and volume trade directly against each other. Sustaining ~35/day inside a 3-day window needs roughly **200–400 ATS boards** plus the aggregators. Seed that watchlist in Phase 1.
+**Supply consequence:** 3-day window + fresher-only + a 50-company watchlist produces **single digits per day**, not 35. Freshness and volume trade directly against each other. Sustaining ~35/day inside a 3-day window needs roughly **200–400 ATS boards** plus the aggregators. Seed that watchlist in Phase 1. *(Note 2026-10-24: seeding underway — 158 verified boards live since 2026-10-23, first expanded harvest +921 `passed_filters`; regenerate with `select ats_provider, count(*) from company_watchlist group by 1`.)*
 
 ---
 
@@ -1006,7 +1010,7 @@ Types live with the schema owner because types *derive* from schema — splittin
 ### Tasks still open
 
 3. Whether to open a 4th peer for the worker + GitHub Actions stream.
-4. Seed the 200–400 company ATS watchlist — **decided** ("seed a large ATS watchlist"), still to be built in Phase 1.
+4. Seed the 200–400 company ATS watchlist — **decided** ("seed a large ATS watchlist"), ~~still to be built in Phase 1~~ *(2026-10-24: partially built — 158 verified boards seeded as of 2026-10-23; regenerate with `select ats_provider, count(*) from company_watchlist group by 1`. 200–400 target still open.)*
 5. Rename `gemini1…gemini6` → `GEMINI_API_KEY_01…_15` in `.env`.
 6. Run `scripts/probe-quota.ts` once written, to replace guessed quota with measured.
 
