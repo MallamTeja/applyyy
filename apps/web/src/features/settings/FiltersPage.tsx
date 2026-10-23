@@ -101,7 +101,8 @@ export const RULE_COPY: Readonly<Partial<Record<FilterRuleType, RuleCopy>>> = {
     name: 'Degree mismatch',
     drops: "Excludes roles strictly requiring a Master's or PhD.",
     threshold: { kind: 'none' },
-    /* cascade.ts:315 skips it whenever requires_advanced_degree is null, and no job carries it.
+    /* The degree_mismatch null-skip in cascade.ts (named, not line-cited — the number
+       drifted once already) fires whenever requires_advanced_degree is null, and no job carries it.
        The second sentence is because filtersStore's evaluateJobMatch DOES read the description
        text, so the Discovered Jobs view can flag a role the screener never drops. */
     notEnforced:

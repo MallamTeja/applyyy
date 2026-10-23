@@ -417,8 +417,9 @@ async function main(): Promise<void> {
   console.log(`[applyy-scout] total new application rows created: ${totalApplications}`);
   // THE SCREENER'S OWN COUNTERS, reported separately from the discovery counters because
   // they answer a different question. The discovery numbers say the poll worked; these
-  // say the CASCADE worked. With filter_rules currently unseeded, `dropped: 0` is the
-  // expected reading — and printing it is what makes that visible rather than assumed.
+  // say the CASCADE worked. (Corrected 2026-10-23: this said "filter_rules currently
+  // unseeded" — all nine rules ARE seeded per user since 20260909235100, most with {}
+  // config, so `dropped: 0` usually means unconfigured thresholds, not missing rows.)
   if (screenContext.ok) {
     console.log(`[applyy-scout] screener: ${totalPassed} passed, ${totalDropped} dropped.`);
     // An unconfigured rule announces itself here. Silence means the rules are configured

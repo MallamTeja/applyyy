@@ -15,7 +15,8 @@ import { parseRuleWarnings, pickRuleWarningRun } from '../src/data/ruleWarnings.
 // The real writer, runtime-neutral, imported the way other web tests reach supabase/functions/_shared.
 import { withRuleWarnings } from '../../../supabase/functions/_shared/screen/run-summary.ts';
 
-// The two warnings the operator most needs to see (cascade.ts:157 and :315), used as fixtures.
+// The two warnings the operator most needs to see (the null-skip returns in cascade.ts's
+// experienceCeiling and degreeMismatch — named, not line-cited; the numbers drifted once), used as fixtures.
 const EXP = 'experience_ceiling skipped: min_experience_years is missing/null in JD';
 // Second real warning, so ordering and the " | " join are both exercised.
 const DEG = 'degree_mismatch skipped: requires_advanced_degree is missing/null in JD';
