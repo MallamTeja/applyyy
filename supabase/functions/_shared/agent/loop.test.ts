@@ -74,7 +74,8 @@ test("kill switch off: nothing is swept and nothing is claimed", async () => {
 });
 
 test("a missing settings row halts the stage exactly like an off switch", async () => {
-  // The CURRENT state of the live database: `bootstrap_user_defaults()` never called.
+  // NO LONGER the live state (CORRECTED 2026-10-24: signup trigger `20261008180000`
+  // seeds defaults); kept as the regression guard for a mis-provisioned account.
   const port = makeFakePort({ settings: null, claims: { passed_filters: THREE_ROWS } });
   // Run.
   const outcome = await runStage(advancingStage(port));

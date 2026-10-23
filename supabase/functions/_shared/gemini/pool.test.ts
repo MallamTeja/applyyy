@@ -87,10 +87,11 @@ test("NULL with keys present reports all_keys_cooling", async () => {
   assert.equal(result.reason, "all_keys_cooling");
 });
 
-// The dangerous case, and it is the CURRENT STATE OF PRODUCTION:
-// `bootstrap_user_defaults()` does not seed `gemini_key_state` and nothing else in
-// the repo writes to it. Every agent then dutifully releases its claim and the
-// pipeline looks merely idle with no error anywhere — the exact §14 silent stop.
+// The dangerous case — NO LONGER production state (CORRECTED 2026-10-24:
+// `applyy_internal.seed_user_defaults` has seeded `gemini_key_state` on signup since
+// `20261009150000`; live rows re-measured today). A mis-provisioned account can still
+// hit an empty pool: every agent then dutifully releases its claim and the pipeline
+// looks merely idle with no error anywhere — the exact §14 silent stop this guards.
 test("NULL with an empty pool reports no_keys_configured", async () => {
   // Claim returns NULL; zero key rows.
   const result = await claimKey(fakeClient({ claim: { data: null, error: null }, keyRowCount: 0 }));

@@ -174,8 +174,11 @@ tested, so the layers are not propping each other up.
 
 ## 5. The two very different NULLs from `claim_gemini_key()`
 
-`bootstrap_user_defaults()` **never seeds `gemini_key_state`**, and nothing else in the
-repo writes to it either. So on a fresh account `claim_gemini_key()` returns NULL
+~~`bootstrap_user_defaults()` **never seeds `gemini_key_state`**, and nothing else in the
+repo writes to it either.~~ *(CORRECTED 2026-10-24: since `20261009150000`,
+`applyy_internal.seed_user_defaults` — called by the signup trigger `20261008180000` —
+DOES seed `gemini_key_state`; live rows re-measured today.)* On an account where seeding
+never ran, `claim_gemini_key()` returns NULL
 forever, every agent dutifully releases its claim, and the pipeline **looks merely idle
 with no error anywhere** — the exact silent stop §14 exists to prevent.
 

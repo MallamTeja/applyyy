@@ -51,8 +51,9 @@ test("system_enabled = false halts the agent", async () => {
 });
 
 test("a MISSING settings row halts the agent — absence is not consent", async () => {
-  // `bootstrap_user_defaults()` has not been called. This is the CURRENT state of the
-  // live database, so it is production behaviour and not a hypothetical.
+  // NO LONGER the live state (CORRECTED 2026-10-24: the signup trigger `20261008180000`
+  // seeds defaults via `seed_user_defaults`). A mis-provisioned account can still lack
+  // the row, so the halt-on-absence contract stays tested as a regression guard.
   const port = makeFakePort({ settings: null });
   // Ask.
   const verdict = await checkKillSwitch(port);
