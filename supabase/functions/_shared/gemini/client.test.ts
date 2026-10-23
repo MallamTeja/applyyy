@@ -868,6 +868,95 @@ test("400 is still terminal after one call (a malformed request fails on every k
   assert.equal(calls, 1);
 });
 
+// --- 400 API_KEY_INVALID = A DEAD KEY, NOT A BAD REQUEST -----------------------------------
+// Google answers an expired or deleted key with HTTP 400 INVALID_ARGUMENT whose
+// error.details[] carries reason "API_KEY_INVALID" — per KEY, not per request. Before the
+// fix (TODO 2026-10-09) this fell into the terminal 400 branch: no rotation, no cooldown,
+// so one dead key kept failing calls. These tests pin the rotation and the fail-closed
+// shape check (CLAUDE.md §6: a lenient reader is the fail-open).
+
+// Google's real envelope for a dead key, shape per the API error docs (google.rpc.ErrorInfo).
+const apiKeyInvalidBody = {
+  error: {
+    code: 400,
+    message: "API key not valid. Please pass a valid API key.",
+    status: "INVALID_ARGUMENT",
+    details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "API_KEY_INVALID", domain: "googleapis.com" }],
+  },
+};
+
+test("400 API_KEY_INVALID then 200: rotates like a 403 — dead key parked 3600s, ok on the next key, no sleep", async () => {
+  const rig = transientRig();
+  // Counts attempts so the test proves the SECOND key answered, not a retry of the first.
+  let calls = 0;
+  const outcome = await callGeminiWithFailover(rig.db, {
+    ...rig.base,
+    execute: async () => {
+      calls += 1;
+      // First key is dead at Google; the second behaves.
+      return calls === 1
+        ? { ok: false as const, status: 400, statusText: "Bad Request", errorBody: apiKeyInvalidBody }
+        : { ok: true as const, data: { ok: 1 as const } };
+    },
+  });
+  // The call survived the dead key: that is the whole point of the rotation.
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.attempts, 2);
+  const first = reportsOf(rig)[0]!;
+  // The DEAD key (index 1) took the blame, so the LRU skips it.
+  assert.equal(first.p_key_index, 1);
+  assert.equal(first.p_success, false);
+  // Exactly the 401/403 path's cooldown: the key, not the request, is at fault.
+  assert.equal(first.p_retry_after_seconds, 3600);
+  // Not an overload: rotating must not wait.
+  assert.deepEqual(rig.sleeps, []);
+});
+
+test("400 WITHOUT reason API_KEY_INVALID stays a terminal request error after one call", async () => {
+  const rig = transientRig();
+  // Counts calls: a malformed request fails identically on every key, so exactly one attempt.
+  let calls = 0;
+  const outcome = await callGeminiWithFailover(rig.db, {
+    ...rig.base,
+    execute: async () => {
+      calls += 1;
+      // A real 400 shape WITH a details array but a different reason: only API_KEY_INVALID rotates.
+      return {
+        ok: false as const,
+        status: 400,
+        statusText: "Bad Request",
+        errorBody: { error: { code: 400, message: "Invalid JSON payload", status: "INVALID_ARGUMENT", details: [{ "@type": "type.googleapis.com/google.rpc.BadRequest", reason: "FIELD_ERROR" }] } },
+      };
+    },
+  });
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  // The terminal branch, not rotation: reason and single attempt prove it.
+  assert.equal(outcome.reason, "http_error");
+  assert.equal(calls, 1);
+});
+
+test("a 400 whose error.details is missing or malformed is NOT treated as API_KEY_INVALID", async () => {
+  // Every odd shape must read as an ordinary 400 (fail closed): rotating on a guess would park a
+  // healthy key for an hour on each malformed request.
+  for (const errorBody of [undefined, null, "plain text", {}, { error: null }, { error: {} }, { error: { details: "API_KEY_INVALID" } }, { error: { details: [null, { reason: 42 }] } }]) {
+    const rig = transientRig();
+    // One counter per shape so the failure message names the shape that rotated.
+    let calls = 0;
+    const outcome = await callGeminiWithFailover(rig.db, {
+      ...rig.base,
+      execute: async () => {
+        calls += 1;
+        return { ok: false as const, status: 400, statusText: "Bad Request", errorBody };
+      },
+    });
+    // Terminal on the first call, never rotated, for every shape in the sweep.
+    assert.equal(outcome.ok, false, JSON.stringify(errorBody));
+    assert.equal(calls, 1, JSON.stringify(errorBody));
+  }
+});
+
 test("a 403 errorBody's error.status and message reach last_error", async () => {
   const rig = transientRig();
   await callGeminiWithFailover(rig.db, {

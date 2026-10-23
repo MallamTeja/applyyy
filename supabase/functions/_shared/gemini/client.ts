@@ -203,6 +203,22 @@ function withGoogleError(base: string, errorBody: unknown): string {
   const extra = parts.join(" - ").replace(/AIza[0-9A-Za-z_-]{35}/g, "[redacted-key]").slice(0, 200);
   return `${base} [${extra}]`;
 }
+// True only for Google's per-KEY 400: an expired or deleted key answers HTTP 400
+// INVALID_ARGUMENT (not 403) with error.details[] carrying an ErrorInfo whose reason is
+// exactly "API_KEY_INVALID". SHAPE-CHECKED at every step (CLAUDE.md §6: the lenient reader
+// is the fail-open): a missing or malformed `details` means "ordinary 400", never "dead key" —
+// rotating on a guess would park a healthy key for an hour on every malformed request.
+function isApiKeyInvalid(errorBody: unknown): boolean {
+  // Only an object body can carry Google's envelope; a text body is an ordinary 400.
+  const err = typeof errorBody === "object" && errorBody !== null ? (errorBody as { error?: unknown }).error : undefined;
+  // No `error` object, no verdict: fail closed.
+  if (typeof err !== "object" || err === null) return false;
+  const details = (err as { details?: unknown }).details;
+  // Anything but an array fails closed — `details: "API_KEY_INVALID"` must not match.
+  if (!Array.isArray(details)) return false;
+  // Exact string match on each entry's `reason`; non-object entries are skipped, not trusted.
+  return details.some((d) => typeof d === "object" && d !== null && (d as { reason?: unknown }).reason === "API_KEY_INVALID");
+}
 // Appends " model=<id>" to a last_error string, AFTER everything else, so the existing
 // "HTTP 503: Service Unavailable [UNAVAILABLE - ...]" prefix the Health page and humans read stays
 // byte-identical. No model (a direct caller that passed none) leaves the text untouched, so the
@@ -369,18 +385,16 @@ export async function callGeminiWithFailover<T>(
       };
     }
 
-    // 4a. KEY REJECTION (401/403): most likely THIS key is bad (revoked, restricted, wrong
-    // project) while the rest of the pool is healthy, so one bad key must not end the call.
+    // 4a. KEY REJECTION (401/403, and the one per-KEY 400): most likely THIS key is bad
+    // (revoked, restricted, wrong project — or deleted at Google, which answers 400
+    // INVALID_ARGUMENT with details[].reason "API_KEY_INVALID", see isApiKeyInvalid) while the
+    // rest of the pool is healthy, so one bad key must not end the call.
     // The key, not the model, is at fault: park it for an hour (KEY_REJECTED_COOLDOWN_S) so the
     // LRU skips it and a human has time to look, then rotate to the next key. NO backoff sleep:
     // this is not an overload, so waiting buys nothing. Same maxRetries budget as everything else.
-    // 400 is deliberately NOT here: a malformed request fails identically on every key.
-    // TODO(2026-10-09, not built): one 400 IS per-key — `API_KEY_INVALID` (an expired or deleted
-    // key; Google returns it as 400 INVALID_ARGUMENT). Today it falls to the terminal branch
-    // below with no rotation and no cooldown, so one dead key fails calls until the LRU moves on.
-    // The fix would match error.details[].reason === "API_KEY_INVALID" here and treat it like a
-    // 403. Left as a note on purpose (orchestrator's scope call); every other 400 stays terminal.
-    if (execResult.status === 401 || execResult.status === 403) {
+    // Every OTHER 400 is deliberately NOT here: a malformed request fails identically on every
+    // key, so it stays in the terminal branch below (fail closed on any odd error shape).
+    if (execResult.status === 401 || execResult.status === 403 || (execResult.status === 400 && isApiKeyInvalid(execResult.errorBody))) {
       const detail = withGoogleError(`HTTP ${execResult.status}: ${execResult.statusText || "Key rejected"}`, execResult.errorBody);
       // Tagged at the write only; `detail` itself stays untagged for the returned outcome.
       await reportResult(db, keyIndex, false, KEY_REJECTED_COOLDOWN_S, withModel(detail, currentModel));
@@ -481,9 +495,9 @@ export async function callGeminiWithFailover<T>(
       };
     }
 
-    // 5. On 400 and any other status that is not a 429, 404, key rejection (401/403) or transient
-    // failure: record the error against the key and fail closed — rotating keys won't fix a
-    // malformed payload. `||` (not `??`) on statusText: HTTP/2 yields "", and an empty string
+    // 5. On 400 (except the per-key API_KEY_INVALID caught in 4a) and any other status that is
+    // not a 429, 404, key rejection or transient failure: record the error against the key and
+    // fail closed — rotating keys won't fix a malformed payload. `||` (not `??`) on statusText: HTTP/2 yields "", and an empty string
     // would otherwise leave a double space in last_error ("HTTP 403:  [...]").
     await reportResult(
       db,
