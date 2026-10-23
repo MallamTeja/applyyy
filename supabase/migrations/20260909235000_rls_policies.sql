@@ -91,7 +91,13 @@ create policy "read own events" on public.application_events
   using ((select auth.uid()) = user_id);
 
 -- Agents insert notes, errors and llm_call rows directly. Status-change rows come
--- from the trigger, which runs as definer and is not subject to this policy.
+-- from the trigger. CORRECTED 2026-10-23 (defect #3, docs/PROGRESS.md): this line
+-- previously said the trigger "runs as definer and is not subject to this policy" —
+-- the wrong reason. FORCE RLS on application_events DOES bind the table owner; the
+-- definer insert lands only because the postgres role carries BYPASSRLS (rolsuper is
+-- false). A plain owner role without BYPASSRLS would be refused by this very policy,
+-- and every status change would fail. Same correct framing as
+-- 20261008180000_bootstrap_defaults_on_signup.sql.
 create policy "append own events" on public.application_events
   for insert to authenticated
   with check ((select auth.uid()) = user_id);

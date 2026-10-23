@@ -16,8 +16,10 @@
 --         `applying` row aborts the WHOLE sweep — a dead worker's lease is never
 --         recovered, and the release statement after it never runs either.
 --      b. It became SECURITY DEFINER with no `set search_path`. Definer runs as the
---         owner, and FORCE RLS on `applications` does not bind a superuser-owned
---         definer the way it binds an invoker, so any authenticated (or anon,
+--         owner, which the postgres role's BYPASSRLS exempts from FORCE RLS
+--         (CORRECTED 2026-10-23: this previously blamed a "superuser-owned definer" —
+--         rolsuper is false here; BYPASSRLS is the exemption, and FORCE RLS does bind
+--         an owner without that attribute), so any authenticated (or anon,
 --         via default privileges) caller swept EVERY tenant's leases. And a
 --         definer with a mutable search_path is the textbook hijack vector.
 --      c. It stopped clearing `claimed_at`, leaving a half-released lease.

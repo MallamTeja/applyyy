@@ -63,8 +63,11 @@ emptying it is the deliberate kill switch.
 - `experience_ceiling` and `degree_mismatch` can never fire: nothing populates
   `jobs.min_experience_years` / `requires_advanced_degree`. Their skips are recorded in
   `agent_runs.error_detail` (`_shared/screen/run-summary.ts`) and shown on the Health page.
-- Every status transition writes two `application_events` rows: one from the RPC and one
-  from the `log_status_change` trigger.
+- Every status transition writes a `status_change` witness row from the `log_status_change`
+  trigger (from/to status; an agent cannot forget to log). A SECOND `note` row — the caller's
+  `p_detail`: scores, `resume_sha256`, block history — is written by the RPC only when
+  `p_detail` is non-empty. The split is DELIBERATE (the migrations' own comments say so:
+  "separable when reading back"); it is a design, not a duplication bug.
 
 **Gates:** `.github/workflows/ci.yml` typechecks and tests every tree on each push to `main`.
 Traps: [`verification-traps.md`](verification-traps.md).
@@ -737,6 +740,7 @@ every subsequent status write then fails with
 ## Runtime defects found in my tree — not yet fixed
 
 > *2026-10-08: #1 fixed (`20260910190000`, `20260918213000`); #2 fixed (bootstrap now seeds `gemini_key_state`, but has no caller); #4 corrected in place; #3 stands, in an applied migration.*
+> *2026-10-23: #1's backwards comment and #3's wrong reason are now corrected IN PLACE in the migration files (inline `CORRECTED 2026-10-23` markers; same narrow comments-never-reached-Postgres exception as #4). Behaviour was already fixed/safe; only the prose lied.*
 
 Load-time is clean; these are behavioural.
 

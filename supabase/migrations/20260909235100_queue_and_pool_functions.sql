@@ -250,9 +250,14 @@ begin
            claim_expires_at = null
      where a.claimed_by is not null
        and a.claim_expires_at < now()
-       -- Belt and braces: the statement above already moved every stale `applying`
-       -- row out of this predicate, but stating it makes the invariant local and
-       -- survives someone reordering the two statements.
+       -- CORRECTED 2026-10-23 (defect #1, docs/PROGRESS.md). This previously read
+       -- "the statement above already moved every stale `applying` row out of this
+       -- predicate" — backwards: that statement set only `status` and left the lease,
+       -- so it moved those rows INTO this predicate and they were double-counted in
+       -- released_count. Behaviour was fixed in 20260910190000 (and the live body is
+       -- 20261009130000, which clears the lease in the first statement); the text here
+       -- is corrected in place because a comment never reached Postgres — the narrow
+       -- exception recorded in docs/audit/2026-09-10-schema-invariants-verified.md.
        and a.status <> 'applying'
     returning a.id
   )

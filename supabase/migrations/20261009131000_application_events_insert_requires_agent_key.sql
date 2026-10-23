@@ -20,8 +20,9 @@
 -- so the second branch is true for every row and the check reduces to the old one.
 --
 -- WHO INSERTS DIRECTLY (repo recon 2026-10-09; every other event comes from inside
--- advance_application_status or the definer trigger log_status_change, which RLS does
--- not apply to):
+-- advance_application_status or the definer trigger log_status_change — exempt via the
+-- postgres role's BYPASSRLS, not because a definer is above RLS: FORCE RLS binds owners
+-- without that attribute (CORRECTED 2026-10-23, defect #3 in docs/PROGRESS.md)):
 --   * apps/web saveTailoredEdit.ts:226 and ReferralOutreachPage.tsx:197: agent 'human',
 --     no key header. Pass in both key states.
 --   * release_application_claim (security INVOKER, so RLS applies): agent 'applier',
