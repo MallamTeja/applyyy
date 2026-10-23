@@ -730,10 +730,12 @@ every subsequent status write then fails with
    already replied?" needs, and the natural join key for threading a conversation
    onto an application. **Recommendation: add the columns.** A dropped field is
    invisible until someone needs it. Not yet done.
-3. **Should `supabase/tests/invariants.sql` exist?** The invariant script is
+3. **Should `supabase/tests/invariants.sql` exist?** ~~The invariant script is
    currently a transcript in a docs file. It should be checked in and
    re-runnable, but `supabase/tests/` has **no assigned owner**, so it is
-   proposed rather than created.
+   proposed rather than created.~~ *(2026-10-23: created — 12 read-only
+   do-block invariants, run manually via psql/MCP, never a migration; all 12
+   verified green against live before commit.)*
 
 ---
 
@@ -794,7 +796,7 @@ Load-time is clean; these are behavioural.
 
 ## Not done — stated as not done
 
-> *2026-10-08: dated 2026-09-10. Everything is now deployed, and CI gates typecheck. Still true: no `supabase/tests/invariants.sql`; ~~SCHEMA_CONTRACT §8.3 still says `APPLYY_WORKER_*`~~ (2026-10-23: §8.3 now says `APPLYY_APP_USER_*`).*
+> *2026-10-08: dated 2026-09-10. Everything is now deployed, and CI gates typecheck. ~~Still true: no `supabase/tests/invariants.sql`~~ (2026-10-23: it exists, 12 invariants, verified green against live); ~~SCHEMA_CONTRACT §8.3 still says `APPLYY_WORKER_*`~~ (2026-10-23: §8.3 now says `APPLYY_APP_USER_*`).*
 
 - **Nothing is deployed.** No `supabase link`, no `db push`, no `vercel deploy`,
   no Actions run has ever executed. This has not changed today.
@@ -804,7 +806,8 @@ Load-time is clean; these are behavioural.
   have known defects above.
 - `pnpm -r run typecheck` is **red** (`worker`, `apps/web`).
 - The working tree is **not renormalised** (deliberate — see above).
-- `supabase/tests/invariants.sql` does not exist.
+- ~~`supabase/tests/invariants.sql` does not exist.~~ *(2026-10-23: created and
+  verified green against live — 12 read-only invariants.)*
 - The `APPLYY_WORKER_*` → `APPLYY_APP_USER_*` rename is **ruled but not
   executed** across contract, function, workflows and Actions secrets.
   *(2026-10-23: executed everywhere in-repo — code and workflows renamed by `21f0701`,
