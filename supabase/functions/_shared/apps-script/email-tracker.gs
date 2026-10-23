@@ -211,7 +211,12 @@ function applyyCollectMessages_(threads) {
           // When it arrived, as ISO-8601 for a timestamptz column.
           received_at: message.getDate().toISOString(),
           // Gmail labels, so the classifier can later tell inbox from archived.
-          label_ids: applyyThreadLabelNames_(thread)
+          label_ids: applyyThreadLabelNames_(thread),
+          // Gmail's own DKIM/SPF verdict (the TOPMOST Authentication-Results header). The
+          // intake confirms a submitted application from a receipt ONLY when this shows the
+          // ATS really sent it (email-tracker-intake/decide.ts verifyReceiptSender). Null
+          // when unreadable, and then nothing is confirmed.
+          authentication_results: applyyTopAuthResults_(message)
         },
         // Kept out of the wire object: which thread to label once this is stored.
         thread: thread
@@ -243,6 +248,40 @@ function applyyThreadLabelNames_(thread) {
  * Cut a string to a maximum length. Defensive on both sides: the endpoint truncates
  * too, but sending less costs nothing and keeps us well inside the 1MB body ceiling.
  */
+/**
+ * Gmail's own Authentication-Results header value, or null.
+ *
+ * Gmail PREPENDS this header when the mail arrives, so the FIRST one in the raw message is
+ * Google's verdict. A sender can embed its own forged "Authentication-Results: ...
+ * dkim=pass" lower down, but can't put one above Google's, so only the first is sent.
+ * (getHeader is not used: which of several same-named headers it returns is undocumented.)
+ */
+function applyyTopAuthResults_(message) {
+  // Raw RFC 822 text; any failure (quota, an oversized message) means "unknown".
+  try {
+    // The whole message as Gmail stored it.
+    var raw = message.getRawContent();
+    // The header block ends at the first blank line; the body is never scanned.
+    var end = raw.search(/\r?\n\r?\n/);
+    // No blank line means no parseable header block.
+    if (end < 0) return null;
+    // Unfold continuation lines (CRLF + whitespace) so one header is one line.
+    var headers = raw.substring(0, end).replace(/\r?\n[ \t]+/g, ' ').split(/\r?\n/);
+    // First match wins: that is Google's.
+    for (var i = 0; i < headers.length; i++) {
+      // Header names are case-insensitive.
+      var match = headers[i].match(/^authentication-results:\s*(.*)$/i);
+      // Trimmed and capped to the intake's limit (MAX_AUTH_RESULTS_CHARS).
+      if (match) return match[1].trim().substring(0, 4096) || null;
+    }
+    // No such header at all.
+    return null;
+  } catch (e) {
+    // Unreadable: the intake treats null as "cannot confirm".
+    return null;
+  }
+}
+
 function applyyTruncate_(text, limit) {
   // A message with no plain body is legal — HTML-only mail exists.
   if (!text) return '';

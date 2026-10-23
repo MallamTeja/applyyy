@@ -37,6 +37,10 @@ export interface ActiveApplication {
     readonly company_name: string;
     // Normalized slug: the matching key.
     readonly company_slug: string;
+    // The job title. Read ONLY by the receipt confirmation, which requires it in the email:
+    // Greenhouse signs mail for every employer, so the company alone doesn't pin the job.
+    // Optional because the older reads (and fixtures) don't select it; absent = no confirm.
+    readonly title?: string | null;
   } | null;
 }
 
@@ -286,4 +290,209 @@ export function matchApplication(
     : candidates.filter((app) => slugNamedIn(message, app.jobs!.company_slug.toLowerCase()));
   // Exactly one, or nothing.
   return pool.length === 1 ? pool[0]!.id : null;
+}
+
+// ---- Receipt confirmation: a verified ATS receipt marks a submitted row `applied` ----------
+//
+// Teja ruled (2026-10-09 23:24 IST) that a Greenhouse "application received" email may move
+// an application the worker tried to submit (`applying`, or `needs_verification` after the
+// sweep) to `applied`, with no human check. Every guard below is mandatory; a missing or
+// malformed input refuses (CLAUDE.md §6). Spoofing is the threat: anyone can send "Thank
+// you for applying to Acme", so the sender must be the ATS AND Gmail must say so.
+
+// The ATS domains whose receipts may CONFIRM a submission. Deliberately separate from (and
+// narrower than) parser.ts's classification list: confirming is higher stakes than reading
+// a reply, so only the vendor Teja ruled on is here. Add one only with a verified DKIM sample.
+export const CONFIRMING_VENDOR_DOMAINS: readonly string[] = ["greenhouse.io", "greenhouse-mail.io"];
+
+// The statuses a receipt may confirm: rows the worker actually tried to submit. Never an
+// earlier status, so a receipt can't jump a row the system never sent past approval.
+export const CONFIRMABLE_STATUSES: readonly ApplicationStatus[] = ["applying", "needs_verification"];
+
+// The one authserv-id whose verdict is trusted. Gmail PREPENDS its own
+// Authentication-Results header; a sender can embed a forged one lower down, but it can't
+// make one appear above Google's, and the script sends only the topmost (email-tracker.gs).
+const TRUSTED_AUTHSERV_ID = "mx.google.com";
+
+/** The vendor a domain belongs to (the domain itself or a subdomain of it), or null. */
+function confirmingVendorOf(domain: string): string | null {
+  // Lowercased once; DNS names are case-insensitive.
+  const lowered = domain.toLowerCase();
+  // Equal, or a true subdomain: the "." prefix stops "evilgreenhouse.io" from matching.
+  return CONFIRMING_VENDOR_DOMAINS.find((vendor) => lowered === vendor || lowered.endsWith(`.${vendor}`)) ?? null;
+}
+
+/** The domain of the sender's address ("Name <a@b.c>" or a bare "a@b.c"), or null. */
+function senderAddressDomain(from: string): string | null {
+  // Exactly one address: "<b@greenhouse.io>, <a@evil.com>" or a display name hiding a
+  // second address is refused outright rather than resolved to whichever comes first.
+  if (from.split("@").length !== 2) return null;
+  // The angle-bracket address wins over any address-like text in the display name.
+  const angled = from.match(/<([^<>@\s]+)@([^<>@\s]+)>/);
+  // A bare address is accepted only when it is the WHOLE header (no display name to hide in).
+  const bare = from.trim().match(/^([^<>@\s]+)@([^<>@\s]+)$/);
+  // The domain part of whichever matched.
+  const domain = angled?.[2] ?? bare?.[2] ?? null;
+  // Shape check: letters, digits, dots and hyphens only, with at least one dot.
+  return domain !== null && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain) ? domain.toLowerCase() : null;
+}
+
+/** The domain named by an `@domain`, `user@domain` or bare `domain` property value. */
+function propertyDomain(value: string): string | null {
+  // Strip a leading "user@" or "@"; what remains must be a plain domain.
+  const domain = value.includes("@") ? value.slice(value.lastIndexOf("@") + 1) : value;
+  // Same shape check as the sender's domain.
+  return /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain) ? domain.toLowerCase() : null;
+}
+
+/**
+ * Whether Gmail verified this receipt as really sent by a confirming ATS vendor, and how.
+ * Null (refuse) unless: the sender is on a vendor domain V; the header's authserv-id is
+ * mx.google.com; and a dkim=pass clause signs for V (header.d / header.i) or, failing
+ * that, an spf=pass clause names V (smtp.mailfrom). The signing domain must be the SAME
+ * vendor as the sender, so a Lever-signed mail can't vouch for a "greenhouse" From.
+ */
+export function verifyReceiptSender(
+  from: string,
+  authenticationResults: string | null,
+): { readonly method: "dkim" | "spf"; readonly domain: string } | null {
+  // The vendor the visible sender claims.
+  const senderDomain = senderAddressDomain(from);
+  // Not a confirming vendor (or no parseable address): never a confirmation.
+  const vendor = senderDomain === null ? null : confirmingVendorOf(senderDomain);
+  if (vendor === null) return null;
+  // No header (older script, or stripped): fail closed.
+  if (authenticationResults === null || authenticationResults.trim() === "") return null;
+  // RFC 8601: "authserv-id; method=result prop=value ...; method=result ...".
+  const clauses = authenticationResults.split(";").map((clause) => clause.trim());
+  // Only Gmail's own verdict counts; anything else may be sender-written.
+  if (clauses[0]!.toLowerCase() !== TRUSTED_AUTHSERV_ID) return null;
+
+  // The clauses after the authserv-id, each tokenised on whitespace.
+  const results = clauses.slice(1).map((clause) => clause.split(/\s+/).map((token) => token.toLowerCase()));
+  // DKIM first: it signs the message itself, the stronger evidence.
+  for (const tokens of results) {
+    // Exactly "dkim=pass" as the method token; "dkim=fail"/"dkim=neutral" never pass.
+    if (tokens[0] !== "dkim=pass") continue;
+    // The signing domain: header.d= or header.i=@domain.
+    const property = tokens.find((token) => token.startsWith("header.d=") || token.startsWith("header.i="));
+    // The domain named by that property, if well formed.
+    const domain = property === undefined ? null : propertyDomain(property.slice(property.indexOf("=") + 1));
+    // It must sign for the SAME vendor the sender claims.
+    if (domain !== null && confirmingVendorOf(domain) === vendor) return { method: "dkim", domain };
+  }
+  // SPF as the fallback: the envelope sender's domain was authorised to send.
+  for (const tokens of results) {
+    // Exactly "spf=pass".
+    if (tokens[0] !== "spf=pass") continue;
+    // The envelope sender, smtp.mailfrom=addr or =domain.
+    const property = tokens.find((token) => token.startsWith("smtp.mailfrom="));
+    // Its domain, if well formed.
+    const domain = property === undefined ? null : propertyDomain(property.slice("smtp.mailfrom=".length));
+    // Same vendor as the visible sender.
+    if (domain !== null && confirmingVendorOf(domain) === vendor) return { method: "spf", domain };
+  }
+  // Nothing passed for this vendor.
+  return null;
+}
+
+/**
+ * Whether this email confirms that this application was submitted, i.e. may move it to
+ * `applied`. Every condition is required; the caller has already matched it to exactly one
+ * row (matchApplication) and verified the sender (verifyReceiptSender).
+ */
+export function receiptConfirmsApplied(input: {
+  // What the email is.
+  readonly decision: Pick<MessageDecision, "classification" | "confidence">;
+  // Where the matched row is now.
+  readonly current: ApplicationStatus;
+  // When Gmail received the email (validated ISO by the contract).
+  readonly receivedAt: string;
+  // When the row LAST entered `applying` (application_events), or null if never.
+  readonly enteredApplyingAt: string | null;
+  // verifyReceiptSender's verdict for this email.
+  readonly verification: { readonly method: "dkim" | "spf"; readonly domain: string } | null;
+  // titleNamedIn: the email names THIS job, not just this company.
+  readonly titleMatches: boolean;
+  // addressedTo: the signed To header names Teja, so it isn't someone else's replayed receipt.
+  readonly addressedToOwner: boolean;
+}): boolean {
+  // Another employer's (or another job's) Greenhouse mail is DKIM-valid too: the job title
+  // must be named, so a company-name coincidence can't confirm the wrong row.
+  if (!input.titleMatches) return false;
+  // A genuine signed receipt for SOMEONE ELSE, re-sent to Teja, still passes DKIM; the To
+  // it was signed with names the original recipient, so it is refused here.
+  if (!input.addressedToOwner) return false;
+  // Only rows the worker tried to submit.
+  if (!CONFIRMABLE_STATUSES.includes(input.current)) return false;
+  // Only a receipt; an interview, rejection or outreach email is not proof of a submit.
+  if (input.decision.classification !== "application_received") return false;
+  // The same confidence bar as every other tracker move.
+  if (!passesConfidenceGate("applied", input.decision.confidence)) return false;
+  // The graph must allow it (status-flow.ts mirrors the database guard).
+  if (!canTransition(input.current, "applied", "tracker")) return false;
+  // Gmail must have verified the vendor.
+  if (input.verification === null) return false;
+  // No recorded submit attempt: a receipt can't be matched to one in time.
+  if (input.enteredApplyingAt === null) return false;
+  // Both instants, parsed; a malformed stamp is not a time (Date.parse("-5") is year -5,
+  // but the contract and the database only ever hand us ISO strings).
+  const received = Date.parse(input.receivedAt);
+  const entered = Date.parse(input.enteredApplyingAt);
+  if (!Number.isFinite(received) || !Number.isFinite(entered)) return false;
+  // STRICTLY after the latest submit attempt: an older receipt is for an earlier
+  // application (or a manual one) to the same company, not this submit.
+  return received > entered;
+}
+
+/** Lowercased words separated by single spaces, so punctuation differences don't matter. */
+function wordsOf(text: string): string {
+  // "Backend Engineer, India" and "Backend Engineer - India" both become "backend engineer india".
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+/**
+ * Whether the email names this job's title, as a whole phrase in the subject or body.
+ * Greenhouse's DKIM key signs mail for every Greenhouse employer, and a subject naming the
+ * company proves only the company. A missing or very short title never matches.
+ */
+export function titleNamedIn(message: { readonly subject: string; readonly snippet: string }, title: string | null | undefined): boolean {
+  // No title on the job row: nothing to pin the receipt to.
+  if (title === null || title === undefined) return false;
+  // The title as words.
+  const phrase = wordsOf(title);
+  // Under 4 characters is too generic to be evidence ("qa", "sde").
+  if (phrase.length < 4) return false;
+  // Subject and body together, as words; padded so only whole words match.
+  const haystack = ` ${wordsOf(`${message.subject} ${message.snippet}`)} `;
+  // The whole title phrase, word-bounded.
+  return haystack.includes(` ${phrase} `);
+}
+
+/**
+ * Whether the To header names the owner's address. A DKIM signature covers the To header,
+ * so a receipt someone else received and re-sent to Teja still names its first recipient.
+ * Fails closed when either side is missing.
+ */
+export function addressedTo(to: string | null, ownerEmail: string | null | undefined): boolean {
+  // Unknown owner (unset env) or no To header: can't prove it was sent to Teja.
+  if (to === null || ownerEmail === null || ownerEmail === undefined || ownerEmail.trim() === "") return false;
+  // The owner's address, normalised.
+  const owner = ownerEmail.trim().toLowerCase();
+  // The header, normalised once so bracket detection and matching see the same text.
+  const header = to.toLowerCase();
+  // A display name is attacker-controlled text: '"owner@real" <evil@x>' would pass a
+  // whole-header scan. So when any <...> brackets are present, only the bracketed
+  // addr-specs count as recipients; a mixed header's bare addresses are dropped, which
+  // fails closed (a false "not Teja") rather than open.
+  const scanned = header.includes("<")
+    // Join the bracket contents; non-greedy per-bracket via the [^<>] class.
+    ? (header.match(/<[^<>]*>/g) ?? []).join(" ")
+    // No brackets anywhere: the header is a bare address list, scan it whole.
+    : header;
+  // Every address in the chosen text ("a@b, c@d").
+  // Typed explicitly: `?? []` alone infers never[], which `includes(owner)` rejects.
+  const addresses: readonly string[] = scanned.match(/[^\s<>,;"]+@[^\s<>,;"]+/g) ?? [];
+  // Exact address equality, never a substring ("xteja@gmail.com" is not "teja@gmail.com").
+  return addresses.includes(owner);
 }

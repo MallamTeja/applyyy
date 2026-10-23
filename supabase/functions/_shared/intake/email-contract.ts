@@ -38,6 +38,9 @@ export const MAX_BODY_BYTES = 1_048_576;
 // rather than rejecting, because a length overrun is our own bug and dropping a
 // recruiter's mail to punish it would be the worse outcome.
 export const MAX_SNIPPET_CHARS = 4096;
+// One Authentication-Results header is a few hundred chars; 4096 leaves room for long
+// DKIM selectors. Truncated beyond (it's read for its leading clauses only).
+export const MAX_AUTH_RESULTS_CHARS = 4096;
 
 // Defensive ceilings on the short header fields. Generous — these exist to stop a
 // pathological payload from reaching the database, not to enforce a format.
@@ -67,6 +70,11 @@ export interface IntakeMessage {
   readonly received_at: string;
   // Gmail labels, used later to distinguish an inbox message from an archived one.
   readonly label_ids: readonly string[];
+  // UNTRUSTED as text, but its SHAPE is checked before use: Gmail's own (topmost)
+  // Authentication-Results header, which says whether DKIM/SPF passed for the sender's
+  // domain. Only the tracker's receipt confirmation reads it (decide.ts verifyReceiptSender);
+  // null when the script didn't send it, and then nothing can be confirmed.
+  readonly authentication_results: Untrusted | null;
 }
 
 // The envelope Apps Script posts. `batch_id` and `sent_at` are observability, not
@@ -226,6 +234,9 @@ function validateMessage(candidate: unknown, index: number): { readonly message:
   const threadId = readOptionalString(candidate, "thread_id", MAX_MESSAGE_ID_CHARS);
   // Labels, already tolerant of absence.
   const labelIds = readLabelIds(candidate);
+  // Gmail's topmost Authentication-Results header, optional: an older script version
+  // doesn't send it, and a message without it simply can never confirm a submission.
+  const authenticationResults = readOptionalString(candidate, "authentication_results", MAX_AUTH_RESULTS_CHARS);
   // Assemble. Every field is now either validated or explicitly absent.
   return {
     message: {
@@ -237,6 +248,7 @@ function validateMessage(candidate: unknown, index: number): { readonly message:
       snippet,
       received_at: receivedAt,
       label_ids: labelIds,
+      authentication_results: authenticationResults,
     },
   };
 }

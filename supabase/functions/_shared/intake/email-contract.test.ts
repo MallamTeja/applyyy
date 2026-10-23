@@ -318,3 +318,59 @@ test("non-string label entries are dropped without failing the message", () => {
   // Only the genuine labels survive.
   assert.deepEqual(result.batch.messages[0]?.label_ids, ["INBOX", "STARRED"]);
 });
+
+// --- authentication_results (2026-10-09): the evidence a receipt confirm rests on ---
+
+// The header ceiling the contract promises; a literal here so a silent change to it is a red test.
+const MAX_AUTH_RESULTS_CHARS = 4096;
+
+// Validate one message with extra fields and return the accepted message (or fail loudly).
+function acceptOne(extra: Record<string, unknown>) {
+  // One message, otherwise valid.
+  const result = validate(envelope([{ ...VALID_MESSAGE, ...extra }]));
+  // Optional fields never cost the message, so this must be accepted.
+  assert.equal(result.ok, true);
+  // Narrow for the compiler; the assertion above already proved it at runtime.
+  if (!result.ok) throw new Error("unreachable");
+  // The header is descriptive, so a bad one never becomes a rejection.
+  assert.equal(result.rejected.length, 0);
+  // Hand back the one canonical message; a widened record so the new field reads before the type lands.
+  return result.batch.messages[0] as unknown as Record<string, unknown>;
+}
+
+test("authentication_results is carried through when present", () => {
+  // A real Gmail header value.
+  const header = "mx.google.com; dkim=pass header.i=@us.greenhouse-mail.io; spf=pass smtp.mailfrom=bounces@us.greenhouse-mail.io";
+  // Verbatim: the verifier parses it, ingest does not judge it.
+  assert.equal(acceptOne({ authentication_results: header }).authentication_results, header);
+});
+
+test("an over-length authentication_results is truncated to 4096, not rejected", () => {
+  // Non-whitespace so trimming cannot be what shortens it.
+  const message = acceptOne({ authentication_results: "a".repeat(MAX_AUTH_RESULTS_CHARS + 100) });
+  // Cut to the ceiling, the same rule as `to` and `thread_id`.
+  assert.equal((message.authentication_results as string).length, MAX_AUTH_RESULTS_CHARS);
+});
+
+test("an absent, empty or non-string authentication_results becomes null", () => {
+  // Absent: the field is still present on the canonical message, as null (not undefined).
+  assert.equal(acceptOne({}).authentication_results, null);
+  // Empty is absence, not a value.
+  assert.equal(acceptOne({ authentication_results: "   " }).authentication_results, null);
+  // A number is a serialiser bug, read as absence rather than coerced into a header.
+  assert.equal(acceptOne({ authentication_results: 42 }).authentication_results, null);
+});
+
+test("adding authentication_results leaves the existing fields unchanged", () => {
+  // A message carrying the new header.
+  const message = acceptOne({ authentication_results: "mx.google.com; dkim=pass header.d=greenhouse.io" });
+  // Every pre-existing field reads exactly as before.
+  assert.equal(message.message_id, VALID_MESSAGE.message_id);
+  assert.equal(message.thread_id, VALID_MESSAGE.thread_id);
+  assert.equal(message.from, VALID_MESSAGE.from);
+  assert.equal(message.to, VALID_MESSAGE.to);
+  assert.equal(message.subject, VALID_MESSAGE.subject);
+  assert.equal(message.snippet, VALID_MESSAGE.snippet);
+  assert.equal(message.received_at, VALID_MESSAGE.received_at);
+  assert.deepEqual(message.label_ids, VALID_MESSAGE.label_ids);
+});

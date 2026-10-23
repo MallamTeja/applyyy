@@ -128,7 +128,7 @@ the way it is.
 
 3. **How It Works**:
    - **Search query**: `newer_than:2d -label:applyy-ingested`, max 200 threads.
-   - **Payload**: Extracts `message_id`, `thread_id`, `from`, `to`, `subject`, `snippet` (plain body truncated to 4096 chars — never full body), `received_at`, and `label_ids`. Batched into chunks of 50.
+   - **Payload**: Extracts `message_id`, `thread_id`, `from`, `to`, `subject`, `snippet` (plain body truncated to 4096 chars — never full body), `received_at`, `label_ids`, and (since 2026-10-09) `authentication_results`: Gmail's own topmost `Authentication-Results` header, read from `getRawContent()`, used only to verify a receipt's DKIM/SPF (see "Receipt confirmation" below). Batched into chunks of 50.
    - **Post**: Sent to `POST /functions/v1/email-tracker-intake`.
    - **Idempotency & Labeling**: Upon receiving `202 Accepted`, the script applies Gmail label `applyy-ingested`. Any trigger double-fire is absorbed harmlessly at Postgres via `ON CONFLICT (user_id, provider_message_id) DO NOTHING`.
    - **On-Demand Trigger (No 15-Min Cron)**:
@@ -164,6 +164,50 @@ other silent deaths in this system (Supabase's 1-week idle pause and GitHub's
 - The **System Health** dashboard page must surface "no `email_events` in N
   hours" as a warning. Not built yet; check with `grep -rn email_events apps/web/src/features/health`. A tracker that stopped looks identical to a quiet inbox,
   and you'd read silence as "no rejections yet."
+
+## Receipt confirmation — added 2026-10-09
+
+Teja ruled (2026-10-09 23:24 IST) that a verified ATS receipt may mark a submitted
+application `applied` with no human check. When the worker submits but can't see the
+confirmation page, the row stays `applying` (later `needs_verification`). A Greenhouse
+"application received" email then confirms it, but ONLY if ALL of these hold
+(`supabase/functions/email-tracker-intake/decide.ts`, `verifyReceiptSender` and
+`receiptConfirmsApplied`; migration `20261009235000_tracker_confirms_applied.sql`):
+
+- the sender is on `greenhouse.io` / `greenhouse-mail.io`;
+- Gmail's own (topmost, authserv-id `mx.google.com`) `Authentication-Results` header shows
+  `dkim=pass` (or `spf=pass`) for that same vendor domain. A missing header never confirms.
+- it arrived after the row's latest entry into `applying`;
+- exactly one loaded application matches the company;
+- and it reads as an application receipt.
+
+The move carries the `email_events` id, Gmail's verdict and both timestamps in its event
+detail, so a human can audit or reverse it.
+
+**This only runs automatically while the 15-minute trigger is installed.** The on-demand
+Web App (above) fires only when someone opens `/emails`, so a receipt would wait until then.
+Re-enabling polling reverses the earlier "on-demand only" choice; automatic confirmation
+needs it.
+
+### Re-enable after a script change (Teja, in Gmail)
+
+1. Open [script.google.com](https://script.google.com), signed in as `tejamallam00@gmail.com`,
+   and open the applyy email-tracker project.
+2. Replace the whole of `Code.gs` with the repo's
+   `supabase/functions/_shared/apps-script/email-tracker.gs`, then **Save**.
+3. **Project Settings → Script Properties**: confirm `APPLYY_INTAKE_URL` is
+   `https://xynqxekcqizwhtskzqrq.supabase.co/functions/v1/email-tracker-intake` and that
+   `APPLYY_INTAKE_SECRET` equals the Supabase secret `EMAIL_INTAKE_SHARED_SECRET`.
+4. Select `applyyTestConnection` → **Run**. Approve the Google permission prompt if shown.
+   The log should show a 2xx from the intake.
+5. Select `applyyInstallTrigger` → **Run**. This installs the 15-minute `applyyIngest`
+   trigger (it removes any older copy first). **Triggers** (clock icon) should then list
+   exactly one `applyyIngest`, time-driven, every 15 minutes.
+6. If the on-demand Web App is in use: **Deploy → Manage deployments → Edit → Version:
+   New version → Deploy**, so the Web App runs the new code too.
+7. Select `applyyIngest` → **Run** once, then check **Executions** for `applyy: accepted ...`.
+8. Verify in Supabase: `select count(*), max(received_at) from public.email_events;` and the
+   newest `received_at` should be recent.
 
 ---
 

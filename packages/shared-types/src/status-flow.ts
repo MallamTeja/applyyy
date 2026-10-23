@@ -120,7 +120,9 @@ export const STATUS_TRANSITIONS: readonly StatusTransition[] = [
   { from: 'approved', to: 'blocked_needs_human', allowedAgents: ['applier'], note: 'Applier hit a blocker on an approved row. Set block_reason in the SAME update — applications_blocked_has_reason requires it. Exists so a blocked row need not travel through `applying`: a crash between an approved->applying write and an applying->blocked write leaves the row at `applying`, the sweeper routes it to needs_verification, and a human then hand-verifies an application that was never submitted.' },
 
   // ---- Submission: the one non-idempotent leg ------------------------------
-  { from: 'applying', to: 'applied', allowedAgents: ['applier'], note: 'Submission confirmed by the worker.' },
+  // 'tracker' since 20261009235000 (Teja, 2026-10-09): a DKIM/SPF-verified ATS receipt
+  // received after the submit confirms it, when the worker could not see the confirmation.
+  { from: 'applying', to: 'applied', allowedAgents: ['applier', 'tracker'], note: 'Submission confirmed by the worker, or by the tracker from a DKIM/SPF-verified ATS receipt received after the submit.' },
   { from: 'applying', to: 'blocked_needs_human', allowedAgents: ['applier'], note: 'Captcha, MFA, or an unanswerable question. block_reason says which. A normal daily queue item, not a failure.' },
   { from: 'applying', to: 'needs_verification', allowedAgents: ['sweeper', 'human'], note: 'SAFETY-CRITICAL. A stale applying lease means the worker died mid-submit and nobody knows if it landed. Routes here, NEVER back to the queue - a blind retry is how you submit twice and violate constraint 7. `human` is included so a person can still resolve the row when the sweeper itself is not running, which section 14 says is a thing that happens silently.' },
   { from: 'applying', to: 'failed', allowedAgents: ['applier'], note: 'Worker positively established the submit did not happen.' },
@@ -140,7 +142,9 @@ export const STATUS_TRANSITIONS: readonly StatusTransition[] = [
   { from: 'interview', to: 'rejected', allowedAgents: ['tracker', 'human'], note: 'Terminal, bad.' },
 
   // ---- Human-only recovery lanes -------------------------------------------
-  { from: 'needs_verification', to: 'applied', allowedAgents: ['human'], note: 'Human checked the employer portal: it did go through.' },
+  // The one exit from needs_verification a machine may take, and only the tracker, only from
+  // a verified receipt (20261009235000). ->approved and ->failed stay human-only.
+  { from: 'needs_verification', to: 'applied', allowedAgents: ['human', 'tracker'], note: 'Human checked the employer portal: it did go through. Or the tracker saw a DKIM/SPF-verified ATS receipt received after the submit.' },
   { from: 'needs_verification', to: 'approved', allowedAgents: ['human'], note: 'Human checked: it did NOT go through, so a resubmit is safe. HUMAN-ONLY BY DESIGN - the only way a row re-enters the submit path, and a machine must never decide that a possibly-submitted application was not submitted.' },
   { from: 'needs_verification', to: 'failed', allowedAgents: ['human'], note: 'Human gave up on this one.' },
   { from: 'blocked_needs_human', to: 'applied', allowedAgents: ['human'], note: 'Human finished the submission by hand.' },

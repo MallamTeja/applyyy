@@ -253,3 +253,211 @@ test("'Unfortunately, we ... we wish you the best in your job search' alone move
   // No terminal move from an active stage.
   assert.equal(moveFor(message, "applied"), null);
 });
+
+// ---- 2026-10-09: a VERIFIED Greenhouse receipt confirms applying|needs_verification -> applied ----
+//
+// Teja's ruling: a receipt may close the submit loop automatically, but only when the sender is
+// authenticated (DKIM/SPF judged by Gmail's own MX), the email is newer than the row's latest entry
+// into `applying`, and exactly one application matches. Spoofs, stale mail and ambiguity do nothing.
+//
+// Namespace import, not named: a missing export then fails only the test that calls it, instead of
+// failing the module link and taking every older test in this file down with it.
+import * as receipt from "./decide.ts";
+
+// Gmail's authserv-id, the only one whose verdicts we trust (any relay can prepend its own header).
+const GMAIL_AUTHSERV = "mx.google.com";
+
+// A realistic Gmail Authentication-Results value for a Greenhouse receipt: dkim and spf both pass.
+const GREENHOUSE_AUTH = `${GMAIL_AUTHSERV};\r\n       dkim=pass header.i=@us.greenhouse-mail.io header.s=s1 header.b=AbCdEf;\r\n       spf=pass (google.com: domain of bounces@us.greenhouse-mail.io designates 198.51.100.7 as permitted sender) smtp.mailfrom=bounces@us.greenhouse-mail.io;\r\n       dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=us.greenhouse-mail.io`;
+
+// The realistic receipt Teja's applications actually get from Greenhouse.
+const GREENHOUSE_RECEIPT = {
+  // Vendor subdomain sender with the company in the display name.
+  from: "Acme Hiring Team <no-reply@us.greenhouse-mail.io>",
+  // Names the company as a whole word, which matching falls back to for vendor senders.
+  subject: "Thank you for applying to Acme",
+  // Receipt wording only: no outcome phrase anywhere.
+  snippet: "We have received your application for Backend Engineer and our team will review it shortly.",
+};
+
+// A confident receipt decision, fixed so the confirm tests do not depend on classifier weights.
+const RECEIPT_DECISION = { classification: "application_received", confidence: 0.9 } as const;
+
+// The verification a passing sender check returns, used when the test is about something else.
+const VERIFIED = { method: "dkim", domain: "us.greenhouse-mail.io" } as const;
+
+// The latest entry into `applying`; every "after" timestamp below is strictly later than this.
+const ENTERED_APPLYING = "2026-10-09T10:00:00.000Z";
+
+// Builds a receiptConfirmsApplied input that SHOULD confirm, so each refusal test changes one field.
+function confirmInput(overrides: Record<string, unknown> = {}) {
+  // Every gate satisfied: confident receipt, confirmable status, verified, newer than
+  // applying, names the job title, and addressed to Teja (review round 2026-10-09).
+  return { decision: RECEIPT_DECISION, current: "applying", receivedAt: "2026-10-09T10:05:00.000Z", enteredApplyingAt: ENTERED_APPLYING, verification: VERIFIED, titleMatches: true, addressedToOwner: true, ...overrides } as Parameters<typeof receipt.receiptConfirmsApplied>[0];
+}
+
+test("CONFIRMING_VENDOR_DOMAINS and CONFIRMABLE_STATUSES are exactly the ruled sets", () => {
+  // Only Greenhouse is ruled in; widening this list widens who can confirm a submit.
+  assert.deepEqual([...receipt.CONFIRMING_VENDOR_DOMAINS], ["greenhouse.io", "greenhouse-mail.io"]);
+  // Only the two in-flight statuses; `applied` and later keep their old receipt mapping.
+  assert.deepEqual([...receipt.CONFIRMABLE_STATUSES], ["applying", "needs_verification"]);
+});
+
+test("verifyReceiptSender: a passing dkim for a vendor subdomain verifies", () => {
+  // Subdomain of greenhouse-mail.io for both sender and signer: the real-world shape.
+  assert.deepEqual(receipt.verifyReceiptSender(GREENHOUSE_RECEIPT.from, GREENHOUSE_AUTH), { method: "dkim", domain: "us.greenhouse-mail.io" });
+  // A bare address with the apex vendor domain and a header.d signer also verifies.
+  assert.deepEqual(receipt.verifyReceiptSender("no-reply@greenhouse.io", `${GMAIL_AUTHSERV}; dkim=pass header.d=greenhouse.io`), { method: "dkim", domain: "greenhouse.io" });
+});
+
+test("verifyReceiptSender: spf=pass for the vendor verifies when dkim is absent", () => {
+  // No dkim clause at all, so the spf fallback is the only path to a verdict.
+  const auth = `${GMAIL_AUTHSERV}; spf=pass (google.com: domain of bounces@greenhouse.io designates 198.51.100.7 as permitted sender) smtp.mailfrom=bounces@greenhouse.io`;
+  // The domain comes from smtp.mailfrom's address.
+  assert.deepEqual(receipt.verifyReceiptSender("no-reply@greenhouse.io", auth), { method: "spf", domain: "greenhouse.io" });
+});
+
+test("verifyReceiptSender: lookalike sender domains are refused", () => {
+  // The vendor name as a LEFT label of an attacker's domain.
+  assert.equal(receipt.verifyReceiptSender("no-reply@greenhouse.io.evil.com", `${GMAIL_AUTHSERV}; dkim=pass header.d=greenhouse.io.evil.com`), null);
+  // The vendor name as a suffix of a longer label, with no dot boundary.
+  assert.equal(receipt.verifyReceiptSender("no-reply@evilgreenhouse.io", `${GMAIL_AUTHSERV}; dkim=pass header.d=evilgreenhouse.io`), null);
+  // A real vendor signature does not rescue a non-vendor sender address.
+  assert.equal(receipt.verifyReceiptSender("Acme <jobs@acme.com>", `${GMAIL_AUTHSERV}; dkim=pass header.d=greenhouse.io`), null);
+});
+
+test("verifyReceiptSender: a dkim pass for a DIFFERENT vendor is refused", () => {
+  // Greenhouse sender, Lever signature: authenticated, but not for the domain that claims to send.
+  assert.equal(receipt.verifyReceiptSender("no-reply@greenhouse.io", `${GMAIL_AUTHSERV}; dkim=pass header.d=lever.co`), null);
+  // Lever is not a confirming vendor at all, even when it signs for itself.
+  assert.equal(receipt.verifyReceiptSender("no-reply@hire.lever.co", `${GMAIL_AUTHSERV}; dkim=pass header.d=hire.lever.co`), null);
+});
+
+test("spoof: a receipt without a passing dkim/spf for the vendor domain is refused", () => {
+  // No Authentication-Results header at all: Apps Script could not read one.
+  assert.equal(receipt.verifyReceiptSender(GREENHOUSE_RECEIPT.from, null), null);
+  // An empty header is absence, not a verdict.
+  assert.equal(receipt.verifyReceiptSender(GREENHOUSE_RECEIPT.from, ""), null);
+  // A forged authserv-id: an attacker's relay can write any verdict under its own name.
+  // It signs for the SAME vendor family as the sender (greenhouse-mail.io), so ONLY the
+  // authserv-id check can refuse it; with header.d=greenhouse.io the vendor-mismatch check
+  // refused it instead and this line guarded nothing (found by red-on-revert, 2026-10-09).
+  assert.equal(receipt.verifyReceiptSender(GREENHOUSE_RECEIPT.from, "evil.example; dkim=pass header.d=greenhouse-mail.io"), null);
+  // A passing signature, but for the attacker's own domain.
+  assert.equal(receipt.verifyReceiptSender(GREENHOUSE_RECEIPT.from, `${GMAIL_AUTHSERV}; dkim=pass header.d=attacker.com`), null);
+  // The vendor's signature present but failing.
+  assert.equal(receipt.verifyReceiptSender(GREENHOUSE_RECEIPT.from, `${GMAIL_AUTHSERV}; dkim=fail header.d=greenhouse-mail.io`), null);
+  // And the downstream gate refuses when verification came back null, all else valid.
+  assert.equal(receipt.receiptConfirmsApplied(confirmInput({ verification: null })), false);
+});
+
+test("classifyMessage reads a realistic Greenhouse receipt as application_received", () => {
+  // The exact email the confirm path is built for; a classifier change that drifts it shows here.
+  assert.equal(classifyMessage(GREENHOUSE_RECEIPT).classification, "application_received");
+});
+
+test("ambiguous: two applications to the same company match neither, so nothing is confirmed", () => {
+  // One row mid-submit and one already in needs_verification, both at acme.
+  const rows = [appAt("a1", "acme", "applying"), appAt("a2", "acme", "needs_verification")];
+  // Parser domain exactly as index.ts passes it (a vendor sender, so the subject carries the match).
+  const domain = classifyMessage(GREENHOUSE_RECEIPT).senderDomain;
+  // Two candidates: refuse to guess.
+  assert.equal(matchApplication(GREENHOUSE_RECEIPT, domain, rows), null);
+  // Positive control: with one acme row the same email DOES match, so the null above is ambiguity, not a dead matcher.
+  assert.equal(matchApplication(GREENHOUSE_RECEIPT, domain, [rows[0]!]), "a1");
+});
+
+test("received-before-applying: a receipt older than the latest entry into applying is refused", () => {
+  // A receipt from a previous application to the same posting, an hour before this submit began.
+  assert.equal(receipt.receiptConfirmsApplied(confirmInput({ receivedAt: "2026-10-09T09:00:00.000Z" })), false);
+  // The same instant is not "after": strictly-greater is the rule.
+  assert.equal(receipt.receiptConfirmsApplied(confirmInput({ receivedAt: ENTERED_APPLYING })), false);
+});
+
+test("receiptConfirmsApplied: no recorded entry into applying is refused", () => {
+  // Without the anchor, a stale receipt cannot be told apart from a fresh one: fail closed.
+  assert.equal(receipt.receiptConfirmsApplied(confirmInput({ enteredApplyingAt: null })), false);
+  // An unparseable anchor is the same absence in disguise (Date.parse gives NaN).
+  assert.equal(receipt.receiptConfirmsApplied(confirmInput({ enteredApplyingAt: "not-a-date" })), false);
+});
+
+test("receiptConfirmsApplied: a receipt on an applied row is not a confirm (old mapping kept)", () => {
+  // `applied` is not confirmable; the confirm path stays out of the way.
+  assert.equal(receipt.receiptConfirmsApplied(confirmInput({ current: "applied" })), false);
+  // And the pre-existing receipt mapping on applied is untouched.
+  assert.equal(statusMoveFor(RECEIPT_DECISION, "applied"), "employer_screening");
+});
+
+test("a non-receipt email on an applying row does nothing", () => {
+  // A confident rejection and an interview invite, both on a row mid-submit.
+  for (const decision of [{ classification: "rejection", confidence: 0.95 }, { classification: "interview_invite", confidence: 0.95 }] as const) {
+    // Not a receipt, so never a confirm, even though every other gate passes.
+    assert.equal(receipt.receiptConfirmsApplied(confirmInput({ decision })), false, decision.classification);
+    // And the ordinary move path has no tracker edge out of applying either.
+    assert.equal(statusMoveFor(decision, "applying"), null, decision.classification);
+  }
+});
+
+test("a low-confidence receipt on an applying row is refused", () => {
+  // Below the non-terminal bar the gate fails, whatever else passes.
+  assert.equal(receipt.receiptConfirmsApplied(confirmInput({ decision: { classification: "application_received", confidence: 0.5 } })), false);
+});
+
+test("a valid receipt moves an applying row to applied", () => {
+  // Every gate passes. Also needs status-flow.ts to give 'tracker' the applying->applied edge.
+  assert.equal(receipt.receiptConfirmsApplied(confirmInput()), true);
+});
+
+test("a valid receipt moves a needs_verification row to applied", () => {
+  // Same, from the sweeper's parking status. Needs 'tracker' on needs_verification->applied.
+  assert.equal(receipt.receiptConfirmsApplied(confirmInput({ current: "needs_verification" })), true);
+});
+
+// ---- Review round (2026-10-09): wrong job, replayed receipt, two-address From ----------
+
+test("wrong job: a receipt that doesn't name the job title is refused", () => {
+  // Greenhouse signs for every employer: a company-name match alone must not confirm.
+  assert.equal(receipt.receiptConfirmsApplied(confirmInput({ titleMatches: false })), false);
+  // The title must appear as a whole phrase, punctuation aside.
+  const msg = { subject: "Thank you for applying to Acme", snippet: "We received your application for Backend Engineer - India." };
+  // Same words, different punctuation: it matches.
+  assert.equal(receipt.titleNamedIn(msg, "Backend Engineer, India"), true);
+  // A different job at the same company: no match.
+  assert.equal(receipt.titleNamedIn(msg, "Frontend Engineer"), false);
+  // A partial word is not the title ("Engineering" is not "Engineer").
+  assert.equal(receipt.titleNamedIn({ subject: "Engineering roles", snippet: "" }, "Engineer"), false);
+  // No title on the row, or a uselessly short one: never a match.
+  assert.equal(receipt.titleNamedIn(msg, null), false);
+  // Under 4 characters is too generic to be evidence.
+  assert.equal(receipt.titleNamedIn({ subject: "SDE role", snippet: "" }, "SDE"), false);
+});
+
+test("replay: a receipt addressed to someone else is refused", () => {
+  // A genuine signed receipt for another applicant, re-sent to Teja, names its first recipient.
+  assert.equal(receipt.receiptConfirmsApplied(confirmInput({ addressedToOwner: false })), false);
+  // Teja's own address in the To header, in either form, matches.
+  assert.equal(receipt.addressedTo("Teja <TejaMallam00@gmail.com>", "tejamallam00@gmail.com"), true);
+  // A different recipient does not.
+  assert.equal(receipt.addressedTo("attacker@example.com", "tejamallam00@gmail.com"), false);
+  // A superstring of Teja's address is not Teja's address.
+  assert.equal(receipt.addressedTo("xtejamallam00@gmail.com", "tejamallam00@gmail.com"), false);
+  // No To header, or no configured owner: fail closed.
+  assert.equal(receipt.addressedTo(null, "tejamallam00@gmail.com"), false);
+  // An unset owner env var arrives as undefined.
+  assert.equal(receipt.addressedTo("tejamallam00@gmail.com", undefined), false);
+});
+
+test("spoof: owner's address in the display name does not pass the owner check", () => {
+  // The quoted display name carries Teja's address but the real recipient is evil@x.com;
+  // a whole-header scan would match the name text, so only <...> may be scanned.
+  assert.equal(receipt.addressedTo('"tejamallam00@gmail.com" <evil@x.com>', "tejamallam00@gmail.com"), false);
+  // The inverse stays true: Teja inside brackets passes even with a decoy display name.
+  assert.equal(receipt.addressedTo('"evil@x.com" <tejamallam00@gmail.com>', "tejamallam00@gmail.com"), true);
+  // A mixed header (bare owner + a bracketed stranger) fails closed by design.
+  assert.equal(receipt.addressedTo("tejamallam00@gmail.com, Name <evil@x.com>", "tejamallam00@gmail.com"), false);
+});
+
+test("a From carrying two addresses is refused", () => {
+  // Resolving to the first <addr> would let a second, attacker address ride along.
+  assert.equal(receipt.verifyReceiptSender("<no-reply@greenhouse.io>, <a@evil.com>", `${GMAIL_AUTHSERV}; dkim=pass header.d=greenhouse.io`), null);
+});
