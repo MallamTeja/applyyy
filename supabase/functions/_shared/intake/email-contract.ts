@@ -54,8 +54,9 @@ const MAX_MESSAGE_ID_CHARS = 512;
 export interface IntakeMessage {
   // Gmail's own message id. THE DEDUPE KEY, and the reason this endpoint is idempotent.
   readonly message_id: string;
-  // Gmail's thread id. Carried for future thread-level correlation; see the note on
-  // `IntakeBatch` about fields the current schema has nowhere to put.
+  // Gmail's thread id. Stored in email_events.thread_id (column added 20260918213000;
+  // mapped into the insert since 2026-10-23 — it was validated here but dropped at the
+  // insert for two weeks). Null when Gmail sent none or an older script omits it.
   readonly thread_id: string | null;
   // UNTRUSTED. The sender, used later to match an application by company domain.
   readonly from: Untrusted;

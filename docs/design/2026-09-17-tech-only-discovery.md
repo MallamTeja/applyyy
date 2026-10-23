@@ -401,7 +401,35 @@ orchestrator.
 3. **Lever's `categories.department` is discarded.** Adding it to
    `ParsedPosting` would give the gate a board-authored signal that beats regex
    on title. Not required for this design; worth doing.
+   > **Decision 2026-10-23 (orchestrator, Teja may overrule): do nothing until a
+   > filter/screen rule actually consumes department.** Recon that day found NO
+   > adapter captures it (Greenhouse and Ashby drop it too — `greenhouse.ts` has
+   > no department code at all), `public.jobs` has no department column
+   > (`20260909234700_core_tables.sql:182-273`, no later `add column`), and
+   > nothing anywhere reads one. The data is preserved in `jobs.raw_payload`
+   > (every adapter stores the full board entry), so a later migration can
+   > backfill from history without re-polling — that is `raw_payload`'s stated
+   > purpose. Upgrade path when a consumer appears: `jobs.department text`
+   > column + `ParsedPosting` field + all three adapters extract (Lever
+   > `categories.department`, Greenhouse `departments[0].name`, Ashby teams) +
+   > `toJobInsert` writes it. The middle option — stuffing it into
+   > `JobSourceRef.metadata` — was considered and rejected: it buries a
+   > queryable field in per-sighting jsonb.
 4. **`ignoreDuplicates: false` rewrites every row on every poll.** At 200–400
    boards this is continuous write amplification nobody has costed.
+   > **Re-measured 2026-10-23: the blanket claim is outdated.** The upsert has
+   > since been SPLIT (scout-ats/index.ts:418-460): new rows go
+   > `ignoreDuplicates: true` (insert-only, `first_seen_at` write-once), and
+   > only RE-SIGHTED rows take the `false` path — deliberately, to refresh
+   > `description_raw`/`apply_url`/`posted_at` drift and advance
+   > `seen_count`/`last_seen_at`, while rebuilding from the STORED
+   > `first_seen_at` (the 2026-10-04 write-once contract,
+   > `adapters.test.ts:526`). One row-write per open posting per poll remains
+   > inherent to that refresh; trimming columns would not avoid the row write.
+   > Known fat if it ever needs costing: `seen_count`, `jobs.last_seen_at` and
+   > the `source_refs` inner `last_seen_at` have NO reader anywhere (liveness
+   > deliberately distrusts `last_seen_at`, index.ts:351), so a content-hash
+   > compare that skips unchanged rows is the real optimization — a measured
+   > project, not a drive-by.
 5. **`per_company_weekly_cap` disagrees with the plan.** §18.5 says max 2 per
    company per week; `filtersStore.ts` defaults to `{ max_per_week: 3 }`.

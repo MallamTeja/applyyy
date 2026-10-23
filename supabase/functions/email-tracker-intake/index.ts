@@ -47,6 +47,7 @@ import type { EmailEventInsert, ApplicationStatus } from "../_shared/contracts/s
 import {
   CONFIRMABLE_STATUSES,
   addressedTo,
+  emailEventRowOf,
   matchPoolFor,
   mayAdvanceStatus,
   classifyMessage,
@@ -304,27 +305,12 @@ Deno.serve(async (request: Request): Promise<Response> => {
     }
   }
 
-  // Event rows for the upsert.
-  const rowsToInsert: (EmailEventInsert & Record<string, unknown>)[] = decided.map(({ message, decision, matchedApplicationId }) => ({
-    // Deduplication key, half of `(user_id, provider_message_id)`.
-    provider_message_id: message.message_id,
-    // Sender header.
-    from_address: message.from,
-    // Subject line.
-    subject: message.subject,
-    // Body excerpt.
-    snippet: message.snippet,
-    // When Gmail received it.
-    received_at: message.received_at,
-    // Verdict.
-    classification: decision.classification,
-    // Verdict confidence.
-    classification_confidence: decision.confidence,
-    // Null when unmatched or ambiguous; the message is still stored.
-    matched_application_id: matchedApplicationId,
-    // Processing time.
-    processed_at: processedAtTimestamp,
-  }));
+  // Event rows for the upsert. Built by the pure, node-tested mapper (decide.ts): the
+  // inline map it replaces silently dropped thread_id for two weeks because no test
+  // could see it (2026-10-23).
+  const rowsToInsert: (EmailEventInsert & Record<string, unknown>)[] = decided.map(({ message, decision, matchedApplicationId }) =>
+    emailEventRowOf(message, decision, matchedApplicationId, processedAtTimestamp)
+  );
 
   // DEDUP FIRST. `ignoreDuplicates` returns only rows actually inserted, which is exactly
   // the set of messages this endpoint has never acted on.

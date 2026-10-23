@@ -10,7 +10,25 @@ import { parseEmail } from "../_shared/email/parser.ts";
 import { classifyEmail } from "../_shared/email/classifier.ts";
 // Schema-owned enum types, so a typo here is a compile error, not a 22P02 at runtime.
 // `isTerminal` and `canTransition` are the runtime mirror of the status graph; read them, never a hand-kept list.
-import { canTransition, isTerminal, type ApplicationStatus, type EmailClassification } from "../_shared/contracts/shared-types.ts";
+// EmailEventInsert types the stored-row builder below against the schema owner's shape.
+import { canTransition, isTerminal, type ApplicationStatus, type EmailClassification, type EmailEventInsert } from "../_shared/contracts/shared-types.ts";
+
+// The wire fields the stored email_events row copies. Narrower than `IntakeMessage` for
+// the same reason DecidableMessage is: tests build one without the whole wire contract.
+export interface StorableMessage {
+  // Dedup key, half of (user_id, provider_message_id).
+  readonly message_id: string;
+  // Gmail thread id, already validated by the contract; null when Gmail sent none.
+  readonly thread_id: string | null;
+  // Sender header.
+  readonly from: string;
+  // Subject line.
+  readonly subject: string;
+  // Body excerpt.
+  readonly snippet: string;
+  // When Gmail received it (validated ISO).
+  readonly received_at: string;
+}
 
 // The three message fields the decisions read. Narrower than `IntakeMessage` so tests can
 // build one without the wire contract's other fields.
@@ -337,6 +355,44 @@ export const SUBMIT_PENDING_STATUSES: readonly ApplicationStatus[] = ["applying"
 export function mayAdvanceStatus(systemEnabled: boolean | null): boolean {
   // Only an affirmative, readable `true` permits a move; null and false both refuse.
   return systemEnabled === true;
+}
+
+/**
+ * The email_events row for one decided message. Pure and exported so the stored shape is
+ * node-testable — thread_id was captured by Apps Script and validated by the contract
+ * since 2026-10-09, then silently dropped by an inline index.ts map no test could reach
+ * (found 2026-10-23). The intersection type mirrors index.ts's upsert typing:
+ * EmailEventInsert lacks the later-added columns (thread_id, classification, ...), and
+ * the Record half is the deliberate escape that lets them ride along.
+ */
+export function emailEventRowOf(
+  message: StorableMessage,
+  decision: Pick<MessageDecision, "classification" | "confidence">,
+  matchedApplicationId: string | null,
+  processedAt: string,
+): EmailEventInsert & Record<string, unknown> {
+  return {
+    // Deduplication key, half of `(user_id, provider_message_id)`.
+    provider_message_id: message.message_id,
+    // Gmail's thread id; null stays null (column is nullable, older scripts sent none).
+    thread_id: message.thread_id,
+    // Sender header.
+    from_address: message.from,
+    // Subject line.
+    subject: message.subject,
+    // Body excerpt.
+    snippet: message.snippet,
+    // When Gmail received it.
+    received_at: message.received_at,
+    // Verdict.
+    classification: decision.classification,
+    // Verdict confidence.
+    classification_confidence: decision.confidence,
+    // Null when unmatched or ambiguous; the message is still stored.
+    matched_application_id: matchedApplicationId,
+    // Processing time.
+    processed_at: processedAt,
+  };
 }
 
 /**

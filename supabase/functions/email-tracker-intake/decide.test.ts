@@ -374,6 +374,21 @@ test("ambiguous: two applications to the same company match neither, so nothing 
   assert.equal(matchApplication(GREENHOUSE_RECEIPT, domain, [rows[0]!]), "a1");
 });
 
+test("the stored email event carries the Gmail thread id", () => {
+  // The wire fields the row copies; thread_id is the one that used to be dropped.
+  const message = { message_id: "m-1", thread_id: "t-42", from: "a@b.c", subject: "s", snippet: "sn", received_at: "2026-10-23T05:00:00.000Z" };
+  // A row built exactly as index.ts builds it.
+  const row = receipt.emailEventRowOf(message, { classification: "other", confidence: 0.5 }, null, "2026-10-23T05:01:00.000Z");
+  // The regression this test exists for: thread_id mapped verbatim, not dropped.
+  assert.equal(row.thread_id, "t-42");
+  // Null stays null — the column is nullable and older scripts send no thread id.
+  assert.equal(receipt.emailEventRowOf({ ...message, thread_id: null }, { classification: "other", confidence: 0.5 }, null, "x").thread_id, null);
+  // Spot-check the rest of the shape so a renamed column can't slip past as "extra key".
+  assert.equal(row.provider_message_id, "m-1");
+  assert.equal(row.matched_application_id, null);
+  assert.equal(row.processed_at, "2026-10-23T05:01:00.000Z");
+});
+
 test("intake advances no status while the kill switch is off", () => {
   // Off refuses: the one status-writing agent that never consulted the switch now does.
   assert.equal(receipt.mayAdvanceStatus(false), false);
