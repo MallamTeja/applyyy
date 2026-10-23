@@ -968,8 +968,9 @@ export type AnswerBankUpdate = Partial<Pick<AnswerBankRow, 'question_text' | 'an
  * Apps Script runs AS the user, so there is no OAuth app, no consent screen, no
  * restricted-scope review, and no refresh token to expire after seven days.
  *
- * Apps Script stays a dumb pipe: it posts from/subject/snippet and nothing else. The
- * classification happens here, so the intelligence stays in the repo.
+ * Apps Script stays a dumb pipe: it posts the raw headers, snippet, thread id and label
+ * names and classifies nothing. The classification happens here, so the intelligence
+ * stays in the repo.
  */
 export interface EmailEventRow {
   id: string;
@@ -983,6 +984,12 @@ export interface EmailEventRow {
   /** UNTRUSTED. Reaches Gemini, so it goes in a fenced untrusted block like any JD. */
   snippet: Untrusted;
   received_at: string;
+  /** Gmail's thread id (column added 20260918213000). NULL from older script versions. */
+  thread_id: string | null;
+  /** UNTRUSTED — the To header as Gmail hands it over. NULL when the script sent none. */
+  recipient_to: Untrusted | null;
+  /** Gmail label names on the thread at capture time. NULL from older script versions. */
+  label_ids: string[] | null;
   classification: EmailClassification;
   classification_confidence: number | null;
   /** Which application this email is about, once matched. NULL until matched, and it may stay NULL. */
@@ -991,7 +998,7 @@ export interface EmailEventRow {
   processed_at: string | null;
   created_at: string;
 }
-/** Insert shape — what Apps Script posts. */
+/** Insert shape — what Apps Script posts (validated by the intake contract first). */
 export type EmailEventInsert = {
   user_id?: string;
   provider_message_id: string;
@@ -999,6 +1006,10 @@ export type EmailEventInsert = {
   subject: Untrusted;
   snippet: Untrusted;
   received_at: string;
+  /** Optional: columns added 20260918213000, mapped by the tracker since 2026-10-23. */
+  thread_id?: string | null;
+  recipient_to?: Untrusted | null;
+  label_ids?: string[] | null;
 };
 /** Update shape — only the Tracker's verdict is writable after ingest. */
 export type EmailEventUpdate = Partial<

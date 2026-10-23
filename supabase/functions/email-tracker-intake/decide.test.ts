@@ -375,14 +375,19 @@ test("ambiguous: two applications to the same company match neither, so nothing 
 });
 
 test("the stored email event carries the Gmail thread id", () => {
-  // The wire fields the row copies; thread_id is the one that used to be dropped.
-  const message = { message_id: "m-1", thread_id: "t-42", from: "a@b.c", subject: "s", snippet: "sn", received_at: "2026-10-23T05:00:00.000Z" };
+  // The wire fields the row copies; thread_id, to and label_ids all used to be dropped.
+  const message = { message_id: "m-1", thread_id: "t-42", to: "teja@x.com", label_ids: ["applyy"], from: "a@b.c", subject: "s", snippet: "sn", received_at: "2026-10-23T05:00:00.000Z" };
   // A row built exactly as index.ts builds it.
   const row = receipt.emailEventRowOf(message, { classification: "other", confidence: 0.5 }, null, "2026-10-23T05:01:00.000Z");
   // The regression this test exists for: thread_id mapped verbatim, not dropped.
   assert.equal(row.thread_id, "t-42");
-  // Null stays null — the column is nullable and older scripts send no thread id.
-  assert.equal(receipt.emailEventRowOf({ ...message, thread_id: null }, { classification: "other", confidence: 0.5 }, null, "x").thread_id, null);
+  // Same bug class, same pin: the To header and label names land in their columns.
+  assert.equal(row.recipient_to, "teja@x.com");
+  assert.deepEqual(row.label_ids, ["applyy"]);
+  // Null stays null — the columns are nullable and older scripts send neither.
+  const nulled = receipt.emailEventRowOf({ ...message, thread_id: null, to: null }, { classification: "other", confidence: 0.5 }, null, "x");
+  assert.equal(nulled.thread_id, null);
+  assert.equal(nulled.recipient_to, null);
   // Spot-check the rest of the shape so a renamed column can't slip past as "extra key".
   assert.equal(row.provider_message_id, "m-1");
   assert.equal(row.matched_application_id, null);

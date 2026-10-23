@@ -20,6 +20,10 @@ export interface StorableMessage {
   readonly message_id: string;
   // Gmail thread id, already validated by the contract; null when Gmail sent none.
   readonly thread_id: string | null;
+  // The To header, contract-validated; null when absent.
+  readonly to: string | null;
+  // Gmail label names on the thread at capture; the contract guarantees an array.
+  readonly label_ids: readonly string[];
   // Sender header.
   readonly from: string;
   // Subject line.
@@ -376,6 +380,10 @@ export function emailEventRowOf(
     provider_message_id: message.message_id,
     // Gmail's thread id; null stays null (column is nullable, older scripts sent none).
     thread_id: message.thread_id,
+    // The To header; same bug class as thread_id — validated, column existed, never mapped.
+    recipient_to: message.to,
+    // Label names; copied so the readonly contract array never aliases the insert payload.
+    label_ids: [...message.label_ids],
     // Sender header.
     from_address: message.from,
     // Subject line.
