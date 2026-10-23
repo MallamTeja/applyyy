@@ -218,11 +218,13 @@ RLS scopes every row by `auth.uid()`, so a second Supabase Auth user would be a 
 disjoint `user_id` and the worker and dashboard would silently stop seeing each other's
 rows. There is therefore **exactly one** application identity.
 
-`SCHEMA_CONTRACT.md` §8.3 names its credentials `APPLYY_WORKER_*`, which names one
-thing after one of its several consumers. This stream uses `APPLYY_APP_USER_EMAIL` /
-`APPLYY_APP_USER_PASSWORD` (`_shared/db/client.ts`). **Two names for one credential is
-how somebody rotates only one of them.** Awaiting the schema owner's ruling; whichever
-name wins, the other must be removed everywhere.
+One name everywhere: `APPLYY_APP_USER_EMAIL` / `APPLYY_APP_USER_PASSWORD`
+(`_shared/db/client.ts`). **Two names for one credential is how somebody rotates only
+one of them.** *(Resolved 2026-10-23: the ruling — `docs/PROGRESS.md` "one credential,
+one name", 2026-09-10 — picked `APPLYY_APP_USER_*`; code and workflows were renamed in
+`21f0701`, and `SCHEMA_CONTRACT.md` §8.3, which this section previously flagged as
+still saying the old `APPLYY_WORKER_*` names and "awaiting the ruling", was fixed on
+2026-10-23.)*
 
 **No service-role key anywhere in this stream.** Edge Functions sign in as the ordinary
 app user and run under normal RLS, so *an Edge Function cannot do anything Teja could
