@@ -212,6 +212,32 @@ test("a refusal carries its violations into the event detail", async () => {
   assert.deepEqual(detail.violations, refused.kind === "refused" ? refused.violations : []);
 });
 
+test("re-tailoring a row clears its cover letter", async () => {
+  // A clean run against the recording fake.
+  const { client, calls } = recordingClient();
+  // Persist the clean verdict — the same write path a re-tailored row would take.
+  await persistTailorOutcome(client, APPLICATION_ID, TAILORED);
+  // The one update statement's columns.
+  const values = calls[0].payload.values as Record<string, unknown>;
+  // WHY (2026-10-24 finding): a cover letter quotes the tailored_profile it was built from,
+  // is write-once (`cover-letter/run.ts:136` queues only `cover_letter is null`), and nothing
+  // else ever clears it. A new profile with the old letter kept would be a stale letter that
+  // the approval page cannot flag (editCount resets to 0 against the NEW tailor original).
+  // Clearing here makes that state unrepresentable; today it is a no-op (the tailor's only
+  // edge is scored -> tailored, where no letter exists yet), it matters the day the
+  // audit_flagged -> tailored re-tailor lane (humanLanes.ts:151, affordance_only) is wired.
+  assert.equal(values.cover_letter, null);
+  // Its CHECK-constraint partner (`applications_cover_letter_consistent`: both null or both
+  // set), cleared in the same statement so the constraint can never refuse the write.
+  assert.equal(values.cover_letter_generated_at, null);
+  // `undefined` would mean "column not sent" — PostgREST drops it and the stale letter stays.
+  assert.ok("cover_letter" in values && "cover_letter_generated_at" in values);
+  // SAME statement as the profile: a second write could fail alone and leave the stale pair.
+  assert.equal(values.tailored_profile, RESUME);
+  // Still exactly one update and one rpc: the clear added no write that could half-fail.
+  assert.deepEqual(calls.map((c) => c.kind), ["update", "rpc"]);
+});
+
 test("persist writes applications.master_version from the resume pin in the SAME update", async () => {
   // A clean run against the recording fake.
   const { client, calls } = recordingClient();

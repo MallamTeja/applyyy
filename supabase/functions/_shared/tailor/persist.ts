@@ -91,7 +91,16 @@ export async function persistTailorOutcome(
     // master_profiles guarded nothing and every reader had to dig the pin out of JSON.
     // It is the validator-stamped pin (validator.ts:776), in the same statement so the
     // column can never disagree with the resume it mirrors.
-    .update({ tailored_profile: outcome.resume, tailor_refs: outcome.refs, selected_jd_keywords: [...outcome.jdKeywords], master_version: outcome.resume.master_version })
+    // `cover_letter` + `cover_letter_generated_at` are CLEARED here (2026-10-24): a letter
+    // quotes the tailored_profile it was built from and is write-once (`cover-letter/run.ts`
+    // queues only `cover_letter is null`), so a new profile keeping an old letter would be a
+    // stale letter nothing can flag — the approval page's notice keys on edits against the
+    // NEW tailor original, which reads 0. Cleared in the SAME statement (the pair's CHECK
+    // `applications_cover_letter_consistent` requires both-null or both-set, and a separate
+    // write could fail alone). Today this is a no-op — the tailor's only edge is
+    // scored -> tailored, where no letter exists yet — it becomes load-bearing the day the
+    // audit_flagged -> tailored re-tailor lane (humanLanes.ts, affordance_only) is wired.
+    .update({ tailored_profile: outcome.resume, tailor_refs: outcome.refs, selected_jd_keywords: [...outcome.jdKeywords], master_version: outcome.resume.master_version, cover_letter: null, cover_letter_generated_at: null })
     // Scoped to one row. Without this predicate the update would rewrite every
     // application the caller's RLS context can see.
     .eq("id", applicationId);
