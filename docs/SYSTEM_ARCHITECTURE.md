@@ -205,7 +205,11 @@ validator resolves every ref against the pinned master. The Auditor is the separ
 - **Kill switch.** `system_settings.system_enabled` (per user), enforced inside
   `claim_applications` and by `readKillSwitch` (`_shared/db/gates.ts`) at the top of the
   pipeline edge agents, failing closed on a missing row or a failed read. Check:
-  `select user_id, system_enabled from system_settings`. Exceptions: see §9.
+  `select user_id, system_enabled from system_settings`. **Absolute since `f918671`
+  (2026-10-23):** `scout-ats` deliberately ignores `?force=true` for the halt
+  (`scout-ats/gate.ts`), and `email-tracker-intake` consults the switch before any status
+  move, failing closed when it is unreadable — intel events are still stored (append-only,
+  already written) and the 202 is kept so Apps Script does not redeliver the batch.
 - **List all triggers:** `select tgname from pg_trigger where tgrelid='public.applications'::regclass and not tgisinternal`.
 
 ## 6. Data pins
@@ -254,7 +258,7 @@ every push to `main`.
 | Agent-key enforcement ON (seeded 2026-10-09 ~13:40 IST; a request without the right key gets 42501; an empty table = off, warn-only) | `select count(*) from applyy_internal.agent_key` (expect 1) |
 | No scheduler for edge agents (pipeline is click-driven) | `select extname from pg_extension where extname='pg_cron'` |
 | Auxiliary functions have no invoker in repo | `grep -rnE "cover-letter\|follow-up\|interview-prep\|referral\|skill-gap" apps/web/src worker/src .github` |
-| `email-tracker-intake` never reads the kill switch; `scout-ats` lets `?force=true` bypass it | `grep -ln "readKillSwitch\|system_enabled" supabase/functions/{email-tracker-intake,scout-ats}/*.ts` and `grep -n "force" supabase/functions/scout-ats/index.ts` |
+| `scout-ats/index.ts` fetches boards with a bare `fetch`, not the robots-gated transport (`_shared/http` callers are gated since `111791c`, fail-closed on a soft-200; the scout-ats port is IN FLIGHT, peer 2) | `grep -n "await fetch(" supabase/functions/scout-ats/index.ts` — a hit means still ungated |
 | Aggregator adapters (Adzuna/Jooble/Workable/SmartRecruiters) unreachable | `grep -rn "scout/tiers" supabase/functions worker/src \| grep -v test` |
 | ATS simulator unwired | `grep -rln "ats-simulator" supabase/functions apps/web/src \| grep -v test` |
 | `scout-remote.ts` invoked by nothing | `grep -n "scout:remote" .github/workflows/*.yml` |

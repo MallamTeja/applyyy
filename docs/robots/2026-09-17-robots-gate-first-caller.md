@@ -156,6 +156,14 @@ bare and read its own exit code.
 
 ## 6. Still open
 
+> **Status note, 2026-10-23 (appended; the list below is left as written):** §6.1 is
+> closed for the shared transport — commit `111791c` put the gate inside
+> `supabase/functions/_shared/http/transport.ts` itself, on by default for every caller,
+> failing closed on a soft-200 and on an underivable product token, exactly the
+> "one function every Deno fetch path crosses" placement this section recommended.
+> The second named site, `scout-ats/index.ts`'s bare `fetch`, is in flight separately.
+> Worker-side, the apply page has been gated since `a3b4115`.
+
 1. **No Deno-side production caller.** The gate protects a developer capture script, not the
    pipeline. The two outbound fetch sites are
    `supabase/functions/_shared/http/transport.ts:301` and `supabase/functions/scout-ats/index.ts:249`.
