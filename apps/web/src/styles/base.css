@@ -56,16 +56,18 @@ h1, h2, h3, h4, h5, h6 {
 /* Page Title: 1.5rem (24px), weight 650, line-height 1.25, tight negative tracking */
 h1 {
   font-size: var(--size-lg);
-  font-weight: 650;
-  line-height: 1.25;
+  /* The page-title tokens, not repeated literals, so h1 and .page__title cannot drift. */
+  font-weight: var(--font-weight-page-title);
+  line-height: var(--line-height-page-title);
   letter-spacing: -0.028em;
 }
 
 /* Section Headers: 1.125rem (18px), weight 600, line-height 1.35 */
 h2 {
   font-size: var(--size-md);
-  font-weight: 600;
-  line-height: 1.35;
+  /* Section-header tokens for the same no-drift reason as h1. */
+  font-weight: var(--font-weight-section-header);
+  line-height: var(--line-height-section-header);
   letter-spacing: -0.018em;
 }
 
@@ -139,8 +141,9 @@ button {
 
 .page__title {
   font-size: var(--size-lg);
-  font-weight: 650;
-  line-height: 1.25;
+  /* Identical to h1 by construction: both read the page-title tokens. */
+  font-weight: var(--font-weight-page-title);
+  line-height: var(--line-height-page-title);
   color: var(--text-primary);
   letter-spacing: -0.028em;
 }
@@ -177,7 +180,8 @@ button {
   max-width: 60ch;
   color: var(--text-muted);
   font-size: var(--size-xs);
-  line-height: 1.4;
+  /* The helper line-height token, so help text everywhere breathes the same. */
+  line-height: var(--line-height-helper);
   margin-top: 1px;
 }
 

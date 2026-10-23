@@ -157,8 +157,11 @@
   --font-machine: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   /* Resume prose: distinct serif for document evaluation */
   --font-paper: 'IBM Plex Serif', 'Charter', Cambria, Georgia, 'Times New Roman', serif;
-  /* Literal identifiers only - bullet ids, tokens, hashes, timestamps */
-  --font-id: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  /* Literal identifiers only - bullet ids, tokens, hashes, timestamps.
+     IBM Plex Mono leads because it is the one the page LOADS (index.html); JetBrains
+     Mono led before, so machines with it installed rendered ids in a different face
+     from machines without — same build, two looks (removed 2026-10-23). */
+  --font-id: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
   /* Calibrated desktop operator typography scale */
   --size-2xs: 0.6875rem;  /* 11px - Micro labels, tiny tags */
@@ -170,22 +173,24 @@
   --size-lg: 1.5rem;      /* 24px - Page titles (letter-spacing: -0.025em) */
   --size-xl: 1.75rem;     /* 28px - Display headlines */
 
-  /* Semantic Typography Hierarchy Tokens */
-  --font-size-page-title: 1.5rem;
+  /* Semantic Typography Hierarchy Tokens.
+     SIZES ARE ALIASES into the scale above (2026-10-23) — they repeated the raw rem
+     values before, which is two homes for one number and how the pair drifts apart. */
+  --font-size-page-title: var(--size-lg);
   --font-weight-page-title: 650;
   --line-height-page-title: 1.25;
 
-  --font-size-section-header: 1.125rem;
+  --font-size-section-header: var(--size-md);
   --font-weight-section-header: 600;
   --line-height-section-header: 1.35;
 
-  --font-size-card-header: 0.9375rem;
+  --font-size-card-header: var(--size-card-head);
   --font-weight-card-header: 600;
 
-  --font-size-body: 0.875rem;
+  --font-size-body: var(--size-base);
   --line-height-body: 1.5;
 
-  --font-size-helper: 0.75rem;
+  --font-size-helper: var(--size-xs);
   --line-height-helper: 1.4;
 
   /* --- Space ----------------------------------------------------------- */

@@ -97,7 +97,7 @@
 
 .rail__heading {
   color: var(--text-muted);
-  font-size: 0.6875rem;
+  font-size: var(--size-2xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;

@@ -347,7 +347,7 @@ export function AnswerBankPage(): ReactElement {
                       <td>
                         <span className="identifier">{question.type}</span>
                         {question.isCustom && (
-                          <div style={{ marginTop: '4px', fontSize: '0.7rem', color: 'var(--accent)' }}>
+                          <div style={{ marginTop: '4px', fontSize: 'var(--size-2xs)', color: 'var(--accent)' }}>
                             Custom
                           </div>
                         )}
@@ -581,7 +581,7 @@ export function AnswerBankPage(): ReactElement {
                           {question.timesUsed > 0 ? `${question.timesUsed}x used` : 'Unused'}
                         </span>
                         {question.lastUsedAt && (
-                          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                          <div style={{ fontSize: 'var(--size-2xs)', color: 'var(--text-muted)' }}>
                             {new Date(question.lastUsedAt).toLocaleDateString()}
                           </div>
                         )}

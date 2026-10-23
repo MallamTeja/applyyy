@@ -422,7 +422,7 @@ export function WatchlistPage(): ReactElement {
                   <tr key={row.id}>
                     <td>
                       <strong>{row.company_name}</strong>
-                      <div className="identifier" style={{ fontSize: '0.75rem', color: 'var(--ink-muted)' }}>
+                      <div className="identifier" style={{ color: 'var(--ink-muted)' }}>
                         {row.company_slug}
                       </div>
                     </td>
@@ -452,7 +452,7 @@ export function WatchlistPage(): ReactElement {
                       {row.consecutive_failures > 0 && (
                         <span
                           className="identifier"
-                          style={{ color: 'var(--fabricated)', marginLeft: '6px', fontSize: '0.75rem' }}
+                          style={{ color: 'var(--fabricated)', marginLeft: '6px', fontSize: 'var(--size-xs)' }}
                           title="Consecutive failures"
                         >
                           ({row.consecutive_failures} fail)

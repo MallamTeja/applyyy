@@ -194,7 +194,7 @@
   /* Not mono: the numeric counts are mono, so breaking the family here is a
      second, redundant signal that this is not a value. */
   font-family: var(--font-machine);
-  font-size: 0.6875rem;
+  font-size: var(--size-2xs);
   /* Keeps a longer phrase from pushing the status title out of the head. */
   text-align: right;
   max-width: 6.5rem;

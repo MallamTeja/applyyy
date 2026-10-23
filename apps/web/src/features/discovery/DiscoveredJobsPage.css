@@ -25,7 +25,7 @@
 .discovery__search-input {
   flex: 1;
   padding: 0.6rem 0.9rem;
-  font-size: 0.95rem;
+  font-size: var(--size-card-head);
   /* --sheet, the raised surface: a field that shares the page's own background
      has only its hairline border to say it is a field. This read as
      `transparent` until now, because --surface was never declared. */
@@ -137,7 +137,7 @@
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
-  font-size: 0.75rem;
+  font-size: var(--size-xs);
   padding: 0.2rem 0.5rem;
   border-radius: var(--radius-sm);
   /* One step ABOVE .job-card's --panel. A chip painted the same colour as the
@@ -209,7 +209,7 @@
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
-  font-size: 0.82rem;
+  font-size: var(--size-sm);
   color: var(--text-muted);
   text-decoration: none;
   transition: color 120ms ease;
@@ -229,7 +229,7 @@
      than as a link beside a disabled something. */
   display: inline-flex;
   align-items: center;
-  font-size: 0.82rem;
+  font-size: var(--size-sm);
   /* A semantic token, never a [data-theme='dark'] rule: theme.ts applies the `system`
      preference by REMOVING the attribute, so such a rule never matches for a
      default-setting user and ships light text on a near-black surface. */
@@ -275,7 +275,7 @@
 .jd-modal__body {
   padding: var(--gap-5);
   overflow-y: auto;
-  font-size: 0.9rem;
+  font-size: var(--size-base);
   line-height: 1.6;
   color: var(--text-primary);
   white-space: pre-wrap;
@@ -293,7 +293,7 @@
   padding: var(--gap-7) var(--gap-4);
   text-align: center;
   color: var(--text-muted);
-  font-size: 0.95rem;
+  font-size: var(--size-card-head);
   background: var(--panel);
   border: 1px dashed var(--rule);
   border-radius: var(--radius-sheet);

@@ -58,13 +58,17 @@
          downloading a round trip earlier; type is the first paint that matters. -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <!-- IBM Plex, three cuts with distinct jobs: Sans for machine chrome, Serif
-         for resume prose (it is a document, so it is set like one), Mono only
-         for literal identifiers a human might copy. One family keeps them
-         harmonious while the role split carries information. -->
+    <!-- Three faces with distinct jobs: Inter for machine chrome, IBM Plex Serif
+         for resume prose (it is a document, so it is set like one), IBM Plex Mono
+         only for literal identifiers a human might copy. (Comment corrected
+         2026-10-23: it said "IBM Plex Sans" while the page has loaded Inter.)
+         Inter is requested as the VARIABLE range 400..700, not four fixed cuts:
+         the CSS uses the in-between weights 450/550/650 in seventeen places, and
+         fixed cuts made the browser snap them to 500/600/700 — the calibrated
+         weights never actually rendered until this range. -->
     <link
       rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap"
     />
   </head>
   <body>

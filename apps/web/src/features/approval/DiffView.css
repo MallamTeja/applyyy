@@ -739,7 +739,7 @@ html:has(.diff__actions) {
 
 .line__edit-save {
   padding: 0.25rem 0.65rem;
-  font-size: 0.8rem;
+  font-size: var(--size-sm);
   font-weight: 550;
   background: var(--accent);
   /* --ink-on-fill flips dark when --accent turns light in dark mode; fixed white failed contrast there. */
@@ -751,7 +751,7 @@ html:has(.diff__actions) {
 
 .line__edit-cancel {
   padding: 0.25rem 0.65rem;
-  font-size: 0.8rem;
+  font-size: var(--size-sm);
   background: transparent;
   color: var(--text-secondary);
   border: 1px solid var(--rule);
