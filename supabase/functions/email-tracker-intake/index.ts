@@ -47,6 +47,7 @@ import type { EmailEventInsert, ApplicationStatus } from "../_shared/contracts/s
 import {
   CONFIRMABLE_STATUSES,
   addressedTo,
+  matchPoolFor,
   classifyMessage,
   matchApplication,
   receiptConfirmsApplied,
@@ -203,16 +204,16 @@ Deno.serve(async (request: Request): Promise<Response> => {
   const updatedAtById = new Map<string, string>();
   // Exceptions from the client are treated the same as an error result.
   try {
-    // Statuses an employer email can still move. `applying` is here so a verified receipt
-    // can confirm a submit (receiptConfirmsApplied); it is also a match candidate, so a
-    // receipt that names two rows of one company stays ambiguous. `needs_verification` is
-    // DELIBERATELY absent (Teja, 2026-10-23): that lane is human-only, so its rows must
-    // not even be match candidates — a receipt for one is stored unmatched, nothing moves.
+    // Statuses an employer email can still move, PLUS `needs_verification`, which no email
+    // may move (human-only lane since 2026-10-23) but which must stay a MATCH CANDIDATE:
+    // hidden from the matcher, its row would stop making a same-company receipt ambiguous,
+    // and its late receipt could then confirm the WRONG applying row (security review,
+    // 2026-10-23). The move itself stays refused by CONFIRMABLE_STATUSES and the graph.
     const { data: appsData, error: appsError } = await client.db
       .from("applications")
       // `title` is read only by the receipt confirmation (titleNamedIn).
       .select("id, status, job_id, updated_at, jobs(company_name, company_slug, title)")
-      .in("status", ["applying", "applied", "employer_screening", "oa_pending", "interview"]);
+      .in("status", ["applying", "needs_verification", "applied", "employer_screening", "oa_pending", "interview"]);
     // An error result is a failed batch.
     if (appsError !== null) {
       // The detail goes to the log, not to the caller.
@@ -241,12 +242,10 @@ Deno.serve(async (request: Request): Promise<Response> => {
   const decided: DecidedMessage[] = batch.messages.map((message) => {
     // Outcome first, out-of-office never advances, receipt only as a fallback.
     const decision = classifyMessage(message);
-    // Only a receipt may land on a row the worker tried to submit; every other email is
-    // matched against the post-apply statuses alone, exactly as before receipts could
-    // confirm, so an interview email isn't made ambiguous by an unrelated submitting row.
-    const pool = decision.classification === "application_received"
-      ? activeApplications
-      : activeApplications.filter((app) => !CONFIRMABLE_STATUSES.includes(app.status));
+    // The pool rule lives in decide.ts (matchPoolFor) so it is node-tested: receipts see
+    // every row (a needs_verification sibling can force ambiguity), everything else sees
+    // only post-submit rows. The 2026-10-23 wrong-row regression was an inline filter here.
+    const pool = matchPoolFor(decision.classification, activeApplications);
     // Exactly one application, or null for none/ambiguous.
     const matchedApplicationId = matchApplication(message, decision.senderDomain, pool);
     // Kept together until the upsert result is known.

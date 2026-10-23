@@ -320,6 +320,28 @@ export const CONFIRMING_VENDOR_DOMAINS: readonly string[] = ["greenhouse.io", "g
 // `needs_verification` either — that lane is human-only (multi-tenant signer, see above).
 export const CONFIRMABLE_STATUSES: readonly ApplicationStatus[] = ["applying"];
 
+// Statuses whose rows a receipt must still SEE as match candidates: both submit-uncertain
+// lanes, not just the confirmable one. A needs_verification row hidden from the matcher
+// would stop making a same-company receipt ambiguous, and its late receipt could then
+// confirm the WRONG row (found by security review, 2026-10-23). Loaded for ambiguity
+// detection only: CONFIRMABLE_STATUSES and the status graph still refuse every tracker
+// move out of needs_verification.
+export const SUBMIT_PENDING_STATUSES: readonly ApplicationStatus[] = ["applying", "needs_verification"];
+
+/**
+ * The match-candidate pool for one classification. Pure and exported so the pool rule is
+ * node-testable — the 2026-10-23 regression lived in an inline filter no test could reach.
+ */
+export function matchPoolFor(classification: EmailClassification, apps: readonly ActiveApplication[]): readonly ActiveApplication[] {
+  // A receipt sees EVERY loaded row: a submit-uncertain sibling (applying or
+  // needs_verification) must be able to force the two-candidate ambiguity refusal, or its
+  // late receipt could match — and confirm — the wrong row.
+  if (classification === "application_received") return apps;
+  // Every other email sees only post-submit rows, exactly as before receipts could
+  // confirm, so an interview email isn't made ambiguous by an unrelated submitting row.
+  return apps.filter((app) => !SUBMIT_PENDING_STATUSES.includes(app.status));
+}
+
 // The one authserv-id whose verdict is trusted. Gmail PREPENDS its own
 // Authentication-Results header; a sender can embed a forged one lower down, but it can't
 // make one appear above Google's, and the script sends only the topmost (email-tracker.gs).

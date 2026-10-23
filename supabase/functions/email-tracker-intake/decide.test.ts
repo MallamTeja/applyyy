@@ -302,6 +302,12 @@ test("CONFIRMING_VENDOR_DOMAINS and CONFIRMABLE_STATUSES are exactly the ruled s
   // Only `applying` (Teja, 2026-10-23): needs_verification is human-only — Greenhouse
   // signs for every tenant, so a genuine receipt is not proof THIS submit landed.
   assert.deepEqual([...receipt.CONFIRMABLE_STATUSES], ["applying"]);
+  // Both submit-uncertain lanes stay match candidates: hiding needs_verification from the
+  // matcher would let its late receipt confirm the wrong applying row (review, 2026-10-23).
+  assert.deepEqual([...receipt.SUBMIT_PENDING_STATUSES], ["applying", "needs_verification"]);
+  // Confirmable is a strict subset of submit-pending: visible to the matcher is a weaker
+  // privilege than movable, and the two drifting apart silently is this line's job to stop.
+  assert.ok(receipt.CONFIRMABLE_STATUSES.every((s) => receipt.SUBMIT_PENDING_STATUSES.includes(s)));
 });
 
 test("verifyReceiptSender: a passing dkim for a vendor subdomain verifies", () => {
@@ -366,6 +372,22 @@ test("ambiguous: two applications to the same company match neither, so nothing 
   assert.equal(matchApplication(GREENHOUSE_RECEIPT, domain, rows), null);
   // Positive control: with one acme row the same email DOES match, so the null above is ambiguity, not a dead matcher.
   assert.equal(matchApplication(GREENHOUSE_RECEIPT, domain, [rows[0]!]), "a1");
+});
+
+test("a needs_verification sibling still trips the ambiguity refusal", () => {
+  // One row mid-submit, one parked in the human-review lane, same company: the receipt
+  // could belong to either attempt, so matching must refuse rather than guess.
+  const rows = [appAt("a1", "acme", "applying"), appAt("a2", "acme", "needs_verification")];
+  // Parser domain exactly as index.ts passes it.
+  const domain = classifyMessage(GREENHOUSE_RECEIPT).senderDomain;
+  // The LIVE pool rule (index.ts calls this same function): a receipt sees both rows.
+  const pool = receipt.matchPoolFor("application_received", rows);
+  // Both rows visible — hiding the needs_verification sibling was the 2026-10-23 regression.
+  assert.equal(pool.length, 2);
+  // Two candidates: refuse, so the wrong row can never be confirmed by the sibling's receipt.
+  assert.equal(matchApplication(GREENHOUSE_RECEIPT, domain, [...pool]), null);
+  // A non-receipt email sees neither submit-uncertain row (pre-feature matching semantics).
+  assert.equal(receipt.matchPoolFor("interview_invite", rows).length, 0);
 });
 
 test("received-before-applying: a receipt older than the latest entry into applying is refused", () => {
