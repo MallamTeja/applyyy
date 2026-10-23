@@ -9,54 +9,24 @@
 import { createAppUserClient } from "../_shared/db/client.ts";
 // Shared CORS headers and the wrapper that keeps an uncaught throw visible to the browser.
 import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
-// The adapter owns each board's API URL, so no URL is ever built from model output.
-import { getAdapter } from "../_shared/ats/registry.ts";
-// The shared retrying transport, so we do not hand-roll fetch.
-import { httpJson } from "../_shared/http/transport.ts";
 // Gemini with key failover; the model name is deliberately left to the client's default.
 import { generateGeminiContent, type GenerateGeminiOptions } from "../_shared/gemini/client.ts";
 // One failure line for every Gemini caller: reason, HTTP status, short redacted detail.
 import { describeGeminiFailure, formatGeminiFailure } from "../_shared/gemini/failure-message.ts";
 // The blanking guard scout-ats uses; keeps one upsert from erasing stored fields.
 import { planJobUpsertGroups } from "../_shared/screen/upsert-plan.ts";
-// The robots gate, reached by relative path (as master-robots itself reaches into
-// _shared), so no package.json edit or pnpm install is needed.
-import { checkRobots } from "../../../packages/master-robots/src/index.ts";
 // The pure pipeline's seam types and the applications row builder.
-import { buildApplicationRows, QuotaExhaustedError, UpstreamUnavailableError, type FetchBoardFn, type SearchFn, type WatchlistName } from "./core.ts";
+import { buildApplicationRows, QuotaExhaustedError, UpstreamUnavailableError, type SearchFn, type WatchlistName } from "./core.ts";
+// The board fetch, gated against robots.txt INSIDE the shared transport (single
+// control; fetch-board.ts records why the pre-check that lived here was removed).
+import { makeFetchBoard } from "./fetch-board.ts";
 // The lifecycle, and the Store contract this file implements.
 import { handleScoutWeb, type Store } from "./handler.ts";
 // One-hop resolver for the Google redirect URLs that grounding metadata returns.
 import { resolveGroundingRedirect } from "./redirects.ts";
 
-// The product token robots.txt groups are matched against; must equal the transport's UA product.
-const ROBOTS_PRODUCT_TOKEN = "applyy-scout";
-
-// Production board fetch: robots first, then the shared retrying transport.
-const fetchBoard: FetchBoardFn = async (provider, token) => {
-  // The adapter owns the board API URL; the token was charset-validated by urls.ts.
-  const adapter = getAdapter(provider);
-  // A missing adapter is a build mismatch; refuse rather than guess a URL.
-  if (adapter === null) return { ok: false, reason: "no_adapter" };
-  // The exact URL we are about to request, which is also what robots is asked about.
-  const url = adapter.buildRequestUrl(token);
-  // Fail closed: only an explicit 'allow' proceeds ('wait' and 'refuse' both stop).
-  const verdict = await checkRobots(url, ROBOTS_PRODUCT_TOKEN);
-  // Report the verdict kind so the UI can tell robots refusals from network failures.
-  if (verdict.kind !== "allow") return { ok: false, reason: `robots_${verdict.kind}: ${verdict.reason}` };
-  try {
-    // 'null' mode turns a 404 (dead board token) into null instead of a throw; two retries
-    // keep a rate-limited host from eating the whole function's wall-clock budget.
-    const payload = await httpJson<unknown>(url, { notFound: "null", retry: { maxRetries: 2 } });
-    // A dead board means the model's URL cannot be real.
-    if (payload === null) return { ok: false, reason: "board_not_found" };
-    // Hand the raw payload to the adapter's own parser (in core.ts).
-    return { ok: true, payload };
-  } catch (err) {
-    // Typed transport errors (bot protection, retries exhausted) become a reason string.
-    return { ok: false, reason: `fetch_failed: ${err instanceof Error ? err.message : String(err)}` };
-  }
-};
+// Built once at module scope, so one robots verdict cache serves the whole isolate.
+const fetchBoard = makeFetchBoard();
 
 // Pull web URIs out of an unknown groundingMetadata value, ignoring anything misshapen.
 function groundingUris(meta: unknown): string[] {

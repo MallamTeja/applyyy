@@ -1,6 +1,6 @@
 # Gmail continuous read *and write*, and whether Zoho is a better base
 
-**Date:** 2026-09-10 · **Status:** recommendation, not yet ratified by Teja
+**Date:** 2026-09-10 · **Status:** adopted — see the 2026-10-23 status update at the end (original line read "recommendation, not yet ratified by Teja")
 **Question asked:** can the system read Gmail continuously *and write back*, and
 would Zoho Mail be a better foundation than Gmail?
 
@@ -158,3 +158,23 @@ Stated plainly, because the rest of it reads as settled and these parts are not:
 **Not adopted, and the reason is the keeper:** the incumbent's advantage is the
 absence of a credential, not the simplicity of one. Any replacement has to beat
 *nothing*, which is a very high bar.
+
+---
+
+## 7. Status update — 2026-10-23: adopted, in production
+
+The recommendation was adopted in practice: the Gmail + Apps Script route is
+**live as of 2026-10-23** — the deployed tracker script feeds
+`email-tracker-intake` (message ingestion), receipt confirmation, and the
+zero-mail heartbeat that checks in to `agent_runs` so a dead trigger stops
+looking like a quiet inbox. The operating document is
+[`docs/setup/gmail-tracker-apps-script.md`](../setup/gmail-tracker-apps-script.md);
+consult it, not this analysis, for how the tracker runs today.
+
+**Mode ruling (Teja, 2026-10-23):** the tracker runs on an **hourly time
+trigger plus on-demand sync when the `/emails` page is opened** — superseding
+the 15-minute-polling assumption in §2 (the "minutes of latency is irrelevant"
+argument holds all the more at an hour, since page-open sync covers the
+moments anyone is actually watching).
+
+The analysis above is kept as written, §5's unverified-claims warning included.
