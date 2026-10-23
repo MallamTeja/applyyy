@@ -77,9 +77,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
     upstreamStatus = response.status;
     upstreamText = await response.text();
   } catch (cause) {
-    // The thrown error can quote the request URL — secret included — so it is scrubbed
-    // before logging and NEVER forwarded to the browser.
-    console.error(`[gmail-sync] upstream fetch failed: ${String(cause).split(config.secret).join("[redacted]")}`);
+    // The thrown error can quote the request URL with the secret in it — and in its
+    // URL-ENCODED form, which a raw-string scrub misses (security review, 2026-10-23).
+    // So the cause is never logged: only its name, which is enough to tell a timeout
+    // (TimeoutError) from DNS/TLS trouble, and nothing is forwarded to the browser.
+    const causeName = cause instanceof Error ? cause.name : typeof cause;
+    console.error(`[gmail-sync] upstream fetch failed (${causeName})`);
     return json(502, { ok: false, error: "upstream sync failed" });
   }
 
