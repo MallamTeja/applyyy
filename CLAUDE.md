@@ -35,6 +35,13 @@ A single real submit: `gh workflow run apply.yml --ref main -f dry_run=false -f 
 (local headed via `assist.ts` preferred for reCAPTCHA; CI has a datacenter IP). A robots.txt
 gate runs before the apply page opens (a3b4115).
 
+**Progress reporting (asked for 2026-10-23):** whenever Teja asks for progress or a
+percentage, lead with a % toward the product goal — one human-approved pipeline running
+end-to-end for real (jobs discovered → screened → tailored → approved → submitted →
+confirmed applied → tracked). Re-derive it at ask time from the repo and live state
+(status counts, what is deployed, what is blocked); never quote a stored number, and
+always state the basis ("X of Y milestones; the gap is …") so the % can be argued with.
+
 ## 2. Shared working tree (several sessions, one index, one `.git`)
 
 On top of the global git form:
