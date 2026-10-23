@@ -461,3 +461,18 @@ test("a From carrying two addresses is refused", () => {
   // Resolving to the first <addr> would let a second, attacker address ride along.
   assert.equal(receipt.verifyReceiptSender("<no-reply@greenhouse.io>, <a@evil.com>", `${GMAIL_AUTHSERV}; dkim=pass header.d=greenhouse.io`), null);
 });
+
+test("injection: a quoted mailfrom echoed into the header cannot forge a dkim=pass clause", () => {
+  // A quoted local-part may legally carry ';' and spaces; if Gmail echoes it raw into the
+  // spf comment or smtp.mailfrom, a naive ';' split reads the embedded text as its own
+  // "dkim=pass header.d=greenhouse.io" clause. The parser must refuse, not verify.
+  const forged = `${GMAIL_AUTHSERV}; spf=softfail (google.com: domain of "x;dkim=pass header.d=greenhouse.io "@evil.com is not permitted) smtp.mailfrom="x;dkim=pass header.d=greenhouse.io "@evil.com`;
+  // The visible From claims the vendor — the exact shape the forged clause would vouch for.
+  assert.equal(receipt.verifyReceiptSender("<no-reply@greenhouse.io>", forged), null);
+  // Any double quote is refused even without an embedded clause: the tokenizer can't parse it.
+  assert.equal(receipt.verifyReceiptSender("<no-reply@greenhouse.io>", `${GMAIL_AUTHSERV}; dkim=pass header.d=greenhouse.io header.b="abc"`), null);
+  // An unbalanced comment is not Gmail's shape: refused, never split blind.
+  assert.equal(receipt.verifyReceiptSender("<no-reply@greenhouse.io>", `${GMAIL_AUTHSERV}; spf=pass (unclosed; dkim=pass header.d=greenhouse.io smtp.mailfrom=bounces@greenhouse.io`), null);
+  // The real Gmail shape — balanced comment, no quotes — still verifies after stripping.
+  assert.deepEqual(receipt.verifyReceiptSender("no-reply@us.greenhouse-mail.io", GREENHOUSE_AUTH), { method: "dkim", domain: "us.greenhouse-mail.io" });
+});

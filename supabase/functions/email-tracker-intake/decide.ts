@@ -363,8 +363,23 @@ export function verifyReceiptSender(
   if (vendor === null) return null;
   // No header (older script, or stripped): fail closed.
   if (authenticationResults === null || authenticationResults.trim() === "") return null;
+  // RFC 8601 allows quoted strings, and a quoted mailfrom local-part may carry ';' and
+  // spaces — text the naive split below would read as a forged "dkim=pass" clause. Gmail's
+  // own result clauses for these vendors never carry a double quote, so any quote means a
+  // header this tokenizer cannot parse safely: refuse it outright.
+  if (authenticationResults.includes('"')) return null;
+  // Parenthesised comments (e.g. Gmail's spf "(google.com: domain of ...)") echo
+  // sender-chosen text, so they must vanish BEFORE the ';' split, never feed it.
+  let stripped = authenticationResults;
+  // Innermost-out so nested comments unwind; the fixed cap bounds a pathological header.
+  for (let depth = 0; depth < 10 && /\([^()]*\)/.test(stripped); depth++) {
+    // Each innermost "(...)" becomes a space, preserving token boundaries around it.
+    stripped = stripped.replace(/\([^()]*\)/g, " ");
+  }
+  // A surviving paren is an unbalanced or over-deep comment — not Gmail's shape: refuse.
+  if (stripped.includes("(") || stripped.includes(")")) return null;
   // RFC 8601: "authserv-id; method=result prop=value ...; method=result ...".
-  const clauses = authenticationResults.split(";").map((clause) => clause.trim());
+  const clauses = stripped.split(";").map((clause) => clause.trim());
   // Only Gmail's own verdict counts; anything else may be sender-written.
   if (clauses[0]!.toLowerCase() !== TRUSTED_AUTHSERV_ID) return null;
 
