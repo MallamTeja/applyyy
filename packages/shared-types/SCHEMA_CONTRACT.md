@@ -635,8 +635,11 @@ Under this design, *"the worker cannot do anything the human could not do from t
 dashboard"* is literally true — worth having as a property on the one component that
 touches real employers.
 
-*Setup, pending and gated on Teja: create the worker's auth user; set
-`APPLYY_WORKER_EMAIL` / `APPLYY_WORKER_PASSWORD` as Actions secrets.*
+*Setup, pending and gated on Teja: create the app's SINGLE auth user (the worker and
+the dashboard share it — RLS scopes rows by `auth.uid()`, so a second user would split
+the data); set `APPLYY_APP_USER_EMAIL` / `APPLYY_APP_USER_PASSWORD` as Actions secrets.
+(Renamed from `APPLYY_WORKER_*` per the 2026-09-10 ruling in `docs/PROGRESS.md` — one
+credential, one name; the code and workflows already use the new names.)*
 
 ### 8.4 Quota counters are dated in **US/Pacific**
 

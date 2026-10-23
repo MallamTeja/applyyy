@@ -790,7 +790,7 @@ Load-time is clean; these are behavioural.
 
 ## Not done — stated as not done
 
-> *2026-10-08: dated 2026-09-10. Everything is now deployed, and CI gates typecheck. Still true: no `supabase/tests/invariants.sql`; SCHEMA_CONTRACT §8.3 still says `APPLYY_WORKER_*`.*
+> *2026-10-08: dated 2026-09-10. Everything is now deployed, and CI gates typecheck. Still true: no `supabase/tests/invariants.sql`; ~~SCHEMA_CONTRACT §8.3 still says `APPLYY_WORKER_*`~~ (2026-10-23: §8.3 now says `APPLYY_APP_USER_*`).*
 
 - **Nothing is deployed.** No `supabase link`, no `db push`, no `vercel deploy`,
   no Actions run has ever executed. This has not changed today.
@@ -803,6 +803,9 @@ Load-time is clean; these are behavioural.
 - `supabase/tests/invariants.sql` does not exist.
 - The `APPLYY_WORKER_*` → `APPLYY_APP_USER_*` rename is **ruled but not
   executed** across contract, function, workflows and Actions secrets.
+  *(2026-10-23: executed everywhere in-repo — code and workflows renamed by `21f0701`,
+  the contract's §8.3 fixed today; only the Actions secrets themselves are not
+  verifiable from the repo.)*
 
 ## Unknowns, stated rather than smoothed over
 

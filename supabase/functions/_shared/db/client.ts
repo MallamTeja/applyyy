@@ -46,10 +46,10 @@ const SUPABASE_ANON_KEY_ENV_VAR = "SUPABASE_ANON_KEY";
 // system, because RLS scopes every row by `auth.uid()` and a second auth user would be
 // a second, disjoint `user_id` — the worker and the dashboard would silently stop
 // seeing each other's rows. So this credential pair is not the worker's; the worker
-// merely also uses it. SCHEMA_CONTRACT §8.3 calls the same pair `APPLYY_WORKER_*`,
-// which names one thing after one of its several consumers. Flagged to the schema
-// owner rather than silently duplicated: two names for one credential is how the two
-// drift apart and someone rotates only one of them.
+// merely also uses it. SCHEMA_CONTRACT §8.3 names the same pair APPLYY_APP_USER_*
+// (aligned 2026-10-23; it said APPLYY_WORKER_* until then): one credential, one name,
+// because two names for one credential is how the two drift apart and someone rotates
+// only one of them.
 export const APP_USER_EMAIL_ENV_VAR = "APPLYY_APP_USER_EMAIL";
 // The password for that same identity.
 export const APP_USER_PASSWORD_ENV_VAR = "APPLYY_APP_USER_PASSWORD";
