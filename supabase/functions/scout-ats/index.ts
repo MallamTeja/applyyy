@@ -10,6 +10,9 @@ import { createAppUserClient } from "../_shared/db/client.ts";
 import { authorizeCaller } from "../_shared/db/gates.ts";
 // The kill-switch verdict, pure so node --test can pin "force never bypasses the halt".
 import { haltedByKillSwitch } from "./gate.ts";
+// The board fetch, through the robots-gated shared transport (111791c closed every
+// httpFetch path; this import closes the one bare `fetch(` that remained here).
+import { fetchBoard } from "./poll-fetch.ts";
 import { getAdapter, supportedProviders, toJobInsert, type JobInsertContext } from "../_shared/ats/registry.ts";
 // The blanking guard. Splits one batch into the fewest upserts that cannot let an
 // omitted field overwrite a stored one — see _shared/screen/upsert-plan.ts for why
@@ -299,33 +302,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const requestUrl = adapter.buildRequestUrl(board.board_token);
 
     try {
-      const response = await fetch(requestUrl, {
-        headers: {
-          "Accept": "application/json",
-          "User-Agent": "applyy-scout/1.0 (+https://github.com/MallamTeja/applyyy)",
-        },
-      });
-
-      if (!response.ok) {
-        // Record failure against watchlist row
-        await db
-          .from("company_watchlist")
-          .update({
-            consecutive_failures: (board.consecutive_failures || 0) + 1,
-            last_polled_at: now.toISOString(),
-          })
-          .eq("id", board.id);
-
-        summaries.push({
-          board: board.board_token,
-          provider: board.ats_provider,
-          status: "failed",
-          fetched: 0,
-          inserted: 0,
-          error: `HTTP ${response.status}: ${response.statusText}`,
-        });
-        continue;
-      }
+      // Robots-gated transport (poll-fetch.ts): a disallow throws RobotsDisallowedError
+      // BEFORE the board is contacted, and a non-ok status throws HttpError — both land
+      // in the catch below, which does the same failure bookkeeping the old inline
+      // `!response.ok` branch did. The transport sends the identity header itself.
+      const response = await fetchBoard(requestUrl);
+      // Null is only possible under a notFound override this caller does not use; the
+      // guard beats a blind non-null assertion (CLAUDE.md §6) and the catch records it.
+      if (response === null) throw new Error("unexpected null response from fetchBoard");
 
       const payload = await response.json();
       const parseResult = adapter.parse(payload);
