@@ -237,7 +237,7 @@ re-picks rows stranded at `audit_clean`/`audit_flagged`), resolves the master pi
 `tailored_profile.master_version` (`_shared/audit/pinned-master.ts`), and makes both hops to
 `awaiting_approval`. *(Was "nothing" on 2026-09-10.)*
 
-### 8. Applier — actually submits (and currently cannot)
+### 8. Applier — actually submits (automatic since 2026-10-09)
 `approved` → `applying` → `applied` / `blocked_needs_human` / `failed`. Runs on
 GitHub Actions with Playwright, not as an Edge Function.
 
@@ -245,10 +245,14 @@ GitHub Actions with Playwright, not as an Edge Function.
 may walk it.** Nothing else in the system can put a row into the submitting
 state.
 
-**`DRY_RUN=true` and there is deliberately no code in the repo capable of
-submitting an application.** `playwright-page.ts`'s `submit()` throws by
-construction — so the guarantee does not depend on three layers of gate each
-being correct.
+**Submission is implemented and bounded** *(was "no code capable of submitting"
+until 2026-10-09, commit `c557533`)*: `SUBMISSION_IMPLEMENTED = true` in
+`worker/src/playwright-page.ts`, `DRY_RUN` still defaults true at every layer, each
+run is capped (`APPLY_MAX_SUBMITS`, default 3) behind a circuit breaker (`0c437e4`),
+and a robots.txt gate runs before the apply page opens (`a3b4115`). A scheduled
+`apply.yml` run submits only while the repo variable `APPLYY_CRON_LIVE` is `true`;
+a deliberate single submit is `gh workflow run apply.yml` with `dry_run=false` +
+`apply_only_id`.
 
 **Submission is the one non-idempotent action, so it never auto-retries.** If the
 worker dies between `applying` and `applied`, the Sweeper routes the row to
@@ -264,10 +268,11 @@ matrix is the obvious "speed-up" and would multiply the billed minutes by ~35,
 because GitHub bills every job rounded up to a whole minute.
 
 *Built:* yes — `worker/src/` has the claim loop, guarded advance, run window,
-field extraction, fill planning and PDF rendering. Submission is still unimplemented
-(`SUBMISSION_IMPLEMENTED = false`, `worker/src/playwright-page.ts`); the working path is
-`worker/src/cli/assist.ts`, which fills one approved application in a visible browser and
-lets the human click Submit. *(2026-09-10 snapshot follows:)* 62 of 65 tests passing.
+field extraction, fill planning, PDF rendering and the submit itself
+(`SUBMISSION_IMPLEMENTED = true`, `worker/src/playwright-page.ts`, since 2026-10-09).
+`worker/src/cli/assist.ts` remains the headed single-row path where the human clicks
+Submit. *(Was "submission unimplemented" until 2026-10-09.)*
+*(2026-09-10 snapshot follows:)* 62 of 65 tests passing.
 ⚠️ The three failures are all in `render-resume-pdf.test.ts`
 (`Unsupported resume schema_version undefined`), so **resume PDF rendering is
 currently broken**, and `apply-one.ts` never calls the renderer anyway.

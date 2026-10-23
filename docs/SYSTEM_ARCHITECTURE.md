@@ -3,7 +3,7 @@
 The current architecture of the job-application pipeline. **This file holds no counts and
 no line numbers** — every inventory points at the command that regenerates it, so run the
 command rather than trusting prose. Last reconciled against code and the live database on
-2026-10-08. History and reasoning: [`architecture/agents.md`](architecture/agents.md) (why
+2026-10-23. History and reasoning: [`architecture/agents.md`](architecture/agents.md) (why
 each agent is shaped the way it is) and
 [`architecture/graph-engineering.md`](architecture/graph-engineering.md) (the status graph as
 a control structure). Live status: the "Current state" section of [`PROGRESS.md`](PROGRESS.md).
@@ -12,7 +12,9 @@ a control structure). Live status: the "Current state" section of [`PROGRESS.md`
 
 Find jobs, filter them cheaply, score and tailor a resume per job **without inventing
 anything**, audit the tailoring, and put it in front of a human. **Nothing is ever submitted
-without a human approval, and today the human also clicks Submit.**
+without a human approval; after approval the worker submits automatically** (since
+2026-10-09, `SUBMISSION_IMPLEMENTED = true` in `worker/src/playwright-page.ts`), bounded by
+a per-run cap, a circuit breaker, a robots.txt gate, and `DRY_RUN` defaulting true.
 
 Stack: Supabase Postgres (RLS on every table) + Deno Edge Functions
 (`supabase/functions/`); React + Vite dashboard (`apps/web/`, Vercel); Node + Playwright
@@ -38,7 +40,7 @@ flowchart LR
     SC[scout.ts — cron]
     RO[run-one.ts]
     AS[assist.ts — headed]
-    AP[apply.ts — dry]
+    AP[apply.ts — submits, DRY_RUN default]
   end
   DB[(Postgres + RLS<br/>applications.status graph)]
   GAS[Google Apps Script] --> ET
@@ -83,7 +85,7 @@ There is **no database scheduler**: `select extname from pg_extension where extn
 | `scout` | `cli/scout.ts` | ATS boards → `jobs`, screens inline, inserts applications | `scout.yml` cron + dispatch |
 | `run-one` | `cli/run-one.ts` | one row through matcher → tailor → auditor via the deployed functions | `run-one.yml` (dispatch) or local |
 | `assist` | `cli/assist.ts` | opens ONE `approved` application headed, fills it, **human clicks Submit**, y/n records the outcome | local terminal |
-| `apply` | `cli/apply.ts` | batch applier; refuses to submit while `SUBMISSION_IMPLEMENTED=false` | `apply.yml` cron, `DRY_RUN` defaults true |
+| `apply` | `cli/apply.ts` | batch applier; submits `approved` rows (cap `APPLY_MAX_SUBMITS`, default 3, + circuit breaker; robots.txt-gated) | `apply.yml` cron — `DRY_RUN` defaults true; a scheduled run is live only while repo variable `APPLYY_CRON_LIVE` is `true` |
 | `keepalive` | `cli/keepalive.ts` | DB activity + repo activity so nothing pauses silently | `keepalive.yml` cron |
 | `scout:remote` | `cli/scout-remote.ts` | RemoteOK/Jobicy/Arbeitnow | **no workflow invokes it** |
 
@@ -163,8 +165,10 @@ flowchart LR
   S --> M[matcher<br/>Gemini] --> T[tailor<br/>Gemini, refs only] --> A[auditor<br/>anti-fabrication]
   A --> Q[awaiting_approval<br/>approval queue + editor]
   Q -->|HUMAN approves| AP[approved]
-  AP --> AS[assist.ts headed fill<br/>HUMAN clicks Submit]
-  AS --> AD[applied] --> ET[email-tracker-intake]
+  AP --> W[apply.yml worker submits<br/>capped + breaker, robots-gated]
+  AP -.-> AS[assist.ts headed fill<br/>HUMAN clicks Submit]
+  W --> AD[applied] --> ET[email-tracker-intake]
+  AS -.-> AD
 ```
 
 The **Tailor cannot invent**: it emits references to master-profile node ids, and the
@@ -246,7 +250,6 @@ every push to `main`.
 
 | Gap | Re-check |
 |---|---|
-| Submission unimplemented; humans submit via `assist.ts` | `grep -n "SUBMISSION_IMPLEMENTED =" worker/src/playwright-page.ts` |
 | Agent-key enforcement off | `select count(*) from applyy_internal.agent_key` |
 | No scheduler for edge agents (pipeline is click-driven) | `select extname from pg_extension where extname='pg_cron'` |
 | Auxiliary functions have no invoker in repo | `grep -rnE "cover-letter\|follow-up\|interview-prep\|referral\|skill-gap" apps/web/src worker/src .github` |

@@ -21,16 +21,22 @@ away.
 
 ---
 
-## Current state (2026-10-08)
+## Current state (2026-10-23)
 
 Architecture, agents and data flow: [`SYSTEM_ARCHITECTURE.md`](SYSTEM_ARCHITECTURE.md). This
 section holds only **live facts, each with the command that regenerates it** — numbers are
 never written here, because they date-stamp themselves. Run the command.
 
 **Pipeline:** scout → normalizer (`deduped`) → screener → matcher (`scored`) → tailor →
-auditor → `awaiting_approval` → human approves → `worker/src/cli/assist.ts` fills the form
-headed → **the human clicks Submit**. Automated submission is off:
-`SUBMISSION_IMPLEMENTED = false` (`worker/src/playwright-page.ts`). The scouts screen at
+auditor → `awaiting_approval` → human approves → **the worker submits automatically**
+(`worker/src/cli/apply.ts` via `apply.yml`). `SUBMISSION_IMPLEMENTED = true` since
+2026-10-09 (`worker/src/playwright-page.ts:21`, commit `c557533`): per run the cap is
+`APPLY_MAX_SUBMITS` (default 3) behind a circuit breaker (`0c437e4`), a robots.txt gate
+runs before the apply page opens (`a3b4115`), and `DRY_RUN` still defaults true at every
+layer — a *scheduled* run submits only while the repo variable `APPLYY_CRON_LIVE` is `true`
+(`.github/workflows/apply.yml`); a real single submit is `gh workflow run apply.yml` with
+`dry_run=false` + `apply_only_id`. `worker/src/cli/assist.ts` remains the headed
+single-row route where the human clicks Submit. The scouts screen at
 insert, so most rows are born at `passed_filters` / `dropped_filter`; `discovered` is the
 screener-unavailable fallback.
 
