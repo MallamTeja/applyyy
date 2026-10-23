@@ -169,18 +169,58 @@ export function sortItems<T extends ListItem>(items: readonly T[], key: SortKey)
   return copy.sort((a, b) => byText(a.job.title, b.job.title));
 }
 
+// How long ago an ISO timestamp was, in the operator's words: "17 days ago", "5 hours ago".
+// EXPORTED PURE with the clock passed in, so every unit boundary is testable at an exact instant.
+// Returns null when the string does not parse to a usable instant — the caller then falls back
+// to the absolute day it shows today (CLAUDE.md §6: Date.parse garbage must never render as
+// "posted 55 years ago"; the ISO_DATE shape check upstream makes null rare, not impossible,
+// because the regex admits digit-shaped non-dates like 2026-13-99).
+export function postedAgo(iso: string, nowMs: number): string | null {
+  // One lenient parse, immediately shape-checked: NaN means fall back, never a guess.
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return null;
+  // Positive = in the past. A slightly-future date is clock skew, not information.
+  const diff = nowMs - ms;
+  // More than a day in the future is not skew, it is bad data: refuse and show the absolute day.
+  if (diff < -86_400_000) return null;
+  // Built-in formatter — Teja ruled no date library; RTF gives "17 days ago" for free.
+  const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'always' });
+  // Small skew and sub-minute ages both read "just now" — "0 minutes ago" helps nobody.
+  const minutes = Math.floor(Math.max(0, diff) / 60_000);
+  if (minutes < 1) return 'just now';
+  // Minutes under an hour, hours under a day, days under a month, then months — each floor'd
+  // so the phrase never claims more age than the data holds.
+  if (minutes < 60) return rtf.format(-minutes, 'minute');
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return rtf.format(-hours, 'hour');
+  const days = Math.floor(hours / 24);
+  if (days < 30) return rtf.format(-days, 'day');
+  // Calendar months vary; 30 days is the honest flat approximation for a job-age pill.
+  const months = Math.floor(days / 30);
+  return rtf.format(-months, 'month');
+}
+
 // The card's posted-date pill: its text, its tooltip, and whether it is an estimate.
-export function postedDate(job: JobRow): { readonly text: string; readonly title: string; readonly approximate: boolean } {
+// `nowMs` is injectable for tests; callers in the page pass nothing and get the real clock.
+export function postedDate(job: JobRow, nowMs: number = Date.now()): { readonly text: string; readonly title: string; readonly approximate: boolean } {
   // The date part of the ISO string; no timezone shift, the server's UTC day is the honest one.
   const day = typeof job.posted_at === 'string' ? ISO_DATE.exec(job.posted_at)?.[1] : undefined;
   // Malformed: say so instead of rendering a parsed guess.
   if (day === undefined) return { text: 'Posted date unknown', title: 'The stored posted date is not a readable date.', approximate: true };
+  // Relative phrase when the timestamp parses; null falls back to the absolute day below.
+  const ago = postedAgo(job.posted_at as string, nowMs);
+  // What the pill shows: "17 days ago" normally, the absolute day when parsing refused.
+  const shown = ago ?? day;
+  // The absolute day moves into the tooltip when the pill went relative, so precision is
+  // hovered, never lost; on the fallback the title would repeat the pill, so it is omitted.
+  const dayPrefix = ago !== null ? `${day} — ` : '';
   // The board gave a real publish timestamp.
-  if (job.posted_at_source === 'exact') return { text: `Posted ${day}`, title: 'Publish date reported by the job board.', approximate: false };
-  // Derived: the board gave no date, so this is when applyyy first saw the posting.
+  if (job.posted_at_source === 'exact') return { text: `Posted ${shown}`, title: `${dayPrefix}Publish date reported by the job board.`, approximate: false };
+  // Derived: the board gave no date, so this is when applyyy first saw the posting. The "≈"
+  // survives the relative form — the AGE is as approximate as the date it came from.
   if (job.posted_at_source === 'derived') {
-    return { text: `Posted ≈ ${day}`, title: 'Approximate: the board gave no publish date, so this is when applyyy first saw the posting.', approximate: true };
+    return { text: `Posted ≈ ${shown}`, title: `${dayPrefix}Approximate: the board gave no publish date, so this is when applyyy first saw the posting.`, approximate: true };
   }
   // unknown (or any future value): the board is not trusted yet, so the date may be the scrape time.
-  return { text: `Posted ≈ ${day}`, title: 'Unreliable: this board is not trusted yet, so the date may be when the posting was first stored.', approximate: true };
+  return { text: `Posted ≈ ${shown}`, title: `${dayPrefix}Unreliable: this board is not trusted yet, so the date may be when the posting was first stored.`, approximate: true };
 }

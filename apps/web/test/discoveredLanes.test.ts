@@ -151,26 +151,63 @@ describe('sort', () => {
 });
 
 describe('posted date marker', () => {
-  it('exact date has no marker', () => {
-    // A board-reported date is shown as is.
-    const d = postedDate(row('1', 't', 'c', '2026-10-01T12:00:00+00:00', 'exact').job);
-    // Plain date, not approximate.
-    assert.equal(d.text, 'Posted 2026-10-01');
+  // A pinned "now" so every relative phrase is asserted at an exact instant.
+  const NOW = Date.parse('2026-10-18T12:00:00+00:00');
+
+  it('exact date reads relative, with the absolute day in the tooltip', () => {
+    // A board-reported date 17 days before the pinned now.
+    const d = postedDate(row('1', 't', 'c', '2026-10-01T12:00:00+00:00', 'exact').job, NOW);
+    // Relative phrasing is what Teja asked to see on the card.
+    assert.equal(d.text, 'Posted 17 days ago');
+    // Precision is hovered, never lost: the tooltip leads with the absolute day.
+    assert.match(d.title, /^2026-10-01 — Publish date reported/);
     // Flag drives nothing else, but must agree with the text.
     assert.equal(d.approximate, false);
   });
 
   it('derived date carries "≈" and a tooltip saying why', () => {
     // A derived date is when applyyy first saw the posting.
-    const d = postedDate(row('1', 't', 'c', '2026-10-01T12:00:00+00:00', 'derived').job);
-    // The marker the operator sees.
-    assert.equal(d.text, 'Posted ≈ 2026-10-01');
-    // The tooltip names what the date really is.
+    const d = postedDate(row('1', 't', 'c', '2026-10-01T12:00:00+00:00', 'derived').job, NOW);
+    // The "≈" survives the relative form: the age is as approximate as its source date.
+    assert.equal(d.text, 'Posted ≈ 17 days ago');
+    // The tooltip names what the date really is, after the absolute day.
     assert.match(d.title, /first saw/);
+    assert.match(d.title, /^2026-10-01 — /);
+  });
+
+  it('REGRESSION: unit boundaries — minutes under an hour, hours under a day, days under 30, then months', () => {
+    // One helper call per band, each at an exact distance from the pinned now.
+    const at = (iso: string) => postedDate(row('1', 't', 'c', iso, 'exact').job, NOW).text;
+    // 59 minutes stays in minutes.
+    assert.equal(at('2026-10-18T11:01:00+00:00'), 'Posted 59 minutes ago');
+    // 5 hours reads in hours.
+    assert.equal(at('2026-10-18T07:00:00+00:00'), 'Posted 5 hours ago');
+    // 29 days stays in days.
+    assert.equal(at('2026-09-19T12:00:00+00:00'), 'Posted 29 days ago');
+    // 65 days rolls into months (30-day months, floor'd).
+    assert.equal(at('2026-08-14T12:00:00+00:00'), 'Posted 2 months ago');
+    // Under a minute — including small clock skew — reads "just now", never "0 minutes ago".
+    assert.equal(at('2026-10-18T11:59:40+00:00'), 'Posted just now');
   });
 
   it('a malformed posted_at is stated, never parsed into a date', () => {
     // Validate the shape; never let a lenient parser turn garbage into a day.
     assert.equal(postedDate(row('1', 't', 'c', '-5').job).text, 'Posted date unknown');
+  });
+
+  it('REGRESSION: a digit-shaped non-date falls back to the absolute day, never "55 years ago"', () => {
+    // 2026-13-99 passes the ISO_DATE shape regex but Date.parse refuses it (NaN) —
+    // the CLAUDE.md §6 trap: a lenient parse must not become a relative age.
+    const d = postedDate(row('1', 't', 'c', '2026-13-99T00:00:00+00:00', 'derived').job, NOW);
+    // Falls back to exactly what the pill showed before this feature.
+    assert.equal(d.text, 'Posted ≈ 2026-13-99');
+    // No relative phrase, so the tooltip carries no absolute-day prefix either.
+    assert.match(d.title, /^Approximate:/);
+  });
+
+  it('a posted_at more than a day in the future is bad data: absolute day, no relative phrase', () => {
+    // Ten days "in the future" cannot be clock skew; refuse the phrase, keep the day.
+    const d = postedDate(row('1', 't', 'c', '2026-10-28T12:00:00+00:00', 'exact').job, NOW);
+    assert.equal(d.text, 'Posted 2026-10-28');
   });
 });
