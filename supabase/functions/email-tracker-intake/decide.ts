@@ -329,6 +329,17 @@ export const CONFIRMABLE_STATUSES: readonly ApplicationStatus[] = ["applying"];
 export const SUBMIT_PENDING_STATUSES: readonly ApplicationStatus[] = ["applying", "needs_verification"];
 
 /**
+ * Whether the tracker may ADVANCE any status this run, given the kill switch
+ * (`system_settings.system_enabled`). Events are always stored — append-only intel is
+ * safe to keep; a status MOVE is the dangerous half, so it needs the switch readable AND
+ * on. Null means the read failed or found no row: OFF, fail closed (CLAUDE.md §6).
+ */
+export function mayAdvanceStatus(systemEnabled: boolean | null): boolean {
+  // Only an affirmative, readable `true` permits a move; null and false both refuse.
+  return systemEnabled === true;
+}
+
+/**
  * The match-candidate pool for one classification. Pure and exported so the pool rule is
  * node-testable — the 2026-10-23 regression lived in an inline filter no test could reach.
  */

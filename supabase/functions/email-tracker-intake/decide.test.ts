@@ -374,6 +374,15 @@ test("ambiguous: two applications to the same company match neither, so nothing 
   assert.equal(matchApplication(GREENHOUSE_RECEIPT, domain, [rows[0]!]), "a1");
 });
 
+test("intake advances no status while the kill switch is off", () => {
+  // Off refuses: the one status-writing agent that never consulted the switch now does.
+  assert.equal(receipt.mayAdvanceStatus(false), false);
+  // Unreadable (failed read, no settings row) is OFF, not a shrug: fail closed.
+  assert.equal(receipt.mayAdvanceStatus(null), false);
+  // Only a readable, affirmative true permits a move.
+  assert.equal(receipt.mayAdvanceStatus(true), true);
+});
+
 test("a needs_verification sibling still trips the ambiguity refusal", () => {
   // One row mid-submit, one parked in the human-review lane, same company: the receipt
   // could belong to either attempt, so matching must refuse rather than guess.

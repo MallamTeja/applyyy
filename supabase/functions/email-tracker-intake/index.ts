@@ -48,6 +48,7 @@ import {
   CONFIRMABLE_STATUSES,
   addressedTo,
   matchPoolFor,
+  mayAdvanceStatus,
   classifyMessage,
   matchApplication,
   receiptConfirmsApplied,
@@ -363,8 +364,37 @@ Deno.serve(async (request: Request): Promise<Response> => {
     .filter((d) => d.matchedApplicationId !== null && newlyInserted.has(d.message.message_id))
     .sort((a, b) => Date.parse(a.message.received_at) - Date.parse(b.message.received_at));
 
-  // Transitions, one per qualifying message.
-  for (const { message, decision, matchedApplicationId } of toTransition) {
+  // KILL SWITCH (2026-10-23): this function stores intel unconditionally (the events are
+  // append-only and already written above), but a status MOVE needs the switch readable
+  // and on — the tracker was the one status-writing agent that never consulted it.
+  let systemEnabled: boolean | null = null;
+  // Skip the round trip when this batch moves nothing anyway.
+  if (toTransition.length > 0) {
+    // Exceptions are treated like an error result: null, which fails closed below.
+    try {
+      // The same single-row settings read scout-ats makes.
+      const { data: settingsRow, error: settingsError } = await client.db
+        .from("system_settings")
+        .select("system_enabled")
+        .limit(1)
+        .single();
+      // An error (including no row) stays null; only a real row can say true.
+      systemEnabled = settingsError !== null ? null : (settingsRow as { system_enabled?: unknown } | null)?.system_enabled === true;
+    } catch (err) {
+      // Same fail-closed handling as an error result; detail to the log.
+      console.error(`[email-tracker-intake] kill switch read exception: ${String(err)}`);
+      systemEnabled = null;
+    }
+  }
+  // The verdict, pure and node-tested (decide.ts). Off or unreadable: skip every move,
+  // still 202 — the emails ARE stored, and Apps Script must not redeliver the batch.
+  const advancesPermitted = mayAdvanceStatus(systemEnabled);
+  // Operational trace of what the switch suppressed, so a quiet day is distinguishable
+  // from a halted one in the function logs.
+  if (!advancesPermitted && toTransition.length > 0) console.warn(`[email-tracker-intake] kill switch off or unreadable: ${toTransition.length} candidate transition(s) skipped`);
+
+  // Transitions, one per qualifying message — none while the kill switch refuses.
+  for (const { message, decision, matchedApplicationId } of advancesPermitted ? toTransition : []) {
     // Narrowed by the filter above.
     const applicationId = matchedApplicationId!;
     // Where the application is now, as far as this batch knows.

@@ -8,6 +8,8 @@
 import { createAppUserClient } from "../_shared/db/client.ts";
 // Caller authentication shared with the pipeline agents; this function is browser-invoked.
 import { authorizeCaller } from "../_shared/db/gates.ts";
+// The kill-switch verdict, pure so node --test can pin "force never bypasses the halt".
+import { haltedByKillSwitch } from "./gate.ts";
 import { getAdapter, supportedProviders, toJobInsert, type JobInsertContext } from "../_shared/ats/registry.ts";
 // The blanking guard. Splits one batch into the fewest upserts that cannot let an
 // omitted field overwrite a stored one — see _shared/screen/upsert-plan.ts for why
@@ -102,6 +104,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   const url = new URL(req.url);
+  // Manual-run marker. Since 2026-10-23 it does NOT bypass the kill switch (gate.ts), and
+  // scout-ats has no force-gated scheduling constraint left, so today it changes nothing;
+  // it is still read so the gate's named test pins the contract against reintroduction.
   const force = url.searchParams.get("force") === "true";
   // Validated: `parseInt("abc")` is NaN and `parseInt("2.5")` silently truncates.
   const limitBoards = resolveBoardLimit(url.searchParams.get("limit"));
@@ -118,7 +123,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   // GATE 1 — WHO IS CALLING. The browser invokes this function (discoveryService.ts), and
   // the platform's verify_jwt accepts the public anon key, so without this anyone holding
-  // the bundle's key could trigger polls — including `?force=true` past the kill switch.
+  // the bundle's key could trigger polls.
   const caller = await authorizeCaller(req, db, clientResult.userId);
   // 401 for no/invalid session, 403 for someone else's; the verdict carries which.
   if (!caller.ok) return jsonResponse(caller.status, { error: caller.error });
@@ -161,7 +166,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   const systemEnabled = settingsData?.system_enabled ?? false;
-  if (!systemEnabled && !force) {
+  // The switch is absolute: `force` is passed but cannot flip the verdict (see gate.ts).
+  if (haltedByKillSwitch(systemEnabled, force)) {
     if (runId) {
       await db
         .from("agent_runs")
@@ -174,7 +180,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
     return jsonResponse(200, {
       status: "halted_by_kill_switch",
-      message: "system_settings.system_enabled is false. Set ?force=true to override for manual discovery.",
+      message: "system_settings.system_enabled is false. Re-enable the system to poll; force cannot override the kill switch.",
       boards_polled: 0,
       jobs_discovered: 0,
     });
