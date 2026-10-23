@@ -185,9 +185,10 @@ validator resolves every ref against the pinned master. The Auditor is the separ
   SHA-256 with `applyy_internal.agent_key` and returns `unconfigured | missing | invalid | valid`.
   Guarded: `advance_application_status` when `p_agent <> 'human'`, and
   `claim_applications` / `release_application_claim` for **every** caller.
-  **Rollout state:** while the table is empty, enforcement is OFF and the functions raise a
-  WARNING. Check: `select count(*) from applyy_internal.agent_key` (0 = off). Seeding the
-  hash turns on all three; `delete from applyy_internal.agent_key` turns them off.
+  **Rollout state: the key IS seeded (since 2026-10-09 ~13:40 IST), so enforcement is ON** —
+  a request without the right key is refused (42501). An empty table would only warn;
+  `delete from applyy_internal.agent_key` is the deliberate kill switch that turns
+  enforcement off. Check: `select count(*) from applyy_internal.agent_key` (expect 1).
 - **Grants.** anon/PUBLIC EXECUTE is revoked on those three RPCs. Check:
   `select proname, proacl from pg_proc where proname in ('advance_application_status','claim_applications','release_application_claim')`.
 - **Transition guard.** `guard_status_transition` (BEFORE UPDATE) refuses an edge absent
@@ -221,7 +222,7 @@ validator resolves every ref against the pinned master. The Auditor is the separ
   absent bundle sentinel (repo `CLAUDE.md` §8).
 - **Database and functions:** deployed only with Teja's direct approval, by the
   orchestrator session, from a **pinned clean worktree** — never the shared tree, which
-  carries peers' uncommitted edits. Recipe in the latest `docs/handoff/*orchestrator-handoff.md`:
+  carries peers' uncommitted edits. Recipe in `CLAUDE.md` §3:
   1. `git worktree add <tmp> <sha>`; copy `supabase/.temp/{project-ref,pooler-url,linked-project.json,postgres-version}` in.
   2. Unset the wrong-account `SUPABASE_ACCESS_TOKEN`.
   3. `supabase db push --linked --dry-run` → push only if it lists exactly the expected files.
@@ -250,7 +251,7 @@ every push to `main`.
 
 | Gap | Re-check |
 |---|---|
-| Agent-key enforcement off | `select count(*) from applyy_internal.agent_key` |
+| Agent-key enforcement ON (seeded 2026-10-09 ~13:40 IST; a request without the right key gets 42501; an empty table = off, warn-only) | `select count(*) from applyy_internal.agent_key` (expect 1) |
 | No scheduler for edge agents (pipeline is click-driven) | `select extname from pg_extension where extname='pg_cron'` |
 | Auxiliary functions have no invoker in repo | `grep -rnE "cover-letter\|follow-up\|interview-prep\|referral\|skill-gap" apps/web/src worker/src .github` |
 | `email-tracker-intake` never reads the kill switch; `scout-ats` lets `?force=true` bypass it | `grep -ln "readKillSwitch\|system_enabled" supabase/functions/{email-tracker-intake,scout-ats}/*.ts` and `grep -n "force" supabase/functions/scout-ats/index.ts` |

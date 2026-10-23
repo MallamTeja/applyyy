@@ -23,7 +23,7 @@ No row here carries a count: each living doc names the command that regenerates 
 | [ui/theming-convention.md](ui/theming-convention.md) | `[data-theme='dark']` rules are dead here; what to write instead |
 | [harvest/README.md](harvest/README.md) | Sub-index for upstream codebases examined for reuse (ideas ported, never vendored) |
 | [../packages/shared-types/SCHEMA_CONTRACT.md](../packages/shared-types/SCHEMA_CONTRACT.md) | Column-level database contract |
-| [../PROJECT_PLAN.md](../PROJECT_PLAN.md) | Locked decisions (§2) and constraints (§3); stale parts are listed in `CLAUDE.md` §7 |
+| [../PROJECT_PLAN.md](../PROJECT_PLAN.md) | Locked decisions (§2) and constraints (§3); verify claims against code before obeying — recon wins over prose (`CLAUDE.md` header rule) |
 
 ## Dated records (historical, never edited)
 

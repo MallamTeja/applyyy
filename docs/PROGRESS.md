@@ -44,15 +44,17 @@ screener-unavailable fallback.
 |---|---|
 | Migrations applied vs local | `supabase migration list --linked`, or `select version from supabase_migrations.schema_migrations order by version;` |
 | Application status distribution | `select status, count(*) from public.applications group by status order by 2 desc;` |
-| Agent-key enforcement (0 = off, guards only warn) | `select count(*) from applyy_internal.agent_key;` |
+| Agent-key enforcement (seeded 2026-10-09, expect 1 = enforcing; 0 would be off/warn-only) | `select count(*) from applyy_internal.agent_key;` |
 | Which agents have actually run, and when | `select agent, count(*), max(started_at) from public.agent_runs group by 1 order by 1;` |
 | Edge functions present | `ls -d supabase/functions/*/ \| grep -v _shared` |
 | Which edge functions have a caller | `grep -rn "functions\.invoke(" apps/web/src worker/src` plus `.github/workflows/*.yml`. A template-literal call (`pipelineRunner.ts`, `rowPipelineDeps.ts`) takes its name from an agent list, so read that list too |
 
-**Agent-key guards:** `advance_application_status`, `claim_applications` and
-`release_application_claim` check a machine agent's `x-applyy-agent-key` header (migrations
-`20261008160000`, `20261008170000`). They enforce only once `applyy_internal.agent_key` is
-seeded; until then they `raise warning` and allow the call.
+**Agent-key guards:** `advance_application_status`, `claim_applications`,
+`release_application_claim` and `sweep_stale_claims` check a machine agent's
+`x-applyy-agent-key` header (migrations `20261008160000`, `20261008170000`). **The key IS
+seeded (since 2026-10-09 ~13:40 IST), so they enforce:** a request without the right key is
+refused (42501). An empty `applyy_internal.agent_key` table would only `raise warning` —
+emptying it is the deliberate kill switch.
 
 **Built but not reached on a schedule:**
 - normalizer, screener, matcher, tailor and auditor have no cron (`pg_cron` is not installed)
