@@ -1,259 +1,201 @@
-/* Every colour here is a token from styles/tokens.css. The previous version
-   hardcoded a white card (#ffffff), light pills and dark text (#1a202c, #4a5568),
-   so dark mode got a white card on a black page, and any text that inherited
-   --text-primary went near-white on that white card. Tokens theme via light-dark().
-   No hex fallbacks inside var(): a fallback hides a typo'd token instead of failing. */
-/* NOTE: .actions, .badge, .label and .btn-secondary are global names also used by
-   followup.css / DiscoveryModal.css; whichever loads last wins. Scope them when the
-   TSX owner next touches ReferralOutreachPage.tsx. */
+/* Styles for the Referral Outreach page — the referral-page__* / referral-card__*
+   BEM classes ReferralOutreachPage.tsx actually renders.
+   REWRITTEN 2026-10-23: the previous file styled a RETIRED markup (.card-header,
+   .job-title, generic .btn/.btn-primary, .actions, .input-field …) that no TSX
+   referenced anywhere — which left this page running on bare base styles, leaked a
+   global .actions margin into the follow-up page (the note in followup.css), and let
+   an unscoped .btn-primary compete with settings.css and DiscoveryModal.css for THEIR
+   buttons, with the bundle's stylesheet order deciding the winner. Every selector
+   below is prefixed referral-, so nothing here can reach another page again. */
 
-/* Container for the entire referral queue page */
-/* This element holds all the referral cards */
-.referral-container {
-    /* Caps line length so drafts stay readable on wide screens. */
-    max-width: 1200px;
-    /* Centres the column inside the main pane. */
-    margin: 0 auto;
-    /* Gutter from the app shell, on the house spacing scale. */
-    padding: var(--gap-5);
-    /* Flex column so cards stack with a uniform gap. */
-    display: flex;
-    /* Cards stack vertically. */
-    flex-direction: column;
-    /* Uniform space between cards without per-card margins. */
-    gap: var(--gap-5);
-    /* Explicit ink so nothing below inherits from an unthemed ancestor. */
-    color: var(--text-primary);
+/* --- Banner -------------------------------------------------------------- */
+
+/* The overview strip above the grid: context, not content, so panel-quiet. */
+.referral-page__banner {
+  /* Text block left, count badge right, wrapping on narrow viewports. */
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--gap-3);
+  flex-wrap: wrap;
+  /* Recessed panel surface: the cards below are the subject, this is the caption. */
+  background: var(--panel);
+  /* A visible but quiet edge, same rule token as every other panel. */
+  border: 1px solid var(--rule);
+  /* Sheet radius: it is a region, not a control. */
+  border-radius: var(--radius-sheet);
+  /* Breathing room inside and a clear separation from the grid below. */
+  padding: var(--gap-3) var(--gap-4);
+  margin-bottom: var(--gap-5);
 }
 
-/* Card for each referral draft */
-/* This encapsulates all data for a single draft */
+/* The banner's lede sentence: helper-grade text, muted and small. */
+.referral-page__banner p {
+  /* Secondary size — the h2 above it carries the heading weight. */
+  font-size: var(--size-sm);
+  /* Muted ink: explanatory prose, not data. */
+  color: var(--text-muted);
+  /* The banner's own padding provides the spacing; no double margins. */
+  margin: var(--gap-1) 0 0 0;
+  /* Comfortable reading measure so the sentence does not run the full row. */
+  max-width: 70ch;
+}
+
+/* The drafted-messages count: metadata, so badge-sized like every other badge. */
+.referral-page__meta-badge {
+  /* The repo's badge size ruling (2026-10-23): all badges read at --size-2xs. */
+  font-size: var(--size-2xs);
+  /* Semibold keeps an 11px label legible without shouting. */
+  font-weight: 600;
+  /* Accent pair: an informational count, no status meaning (theming convention). */
+  background: var(--accent-subtle);
+  color: var(--accent-strong);
+  /* Control radius: it reads as a pill, not a sheet. */
+  border-radius: var(--radius-control);
+  /* Tight pill padding. */
+  padding: 2px var(--gap-2);
+  /* A count must never wrap mid-phrase. */
+  white-space: nowrap;
+}
+
+/* --- Page states ---------------------------------------------------------- */
+
+/* Loading, error and no-rows states share one quiet centered box. */
+.referral-page__empty {
+  /* Dashed edge is the repo's "nothing here yet" idiom — clearly not a card. */
+  border: 1px dashed var(--rule-strong);
+  border-radius: var(--radius-sheet);
+  /* Generous padding so a one-line message does not look like an accident. */
+  padding: var(--gap-6);
+  /* Muted: states describe the page, they are not its content. */
+  color: var(--text-muted);
+  font-size: var(--size-base);
+  text-align: center;
+}
+
+/* --- The grid of draft cards ---------------------------------------------- */
+
+/* Responsive columns: as many 360px-minimum cards as fit, like the watchlist grid. */
+.referral-page__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: var(--gap-5);
+}
+
+/* One referral draft. Sheet surface with the shared lift, same as sibling cards. */
 .referral-card {
-    /* Faint edge that stays faint in both themes; #e2e8f0 glared on dark. */
-    border: 1px solid var(--rule);
-    /* House sheet radius so cards match the rest of the app. */
-    border-radius: var(--radius-sheet);
-    /* Breathing room between edge and content. */
-    padding: var(--gap-5);
-    /* Raised surface token; #ffffff rendered a white card on a black page. */
-    background: var(--sheet);
-    /* Depth cue; black only darkens, so it is safe in both themes. */
-    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  /* The card stacks header → body → footer with even internal rhythm. */
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-3);
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+  /* The shared elevation token (the one allowed [data-theme] exception lives there). */
+  box-shadow: var(--lift);
+  padding: var(--gap-4);
 }
 
-/* Header section of the card */
-/* Contains the title, company, and badges */
-.card-header {
-    /* Title block and badge share one row. */
-    display: flex;
-    /* Pushes the badge to the far edge. */
-    justify-content: space-between;
-    /* Badge centres against a two-line title block. */
-    align-items: center;
-    /* Separates header from the draft fields. */
-    margin-bottom: var(--gap-4);
+/* A recorded-sent card steps back: done, kept for the record. */
+.referral-card--sent {
+  /* Dimmed as a whole, so "already handled" is visible before reading. */
+  opacity: 0.75;
+  /* Success-token edge: sent is a completed state, not an alert. */
+  border-color: var(--traced);
 }
 
-/* Job title text styling */
-/* Ensures the job title stands out */
-.job-title {
-    /* Weight makes it the card's primary anchor. */
-    font-weight: 700;
-    /* Larger than body text to set hierarchy. */
-    font-size: 1.25rem;
-    /* Primary ink token; #1a202c was invisible on a dark sheet. */
-    color: var(--text-primary);
-    /* Header layout controls spacing, not UA margins. */
-    margin: 0;
+/* --- Card header ----------------------------------------------------------- */
+
+/* Company name and target pill share the top line; title sits under them. */
+.referral-card__top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--gap-2);
+  /* A long company name pushes the pill to its own line instead of clipping. */
+  flex-wrap: wrap;
 }
 
-/* Company text styling */
-/* Subtitle text under the job title */
-.company-name {
-    /* Smaller than the title, establishing hierarchy. */
-    font-size: 1rem;
-    /* Secondary ink de-emphasises without vanishing in dark mode. */
-    color: var(--text-secondary);
-    /* Header layout controls spacing. */
-    margin: 0;
+/* The company: secondary identity above the role title. */
+.referral-card__company {
+  font-size: var(--size-sm);
+  /* Semibold separates it from body prose without rivalling the title. */
+  font-weight: 600;
+  color: var(--text-muted);
 }
 
-/* Badge for target recipient */
-/* Indicates who the message is intended for */
-.badge {
-    /* Lets padding size the pill around its text. */
-    display: inline-block;
-    /* Pill inset. */
-    padding: 4px 12px;
-    /* Full rounding gives the pill shape. */
-    border-radius: 9999px;
-    /* Compact so it does not compete with the title. */
-    font-size: 0.875rem;
-    /* Weight keeps small text legible. */
-    font-weight: 600;
-    /* Accent wash reads as a tag in both themes; #ebf8ff was a light-only blue. */
-    background-color: var(--accent-subtle);
-    /* Strong accent ink keeps contrast on the wash in both themes. */
-    color: var(--accent-strong);
+/* Who the message targets: metadata, badge-sized per the one-badge-size ruling. */
+.referral-card__role-pill {
+  font-size: var(--size-2xs);
+  font-weight: 600;
+  background: var(--accent-subtle);
+  color: var(--accent-strong);
+  border-radius: var(--radius-control);
+  padding: 2px var(--gap-2);
+  white-space: nowrap;
 }
 
-/* Pill for location */
-/* Shown next to the job title */
-.location-pill {
-    /* Smaller than the title it sits beside. */
-    font-size: 0.875rem;
-    /* Recessed surface marks it as metadata; #edf2f7 was light-only. */
-    background-color: var(--panel);
-    /* Secondary ink matches the company line's voice. */
-    color: var(--text-secondary);
-    /* Pill inset. */
-    padding: 2px 8px;
-    /* Full rounding gives the pill shape. */
-    border-radius: 9999px;
-    /* Separates the pill from the title text. */
-    margin-left: var(--gap-2);
-    /* Lets padding apply vertically inside an inline run. */
-    display: inline-block;
-    /* Overrides the bold title it is nested in. */
-    font-weight: 400;
+/* The job title is the card's heading (an h3): card-header rank from the tokens. */
+.referral-card__title {
+  font-size: var(--font-size-card-header);
+  font-weight: var(--font-weight-card-header);
+  /* The card's gap provides vertical rhythm; headings bring UA margins we reset. */
+  margin: var(--gap-1) 0 0 0;
+  color: var(--text-primary);
 }
 
-/* Input group container */
-/* Wraps label and input element */
-.input-group {
-    /* Separates consecutive fields. */
-    margin-bottom: var(--gap-4);
-    /* Flex column so label sits above its field. */
-    display: flex;
-    /* Label above field. */
-    flex-direction: column;
-    /* Small fixed space between label and field. */
-    gap: 5px;
+/* The location line: smallest supporting fact on the card. */
+.referral-card__location {
+  font-size: var(--size-xs);
+  color: var(--text-muted);
 }
 
-/* Labels for inputs */
-/* Styling for the text above inputs */
-.label {
-    /* Smaller than field text: labels are scaffolding. */
-    font-size: 0.875rem;
-    /* Weight keeps the small label scannable. */
-    font-weight: 600;
-    /* Secondary ink; #4a5568 was too dark for a dark sheet. */
-    color: var(--text-secondary);
+/* --- Card body: the draft itself ------------------------------------------- */
+
+/* The subject + message sit in a recessed box: this is the COPYABLE artifact. */
+.referral-card__body-box {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+  padding: var(--gap-3);
+  /* Subject and body separate inside the box. */
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-2);
 }
 
-/* Input and textarea common styles */
-/* Shared text field appearance */
-.input-field {
-    /* Fields span the card. */
-    width: 100%;
-    /* Text inset from the border. */
-    padding: 8px 12px;
-    /* Visible field boundary in both themes; #cbd5e0 was light-only. */
-    border: 1px solid var(--rule-strong);
-    /* House control radius. */
-    border-radius: var(--radius-control);
-    /* Fields do not inherit font by default. */
-    font-family: inherit;
-    /* Readable draft text. */
-    font-size: 1rem;
-    /* Lets the user enlarge a long draft. */
-    resize: vertical;
-    /* Recessed surface marks it as editable against the raised card. */
-    background-color: var(--panel);
-    /* Explicit ink so typed text themes with its surface. */
-    color: var(--text-primary);
-    /* Padding inside the width so the field does not overflow the card. */
-    box-sizing: border-box;
+/* The subject line: one emphasized row above the body. */
+.referral-card__subject {
+  font-size: var(--size-sm);
+  color: var(--text-primary);
 }
 
-/* Action buttons container */
-/* Wraps all the action buttons at the bottom */
-.actions {
-    /* Buttons in a row. */
-    display: flex;
-    /* Wrap on phone widths instead of overflowing. */
-    flex-wrap: wrap;
-    /* Keeps buttons from touching. */
-    gap: var(--gap-2);
-    /* Separates actions from the last field. */
-    margin-top: var(--gap-5);
+/* The message body: email prose, body-ranked, with its line breaks preserved
+   because the draft is written (and will be pasted) as plain text. */
+.referral-card__message {
+  font-size: var(--size-base);
+  line-height: var(--line-height-body);
+  color: var(--text-primary);
+  white-space: pre-wrap;
 }
 
-/* Base button styles */
-/* Shared properties across all buttons */
-.btn {
-    /* Comfortable click target. */
-    padding: 8px 16px;
-    /* House control radius. */
-    border-radius: var(--radius-control);
-    /* Weight keeps button labels scannable. */
-    font-weight: 600;
-    /* Signals clickability. */
-    cursor: pointer;
-    /* Fill alone defines the button; variants add a border where needed. */
-    border: none;
-    /* Compact label size. */
-    font-size: 0.875rem;
-    /* Softens hover changes. */
-    transition: background-color 0.2s ease-in-out;
+/* The strategy note: helper text, visually an aside rather than part of the draft. */
+.referral-card__notes {
+  font-size: var(--size-xs);
+  line-height: var(--line-height-helper);
+  color: var(--text-muted);
+  /* Signal wash: it asks the human to think, so it may be gently marked. */
+  background: var(--signal-wash);
+  border-radius: var(--radius-control);
+  padding: var(--gap-2) var(--gap-3);
 }
 
-/* Primary button styling */
-/* Used for primary actions like Mark as sent */
-.btn-primary {
-    /* Success-green token: "mark as sent" is a completion action. */
-    background-color: var(--traced);
-    /* Ink-on-fill flips dark in dark mode, where --traced turns light green; white would fail contrast. */
-    color: var(--ink-on-fill);
-}
+/* --- Card footer ------------------------------------------------------------ */
 
-/* Primary button hover state */
-/* Darkens on hover */
-.btn-primary:hover {
-    /* Strong variant shifts the fill in the theme-correct direction. */
-    background-color: var(--traced-strong);
-}
-
-/* Secondary button styling */
-/* Used for secondary actions like Copy or Regenerate */
-.btn-secondary {
-    /* Recessed surface: quieter than the primary fill; #edf2f7 was light-only. */
-    background-color: var(--panel);
-    /* Primary ink keeps the label readable on the panel in both themes. */
-    color: var(--text-primary);
-    /* Edge so the button does not dissolve into a panel-coloured context. */
-    border: 1px solid var(--rule-strong);
-}
-
-/* Secondary button hover state */
-/* Darkens on hover */
-.btn-secondary:hover {
-    /* Translucent hover token works on any base surface. */
-    background-color: var(--surface-hover);
-}
-
-/* Link button styling */
-/* Used for external links like LinkedIn */
-.btn-link {
-    /* Accent fill marks the outbound link. */
-    background-color: var(--accent);
-    /* Ink-on-fill guarantees contrast on the accent in both themes. */
-    color: var(--ink-on-fill);
-}
-
-/* Link button hover state */
-/* Darkens on hover */
-.btn-link:hover {
-    /* Strong accent shifts the fill in the theme-correct direction. */
-    background-color: var(--accent-strong);
-}
-
-/* Disabled button state */
-/* Styling when button is disabled */
-.btn:disabled {
-    /* Dims the button so the disabled state is visible at a glance. */
-    opacity: 0.6;
-    /* Signals the click will do nothing. */
-    cursor: not-allowed;
+/* The action row: the shared .button classes style the buttons themselves; this
+   only lays them out, wrapped so three labels fit any card width. */
+.referral-card__actions {
+  display: flex;
+  gap: var(--gap-2);
+  flex-wrap: wrap;
 }

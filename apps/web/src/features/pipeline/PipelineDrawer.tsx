@@ -412,8 +412,10 @@ export function PipelineDrawer({
               {/* Map over all applications to render a prep panel for each. */}
               {state.rows.map(app => (
                 <div key={app.id}>
-                  {/* Title for the individual application prep section. */}
-                  <h4 style={{ margin: '0 0 8px 0' }}>{app.role} at {app.company}</h4>
+                  {/* Title for the individual application prep section. An h3, not h4:
+                      InterviewPrepPanel renders its own h3/h4 below, and an h4 must not
+                      parent an h3 (heading inversion, fixed 2026-10-23). */}
+                  <h3 style={{ margin: '0 0 8px 0' }}>{app.role} at {app.company}</h3>
                   {/* Provide the application ID to the prep panel component. */}
                   <InterviewPrepPanel applicationId={app.id} />
                 </div>

@@ -300,7 +300,9 @@ export function EmailMonitoringPage(): ReactElement {
                   </div>
                 </div>
 
-                <h3 className="email-card__subject">
+                {/* h2, not h3: the page h1 is the only heading above a card subject,
+                    and h1→h3 skips a level (fixed 2026-10-23); the class carries the size. */}
+                <h2 className="email-card__subject">
                   <a
                     href={`https://mail.google.com/mail/u/0/#all/${encodeURIComponent(event.provider_message_id)}`}
                     target="_blank"
@@ -310,7 +312,7 @@ export function EmailMonitoringPage(): ReactElement {
                   >
                     {event.subject}
                   </a>
-                </h3>
+                </h2>
                 <p className="email-card__snippet">{event.snippet}</p>
 
                 <div className="email-card__meta">

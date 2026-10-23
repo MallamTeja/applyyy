@@ -98,9 +98,10 @@
 }
 
 /* We style the actions container. */
-/* NOTE: referral.css also defines a global .actions; both files load into one
-   bundle, so the later rule's margin-top leaks here. Scope the class name when the
-   TSX owner next touches FollowUpNudgesPage.tsx. */
+/* NOTE (resolved 2026-10-23): referral.css used to define a global .actions whose
+   margin-top leaked here depending on bundle order; its rules are now all scoped
+   under referral- prefixes, so this name is this file's alone again. Scoping it
+   properly is still worth doing when FollowUpNudgesPage.tsx is next touched. */
 .actions {
     /* Lays buttons out in a row. */
     display: flex;
