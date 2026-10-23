@@ -152,6 +152,17 @@ export const NO_BOARD_FOUND_WORKDAY_BELIEVED: BoardVerification = {
   realPortal: { confidence: 'believed', portal: 'workday' },
 };
 
+/* Second sweep. Same rule as the first constant: rows probed on this date cite this
+ * constant; rows that were not re-probed keep the old one. */
+export const BOARD_PROBE_DATE_2026_10_23 = '2026-10-23' as const;
+
+/* Constructor for the no-board arm, mirroring verified(): the date and the portal
+ * knowledge are REQUIRED at the call site, so a row cannot claim a refutation without
+ * saying when it was probed and what was actually found instead. */
+export function noBoardFound(probedOn: string, realPortal: RealPortalKnowledge): BoardVerification {
+  return { kind: 'no-board-found', probedOn, realPortal };
+}
+
 export interface CompanyCooldown {
   readonly interview: string;
   readonly screening: string;
@@ -235,8 +246,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'target',
     cooldown: { interview: '6 Months', screening: 'None / 3 Months' },
-    // Probed 2026-09-17 under this and other plausible slugs; no board answered.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    /* Probed 2026-10-23: Target's own job pages name Workday as their ATS. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'workday (indiajobs.target.com)' }),
   },
   {
     name: 'Fidelity Investments',
@@ -246,8 +257,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'fidelity',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Not in either probe table, so nobody has looked: token is still the name.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: jobs.fidelity.com is a custom front end; Workday backend per third parties, not loaded. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'believed', portal: 'workday' }),
   },
   {
     name: 'Walmart Global Tech',
@@ -258,7 +269,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsIdentifier: 'walmart',
     cooldown: { interview: '6 Months', screening: '3 Months' },
     // Probed 2026-09-17: absent from all three ATSes; replacement portal unknown.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    /* Probed 2026-10-23: careers.walmart.com custom portal; Workday backend per aggregators, not loaded. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'believed', portal: 'workday' }),
   },
   {
     name: "Lowe's India",
@@ -268,8 +280,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'lowes',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed; `lowes` is the name-guessing heuristic, not a finding.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: page source carries phenom markers. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'phenom (talent.lowes.com)' }),
   },
   {
     name: 'Wells Fargo India',
@@ -279,8 +291,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'wellsfargo',
     cooldown: { interview: '6 Months', screening: '3 Months' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: apply URL is a Workday tenant. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'workday (wd1.myworkdaysite.com/recruiting/wf/WellsFargoJobs)' }),
   },
   {
     name: 'PayPal India',
@@ -290,8 +302,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'paypal',
     cooldown: { interview: '6–12 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: paypal.eightfold.ai/careers answers 200. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'eightfold (paypal.eightfold.ai)' }),
   },
   {
     name: 'Intuit India',
@@ -303,7 +315,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     cooldown: { interview: '6 Months', screening: 'None' },
     // Probed 2026-09-17 as "Intuit": no board. Portal explicitly UNKNOWN — the
     // brief named Intuit among the companies where no portal may be assumed.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    /* Probed 2026-10-23: own careers app; no public GH/lever/ashby board. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'custom (jobs.intuit.com)' }),
   },
   {
     name: 'Goldman Sachs',
@@ -313,8 +326,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'goldmansachs',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Probed 2026-09-17: no board on any of the three ATSes.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    /* Probed 2026-10-23: apply routes to Oracle Recruiting Cloud. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'oracle-recruiting-cloud (higher.gs.com)' }),
   },
   {
     name: 'JPMorgan Chase',
@@ -324,8 +337,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'jpmorganchase',
     cooldown: { interview: '6 Months', screening: '3 Months' },
-    // Probed 2026-09-17: no board.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    /* Probed 2026-10-23: candidate site is an Oracle Recruiting Cloud tenant. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'oracle-recruiting-cloud (jpmc.fa.oraclecloud.com)' }),
   },
   {
     name: 'American Express',
@@ -335,8 +348,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'amex',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Probed 2026-09-17: no board.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    /* Probed 2026-10-23: weakest wrong-provider call of the sweep: eightfold 404, ORC is the most specific third-party claim. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'believed', portal: 'oracle-recruiting-cloud' }),
   },
   {
     name: 'Nike Tech',
@@ -346,8 +359,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'nike',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: own portal; Workday/Avature backend per Nike's own postings, not loaded. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'believed', portal: 'workday-or-avature (careers.nike.com)' }),
   },
   {
     name: 'Boeing India',
@@ -357,8 +370,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'boeing',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: jobs.boeing.com runs a single Workday tenant. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'workday (jobs.boeing.com)' }),
   },
 
   // =========================================================================
@@ -395,9 +408,9 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'atlassian',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Probed 2026-09-17: the `atlassian` token was fabricated and no board
-    // exists under it or any variant. Portal explicitly UNKNOWN — do not guess.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    // Probed 2026-09-17: the `atlassian` token was fabricated; no board answered.
+    /* Probed 2026-10-23: GH and lever 404; the APAC iCIMS tenant serves the postings. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'icims (careers-apac-atlassian.icims.com)' }),
   },
   {
     name: 'MongoDB',
@@ -407,8 +420,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'mongodb',
     cooldown: { interview: '6–12 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: live board, 384 jobs. */
+    verification: verified(BOARD_PROBE_DATE_2026_10_23, 384),
   },
   {
     name: 'Stripe',
@@ -428,8 +441,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'gitlab',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: live board, 237 jobs. */
+    verification: verified(BOARD_PROBE_DATE_2026_10_23, 237),
   },
   {
     name: 'Uber',
@@ -439,8 +452,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'uber',
     cooldown: { interview: '6–12 Months', screening: 'None' },
-    // Probed 2026-09-17: no board on greenhouse/lever/ashby.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    /* Probed 2026-10-23: ubertechnologies/ubercareers variants 404; no public board. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'custom (uber.com/careers)' }),
   },
   {
     name: 'Rubrik',
@@ -450,8 +463,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'rubrik',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: live board, 149 jobs. */
+    verification: verified(BOARD_PROBE_DATE_2026_10_23, 149),
   },
   {
     name: 'Rippling',
@@ -461,8 +474,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'lever',
     atsIdentifier: 'rippling',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: lever 502/404, ashby 404; Rippling runs its own ATS. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'rippling-ats (ats.rippling.com/rippling/jobs)' }),
   },
   {
     name: 'Figma',
@@ -480,11 +493,11 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     category: 'Mid-Scale MNC',
     domain: 'Productivity & AI Workspace Architecture',
     location: 'Remote / Global',
-    atsProvider: 'lever',
+    atsProvider: 'ashby',
     atsIdentifier: 'notion',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: lever 404; the live board is on ASHBY (140 jobs), matching the live watchlist row. */
+    verification: verified(BOARD_PROBE_DATE_2026_10_23, 140),
   },
   {
     name: 'Salesforce',
@@ -494,8 +507,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'salesforce',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Probed 2026-09-17: no board. Portal explicitly UNKNOWN per the brief.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    /* Probed 2026-10-23: careers site routes applicants to Workday. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'workday (careers.salesforce.com)' }),
   },
   {
     name: 'Twilio',
@@ -513,21 +526,21 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     domain: 'Logistics Dispatch / Matching Algorithms / Kotlin Services',
     location: 'Remote / Global',
     atsProvider: 'greenhouse',
-    atsIdentifier: 'doordash',
+    atsIdentifier: 'doordashusa',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: old token 'doordash' 404s; the live board is 'doordashusa', 464 jobs. */
+    verification: verified(BOARD_PROBE_DATE_2026_10_23, 464),
   },
   {
     name: 'Canva',
     category: 'Mid-Scale MNC',
     domain: 'Visual Content Generation / WebAssembly / Cloud Rendering',
     location: 'Remote / Global',
-    atsProvider: 'greenhouse',
-    atsIdentifier: 'canva',
+    atsProvider: 'smartrecruiters',
+    atsIdentifier: 'Canva',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Probed 2026-09-17: no board on greenhouse/lever/ashby.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    /* Probed 2026-10-23: greenhouse/lever 404; real board is SmartRecruiters token Canva — unpollable until an adapter exists. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'smartrecruiters (live, 97 postings via /v1/companies/Canva; NO scout adapter yet)' }),
   },
 
   /* ---- Added 2026-09-17: boards the probe found and the catalog lacked. ----
@@ -656,8 +669,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'postman',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Probed 2026-09-17: no board. Portal explicitly UNKNOWN per the brief.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    /* Probed 2026-10-23: GH postman/postmanlabs 404 and the stale job-boards.greenhouse.io/postman link 404s too. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'custom (postman.com careers; greenhouse board decommissioned)' }),
   },
   {
     name: 'Razorpay',
@@ -683,7 +696,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     cooldown: { interview: '3–6 Months', screening: 'None' },
     // Probed 2026-09-17: no board. Workday is BELIEVED, not confirmed — nobody
     // has loaded the tenant, so re-check before building anything on it.
-    verification: NO_BOARD_FOUND_WORKDAY_BELIEVED,
+    /* Probed 2026-10-23: live Workable board found — the 2026-09-17 'Workday believed' call was WRONG. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'workable (apply.workable.com/browserstack-2)' }),
   },
   {
     name: 'CRED',
@@ -714,8 +728,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'zepto',
     cooldown: { interview: '3 Months', screening: 'None' },
-    // Probed 2026-09-17: no board on greenhouse/lever/ashby.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    /* Probed 2026-10-23: gh/lever/ashby zepto + zeptonow all 404; zeptonow.com/careers bot-walled; only aggregator reposts found. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'unknown' }),
   },
   {
     name: 'CleverTap',
@@ -725,8 +739,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'clevertap',
     cooldown: { interview: '3 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: careers HTML carries a darwinbox signature. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'darwinbox (clevertap.com/careers)' }),
   },
   {
     name: 'PhonePe',
@@ -736,8 +750,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'phonepe',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Probed 2026-09-17: no board on greenhouse/lever/ashby.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    /* Probed 2026-10-23: ALL gh endpoints 404 though search still shows cached job-boards.greenhouse.io/phonepe pages — board removed recently; worth re-probing periodically. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'unknown' }),
   },
   {
     name: 'Swiggy',
@@ -747,8 +761,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'lever',
     atsIdentifier: 'swiggy',
     cooldown: { interview: '3–6 Months', screening: 'None' },
-    // Probed 2026-09-17: no board on greenhouse/lever/ashby.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    /* Probed 2026-10-23: own SPA; JS bundle has no ATS signature. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'custom (careers.swiggy.in)' }),
   },
   {
     name: 'Meesho',
@@ -801,8 +815,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'urbancompany',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: urbancompany/urbanclap variants 404; own SPA, no ATS signature. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'custom (careers.urbancompany.com)' }),
   },
   {
     name: 'Zomato',
@@ -812,8 +826,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'zomato',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Probed 2026-09-17: no board on greenhouse/lever/ashby.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    /* Probed 2026-10-23: company renamed Eternal; gh zomato/eternal 404; eternal.com/careers has no job board (referral-driven). */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'unknown' }),
   },
   {
     name: 'Dream11',
@@ -823,8 +837,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'dream11',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: dreamsports.group still links jobs.lever.co/dreamsports but that board 404s — stale link, board removed. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'unknown' }),
   },
   {
     name: 'Licious',
@@ -834,8 +848,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'licious',
     cooldown: { interview: '3 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: licious.in/careers/jobs is an own SPA with no ATS signature; only aggregator reposts found. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'unknown' }),
   },
   {
     name: 'slice',
@@ -845,8 +859,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'slice',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: live board, 22 jobs; board-name endpoint confirms "Slice". */
+    verification: verified(BOARD_PROBE_DATE_2026_10_23, 22),
   },
   {
     name: 'CoinSwitch',
@@ -856,8 +870,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'coinswitch',
     cooldown: { interview: '3–6 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: live listing found on Recruiterflow. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'recruiterflow (recruiterflow.com/coinswitch)' }),
   },
   {
     name: 'Apna',
@@ -867,8 +881,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'lever',
     atsIdentifier: 'apna',
     cooldown: { interview: '3 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: careers HTML carries a workable signature. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'workable (careers.apna.co)' }),
   },
 
   // =========================================================================
@@ -892,11 +906,10 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     domain: 'Digital Engineering / Cloud Native Platforms',
     location: 'Delhi NCR',
     atsProvider: 'smartrecruiters',
-    atsIdentifier: 'nagarro',
+    atsIdentifier: 'Nagarro1',
     cooldown: { interview: '3–6 Months', screening: 'None' },
-    // Never probed — and note the probe only covered greenhouse/lever/ashby, so
-    // smartrecruiters rows could not have been settled by it either way.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: token 'nagarro' nonexistent; real SR token is 'Nagarro1' — unpollable until an adapter exists. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'smartrecruiters (live, 582 postings via /v1/companies/Nagarro1; NO scout adapter yet)' }),
   },
   {
     name: 'Persistent Systems',
@@ -906,8 +919,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'smartrecruiters',
     atsIdentifier: 'persistentsystems',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed; smartrecruiters was outside the sweep.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: careers HTML carries zwayam + naukri signatures. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'zwayam (careers.persistent.com)' }),
   },
   {
     name: 'EPAM Systems',
@@ -917,8 +930,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'epam',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Probed 2026-09-17: no board on greenhouse/lever/ashby.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    /* Probed 2026-10-23: own Contentstack portal; epam.com 403s to bots. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'custom (careers.epam.com)' }),
   },
   {
     name: 'LTIMindtree',
@@ -928,8 +941,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'ltimindtree',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Probed 2026-09-17: no board on greenhouse/lever/ashby.
-    verification: NO_BOARD_FOUND_PORTAL_UNKNOWN,
+    /* Probed 2026-10-23: careers HTML carries a ripplehire signature. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'ripplehire (ltimindtree.com/careers)' }),
   },
   {
     name: 'GlobalLogic',
@@ -939,8 +952,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'globallogic',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: own career pages, no third-party ATS signature. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'custom (globallogic.com/career-search-page)' }),
   },
   {
     name: 'Hexaware',
@@ -950,8 +963,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'smartrecruiters',
     atsIdentifier: 'hexaware',
     cooldown: { interview: '3–6 Months', screening: 'None' },
-    // Never probed; smartrecruiters was outside the sweep.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: careers site loads an Oracle Cloud HCM tenant. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'oracle-hcm (jobs.hexaware.com)' }),
   },
   {
     name: 'Cognizant',
@@ -961,8 +974,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'smartrecruiters',
     atsIdentifier: 'cognizant',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed; smartrecruiters was outside the sweep.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: careers.cognizant.com 403s to bots; iCIMS is the third-party claim, unverified first-hand. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'believed', portal: 'icims' }),
   },
   {
     name: 'Infosys',
@@ -972,8 +985,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'infosys',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: own portal, no third-party ATS signature. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'custom (infosys.com careers portal)' }),
   },
   {
     name: 'Tata Consultancy Services',
@@ -983,8 +996,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'tcs',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed. `tcs` is an abbreviation someone typed, not an observation.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: TRAP: greenhouse 'tcs' answers 200 with 92 jobs but belongs to Thornbury Community Services, a UK healthcare staffer — NEVER mark this verified off a bare 200; identity-check the board-name endpoint first. Real TCS careers is a custom portal. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'unknown' }),
   },
   {
     name: 'Accenture',
@@ -994,8 +1007,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'accenture',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: careers site links its Workday tenant directly. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'workday (accenture.wd103.myworkdayjobs.com/AccentureCareers)' }),
   },
   {
     name: 'Capgemini',
@@ -1005,8 +1018,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'capgemini',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: own job-search page, no third-party ATS signature. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'custom (capgemini.com job-search)' }),
   },
   {
     name: 'Tech Mahindra',
@@ -1016,8 +1029,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'smartrecruiters',
     atsIdentifier: 'techmahindra',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed; smartrecruiters was outside the sweep.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: own portal, no third-party ATS signature. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'custom (careers.techmahindra.com)' }),
   },
   {
     name: 'Wipro',
@@ -1027,8 +1040,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'wipro',
     cooldown: { interview: '6 Months', screening: 'None' },
-    // Never probed.
-    verification: UNVERIFIED_TOKEN,
+    /* Probed 2026-10-23: careers HTML loads rmkcdn.successfactors.com. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'successfactors (careers.wipro.com)' }),
   },
 ];
 
