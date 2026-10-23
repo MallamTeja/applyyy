@@ -225,6 +225,17 @@ parses either out of a job description.
 Worse than the empty-config case: `cascade.ts:157` and `:315` return
 `drop: false` on null **without a warning**, so they read as working rules.
 
+> **Status note, 2026-10-23 (appended; the text above is left as written):** the
+> silent-null half is fixed — the cascade now returns a "skipped" warning on a null
+> JD field, and `_shared/screen/run-summary.ts` persists those into
+> `agent_runs.error_detail` for the Health page (B1, ruled 2026-10-08). The
+> structural half was re-verified today and still stands: `ParsedPosting`
+> (`_shared/ats/types.ts`) has no field for experience or degree, no row builder
+> writes `jobs.min_experience_years` / `requires_advanced_degree`, and no JD parser
+> exists in the repo (the web UI's degree regex in
+> `apps/web/src/features/settings/filtersStore.ts` is display-only). The two rules
+> stay inert until someone builds extraction — a new feature, not a wiring fix.
+
 The irony worth recording: **`experience_ceiling` is `PROJECT_PLAN` §8's headline
 worked example.** The plan illustrates the cascade with the one rule that cannot
 run.

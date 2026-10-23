@@ -1,7 +1,9 @@
 // Persisting the cascade's "rule skipped" warnings into agent_runs.error_detail.
 //
 // WHY THIS EXISTS. cascade.ts returns a warning when a rule cannot run (unconfigured, or
-// the JD side is null; cascade.ts:155,157,315). Every screening caller collected those and
+// the JD side is null; the no-max_years and null-skip returns in experienceCeiling and
+// the null-skip in degreeMismatch — named, not line-cited, because the line numbers
+// drifted once already). Every screening caller collected those and
 // then only returned or printed them, so experience_ceiling and degree_mismatch read as
 // working while filtering nothing (B1, ruled 2026-10-08: make them loud). agent_runs has no
 // jsonb column, so error_detail is the one place a run can say this without a migration.

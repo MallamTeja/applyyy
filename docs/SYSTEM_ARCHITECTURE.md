@@ -265,7 +265,7 @@ every push to `main`.
 | `interview ↔ oa_pending` cycle unbounded | §3 invariants |
 | No live declared-vs-graph diff test | `grep -rln application_status_transitions --include=*.test.ts .` |
 | `email_events.thread_id` never written | `grep -n thread_id supabase/functions/email-tracker-intake/index.ts` |
-| `experience_ceiling` / `degree_mismatch` cannot fire (JD fields never populated); skips are recorded in `agent_runs.error_detail` | `select count(*) filter (where min_experience_years is not null) from jobs` |
+| `experience_ceiling` / `degree_mismatch` cannot fire — re-verified 2026-10-23: the rules are registered, enabled and tested (`_shared/filter/cascade.ts`), but NO producer writes `jobs.min_experience_years` / `requires_advanced_degree` — `ParsedPosting` (`_shared/ats/types.ts`) has no slot for them and no JD parser exists anywhere (the web UI's degree regex in `filtersStore.ts` is display-only, never written back). Making them live is NEW extraction work, not a wiring fix. Skips are recorded in `agent_runs.error_detail` | `select count(*) filter (where min_experience_years is not null) from jobs` |
 | NOT a gap (verified 2026-10-23): two `application_events` rows per transition is deliberate — the `log_status_change` trigger writes the `status_change` witness (from/to status), the RPC adds a `note` row carrying the caller's `p_detail` (scores, hashes, block history), and only when `p_detail` is non-empty. Removing either loses data the other never sees | `select application_id, count(*) from application_events group by 1 order by 2 desc limit 5` |
 | Nothing alerts on a failed Vercel deploy | `grep -in vercel .github/workflows/*.yml` |
 | Where rows sit | `select status, count(*) from applications group by 1 order by 1` |

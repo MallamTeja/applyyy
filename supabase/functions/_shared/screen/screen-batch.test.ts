@@ -106,8 +106,10 @@ test("the adapter carries across the fields every rule reads", () => {
 // THE TWO INERT RULES, pinned as a test so the gap is visible rather than folklore.
 // `toJobInsert` never populates min_experience_years or requires_advanced_degree — no
 // producer in the repo parses either out of a JD — so experience_ceiling and
-// degree_mismatch receive null and return drop:false for every job, WITHOUT a warning.
-// They read as working rules. If a future change starts populating these columns, this
+// degree_mismatch receive null and return drop:false for every job. (Since B1, ruled
+// 2026-10-08, the null path DOES warn, and run-summary.ts persists the warning to
+// agent_runs.error_detail — the rules are loud about being skipped, but still inert.)
+// If a future change starts populating these columns, this
 // test fails and whoever made that change learns the two rules just came alive.
 test("experience and degree arrive as null because nothing populates them", () => {
   const job = toScreenableJob(BASE_ROW);
