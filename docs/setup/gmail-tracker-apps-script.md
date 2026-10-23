@@ -57,7 +57,7 @@ infrastructure, free.
 
 ```
 Gmail (yours)
-   │  Apps Script: on-demand Web App call (doGet), or the optional 15-min trigger (applyyInstallTrigger)
+   │  Apps Script: hourly trigger (applyyInstallTrigger) + on-demand Web App call (doGet, 60s cooldown)
    │  reads: from / subject / snippet  ── nothing else
    ▼
 Supabase Edge Function  email-tracker-intake
@@ -131,16 +131,18 @@ the way it is.
    - **Payload**: Extracts `message_id`, `thread_id`, `from`, `to`, `subject`, `snippet` (plain body truncated to 4096 chars — never full body), `received_at`, `label_ids`, and (since 2026-10-09) `authentication_results`: Gmail's own topmost `Authentication-Results` header, read from `getRawContent()`, used only to verify a receipt's DKIM/SPF (see "Receipt confirmation" below). Batched into chunks of 50.
    - **Post**: Sent to `POST /functions/v1/email-tracker-intake`.
    - **Idempotency & Labeling**: Upon receiving `202 Accepted`, the script applies Gmail label `applyy-ingested`. Any trigger double-fire is absorbed harmlessly at Postgres via `ON CONFLICT (user_id, provider_message_id) DO NOTHING`.
-   - **On-Demand Trigger (No 15-Min Cron)**:
-     - The continuous 15-minute background polling trigger has been replaced with **on-demand Web App monitoring**.
-     - In the Apps Script editor, run `applyyRemoveTriggers()` to delete any active scheduled triggers.
-     - Deploy as a Web App: Click **Deploy → New deployment → Type: Web app**.
-       - **Execute as**: `Me (tejamallam00@gmail.com)`
-       - **Who has access**: `Anyone`
-     - Copy the Web App URL (e.g. `https://script.google.com/macros/s/.../exec`).
-     - Append your secret query parameter: `?secret=<APPLYY_INTAKE_SECRET>`.
-     - Set this in `apps/web/.env.local` as `VITE_EMAIL_SYNC_WEBHOOK_URL` or paste it into the **Sync Settings** drawer on `/emails`. **Never set it in Vercel's env:** every `VITE_` variable is compiled into the public bundle, and this URL carries the intake secret.
-     - Whenever you navigate to `/emails` or click the **"Refresh Interviews"** button, the web console triggers this Web App to immediately ingest new recruiter emails from Gmail without any 15-minute lag!
+   - **Running mode (Teja, 2026-10-23 17:56 IST): hourly trigger + on-demand sync.**
+     - The background trigger is HOURLY (`applyyInstallTrigger`), and the dashboard's
+       `/emails` page syncs on demand through the `gmail-sync` edge function, capped at
+       once a minute by a SERVER-SIDE cooldown in the script itself
+       (`APPLYY_LAST_ONDEMAND_RUN` in Script Properties) — a client debounce is advisory,
+       two tabs are not.
+     - **SUPERSEDED (2026-10-23):** the old route put the Web App URL with `?secret=`
+       into `VITE_EMAIL_SYNC_WEBHOOK_URL` or the Sync Settings drawer — a `VITE_` var
+       compiles into the public bundle, so the browser carried the intake secret. The
+       browser now POSTs to `/functions/v1/gmail-sync` with the user JWT and the secret
+       stays server-side. Remove any `VITE_EMAIL_SYNC_WEBHOOK_URL` from `.env.local`.
+     - One-time wiring steps: see "Enable the on-demand sync route" below.
 
 4. **Live Verification Record (2026-09-11 17:51 IST)**:
    - **Apps Script Execution Log**:
@@ -172,7 +174,7 @@ other silent deaths in this system (Supabase's 1-week idle pause and GitHub's
   intake down). What it CANNOT assert: which of those it is — **Apps Script →
   Executions** stays the place that says why. In on-demand Web App mode the heartbeat
   only fires when a sync is requested, so staleness then means "nobody synced", not
-  "tracker broken" — the 15-minute trigger is what makes the signal trustworthy.
+  "tracker broken" — the hourly trigger is what makes the signal trustworthy.
 
 ## Receipt confirmation — added 2026-10-09
 
@@ -194,10 +196,29 @@ received" email confirms an `applying` row, but ONLY if ALL of these hold
 The move carries the `email_events` id, Gmail's verdict and both timestamps in its event
 detail, so a human can audit or reverse it.
 
-**This only runs automatically while the 15-minute trigger is installed.** The on-demand
-Web App (above) fires only when someone opens `/emails`, so a receipt would wait until then.
-Re-enabling polling reverses the earlier "on-demand only" choice; automatic confirmation
-needs it.
+**This only runs automatically while the hourly trigger is installed.** The on-demand
+sync fires only when someone opens `/emails`, so a receipt would otherwise wait until
+then. Teja ruled the running mode on 2026-10-23 17:56 IST: hourly background trigger PLUS
+on-demand sync capped at once a minute — automatic confirmation rides the hourly tick.
+
+### Enable the on-demand sync route (Teja, one time — added 2026-10-23)
+
+The `gmail-sync` edge function returns `503 {"ok":false,"error":"gmail sync not
+configured"}` until these are done; nothing crashes in the meantime.
+
+1. Re-paste `Code.gs` first (next section) — the cooldown and hourly trigger live in it.
+2. In the Apps Script editor: **Deploy → New deployment → Type: Web app**
+   (or **Manage deployments → Edit → Version: New version** if one exists).
+   - **Execute as**: `Me (tejamallam00@gmail.com)`
+   - **Who has access**: `Anyone` (the `?secret=` check in `handleOnDemandSync_` is the
+     gate; the URL alone does nothing without it).
+3. Copy the Web App URL (ends in `/exec`), WITHOUT any query string.
+4. Set it as a Supabase secret:
+   `supabase secrets set APPLYY_GMAIL_SYNC_URL=<the /exec url>` (or Dashboard → Edge
+   Functions → Secrets). `EMAIL_INTAKE_SHARED_SECRET` already exists and is reused.
+5. Verify: `curl -X POST -H "Authorization: Bearer <your JWT>"
+   https://xynqxekcqizwhtskzqrq.supabase.co/functions/v1/gmail-sync` → `{"ok":true,...}`,
+   and a second call within 60 seconds → `{"ok":true,"cooldown":true}`.
 
 ### Re-enable after a script change (Teja, in Gmail)
 
@@ -215,9 +236,10 @@ needs it.
    `APPLYY_INTAKE_SECRET` equals the Supabase secret `EMAIL_INTAKE_SHARED_SECRET`.
 4. Select `applyyTestConnection` → **Run**. Approve the Google permission prompt if shown.
    The log should show a 2xx from the intake.
-5. Select `applyyInstallTrigger` → **Run**. This installs the 15-minute `applyyIngest`
-   trigger (it removes any older copy first). **Triggers** (clock icon) should then list
-   exactly one `applyyIngest`, time-driven, every 15 minutes.
+5. Select `applyyInstallTrigger` → **Run**. This installs the HOURLY `applyyIngest`
+   trigger (it removes any older copy first — including a leftover 15-minute one).
+   **Triggers** (clock icon) should then list exactly one `applyyIngest`, time-driven,
+   every hour.
 6. If the on-demand Web App is in use: **Deploy → Manage deployments → Edit → Version:
    New version → Deploy**, so the Web App runs the new code too.
 7. Select `applyyIngest` → **Run** once, then check **Executions** for `applyy: accepted ...`.

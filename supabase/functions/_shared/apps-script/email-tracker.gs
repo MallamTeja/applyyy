@@ -38,8 +38,9 @@
  *  4. Run `applyyTestConnection` once from the editor. Google will ask for Gmail and
  *     external-request permission; grant it. The execution log tells you whether the
  *     URL and secret are right BEFORE any trigger fires.
- *  5. Run `applyyInstallTrigger` once. That creates the 15-minute time trigger and
- *     removes any duplicate it finds, so running it twice is safe.
+ *  5. Run `applyyInstallTrigger` once. That creates the HOURLY time trigger (Teja,
+ *     2026-10-23: hourly background + on-demand sync from the dashboard, capped at
+ *     once a minute) and removes any duplicate it finds, so running it twice is safe.
  * ---------------------------------------------------------------------------------
  */
 
@@ -56,7 +57,7 @@
 var APPLYY_LABEL = 'applyy-ingested';
 
 /**
- * How far back to look. Deliberately much wider than the 15-minute trigger interval:
+ * How far back to look. Deliberately much wider than the hourly trigger interval:
  * the label already prevents re-sending, so overlap costs nothing, while a window
  * equal to the interval would permanently lose anything that arrived during an
  * outage. Cheap redundancy against a failure mode that is otherwise unrecoverable.
@@ -348,7 +349,7 @@ function applyySendInChunks_(messages, config, label, chunkSize) {
       return;
     }
     // 429/500/network: DO NOTHING. Do not label, do not advance, do not retry in this
-    // run. The messages stay unlabelled, so the next 15-minute trigger picks them up
+    // run. The messages stay unlabelled, so the next trigger (or on-demand sync) picks them up
     // naturally — the search window IS the retry queue, and building a second one
     // would be a queue that can itself get stuck.
     Logger.log('applyy: transient failure, leaving the rest for the next trigger');
@@ -447,8 +448,10 @@ function applyyLabelThreads_(slice, label) {
 }
 
 /**
- * Install the 15-minute trigger. Safe to run repeatedly: it removes any existing
- * trigger for this function first, so a second run replaces rather than duplicates.
+ * Install the hourly trigger (15-minute until 2026-10-23; Teja ruled hourly background
+ * plus the once-a-minute-capped on-demand sync covers it). Safe to run repeatedly: it
+ * removes any existing trigger for this function first, so a second run replaces
+ * rather than duplicates.
  */
 function applyyInstallTrigger() {
   // Everything currently scheduled in this project.
@@ -461,11 +464,12 @@ function applyyInstallTrigger() {
       ScriptApp.deleteTrigger(existing[i]);
     }
   }
-  // One trigger, every fifteen minutes.
-  ScriptApp.newTrigger('applyyIngest').timeBased().everyMinutes(15).create();
+  // One trigger, every hour. The 2-day search window makes the wider gap safe: nothing
+  // is lost, it just waits (the on-demand sync covers "I want it now").
+  ScriptApp.newTrigger('applyyIngest').timeBased().everyHours(1).create();
   // Confirm in the execution log, since a trigger's existence is otherwise invisible
   // until the next tick.
-  Logger.log('applyy: trigger installed, every 15 minutes');
+  Logger.log('applyy: trigger installed, every hour');
 }
 
 /**
@@ -512,8 +516,8 @@ function applyyTestConnection() {
 /**
  * Remove ALL time-driven triggers.
  *
- * RUN THIS FUNCTION ONCE from the Apps Script editor to eliminate continuous
- * 15-minute background polling triggers.
+ * RUN THIS FUNCTION ONCE from the Apps Script editor to eliminate the background
+ * polling trigger (hourly since 2026-10-23).
  * After running this, monitoring runs solely on-demand when you open or refresh the web console.
  */
 function applyyRemoveTriggers() {
@@ -523,7 +527,7 @@ function applyyRemoveTriggers() {
     ScriptApp.deleteTrigger(existing[i]);
     count += 1;
   }
-  Logger.log('applyy: Successfully deleted ' + count + ' trigger(s). 15-minute background polling is stopped.');
+  Logger.log('applyy: Successfully deleted ' + count + ' trigger(s). Background polling is stopped.');
 }
 
 /**
@@ -562,6 +566,32 @@ function handleOnDemandSync_(e) {
       error: 'Unauthorized: invalid or missing secret parameter.'
     })).setMimeType(ContentService.MimeType.JSON);
   }
+
+  // SERVER-SIDE COOLDOWN (Teja, 2026-10-23): on-demand sync at most once a minute. The
+  // dashboard debounce is advisory — two tabs, a reload loop or curl all bypass it, so
+  // the cap must hold HERE, after auth (an unauthorized caller never advances the clock).
+  var props = PropertiesService.getScriptProperties();
+  // Epoch millis of the last on-demand run; absent or corrupted reads as 0, which FAILS
+  // OPEN on the cheap side (one extra sync) rather than blocking sync forever.
+  var lastRun = parseInt(props.getProperty('APPLYY_LAST_ONDEMAND_RUN') || '0', 10);
+  if (isNaN(lastRun)) {
+    lastRun = 0;
+  }
+  // The one clock both the check and the stamp below read.
+  var nowMs = Date.now();
+  // Inside the window: report the skip honestly (ok + cooldown) and run nothing.
+  if (nowMs - lastRun < 60000) {
+    return ContentService.createTextOutput(JSON.stringify({
+      ok: true,
+      cooldown: true,
+      skipped: true,
+      timestamp: new Date(nowMs).toISOString()
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+  // Stamp BEFORE running, so two near-simultaneous calls can't both pass the check and
+  // both ingest; the LockService lock inside applyyIngest is the second net for the
+  // narrow race between the read above and this write.
+  props.setProperty('APPLYY_LAST_ONDEMAND_RUN', String(nowMs));
 
   // Execute ingestion
   var result = applyyIngest();
