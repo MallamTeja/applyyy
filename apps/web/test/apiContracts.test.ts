@@ -12,13 +12,13 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
-  canTriggerSync,
-  EMAIL_SYNC_STORAGE_KEY,
   formatSyncTime,
+  GMAIL_SYNC_DEBOUNCE_MS,
   isInterviewEmail,
-  resolveEmailSyncUrl,
-  triggerGmailSync,
+  shouldAutoSync,
+  syncGmailInbox,
   type EmailEventRow,
+  type GmailSyncClient,
 } from '../src/features/emails/emailSync.ts';
 import * as authModule from '../src/data/useAuth.ts';
 import {
@@ -79,35 +79,34 @@ describe('Supabase Auth API Contracts', () => {
   });
 });
 
-describe('Gmail Sync Webhook API Contracts', () => {
-  it('resolves webhook sync URLs correctly from environment or storage fallback', () => {
-    // When environment URL is present, it takes precedence
-    const envUrl = 'https://script.google.com/macros/s/ENV_ID/exec';
-    assert.equal(resolveEmailSyncUrl(envUrl, ''), envUrl);
-
-    // When environment URL is absent, user custom URL from settings is used
-    const customUrl = 'https://script.google.com/macros/s/CUSTOM_ID/exec';
-    assert.equal(resolveEmailSyncUrl('', customUrl), customUrl);
-
-    // When both are absent, null is returned
-    assert.equal(resolveEmailSyncUrl('', ''), null);
-    assert.equal(resolveEmailSyncUrl(undefined, '   '), null);
+describe('Gmail Sync Edge-Function Contracts', () => {
+  it('maps the gmail-sync response contract onto the closed outcome union', async () => {
+    // One canned invoke per contract arm — the same seam double the unit tests use.
+    const call = (result: { data: unknown; error: unknown }) => {
+      const client: GmailSyncClient = { functions: { invoke: async () => result } };
+      return syncGmailInbox(client);
+    };
+    // ok: true is the only success spelling.
+    assert.equal((await call({ data: { ok: true }, error: null })).kind, 'ok');
+    // cooldown: true is the server's "just ran" — not a failure.
+    assert.equal((await call({ data: { ok: false, cooldown: true }, error: null })).kind, 'cooldown');
+    // An invoke error (503 not-configured included) is the failed arm.
+    assert.equal((await call({ data: null, error: new Error('non-2xx') })).kind, 'failed');
+    // A malformed body fails closed rather than being guessed into a success.
+    assert.equal((await call({ data: { ok: 'yes' }, error: null })).kind, 'failed');
   });
 
-  it('enforces sync cooldown and in-flight lock (canTriggerSync)', () => {
+  it('enforces the once-a-minute on-open debounce (shouldAutoSync)', () => {
     const now = Date.now();
 
-    // In flight sync cannot be triggered again
-    assert.equal(canTriggerSync(now - 10000, true), false);
+    // Sync 2 seconds ago: inside the minute, skip.
+    assert.equal(shouldAutoSync(now - 2_000, now), false);
 
-    // Sync within 10 seconds cooldown cannot be triggered
-    assert.equal(canTriggerSync(now - 2000, false), false);
+    // Sync exactly one window ago: allowed again.
+    assert.equal(shouldAutoSync(now - GMAIL_SYNC_DEBOUNCE_MS, now), true);
 
-    // Sync after cooldown window (>= 10000ms) can be triggered
-    assert.equal(canTriggerSync(now - 12000, false), true);
-
-    // Initial sync (never synced before) can be triggered
-    assert.equal(canTriggerSync(null, false), true);
+    // Never synced: always allowed.
+    assert.equal(shouldAutoSync(null, now), true);
   });
 
   it('formats sync timestamps into human-readable relative/absolute descriptions', () => {

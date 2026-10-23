@@ -12,69 +12,124 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
-  canTriggerSync,
-  DEFAULT_SYNC_COOLDOWN_MS,
   formatSyncTime,
+  GMAIL_SYNC_DEBOUNCE_MS,
+  GMAIL_SYNC_LAST_MS_KEY,
   isInterviewEmail,
-  resolveEmailSyncUrl,
-  triggerGmailSync,
+  readLastGmailSyncMs,
+  shouldAutoSync,
+  syncGmailInbox,
+  syncStatusLine,
+  writeLastGmailSyncMs,
   type EmailEventRow,
+  type GmailSyncClient,
 } from '../src/features/emails/emailSync.ts';
 
+/* A GmailSyncClient double returning one canned invoke result — the same seam shape
+   pipelineRunner tests use; no network, no supabase. */
+const fakeClient = (result: { data: unknown; error: unknown }): GmailSyncClient => ({
+  functions: { invoke: async () => result },
+});
+
 describe('emailSync helpers', () => {
-  describe('resolveEmailSyncUrl', () => {
-    it('prioritizes envUrl when both env and storage URLs are present', () => {
-      const result = resolveEmailSyncUrl('https://env.example.com/sync', 'https://storage.example.com/sync');
-      assert.equal(result, 'https://env.example.com/sync');
+  describe('shouldAutoSync — the once-a-minute on-open debounce', () => {
+    // A pinned clock so the 60s boundary is asserted exactly, never raced.
+    const NOW = 10_000_000;
+
+    it('REGRESSION: skips inside the window, syncs at and past the boundary', () => {
+      // 1ms into the window: skip.
+      assert.equal(shouldAutoSync(NOW - 1, NOW), false);
+      // One ms short of the full minute: still skip.
+      assert.equal(shouldAutoSync(NOW - (GMAIL_SYNC_DEBOUNCE_MS - 1), NOW), false);
+      // Exactly 60s: sync (>= boundary, so the cap is one-per-minute, not one-per-61s).
+      assert.equal(shouldAutoSync(NOW - GMAIL_SYNC_DEBOUNCE_MS, NOW), true);
+      // Well past: sync.
+      assert.equal(shouldAutoSync(NOW - GMAIL_SYNC_DEBOUNCE_MS * 5, NOW), true);
     });
 
-    it('falls back to storageUrl when envUrl is absent or blank', () => {
-      const resultFromUndefined = resolveEmailSyncUrl(undefined, 'https://storage.example.com/sync');
-      assert.equal(resultFromUndefined, 'https://storage.example.com/sync');
-
-      const resultFromBlank = resolveEmailSyncUrl('   ', 'https://storage.example.com/sync');
-      assert.equal(resultFromBlank, 'https://storage.example.com/sync');
-    });
-
-    it('returns null when neither URL is provided', () => {
-      assert.equal(resolveEmailSyncUrl(undefined, undefined), null);
-      assert.equal(resolveEmailSyncUrl('', ''), null);
-      assert.equal(resolveEmailSyncUrl('  ', '   '), null);
-    });
-
-    it('trims whitespace cleanly', () => {
-      assert.equal(resolveEmailSyncUrl('  https://env.example.com/sync  '), 'https://env.example.com/sync');
-      assert.equal(resolveEmailSyncUrl(undefined, '  https://storage.example.com/sync  '), 'https://storage.example.com/sync');
+    it('never synced (null) and garbage future timestamps both mean sync', () => {
+      // No record: first visit, go.
+      assert.equal(shouldAutoSync(null, NOW), true);
+      // A future instant is a mangled clock or storage, not a reason to stop syncing.
+      assert.equal(shouldAutoSync(NOW + 5_000, NOW), true);
     });
   });
 
-  describe('canTriggerSync cooldown and lock check', () => {
-    it('refuses to trigger if a sync is already in flight', () => {
-      // Regardless of cooldown, a running sync must block another trigger
-      assert.equal(canTriggerSync(null, true), false);
-      assert.equal(canTriggerSync(Date.now() - 100_000, true), false);
+  describe('readLastGmailSyncMs — shape-checked storage read', () => {
+    // A Map-backed storage double, the repo's standard trick for node tests.
+    const storageWith = (value: string | null): Pick<Storage, 'getItem'> => ({
+      getItem: (key) => (key === GMAIL_SYNC_LAST_MS_KEY ? value : null),
     });
 
-    it('permits initial sync when lastSyncedAt is null', () => {
-      // First run on page mount should always proceed
-      assert.equal(canTriggerSync(null, false), true);
+    it('REGRESSION: a non-digit or empty value reads as null, never as a number', () => {
+      // CLAUDE.md §6: Number('') is 0, which would read as "synced in 1970" = always resync
+      // — and worse, '-5' or garbage must not become an instant either.
+      for (const bad of ['', '-5', '1.5', 'yesterday', '1e9', ' 123 ']) {
+        assert.equal(readLastGmailSyncMs(storageWith(bad)), null, JSON.stringify(bad));
+      }
     });
 
-    it('enforces the minimum cooldown window', () => {
-      const now = 1_000_000;
-      const cooldown = DEFAULT_SYNC_COOLDOWN_MS; // 10,000ms
+    it('a plain digits value round-trips through write and read', () => {
+      // One Map-backed store shared by both helpers.
+      const map = new Map<string, string>();
+      const store = { getItem: (k: string) => map.get(k) ?? null, setItem: (k: string, v: string) => void map.set(k, v) };
+      writeLastGmailSyncMs(store, 1_730_000_000_000);
+      assert.equal(readLastGmailSyncMs(store), 1_730_000_000_000);
+    });
 
-      // 5 seconds ago: still in cooldown
-      assert.equal(canTriggerSync(now - 5_000, false, cooldown, now), false);
+    it('a throwing or absent storage reads null and never throws', () => {
+      // Safari private mode and locked-down profiles THROW on access; the page must work.
+      const throwing: Pick<Storage, 'getItem'> = { getItem: () => { throw new Error('blocked'); } };
+      assert.equal(readLastGmailSyncMs(throwing), null);
+      // SSR / node: no storage object at all.
+      assert.equal(readLastGmailSyncMs(undefined), null);
+      // Writes are equally silent.
+      writeLastGmailSyncMs(undefined, 123);
+    });
+  });
 
-      // 9.999 seconds ago: still in cooldown
-      assert.equal(canTriggerSync(now - 9_999, false, cooldown, now), false);
+  describe('syncGmailInbox — the gmail-sync edge call, outcomes only', () => {
+    it('ok: true becomes the ok outcome', async () => {
+      const outcome = await syncGmailInbox(fakeClient({ data: { ok: true, details: { ingested: 2 } }, error: null }));
+      assert.equal(outcome.kind, 'ok');
+    });
 
-      // Exactly at cooldown boundary: allowed
-      assert.equal(canTriggerSync(now - 10_000, false, cooldown, now), true);
+    it('cooldown: true wins even alongside ok, and reads as the quiet skip', async () => {
+      // The server saying "just ran" is not a success to re-render around.
+      const outcome = await syncGmailInbox(fakeClient({ data: { ok: false, cooldown: true }, error: null }));
+      assert.equal(outcome.kind, 'cooldown');
+    });
 
-      // 20 seconds ago: allowed
-      assert.equal(canTriggerSync(now - 20_000, false, cooldown, now), true);
+    it('an invoke error (the 503 not-configured case) is the failed outcome', async () => {
+      const outcome = await syncGmailInbox(fakeClient({ data: null, error: new Error('Edge Function returned a non-2xx status code') }));
+      assert.equal(outcome.kind, 'failed');
+      if (outcome.kind === 'failed') assert.match(outcome.message, /non-2xx/);
+    });
+
+    it('REGRESSION: a malformed body fails closed, never a guessed success', async () => {
+      // Every shape that is not exactly ok === true must land in failed (or cooldown
+      // only on exactly cooldown === true) — truthiness is how "ok": "no" becomes a sync.
+      for (const data of [null, 'done', 42, {}, { ok: 'true' }, { ok: 1 }, { cooldown: 'yes' }]) {
+        const outcome = await syncGmailInbox(fakeClient({ data, error: null }));
+        assert.equal(outcome.kind, 'failed', JSON.stringify(data));
+      }
+    });
+
+    it('a throwing client double is contained as failed, not propagated', async () => {
+      const throwing: GmailSyncClient = { functions: { invoke: async () => { throw new Error('boom'); } } };
+      const outcome = await syncGmailInbox(throwing);
+      assert.equal(outcome.kind, 'failed');
+    });
+  });
+
+  describe('syncStatusLine — the one quiet line the page shows', () => {
+    it('each state has its ruled phrase; idle renders nothing', () => {
+      assert.equal(syncStatusLine('idle'), null);
+      assert.equal(syncStatusLine('syncing'), 'syncing inbox…');
+      assert.equal(syncStatusLine('ok'), 'inbox synced');
+      assert.equal(syncStatusLine('cooldown'), 'sync skipped (just ran)');
+      // The failure wording must say the EVENTS are fine — stale at worst.
+      assert.equal(syncStatusLine('failed'), 'sync failed — events may be stale');
     });
   });
 
@@ -138,38 +193,22 @@ describe('emailSync helpers', () => {
     });
   });
 
-  describe('triggerGmailSync network fetch', () => {
-    it('returns ok: true when fetch succeeds with 200 JSON', async () => {
-      const mockFetch: typeof fetch = async () => {
-        return new Response(JSON.stringify({ ok: true, message: 'Sync done', data: { ingested: 2 } }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      };
-
-      const result = await triggerGmailSync('https://script.google.com/sync', 5000, mockFetch);
-      assert.equal(result.ok, true);
-      assert.equal(result.message, 'Gmail on-demand sync completed successfully.');
-    });
-
-    it('returns ok: false when endpoint returns HTTP error code', async () => {
-      const mockFetch: typeof fetch = async () => {
-        return new Response('Unauthorized', { status: 401, statusText: 'Unauthorized' });
-      };
-
-      const result = await triggerGmailSync('https://script.google.com/sync', 5000, mockFetch);
-      assert.equal(result.ok, false);
-      assert.ok(result.message.includes('401'));
-    });
-
-    it('handles network failure gracefully', async () => {
-      const mockFetch: typeof fetch = async () => {
-        throw new Error('Failed to fetch');
-      };
-
-      const result = await triggerGmailSync('https://script.google.com/sync', 5000, mockFetch);
-      assert.equal(result.ok, false);
-      assert.equal(result.message, 'Failed to fetch');
+  describe('a failed sync never blocks the stored events (page wiring)', () => {
+    // SSR cannot run useEffect (see discoveredJobsLoadError.test.ts for the precedent),
+    // so this pins the wiring by the page's own source text — brittle on rewrites, but
+    // the properties asserted are exactly the safety contract.
+    it('REGRESSION: events are fetched before any sync decision, and a failure only sets the quiet state', async () => {
+      const { readFileSync } = await import('node:fs');
+      const source = readFileSync('src/features/emails/EmailMonitoringPage.tsx', 'utf8');
+      // The fetch of stored events is the FIRST act of performSync, before every gate.
+      assert.match(source, /await fetchEvents\(\);\s*\n\s*\/\/ No client, no call/);
+      // The failed branch sets the quiet status pair and nothing else: no setError, no
+      // setEvents, so the rendered list is untouched by a sync failure.
+      const failedBranch = source.match(/\/\/ Failed \(503 not-configured included\)[\s\S]*?setSyncDetail\(outcome\.message\);/)?.[0] ?? '';
+      assert.notEqual(failedBranch, '', 'the failed branch must exist');
+      assert.doesNotMatch(failedBranch, /setError|setEvents/);
+      // The sync failure renders through the muted one-liner, not the error banner.
+      assert.match(source, /syncStatusLine\(syncState\)/);
     });
   });
 });

@@ -25,12 +25,13 @@ import type { ReactElement } from 'react';
 import { supabase } from '../../data/supabase.ts';
 import { PageHeader } from '../../app/PageHeader.tsx';
 import {
-  canTriggerSync,
-  EMAIL_SYNC_STORAGE_KEY,
   formatSyncTime,
   isInterviewEmail,
-  resolveEmailSyncUrl,
-  triggerGmailSync,
+  readLastGmailSyncMs,
+  shouldAutoSync,
+  syncGmailInbox,
+  syncStatusLine,
+  writeLastGmailSyncMs,
   type EmailEventRow,
 } from './emailSync.ts';
 
@@ -43,30 +44,19 @@ export function EmailMonitoringPage(): ReactElement {
   const [loading, setLoading] = useState<boolean>(true);
   /* Sync state while live Gmail fetch is in flight */
   const [syncing, setSyncing] = useState<boolean>(false);
-  /* Error state if query or sync fails */
+  /* Error state if the DATABASE query fails — sync failures never land here, because a
+     failed sync must stay a quiet one-liner while the stored events render normally. */
   const [error, setError] = useState<string | null>(null);
-  /* Informational notice describing sync result */
-  const [syncNotice, setSyncNotice] = useState<string | null>(null);
-  /* Timestamp of last successful sync execution */
+  /* Where this visit's sync attempt stands; drives the one-line status via syncStatusLine. */
+  const [syncState, setSyncState] = useState<'idle' | 'syncing' | 'ok' | 'cooldown' | 'failed'>('idle');
+  /* The failure's own words, shown only as the status line's hover title — detail on
+     demand, noise never. */
+  const [syncDetail, setSyncDetail] = useState<string | null>(null);
+  /* Timestamp of last successful sync execution (this visit; the cross-visit cap lives
+     in localStorage via read/writeLastGmailSyncMs). */
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
   /* Query filter string for instant search */
   const [searchQuery, setSearchQuery] = useState<string>('');
-  /* Custom webhook URL saved in localStorage */
-  const [customSyncUrl, setCustomSyncUrl] = useState<string>(() => {
-    try {
-      return localStorage.getItem(EMAIL_SYNC_STORAGE_KEY) ?? '';
-    } catch {
-      return '';
-    }
-  });
-  /* Toggle for sync settings drawer */
-  const [showSettings, setShowSettings] = useState<boolean>(false);
-
-  /* Resolved sync URL from environment or localStorage */
-  const activeSyncUrl = useMemo(() => {
-    const envUrl = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_EMAIL_SYNC_WEBHOOK_URL;
-    return resolveEmailSyncUrl(envUrl, customSyncUrl);
-  }, [customSyncUrl]);
 
   /* Fetch latest email events from Supabase */
   const fetchEvents = useCallback(async () => {
@@ -98,53 +88,57 @@ export function EmailMonitoringPage(): ReactElement {
     }
   }, []);
 
-  /* Execute on-demand live Gmail sync and re-fetch events */
+  /* Execute on-demand Gmail sync via the gmail-sync edge function, then re-fetch events.
+     ORDER IS THE SAFETY PROPERTY: stored events are fetched and rendered FIRST, so no
+     sync outcome — not even a thrown one — can block the page's real job. */
   const performSync = useCallback(
     async (manual: boolean) => {
-      // Always re-fetch current DB events first
+      // Always re-fetch current DB events first; the list never waits on Gmail.
       await fetchEvents();
 
-      // If no sync URL is configured, report advice on manual click
-      if (!activeSyncUrl) {
-        if (manual) {
-          setSyncNotice(
-            'Tip: Deploy the updated Apps Script Web App and paste the URL in "Sync Settings" to enable live 1-click Gmail sync.',
-          );
-        }
-        return;
-      }
+      // No client, no call: the DB error banner from fetchEvents already explains why.
+      if (supabase === null) return;
 
-      // Check lock and cooldown constraints
-      if (!canTriggerSync(lastSyncedAt, syncing)) {
-        if (manual) {
-          setSyncNotice('Sync cooldown active. Please wait a few seconds before checking Gmail again.');
-        }
+      // One sync at a time; a second click while in flight is a no-op, not a queue.
+      if (syncing) return;
+
+      // CLIENT-SIDE DEBOUNCE, auto-trigger only: Teja's once-a-minute cap on page open.
+      // Advisory — the function's own cooldown is authoritative — and read through the
+      // shape-checked storage helper, so a blocked or mangled localStorage only costs
+      // one extra server-absorbed call. A manual click always goes through: the server
+      // answers `cooldown` if it really is too soon, and the same quiet line shows.
+      const storage = typeof localStorage === 'undefined' ? undefined : localStorage;
+      if (!manual && !shouldAutoSync(readLastGmailSyncMs(storage), Date.now())) {
+        setSyncState('cooldown');
         return;
       }
 
       setSyncing(true);
-      setSyncNotice('Connecting to Gmail & ingesting new interview emails...');
+      setSyncState('syncing');
 
-      try {
-        const result = await triggerGmailSync(activeSyncUrl);
-        if (result.ok) {
-          setLastSyncedAt(Date.now());
-          setSyncNotice('Gmail sync complete. Checking for latest events...');
-          // Refresh database rows to surface any newly ingested emails
-          await fetchEvents();
-          setSyncNotice(null);
-        } else {
-          setError(result.message);
-          setSyncNotice(null);
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Error triggering Gmail sync.');
-        setSyncNotice(null);
-      } finally {
-        setSyncing(false);
+      // syncGmailInbox never throws: every path lands in the closed outcome union.
+      const outcome = await syncGmailInbox(supabase);
+      if (outcome.kind === 'ok') {
+        // Record the instant in state (the card's "Last checked") and in storage (the cap).
+        const now = Date.now();
+        setLastSyncedAt(now);
+        writeLastGmailSyncMs(storage, now);
+        // Surface whatever the sync just ingested.
+        await fetchEvents();
+        setSyncState('ok');
+        setSyncDetail(null);
+      } else if (outcome.kind === 'cooldown') {
+        // The server said "just ran" — same quiet line as the client-side skip.
+        setSyncState('cooldown');
+        setSyncDetail(null);
+      } else {
+        // Failed (503 not-configured included): quiet line, detail on hover, events stay.
+        setSyncState('failed');
+        setSyncDetail(outcome.message);
       }
+      setSyncing(false);
     },
-    [activeSyncUrl, fetchEvents, lastSyncedAt, syncing],
+    [fetchEvents, syncing],
   );
 
   /* Set once the mount-time sync has been attempted. A ref, not state, so flipping it
@@ -164,16 +158,6 @@ export function EmailMonitoringPage(): ReactElement {
     // Fire-and-forget: performSync records its own errors in state.
     void performSync(false);
   }, [performSync]);
-
-  /* Save custom sync URL to localStorage */
-  const handleSaveSyncUrl = useCallback((newUrl: string) => {
-    setCustomSyncUrl(newUrl);
-    try {
-      localStorage.setItem(EMAIL_SYNC_STORAGE_KEY, newUrl.trim());
-    } catch {
-      // LocalStorage access restricted in some sandboxes
-    }
-  }, []);
 
   /* STRICT INTERVIEW FILTER: Discard all non-interview emails */
   const interviewEvents = useMemo(() => {
@@ -232,8 +216,9 @@ export function EmailMonitoringPage(): ReactElement {
         </div>
         <div className="email-stat-card">
           <span className="email-stat-card__label">Monitoring Mode</span>
+          {/* One mode since the edge-function transport: the page itself triggers the sync. */}
           <span className="email-stat-card__value" style={{ fontSize: 'var(--size-base)', fontWeight: 600 }}>
-            {activeSyncUrl ? '⚡ On-Demand (Page Open)' : '📦 Supabase Cached'}
+            ⚡ On-Demand (Page Open)
           </span>
           <span style={{ fontSize: 'var(--size-xs)', color: 'var(--ink-muted)' }}>
             Last checked: {formatSyncTime(lastSyncedAt)}
@@ -261,44 +246,21 @@ export function EmailMonitoringPage(): ReactElement {
           >
             {syncing ? 'Checking Gmail...' : loading ? 'Refreshing...' : 'Refresh Interviews'}
           </button>
-          <button
-            type="button"
-            className="email-monitor__settings-toggle"
-            onClick={() => setShowSettings((prev) => !prev)}
-            title="Configure Gmail On-Demand Sync URL"
-          >
-            {showSettings ? 'Close Settings' : 'Sync Settings'}
-          </button>
         </div>
       </div>
 
-      {/* Sync settings drawer for configuring the Apps Script Web App URL */}
-      {showSettings && (
-        <div className="email-monitor__settings-box">
-          <h4 style={{ margin: '0 0 var(--gap-2) 0', fontSize: 'var(--size-sm)' }}>
-            Gmail Webhook Configuration
-          </h4>
-          <p style={{ fontSize: 'var(--size-xs)', color: 'var(--ink-muted)', margin: '0 0 var(--gap-2) 0' }}>
-            Enter your Google Apps Script Web App URL to enable on-demand Gmail sync for interview invitations.
-          </p>
-          <input
-            type="url"
-            className="email-monitor__url-input"
-            placeholder="https://script.google.com/macros/s/.../exec?secret=YOUR_SECRET"
-            value={customSyncUrl}
-            onChange={(e) => handleSaveSyncUrl(e.target.value)}
-          />
-        </div>
-      )}
-
-      {/* Informational notification */}
-      {syncNotice !== null && (
-        <p className="store-notice store-notice--info" style={{ marginBottom: 'var(--gap-3)' }}>
-          {syncNotice}
+      {/* The sync's quiet one-liner: muted fact, never a banner, never blocks the list.
+          The failure detail rides in the hover title so the line itself stays calm. */}
+      {syncStatusLine(syncState) !== null && (
+        <p
+          style={{ fontSize: 'var(--size-sm)', color: 'var(--ink-muted)', margin: '0 0 var(--gap-3) 0' }}
+          title={syncDetail ?? undefined}
+        >
+          {syncStatusLine(syncState)}
         </p>
       )}
 
-      {/* Error banner if query or sync failed */}
+      {/* Error banner if the DATABASE query failed (sync failures stay in the line above) */}
       {error !== null && (
         <p className="store-notice store-notice--bad" style={{ marginBottom: 'var(--gap-3)' }}>
           {error}

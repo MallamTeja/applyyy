@@ -553,7 +553,7 @@ describe('Playwright E2E Operator Console Suite', () => {
     );
   });
 
-  it('8. verifies Email Intake & Monitoring dashboard, metric cards and sync drawer', async () => {
+  it('8. verifies Email Intake & Monitoring dashboard, metric cards and edge-function sync', async () => {
     await page.goto(`${serverUrl}/emails`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('.page__title');
 
@@ -561,18 +561,20 @@ describe('Playwright E2E Operator Console Suite', () => {
     const emailStats = await page.locator('.email-stat-card').count();
     assert.equal(emailStats, 4, 'Must render 4 email metric boxes (Interviews, Linked, Direct, Mode)');
 
-    // Toggle Sync Settings drawer
-    const settingsBtn = page.locator('.email-monitor__settings-toggle');
-    await settingsBtn.click();
-    await page.waitForSelector('.email-monitor__settings-box');
+    // The sync moved to the gmail-sync edge function (2026-10-23): the webhook settings
+    // drawer and its URL input are GONE — their presence would mean the dead UI returned.
+    assert.equal(await page.locator('.email-monitor__settings-toggle').count(), 0, 'Webhook settings toggle must not render');
+    assert.equal(await page.locator('.email-monitor__url-input').count(), 0, 'Webhook URL input must not render');
 
-    const hasUrlInput = await page.locator('.email-monitor__url-input').isVisible();
-    assert.ok(hasUrlInput, 'Must render Google Apps Script Webhook URL input');
+    // The manual refresh button is the one sync control left.
+    const refreshBtn = page.locator('.email-monitor__toolbar .ingest__button');
+    assert.equal(await refreshBtn.count(), 1, 'Refresh Interviews button must render');
 
-    // Close settings drawer
-    await settingsBtn.click();
-    const isBoxVisible = await page.locator('.email-monitor__settings-box').isVisible().catch(() => false);
-    assert.equal(isBoxVisible, false, 'Settings box must collapse on toggle');
+    // The mount-time sync has run (or failed) by now: the quiet one-line status is on
+    // screen, and in the e2e sandbox (no real gmail-sync function) it must be the failed
+    // or skipped wording — never a banner, and the page rendered regardless.
+    const statusLine = page.locator('p[title], p').filter({ hasText: /inbox|sync/ });
+    assert.ok((await statusLine.count()) >= 1, 'The one-line sync status must render after mount');
   });
 
   it('9. verifies High-Legibility Typography and Dark/Light Theme Switching', async () => {
