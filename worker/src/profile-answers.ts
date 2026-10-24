@@ -33,7 +33,9 @@ export function normaliseKey(text: string): string {
 // full_name, city, location and company join the original six; each is a plain stored fact.
 type ProfileField =
   | 'email' | 'phone' | 'linkedin' | 'github' | 'website' | 'country'
-  | 'full_name' | 'city' | 'location' | 'company';
+  | 'full_name' | 'city' | 'location' | 'company'
+  // Greenhouse's standard education questions, from the master's FIRST education entry.
+  | 'school' | 'degree' | 'discipline';
 
 // The closed synonym table: normalised label -> profile field. Exact keys only, by design.
 // A Map (not an object literal) because a label like "constructor" or "__proto__" would hit
@@ -68,6 +70,23 @@ const SYNONYMS: ReadonlyMap<string, ProfileField> = new Map<string, ProfileField
   ['current_city', 'city'],
   // Same question, stated as residence.
   ['city_of_residence', 'city'],
+  // Greenhouse's standard location question, "Location (City)" (live Sigma form, 2026-10-24).
+  ['location_city', 'city'],
+  // EDUCATION, added 2026-10-24: Greenhouse's standard School / Degree / Discipline block
+  // parked Sigma (428f6cbc) although the master holds all three. Exact labels only, so a
+  // "highest degree you expect to complete" never reaches here.
+  // The school, by its Greenhouse label and its plain synonyms.
+  ['school', 'school'],
+  ['school_name', 'school'],
+  ['university', 'school'],
+  ['college', 'school'],
+  ['institution', 'school'],
+  // The degree, as the master states it.
+  ['degree', 'degree'],
+  // The field of study, by Greenhouse's word for it and the common ones.
+  ['discipline', 'discipline'],
+  ['field_of_study', 'discipline'],
+  ['major', 'discipline'],
   // Free-text location, copied whole. "where_are_you_located" is absent: it overlaps the located_in denylist.
   // Explicit free-text location label.
   ['current_location', 'location'],
@@ -179,6 +198,29 @@ function currentCompanyOf(experience: unknown): string | null {
 }
 
 /**
+ * One fact from the master's FIRST education entry (education[0], document order), or null.
+ *
+ * education[0] because it is the entry the resume leads with, and Greenhouse's standard block
+ * asks for one school. The entry is read field by field with the same blank guard as every
+ * other fact, so a null `field` (MasterEducation allows it) refuses Discipline instead of
+ * becoming the text "null", and a malformed jsonb entry refuses all three (CLAUDE.md §6).
+ */
+function educationFact(education: unknown, fact: 'school' | 'degree' | 'discipline'): string | null {
+  // jsonb may not be an array at runtime; anything else holds no education.
+  if (!Array.isArray(education)) return null;
+  // The first entry only; an empty list has none.
+  const first: unknown = education[0];
+  // A missing or non-object entry is unreadable, not empty.
+  if (first === null || typeof first !== 'object') return null;
+  // MasterEducation's own keys: institution, degree, field.
+  const entry = first as { institution?: unknown; degree?: unknown; field?: unknown };
+  // The one key the question asks for, blank-guarded.
+  const value = fact === 'school' ? entry.institution : fact === 'degree' ? entry.degree : entry.field;
+  // Only a non-empty string is an answer.
+  return typeof value === 'string' ? nonEmpty(value) : null;
+}
+
+/**
  * The value the master profile holds for this field's label, or null when the label is not
  * in the table, the profile lacks the value, or (country) the control would not accept it.
  */
@@ -205,6 +247,8 @@ export function resolveProfileAnswer(field: FormField, profile: MasterProfile | 
   if (target === 'city') return cityOf(identity.location);
   // Company comes from the experience list, never from identity.
   if (target === 'company') return currentCompanyOf(profile.experience);
+  // Education comes from the FIRST entry in document order, the one the resume leads with.
+  if (target === 'school' || target === 'degree' || target === 'discipline') return educationFact(profile.education, target);
 
   // Country is the one DERIVED value, so it gets the extra guards below.
   if (target === 'country') {

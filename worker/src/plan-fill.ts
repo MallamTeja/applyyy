@@ -25,7 +25,8 @@ export { normaliseKey };
 // or not, can reach them. Over-matching sends more questions to the human, which is the safe
 // direction. It must not catch factual questions such as "current country of residence" or
 // "primary programming language" (hence no bare "age"). Judgement items (relocation,
-// pronouns, salary expectation) are NOT disclosures and stay answerable from the bank.
+// pronouns, onsite, motivation) are NOT disclosures: they are answerable, but only from
+// Teja's ATTESTED bank row (OPINION_FRAGMENTS below, 2026-10-24).
 // SUBSTRING fragments: long enough that a hit inside another word is still a disclosure.
 const NEVER_FRAGMENTS: readonly string[] = [
   // (Protected-class self-identification moved to EEO_FRAGMENTS on 2026-10-09: answerable
@@ -90,6 +91,22 @@ const ELIGIBILITY_FRAGMENTS: readonly string[] = [
   'previously_worked', 'worked_at', 'worked_for', 'consulted_for', 'former_employee', 'employed_by',
 ];
 
+// OPINIONS, PREFERENCES AND ACKNOWLEDGEMENTS (2026-10-24): what excites him, his pronouns,
+// whether he will work onsite or relocate, "I understand this is an in-person role". None
+// is a fact the profile holds, and each is a statement Teja signs, so a label here is
+// answered ONLY from an attested bank row keyed to it: never from the profile, never from
+// a row a machine wrote. Evidence: live parks on Sigma (428f6cbc) and Perpay (634f6f48).
+// SUBSTRING fragments: over-matching only sends a question to Teja, the safe side.
+const OPINION_FRAGMENTS: readonly string[] = [
+  // Self-identification that is not EEO.
+  'pronoun',
+  // Work arrangement and location preferences.
+  'onsite', 'on_site', 'in_person', 'in_office', 'hybrid', 'relocat', 'commut',
+  // Motivation and interest essays.
+  'excite', 'why_do_you_want', 'why_are_you_interested', 'interests_you', 'motivat',
+  // Acknowledgements ("I understand…"), which are agreements like consent.
+  'i_understand', 'i_acknowledge',
+];
 // The eligibility questions Teja ruled answerable on 2026-10-09.
 type EligibilityCategory = 'located_in' | 'sponsorship' | 'employment_restrictions' | 'previously_worked';
 
@@ -497,6 +514,34 @@ export function planFill(
       }
       // Copied from Teja's own answer or his own profile; nothing composed.
       fills.push({ id: formField.id, value: answer.value, kind: formField.kind, source: answer.source });
+      continue;
+    }
+
+    // OPINIONS NEXT: answered only from Teja's attested row keyed to this exact label, so
+    // neither the profile nor a machine-written row can state a preference for him.
+    if (OPINION_FRAGMENTS.some((fragment) => key.includes(fragment))) {
+      // The attested row, or why there isn't a usable one (none, placeholder, unattested, ambiguous).
+      const row = attestedRow(byKey, collisions, key);
+      // No usable row: the reason goes to Teja (silently dropped on an optional field).
+      if (typeof row === 'string') {
+        refuse(row);
+        continue;
+      }
+      // Only non-empty text (or a number) is an answer.
+      const text = answerText(row.answer_value);
+      // A blank or non-text attested row is still not an answer.
+      if (text === null) {
+        refuse('invalid_answer');
+        continue;
+      }
+      // A select or radio must offer it verbatim.
+      if (formField.options !== undefined && !formField.options.includes(text)) {
+        // Never the nearest option: a preference must be stated exactly as Teja wrote it.
+        refuse('no_matching_option');
+        continue;
+      }
+      // Copied exactly as Teja saved and attested it.
+      fills.push({ id: formField.id, value: text, kind: formField.kind, source: 'answer_bank' });
       continue;
     }
 
