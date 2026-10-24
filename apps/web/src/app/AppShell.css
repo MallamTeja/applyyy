@@ -456,3 +456,25 @@
     justify-content: space-between;
   }
 }
+
+/* The "needs you" count on the System health rail item: jobs to apply or verify by hand. */
+.rail__count {
+  /* Pushed to the row's end; .rail__link is already a flex row. */
+  margin-left: auto;
+  /* Room for a two-digit count without touching the label. */
+  min-width: 1.5em;
+  /* Small horizontal padding so the pill reads as a badge, not text. */
+  padding: 0 6px;
+  /* The shared badge radius, so it matches every other badge in the console. */
+  border-radius: var(--radius-badge);
+  /* Bronze wash: "a human is required", the same token the rail's defect notice uses. */
+  background: var(--signal-wash);
+  /* The signal colour itself for the number; the token already carries light-dark(). */
+  color: var(--signal);
+  /* Small and bold, so it is noticed without shouting over the label. */
+  font-size: var(--size-2xs);
+  /* Bold enough to read at the small size. */
+  font-weight: 700;
+  /* Centred digits inside the min-width. */
+  text-align: center;
+}

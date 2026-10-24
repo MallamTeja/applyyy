@@ -467,3 +467,26 @@
   border-left-color: var(--fabricated);
   background: var(--fabricated-wash);
 }
+
+/* Why a row is waiting (block reason, unknown submit outcome): its own line under the label, primary
+   text so it is read before the stamp. */
+.recovery__reason {
+  /* Its own line. */
+  display: block;
+  /* Same size as the move meanings, one step above the stamp. */
+  font-size: var(--size-sm);
+  /* Normal weight: the label above is the heading. */
+  font-weight: 400;
+  /* Primary text: this is the sentence the operator acts on. */
+  color: var(--text-primary);
+}
+
+/* The link to the posting, to finish or check the application by hand. */
+.recovery__apply {
+  /* Starts under the reason (a block); inline-block keeps the click target to the words, not the cell. */
+  display: inline-block;
+  /* Same size as the reason. */
+  font-size: var(--size-sm);
+  /* The console's link colour token, so it reads as a link in both themes. */
+  color: var(--accent);
+}

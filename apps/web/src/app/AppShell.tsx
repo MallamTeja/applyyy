@@ -24,8 +24,11 @@ import { ThemeToggle } from './ThemeToggle';
 import {
   MISSING_HUMAN_CONTROLS,
   UNBUILT_HUMAN_CONTROLS,
+  manualActionCount,
 } from '../data/humanLanes';
 import { useAuth } from '../data/useAuth';
+// Per-status counts from the application_status_counts RPC, read once here for the rail badge.
+import { useApplicationCounts } from '../data/useApplicationCounts';
 import { LoginPage } from '../features/auth/LoginPage';
 
 import './AppShell.css';
@@ -42,6 +45,19 @@ export function AppShell(): ReactElement {
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   /* The route drives both the tab title and closing the menu after a tap. */
   const { pathname } = useLocation();
+  /* The "needs you" badge's source (2026-10-24). Called here, above the early returns, because the
+     shell renders once for every route: one ~20-row RPC for the whole console, not one per nav item. */
+  const { state: countState, counts, refetch: refetchCounts } = useApplicationCounts();
+  /* Re-read on every navigation and on sign-in: the hook's first read can land before the session
+     exists (it then reports no_session), and a resolve on System health changes the count. The extra
+     read on mount is one tiny aggregate, cheaper than code to skip it. */
+  useEffect(() => {
+    // A fresh count for the page the operator just opened.
+    refetchCounts();
+  }, [pathname, auth.user?.id, refetchCounts]);
+  /* Jobs waiting for the operator to finish or check by hand. Only a successful read counts: a failed
+     or pending read shows no badge rather than a made-up zero or a stale number. */
+  const needsYou = countState.kind === 'rows' ? manualActionCount(counts) : 0;
 
   /* Per-route tab title. Applied here rather than in each page because the
      shell is the one component every route renders through, so no page can
@@ -168,6 +184,17 @@ export function AppShell(): ReactElement {
                     }
                   >
                     {route.label}
+                    {/* The badge sits on System health because both manual-action queues live there
+                        (humanLanes.ts MANUAL_ACTION_STATUSES); hidden at zero so it only ever means "act". */}
+                    {route.path === NEEDS_YOU_ROUTE && needsYou > 0 ? (
+                      /* The visible number for the eye; the sentence below is what a screen reader hears. */
+                      <span className="rail__count">
+                        {/* The count alone, hidden from assistive tech so it is not read twice. */}
+                        <span aria-hidden="true">{needsYou}</span>
+                        {/* The full meaning, for screen readers only. */}
+                        <span className="visually-hidden">{`, ${needsYou} ${needsYou === 1 ? 'job needs' : 'jobs need'} you to apply or verify by hand`}</span>
+                      </span>
+                    ) : null}
                   </NavLink>
                 </li>
               ))}
@@ -235,3 +262,7 @@ export function AppShell(): ReactElement {
     </div>
   );
 }
+
+/* The rail item that holds the manual-action queues (needs_verification and blocked_needs_human both
+   render on System health; humanLanes.ts maps them to "System health, ..." screens). */
+const NEEDS_YOU_ROUTE = 'health';

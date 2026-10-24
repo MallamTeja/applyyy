@@ -45,7 +45,7 @@ import { PageHeader } from '../../app/PageHeader';
 import { AGENT_NAMES } from '../../data/contract';
 /* The four recovery panels list their stuck rows with working moves through this one component
    (2026-10-09), so the moves are built from the graph in one place rather than four. */
-import { RecoveryQueue } from './RecoveryQueue';
+import { RecoveryQueue, manualActionMeaning, manualActionVerb } from './RecoveryQueue';
 /* The coverage check, imported rather than recomputed. Its own file explains
    why the predicate is `.includes('human')` and not `=== ['human']`, and why
    one list of gaps was not enough: a status claimed by a screen nobody wrote
@@ -790,8 +790,10 @@ function NeedsVerificationQueuePanel(): ReactElement {
         The retry (<span className="identifier">approved</span>) is held: under automatic submission it
         would send the application again.
       </p>
-      {/* -> approved renders disabled with its reason (humanLanes.ts HELD_HUMAN_EDGES). */}
-      <RecoveryQueue status="needs_verification" verb={(to) => `Mark as ${to}`} />
+      {/* -> approved renders disabled with its reason (humanLanes.ts HELD_HUMAN_EDGES). Each row shows
+          why it is here and its apply link, so the operator can check the portal or finish it by hand;
+          the buttons use the manual-action wording ("I applied", "Failed / skip") shared with the blocked queue. */}
+      <RecoveryQueue status="needs_verification" verb={manualActionVerb} meaning={manualActionMeaning} />
     </section>
   );
 }
@@ -806,20 +808,9 @@ function BlockedQueuePanel(): ReactElement {
         Applications parked when hitting anti-bot walls, captchas, or custom portal auth.
         Constraint #5 strictly prohibits automated bypass; finish manually and record outcome.
       </p>
-      {/* The three resolutions keep their meanings, now beside working buttons. */}
-      <RecoveryQueue
-        status="blocked_needs_human"
-        verb={(to) => `Resolve as ${to}`}
-        meaning={(to) =>
-          to === 'applied'
-            ? 'Submitted manually by you in the browser'
-            : to === 'dropped_filter'
-              ? 'Abandoned: disqualified or unwanted portal requirements'
-              : to === 'failed'
-                ? 'Fatal obstacle or unresolvable submission error'
-                : null
-        }
-      />
+      {/* The three resolutions, in the same manual-action wording as the verification queue; each row
+          shows its block reason and apply link, so a captcha-blocked application can be finished by hand. */}
+      <RecoveryQueue status="blocked_needs_human" verb={manualActionVerb} meaning={manualActionMeaning} />
     </section>
   );
 }

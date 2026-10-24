@@ -16,6 +16,10 @@
  *  - A row at `applying` whose worker lease has not expired cannot be moved from here: the operator
  *    cannot see whether a live worker is mid-submit, and the stamp guard does not catch a live lease.
  *  - A capped read says it is capped: a list that silently stops at the limit looks complete.
+ *  - Every row shows WHY it is waiting and its apply link (2026-10-24), because the two manual-action
+ *    queues are where the operator finishes a captcha-blocked submit or checks an unconfirmed one by
+ *    hand. The link goes through safeHref: apply_url is UNTRUSTED board data, and a javascript: URL
+ *    must never become a clickable href.
  */
 
 // Hooks for the read, the per-row locks, the outcome notes and the stale-read guard.
@@ -34,6 +38,8 @@ import { heldReason } from '../../data/humanLanes';
 import { advanceRecovery, confirmText, describeRecovery } from './advanceRecovery';
 // The structural client type the engine takes, and the outcome kinds the strip colours by.
 import type { RecoveryClient, RecoveryOutcome } from './advanceRecovery';
+// The one gate between untrusted board URLs and an href: only http(s) passes, everything else is undefined.
+import { safeHref } from '../../app/safeHref';
 
 /* How many rows one queue shows. One more is fetched, so "there are more" is a fact, not a guess. */
 const QUEUE_LIMIT = 50;
@@ -48,6 +54,10 @@ interface QueueRow {
   readonly label: string;
   // The worker lease's expiry exactly as returned, or null when there is no lease.
   readonly leaseUntil: string | null;
+  // The posting's apply URL after safeHref; undefined when absent or not a safe http(s) URL.
+  readonly applyHref: string | undefined;
+  // Why the row is waiting, in one sentence (queueReason).
+  readonly reason: string;
 }
 
 /* The read's three honest states: an empty list is only ever shown after a SUCCESSFUL read. */
@@ -84,6 +94,69 @@ function rowLabel(id: string, jobs: unknown): string {
   if (title !== null && company !== null) return `${title} at ${company}`;
   // One of them, or the id prefix so the operator can still tell rows apart.
   return title ?? company ?? `application ${id.slice(0, 8)}`;
+}
+
+/* The job's apply URL through safeHref, from the same loose join shape rowLabel reads. */
+function rowApplyHref(jobs: unknown): string | undefined {
+  // Same to-many tolerance as rowLabel.
+  const job = (Array.isArray(jobs) ? jobs[0] : jobs) as { apply_url?: unknown } | null | undefined;
+  // Only a string can be a URL; safeHref then refuses anything that is not http(s).
+  return typeof job?.apply_url === 'string' ? safeHref(job.apply_url) : undefined;
+}
+
+/* Why a row sits in this queue, in the operator's words. A missing reason is SAID, never left blank:
+   an empty cell would read as "nothing wrong". */
+function queueReason(status: ApplicationStatus, blockReason: unknown, failureReason: unknown): string {
+  // The sweeper's lane: the worker reached the submit and nobody knows whether it landed (constraint 7).
+  if (status === 'needs_verification') return 'Submit outcome unknown: the worker may already have submitted. Check the posting or your inbox before choosing; never resubmit blind.';
+  // The worker stopped and handed over; block_reason is the enum value (captcha, mfa, ...).
+  if (status === 'blocked_needs_human') return typeof blockReason === 'string' && blockReason !== '' ? `Blocked: ${blockReason.replace(/_/g, ' ')}` : 'Blocked: reason not recorded';
+  // A failed row carries its failure_reason when the agent wrote one.
+  if (status === 'failed') return typeof failureReason === 'string' && failureReason.trim() !== '' ? `Failed: ${failureReason}` : 'Failed: reason not recorded';
+  // A row at applying is mid-submit, or its worker died before the sweeper ran.
+  if (status === 'applying') return 'Submit in progress, or the worker died mid-submit.';
+  // Any other status this component is pointed at: name it rather than invent a reason.
+  return `At ${status}`;
+}
+
+/* One raw row of the queue's select, validated into a QueueRow, or null when it cannot be moved
+   safely. Exported so a test parses exactly what the read parses. */
+export function parseQueueRow(status: ApplicationStatus, raw: unknown): QueueRow | null {
+  // Anything but an object has no fields to read.
+  if (typeof raw !== 'object' || raw === null) return null;
+  // Read loosely, then each field is proven below.
+  const r = raw as { id?: unknown; updated_at?: unknown; claim_expires_at?: unknown; block_reason?: unknown; failure_reason?: unknown; jobs?: unknown };
+  // Both are required for a guarded move; a row missing either is skipped, not guessed.
+  if (typeof r.id !== 'string' || typeof r.updated_at !== 'string') return null;
+  // A lease is a string or absent; anything else counts as no lease.
+  const leaseUntil = typeof r.claim_expires_at === 'string' ? r.claim_expires_at : null;
+  // Shaped for the table.
+  return { id: r.id, stamp: r.updated_at, label: rowLabel(r.id, r.jobs), leaseUntil, applyHref: rowApplyHref(r.jobs), reason: queueReason(status, r.block_reason, r.failure_reason) };
+}
+
+/* Button text for the two manual-action queues (needs_verification, blocked_needs_human): the words
+   the operator thinks in, not the status names. Exported so the page and the test share one wording. */
+export function manualActionVerb(to: ApplicationStatus): string {
+  // The resolve after finishing the application by hand, or confirming the worker's submit landed.
+  if (to === 'applied') return 'I applied (mark applied)';
+  // The give-up resolve.
+  if (to === 'failed') return 'Failed / skip';
+  // blocked_needs_human's third edge: not worth finishing.
+  if (to === 'dropped_filter') return 'Drop (not worth finishing)';
+  // Any other edge (needs_verification -> approved, held) keeps the plain form.
+  return `Mark as ${to}`;
+}
+
+/* The one-line meaning under each manual-action button. */
+export function manualActionMeaning(to: ApplicationStatus): string | null {
+  // Says when "applied" is true, so it is never clicked on hope.
+  if (to === 'applied') return 'You submitted it yourself, or checked the portal or your inbox and it went through.';
+  // The terminal give-up.
+  if (to === 'failed') return 'It did not go through and you are not finishing it.';
+  // The blocked queue's abandon edge, in the words that queue already used.
+  if (to === 'dropped_filter') return 'Abandoned: disqualified or unwanted portal requirements.';
+  // The held edge shows its own reason instead.
+  return null;
 }
 
 /* Why a row cannot be moved right now beyond the edge itself, or null. Only `applying` has a lease. */
@@ -145,8 +218,8 @@ export function RecoveryQueue(props: {
       const { data, error } = await supabase
         // The rows themselves, under RLS (only this user's).
         .from('applications')
-        // Exactly what the table and the move need, plus the lease for the applying queue.
-        .select('id, updated_at, claim_expires_at, jobs:job_id(title, company_name)')
+        // What the table and the move need: the lease for applying, the reasons, and the apply URL.
+        .select('id, updated_at, claim_expires_at, block_reason, failure_reason, jobs:job_id(title, company_name, apply_url)')
         // This queue's status only.
         .eq('status', status)
         // Longest-stuck first.
@@ -158,13 +231,11 @@ export function RecoveryQueue(props: {
       // Validate the shape row by row: a row without a string id or stamp cannot be moved safely.
       const rows: QueueRow[] = [];
       // data is typed loosely by the select string, so each field is checked rather than trusted.
-      for (const raw of (data ?? []) as ReadonlyArray<{ id?: unknown; updated_at?: unknown; claim_expires_at?: unknown; jobs?: unknown }>) {
-        // Both are required for a guarded move; a row missing either is skipped, not guessed.
-        if (typeof raw.id !== 'string' || typeof raw.updated_at !== 'string') continue;
-        // A lease is a string or absent; anything else is treated as no lease only when it is null.
-        const leaseUntil = typeof raw.claim_expires_at === 'string' ? raw.claim_expires_at : null;
-        // Shaped for the table.
-        rows.push({ id: raw.id, stamp: raw.updated_at, label: rowLabel(raw.id, raw.jobs), leaseUntil });
+      for (const raw of (data ?? []) as readonly unknown[]) {
+        // The same parse the test pins; null means the row cannot be moved safely.
+        const row = parseQueueRow(status, raw);
+        // Skipped, not guessed.
+        if (row !== null) rows.push(row);
       }
       // Counted on the raw answer, before validation, so a skipped row cannot hide the overflow.
       const more = (data ?? []).length > QUEUE_LIMIT;
@@ -276,78 +347,135 @@ export function RecoveryQueue(props: {
               </thead>
               {/* One row per stuck application, oldest first, as read. */}
               <tbody>
-                {read.rows.map((row) => {
-                  // In flight, or frozen after an unknown outcome: every move on this row is off.
-                  const locked = busy.has(row.id) || frozen.has(row.id);
-                  // A live worker lease blocks every move on an applying row.
-                  const lease = leaseBlock(status, row, now);
-                  return (
-                    /* Keyed by the row's id: the lock, the note and the stamp all follow the same row. */
-                    <tr key={row.id}>
-                      {/* The row in words; the id stays available in the title for anyone who copies it. */}
-                      <th scope="row" className="table__id recovery__label" title={row.id}>
-                        {/* The same label the confirm dialog and the outcome note use, so all three match. */}
-                        {row.label}
-                        {/* The raw stamp, under the label: the same string the move's guard compares. */}
-                        <span className="recovery__stamp identifier">changed {row.stamp}</span>
-                      </th>
-                      {/* The moves cell: one line per human edge out of this status. */}
-                      <td>
-                        {/* Stacked so a held move's reason sits under its own button. */}
-                        <div className="recovery__moves">
-                          {/* Built from the graph, so a new human edge appears here with no edit. */}
-                          {moves.map((to) => {
-                            // Deliberately off edges show their reason instead of firing.
-                            const held = heldReason(status, to);
-                            // The optional meaning line for this move.
-                            const why = meaning?.(to) ?? null;
-                            // One id per row and move, so the button can point at its own explanation.
-                            const noteId = `recovery-${row.id}-${to}`;
-                            // Whichever explanation applies, held first (it is permanent), then the lease.
-                            const blocker = held ?? lease;
-                            return (
-                              /* Keyed by target: a status has at most one edge to each target. */
-                              <div key={to} className="recovery__move">
-                                <button
-                                  /* type=button: never a form submit, whatever this is nested in later. */
-                                  type="button"
-                                  /* The page's existing recovery-button look, so the four queues match. */
-                                  className="health-recovery-button"
-                                  /* Off when held, while a lease is live, or while the row is locked. */
-                                  disabled={blocker !== null || locked}
-                                  /* A specific accessible name: every row has the same verbs, so the row is named too. */
-                                  aria-label={`${verb(to)}: ${row.label}`}
-                                  /* Ties the reason to the button, for screen readers that reach a disabled control. */
-                                  aria-describedby={blocker !== null || why !== null ? noteId : undefined}
-                                  /* The write, through the confirm and the locks above. */
-                                  onClick={() => void move(row, to)}
-                                >
-                                  {/* The visible verb; the row name is in aria-label, where the eye does not need it. */}
-                                  {verb(to)}
-                                </button>
-                                {/* Why it is off (HELD_HUMAN_EDGES' own words, or the lease), else what it means. */}
-                                {blocker !== null ? (
-                                  /* The reason the button is off; its id is what aria-describedby points at. */
-                                  <span id={noteId} className="recovery__held">{blocker}</span>
-                                ) : why !== null ? (
-                                  /* Otherwise the move's meaning, under the same id for the same reason. */
-                                  <span id={noteId} className="recovery__why">{why}</span>
-                                ) : null}
-                              </div>
-                            );
-                          })}
-                          {/* Said once per frozen row, so its disabled buttons are explained. */}
-                          {frozen.has(row.id) ? <span className="recovery__held">Outcome unknown: reload before moving this row again.</span> : null}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
+                {read.rows.map((row) => (
+                  /* Keyed by the row's id: the lock, the note and the stamp all follow the same row. */
+                  <RecoveryRowView
+                    key={row.id}
+                    /* The queue's status: the held-edge lookup needs it. */
+                    status={status}
+                    /* The validated row. */
+                    row={row}
+                    /* The graph's human moves out of this status. */
+                    moves={moves}
+                    /* The page's button wording. */
+                    verb={verb}
+                    /* The optional meaning line per move. */
+                    meaning={meaning}
+                    /* In flight, or frozen after an unknown outcome: every move on this row is off. */
+                    locked={busy.has(row.id) || frozen.has(row.id)}
+                    /* Frozen alone, for its own explanation line. */
+                    frozen={frozen.has(row.id)}
+                    /* A live worker lease blocks every move on an applying row. */
+                    lease={leaseBlock(status, row, now)}
+                    /* The write, through the confirm and the locks in move(). */
+                    onMove={(to) => void move(row, to)}
+                  />
+                ))}
               </tbody>
             </table>
           </div>
         </>
       )}
     </>
+  );
+}
+
+/* One queue row, as drawn. Pure: everything it shows arrives as props, so a static render in a test
+   draws exactly what the operator sees (no fetch, no effect). RecoveryQueue owns the state and locks. */
+export function RecoveryRowView(props: {
+  // The queue's status, for the held-edge lookup.
+  readonly status: ApplicationStatus;
+  // The validated row.
+  readonly row: QueueRow;
+  // The human moves out of this status, from the graph.
+  readonly moves: readonly ApplicationStatus[];
+  // Button text per move.
+  readonly verb: (to: ApplicationStatus) => string;
+  // Optional meaning line per move.
+  readonly meaning?: ((to: ApplicationStatus) => string | null) | undefined;
+  // True while a move is in flight or after an unknown outcome.
+  readonly locked: boolean;
+  // True after an unknown outcome only.
+  readonly frozen: boolean;
+  // The live-lease sentence, or null.
+  readonly lease: string | null;
+  // Called with the target status when a move's button is clicked.
+  readonly onMove: (to: ApplicationStatus) => void;
+}): ReactElement {
+  // Destructured once for readability below.
+  const { status, row, moves, verb, meaning, locked, frozen, lease, onMove } = props;
+  return (
+    /* One table row per application. */
+    <tr>
+      {/* The row in words; the id stays available in the title for anyone who copies it. */}
+      <th scope="row" className="table__id recovery__label" title={row.id}>
+        {/* The same label the confirm dialog and the outcome note use, so all three match. */}
+        {row.label}
+        {/* Why it is waiting, before anything else, so the operator knows what to check. */}
+        <span className="recovery__reason">{row.reason}</span>
+        {/* The posting itself, to finish or check the application by hand; safeHref already vetted it. */}
+        {row.applyHref !== undefined ? (
+          /* New tab so the queue stays open; noopener noreferrer so the employer page gets no handle back. */
+          <a className="recovery__apply" href={row.applyHref} target="_blank" rel="noopener noreferrer">
+            {/* The action, in words. */}
+            Open the application page
+          </a>
+        ) : (
+          /* Said, not hidden: a row with no safe link must be found another way. */
+          <span className="recovery__held">Apply link unavailable (missing, or not a safe http(s) URL).</span>
+        )}
+        {/* The raw stamp, under the label: the same string the move's guard compares. */}
+        <span className="recovery__stamp identifier">changed {row.stamp}</span>
+      </th>
+      {/* The moves cell: one line per human edge out of this status. */}
+      <td>
+        {/* Stacked so a held move's reason sits under its own button. */}
+        <div className="recovery__moves">
+          {/* Built from the graph, so a new human edge appears here with no edit. */}
+          {moves.map((to) => {
+            // Deliberately off edges show their reason instead of firing.
+            const held = heldReason(status, to);
+            // The optional meaning line for this move.
+            const why = meaning?.(to) ?? null;
+            // One id per row and move, so the button can point at its own explanation.
+            const noteId = `recovery-${row.id}-${to}`;
+            // Whichever explanation applies, held first (it is permanent), then the lease.
+            const blocker = held ?? lease;
+            return (
+              /* Keyed by target: a status has at most one edge to each target. */
+              <div key={to} className="recovery__move">
+                <button
+                  /* type=button: never a form submit, whatever this is nested in later. */
+                  type="button"
+                  /* The page's existing recovery-button look, so the four queues match. */
+                  className="health-recovery-button"
+                  /* Off when held, while a lease is live, or while the row is locked. */
+                  disabled={blocker !== null || locked}
+                  /* A specific accessible name: every row has the same verbs, so the row is named too. */
+                  aria-label={`${verb(to)}: ${row.label}`}
+                  /* Ties the reason to the button, for screen readers that reach a disabled control. */
+                  aria-describedby={blocker !== null || why !== null ? noteId : undefined}
+                  /* The write, through the queue's confirm and locks. */
+                  onClick={() => onMove(to)}
+                >
+                  {/* The visible verb; the row name is in aria-label, where the eye does not need it. */}
+                  {verb(to)}
+                </button>
+                {/* Why it is off (HELD_HUMAN_EDGES' own words, or the lease), else what it means. */}
+                {blocker !== null ? (
+                  /* The reason the button is off; its id is what aria-describedby points at. */
+                  <span id={noteId} className="recovery__held">{blocker}</span>
+                ) : why !== null ? (
+                  /* Otherwise the move's meaning, under the same id for the same reason. */
+                  <span id={noteId} className="recovery__why">{why}</span>
+                ) : null}
+              </div>
+            );
+          })}
+          {/* Said once per frozen row, so its disabled buttons are explained. */}
+          {frozen ? <span className="recovery__held">Outcome unknown: reload before moving this row again.</span> : null}
+        </div>
+      </td>
+    </tr>
   );
 }

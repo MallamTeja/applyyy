@@ -341,3 +341,17 @@ export function isHumanOnlyLane(
     (transition) => transition.from === from && transition.to === to,
   );
 }
+
+/* The two lanes where a job waits for the operator to finish or check it BY HAND (2026-10-24):
+ * needs_verification (the worker submitted, outcome unknown) and blocked_needs_human (captcha, MFA,
+ * an unanswerable question). Both queues live on System health; the rail badge counts these rows so
+ * "a job needs you" is visible without opening that page. `applying` is deliberately absent: a live
+ * lease is normal in-flight work, not a job waiting on the operator. */
+export const MANUAL_ACTION_STATUSES: readonly ApplicationStatus[] = ['needs_verification', 'blocked_needs_human'];
+
+/* Rows waiting in the manual-action lanes, from per-status counts. An absent key is a lane with no
+ * rows (the GROUP BY omits it), so it adds 0; the caller decides whether the counts were read at all. */
+export function manualActionCount(counts: Readonly<Partial<Record<ApplicationStatus, number>>>): number {
+  // Summed over the two lanes only, so no other status can inflate the badge.
+  return MANUAL_ACTION_STATUSES.reduce((sum, status) => sum + (counts[status] ?? 0), 0);
+}
