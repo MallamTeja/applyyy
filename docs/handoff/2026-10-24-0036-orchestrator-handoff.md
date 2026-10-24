@@ -41,6 +41,12 @@ Progress questions get a % toward the product goal, re-derived at ask time (CLAU
 
 ## Rescue branches — in-flight work cut off by the 00:32 shutdown
 
+> **RESOLVED 2026-10-24 ~13:00 IST — these branches no longer exist.** Their content was
+> landed on main (7501a95, 10bfbc3, and the headless-pass docs) and a read-only content
+> audit found no line missing from main, so all three rescue branches were deleted, local
+> and remote, on Teja's ruling. Do not try to resume from them; resume from `main`.
+> The history below is kept for context only.
+
 1. **`rescue/2026-10-24-1050-full`** — THE branch to resume from (updated 2026-10-24
    10:55: it carries the FINAL tree state as `wip(rescue3)` and supersedes
    `rescue/2026-10-24-0032-session-end`, a stale partial snapshot kept only as history;
