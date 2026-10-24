@@ -1,19 +1,24 @@
-// CLI: build the manual apply kit for ONE application (worker/src/apply-kit.ts).
+// CLI: build manual apply kits (worker/src/apply-kit.ts).
 //
-//   node src/cli/apply-kit.ts --id <application-uuid>
-//   (or APPLY_KIT_ID=<uuid>, which .github/workflows/apply-kit.yml sets)
+//   node src/cli/apply-kit.ts --id <application-uuid>   ONE application (or APPLY_KIT_ID=<uuid>)
+//   node src/cli/apply-kit.ts                            SWEEP: every row waiting on Teja whose
+//                                                        kit is missing or older than its last
+//                                                        status change (worker/src/apply-kit-sweep.ts)
+//
+// The sweep is how kits are made normally: .github/workflows/apply-kit.yml runs it after
+// every applier run and daily, so nobody dispatches a kit by hand (Teja, 2026-10-24).
 //
 // Opens the application's live form, plans every field from our data, renders a fresh
 // resume with the latest master's identity, and appends ONE application_events note.
 // It never claims, moves, fills or submits: Greenhouse's captcha refuses CI SUBMITS, but
 // loading a form is fine, which is all this does.
 import { chromium } from 'playwright';
-// The UUID shape check the applier uses for APPLY_ONLY_ID, so both refuse the same junk.
-import { parseOnlyApplicationId } from '../claim-loop.ts';
 // The robots gate under the applier's token: the kit loads the same page the applier would.
 import { createRobotsCheck } from '../apply-one.ts';
 // The kit itself, and its gateway over the supabase client.
-import { buildApplyKit, createKitGateway } from '../apply-kit.ts';
+import { buildApplyKit, createKitGateway, type ApplyKitDetail } from '../apply-kit.ts';
+// The sweep: which rows are due, and the loop that builds them one by one.
+import { createSweepReader, parseKitTarget, runKitSweep } from '../apply-kit-sweep.ts';
 // The production page adapter; the kit receives only its read-only operations.
 import { createPlaywrightPage } from '../playwright-page.ts';
 // The renderer apply-one uses, so the kit's PDF is the bot's PDF.
@@ -32,31 +37,52 @@ function required(name: string): string {
   return value;
 }
 
-/** The application id from `--id <uuid>` or APPLY_KIT_ID, validated by shape. */
-function readApplicationId(argv: readonly string[]): string {
+/** The application id from `--id <uuid>` or APPLY_KIT_ID, validated by shape; undefined means sweep. */
+function readApplicationId(argv: readonly string[]): string | undefined {
   // The flag wins over the variable, so a local run can override an exported one.
   const flagIndex = argv.indexOf('--id');
-  // The value after the flag, or the environment's.
+  // The value after the flag, or the environment's (the workflow passes '' when no id is given).
   const raw = flagIndex >= 0 ? argv[flagIndex + 1] : process.env['APPLY_KIT_ID'];
-  // Shape-checked like APPLY_ONLY_ID; absent is an error here, since a kit is always for one row.
-  let id: string | undefined;
-  try {
-    // The applier's parser, so both refuse the same junk.
-    id = parseOnlyApplicationId(raw);
-  } catch {
-    // Re-thrown under this CLI's own names: the parser's message names APPLY_ONLY_ID.
-    throw new Error(`--id / APPLY_KIT_ID must be an application UUID; got ${JSON.stringify(raw)}`);
-  }
-  // parseOnlyApplicationId returns undefined only for an absent value.
-  if (id === undefined) throw new Error('usage: apply-kit --id <application-uuid> (or APPLY_KIT_ID)');
-  // Lower-cased by the parser, so it matches the stored uuid exactly.
-  return id;
+  // Blank selects the sweep, junk is refused (tested in apply-kit-sweep.test.ts).
+  return parseKitTarget(raw);
 }
 
-/** Sign in as the app user, build one kit, print it, and close the browser either way. */
+/** The sweep's per-run cap from APPLY_KIT_SWEEP_CAP, default 5; anything but a positive integer is refused. */
+function readSweepCap(): number {
+  // Unset means the default: five page loads and renders fit well inside the job timeout.
+  const raw = process.env['APPLY_KIT_SWEEP_CAP'];
+  if (raw === undefined || raw === '') return 5;
+  // Digits only, so "5abc" or "-1" cannot become a number by a lenient parse (§6).
+  if (!/^[1-9]\d*$/.test(raw)) throw new Error(`APPLY_KIT_SWEEP_CAP must be a positive integer; got ${JSON.stringify(raw)}`);
+  return Number(raw);
+}
+
+/** Logs one built kit WITHOUT its values (see the comment at the call site). */
+function logKit(applicationId: string, kit: ApplyKitDetail, perField: boolean): void {
+  // The one-line summary: counts only.
+  console.log(`[apply-kit] ${applicationId}: ${kit.fields.length} fields, resume ${kit.resume === null ? 'none' : 'rendered'}; full kit in the application's apply_kit note`);
+  // Every field by its question, for a single-row run where someone is reading the log.
+  if (perField) {
+    for (const field of kit.fields) {
+      // The form's own label and our source only; never the value.
+      console.log(`[apply-kit]   ${field.required ? '*' : ' '} ${field.label}: ${field.value === null ? '(you answer)' : 'filled'} [${field.source}]`);
+    }
+  }
+  // Every warning; identity-drift warnings name the fact, not its values.
+  for (const warning of kit.warnings) {
+    // "identity.email: the row's ... has "<old>", the latest master has "<new>"" becomes its key alone.
+    const safe = warning.startsWith('identity.') ? `${warning.split(':')[0]}: differs between the row's tailored_profile and the latest master (values in the note)` : warning;
+    // Refusal warnings carry only the form's question text, which is safe to print.
+    console.warn(`[apply-kit] WARNING ${applicationId}: ${safe}`);
+  }
+}
+
+/** Sign in as the app user, build one kit (or sweep), print counts only, and close the browser either way. */
 async function main(): Promise<void> {
-  // Validated before any sign-in, so a typo costs nothing.
+  // Validated before any sign-in, so a typo costs nothing; undefined selects the sweep.
   const applicationId = readApplicationId(process.argv.slice(2));
+  // Read up front too, so a bad cap fails before a browser starts.
+  const sweepCap = applicationId === undefined ? readSweepCap() : 0;
   // Required up front: without it the note insert fails closed with 42501.
   required(AGENT_KEY_ENV_VAR);
   // Connection and the ordinary app-user account, exactly as the applier signs in (RLS applies).
@@ -91,42 +117,56 @@ async function main(): Promise<void> {
   // The renderer owns its own page, never the form's.
   const renderer = createResumeRenderer(browser);
   // Closed in `finally`, whatever the kit does.
-  try {
-    // A fresh page for the form, wrapped in the production adapter.
-    const page = createPlaywrightPage(await browser.newPage());
-    // The kit: reads, one resume upload, one note.
-    const kit = await buildApplyKit({
-      // The one row, already shape-checked.
-      applicationId,
-      // Reads and the two allowed writes; no status method exists on it.
-      gateway: createKitGateway(client, { userId }),
-      // Narrowed by the kit's type to goto, extractFields and detectBlocker.
-      page,
-      // The applier's renderer, so the PDF matches a bot run's.
-      renderResume: renderer.render,
-      // The applier's robots token, so the kit loads only what the applier may.
-      checkRobots: createRobotsCheck(),
-      // The Actions run id when dispatched there, so the note links back to its log.
-      runId: process.env['GITHUB_RUN_ID'] ?? null,
-      // The real clock for generated_at.
-      now: () => new Date(),
-    });
-    // NO VALUES IN THE LOG. Field values are Teja's contact details and answers, and an
-    // Actions log is kept for 90 days and readable by every collaborator. The full kit,
-    // values included, is the RLS-protected application_events note; the log says only
-    // what was planned, so a run can be checked without exposing any of it.
-    console.log(`[apply-kit] ${applicationId}: ${kit.fields.length} fields, resume ${kit.resume === null ? 'none' : 'rendered'}; full kit in the application's apply_kit note`);
-    // Every field by its question: `*` marks required, "(you answer)" what the system refused to guess.
-    for (const field of kit.fields) {
-      // The form's own label and our source only; never the value.
-      console.log(`[apply-kit]   ${field.required ? '*' : ' '} ${field.label}: ${field.value === null ? '(you answer)' : 'filled'} [${field.source}]`);
+  // One gateway for every kit in this run: reads and the two allowed writes, no status method.
+  const gateway = createKitGateway(client, { userId });
+  // Builds ONE kit on its own fresh page, which is closed afterwards so a sweep does not pile pages up.
+  const buildOne = async (id: string): Promise<ApplyKitDetail> => {
+    // A fresh tab per row: one form's state never leaks into the next.
+    const tab = await browser.newPage();
+    try {
+      // The kit: reads, one resume upload, one note.
+      return await buildApplyKit({
+        // The one row; buildApplyKit re-checks its status before touching anything.
+        applicationId: id,
+        gateway,
+        // Narrowed by the kit's type to goto, extractFields and detectBlocker.
+        page: createPlaywrightPage(tab),
+        // The applier's renderer, so the PDF matches a bot run's.
+        renderResume: renderer.render,
+        // The applier's robots token, so the kit loads only what the applier may.
+        checkRobots: createRobotsCheck(),
+        // The Actions run id when run there, so the note links back to its log.
+        runId: process.env['GITHUB_RUN_ID'] ?? null,
+        // The real clock for generated_at.
+        now: () => new Date(),
+      });
+    } finally {
+      // Closed whatever happened, so a failed row does not hold a tab open.
+      await tab.close();
     }
-    // Every warning, last, where the eye lands; identity-drift warnings name the fact, not its values.
-    for (const warning of kit.warnings) {
-      // "identity.email: the row's ... has "<old>", the latest master has "<new>"" becomes its key alone.
-      const safe = warning.startsWith('identity.') ? `${warning.split(':')[0]}: differs between the row's tailored_profile and the latest master (values in the note)` : warning;
-      // Refusal warnings carry only the form's question text, which is safe to print.
-      console.warn(`[apply-kit] WARNING: ${safe}`);
+  };
+  // NO VALUES IN THE LOG, in either mode. Field values are Teja's contact details and answers,
+  // and an Actions log is kept for 90 days and readable by every collaborator. The full kit,
+  // values included, is the RLS-protected application_events note; the log says only what
+  // was planned, so a run can be checked without exposing any of it.
+  try {
+    if (applicationId !== undefined) {
+      // ONE row: a failure throws to the catch below and the run goes red.
+      logKit(applicationId, await buildOne(applicationId), true);
+    } else {
+      // THE SWEEP: every due row, capped, one failure never stopping the rest.
+      const summary = await runKitSweep({
+        // The two reads, over the same signed-in client (RLS applies).
+        ...createSweepReader(client),
+        // Each kit's counts reach the log; its values never do.
+        buildOne: async (id) => logKit(id, await buildOne(id), false),
+        cap: sweepCap,
+        log: (line) => console.log(line),
+      });
+      // The totals as one line, so the run page shows the outcome at a glance.
+      console.log(`[apply-kit sweep] done: eligible ${summary.eligible}, attempted ${summary.attempted}, built ${summary.built}, failed ${summary.failed.length}`);
+      // A failed row turns the run red so it is seen, after every other row has had its turn.
+      if (summary.failed.length > 0) process.exitCode = 1;
     }
   } finally {
     // Both closed, so a failed kit does not keep Chromium (and the Actions job) alive.

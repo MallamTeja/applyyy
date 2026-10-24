@@ -1,21 +1,36 @@
-name: applyy apply kit (one application, manual)
+name: applyy apply kit (automatic sweep, or one application)
 
-# Builds the MANUAL APPLY KIT for one application (worker/src/apply-kit.ts): opens its
-# live form, plans every field from our data, renders a fresh resume with the latest
-# master's identity, and appends ONE application_events note the dashboard shows.
+# Builds MANUAL APPLY KITS (worker/src/apply-kit.ts): for each application, opens its live
+# form, plans every field from our data, renders a fresh resume with the latest master's
+# identity, and appends ONE application_events note the dashboard shows.
 # It never claims, moves, fills or submits a row. Greenhouse's reCAPTCHA refuses CI
 # SUBMITS (2026-10-24, captcha-failed); loading a form from CI is fine, which is all
 # this does. The robots gate still applies (worker/src/apply-one.ts createRobotsCheck).
+#
+# AUTOMATIC by default (Teja, 2026-10-24: kits are made by the system, not dispatched by
+# hand). With no application_id it SWEEPS (worker/src/apply-kit-sweep.ts): every row
+# waiting on Teja whose kit is missing or older than its last status change, capped per run.
 on:
-  # Manual only: a kit is asked for one application at a time, never on a schedule.
+  # Minutes after every applier run, since that is when rows get parked for Teja.
+  workflow_run:
+    # Must match apply.yml's `name:` exactly; GitHub matches workflow_run by name.
+    workflows: ['applyy applier (daily batch)']
+    # Any conclusion: a run that ended red may still have parked rows.
+    types: [completed]
+  # The daily backstop, for rows parked by anything other than an applier run
+  # (a sweeper move, a manual status change). 12:00 UTC = 17:30 IST, after the applier's slot.
+  schedule:
+    - cron: '0 12 * * *'
+  # By hand: blank for a sweep now, or one id to rebuild that row's kit.
   workflow_dispatch:
     inputs:
-      # The one row to build the kit for.
+      # Optional: blank runs the sweep.
       application_id:
         # Shown in the dispatch form, with the statuses the worker accepts.
-        description: 'Application UUID to build the kit for (status approved, applying, needs_verification or blocked_needs_human).'
-        # No default: a kit without a row is meaningless, and the worker refuses one anyway.
-        required: true
+        description: 'Blank = sweep every row that needs a kit. Or one application UUID (status approved, applying, needs_verification or blocked_needs_human).'
+        # Optional, so a blank dispatch sweeps; a malformed id is still refused by the worker.
+        required: false
+        default: ''
 
 # Read-only on the repository; every write the kit makes goes to Supabase under RLS.
 permissions:
@@ -24,16 +39,18 @@ permissions:
 concurrency:
   # Its own group: a kit takes no claim, so it neither blocks nor waits on the applier.
   group: applyy-apply-kit
-  # A kit only reads and appends a note, so a newer dispatch may replace a running one.
-  cancel-in-progress: true
+  # Never kill a running sweep mid-row (it would leave a rendered PDF without its note).
+  # A newer trigger waits; if several pile up, GitHub keeps only the newest pending one,
+  # which is fine because each sweep re-reads what is still due.
+  cancel-in-progress: false
 
 jobs:
   # One job: set up the worker exactly as apply.yml does, then build the kit.
   kit:
     # The same runner image the applier uses, so Chromium behaves identically.
     runs-on: ubuntu-latest
-    # One page load and one render: minutes, never an hour.
-    timeout-minutes: 15
+    # Up to the sweep cap of page loads and renders: minutes, never an hour.
+    timeout-minutes: 20
 
     # NO job-level env, for the reason apply.yml gives: only the one step that runs the
     # worker may see the app-user password and the agent key.
@@ -90,15 +107,18 @@ jobs:
         # Run through pnpm's filter so it executes inside the worker package, as apply.yml does.
         run: pnpm --filter '@applyy/worker' exec playwright install-deps chromium
 
-      # The kit. The id travels as an environment variable, never interpolated into the
+      # The kit(s). The id travels as an environment variable, never interpolated into the
       # shell line, so an input can never become a command; the worker validates its UUID shape.
-      - name: Build the apply kit
+      - name: Build apply kits (sweep, or the one given id)
         # Run through pnpm's filter so it executes inside the worker package, as apply.yml does.
         run: pnpm --filter '@applyy/worker' exec node src/cli/apply-kit.ts
         # Step-scoped, as in apply.yml: no action or install script sees these.
         env:
-          # The one application, validated by shape in the worker (claim-loop.ts parseOnlyApplicationId).
+          # One application, or '' (every automatic trigger, and a blank dispatch) for the sweep.
+          # Validated by shape in the worker (apply-kit-sweep.ts parseKitTarget).
           APPLY_KIT_ID: ${{ inputs.application_id }}
+          # The most kits one sweep builds; the rest wait for the next trigger.
+          APPLY_KIT_SWEEP_CAP: '5'
           # Supabase connection. Secrets, never committed (constraint #11).
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           # Public by design; authority comes from the app user's JWT below.
