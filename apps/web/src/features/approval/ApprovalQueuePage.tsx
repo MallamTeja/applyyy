@@ -79,6 +79,8 @@ import type { EditEventKind, StoredRow } from './saveTailoredEdit';
 // so every row can be SEEN before it is approved. Shared with the pipeline history page.
 import { ResumePreview } from '../resume-preview/ResumePreview';
 import { supabase } from '../../data/supabase';
+// Newest arrival in review first; pure, so the order is testable without rendering the page.
+import { newestInReviewFirst } from './queueOrder';
 
 import './ApprovalQueuePage.css';
 
@@ -380,7 +382,10 @@ export function ApprovalQueuePage(): ReactElement {
              jobs table does not silently start shipping it to the browser. */
           .select('*, jobs:job_id(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, description_raw)')
           .eq('status', 'awaiting_approval')
-          .order('created_at', { ascending: false });
+          /* Newest entry into review first (2026-10-24): status_changed_at is when the row reached
+             awaiting_approval, served by the (user_id, status, status_changed_at desc) index. Not
+             created_at, which is the discovery date. See queueOrder.ts. */
+          .order('status_changed_at', { ascending: false });
 
         /* `live` is a cancelled render, not a failure - a component that
            unmounted mid-fetch has nothing to report. Separated from the two
@@ -418,7 +423,8 @@ export function ApprovalQueuePage(): ReactElement {
         const masters = new Map<number, MasterProfile | null>();
         // Each row's concurrency stamp from the same read, seeded into latestStamps below.
         const stamps = new Map<string, string>();
-        for (const app of data) {
+        // Re-ordered client-side too, for the id tie-break and a malformed stamp sorting last.
+        for (const app of newestInReviewFirst(data)) {
           const job = app.jobs as unknown as JobRow | null;
           /* A missing job row used to fall back to an invented "Software Engineer at
              Target Company", so the operator approved against a job that was never
