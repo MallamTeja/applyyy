@@ -421,6 +421,35 @@ describe('applyToOne — the resume', () => {
     ]);
   });
 
+  it('an upload that never finishes stops the run BEFORE `applying`: no status write, no click', async () => {
+    // THE GITLAB SAFETY PROPERTY. attachFile throws when Greenhouse's resume upload never
+    // finishes (playwright-page.ts). Because the attach sits before `approved -> applying`,
+    // that throw must leave the row untouched and unsent: no status write at all, and
+    // submit() never called. The lease expires and the row stays `approved`.
+    const submitted: string[] = [];
+    const { page } = fakePage({
+      extractFields: async () => formWithResumeUpload,
+      attachFile: async () => {
+        throw new Error('file upload "Resume/CV" (#resume) did not finish within 30000ms');
+      },
+      submit: async () => {
+        submitted.push('submit');
+        return { kind: 'confirmed', evidence: 'test' } as const;
+      },
+    });
+    const { transitions, gateway } = fakeGateway();
+
+    // The throw propagates to the claim loop, which counts it as an error.
+    await expect(
+      applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render }),
+    ).rejects.toThrow(/did not finish/);
+
+    // No transition of any kind, and above all not `applying`.
+    expect(transitions).toEqual([]);
+    // And the one code path that sends an application never ran.
+    expect(submitted).toEqual([]);
+  });
+
   it('renders from the pinned tailored_profile, not from any stored artifact', async () => {
     // THE CENTRAL GUARANTEE: "what you approved is byte-for-byte what gets
     // sent." It holds because the artifact is DERIVED from the immutable

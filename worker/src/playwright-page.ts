@@ -105,6 +105,12 @@ const SUBMIT_POLL_INTERVAL_MS = 250;
 // with no request that could carry the application, before it is believed. Longer than
 // an invisible-reCAPTCHA token round trip, which is what can delay a real send.
 const REJECTION_SETTLE_MS = 5_000;
+// How long attachFile waits for Greenhouse's S3 upload to reach its done state. The
+// resume is a few hundred KB, which a runner uploads in a second or two; 30s is an
+// order of magnitude of slack for a slow S3 region. It is spent BEFORE `applying`, so a
+// timeout costs only run time, never an unknown outcome; and it must be finite, because
+// the widget's XHR error handler only logs and a failed upload never leaves its bar.
+const FILE_UPLOAD_TIMEOUT_MS = 30_000;
 // Request types that can carry form data whatever their method (see submit()).
 const SEND_CAPABLE_TYPES: ReadonlySet<string> = new Set(['xhr', 'fetch', 'document', 'ping', 'eventsource']);
 // ponytail: WebSocket frames are invisible here (Chromium reports sockets as `websocket`
@@ -395,6 +401,8 @@ export interface PlaywrightPageOptions {
   readonly submitOutcomeTimeoutMs?: number;
   // How long a "nothing was sent" answer must hold. Tests set it low for speed.
   readonly rejectionSettleMs?: number;
+  // How long attachFile waits for a Greenhouse upload to finish; FILE_UPLOAD_TIMEOUT_MS by default.
+  readonly fileUploadTimeoutMs?: number;
 }
 
 export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions = {}): ClosableApplicationPage {
@@ -402,6 +410,8 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
   const submitOutcomeTimeoutMs = options.submitOutcomeTimeoutMs ?? SUBMIT_OUTCOME_TIMEOUT_MS;
   // The settle window submit() uses: the test override, or the production constant.
   const rejectionSettleMs = options.rejectionSettleMs ?? REJECTION_SETTLE_MS;
+  // The bound on a Greenhouse file upload finishing; overridable so tests fail fast.
+  const fileUploadTimeoutMs = options.fileUploadTimeoutMs ?? FILE_UPLOAD_TIMEOUT_MS;
   /** Whether any challenge frame is on screen now. Shared by detectBlocker and submit. */
   async function visibleChallenge(): Promise<boolean> {
     for (const selector of VISIBLE_CHALLENGE_SELECTORS) {
@@ -684,6 +694,41 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
         // VIEWS the same memory rather than copying it.
         buffer: Buffer.from(file.bytes),
       });
+
+      // GREENHOUSE UPLOADS ASYNCHRONOUSLY, AND THE FILE IS NOT "ATTACHED" UNTIL IT LANDS.
+      // Its job-boards widget sends the chosen file to S3 and only then records it; the
+      // application POST carries `resume_url` solely from that finished state. Returning
+      // here at once meant the click could send an application WITHOUT the resume: every
+      // pre-click screenshot of GitLab ba1e5d1d (2026-10-10 and 2026-10-24) showed the
+      // required Resume/CV box as an empty progress bar about a second before the click.
+      // Scoped to the widget's own DOM shape: a `.file-upload` group around this input.
+      // Any other file input keeps the set-and-return path above, unchanged.
+      const group = page.locator('.file-upload').filter({ has: page.locator(byId(id)) });
+      // No widget around this input: nothing to wait for.
+      if ((await group.count()) === 0) return;
+      // The widget's DONE state: the file's own name shown in the filename row.
+      const done = group.locator('.file-upload__filename', { hasText: file.name });
+      // Its UPLOADING state, which must be gone too.
+      const uploading = group.locator('[role="progressbar"].file-upload__progressbar');
+      try {
+        // Bounded, because the widget's XHR error handler only logs: a failed upload
+        // never leaves the progress state, and an unbounded wait would hang the job.
+        await done.first().waitFor({ state: 'visible', timeout: fileUploadTimeoutMs });
+        // The two states are exclusive in the widget's render; checked, not assumed.
+        if ((await uploading.count()) > 0) throw new Error('progress bar still shown beside the file name');
+      } catch (error) {
+        // The label a human sees ("Resume/CV"), read off the group's aria-labelledby; best effort.
+        const labelId = await group.first().getAttribute('aria-labelledby').catch(() => null);
+        // An absent or unreadable label falls back to the id alone.
+        const label = labelId === null ? null : (await page.locator(byId(labelId)).first().textContent().catch(() => null))?.trim() ?? null;
+        // THROWN, NOT PARKED: attachFile runs before `approved -> applying` (apply-one.ts),
+        // so a throw here is a no-status-write stop. Nothing was clicked and nothing sent;
+        // the row keeps its lease, stays `approved`, and the claim loop counts an error.
+        throw new Error(
+          `file upload ${label === null ? '' : `"${label}" `}(#${id}) did not finish within ${fileUploadTimeoutMs}ms; ` +
+            `submitting now would send the application without it (${error instanceof Error ? error.message : String(error)})`,
+        );
+      }
     },
 
     async screenshot() {
