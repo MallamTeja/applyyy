@@ -6,48 +6,13 @@
  * tests pin the behavior both ways:
  *   hasCoverLetter && editCount > 0  -> p.diff__edit-note with the exact sentence
  *   letter without edits, or edits without a letter -> no diff__edit-note at all
- * Harness copied from clickToEdit.test.ts (resolve + load hooks; .tsx transpiled, .css
+ * Harness: support/registerTsxHooks.ts (resolve + load hooks; .tsx transpiled, .css
  * emptied). Assertions match markup SHAPE (element + class + sentence), never a bare word. */
 
+// The .tsx loader; must be the first import so it runs before any component loads.
+import './support/registerTsxHooks.ts';
 import assert from 'node:assert/strict';
-// Hooks let Node resolve the app's extensionless/.tsx imports without a bundler.
-import { registerHooks, createRequire } from 'node:module';
-// nextLoad refuses .tsx, so the load hook reads the file itself.
-import { readFileSync } from 'node:fs';
 import { describe, it, before } from 'node:test';
-// The load hook receives a URL and typescript wants a path.
-import { fileURLToPath } from 'node:url';
-
-registerHooks({
-  // Extensionless RELATIVE imports only: try the original, then .tsx, then .ts.
-  resolve(specifier, context, nextResolve) {
-    // Packages and already-extended paths resolve normally.
-    if (!specifier.startsWith('.') || /\.[cm]?[jt]sx?$|\.css$/.test(specifier)) return nextResolve(specifier, context);
-    // First the way Vite would write it, so a real .js sibling still wins.
-    try { return nextResolve(specifier, context); } catch { /* fall through to TS extensions */ }
-    // A component is the usual case for an extensionless import here.
-    try { return nextResolve(`${specifier}.tsx`, context); } catch { /* then a plain module */ }
-    // Last resort; a genuine miss throws from here with the .ts path named.
-    return nextResolve(`${specifier}.ts`, context);
-  },
-  // Same load hook as the other web render tests.
-  load(url, context, nextLoad) {
-    // Stylesheets have no runtime meaning in Node.
-    if (url.endsWith('.css')) return { format: 'module', source: '', shortCircuit: true };
-    // Only .tsx needs transpiling; .ts is type-stripped by Node itself.
-    if (!url.endsWith('.tsx')) return nextLoad(url, context);
-    // apps/web's own typescript, no new dependency.
-    const ts = createRequire(import.meta.url)('typescript') as typeof import('typescript');
-    // nextLoad refuses .tsx, so read it directly.
-    const source = readFileSync(fileURLToPath(url), 'utf8');
-    // react-jsx matches tsconfig.
-    const out = ts.transpileModule(source, {
-      compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-    });
-    // Plain ESM for Node.
-    return { format: 'module', source: out.outputText, shortCircuit: true };
-  },
-});
 
 // The component under test.
 let view: typeof import('../src/features/approval/DiffView.tsx');

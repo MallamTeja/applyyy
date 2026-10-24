@@ -9,43 +9,10 @@
  *
  * Renders the exported component, never the page: the page imports supabase.ts. */
 
+// The .tsx loader; must be the first import so it runs before any component loads.
+import './support/registerTsxHooks.ts';
 import assert from 'node:assert/strict';
-import { registerHooks, createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
 import { describe, it, before } from 'node:test';
-import { fileURLToPath } from 'node:url';
-
-// Same hooks as drawerSendPipeline.test.ts: the card has extensionless relative imports.
-registerHooks({
-  // Extensionless RELATIVE imports only: try the original, then .tsx, then .ts.
-  resolve(specifier, context, nextResolve) {
-    // Packages and already-extended paths resolve normally.
-    if (!specifier.startsWith('.') || /\.[cm]?[jt]sx?$|\.css$/.test(specifier)) return nextResolve(specifier, context);
-    // First the way Vite would write it.
-    try { return nextResolve(specifier, context); } catch { /* fall through to TS extensions */ }
-    // A component is the usual case.
-    try { return nextResolve(`${specifier}.tsx`, context); } catch { /* then a plain module */ }
-    // Last resort; a genuine miss throws with the .ts path named.
-    return nextResolve(`${specifier}.ts`, context);
-  },
-  // .css becomes empty, .tsx is transpiled with apps/web's own typescript.
-  load(url, context, nextLoad) {
-    // Stylesheets have no runtime meaning in Node.
-    if (url.endsWith('.css')) return { format: 'module', source: '', shortCircuit: true };
-    // Everything else but .tsx loads normally.
-    if (!url.endsWith('.tsx')) return nextLoad(url, context);
-    // No new dependency.
-    const ts = createRequire(import.meta.url)('typescript') as typeof import('typescript');
-    // nextLoad refuses .tsx, so read it directly.
-    const source = readFileSync(fileURLToPath(url), 'utf8');
-    // react-jsx matches tsconfig.
-    const out = ts.transpileModule(source, {
-      compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-    });
-    // Plain ESM for Node.
-    return { format: 'module', source: out.outputText, shortCircuit: true };
-  },
-});
 
 // The card module, loaded after the hooks.
 let card: typeof import('../src/features/pipeline/DrawerAppCard.tsx');
