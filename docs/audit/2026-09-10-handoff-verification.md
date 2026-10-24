@@ -178,7 +178,8 @@ a comment-every-line check before any of it is staged.
   the root's `outputDirectory`. Vercel treats the repo root as project root, so
   `apps/web/vercel.json` is inert. Deleting it needs Teja's OK (gate on
   destructive work) — but note the drift is live *today*: an editor of the dead
-  file would see their CSP change do nothing.
+  file would see their CSP change do nothing. **Resolved 2026-10-24:** deleted with
+  Teja's OK; the one test that read it by path now checks the root file only.
 - **`.playwright-mcp/` is already gitignored**, with a rationale comment
   explaining the write-into-tree + `git add -A` combination. Listed as
   outstanding in the handoff; it is done.

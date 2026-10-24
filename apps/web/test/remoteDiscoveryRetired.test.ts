@@ -33,18 +33,18 @@ describe('browser remote discovery is retired', () => {
     assert.deepEqual(match[1]!.split(',').map((s) => s.trim()).sort(), ['REMOTE_FEEDS_SCHEDULE_NOTE', 'runWatchlistScan']);
   });
 
-  it('both CSPs connect only to the hosts the app still fetches (the three feed hosts are gone)', () => {
+  it('the CSP connects only to the hosts the app still fetches (the three feed hosts are gone)', () => {
     // The exact connect-src host list the app needs: Supabase (https + realtime), the watchlist
     // scan's Ashby fallback, and the email tracker's Apps Script.
     const expected = ['https://api.ashbyhq.com', 'https://script.google.com', 'https://script.googleusercontent.com', 'https://xynqxekcqizwhtskzqrq.supabase.co', "'self'", 'wss://xynqxekcqizwhtskzqrq.supabase.co'].sort();
-    // Both configs: root (the Vercel project) and apps/web (kept in sync).
-    for (const path of ['../../../vercel.json', '../vercel.json']) {
-      // The connect-src directive out of the CSP header value.
-      const directive = /connect-src ([^;]+);/.exec(read(path));
-      // Non-vacuity: the directive was found.
-      assert.ok(directive, `${path}: no connect-src directive found; this test would be vacuous`);
-      // The closed host set.
-      assert.deepEqual(directive[1]!.trim().split(/\s+/).sort(), expected, `${path}: connect-src changed`);
-    }
+    // The root config is the only one: Vercel builds from the repo root, and the inert
+    // apps/web/vercel.json duplicate was deleted 2026-10-24 so a CSP edit can't land in a dead file.
+    const path = '../../../vercel.json';
+    // The connect-src directive out of the CSP header value.
+    const directive = /connect-src ([^;]+);/.exec(read(path));
+    // Non-vacuity: the directive was found.
+    assert.ok(directive, `${path}: no connect-src directive found; this test would be vacuous`);
+    // The closed host set.
+    assert.deepEqual(directive[1]!.trim().split(/\s+/).sort(), expected, `${path}: connect-src changed`);
   });
 });

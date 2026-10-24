@@ -67,7 +67,8 @@ command, and counts are timestamps, not facts.
   `applyy-apply-kit` concurrency group keeps only one pending run).
 - ~2026-10-31: `select idx_scan from pg_stat_user_indexes where indexrelname =
   'applications_user_status_created_id_idx'` — if 0, peer drafts a drop migration.
-- `apps/web/vercel.json` is a stale duplicate of the root `vercel.json` (root is live).
+- `apps/web/vercel.json` — DELETED 2026-10-24 with Teja's OK. It was an inert duplicate of the
+  root `vercel.json` (Vercel builds from the repo root); the root file is now the only CSP.
 - Filler: Greenhouse typeahead (School/City) picks exact options only → may park as
   `no_matching_option` (safe direction); a fuzzy-but-verified picker is a future parcel.
 
