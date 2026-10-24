@@ -1,0 +1,111 @@
+name: applyy apply kit (one application, manual)
+
+# Builds the MANUAL APPLY KIT for one application (worker/src/apply-kit.ts): opens its
+# live form, plans every field from our data, renders a fresh resume with the latest
+# master's identity, and appends ONE application_events note the dashboard shows.
+# It never claims, moves, fills or submits a row. Greenhouse's reCAPTCHA refuses CI
+# SUBMITS (2026-10-24, captcha-failed); loading a form from CI is fine, which is all
+# this does. The robots gate still applies (worker/src/apply-one.ts createRobotsCheck).
+on:
+  # Manual only: a kit is asked for one application at a time, never on a schedule.
+  workflow_dispatch:
+    inputs:
+      # The one row to build the kit for.
+      application_id:
+        # Shown in the dispatch form, with the statuses the worker accepts.
+        description: 'Application UUID to build the kit for (status approved, applying, needs_verification or blocked_needs_human).'
+        # No default: a kit without a row is meaningless, and the worker refuses one anyway.
+        required: true
+
+# Read-only on the repository; every write the kit makes goes to Supabase under RLS.
+permissions:
+  contents: read
+
+concurrency:
+  # Its own group: a kit takes no claim, so it neither blocks nor waits on the applier.
+  group: applyy-apply-kit
+  # A kit only reads and appends a note, so a newer dispatch may replace a running one.
+  cancel-in-progress: true
+
+jobs:
+  # One job: set up the worker exactly as apply.yml does, then build the kit.
+  kit:
+    # The same runner image the applier uses, so Chromium behaves identically.
+    runs-on: ubuntu-latest
+    # One page load and one render: minutes, never an hour.
+    timeout-minutes: 15
+
+    # NO job-level env, for the reason apply.yml gives: only the one step that runs the
+    # worker may see the app-user password and the agent key.
+
+    steps:
+      # The same SHA-pinned setup as apply.yml, so the kit runs the exact worker the applier runs.
+      - name: Check out the repository
+        # Pinned to a full commit SHA (the repo's supply-chain rule); the tag is the trailing comment.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # History is irrelevant to the worker.
+          fetch-depth: 1
+
+      # pnpm before setup-node, whose pnpm cache resolution shells out to pnpm.
+      - name: Install pnpm
+        # Pinned to a full commit SHA (the repo's supply-chain rule); the tag is the trailing comment.
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          # The root package.json's packageManager version.
+          version: 11.25.0
+
+      - name: Set up Node
+        # Pinned to a full commit SHA (the repo's supply-chain rule); the tag is the trailing comment.
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          # The pinned runtime, as apply.yml.
+          node-version: '24'
+          # The pnpm store, restored between runs.
+          cache: 'pnpm'
+
+      # Exactly the committed lockfile.
+      - name: Install dependencies
+        # The whole workspace, from the committed lockfile: the worker imports shared packages by path.
+        run: pnpm install --frozen-lockfile
+
+      # The Chromium binary, restored when the lockfile has not changed.
+      - name: Restore the Playwright browser cache
+        id: playwright-cache
+        # Pinned to a full commit SHA (the repo's supply-chain rule); the tag is the trailing comment.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          # Keyed on the lockfile, so a Playwright bump invalidates it.
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      # Downloaded only on a cache miss.
+      - name: Install Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        # Run through pnpm's filter so it executes inside the worker package, as apply.yml does.
+        run: pnpm --filter '@applyy/worker' exec playwright install --with-deps chromium
+
+      # The system libraries on every run: the cache restores the binary, not the apt packages.
+      - name: Install Chromium system dependencies
+        # Run through pnpm's filter so it executes inside the worker package, as apply.yml does.
+        run: pnpm --filter '@applyy/worker' exec playwright install-deps chromium
+
+      # The kit. The id travels as an environment variable, never interpolated into the
+      # shell line, so an input can never become a command; the worker validates its UUID shape.
+      - name: Build the apply kit
+        # Run through pnpm's filter so it executes inside the worker package, as apply.yml does.
+        run: pnpm --filter '@applyy/worker' exec node src/cli/apply-kit.ts
+        # Step-scoped, as in apply.yml: no action or install script sees these.
+        env:
+          # The one application, validated by shape in the worker (claim-loop.ts parseOnlyApplicationId).
+          APPLY_KIT_ID: ${{ inputs.application_id }}
+          # Supabase connection. Secrets, never committed (constraint #11).
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          # Public by design; authority comes from the app user's JWT below.
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # The ordinary app user the applier signs in as, so every read and write runs under RLS.
+          APPLYY_APP_USER_EMAIL: ${{ secrets.APPLYY_APP_USER_EMAIL }}
+          # Same account.
+          APPLYY_APP_USER_PASSWORD: ${{ secrets.APPLYY_APP_USER_PASSWORD }}
+          # The note insert is admitted for agent 'applier' only with a valid agent key.
+          APPLYY_AGENT_KEY: ${{ secrets.APPLYY_AGENT_KEY }}

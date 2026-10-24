@@ -1,0 +1,328 @@
+// The manual apply kit, against the REAL captured GitLab form (job 8775507002), in real
+// Chromium. The kit exists because Greenhouse's captcha refuses CI submits (2026-10-24):
+// Teja applies by hand, with every answer taken from the system. So the kit must equal
+// what the bot would have typed (same planner), never invent an answer, take contact
+// identity from the LATEST master (one-email ruling, 2026-10-24), and send nothing.
+import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { chromium, type Browser } from 'playwright';
+import type { AnswerBankRow, MasterProfile, ResolvedResume } from '@applyy/shared-types';
+import { startFixtureServer, type FixtureServer } from '../src/fixture-server.ts';
+import { createPlaywrightPage } from '../src/playwright-page.ts';
+import { buildApplyKit, createKitGateway, type KitApplication, type KitGateway } from '../src/apply-kit.ts';
+// The production file-name rule, so the expected name is never hand-copied.
+import { resumeFileName } from '../src/plan-resume-attachment.ts';
+import type { SupabaseLike } from '../src/supabase-gateway.ts';
+import { syntheticResume } from './resolved-resume-fixture.ts';
+
+let browser: Browser;
+let server: FixtureServer;
+
+beforeAll(async () => {
+  // Headless, as the CI dispatch runs it.
+  browser = await chromium.launch();
+  // Serves worker/fixtures on 127.0.0.1.
+  server = await startFixtureServer('fixtures');
+}, 60_000);
+
+afterAll(async () => {
+  await browser?.close();
+  await server?.close();
+});
+
+// The exact form the first real kit is for.
+const FORM_PATH = '/greenhouse/gitlab-8775507002-backend-india.html';
+
+// The two emails of the ruling: the frozen snapshot's OLD one, and the latest master's.
+const OLD_EMAIL = 'tejamallam1233@gmail.com';
+const NEW_EMAIL = 'tejamallam00@gmail.com';
+
+// The row's frozen tailored_profile: content to keep, identity that is stale.
+const tailored: ResolvedResume = {
+  ...(syntheticResume as unknown as ResolvedResume),
+  identity: { ...(syntheticResume as unknown as ResolvedResume).identity, full_name: 'Teja Mallam', email: OLD_EMAIL },
+};
+
+// The LATEST master (v3): the one source of contact identity.
+const latestMaster = {
+  identity: {
+    full_name: 'Teja Mallam',
+    headline: null,
+    email: NEW_EMAIL,
+    phone: '9392256662',
+    location: 'Hyderabad, India',
+    links: [{ id: 'l1', label: 'LinkedIn', url: 'https://linkedin.com/in/teja' }],
+  },
+  // Read by the planner's "previously worked at GitLab?": not GitLab, so it derives "No".
+  experience: [{ id: 'e1', company: 'Aczen', role: 'Engineer' }],
+} as unknown as MasterProfile;
+
+// The resume's file name: the snapshot's content under the latest master's identity.
+const KIT_FILE_NAME = resumeFileName({ ...tailored, identity: latestMaster.identity });
+
+// Name fields come only from the bank (the planner never splits full_name).
+const answers = [
+  { question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text' },
+  { question_key: 'last_name', answer_value: 'Mallam', needs_human: false, answer_type: 'text' },
+] as unknown as AnswerBankRow[];
+
+// The row as the database holds it: `applying`, like GitLab ba1e5d1d.
+const application: KitApplication = {
+  id: 'ba1e5d1d-0000-4000-8000-000000000001',
+  status: 'applying',
+  applyUrl: '',
+  tailoredProfile: tailored,
+  employerName: 'GitLab',
+};
+
+/** A kit gateway that records every call, with the notes it was asked to append. */
+function recordingGateway(row: KitApplication) {
+  const calls: string[] = [];
+  const notes: Array<Record<string, unknown>> = [];
+  const gateway: KitGateway = {
+    fetchApplication: async () => {
+      calls.push('fetchApplication');
+      return row;
+    },
+    fetchLatestProfile: async () => {
+      calls.push('fetchLatestProfile');
+      return latestMaster;
+    },
+    fetchAnswers: async () => {
+      calls.push('fetchAnswers');
+      return answers;
+    },
+    uploadResume: async () => {
+      calls.push('uploadResume');
+      return `user/${row.id}/1792900000000.pdf`;
+    },
+    appendApplicationNote: async (_id, detail) => {
+      calls.push('appendApplicationNote');
+      notes.push(detail);
+    },
+  };
+  return { gateway, calls, notes };
+}
+
+/**
+ * Open the real form behind the production adapter, with every call to a page method
+ * that could type or send recorded. The kit's port type offers none of them; this proves
+ * the runtime agrees.
+ */
+async function openKitPage() {
+  const raw = await browser.newPage();
+  // Every request that could carry data out of the page.
+  const sends: string[] = [];
+  raw.on('request', (request) => {
+    if (request.method() !== 'GET') sends.push(`${request.method()} ${request.url()}`);
+  });
+  const port = createPlaywrightPage(raw);
+  // Calls to the three operations the kit must never make.
+  const forbidden: string[] = [];
+  const page = {
+    ...port,
+    goto: port.goto.bind(port),
+    extractFields: port.extractFields.bind(port),
+    detectBlocker: port.detectBlocker.bind(port),
+    fill: async (id: string) => void forbidden.push(`fill ${id}`),
+    attachFile: async (id: string) => void forbidden.push(`attachFile ${id}`),
+    submit: async () => {
+      forbidden.push('submit');
+      return { kind: 'unconfirmed' as const, detail: 'test' };
+    },
+  };
+  return { raw, page, sends, forbidden };
+}
+
+/** A renderer that records the identity it was asked to print. */
+function recordingRenderer() {
+  const identities: string[] = [];
+  const render = async (resume: ResolvedResume) => {
+    identities.push(resume.identity.email);
+    return { bytes: new Uint8Array([37, 80, 68, 70]), sha256: 'test' };
+  };
+  return { render, identities };
+}
+
+/** Build one kit on the real form; returns the kit plus every recording. */
+async function buildOnRealForm(row: KitApplication = application) {
+  const { raw, page, sends, forbidden } = await openKitPage();
+  const { gateway, calls, notes } = recordingGateway({ ...row, applyUrl: `${server.url}${FORM_PATH}` });
+  const renderer = recordingRenderer();
+  try {
+    const kit = await buildApplyKit({
+      applicationId: row.id,
+      gateway,
+      page,
+      renderResume: renderer.render as never,
+      // The gate is honoured: an explicit allow, as the live check returns for Greenhouse.
+      checkRobots: async () => ({ kind: 'allow' }) as never,
+      runId: 'run-1',
+      now: () => new Date('2026-10-24T08:00:00.000Z'),
+    });
+    return { kit, calls, notes, sends, forbidden, identities: renderer.identities };
+  } finally {
+    await raw.close();
+  }
+}
+
+describe('the manual apply kit on the real GitLab form', () => {
+  test('the kit lists every visible field with label, value, source and required', async () => {
+    const { kit, notes } = await buildOnRealForm();
+    // Non-vacuity: the real form has more than ten controls.
+    expect(kit.fields.length).toBeGreaterThan(10);
+    // Every field carries the contract's shape, and a value only with a real source.
+    for (const field of kit.fields) {
+      expect(field.label.trim().length).toBeGreaterThan(0);
+      expect(['identity', 'tailored', 'answer_bank', 'derived', 'unanswered']).toContain(field.source);
+      expect(field.value === null).toBe(field.source === 'unanswered');
+    }
+    // Spot checks, one per source.
+    const byLabel = (label: string) => kit.fields.find((field) => field.label === label);
+    expect(byLabel('First Name')).toMatchObject({ value: 'Teja', source: 'answer_bank', required: true, input_type: 'text' });
+    expect(byLabel('Resume/CV')).toMatchObject({ value: KIT_FILE_NAME, source: 'tailored', required: true, input_type: 'file' });
+    expect(byLabel('Cover Letter')).toMatchObject({ value: null, source: 'unanswered', required: false, input_type: 'file' });
+    // "Previously worked at GitLab?" is derived from the experience list, not an identity fact.
+    expect(kit.fields.find((field) => /worked .*gitlab/i.test(field.label))).toMatchObject({ value: 'No', source: 'derived' });
+    // The contract envelope, written as ONE note.
+    expect(kit).toMatchObject({ kind: 'apply_kit', v: 1, generated_at: '2026-10-24T08:00:00.000Z', run_id: 'run-1', form_url: `${server.url}${FORM_PATH}` });
+    expect(kit.resume).toEqual({ storage_path: `user/${application.id}/1792900000000.pdf`, file_name: KIT_FILE_NAME });
+    expect(notes).toEqual([kit]);
+  }, 60_000);
+
+  test('contact identity comes from the latest master, with a warning when the snapshot differs', async () => {
+    const { kit, identities } = await buildOnRealForm();
+    // The form's Email answer is the latest master's.
+    expect(kit.fields.find((field) => field.label === 'Email')).toMatchObject({ value: NEW_EMAIL, source: 'identity' });
+    // The resume was RE-RENDERED with that identity, not the frozen snapshot's.
+    expect(identities).toEqual([NEW_EMAIL]);
+    // And the difference is said out loud.
+    expect(kit.warnings.some((warning) => warning.includes(OLD_EMAIL) && warning.includes(NEW_EMAIL))).toBe(true);
+  }, 60_000);
+
+  test('a required custom question with no answer is value null, source unanswered, and warned', async () => {
+    const { kit } = await buildOnRealForm();
+    // "Primary programming language/framework" is required and nothing in the bank answers it.
+    const question = kit.fields.find((field) => /programming language/i.test(field.label));
+    expect(question).toMatchObject({ value: null, source: 'unanswered', required: true });
+    // Named in the warnings with the planner's reason, so Teja knows what to type.
+    expect(kit.warnings.some((warning) => /programming language/i.test(warning) && warning.includes('no_answer'))).toBe(true);
+  }, 60_000);
+
+  test('the kit sends nothing: no fill, attach or submit, and no non-GET request', async () => {
+    const { calls, sends, forbidden } = await buildOnRealForm();
+    // The page operations that type or send were never called.
+    expect(forbidden).toEqual([]);
+    // Nothing but page loads left the browser.
+    expect(sends).toEqual([]);
+    // The only writes: one resume upload and one note. No status method exists on the port.
+    expect(calls.filter((call) => call === 'uploadResume' || call === 'appendApplicationNote')).toEqual(['uploadResume', 'appendApplicationNote']);
+  }, 60_000);
+
+  test('a row outside the kit statuses is refused before the form opens or anything is written', async () => {
+    const { raw, page } = await openKitPage();
+    const { gateway, calls } = recordingGateway({ ...application, status: 'applied', applyUrl: `${server.url}${FORM_PATH}` });
+    try {
+      await expect(
+        buildApplyKit({
+          applicationId: application.id,
+          gateway,
+          page,
+          renderResume: recordingRenderer().render as never,
+          checkRobots: async () => ({ kind: 'allow' }) as never,
+          runId: null,
+          now: () => new Date(),
+        }),
+      ).rejects.toThrow(/applied/);
+      // Read the row, then stopped.
+      expect(calls).toEqual(['fetchApplication']);
+    } finally {
+      await raw.close();
+    }
+  }, 60_000);
+});
+
+/**
+ * The kit gateway over a supabase-js-shaped client that RECORDS every operation and
+ * answers like supabase-js: `{ data, error }`, never a throw. Any status RPC or row
+ * update gets an `{ error }` back, so a silent write attempt would still be visible here.
+ */
+function recordingClient(row: { status: string; tailored_profile: unknown; job_id: string }) {
+  const ops: string[] = [];
+  const builder = (table: string) => {
+    let write = false;
+    let single = false;
+    const b: Record<string, unknown> = {};
+    for (const method of ['select', 'order', 'limit', 'eq', 'in']) {
+      b[method] = () => {
+        ops.push(`${table}.${method}`);
+        return b;
+      };
+    }
+    b['maybeSingle'] = () => {
+      ops.push(`${table}.maybeSingle`);
+      single = true;
+      return b;
+    };
+    for (const method of ['update', 'upsert', 'delete']) {
+      b[method] = () => {
+        ops.push(`${table}.${method}`);
+        write = true;
+        return b;
+      };
+    }
+    b['insert'] = () => {
+      ops.push(`${table}.insert`);
+      return b;
+    };
+    b['then'] = (resolve: (value: unknown) => unknown) => {
+      if (write) return resolve({ data: null, error: { message: 'recording client: writes refused' } });
+      if (table === 'applications') return resolve({ data: single ? { id: 'a1', ...row } : [], error: null });
+      if (table === 'jobs') return resolve({ data: { apply_url: 'https://job-boards.greenhouse.io/gitlab/jobs/8775507002', company_name: 'GitLab' }, error: null });
+      if (table === 'master_profiles') return resolve({ data: [{ profile: latestMaster }], error: null });
+      if (table === 'answer_bank') return resolve({ data: answers, error: null });
+      return resolve({ data: null, error: null });
+    };
+    return b;
+  };
+  const client = {
+    rpc: async (fn: string) => {
+      ops.push(`rpc.${fn}`);
+      return { data: null, error: { message: 'recording client: rpc refused' } };
+    },
+    from: (table: string) => builder(table),
+    storage: {
+      from: (bucket: string) => ({
+        upload: async (path: string) => {
+          ops.push(`storage.${bucket}.upload ${path.endsWith('.pdf') ? 'pdf' : path}`);
+          return { data: null, error: null };
+        },
+      }),
+    },
+    auth: {
+      signInWithPassword: async () => ({ data: { session: null }, error: null }),
+      getSession: async () => ({ data: { session: null }, error: null }),
+    },
+  } as unknown as SupabaseLike;
+  return { client, ops };
+}
+
+describe('the kit gateway over a supabase-js client', () => {
+  test('reads the row and its job, uploads one resume, appends one note, and writes no status', async () => {
+    const { client, ops } = recordingClient({ status: 'applying', tailored_profile: tailored, job_id: 'j1' });
+    const gateway = createKitGateway(client, { userId: 'user' });
+    // The row, joined to its job by a second read.
+    expect(await gateway.fetchApplication('a1')).toEqual({
+      id: 'a1',
+      status: 'applying',
+      applyUrl: 'https://job-boards.greenhouse.io/gitlab/jobs/8775507002',
+      tailoredProfile: tailored,
+      employerName: 'GitLab',
+    });
+    await gateway.uploadResume('a1', new Uint8Array([1]));
+    await gateway.appendApplicationNote('a1', { kind: 'apply_kit' });
+    // No RPC (claim, advance, release) and no row update of any kind.
+    expect(ops.filter((op) => op.startsWith('rpc.') || /\.(update|upsert|delete)$/.test(op))).toEqual([]);
+    // Exactly the two writes the kit is allowed.
+    expect(ops.filter((op) => op.includes('upload') || op.endsWith('.insert'))).toEqual(['storage.resumes.upload pdf', 'application_events.insert']);
+  });
+});
