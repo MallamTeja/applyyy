@@ -14,11 +14,13 @@ import { haltedByKillSwitch } from "./gate.ts";
 // httpFetch path; this import closes the one bare `fetch(` that remained here).
 import { fetchBoard } from "./poll-fetch.ts";
 // The adapters, the row builder, and the board-read rules: `collectBoardPages` reads a
-// paged board in full or not at all, and `boardWentEmpty` refuses a soft-200 emptied
-// board as a healthy one. Both are pure-ish and node-tested; this file is not.
+// paged board in full or not at all, `boardRefusal` refuses a stranger's or a soft-200
+// emptied board before any write, and `failureMark` is the one failed-poll update. All
+// are pure-ish and node-tested; this file is not.
 import {
-  boardWentEmpty,
+  boardRefusal,
   collectBoardPages,
+  failureMark,
   getAdapter,
   supportedProviders,
   toJobInsert,
@@ -338,13 +340,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
       });
 
       if (!parseResult.ok) {
-        await db
-          .from("company_watchlist")
-          .update({
-            consecutive_failures: (board.consecutive_failures || 0) + 1,
-            last_polled_at: now.toISOString(),
-          })
-          .eq("id", board.id);
+        // The shared failed-poll update, identical for every failure path.
+        await db.from("company_watchlist").update(failureMark(board, now)).eq("id", board.id);
 
         summaries.push({
           board: board.board_token,
@@ -359,73 +356,41 @@ Deno.serve(async (req: Request): Promise<Response> => {
         continue;
       }
 
-      // IDENTITY GUARD, BEFORE ANY WRITE. The payload parsed, but does it belong to
-      // the company this watchlist row claims? Greenhouse and SmartRecruiters report a
-      // name in the same payload; lever/ashby report none and come back `no_signal`,
-      // which is NOT a failure — only a positive mismatch blocks the board. Evaluated
-      // after parse so a malformed payload is still recorded as the parse failure it
-      // really is. Page one answers for the board: one board is one company.
-      const identity = evaluateBoardIdentity(adapter, parseResult.firstPayload, board.company_name);
-      if (identity.verdict === "mismatch") {
-        // Same bookkeeping as a parse failure — this IS a failing board (wrong token,
-        // renamed company, or a stranger's board), and the existing counter is what
-        // the health page and any future auto-disable already read.
-        await db
-          .from("company_watchlist")
-          .update({
-            consecutive_failures: (board.consecutive_failures || 0) + 1,
-            last_polled_at: now.toISOString(),
-          })
-          .eq("id", board.id);
-        // Run-level counter, reported in the response beside the other totals.
-        totalIdentityMismatch += 1;
-        // The summary names both spellings so the fix (correct the token or the row)
-        // is diagnosable from the health page without re-polling.
+      // REFUSAL, BEFORE ANY WRITE. Two rules, shared with the cron CLI via boardRefusal:
+      //   - identity: does the payload belong to the company this row claims? Greenhouse
+      //     and SmartRecruiters report a name; lever/ashby report none (`no_signal`),
+      //     which is NOT a refusal. Page one answers for the board: one board is one company.
+      //   - emptied: postings last poll, none now — most often a token gone bad, since
+      //     SmartRecruiters soft-200s a nonexistent token as an empty board.
+      // Evaluated after the read, so a malformed payload is still recorded as the read
+      // failure it really is.
+      const refusal = boardRefusal(
+        // The provider's own identity claim, compared with the row's company name.
+        evaluateBoardIdentity(adapter, parseResult.firstPayload, board.company_name),
+        // The row's name and its last successful posting count.
+        board,
+        // This poll's count across every page.
+        parseResult.postings.length,
+      );
+      if (refusal !== null) {
+        // Failure mark only: last_poll_job_count is NOT overwritten, so an emptied board
+        // keeps failing visibly until postings return or a human looks.
+        await db.from("company_watchlist").update(failureMark(board, now)).eq("id", board.id);
+        // Mismatches are counted apart: the one failure where the BOARD is healthy and
+        // the watchlist row is what's wrong.
+        if (refusal.kind === "identity_mismatch") totalIdentityMismatch += 1;
+        // The diagnosis names what to fix, so the health page needs no re-poll.
         summaries.push({
           board: board.board_token,
-          provider: board.ats_provider,
-          status: "failed",
-          fetched: 0,
-          inserted: 0,
-          error: `Identity mismatch: board reports "${identity.reported}", watchlist says "${board.company_name}" — nothing persisted`,
-        });
-        // Nothing from this response may be written.
-        continue;
-      }
-
-      // EMPTIED BOARD, ALSO BEFORE ANY WRITE. A board that listed postings last time
-      // and lists none now is most often a token gone bad — SmartRecruiters soft-200s a
-      // nonexistent token as an empty board, which the identity guard above cannot see.
-      // Failed rather than "ok, 0": `last_poll_job_count` is NOT overwritten, so the
-      // board keeps failing visibly until postings return or a human looks.
-      if (boardWentEmpty(board.last_poll_job_count, parseResult.postings.length)) {
-        // The same failure bookkeeping as the other refusals.
-        await db
-          .from("company_watchlist")
-          .update({
-            // One more consecutive failure: the counter the health page reads.
-            consecutive_failures: (board.consecutive_failures || 0) + 1,
-            // Polled now, so the rotation moves on to the boards behind this one.
-            last_polled_at: now.toISOString(),
-            // last_poll_job_count deliberately absent: it stays the non-zero baseline.
-          })
-          // This board's row only.
-          .eq("id", board.id);
-        // Both numbers, so the health page shows what changed without a re-poll.
-        summaries.push({
-          // Which board, by the token a human would correct.
-          board: board.board_token,
-          // Which provider soft-200'd.
           provider: board.ats_provider,
           // Failed, so it counts toward error_count and the all-failed run verdict.
           status: "failed",
           // Nothing fetched counts and nothing was written.
           fetched: 0,
           inserted: 0,
-          // The diagnosis, with the baseline it was compared to.
-          error: `Board went empty: last poll stored ${board.last_poll_job_count}, this poll found 0 — check the token`,
+          error: refusal.warning,
         });
-        // An empty read has nothing to write, and liveness must not run on it.
+        // Nothing from this response may be written, and liveness must not run on it.
         continue;
       }
 
@@ -720,13 +685,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
       });
     } catch (fetchErr: unknown) {
       const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
-      await db
-        .from("company_watchlist")
-        .update({
-          consecutive_failures: (board.consecutive_failures || 0) + 1,
-          last_polled_at: now.toISOString(),
-        })
-        .eq("id", board.id);
+      // The same failed-poll update as every other failure path.
+      await db.from("company_watchlist").update(failureMark(board, now)).eq("id", board.id);
 
       summaries.push({
         board: board.board_token,

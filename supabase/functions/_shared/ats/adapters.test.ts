@@ -20,8 +20,10 @@ import { smartrecruitersAdapter } from "../scout/adapters/smartrecruiters.ts";
 import { workableAdapter } from "../scout/adapters/workable.ts";
 // The registry, the shared row builder, and the board-read helpers the Scout loops on.
 import {
+  boardRefusal,
   boardWentEmpty,
   collectBoardPages,
+  failureMark,
   getAdapter,
   supportedProviders,
   toJobInsert,
@@ -532,7 +534,8 @@ test("pagination pulls all pages of a paged board", async () => {
   assert.deepEqual(result.postings.map((p) => p.atsJobId), ["a", "b", "c", "d", "e"]);
   // Exactly the three page URLs, and no fourth request past the last page.
   assert.deepEqual(requested, [SR_BASE, `${SR_BASE}?offset=2&limit=2`, `${SR_BASE}?offset=4&limit=2`]);
-  assert.equal(result.pages, 3);
+  // Five postings across the three pages, none dropped at a page boundary.
+  assert.equal(result.postings.length, 5);
   // The identity guard reads the first page's payload.
   assert.deepEqual(result.firstPayload, srPage(0, 2, 5, ["a", "b"]));
 });
@@ -685,6 +688,66 @@ test("an empty board is not a failure when it was empty or never polled", () => 
   assert.equal(boardWentEmpty(null, 0), false);
   // Fewer postings is ordinary churn, not an emptied board.
   assert.equal(boardWentEmpty(585, 3), false);
+});
+
+// --- the one refusal decision every board poller shares ---------------------------
+//
+// scout-ats and the cron CLI both refuse a board BEFORE any write when it answers as a
+// different company or goes empty. Neither caller can be loaded by a test (scout-ats
+// calls Deno.serve on import, the CLI runs main() on import), so THESE are the tests
+// that go red if the refusal is ever bypassed. Moved here from the CLI's former
+// worker/test/{identity-gate,empty-board-gate}.test.ts; every assertion kept.
+
+// The incident watchlist row: the user tracks TCS, and the board last listed 585 jobs.
+const TCS_ROW = { company_name: "Tata Consultancy Services", last_poll_job_count: 585 };
+// A clean identity verdict, so the went-empty cases isolate the second rule.
+const NO_SIGNAL = { verdict: "no_signal", reason: "smartrecruiters: payload carries no reported identity" } as const;
+
+test("boardRefusal: an identity mismatch refuses the board and names both spellings", () => {
+  // The 2026-10-23 incident: the token answered as a different company entirely.
+  const refusal = boardRefusal({ verdict: "mismatch", reported: "Thornbury Community Services" }, TCS_ROW, 92);
+  // Byte-identical to the summary error scout-ats wrote before the refactor.
+  assert.deepEqual(refusal, {
+    kind: "identity_mismatch",
+    warning: 'Identity mismatch: board reports "Thornbury Community Services", watchlist says "Tata Consultancy Services" — nothing persisted',
+  });
+});
+
+test("boardRefusal: a matching or signal-less board is not refused", () => {
+  // A healthy board flows on exactly as before the guard existed.
+  assert.equal(boardRefusal({ verdict: "match", reported: "Tata Consultancy Services" }, TCS_ROW, 92), null);
+  // lever/ashby carry no identity; punishing them would fire on healthy boards.
+  assert.equal(boardRefusal(NO_SIGNAL, TCS_ROW, 92), null);
+});
+
+test("boardRefusal: a board that had postings and now has none is refused with its baseline", () => {
+  // SR soft-200s a dead token as an empty board, which the identity check reads as no_signal.
+  assert.deepEqual(boardRefusal(NO_SIGNAL, TCS_ROW, 0), {
+    kind: "went_empty",
+    warning: "Board went empty: last poll stored 585, this poll found 0 — check the token",
+  });
+});
+
+test("boardRefusal: an empty board that was empty, never polled, or merely shrank is not refused", () => {
+  // 0 -> 0: a quiet hiring quarter, not news.
+  assert.equal(boardRefusal(NO_SIGNAL, { ...TCS_ROW, last_poll_job_count: 0 }, 0), null);
+  // Never polled successfully: no baseline to compare against.
+  assert.equal(boardRefusal(NO_SIGNAL, { ...TCS_ROW, last_poll_job_count: null }, 0), null);
+  // Fewer postings is ordinary churn.
+  assert.equal(boardRefusal(NO_SIGNAL, TCS_ROW, 3), null);
+});
+
+test("boardRefusal: identity is checked first, so a stranger's empty board reads as a mismatch", () => {
+  // Order is part of the contract: the old code checked identity, then emptiness.
+  assert.equal(boardRefusal({ verdict: "mismatch", reported: "Thornbury Community Services" }, TCS_ROW, 0)?.kind, "identity_mismatch");
+});
+
+test("failureMark: one more failure and a fresh poll stamp, and NOTHING else", () => {
+  // Exactly two keys: no poll_count, no consecutive_failures reset, and no
+  // last_poll_job_count, which must stay the non-zero baseline after an emptied board.
+  assert.deepEqual(failureMark({ consecutive_failures: 2 }, NOW), { consecutive_failures: 3, last_polled_at: NOW.toISOString() });
+  // A null count from an old row is treated as zero, as every inline mark did.
+  assert.deepEqual(failureMark({ consecutive_failures: null }, NOW), { consecutive_failures: 1, last_polled_at: NOW.toISOString() });
 });
 
 // --- the shared classifiers -----------------------------------------------------

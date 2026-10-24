@@ -24,6 +24,9 @@ import { leverAdapter } from "./lever.ts";
 import { smartrecruitersAdapter } from "../scout/adapters/smartrecruiters.ts";
 // The adapter contract.
 import type { AtsAdapter, ParsedPosting } from "./types.ts";
+// The identity verdict boardRefusal acts on. Type-only: the verdict is computed by the
+// caller (evaluateBoardIdentity), so this module stays free of identity's logic.
+import type { BoardIdentityVerdict } from "./identity.ts";
 // The shared dedupe primitive. Async because it hashes.
 import { jobFingerprint } from "../normalize/fingerprint.ts";
 // The shared freshness policy, including the §13 cold-start guard.
@@ -87,7 +90,6 @@ export type BoardPagesResult =
       readonly firstPayload: unknown;
       readonly postings: readonly ParsedPosting[];
       readonly skipped: readonly string[];
-      readonly pages: number;
     }
   // Some page failed to parse, the cursor stalled, or the cap was hit. Nothing from
   // any page is returned: a partial board would be stored as if it were the whole one,
@@ -130,7 +132,7 @@ export async function collectBoardPages(
     // Ask the adapter for the next page. No method means a single-response board.
     const next = adapter.nextPageUrl?.(boardToken, payload) ?? null;
     // No next page: the board has been read in full.
-    if (next === null) return { ok: true, firstPayload, postings, skipped, pages: page };
+    if (next === null) return { ok: true, firstPayload, postings, skipped };
     // A cursor that points back at this page would re-read it until the cap.
     if (next === url) return { ok: false, reason: `pagination cursor did not advance past page ${page}` };
     // Move on.
@@ -153,6 +155,65 @@ export function boardWentEmpty(previousJobCount: number | null, currentJobCount:
   if (currentJobCount > 0) return false;
   // Never polled successfully (null) or empty last time too: no change to report.
   return previousJobCount !== null && previousJobCount > 0;
+}
+
+// Why a board is refused BEFORE anything from its response is written. A closed union
+// so a caller switches on `kind` for its own counters, and the warning travels with it.
+export interface BoardRefusal {
+  // identity_mismatch: the provider says this is a different company (wrong token, or
+  // the 'tcs'→Thornbury case). went_empty: postings last poll, none now (a dead token).
+  readonly kind: "identity_mismatch" | "went_empty";
+  // The one diagnosis line both scouts log and report, naming what to fix.
+  readonly warning: string;
+}
+
+// The single refuse-this-board decision shared by scout-ats and the cron CLI, so the two
+// pollers cannot disagree about which board is failing. Null means "persist as normal".
+// Both rules are §6 controls moved here intact, never relaxed: a no_signal identity is NOT
+// a refusal (that would fail healthy lever/ashby boards), and only a non-zero baseline
+// dropping to zero counts as emptied.
+export function boardRefusal(
+  // The caller's evaluateBoardIdentity verdict for this board's first page.
+  identity: BoardIdentityVerdict,
+  // The two watchlist fields the rules compare against.
+  board: { readonly company_name: string; readonly last_poll_job_count: number | null },
+  // Postings this poll found across every page.
+  postingCount: number,
+): BoardRefusal | null {
+  // Identity first: a stranger's board is a mismatch even when it is also empty, and
+  // that order is what the callers did before this was shared.
+  if (identity.verdict === "mismatch") {
+    // Both spellings, so the token or the row can be fixed without re-polling.
+    return {
+      kind: "identity_mismatch",
+      warning: `Identity mismatch: board reports "${identity.reported}", watchlist says "${board.company_name}" — nothing persisted`,
+    };
+  }
+  // Then emptiness, which the identity check cannot see (an empty board is no_signal).
+  if (boardWentEmpty(board.last_poll_job_count, postingCount)) {
+    // The baseline it was compared to, so the change is visible without a re-poll.
+    return {
+      kind: "went_empty",
+      warning: `Board went empty: last poll stored ${board.last_poll_job_count}, this poll found 0 — check the token`,
+    };
+  }
+  // Neither rule fired: the board is fine to persist.
+  return null;
+}
+
+// The watchlist update for ANY failed poll: refused, unreadable, or thrown. Exactly two
+// fields, on purpose: no poll_count bump, no consecutive_failures reset, and no
+// last_poll_job_count, which must keep its non-zero baseline after an emptied board.
+// Only a SUCCESSFUL poll may write those (worker/src/scout/persist-jobs.ts).
+export function failureMark(
+  // Only the counter is read; `|| 0` tolerates a null count on an old row.
+  board: { readonly consecutive_failures: number | null },
+  // The run clock, shared with every other write in the poll.
+  now: Date,
+): { consecutive_failures: number; last_polled_at: string } {
+  // One more consecutive failure (the counter the health page reads), and a fresh stamp
+  // so a failing board rotates behind the others instead of hogging the front.
+  return { consecutive_failures: (board.consecutive_failures || 0) + 1, last_polled_at: now.toISOString() };
 }
 
 // Everything `toJobInsert` needs that a posting cannot know about itself.

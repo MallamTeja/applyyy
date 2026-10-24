@@ -22,12 +22,12 @@ import { dedupeByFingerprint, persistJobBatch, watchlistPollUpdate, type Prepare
 // The board-identity guard, shared with scout-ats: a wrong token can answer 200 with a
 // DIFFERENT company's jobs (2026-10-23 'tcs'→Thornbury), and this file is the one on cron.
 import { evaluateBoardIdentity } from '../../../supabase/functions/_shared/ats/identity.ts';
-// What to do with a verdict, kept pure in its own module because this file runs main() on import.
-import { identityGate } from '../scout/identity-gate.ts';
-// Every page of a board through plain HTTP, kept in its own module for the same reason.
+// The one refuse-this-board decision and the one failed-poll update, shared with scout-ats
+// so the two pollers cannot disagree about which board is failing. Pure and tested in
+// _shared/ats/adapters.test.ts, since this file runs main() on import and cannot be.
+import { boardRefusal, failureMark } from '../../../supabase/functions/_shared/ats/registry.ts';
+// Every page of a board through plain HTTP, kept in its own module so it can be tested.
 import { readBoardPages } from '../scout/board-pages.ts';
-// The emptied-board refusal (a dead SR token soft-200s as an empty board), pure for the same reason.
-import { emptyBoardGate } from '../scout/empty-board-gate.ts';
 import type { AtsProvider, JobInsert } from '../../../packages/shared-types/src/tables.ts';
 
 function required(name: string): string {
@@ -264,60 +264,37 @@ async function main(): Promise<void> {
         console.warn(`[applyy-scout] ⚠️ ${board.company_name} board read failed: ${parseResult.reason}`);
         // Checked: an unrecorded failure leaves `consecutive_failures` low, so a
         // dead board never looks dead enough to disable.
-        const { error: failMarkErr } = await client
-          .from('company_watchlist')
-          .update({
-            consecutive_failures: (board.consecutive_failures || 0) + 1,
-            last_polled_at: now.toISOString(),
-          })
-          .eq('id', board.id);
+        const { error: failMarkErr } = await client.from('company_watchlist').update(failureMark(board, now)).eq('id', board.id);
         noteError(`${board.company_name}: record poll failure`, failMarkErr);
         continue;
       }
 
-      // IDENTITY BEFORE ANY WRITE. Checked after parse so a malformed payload is still
-      // recorded as the parse failure it really is; checked before toJobInsert so a
-      // stranger's postings never reach jobs, applications, or the screener.
-      // Page one's payload answers for the board: one board is one company (as scout-ats does).
-      const identity = identityGate(evaluateBoardIdentity(adapter, parseResult.firstPayload, board.company_name), board, now);
-      // A positive mismatch: nothing from this response may be persisted.
-      if (!identity.proceed) {
-        // Both spellings in the Actions log, so the token or the row can be fixed without re-polling.
-        console.warn(`[applyy-scout] ⚠️ ${board.company_name}: ${identity.warning}`);
-        // Checked like the other failure marks: an unrecorded mismatch would keep a
-        // stranger's board looking healthy forever.
-        const { error: mismatchMarkErr } = await client
-          .from('company_watchlist')
-          // The pure gate built the payload, so this branch cannot drift from its test.
-          .update(identity.watchlistUpdate)
-          .eq('id', board.id);
-        // Only a failed WRITE is a run error; the mismatch itself is board state.
-        noteError(`${board.company_name}: record identity mismatch`, mismatchMarkErr);
-        // Counted for the closing summary line.
-        totalIdentityMismatch += 1;
-        // Skip every write for this board.
-        continue;
-      }
-
-      // EMPTIED BOARD, ALSO BEFORE ANY WRITE (mirrors scout-ats). SmartRecruiters soft-200s a
-      // nonexistent token as an empty board, which the identity guard cannot see; without this
-      // the success write below would reset consecutive_failures and store a 0 baseline.
-      const emptied = emptyBoardGate(board, parseResult.postings.length, now);
-      // Had postings last time, has none now.
-      if (!emptied.proceed) {
-        // The baseline is in the warning, so the Actions log shows what changed.
-        console.warn(`[applyy-scout] ⚠️ ${board.company_name}: ${emptied.warning}`);
-        // Failure mark only; last_poll_job_count stays the non-zero baseline. Checked, like
-        // every other mark, so a lost write cannot leave the board looking healthy.
-        const { error: emptyMarkErr } = await client
-          .from('company_watchlist')
-          // The pure gate built the payload, so this branch cannot drift from its test.
-          .update(emptied.watchlistUpdate)
-          .eq('id', board.id);
-        // Only a failed WRITE is a run error; an emptied board is board state.
-        noteError(`${board.company_name}: record emptied board`, emptyMarkErr);
-        // Counted for the closing summary line.
-        totalEmptiedBoards += 1;
+      // REFUSAL BEFORE ANY WRITE, the same decision scout-ats makes (boardRefusal): the
+      // board answered as a different company, or had postings last poll and none now (a
+      // dead SR token soft-200s as an empty board). Checked after the read so a malformed
+      // payload is still recorded as the read failure it is; before toJobInsert so a
+      // refused board's postings never reach jobs, applications, or the screener.
+      const refusal = boardRefusal(
+        // Page one's payload answers for the board: one board is one company.
+        evaluateBoardIdentity(adapter, parseResult.firstPayload, board.company_name),
+        // The row's name and its last successful posting count.
+        board,
+        // This poll's count across every page.
+        parseResult.postings.length,
+      );
+      if (refusal !== null) {
+        // The diagnosis in the Actions log, so the token or the row can be fixed without re-polling.
+        console.warn(`[applyy-scout] ⚠️ ${board.company_name}: ${refusal.warning}`);
+        // Checked like every other mark: a lost write would leave a refused board looking
+        // healthy. failureMark leaves last_poll_job_count as the non-zero baseline.
+        const { error: refusalMarkErr } = await client.from('company_watchlist').update(failureMark(board, now)).eq('id', board.id);
+        // Only a failed WRITE is a run error; the refusal itself is board state.
+        const isMismatch = refusal.kind === 'identity_mismatch';
+        // Each kind keeps its own label, so the run row says which refusal failed to record.
+        noteError(`${board.company_name}: ${isMismatch ? 'record identity mismatch' : 'record emptied board'}`, refusalMarkErr);
+        // Counted per kind for the closing summary lines.
+        if (isMismatch) totalIdentityMismatch += 1;
+        else totalEmptiedBoards += 1;
         // Skip every write for this board.
         continue;
       }
@@ -449,14 +426,8 @@ async function main(): Promise<void> {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[applyy-scout] error polling ${board.company_name}: ${msg}`);
-      // Checked like the other two failure marks, for the same reason.
-      const { error: crashMarkErr } = await client
-        .from('company_watchlist')
-        .update({
-          consecutive_failures: (board.consecutive_failures || 0) + 1,
-          last_polled_at: now.toISOString(),
-        })
-        .eq('id', board.id);
+      // Checked like the other failure marks, for the same reason; same shared update.
+      const { error: crashMarkErr } = await client.from('company_watchlist').update(failureMark(board, now)).eq('id', board.id);
       noteError(`${board.company_name}: record poll failure`, crashMarkErr);
     }
   }

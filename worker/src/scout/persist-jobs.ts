@@ -16,6 +16,9 @@ import type { JobInsert } from '../../../packages/shared-types/src/tables.ts';
 // The blanking guard: an omitted field must never overwrite a stored one.
 // Reused rather than rewritten: one blanking guard for every scout path means one place to fix.
 import { planJobUpsertGroups } from '../../../supabase/functions/_shared/screen/upsert-plan.ts';
+// The failed-poll update every scout path writes; shared so a job-write failure and a
+// refused board can never mark a board two different ways.
+import { failureMark } from '../../../supabase/functions/_shared/ats/registry.ts';
 
 // A posting paired with how to rebuild its row against a STORED first sighting.
 // Exported because the CLI builds these and the tests build fakes of them.
@@ -174,10 +177,8 @@ export function watchlistPollUpdate(
   now: Date,
 ): Record<string, unknown> {
   // Failure: count it and move the board back in the rotation, but write NO success field.
-  if (jobWriteErrors.length > 0) {
-    // last_polled_at moves so a failing board does not hog the front of the rotation.
-    return { consecutive_failures: (board.consecutive_failures || 0) + 1, last_polled_at: now.toISOString() };
-  }
+  // The shared failed-poll update, so this cannot drift from the scouts' refusal marks.
+  if (jobWriteErrors.length > 0) return failureMark(board, now);
   // Success: the only path allowed to reset consecutive_failures.
   return {
     poll_count: (board.poll_count || 0) + 1,

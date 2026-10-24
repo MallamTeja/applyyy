@@ -33,6 +33,8 @@ import {
   UpstreamUnavailableError,
   // Shape of one watchlist naming record.
   type WatchlistName,
+  // One board-verified posting, for the kept/refused split.
+  type VerifiedPosting,
   // Seam type for the robots-gated board fetch.
   type FetchBoardFn,
   // Seam type for the one-hop grounding redirect resolver.
@@ -303,14 +305,18 @@ export async function handleScoutWeb(req: Request, deps: HandlerDeps): Promise<R
       mismatchedBoards.set(key, { provider: v.parsedUrl.provider, token: v.parsedUrl.token });
     }
   }
-  // Mismatched boards contribute nothing to rows, counts or the response's job list.
-  const kept = found.verified.filter((v) => !mismatchedBoards.has(boardKey(v.parsedUrl.provider, v.parsedUrl.token)));
-  // Refused postings stay visible with their reason; the board's own URL, since the posting is real.
-  const identityRejections = found.verified
-    // Exactly the postings `kept` dropped.
-    .filter((v) => mismatchedBoards.has(boardKey(v.parsedUrl.provider, v.parsedUrl.token)))
-    // Same Rejection shape the UI already renders.
-    .map((v) => ({ url: v.posting.applyUrl, reason: "identity_mismatch" }));
+  // One pass splits the postings: mismatched boards contribute nothing to rows, counts or
+  // the job list, and their postings stay visible as rejections instead.
+  const kept: VerifiedPosting[] = [];
+  // Same Rejection shape the UI already renders.
+  const identityRejections: { url: string; reason: string }[] = [];
+  // Each posting lands in exactly one of the two lists, so none is lost or double-counted.
+  for (const v of found.verified) {
+    // The board's own URL, since the posting is real; only its board is refused.
+    if (mismatchedBoards.has(boardKey(v.parsedUrl.provider, v.parsedUrl.token))) identityRejections.push({ url: v.posting.applyUrl, reason: "identity_mismatch" });
+    // Every other posting persists as before.
+    else kept.push(v);
+  }
   // Count each mismatch against its watchlist row so the health page sees a failing board.
   for (const board of mismatchedBoards.values()) {
     // Logged with the board, so the token or the row can be corrected without re-running.
