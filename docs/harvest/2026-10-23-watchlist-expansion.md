@@ -202,6 +202,72 @@ Docker (bot-blocked), Tower Research (Gurgaon roles exist; lever token guess
 Rippling, Harness, HackerRank, Zepto, Dream11, CoinDCX, Jupiter, Fi, Urban
 Company, DevRev, Rubrik, Capillary).
 
+## Headless pass (2026-10-24) — the ~25 JS-unresolved companies, resolved
+
+Method: same bar as above, plus a headless render step. Candidate tokens were
+read by 4 recon subagents driving a Playwright headless Chromium (scratch
+script `render-board.mjs`, session scratchpad; `worker/node_modules/playwright`
+imported by absolute file URL — ESM ignores NODE_PATH) over each company's own
+careers page, with a network sniffer recording the ATS API calls the page
+itself makes (`net` = strongest evidence; name-derived guesses stayed banned).
+Every candidate was then verified centrally on 2026-10-24 ~00:30 IST by one
+read-only GET per board, 1 req/s/host, PASS = HTTP 200 + provider JSON shape +
+>0 postings + identity check (greenhouse `/v1/boards/{t}` display name; ashby
+has no name field, so sample titles + description text were matched to the
+company). Gate proven non-vacuous: garbage token `zz-no-such-board-xx` FAILED
+with HTTP 404 in the same run.
+
+**Verified pollable: 14 of 25 targeted** (counts point-in-time, same column
+definitions as the half-B table).
+
+| company | provider | board_token | verdict (2026-10-24 ~00:30 IST) |
+|---|---|---|---|
+| xAI | greenhouse | `xai` | PASS — total 298, tech 137, early 4, India/remote 11; e.g. Spring 2027 Software Engineering Internship/Co-op (Palo Alto, CA). Evidence: x.ai/careers itself links boards.greenhouse.io/xai. NOTE: the board's display name reads "SpaceXSI" (shared Musk-co recruiting tooling, roles are unmistakably xAI's — AI Tutor, Palo Alto SWE intern) |
+| Tower Research Capital | greenhouse | `towerresearchcapital` | PASS — total 100, tech 74, early 19, India/remote 0 (Gurgaon + Montreal new-grad/intern rows; location regex misses "Gurgaon", screener will see them). Net-sniffed from tower-research.com/open-positions; the old lever guess was the wrong PROVIDER, not just the wrong token |
+| HackerRank | greenhouse | `hackerrank` | PASS — total 30, tech 18, early 2, India/remote 14; e.g. Software Development Engineer Intern (Onsite in Bangalore) |
+| DevRev | greenhouse | `devrev` | PASS — total 42, tech 20, early 1, India/remote 11; e.g. Junior Forward Deployed Engineer |
+| Grafana Labs | greenhouse | `grafanalabs` | PASS — total 133, tech 72, early 0, India/remote 72 (remote-heavy, no early rows today) |
+| Harness | greenhouse | `harnessinc` | PASS — total 67, tech 33, early 0, India/remote 17. Token is `harnessinc`, NOT `harness` — net-sniffed from harness.io/company/jobs |
+| InMobi | greenhouse | `inmobi` | PASS — total 82, tech 11, early 1, India/remote 6 (Bangalore/Bengaluru rows) |
+| CircleCI | greenhouse | `circleci` | PASS — total 13, tech 6, early 0, India/remote 5. Careers index is SSR — only individual posting pages load the greenhouse embed; render postings, not indexes |
+| Pulumi | greenhouse | `pulumicorporation` | PASS — total 4, tech 1, early 0, India/remote 0. Token is `pulumicorporation`, not `pulumi` |
+| Tekion | ashby | `tekion` | PASS — total 93, tech 52, early 0, India/remote 41 (Bangalore HQ volume) |
+| Docker | ashby | `docker` | PASS — total 67, tech 32, early 0, India/remote 0 US/EU-titled. docker.com itself was unreachable from this host (timeout + cert mismatch, network-level); token came from an aggregator lead, so identity was checked harder: sample titles (Staff Backend Engineer, Hub; Senior Software Engineer, Secure Build) + description text name Docker Inc |
+| Astronomer | ashby | `astronomer` | PASS — total 18, tech 11, early 0, India/remote 1 (Hyderabad CRE). Token via server 302: their own apply links redirect to jobs.ashbyhq.com/astronomer |
+| Airbyte | ashby | `airbyte` | PASS — total 13, tech 7, early 0, India/remote 0 |
+| Prefect | ashby | `prefect` | PASS — total 8, tech 6, early 0, India/remote 5 |
+
+**Not seeded, with reasons** (each re-checkable by the same probe):
+
+| company | verdict |
+|---|---|
+| Rubrik | already live in the watchlist as greenhouse `rubrik` (seeded earlier tonight) — dedupe, nothing to add |
+| Fi (Epifi) | lever `epifi` is a VALID board (200, correct shape) but 0 postings on 2026-10-24 — fails the >0 bar; cheap to re-probe later |
+| Dream11 | their dreamsports.group/careers page links jobs.lever.co/dreamsports, but both the API and the hosted page 404 — stale link, board removed |
+| Redpanda | own careers page net-calls boards-api.greenhouse.io/v1/boards/redpandadata/departments and gets 404 — broken/stale embed, board gone |
+| PhonePe | re-probed as directed: greenhouse `phonepe` still 404, and headless renders of both careers pages show zero big-3 references — has not returned |
+| Aiven | greenhouse EU confirmed (posting pages embed #grnhse_app and call boards.eu.greenhouse.io) but token unprovable: boards-api.eu.greenhouse.io does not resolve (curl 000), boards.eu/job-boards.eu 404 the /v1 path, and main-host `aiven` is 404 — the adapter only polls boards-api.greenhouse.io, so this is an ADAPTER GAP (EU greenhouse host), not a token problem |
+
+**Confirmed rejects (adapter-gap / no-board evidence):** Thoughtspot (Rippling
+ATS, single-source), Rippling (dogfoods its own ATS), Jupiter (Keka, tenant
+`jupiter`), Stytch (careers 307s into jobs.twilio.com — Eightfold front over
+Twilio's greenhouse; no Stytch board exists post-acquisition), Zepto (no big-3
+signal; aggregators disagree on BambooHR vs TalentRecruit).
+
+**Still unresolved:** CoinDCX (careers redirects to about-us; hires via
+aggregators), Urban Company (careers SPA makes no big-3 calls — likely
+in-house portal), Capillary Technologies (renders no big-3 calls, direct fetch
+403, ATS unidentified).
+
+Seed: `supabase/snippets/2026-10-24-seed-watchlist-headless-pass.sql` (+14,
+additive, same on-conflict pattern as half B). Execution belongs to the
+orchestrator after Teja's approval — never run from a peer session.
+
+Tooling lessons recorded for the next sweep: careers INDEX pages on SSR sites
+sniff nothing — render an individual posting URL first; and the sniffer's
+token regexes must include `boards.eu.greenhouse.io` hosts to resolve
+EU-greenhouse tenants in one run.
+
 ## Deliberate exclusions
 
 - ITAR / US-person-only defense & space boards (SpaceX, Anduril, Shield AI,
