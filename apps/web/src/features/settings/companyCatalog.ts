@@ -163,6 +163,11 @@ export function noBoardFound(probedOn: string, realPortal: RealPortalKnowledge):
   return { kind: 'no-board-found', probedOn, realPortal };
 }
 
+/* Third sweep: the targeted re-probe of boards the 2026-10-23 sweep left marked
+ * "re-probe later" (evidence: docs/harvest/2026-10-24-board-reprobes.md). Only rows
+ * re-probed that day cite it; every other row keeps its older constant. */
+export const BOARD_PROBE_DATE_2026_10_24 = '2026-10-24' as const;
+
 export interface CompanyCooldown {
   readonly interview: string;
   readonly screening: string;
@@ -747,11 +752,13 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     category: 'Startup / Unicorn',
     domain: 'FinTech / UPI Payments & Distributed Storage',
     location: 'Bengaluru',
-    atsProvider: 'greenhouse',
-    atsIdentifier: 'phonepe',
+    // PROVIDER CORRECTED 2026-10-24: the old greenhouse/phonepe board is gone; phonepe.com's own job feed now links every public opening to SmartRecruiters.
+    atsProvider: 'smartrecruiters',
+    // The legal-entity token read off phonepe.com's feed, not name-derived; SR's postings response names it "PHONEPE LIMITED".
+    atsIdentifier: 'PHONEPELIMITED',
     cooldown: { interview: '6 Months', screening: 'None' },
-    /* Probed 2026-10-23: ALL gh endpoints 404 though search still shows cached job-boards.greenhouse.io/phonepe pages — board removed recently; worth re-probing periodically. */
-    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'unknown' }),
+    /* Probed 2026-10-24: greenhouse phonepe still 404; SR /v1/companies/PHONEPELIMITED/postings = 118, matching the 118 PUBLIC rows of phonepe.com's own feed. Kept on the no-board arm like Canva/Nagarro because no SR scout adapter exists, so it must not be offered as pollable. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_24, { confidence: 'confirmed', portal: 'smartrecruiters (live, 118 postings via /v1/companies/PHONEPELIMITED/postings; NO scout adapter yet)' }),
   },
   {
     name: 'Swiggy',
@@ -837,8 +844,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'greenhouse',
     atsIdentifier: 'dream11',
     cooldown: { interview: '6 Months', screening: 'None' },
-    /* Probed 2026-10-23: dreamsports.group still links jobs.lever.co/dreamsports but that board 404s — stale link, board removed. */
-    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'unknown' }),
+    /* Re-probed 2026-10-24: still no board — lever dreamsports 404 (US, EU, hosted), greenhouse dream11 404, ashby 404, and token sweeps dream11/dreamsportsgroup/dream-sports 404 everywhere; the careers CTA still points at the dead lever board. */
+    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_24, { confidence: 'unknown' }),
   },
   {
     name: 'Licious',
