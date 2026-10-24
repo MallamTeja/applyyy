@@ -14,6 +14,10 @@ import { haltedByKillSwitch } from "./gate.ts";
 // httpFetch path; this import closes the one bare `fetch(` that remained here).
 import { fetchBoard } from "./poll-fetch.ts";
 import { getAdapter, supportedProviders, toJobInsert, type JobInsertContext } from "../_shared/ats/registry.ts";
+// The board-identity guard: a wrong token can answer 200 with a DIFFERENT company's
+// jobs (the 2026-10-23 'tcs'→Thornbury incident), so a provider-reported identity is
+// compared against the watchlist row before anything from the response is persisted.
+import { evaluateBoardIdentity } from "../_shared/ats/identity.ts";
 // The blanking guard. Splits one batch into the fewest upserts that cannot let an
 // omitted field overwrite a stored one — see _shared/screen/upsert-plan.ts for why
 // stripping nulls per row does NOT work.
@@ -283,6 +287,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // identical databases, so these are the only thing that tells them apart.
   let totalPassed = 0;
   let totalDropped = 0;
+  // Boards refused because the provider-reported identity named a different company.
+  // Counted separately from ordinary failures: this is the one failure mode where the
+  // board is HEALTHY and the watchlist row is what's wrong.
+  let totalIdentityMismatch = 0;
 
   // 3. Poll each board
   for (const board of boards as WatchlistRow[]) {
@@ -331,6 +339,39 @@ Deno.serve(async (req: Request): Promise<Response> => {
           inserted: 0,
           error: `Parse error: ${parseResult.reason}`,
         });
+        continue;
+      }
+
+      // IDENTITY GUARD, BEFORE ANY WRITE. The payload parsed, but does it belong to
+      // the company this watchlist row claims? Greenhouse reports a name in the same
+      // payload; lever/ashby report none and come back `no_signal`, which is NOT a
+      // failure — only a positive mismatch blocks the board. Evaluated after parse so
+      // a malformed payload is still recorded as the parse failure it really is.
+      const identity = evaluateBoardIdentity(adapter, payload, board.company_name);
+      if (identity.verdict === "mismatch") {
+        // Same bookkeeping as a parse failure — this IS a failing board (wrong token,
+        // renamed company, or a stranger's board), and the existing counter is what
+        // the health page and any future auto-disable already read.
+        await db
+          .from("company_watchlist")
+          .update({
+            consecutive_failures: (board.consecutive_failures || 0) + 1,
+            last_polled_at: now.toISOString(),
+          })
+          .eq("id", board.id);
+        // Run-level counter, reported in the response beside the other totals.
+        totalIdentityMismatch += 1;
+        // The summary names both spellings so the fix (correct the token or the row)
+        // is diagnosable from the health page without re-polling.
+        summaries.push({
+          board: board.board_token,
+          provider: board.ats_provider,
+          status: "failed",
+          fetched: 0,
+          inserted: 0,
+          error: `Identity mismatch: board reports "${identity.reported}", watchlist says "${board.company_name}" — nothing persisted`,
+        });
+        // Nothing from this response may be written.
         continue;
       }
 
@@ -714,6 +755,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
     screen_warnings: [...screenWarnings],
     // Run total of jobs marked disappeared; per-board detail is in `results`.
     disappeared_marked: totalDisappearedMarked,
+    // Boards refused because the provider said they belong to a DIFFERENT company
+    // (wrong or stale token). Per-board detail, with both spellings, is in `results`.
+    identity_mismatch: totalIdentityMismatch,
     // Boards whose marking was refused, with why. Empty means every ok board was evaluated.
     disappearance_refused_reason: livenessRefusals,
     results: summaries,

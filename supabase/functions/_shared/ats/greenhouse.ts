@@ -73,6 +73,33 @@ export const greenhouseAdapter: AtsAdapter = {
     return `${GREENHOUSE_API_ORIGIN}/v1/boards/${encodeURIComponent(boardToken)}/jobs?content=true`;
   },
 
+  // Greenhouse DOES report identity, and in the SAME response the jobs come from:
+  // every entry of `.jobs[]` carries a `company_name` string (live probe 2026-10-24 —
+  // the board-name endpoint `/v1/boards/{token}` agrees, but using the jobs payload
+  // costs zero extra requests). This is the field that catches the 'tcs' trap: the
+  // token says tcs, the payload says "Thornbury Community Services".
+  readReportedIdentity(payload: unknown): string | null {
+    // Same envelope shape-checks as `parse` — a non-object or jobs-less payload has
+    // no identity to offer, and `parse` will record it as a failure on its own.
+    if (!isRecord(payload)) return null;
+    // The postings array is where the identity rides.
+    const jobs = payload["jobs"];
+    // No array, no signal.
+    if (!Array.isArray(jobs)) return null;
+    // First readable `company_name` wins: one board is one company, so entries agree,
+    // and an empty board legitimately has no signal (nothing to persist = no risk).
+    for (const entry of jobs) {
+      // Skip serialisation noise, same tolerance as `parse`.
+      if (!isRecord(entry)) continue;
+      // The shared reader applies the usual whitespace-as-absence rule.
+      const name = readString(entry, "company_name");
+      // First hit is the answer.
+      if (name !== null) return name;
+    }
+    // A board whose entries all lack the field: no signal, declared honestly.
+    return null;
+  },
+
   // Pure. No network, no clock, no database — which is what lets this be covered by a
   // saved fixture rather than only by a live board that changes underneath the test.
   parse(payload: unknown): AtsParseResult {

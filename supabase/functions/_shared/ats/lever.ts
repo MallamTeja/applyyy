@@ -82,6 +82,17 @@ export const leverAdapter: AtsAdapter = {
     return `${LEVER_API_ORIGIN}/v0/postings/${encodeURIComponent(boardToken)}?mode=json`;
   },
 
+  // Lever reports NO identity: a live probe (2026-10-24) enumerated every posting
+  // key — additionalPlain, categories, createdAt, descriptionPlain, id, text,
+  // hostedUrl, applyUrl, workplaceType and friends — and none carries the company
+  // name. `hostedUrl` only echoes the board token back, and the name appears solely
+  // in free prose (`text`, descriptions), which a recruiter wrote and a heuristic
+  // would misread. Declared null: an unreliable guard that fails healthy boards is
+  // worse than no guard (CLAUDE.md §6). Lever boards stay human-verified.
+  readReportedIdentity(_payload: unknown): string | null {
+    return null;
+  },
+
   // Pure and synchronous.
   parse(payload: unknown): AtsParseResult {
     // TOP-LEVEL ARRAY, unlike the other two adapters. Asserted explicitly so a change

@@ -97,6 +97,14 @@ export interface AtsAdapter {
   // table-driven tests against a saved fixture (PROJECT_PLAN §19) rather than only
   // being exercised against a live board that changes underneath the test.
   parse(payload: unknown): AtsParseResult;
+  // Read the company identity the PROVIDER ITSELF reports in this payload, or null
+  // when the provider offers none. REQUIRED, not optional: an optional method would
+  // let a new adapter silently skip the identity guard, and the whole point (the
+  // 2026-10-23 'tcs'→Thornbury fail-open) is that unverified boards harvest a
+  // stranger's jobs. Null is a legitimate, DECLARED answer — lever and ashby ship no
+  // identity field (live probes 2026-10-24) — and the caller treats it as "check
+  // inapplicable", never as a failure. Pure and synchronous, same as `parse`.
+  readReportedIdentity(payload: unknown): string | null;
 }
 
 // --- shared field readers -------------------------------------------------------

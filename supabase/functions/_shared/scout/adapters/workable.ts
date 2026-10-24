@@ -127,6 +127,16 @@ export const workableAdapter: AtsAdapter = {
     return `${WORKABLE_API_ORIGIN}/api/v1/widget/accounts/${encodeURIComponent(boardToken)}?details=true`;
   },
 
+  // Workable DOES report identity: the widget endpoint this adapter polls answers
+  // with a top-level `name` beside `jobs` (live probe 2026-10-24: account 'printful'
+  // → `.name` = "Printful"), so identity arrives free with the jobs fetch.
+  readReportedIdentity(payload: unknown): string | null {
+    // A non-object payload has nothing to read; parse records the failure itself.
+    if (!isRecord(payload)) return null;
+    // The account's display name, whitespace-as-absence like every shared read.
+    return readString(payload, "name");
+  },
+
   // Pure synchronous parser converting JSON payload into ParsedPosting array.
   //
   // Performs no network calls, database queries, or wall-clock reads.

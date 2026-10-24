@@ -148,6 +148,37 @@ export const smartrecruitersAdapter: AtsAdapter = {
     return `${SMARTRECRUITERS_API_ORIGIN}/v1/companies/${encodeURIComponent(boardToken)}/postings`;
   },
 
+  // SmartRecruiters DOES report identity: each posting in `.content[]` carries a
+  // `company` record whose `name` is the display name (live probe 2026-10-24: token
+  // 'ubisoft2' → `.content[0].company.name` = "Ubisoft"; `.identifier` only echoes
+  // the token, so it is deliberately not used). KNOWN TRAP this cannot close: a
+  // nonexistent token soft-200s with `{"totalFound":0,"content":[]}` — an empty
+  // board — which yields null here, and null means "check inapplicable", never pass.
+  readReportedIdentity(payload: unknown): string | null {
+    // The same envelope tolerance as parse: object with `content`, or a bare array.
+    const entries = isRecord(payload)
+      ? payload["content"] ?? payload["postings"]
+      : payload;
+    // No postings array means no posting to carry the company record.
+    if (!Array.isArray(entries)) return null;
+    // First posting with a readable company name answers for the board — one board
+    // is one company, so the entries agree.
+    for (const entry of entries) {
+      // Serialisation noise is skipped, same as parse.
+      if (!isRecord(entry)) continue;
+      // The nested company record.
+      const company = entry["company"];
+      // A malformed company record on one entry does not forfeit the rest.
+      if (!isRecord(company)) continue;
+      // The display name, whitespace-as-absence like every shared read.
+      const name = readString(company, "name");
+      // First hit answers.
+      if (name !== null) return name;
+    }
+    // An empty or name-less board: no signal, declared honestly.
+    return null;
+  },
+
   // Pure synchronous parser converting JSON payload into ParsedPosting array.
   //
   // Performs no network requests, database operations, or system clock reads.

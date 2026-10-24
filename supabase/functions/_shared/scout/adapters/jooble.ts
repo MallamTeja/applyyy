@@ -144,6 +144,13 @@ export const joobleAdapter: AtsAdapter = {
     return DEFAULT_JOOBLE_ENDPOINT;
   },
 
+  // Jooble is an AGGREGATOR: one response mixes many employers, so there is no single
+  // board identity to compare against a watchlist row's company_name. The guard is
+  // structurally inapplicable here, declared as the permanent no-signal answer.
+  readReportedIdentity(_payload: unknown): string | null {
+    return null;
+  },
+
   // Parse raw JSON response payload into clean ParsedPosting objects.
   // PURE AND SYNCHRONOUS: no network, no clock, no database side-effects.
   // Returns AtsParseResult indicating success or descriptive failure reason.

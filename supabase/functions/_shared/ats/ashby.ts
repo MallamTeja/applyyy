@@ -60,6 +60,15 @@ export const ashbyAdapter: AtsAdapter = {
     return `${ASHBY_API_ORIGIN}/posting-api/job-board/${encodeURIComponent(boardToken)}`;
   },
 
+  // Ashby reports NO identity: the posting API's top-level keys are only `jobs` and
+  // `apiVersion`, and no job entry carries an organization name (live probe
+  // 2026-10-24 enumerated the keys; `jobUrl` merely echoes the token back, which
+  // proves nothing about ownership). Declared null rather than faked from the URL —
+  // a token echo would certify exactly the wrong-token case the guard exists for.
+  readReportedIdentity(_payload: unknown): string | null {
+    return null;
+  },
+
   // Pure and synchronous.
   parse(payload: unknown): AtsParseResult {
     // Object envelope, like Greenhouse and unlike Lever.
