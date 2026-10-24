@@ -584,6 +584,39 @@ test("an unparseable later page fails the whole board, keeping no partial postin
   assert.equal(result.ok, false);
 });
 
+// apply_url reaches the dashboard as an <a href>, and React 18 still renders a
+// `javascript:` href. A board-supplied URL that is not https must never be stored.
+test("smartrecruiters skips a posting whose only apply URL is not https", () => {
+  const result = smartrecruitersAdapter.parse({
+    content: [{ id: "x1", name: "Engineer", applyUrl: "javascript:alert(document.cookie)" }],
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  // No company identifier to build the fallback from, so the posting is dropped.
+  assert.equal(result.postings.length, 0);
+  assert.equal(result.skipped.length, 1);
+});
+
+// A non-https candidate is treated as absent, so the canonical fallback still applies,
+// and the payload's company/id segments are encoded rather than becoming path structure.
+test("smartrecruiters rejects a non-https apply URL and encodes the fallback URL", () => {
+  const result = smartrecruitersAdapter.parse({
+    content: [{ id: "7/../x", name: "Engineer", applyUrl: "data:text/html,hi", company: { identifier: "a/b", name: "A" } }],
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.postings[0]?.applyUrl, "https://jobs.smartrecruiters.com/a%2Fb/7%2F..%2Fx");
+});
+
+// A genuine https apply URL is kept verbatim.
+test("smartrecruiters keeps a genuine https apply URL", () => {
+  const url = "https://jobs.smartrecruiters.com/Nagarro1/744000146635269-engineer?oga=true";
+  const result = smartrecruitersAdapter.parse({ content: [{ id: "744000146635269", name: "Engineer", applyUrl: url }] });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.postings[0]?.applyUrl, url);
+});
+
 // The adapter's half of pagination, pinned directly.
 test("smartrecruiters stops paging at the last page and on a malformed envelope", () => {
   // offset 4 + limit 2 covers totalFound 5: no next page.
