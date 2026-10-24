@@ -201,21 +201,9 @@ jobs:
           # the one step that will, rather than dropped, so behaviour is unchanged.
           STORAGE_STATE_ENC_KEY: ${{ secrets.STORAGE_STATE_ENC_KEY }}
 
-      # Screenshots are the entire deliverable of the §18.6 trust period: Teja
-      # reviews them to see exactly what WOULD have been submitted before
-      # granting the system authority to submit anything.
-      - name: Upload run screenshots
-        # always() so screenshots survive a failed run — a failure is precisely
-        # when the evidence matters most.
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: applyy-screenshots-${{ github.run_id }}
-          path: worker/screenshots/
-          # Screenshots of filled forms contain personal data (CTC, phone,
-          # notice period), so they expire quickly rather than sitting in the
-          # artifact store indefinitely.
-          retention-days: 7
-          # A dry run that filled nothing is a real signal worth investigating,
-          # not a reason to fail the upload step.
-          if-no-files-found: warn
+      # NO ARTIFACT STEP, deliberately (removed 2026-10-24). Screenshots go to the
+      # Supabase Storage bucket `screenshots` (apply-one.ts uploadScreenshot), and
+      # the row's screenshot_storage_path points at them; nothing ever wrote the
+      # worker/screenshots/ directory the old upload-artifact step read, so it only
+      # ever warned "No files were found". An unknown submit's cause is recorded in
+      # agent_runs.error_detail (claim-loop.ts closeRun), not in a CI artifact.

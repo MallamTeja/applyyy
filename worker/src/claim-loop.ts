@@ -523,7 +523,12 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
       // actually been sent.
       rows_out: submitted,
       error_count: errors,
-      error_detail: errors > 0 ? stoppedReason : null,
+      // The error when there was one; otherwise the breaker's reason, which for an
+      // unknown outcome carries submit()'s detail (the POST's response status and the
+      // board's `code`, e.g. captcha-failed). Without it that cause reached only the CI
+      // log: an unknown counts no error, so this field stayed null for exactly the runs
+      // a human must hand-check. Null still means a run that tripped nothing.
+      error_detail: errors > 0 ? stoppedReason : breakerReason,
     });
   }
 

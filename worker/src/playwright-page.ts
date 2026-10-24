@@ -145,6 +145,31 @@ function isCaptchaTraffic(url: string): boolean {
 }
 
 /**
+ * The machine-readable `code` of an error response body, or null.
+ *
+ * Only a JSON object with a non-empty string `code` counts (Greenhouse:
+ * `{"code":"captcha-failed",…}`). An HTML firewall page, a bare string or a numeric
+ * code yields null rather than a guess (CLAUDE.md §6: a lenient parse is not an answer).
+ */
+function readErrorCode(body: string): string | null {
+  // Not JSON at all: no code, and no exception escapes into the response listener.
+  let parsed: unknown;
+  try {
+    // The whole body; Greenhouse's refusal is a small JSON object.
+    parsed = JSON.parse(body);
+  } catch {
+    // An HTML or plain-text refusal carries no code.
+    return null;
+  }
+  // An object, not null or an array, holding the field.
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+  // Read once.
+  const code = (parsed as Record<string, unknown>)['code'];
+  // A non-empty string only, so it reads as the board wrote it.
+  return typeof code === 'string' && code.trim().length > 0 ? code.trim() : null;
+}
+
+/**
  * The only path this form's confirmation may have: the form's own path plus
  * `/confirmation`. Null when the form's URL is ITSELF a confirmation route,
  * because then "we are on a confirmation page" says nothing about this click.
@@ -745,6 +770,34 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
       // Attached BEFORE the click: a request fired by the click itself is the one that matters most.
       context.on('request', onRequest);
 
+      // WHAT CAME BACK for each employer write. Evidence only: no verdict below reads it.
+      // A refused POST can still mean a stored application on some board, so the answer
+      // stays `unconfirmed`; but without this an unknown said only "45000ms, url=…".
+      // Greenhouse answers a reCAPTCHA refusal with a non-2xx JSON `code` (captcha-failed,
+      // 2026-10-24 GitLab run 40073654094, confirmed by the security-code email it sent)
+      // and leaves the page as it was, so the response is the one place the cause shows.
+      const employerResponses: { text: string; code: string | null }[] = [];
+      // Same filter as the request log: non-GET, not the captcha provider's own traffic.
+      const onResponse = (response: { status(): number; text(): Promise<string>; request(): { method(): string; url(): string } }) => {
+        // The request this response answers.
+        const request = response.request();
+        // A GET page load or a captcha round trip is not the application coming back.
+        if (request.method() === 'GET' || isCaptchaTraffic(request.url())) return;
+        // Recorded synchronously, so the status is in the log however soon the loop ends.
+        const entry: { text: string; code: string | null } = { text: `${response.status()} ${request.url()}`, code: null };
+        employerResponses.push(entry);
+        // A refusal's body names its cause. Best effort: a body still in flight at the
+        // deadline is simply absent, and a read failure must not reject unhandled.
+        if (response.status() >= 400) response.text().then((body) => { entry.code = readErrorCode(body); }, () => {});
+      };
+      // Attached with the request listener, and detached beside it in `finally`.
+      context.on('response', onResponse);
+      // Every unconfirmed detail ends with the responses, so each unknown names its own cause.
+      const withResponses = (detail: string): string =>
+        employerResponses.length === 0
+          ? detail
+          : `${detail}; responses: ${employerResponses.map((r) => (r.code === null ? r.text : `${r.text} code=${r.code}`)).join(', ')}`;
+
       try {
         // THE CLICK. noWaitAfter: Playwright must not decide when the page is
         // "done"; the loop below does, with its own positive test.
@@ -792,7 +845,7 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
           if (await visibleChallenge()) {
             // Something reached the employer: the send may have happened.
             if (employerWrites.length > 0) {
-              return { kind: 'unconfirmed', detail: `challenge shown after ${employerWrites.join(', ')}` };
+              return { kind: 'unconfirmed', detail: withResponses(`challenge shown after ${employerWrites.join(', ')}`) };
             }
             // Nothing sent YET. Pending, not final: see the settle window below.
             return { pending: { kind: 'challenge', reason: 'captcha' } };
@@ -807,7 +860,7 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
             // Flagged fields AFTER a send: server-side errors on an application that
             // may have been stored. Unknown, never "blocked".
             if (invalid.length > 0 && employerWrites.length > 0) {
-              return { kind: 'unconfirmed', detail: `fields flagged (${invalid.join('; ')}) after ${employerWrites.join(', ')}` };
+              return { kind: 'unconfirmed', detail: withResponses(`fields flagged (${invalid.join('; ')}) after ${employerWrites.join(', ')}`) };
             }
             // Flagged with nothing sent YET. Pending, not final: see the settle window.
             if (invalid.length > 0) return { pending: { kind: 'rejected_by_form', labels: invalid } };
@@ -873,7 +926,7 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
               // Anything that slipped out while the seal was being installed shows up here.
               if (employerWrites.length > 0) {
                 // A send raced the seal: unknown, never "nothing was sent".
-                return { kind: 'unconfirmed', detail: `${step.pending.kind} held ${rejectionSettleMs}ms, then ${employerWrites.join(', ')}` };
+                return { kind: 'unconfirmed', detail: withResponses(`${step.pending.kind} held ${rejectionSettleMs}ms, then ${employerWrites.join(', ')}`) };
               }
               // Sealed with nothing sent: now the answer is proof, and stays true.
               return step.pending;
@@ -894,11 +947,13 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
         return {
           kind: 'unconfirmed',
           // Names what went out, so the human verifying it knows whether a send happened.
-          detail: `no confirmation within ${submitOutcomeTimeoutMs}ms; last seen ${lastSeen}; requests that could carry it: ${employerWrites.join(', ') || 'none'}`,
+          detail: withResponses(`no confirmation within ${submitOutcomeTimeoutMs}ms; last seen ${lastSeen}; requests that could carry it: ${employerWrites.join(', ') || 'none'}`),
         };
       } finally {
         // Detached on every exit, so a later page action is never recorded against this submit.
         context.off('request', onRequest);
+        // The response log likewise ends with this submit.
+        context.off('response', onResponse);
       }
     },
 

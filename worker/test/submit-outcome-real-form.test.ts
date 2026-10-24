@@ -455,6 +455,87 @@ describe('submit() on the real Greenhouse form', () => {
     }
   });
 
+  test('submit: a POST the server REFUSES (captcha-failed) → unconfirmed whose detail names the status and code', async () => {
+    // THE GITLAB CASE (run 40073654094). Greenhouse's job-boards client navigates to
+    // /confirmation only on a 2xx POST; a reCAPTCHA refusal comes back non-2xx with a
+    // JSON `code` and the page stays put, flagging no field. The verdict stays unknown
+    // (a stored application cannot be ruled out from here), but the detail must carry
+    // the response so the human verifying it sees WHY instead of "45000ms, url=…".
+    const { raw, port } = await openForm(3_000);
+    // Every hit on the employer's POST endpoint (non-vacuity for the send).
+    const posts: string[] = [];
+    try {
+      // The refusal, shaped like Greenhouse's: non-2xx JSON with a machine-readable code.
+      await raw.route((url) => url.pathname === `${JOB_PATH}/apply`, (route) => {
+        // Recorded so the test proves the POST really left the page.
+        posts.push(route.request().method());
+        // The status and body the worker must surface.
+        return route.fulfill({ status: 422, contentType: 'application/json', body: '{"code":"captcha-failed","security_code_recipient":"t***@example.com"}' });
+      });
+      // A submit handler that POSTs and, like Greenhouse on a refusal, stays on the page.
+      await raw.evaluate((jobPath) => {
+        // The one form on the page.
+        const form = document.getElementById('application-form') as HTMLFormElement;
+        // Native validation off, so the listener is what runs.
+        form.noValidate = true;
+        // Async submit: no navigation whatever the response.
+        form.addEventListener('submit', (event) => {
+          event.preventDefault();
+          void fetch(`${jobPath}/apply`, { method: 'POST', body: '{}' });
+        });
+      }, JOB_PATH);
+
+      // The real adapter's click and poll, to the deadline.
+      const result = await port.submit();
+
+      // Still unknown: the verdict policy is unchanged.
+      expect(result.kind).toBe('unconfirmed');
+      // The response is named: status, endpoint and the board's own code.
+      if (result.kind === 'unconfirmed') {
+        expect(result.detail).toContain('responses: 422');
+        expect(result.detail).toContain('code=captcha-failed');
+      }
+      // Non-vacuity: the POST really happened.
+      expect(posts).toEqual(['POST']);
+    } finally {
+      // Always closed.
+      await raw.close();
+    }
+  });
+
+  test('submit: a refused POST with a non-JSON body → the status is named, no code is invented', async () => {
+    // A WAF or proxy page answers HTML. The status is still evidence; a `code` parsed
+    // out of non-JSON would be made up (§6: a lenient parser's guess is not an answer).
+    const { raw, port } = await openForm(3_000);
+    try {
+      // An HTML 403, as a firewall in front of a board would send.
+      await raw.route((url) => url.pathname === `${JOB_PATH}/apply`, (route) =>
+        route.fulfill({ status: 403, contentType: 'text/html', body: '<html>Access denied</html>' }),
+      );
+      // Same async submit that stays on the page.
+      await raw.evaluate((jobPath) => {
+        const form = document.getElementById('application-form') as HTMLFormElement;
+        form.noValidate = true;
+        form.addEventListener('submit', (event) => {
+          event.preventDefault();
+          void fetch(`${jobPath}/apply`, { method: 'POST', body: '{}' });
+        });
+      }, JOB_PATH);
+
+      const result = await port.submit();
+
+      expect(result.kind).toBe('unconfirmed');
+      if (result.kind === 'unconfirmed') {
+        // The status, named.
+        expect(result.detail).toContain('responses: 403');
+        // And no code, because none was sent.
+        expect(result.detail).not.toContain('code=');
+      }
+    } finally {
+      await raw.close();
+    }
+  });
+
   test('submit: field flagged FIRST, then a POST 500ms later → unconfirmed, never rejected_by_form', async () => {
     // THE SECOND REVIEW'S M-1. A validate-on-blur script can flag a field the
     // instant Submit takes focus, while the form's own handler is still waiting on

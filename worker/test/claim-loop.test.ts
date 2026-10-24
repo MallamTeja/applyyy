@@ -779,6 +779,43 @@ describe('submit cap and circuit breaker', () => {
     expect(summary.stoppedReason).toMatch(/circuit breaker/);
   });
 
+  it('an unknown outcome names its cause in the run row error_detail', async () => {
+    // THE GITLAB CASE. An unknown outcome counts no error, so error_detail used to stay
+    // null and the cause (the POST's response code) reached only the CI log. The run row
+    // is the one DB field the health page already reads, so the breaker reason lands there.
+    const { gateway } = capQueueGateway(ids(1));
+    // Every closeRun update, to read what the run row records.
+    const closed: Array<Record<string, unknown>> = [];
+    gateway.closeRun = async (_id, update) => {
+      closed.push(update);
+    };
+    // A refused POST, described as submit() now describes it.
+    const { openPage } = scriptedPages({
+      submit: () => ({ kind: 'unconfirmed', detail: 'no confirmation within 45000ms; responses: 422 https://boards.greenhouse.io/gitlab/jobs/1 code=captcha-failed' }),
+    });
+
+    await runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false', APPLY_MAX_SUBMITS: '10' }, clock: frozenClock });
+
+    // Still not an error, so the run's status is unchanged.
+    expect(closed[0]).toMatchObject({ status: 'succeeded', error_count: 0 });
+    // But the cause is on the row, with the board's own code.
+    expect(closed[0]?.['error_detail']).toEqual(expect.stringMatching(/circuit breaker: submit outcome unknown.*code=captcha-failed/));
+  });
+
+  it('a clean live run leaves error_detail null', async () => {
+    // Non-vacuity for the test above: the field is not filled on every run.
+    const { gateway } = capQueueGateway(ids(1));
+    const closed: Array<Record<string, unknown>> = [];
+    gateway.closeRun = async (_id, update) => {
+      closed.push(update);
+    };
+    const { openPage } = scriptedPages({ submit: () => ({ kind: 'confirmed', evidence: 'test' }) });
+
+    await runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false', APPLY_MAX_SUBMITS: '10' }, clock: frozenClock });
+
+    expect(closed[0]).toMatchObject({ status: 'succeeded', error_detail: null });
+  });
+
   it('a captcha stops further claims in a live run', async () => {
     // A captcha on one form means the next form on this IP will very likely challenge too.
     const { gateway, releases } = capQueueGateway(ids(3));
