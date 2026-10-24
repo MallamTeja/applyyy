@@ -1,0 +1,180 @@
+/* Manual apply page (2026-10-24). Semantic tokens only (they carry light-dark()), so both themes work
+   with no [data-theme] rule (docs/ui/theming-convention.md). */
+
+/* The open-form / resume / copy-all row under each card's title. */
+.kit-card__actions {
+  /* One row that wraps on a phone. */
+  display: flex;
+  /* Wraps instead of overflowing at 390px. */
+  flex-wrap: wrap;
+  /* Buttons and link line up on their text. */
+  align-items: center;
+  /* Space between the actions. */
+  gap: var(--gap-2);
+  /* Separates the actions from the fields below. */
+  margin-bottom: var(--gap-3);
+}
+
+/* The form link reads as the primary action. */
+.kit-card__open {
+  /* The console's link colour. */
+  color: var(--accent);
+  /* Heavier than body text: it is the first click. */
+  font-weight: 600;
+}
+
+/* The field list: numbered by the browser, which is the form's order. */
+.kit-card__fields {
+  /* The browser's own numbering, so "field 7" on screen is field 7 in the form. */
+  list-style: decimal;
+  /* Room for the numbers. */
+  padding-left: 1.5em;
+  /* Stacked fields with breathing room. */
+  display: flex;
+  /* One field per line. */
+  flex-direction: column;
+  /* Space between fields. */
+  gap: var(--gap-2);
+}
+
+/* One field: label, value, source, then its copy button, wrapping on a phone. */
+.kit-field {
+  /* Inline pieces that wrap. */
+  display: flex;
+  /* Wraps rather than scrolling sideways. */
+  flex-wrap: wrap;
+  /* Baseline so label and value read as one line. */
+  align-items: baseline;
+  /* Space between the pieces. */
+  gap: var(--gap-1) var(--gap-2);
+  /* Inner space, so a highlighted field's wash has an edge. */
+  padding: var(--gap-1) var(--gap-2);
+  /* The shared control radius. */
+  border-radius: var(--radius-control);
+  /* Invisible by default; the missing state colours it. */
+  border-left: 3px solid transparent;
+}
+
+/* A required field we have no answer for: the one thing that will stop the submit. Bronze "a human is
+   required", never the oxblood that means a fabrication. */
+.kit-field--missing {
+  /* The needs-a-human wash. */
+  background: var(--signal-wash);
+  /* And its edge. */
+  border-left-color: var(--signal);
+}
+
+/* The form's label. */
+.kit-field__label {
+  /* Labels are what the eye scans for. */
+  font-weight: 600;
+}
+
+/* The required star. */
+.kit-field__required {
+  /* Same bronze as the missing state. */
+  color: var(--signal);
+}
+
+/* The answer: selectable, wraps anywhere so a long URL cannot widen the page. */
+.kit-field__value {
+  /* Long answers (URLs, cover text) break instead of overflowing. */
+  overflow-wrap: anywhere;
+  /* Keeps a textarea answer's own line breaks. */
+  white-space: pre-wrap;
+}
+
+/* Provenance tag. */
+.kit-field__source {
+  /* Small. */
+  font-size: var(--size-xs);
+  /* Quiet. */
+  color: var(--text-secondary);
+  /* Outlined so it reads as a tag. */
+  border: 1px solid var(--rule);
+  /* The shared badge radius. */
+  border-radius: var(--radius-badge);
+  /* Tight padding. */
+  padding: 0 4px;
+}
+
+/* Choices, hints and the answer-bank link: secondary lines under the field. */
+.kit-field__options,
+.kit-field__hint,
+.kit-field__fix {
+  /* Their own line within the wrapped field. */
+  flex-basis: 100%;
+  /* Small. */
+  font-size: var(--size-xs);
+}
+
+/* Choices and hints are quiet. */
+.kit-field__options,
+.kit-field__hint {
+  /* Secondary text. */
+  color: var(--text-secondary);
+}
+
+/* The answer-bank link is an action. */
+.kit-field__fix {
+  /* Link colour. */
+  color: var(--accent);
+}
+
+/* Copy and resume buttons: small, plain, same look as the recovery buttons' scale. */
+.kit-copy__button,
+.kit-resume__button {
+  /* Small text. */
+  font-size: var(--size-xs);
+  /* Compact. */
+  padding: 2px 8px;
+  /* The shared control radius. */
+  border-radius: var(--radius-control);
+  /* Outlined. */
+  border: 1px solid var(--rule);
+  /* Sheet background, so it reads on a washed field. */
+  background: var(--sheet);
+  /* Primary text. */
+  color: var(--text-primary);
+  /* Clickable. */
+  cursor: pointer;
+}
+
+/* Hover feedback. */
+.kit-copy__button:hover,
+.kit-resume__button:hover {
+  /* The shared hover surface. */
+  background: var(--surface-hover);
+}
+
+/* A refused copy or a failed download: said in the needs-a-human colour. */
+.kit-copy__failed {
+  /* Small. */
+  font-size: var(--size-xs);
+  /* Bronze. */
+  color: var(--signal);
+  /* A little space from the button. */
+  margin-left: var(--gap-1);
+}
+
+/* The kit's warnings, read before anything is pasted. */
+.kit-card__warnings {
+  /* The needs-a-human wash. */
+  background: var(--signal-wash);
+  /* Its edge. */
+  border-left: 3px solid var(--signal);
+  /* Inner space. */
+  padding: var(--gap-2) var(--gap-3);
+  /* Space before the fields. */
+  margin: 0 0 var(--gap-3);
+  /* Bullets inside the wash. */
+  list-style-position: inside;
+}
+
+/* Each lane's heading in the resolve section. */
+.kit-resolve__title {
+  /* Small heading. */
+  font-size: var(--size-sm);
+  /* Space above, separating the two lanes. */
+  margin: var(--gap-3) 0 var(--gap-1);
+}

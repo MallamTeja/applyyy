@@ -82,8 +82,9 @@ interface OutcomeNote {
   readonly kind: RecoveryOutcome['kind'];
 }
 
-/* The JD join can come back as an object, an array (a to-many shape) or null; this reads all three. */
-function rowLabel(id: string, jobs: unknown): string {
+/* The JD join can come back as an object, an array (a to-many shape) or null; this reads all three.
+   Exported so the Manual apply page names a row exactly as this queue and its confirm dialog do. */
+export function rowLabel(id: string, jobs: unknown): string {
   // A to-many join shape still carries one job here; take the first.
   const job = (Array.isArray(jobs) ? jobs[0] : jobs) as { title?: unknown; company_name?: unknown } | null | undefined;
   // Only a real string counts; '{}' or a number must not become a label.

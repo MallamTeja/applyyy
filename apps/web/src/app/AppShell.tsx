@@ -24,8 +24,13 @@ import { ThemeToggle } from './ThemeToggle';
 import {
   MISSING_HUMAN_CONTROLS,
   UNBUILT_HUMAN_CONTROLS,
-  manualActionCount,
 } from '../data/humanLanes';
+// The badge arithmetic: the two manual lanes plus open rows that have a kit, each row once.
+import { manualApplyCount } from '../features/manual-apply/applyKit';
+// The statuses of rows that have a kit, for that arithmetic.
+import { loadKitRowStatuses } from '../features/manual-apply/manualApplyData';
+// Type only: a status, for the kit-row state.
+import type { ApplicationStatus } from '../data/contract';
 import { useAuth } from '../data/useAuth';
 // Per-status counts from the application_status_counts RPC, read once here for the rail badge.
 import { useApplicationCounts } from '../data/useApplicationCounts';
@@ -51,13 +56,22 @@ export function AppShell(): ReactElement {
   /* Re-read on every navigation and on sign-in: the hook's first read can land before the session
      exists (it then reports no_session), and a resolve on System health changes the count. The extra
      read on mount is one tiny aggregate, cheaper than code to skip it. */
+  /* Statuses of the rows that have an apply kit; [] until read, and [] on a failed read (the badge
+     then counts the lanes alone, an undercount the Manual apply page itself corrects). */
+  const [kitStatuses, setKitStatuses] = useState<readonly ApplicationStatus[]>([]);
   useEffect(() => {
     // A fresh count for the page the operator just opened.
     refetchCounts();
+    // Guards against a slow earlier read landing after a newer one.
+    let live = true;
+    // The kit rows' statuses; never throws past this catch.
+    void loadKitRowStatuses().then((s) => { if (live) setKitStatuses(s); }).catch(() => { if (live) setKitStatuses([]); });
+    // A newer navigation supersedes this read.
+    return () => { live = false; };
   }, [pathname, auth.user?.id, refetchCounts]);
-  /* Jobs waiting for the operator to finish or check by hand. Only a successful read counts: a failed
-     or pending read shows no badge rather than a made-up zero or a stale number. */
-  const needsYou = countState.kind === 'rows' ? manualActionCount(counts) : 0;
+  /* Jobs to apply to or check by hand. Only a successful count read counts: a failed or pending read
+     shows no badge rather than a made-up zero or a stale number. */
+  const needsYou = countState.kind === 'rows' ? manualApplyCount(counts, kitStatuses) : 0;
 
   /* Per-route tab title. Applied here rather than in each page because the
      shell is the one component every route renders through, so no page can
@@ -184,8 +198,8 @@ export function AppShell(): ReactElement {
                     }
                   >
                     {route.label}
-                    {/* The badge sits on System health because both manual-action queues live there
-                        (humanLanes.ts MANUAL_ACTION_STATUSES); hidden at zero so it only ever means "act". */}
+                    {/* The badge sits on Manual apply, where every such job is listed with its kit and its
+                        resolves (the queues also stay on System health); hidden at zero so it only means "act". */}
                     {route.path === NEEDS_YOU_ROUTE && needsYou > 0 ? (
                       /* The visible number for the eye; the sentence below is what a screen reader hears. */
                       <span className="rail__count">
@@ -263,6 +277,5 @@ export function AppShell(): ReactElement {
   );
 }
 
-/* The rail item that holds the manual-action queues (needs_verification and blocked_needs_human both
-   render on System health; humanLanes.ts maps them to "System health, ..." screens). */
-const NEEDS_YOU_ROUTE = 'health';
+/* The rail item that lists every job to apply to by hand: the manual-action lanes plus open kit rows. */
+const NEEDS_YOU_ROUTE = 'manual-apply';

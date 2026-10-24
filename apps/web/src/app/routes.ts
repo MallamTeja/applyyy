@@ -49,6 +49,13 @@ export const OPERATIONS_SECTION: ConsoleSection = {
       lede: 'Explore discovered jobs across watched ATS career pages and hiring feeds.',
     },
     {
+      /* The jobs to apply to BY HAND (captcha boards, unknown submits), each with its pre-answered
+         form kit. Placed before System health because it is daily work, not monitoring (2026-10-24). */
+      path: 'manual-apply',
+      label: 'Manual apply',
+      lede: 'Jobs to apply to by hand, with every form answer ready to copy and the resume to download.',
+    },
+    {
       path: 'health',
       label: 'System health',
       lede: 'Automation status, worker freshness, and database connectivity.',
