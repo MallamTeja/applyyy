@@ -208,3 +208,13 @@ naming the recon split — the natural partitions are `supabase/functions/<fn>/`
 `worker/src/`. Peers have **no Supabase MCP**: the brief must carry every live-DB fact,
 or tell the worker to send SQL to the orchestrator. Budget default: ≤3 recon subagents
 per worker, measure before fixing.
+
+**Ponytail when writing, editing or refactoring code (asked for 2026-10-24).** The
+`ponytail` plugin loads in every session; apply its ladder to every code change here:
+does it need to exist → is it already in this repo (grep first) → stdlib → native
+platform → an installed dependency → the smallest code that works. Before committing, run
+`/ponytail-review` over your own diff and act on its findings or say why not. **Three repo
+rules outrank it:** (1) the comment rule (§8) — ponytail's "short explanation" governs chat
+prose, never code comments; never delete a comment to shrink a diff; (2) §6 controls — a
+shape check, closed union, required param or DB constraint is not "speculative", so name
+the question it answers before cutting one; (3) red-on-revert tests are not bloat.
