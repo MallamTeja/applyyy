@@ -90,6 +90,27 @@ const SECTION_HEADINGS: Readonly<Record<TailoredSectionKind, string>> = {
 };
 
 /**
+ * The one reading of a nullable display field: its text, or null for "this resume
+ * has none".
+ *
+ * WHY UNDEFINED IS HANDLED, although the type says `string | null`. The input is a
+ * jsonb snapshot, and a writer that left a key out (rather than writing null) gives
+ * this function `undefined` behind the type's back — live on 2026-10-24, where a
+ * master uploaded without `description` reached the approval queue. Testing only
+ * `=== null || === ''` let undefined through to two failures: escapeHtml(undefined)
+ * threw, and string concatenation PRINTED the word "undefined" onto the submitted PDF.
+ *
+ * ONLY nullable fields go through here. A REQUIRED field (label, ref, text, name)
+ * that is missing still reaches escapeHtml and fails loudly, because inventing a
+ * blank for it would hide a broken snapshot instead of refusing it.
+ */
+function optionalText(value: string | null | undefined): string | null {
+  // Absent, null and empty all mean "none", so all three collapse to one value and
+  // the output stays byte-identical whichever shape the writer used (determinism).
+  return value === undefined || value === null || value === '' ? null : value;
+}
+
+/**
  * Render one achievement line.
  *
  * `master_text` is deliberately NOT rendered: it exists on the type for the
@@ -126,10 +147,12 @@ function renderBullets(bullets: readonly ResolvedBullet[]): string {
  */
 function renderEntryHead(title: string, subtitle: string | null, dates: string): string {
   // Subtitle is optional across all three entry kinds, so it is built separately
-  // and folded in only when present.
-  const subtitleHtml = subtitle === null || subtitle === ''
+  // and folded in only when present; read through optionalText like every nullable.
+  const subtitleText = optionalText(subtitle);
+  // No subtitle line at all when there is none, never an empty div.
+  const subtitleHtml = subtitleText === null
     ? ''
-    : `\n<div class="resume__entry-subtitle">${escapeHtml(subtitle)}</div>`;
+    : `\n<div class="resume__entry-subtitle">${escapeHtml(subtitleText)}</div>`;
   // Dates are printed VERBATIM from the *_display fields. The renderer performs
   // no date arithmetic and no formatting, which is what keeps output independent
   // of host timezone and ICU version.
@@ -156,9 +179,12 @@ function joinDates(start: string, end: string): string {
 function renderExperience(entry: ResolvedExperience): string {
   // Location is nullable; when absent the subtitle is the company alone rather
   // than 'Company, ' with a trailing comma.
-  const subtitle = entry.location === null || entry.location === ''
+  const location = optionalText(entry.location);
+  // Concatenation is where an unguarded undefined PRINTS rather than throws, so the
+  // branch reads the normalised value, never the raw field.
+  const subtitle = location === null
     ? entry.company
-    : `${entry.company}, ${entry.location}`;
+    : `${entry.company}, ${location}`;
   // data-ref again anchors the entry to its master node for the diff view.
   return `<div class="resume__entry" data-ref="${escapeHtml(entry.ref)}">
 ${renderEntryHead(entry.role, subtitle, joinDates(entry.start_display, entry.end_display))}
@@ -211,14 +237,18 @@ ${renderBullets(entry.bullets)}
 /** Render one degree. Grade and field of study are both optional. */
 function renderEducation(entry: ResolvedEducation): string {
   // Field of study qualifies the degree when present, e.g. 'B.Tech, CSE'.
-  const degreeLine = entry.field === null || entry.field === ''
+  const field = optionalText(entry.field);
+  // Same concatenation hazard as an experience location: read the normalised value.
+  const degreeLine = field === null
     ? entry.degree
-    : `${entry.degree}, ${entry.field}`;
+    : `${entry.degree}, ${field}`;
   // Grade is its own line rather than appended to the subtitle, because
   // recruiters scan for CGPA and a buried one is easy to miss.
-  const gradeHtml = entry.grade_display === null || entry.grade_display === ''
+  const grade = optionalText(entry.grade_display);
+  // No grade line when there is no grade.
+  const gradeHtml = grade === null
     ? ''
-    : `\n<div class="resume__entry-detail">${escapeHtml(entry.grade_display)}</div>`;
+    : `\n<div class="resume__entry-detail">${escapeHtml(grade)}</div>`;
   return `<div class="resume__entry" data-ref="${escapeHtml(entry.ref)}">
 ${renderEntryHead(degreeLine, entry.institution, joinDates(entry.start_display, entry.end_display))}${gradeHtml}
 ${renderBullets(entry.bullets)}
@@ -260,9 +290,11 @@ function renderUndatedEntry(entry: ResolvedAchievement | ResolvedCertification):
   // Appending it to the label instead would print 'AWS Certified Practitioner – '
   // with a dangling separator on every entry that has no description, and the
   // contract says null is the normal case rather than the exception.
-  const descriptionHtml = entry.description === null || entry.description === ''
+  const description = optionalText(entry.description);
+  // The live 2026-10-24 crash site: an absent description now means "none".
+  const descriptionHtml = description === null
     ? ''
-    : `\n<div class="resume__entry-detail">${escapeHtml(entry.description)}</div>`;
+    : `\n<div class="resume__entry-detail">${escapeHtml(description)}</div>`;
   // data-ref anchors the entry to its master node so the approval diff view can
   // highlight this exact line, the same as every other entry kind. It is an
   // attribute, so a text extractor never sees it on the PDF.
@@ -349,14 +381,18 @@ ${body}
  */
 function renderSection(kind: TailoredSectionKind, resume: ResolvedResume): string {
   switch (kind) {
-    case 'summary':
+    case 'summary': {
       // Summary is prose and cannot be ref-constrained the way a bullet can —
       // aa flagged it as the weakest point in the honesty model, and section
       // 18.8 is why the Auditor gates it. Rendering it verbatim is correct; the
       // defence belongs upstream, not here.
-      return wrapSection(kind, resume.summary === null || resume.summary === ''
+      // Read once through optionalText so an absent summary key means "no summary".
+      const summary = optionalText(resume.summary);
+      // An empty body makes wrapSection drop the heading too.
+      return wrapSection(kind, summary === null
         ? ''
-        : `<p class="resume__summary">${escapeHtml(resume.summary)}</p>`);
+        : `<p class="resume__summary">${escapeHtml(summary)}</p>`);
+    }
     case 'skills':
       return wrapSection(kind, renderSkills(resume.skills));
     case 'experience':
@@ -390,8 +426,13 @@ function renderContact(identity: ResolvedResume['identity']): string {
   // Email first — it is the field an ATS most needs to extract.
   parts.push(`<a href="mailto:${safeHref(identity.email)}">${escapeHtml(identity.email)}</a>`);
   // Phone and location are nullable; push only when genuinely present.
-  if (identity.phone !== null && identity.phone !== '') parts.push(escapeHtml(identity.phone));
-  if (identity.location !== null && identity.location !== '') parts.push(escapeHtml(identity.location));
+  const phone = optionalText(identity.phone);
+  // Pushed only when present, so an absent phone leaves no separator behind.
+  if (phone !== null) parts.push(escapeHtml(phone));
+  // Same rule for the location line.
+  const location = optionalText(identity.location);
+  // Pushed only when present.
+  if (location !== null) parts.push(escapeHtml(location));
   // Links render as their label, in the order the master declares them.
   for (const link of identity.links) {
     parts.push(`<a href="${safeHref(link.url)}">${escapeHtml(link.label)}</a>`);
@@ -432,9 +473,11 @@ export function renderResumeHtml(resume: ResolvedResume): string {
     .filter((html) => html !== '')
     .join('\n');
   // Optional headline sits under the name, e.g. 'Backend Engineer'.
-  const headline = resume.identity.headline === null || resume.identity.headline === ''
+  const headlineText = optionalText(resume.identity.headline);
+  // No headline div at all when there is none.
+  const headline = headlineText === null
     ? ''
-    : `\n<div class="resume__headline">${escapeHtml(resume.identity.headline)}</div>`;
+    : `\n<div class="resume__headline">${escapeHtml(headlineText)}</div>`;
   // A full document, not a fragment: page.pdf() needs <html> and the inlined
   // <style>, and the React preview gets the identical bytes via iframe srcdoc.
   // lang="en" helps PDF text extraction pick the right word-breaking rules.

@@ -467,3 +467,94 @@ describe('renderResumeHtml — achievements and certifications (undated sections
     assert.match(sparse, /judged by &quot;Acme&quot; &amp; &lt;b&gt;Corp&lt;\/b&gt;/, 'description must be escaped exactly once');
   });
 });
+
+// Every field the contract types `string | null`, by where it sits. One list, so the
+// null builder and the absent builder below can never disagree about which keys exist.
+type NullableKeys = { identity: string[]; summary: boolean; experience: string[]; education: string[]; achievements: string[]; certifications: string[] };
+// The nine nullable display fields in ResolvedResume (shared-types profile-nodes.ts).
+const NULLABLE: NullableKeys = {
+  // Headline, phone and location are the optional identity lines.
+  identity: ['headline', 'phone', 'location'],
+  // The summary itself is the one top-level nullable field.
+  summary: true,
+  // A role's location: the "Acme, undefined" silent-print case.
+  experience: ['location'],
+  // Field of study prints after the degree, the grade gets its own line.
+  education: ['field', 'grade_display'],
+  // The qualifying detail line under an undated entry: the live crash.
+  achievements: ['description'],
+  // Same field, the second undated section.
+  certifications: ['description'],
+};
+
+// The fixture with every nullable field either set to null or DELETED. Deleting
+// models a stored jsonb snapshot whose writer dropped the key, which is exactly
+// what master_profiles v2 and the 3c77d7dc tailored_profile hold live (2026-10-24).
+// It violates the type on purpose, so it is built on an untyped JSON clone and
+// cast back only at the end: that cast IS the lie the renderer has to survive.
+function withNullables(mode: 'null' | 'absent'): ResolvedResume {
+  // A deep clone, so neither variant mutates the shared fixture.
+  const clone = JSON.parse(JSON.stringify(zomatoBackendIntern)) as Record<string, any>;
+  // One edit for one key: set it to null, or remove it outright.
+  const clear = (node: Record<string, unknown>, key: string): void => {
+    // The two shapes a reader can receive for "this resume has none".
+    if (mode === 'null') node[key] = null; else delete node[key];
+  };
+  // Identity is a single object.
+  for (const key of NULLABLE.identity) clear(clone['identity'], key);
+  // The summary sits on the root.
+  if (NULLABLE.summary) clear(clone, 'summary');
+  // The four list sections: every entry, every nullable key.
+  for (const section of ['experience', 'education', 'achievements', 'certifications'] as const) {
+    // Each entry of the section loses the same keys.
+    for (const entry of clone[section] as Record<string, unknown>[]) {
+      // The section's nullable keys from the one list above.
+      for (const key of NULLABLE[section]) clear(entry, key);
+    }
+  }
+  // Cast only here, after the type has been deliberately broken (see header).
+  return clone as unknown as ResolvedResume;
+}
+
+describe('renderResumeHtml — a nullable key that is ABSENT means the same as null', () => {
+  it('an achievement with no description key renders like description: null', () => {
+    // THE LIVE CRASH (approval queue, 2026-10-24): escapeHtml(undefined) threw
+    // "TypeError: Cannot read properties of undefined (reading 'replace')" because
+    // the guard tested only `=== null || === ''`.
+    const absent = JSON.parse(JSON.stringify(zomatoBackendIntern)) as Record<string, any>;
+    // The same entry in its null form, for the byte comparison.
+    const nulled = JSON.parse(JSON.stringify(zomatoBackendIntern)) as Record<string, any>;
+    // ach_sih carries a real description in the fixture, so deleting it is a change.
+    delete absent['achievements'][0]['description'];
+    // Its twin carries an explicit null.
+    nulled['achievements'][0]['description'] = null;
+    // Non-vacuity: the key really is gone from the input under test.
+    assert.equal('description' in absent['achievements'][0], false, 'the key was not removed; this test would be vacuous');
+    // Absent and null must render the same bytes: one meaning, one output.
+    assert.equal(renderResumeHtml(absent as unknown as ResolvedResume), renderResumeHtml(nulled as unknown as ResolvedResume));
+  });
+
+  it('a role with no location key and a degree with no field key never print "undefined"', () => {
+    // THE SILENT CASE, worse than the crash: these two sites build a subtitle by
+    // concatenation, so undefined did not throw — it printed "Acme, undefined" onto
+    // the PDF that gets submitted (repo CLAUDE.md §6: missing data became an answer).
+    const html = renderResumeHtml(withNullables('absent'));
+    // The literal word must appear nowhere in the document.
+    assert.equal(html.includes('undefined'), false, 'an absent nullable key printed the word "undefined"');
+    // Non-vacuity: the sections whose subtitles are under test did render.
+    assert.ok(html.includes('data-section="experience"') && html.includes('data-section="education"'), 'the sections under test did not render');
+  });
+
+  it('every nullable key absent renders byte-identical to every nullable key null', () => {
+    // The whole class at once. Byte equality, not "does not throw": a reader that
+    // invents a value for undefined would pass a no-throw check and still differ.
+    const absent = renderResumeHtml(withNullables('absent'));
+    // The contract-conforming twin.
+    const nulled = renderResumeHtml(withNullables('null'));
+    // One meaning, one rendering.
+    assert.equal(absent, nulled);
+    // Non-vacuity: clearing the keys must have changed SOMETHING versus the full
+    // fixture, or both variants would equal the original and prove nothing.
+    assert.notEqual(nulled, renderResumeHtml(zomatoBackendIntern), 'clearing the nullable keys changed nothing; this test would be vacuous');
+  });
+});

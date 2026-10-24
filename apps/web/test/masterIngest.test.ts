@@ -696,3 +696,102 @@ test('a project with no links array is reported, never thrown', () => {
   if (result.ok) return;
   assert.ok(blockingPaths(result.findings).includes('projects[0].links'));
 });
+
+/* --- Absent nullable keys are stored as explicit nulls (2026-10-24) ---
+ *
+ * master_profiles v2 went in through this check with achievements that had NO
+ * `description` key - not null, absent. `checkUndatedNode` rightly does not
+ * require a description, but the accepted profile was the raw paste cast to
+ * MasterProfile, so the hole was stored as-is. The Tailor copied it into a
+ * tailored snapshot and the approval preview crashed on it; a degree with no
+ * `field` key would instead have printed "BTech, undefined" onto a submitted PDF.
+ * The contract types these fields `string | null` (a required key, a nullable
+ * value), so the accepted profile must carry the key with null in it. */
+
+/* Every nullable-VALUE field below the root, as [section or 'identity', key]. The
+ * summary is NOT here: an absent summary is already a blocking finding (tests
+ * above), because it is an id-bearing node rather than display text. */
+const NULLABLE_FIELDS: ReadonlyArray<readonly [string, string]> = [
+  /* The three optional identity lines. */
+  ['identity', 'headline'],
+  ['identity', 'phone'],
+  ['identity', 'location'],
+  /* A role's location: the 'ExampleCo, undefined' silent-print case. */
+  ['experience', 'location'],
+  /* Field of study and grade, both printed beside or under the degree. */
+  ['education', 'field'],
+  ['education', 'grade_display'],
+  /* The undated entries' qualifying detail: the live v2 hole. */
+  ['achievements', 'description'],
+  ['certifications', 'description'],
+];
+
+/* The valid fixture with every one of those keys DELETED, the shape v2 has live. */
+function profileWithoutNullableKeys(): Record<string, any> {
+  /* Fresh copy per call, so the deletions cannot leak into another test. */
+  const profile = validProfile() as Record<string, any>;
+  /* Identity is one object; the four sections are arrays of nodes. */
+  for (const [where, key] of NULLABLE_FIELDS) {
+    /* One node for identity, every node of the section otherwise. */
+    const nodes = where === 'identity' ? [profile.identity] : profile[where];
+    /* Remove the key outright - absent, not null. */
+    for (const node of nodes) delete node[key];
+  }
+  /* The holed profile, typed loosely because it now breaks the contract. */
+  return profile;
+}
+
+test('a profile with absent nullable keys is accepted with every one stored as an explicit null', () => {
+  /* The input under test. */
+  const input = profileWithoutNullableKeys();
+  /* Non-vacuity: the keys really are gone from the input. */
+  assert.equal('description' in input['achievements'][0], false, 'the fixture still has the key; this test would be vacuous');
+  /* An absent optional field is not a defect in the paste, so it is not refused. */
+  const result = checkMasterProfile(input);
+  /* Accepted, with the whole result printed if not. */
+  assert.equal(result.ok, true, JSON.stringify(result, null, 2));
+  /* Narrows the union so the profile can be read. */
+  if (!result.ok) return;
+  /* The stored profile, read untyped so the check sees what JSON will see. */
+  const stored = result.profile as unknown as Record<string, any>;
+  for (const [where, key] of NULLABLE_FIELDS) {
+    /* Same node selection as the builder above. */
+    const nodes = where === 'identity' ? [stored['identity']] : stored[where];
+    /* Every node of the section is checked, not just the first. */
+    for (const node of nodes) {
+      /* Present, because JSON.stringify drops an undefined key before the insert. */
+      assert.equal(key in node, true, where + '.' + key + ' is missing from the accepted profile');
+      /* And null, because absent means "this resume has none". */
+      assert.equal(node[key], null, where + '.' + key + ' should be null');
+    }
+  }
+});
+
+/* NON-VACUITY TWIN: a PRESENT value must pass through untouched. Without this, a
+ * normaliser that nulled every optional field would pass the test above and wipe
+ * the operator's real headline, phone and grades from every stored master. */
+test('a present nullable value is stored exactly as pasted, never nulled', () => {
+  /* Real values in a representative pair of the fields. */
+  const profile = validProfile() as Record<string, any>;
+  profile['identity']['headline'] = 'Backend Engineer';
+  profile['education'][0]['grade_display'] = 'CGPA 8.0 / 10';
+  /* Accepted as before. */
+  const result = checkMasterProfile(profile);
+  assert.equal(result.ok, true, JSON.stringify(result, null, 2));
+  if (!result.ok) return;
+  /* Both values survive byte-for-byte; the existing description does too. */
+  assert.equal(result.profile.identity.headline, 'Backend Engineer');
+  assert.equal(result.profile.education[0]?.grade_display, 'CGPA 8.0 / 10');
+  assert.equal(result.profile.certifications[0]?.description, 'Example Issuer');
+});
+
+/* The caller's object is the operator's parsed paste. Normalising must build a
+ * copy, or a re-check of the same object would see a profile it never pasted. */
+test('normalising absent keys never mutates the object that was passed in', () => {
+  /* The input, with holes. */
+  const input = profileWithoutNullableKeys();
+  /* Checked once. */
+  checkMasterProfile(input);
+  /* Still absent on the caller's object afterwards. */
+  assert.equal('description' in input['achievements'][0], false, 'checkMasterProfile wrote into its argument');
+});

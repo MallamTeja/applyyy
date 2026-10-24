@@ -167,6 +167,19 @@ export function isValidCitationRef(ref: unknown): ref is NodeId {
   return typeof ref === "string" && ref.trim().length > 0;
 }
 
+// A nullable master display field, as the snapshot must store it: present, and null
+// when the master has none. The master is jsonb read back through a cast, and a stored
+// master that LEFT OUT the key (master_profiles v2, live 2026-10-24) hands this file
+// `undefined`; JSON then drops the key from tailored_profile and the renderer crashed
+// on the hole. Versions are immutable and pinned, so the stored hole is permanent and
+// this copy step is the one place every future snapshot can be made whole.
+// Nullable fields ONLY: a missing REQUIRED field is a broken master, not an absence.
+function nullIfAbsent(value: string | null | undefined): string | null {
+  // `??` maps exactly undefined and null to null; '' and real text pass unchanged,
+  // so a present value is still copied byte-for-byte (the honesty guarantee).
+  return value ?? null;
+}
+
 // Collect every skill token in the profile once, so a rewording may legitimately name
 // a real skill. Computed a single time per validation rather than per bullet.
 function masterSkillTokens(master: MasterProfile): ReadonlySet<string> {
@@ -541,7 +554,8 @@ export function validateTailoredProfile(
       ref: node.id,
       company: node.company,
       role: node.role,
-      location: node.location,
+      // Nullable: an absent key in the stored master becomes an explicit null here.
+      location: nullIfAbsent(node.location),
       start_display: node.start_display,
       end_display: node.end_display,
       bullets,
@@ -627,10 +641,12 @@ export function validateTailoredProfile(
       ref: node.id,
       institution: node.institution,
       degree: node.degree,
-      field: node.field,
+      // Nullable: absent becomes null (see nullIfAbsent).
+      field: nullIfAbsent(node.field),
       start_display: node.start_display,
       end_display: node.end_display,
-      grade_display: node.grade_display,
+      // Nullable, same rule.
+      grade_display: nullIfAbsent(node.grade_display),
       bullets,
     });
   }
@@ -673,7 +689,8 @@ export function validateTailoredProfile(
     resolvedAchievements.push({
       ref: node.id,
       label: node.label,
-      description: node.description,
+      // The live 2026-10-24 hole: master v2 stores achievements with no description key.
+      description: nullIfAbsent(node.description),
       bullets,
     });
   }
@@ -712,7 +729,8 @@ export function validateTailoredProfile(
     resolvedCertifications.push({
       ref: node.id,
       label: node.label,
-      description: node.description,
+      // Nullable, same rule as an achievement's description.
+      description: nullIfAbsent(node.description),
       bullets,
     });
   }
@@ -776,7 +794,16 @@ export function validateTailoredProfile(
       master_version: masterVersion,
       // Verbatim from the master. There is no honest reason to tailor a name or a
       // phone number, and aa's type gives the Tailor no way to try.
-      identity: master.identity,
+      // The three optional lines are normalised so an absent key cannot ride along;
+      // every other identity field is the master's own value, unchanged.
+      identity: {
+        // Name, email and links, exactly as stored.
+        ...master.identity,
+        // Absent becomes null for each optional line (see nullIfAbsent).
+        headline: nullIfAbsent(master.identity.headline),
+        phone: nullIfAbsent(master.identity.phone),
+        location: nullIfAbsent(master.identity.location),
+      },
       // Order is a tailoring decision, carried through untouched.
       section_order: tailored.section_order,
       // Prose if there was any, already checked for declared support above.

@@ -626,6 +626,62 @@ function checkSummary(
  *
  * Takes `unknown` because it is fed `JSON.parse` output. Never throws: a paste
  * check that can crash is a paste check that loses the operator's paste. */
+/* Every nullable-VALUE display field, by where it sits. These are the fields the
+ * contract types `string | null` - a REQUIRED key holding a nullable value - and
+ * that this module's walk deliberately does not require, because "none" is the
+ * ordinary case for each (see `checkUndatedNode` on `description`).
+ * The summary is not here: it is an id-bearing node, and its absence is already a
+ * blocking finding rather than something to fill in. */
+const NULLABLE_DISPLAY_FIELDS: Readonly<Record<'identity' | 'experience' | 'education' | 'achievements' | 'certifications', readonly string[]>> = {
+  identity: ['headline', 'phone', 'location'],
+  experience: ['location'],
+  education: ['field', 'grade_display'],
+  achievements: ['description'],
+  certifications: ['description'],
+};
+
+/* A copy of a shape-checked paste in which every absent nullable key is present
+ * and null.
+ *
+ * WHY THIS EXISTS (2026-10-24). master_profiles v2 was stored with achievements
+ * carrying NO `description` key. Nothing refused it, because an absent optional
+ * field is not a defect - but the accepted profile was the raw paste cast to
+ * MasterProfile, so the hole was stored as-is. Downstream code reads these fields
+ * as `string | null`: the Tailor copied the hole into a tailored snapshot, the
+ * resume renderer crashed on it in the approval queue, and a degree with no
+ * `field` key would have printed "BTech, undefined" onto a submitted PDF.
+ * Master versions are immutable, so the fix has to happen BEFORE the insert.
+ *
+ * ONLY ABSENT KEYS ARE FILLED. A present value - text, '' or null - is copied
+ * untouched, so this can never erase what the operator pasted.
+ *
+ * A COPY, NOT AN EDIT: `raw` is the operator's parsed paste, and writing into it
+ * would make a second check of the same object see a profile nobody pasted.
+ * Called only after the structural walk found nothing blocking, so identity is
+ * an object and every section is an array of objects. */
+function withExplicitNulls(raw: Record<string, unknown>): Record<string, unknown> {
+  /* Deep copy: the nodes are nested, and a shallow one would share them with `raw`. */
+  const copy = structuredClone(raw);
+  /* Fill one node: each listed key that is absent becomes null, nothing else moves. */
+  const fill = (node: unknown, keys: readonly string[]): void => {
+    /* Proven by the walk above; re-checked so a future caller cannot make it throw. */
+    if (!isRecord(node)) return;
+    /* `in`, not `=== undefined`: only a key that is missing is filled. */
+    for (const key of keys) if (!(key in node)) node[key] = null;
+  };
+  /* Identity is a single object. */
+  fill(copy['identity'], NULLABLE_DISPLAY_FIELDS.identity);
+  /* The four sections are arrays; every node in each gets the same keys. */
+  for (const section of ['experience', 'education', 'achievements', 'certifications'] as const) {
+    /* Proven an array by the walk; guarded for the same reason as `fill`. */
+    const nodes = copy[section];
+    /* Each node of the section. */
+    if (Array.isArray(nodes)) for (const node of nodes) fill(node, NULLABLE_DISPLAY_FIELDS[section]);
+  }
+  /* The filled copy; `raw` is unchanged. */
+  return copy;
+}
+
 export function checkMasterProfile(raw: unknown): IngestResult {
   const findings: IngestFinding[] = [];
   const ledger = new IdPresenceLedger();
@@ -872,8 +928,9 @@ export function checkMasterProfile(raw: unknown): IngestResult {
 
   /* Shape is sound, so the profile can be handed to the package's rule. The
      cast is the same one the success branch makes below, and it is earned by
-     the same checks. */
-  const shaped = raw as unknown as MasterProfile;
+     the same checks - plus `withExplicitNulls`, which earns the part of it the
+     checks deliberately leave alone (an optional field whose key is absent). */
+  const shaped = withExplicitNulls(raw) as unknown as MasterProfile;
   const duplicates = duplicateFindings(shaped);
 
   const all = [...structural, ...duplicates];

@@ -1280,3 +1280,66 @@ test("live-shaped: a certification ref absent from the master is refused as unre
     result.ok === false ? JSON.stringify(result.violations) : "expected a refusal",
   );
 });
+
+// ---------------------------------------------------------------------------
+// ABSENT NULLABLE KEYS IN A STORED MASTER (live 2026-10-24). master_profiles v2 was
+// uploaded with achievements that have NO `description` key at all, not `null`.
+// The type says `string | null`, but the master is jsonb read back through a cast, so
+// the validator received `undefined` and copied it into the tailored snapshot, where
+// the renderer crashed on it. Master versions are immutable and pinned, so the stored
+// hole is permanent: this copy step is where every future snapshot gets it fixed.
+// ---------------------------------------------------------------------------
+
+// The master with every nullable display key DELETED — the shape v2 has live. Built
+// through an untyped view of a clone, because the point is to violate the type.
+function masterWithoutNullableKeys(): MasterProfile {
+  // A private copy, so no other test sees the deletions.
+  const master = masterClone();
+  // An untyped handle on the same object, for the deletions the type forbids.
+  const raw = master as unknown as Record<string, any>;
+  // The three optional identity lines.
+  for (const key of ["headline", "phone", "location"]) delete raw.identity[key];
+  // Every role's location.
+  for (const node of raw.experience) delete node.location;
+  // Every degree's field of study and grade.
+  for (const node of raw.education) { delete node.field; delete node.grade_display; }
+  // Every undated entry's qualifying detail: the live case.
+  for (const node of [...raw.achievements, ...raw.certifications]) delete node.description;
+  // Same object, now carrying the holes.
+  return master;
+}
+
+test("a master with absent nullable keys resolves to explicit nulls, never undefined", () => {
+  // The award tailoring, so all four kinds of nullable field are selected at once.
+  const result = validateTailoredProfile(withAwards(), masterWithoutNullableKeys(), PINNED_VERSION);
+  // Still a valid tailoring: an absent optional field is not a fabrication.
+  assert.equal(result.ok, true, result.ok === false ? JSON.stringify(result.violations) : "");
+  if (!result.ok) return;
+  // The resolved resume, under test.
+  const resume = result.resume;
+  // Non-vacuity: every section whose field is checked below was actually selected.
+  assert.ok(resume.experience.length > 0 && resume.education.length > 0 && resume.achievements.length > 0 && resume.certifications.length > 0, "a section under test resolved empty; this test would be vacuous");
+  // Each [label, node, key] triple names one nullable field in the resolved resume.
+  const fields: Array<[string, Record<string, unknown>, string]> = [
+    // Identity's three optional lines.
+    ["identity.headline", resume.identity as unknown as Record<string, unknown>, "headline"],
+    ["identity.phone", resume.identity as unknown as Record<string, unknown>, "phone"],
+    ["identity.location", resume.identity as unknown as Record<string, unknown>, "location"],
+    // The role location that printed "Acme, undefined".
+    ["experience[0].location", resume.experience[0] as unknown as Record<string, unknown>, "location"],
+    // The degree's field and grade.
+    ["education[0].field", resume.education[0] as unknown as Record<string, unknown>, "field"],
+    ["education[0].grade_display", resume.education[0] as unknown as Record<string, unknown>, "grade_display"],
+    // The two undated descriptions, the live crash.
+    ["achievements[0].description", resume.achievements[0] as unknown as Record<string, unknown>, "description"],
+    ["certifications[0].description", resume.certifications[0] as unknown as Record<string, unknown>, "description"],
+  ];
+  // Every one must be a PRESENT key holding null: JSON.stringify drops an undefined
+  // key, so "present and null" is the only shape that survives into the jsonb snapshot.
+  for (const [label, node, key] of fields) {
+    // The key exists on the resolved node.
+    assert.equal(key in node, true, `${label} is missing from the resolved resume`);
+    // And its value is exactly null, not undefined.
+    assert.equal(node[key], null, `${label} should be null, got ${String(node[key])}`);
+  }
+});
