@@ -1,6 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "outputDirectory": "apps/web/dist",
+  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- apps/web packages supabase/functions/_shared package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json .npmrc vercel.json",
   "rewrites": [
     {
       "source": "/(.*)",
