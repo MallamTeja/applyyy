@@ -41,7 +41,10 @@ Progress questions get a % toward the product goal, re-derived at ask time (CLAU
 
 ## Rescue branches — in-flight work cut off by the 00:32 shutdown
 
-1. **`rescue/2026-10-24-0032-session-end`** (`af34294`+`8fbbb62`, marked UNGATED):
+1. **`rescue/2026-10-24-1050-full`** — THE branch to resume from (updated 2026-10-24
+   10:55: it carries the FINAL tree state as `wip(rescue3)` and supersedes
+   `rescue/2026-10-24-0032-session-end`, a stale partial snapshot kept only as history;
+   the main working tree is now CLEAN, the WIP lives on the branch alone):
    the scout **board-identity guard** (_shared/ats/identity.ts + 15/15 test, a required
    `readReportedIdentity` in all 7 adapters, scout-ats wired: identity mismatch →
    persist nothing, consecutive_failures+1, `identity_mismatch` run counter). The branch
