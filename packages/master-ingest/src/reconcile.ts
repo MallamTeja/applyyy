@@ -172,9 +172,18 @@ function linkLabel(link: MasterLink): string {
  * issuer changed from "Amazon Web Services" to "AWS" is a row where `label` and
  * `previousLabel` differ, and that difference is the entire content of the
  * review. Structural typing rather than a union of the two interfaces, so it
- * cannot drift if one of them gains a field. */
-function labelledEntryLabel(node: { readonly label: string; readonly description: string | null }): string {
-  return node.description === null ? node.label : node.label + ' - ' + node.description;
+ * cannot drift if one of them gains a field.
+ *
+ * AN ABSENT DESCRIPTION KEY READS AS NULL (2026-10-24). The stored master is
+ * jsonb read back through a cast, and master_profiles v2 holds achievements with
+ * no `description` key at all. Testing only `=== null` let undefined reach the
+ * concatenation and the review row read "... - undefined". `undefined` is
+ * admitted in the parameter type on purpose, so the compiler keeps the check
+ * honest; '' still renders as a separator because a stored '' is a real value
+ * and this label must show the reviewer exactly what is there. */
+function labelledEntryLabel(node: { readonly label: string; readonly description: string | null | undefined }): string {
+  /* `== null` is the one check that matches exactly null and undefined. */
+  return node.description == null ? node.label : node.label + ' - ' + node.description;
 }
 
 /* --- Exact key matching, shared by every non-bullet kind ---------------- */

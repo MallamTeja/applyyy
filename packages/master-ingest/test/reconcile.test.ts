@@ -1216,3 +1216,35 @@ describe('project links are reconciled inside their own project', () => {
     assert.equal(result.report.dropped[0]?.id, 'lnk-oo-live');
   });
 });
+
+/* ABSENT DESCRIPTION KEY (live 2026-10-24). master_profiles v2 stores two
+   achievements with NO `description` key - absent, not null - and it is the
+   `previous` profile of every future upload. labelledEntryLabel tested only
+   `=== null`, so undefined fell through to concatenation and the upload review
+   showed "Winner - Smart India Hackathon 2025 - undefined". Absent must read
+   exactly as null: the label alone. */
+describe('an achievement whose description key is absent', () => {
+  it('labels both sides of a carry without the word "undefined"', () => {
+    /* The stored side in v2's shape: ach-sih with its description key deleted. */
+    const previous = structuredClone(STORED) as unknown as { achievements: Record<string, unknown>[] };
+    /* Delete, not null - the shape the type forbids and the live row has. */
+    delete previous.achievements[0]!['description'];
+    /* Non-vacuity: the key really is gone from the input under test. */
+    assert.equal('description' in previous.achievements[0]!, false, 'the key was not removed; this test would be vacuous');
+    /* The incoming side rewords the detail line, so a carry is reported with both labels. */
+    const incoming = reparse({
+      ...STORED,
+      achievements: STORED.achievements.map((a) =>
+        a.id !== 'ach-sih' ? a : { ...a, description: '312 teams through to the national finals' },
+      ),
+    });
+    /* Reconcile against the holed stored profile. */
+    const result = reconcileMasterProfile({ previous: previous as unknown as MasterProfile, incoming, mintId: makeMinter('new') });
+    /* The carry row for the achievement whose stored side has no description. */
+    const carry = result.report.carried.find((entry) => entry.id === 'ach-sih');
+    /* The previous label is the label alone, exactly as a null description renders it. */
+    assert.equal(carry?.previousLabel, 'Winner - Smart India Hackathon 2025');
+    /* And the incoming side still shows its real description: the fix is not a blanket drop. */
+    assert.equal(carry?.label, 'Winner - Smart India Hackathon 2025 - 312 teams through to the national finals');
+  });
+});
