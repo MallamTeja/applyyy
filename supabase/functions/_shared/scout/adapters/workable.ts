@@ -28,6 +28,7 @@ import {
   classifyWorkArrangement,
   isRecord,
   readId,
+  readHttpUrl,
   readString,
   stripHtml,
   type AtsAdapter,
@@ -187,12 +188,14 @@ export const workableAdapter: AtsAdapter = {
       }
 
       // Read candidate application URL from payload (`shortlink`, `url`, `apply_url`).
-      let applyUrl = readString(entry, "shortlink", "url", "apply_url", "hostedUrl");
+      // http(s) only (readHttpUrl): an unsafe value falls through to the next field.
+      let applyUrl = readHttpUrl(entry, "shortlink", "url", "apply_url", "hostedUrl");
 
       // Fallback: If direct applyUrl is missing but shortcode exists, build canonical URL.
       if (applyUrl === null && atsJobId !== null) {
-        // Construct canonical public application page URL using shortcode.
-        applyUrl = `${WORKABLE_API_ORIGIN}/j/${atsJobId}`;
+        // Construct canonical public application page URL using shortcode. Encoded:
+        // the shortcode comes from the payload and must not add path structure.
+        applyUrl = `${WORKABLE_API_ORIGIN}/j/${encodeURIComponent(atsJobId)}`;
       }
 
       // Skip job if no actionable application URL target could be determined.

@@ -31,6 +31,7 @@ import {
   classifyEmploymentType,
   classifyWorkArrangement,
   isRecord,
+  readHttpUrl,
   readId,
   readString,
   stripHtml,
@@ -62,24 +63,6 @@ function postingsUrl(boardToken: string): string {
 function isCount(value: unknown): value is number {
   // Numbers only, whole, and never negative.
   return typeof value === "number" && Number.isInteger(value) && value >= 0;
-}
-
-// The value back if it parses as an absolute https URL, else null. Parsed with the URL
-// constructor rather than a prefix test, so " javascript:" or "HTTPS:" tricks resolve
-// to their real scheme before the check. Scheme only, no host allowlist: SR postings
-// can point at an employer's own careers domain, and the host decision for submission
-// belongs to the shared apply-url gate (_shared/scout/apply-url.ts), not to a parser.
-function httpsUrlOrNull(value: string | null): string | null {
-  // Absence stays absence.
-  if (value === null) return null;
-  // The URL constructor throws on anything that is not an absolute URL.
-  try {
-    // Only the https scheme is a storable apply target.
-    return new URL(value).protocol === "https:" ? value : null;
-  } catch {
-    // Unparseable is treated the same as absent.
-    return null;
-  }
 }
 
 // Extract human-readable location prose from a SmartRecruiters job entry.
@@ -301,14 +284,13 @@ export const smartrecruitersAdapter: AtsAdapter = {
       }
 
       // Read candidate application target URL (`applyUrl`, `jobUrl`, `hostedUrl`, `url`).
-      // Only an https URL counts: apply_url is rendered as a dashboard <a href>, and a
-      // board-supplied `javascript:` or `data:` value must never be stored. A rejected
+      // Only an http(s) URL counts (readHttpUrl, shared by every adapter): a rejected
       // candidate is treated as absent, so the canonical fallback below still applies.
-      let applyUrl = httpsUrlOrNull(readString(entry, "applyUrl", "jobUrl", "hostedUrl", "url"));
+      let applyUrl = readHttpUrl(entry, "applyUrl", "jobUrl", "hostedUrl", "url");
 
       // Check `ref` property: if ref is a string and does not point to internal API path, use it.
-      // Held to the same https-only rule as the candidates above.
-      const refUrl = httpsUrlOrNull(readString(entry, "ref"));
+      // Held to the same http(s)-only rule as the candidates above.
+      const refUrl = readHttpUrl(entry, "ref");
       if (applyUrl === null && refUrl !== null && !refUrl.includes("/v1/companies/")) {
         // Use non-API ref URL as candidate application URL.
         applyUrl = refUrl;

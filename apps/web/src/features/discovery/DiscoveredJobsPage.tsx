@@ -37,6 +37,8 @@ import { Link } from 'react-router-dom';
 
 import { PageHeader } from '../../app/PageHeader';
 import { SourceBadge } from '../../app/SourceBadge';
+// apply_url is board-supplied: every href built from it goes through the http(s) gate.
+import { safeHref } from '../../app/safeHref.ts';
 import type { DiscoverySource } from '../../data/contract.ts';
 import { supabase } from '../../data/supabase.ts';
 import { DiscoveryModal } from '../pipeline/DiscoveryModal';
@@ -846,7 +848,7 @@ export function DiscoveredJobsPage(): ReactElement {
               {/* Card Footer Actions */}
               <div className="job-card__footer">
                 <a
-                  href={job.apply_url}
+                  href={safeHref(job.apply_url)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="job-card__link"
@@ -954,7 +956,7 @@ export function DiscoveredJobsPage(): ReactElement {
 
             <footer className="jd-modal__footer">
               <a
-                href={activeJdModal.apply_url}
+                href={safeHref(activeJdModal.apply_url)}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="button button--secondary"

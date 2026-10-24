@@ -19,6 +19,8 @@ import { useCallback, useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
+// Profile links are parsed out of an uploaded resume, so they get the same http(s) gate.
+import { safeHref } from '../../app/safeHref.ts';
 import { ingestMasterProfileText } from './masterIngest';
 import type { IngestResult } from './masterIngest';
 import { MasterUploadReview } from './MasterUploadReview';
@@ -302,7 +304,7 @@ export function MasterProfilePage(): ReactElement {
                 {stored.identity.links.map((link) => (
                   <a
                     key={link.id}
-                    href={link.url}
+                    href={safeHref(link.url)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="profile-link-badge"
@@ -443,7 +445,7 @@ export function MasterProfilePage(): ReactElement {
                         {proj.links.map((l) => (
                           <a
                             key={l.id}
-                            href={l.url}
+                            href={safeHref(l.url)}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="profile-link-badge"

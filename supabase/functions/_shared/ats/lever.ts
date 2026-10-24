@@ -28,6 +28,7 @@ import {
   classifyWorkArrangement,
   isRecord,
   readId,
+  readHttpUrl,
   readString,
   stripHtml,
   type AtsAdapter,
@@ -125,7 +126,8 @@ export const leverAdapter: AtsAdapter = {
       // THE CANONICAL SUBMIT TARGET. `applyUrl` is the form itself and is preferred;
       // `hostedUrl` is the posting page and is the fallback. Preferring the direct
       // form URL saves the worker one navigation and one chance to be redirected.
-      const applyUrl = readString(entry, "applyUrl", "hostedUrl");
+      // http(s) only (readHttpUrl): an unsafe applyUrl falls through to hostedUrl.
+      const applyUrl = readHttpUrl(entry, "applyUrl", "hostedUrl");
       // Not actionable without one.
       if (applyUrl === null) {
         skipped.push(`posting ${atsJobId ?? "?"} had no applyUrl or hostedUrl`);

@@ -4,6 +4,8 @@
 
 // Hooks only; no state library, because the panel has one request and one result.
 import { useState } from 'react';
+// The http(s)-only href gate: a scouted apply_url is LLM-proposed, so it is untrusted.
+import { safeHref } from '../../app/safeHref.ts';
 // Styles are co-located so the panel can be mounted or removed as one unit.
 import './WebScoutPanel.css';
 
@@ -305,7 +307,7 @@ export function WebScoutView(props: {
               <li key={job.apply_url} className="web-scout__job">
                 {/* External link: noopener+noreferrer so the target cannot reach window.opener. */}
                 {/* The title is the link text, so the accessible name is the job itself. */}
-                <a className="web-scout__link" href={job.apply_url} target="_blank" rel="noopener noreferrer">{job.title}</a>
+                <a className="web-scout__link" href={safeHref(job.apply_url)} target="_blank" rel="noopener noreferrer">{job.title}</a>
                 {/* Company, location and provider on one wrapping meta line. */}
                 <span className="web-scout__meta">
                   {job.company_name} · {job.location_raw ?? 'Location not listed'} · {job.ats_provider}

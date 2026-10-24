@@ -146,6 +146,40 @@ export function readString(source: Record<string, unknown>, ...candidates: reado
   return null;
 }
 
+// Read an apply URL: the first candidate that parses as an absolute http(s) URL, or
+// null. EVERY ADAPTER READS ITS APPLY URL THROUGH THIS, because apply_url is rendered
+// as a dashboard <a href> and React 18 still renders `javascript:` hrefs.
+//
+// WHY HERE AND NOT IN toJobInsert: apply_url is `text not null`, so a row cannot say
+// "absent". At parse time absence already has a path: each adapter skips the posting
+// and records why. An unsafe candidate is treated as absent, so the walk moves on to
+// the next field (lever's hostedUrl behind its applyUrl).
+//
+// SCHEME ONLY, http AND https: greenhouse postings link to employers' own careers
+// domains, so no host allowlist belongs here (the submit-host gate is
+// _shared/scout/apply-url.ts). http is admitted because the threat is a scheme that
+// runs or embeds content, and http does neither; the web's safeHref uses the same two.
+export function readHttpUrl(source: Record<string, unknown>, ...candidates: readonly string[]): string | null {
+  // Same candidate walk and emptiness rule as readString, one key at a time.
+  for (const key of candidates) {
+    // The trimmed string under this key, or null.
+    const value = readString(source, key);
+    // Absent here; try the next field.
+    if (value === null) continue;
+    // The URL constructor resolves casing and whitespace tricks to the real scheme.
+    try {
+      // Only a web-navigable scheme is storable.
+      const { protocol } = new URL(value);
+      // Accepted: return the board's own string, unchanged.
+      if (protocol === "https:" || protocol === "http:") return value;
+    } catch {
+      // Not an absolute URL; treated exactly like an unsafe scheme.
+    }
+  }
+  // No candidate was a safe URL.
+  return null;
+}
+
 // Read an id that a board may express as either a string or a number. Greenhouse uses
 // numeric ids and Lever uses UUID strings, so coercing here keeps that difference from
 // leaking into three separate adapters.

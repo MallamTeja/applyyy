@@ -26,6 +26,7 @@ import {
   classifyWorkArrangement,
   isRecord,
   readId,
+  readHttpUrl,
   readString,
   stripHtml,
   type AtsAdapter,
@@ -142,7 +143,8 @@ export const greenhouseAdapter: AtsAdapter = {
       }
       // THE CANONICAL SUBMIT TARGET, decided once here. Required for the same reason:
       // a job with no apply URL is not actionable.
-      const applyUrl = readString(entry, "absolute_url");
+      // http(s) only (readHttpUrl): a `javascript:` value here is skipped like a missing one.
+      const applyUrl = readHttpUrl(entry, "absolute_url");
       // Skipped rather than stored, because a row that can never be submitted would
       // sit in the queue consuming attention forever.
       if (applyUrl === null) {

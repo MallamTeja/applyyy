@@ -47,6 +47,8 @@ import {
 } from './diffModel';
 import { StatusBadge } from '../../app/StatusBadge';
 import { SourceBadge } from '../../app/SourceBadge';
+/* The shared http(s)-only gate for every href built from stored data. */
+import { safeHref } from '../../app/safeHref.ts';
 import type { DiscoverySource } from '../../data/contract';
 
 import './DiffView.css';
@@ -92,35 +94,6 @@ export interface DiffViewProps {
 
 /* --- The job being approved against ------------------------------------- */
 
-/* Only ever produce an href for a URL we have proved is http(s).
- *
- * WHY A HELPER AND NOT A REGEX AT THE CALL SITE: `apply_url` is attacker-
- * influenced. It reaches us from a job board, and commit 2921bca already had to
- * validate apply URLs coming out of untrusted LinkedIn post text. A string
- * beginning `javascript:` in an href executes on click, and `data:` can carry a
- * whole document; both defeat rel="noopener" entirely, because the navigation
- * never leaves the page. Parsing with the URL constructor and allowlisting the
- * two schemes we want is the check that cannot be fooled by casing, whitespace
- * or percent-encoding the way a substring test can.
- * Returns null rather than a sanitised string, so the caller has to handle
- * "no safe link" explicitly instead of rendering a dead anchor. */
-function safeHttpUrl(raw: string | null | undefined): string | null {
-  /* Nothing to validate. Not an error - most rows have a URL, some do not. */
-  if (typeof raw !== 'string' || raw.trim().length === 0) return null;
-  try {
-    const parsed = new URL(raw.trim());
-    /* The allowlist. Anything else - javascript:, data:, file:, blob: - is
-       refused rather than escaped, because there is no safe rendering of a
-       scheme this screen has no reason to open. */
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:'
-      ? parsed.href
-      : null;
-  } catch {
-    /* Unparseable. Treated exactly like an unsafe scheme: no link. */
-    return null;
-  }
-}
-
 /* The posting itself, beside the resume that claims to answer it.
  *
  * WHY THIS EXISTS AT ALL: this screen asks the operator to confirm a resume was
@@ -137,8 +110,9 @@ function JobPosting({ diff }: { readonly diff: ResumeDiff }): ReactElement | nul
      other part of the app has a reason to know about. */
   const [expanded, setExpanded] = useState(false);
 
-  /* Validated once per render rather than at each use site. */
-  const href = safeHttpUrl(diff.applyUrl);
+  /* Validated once per render rather than at each use site; undefined means no safe
+     link (apply_url is board-supplied, see app/safeHref.ts). */
+  const href = safeHref(diff.applyUrl);
 
   /* Tags stripped rather than rendered: this text came from a job board and is
      UNTRUSTED. Stripping here and passing a plain string to a React text child
@@ -151,7 +125,7 @@ function JobPosting({ diff }: { readonly diff: ResumeDiff }): ReactElement | nul
   /* Render nothing at all rather than an empty panel: a box saying "no job
      details" is noise on a screen where everything visible must be worth
      reading. */
-  if (href === null && description.length === 0) return null;
+  if (href === undefined && description.length === 0) return null;
 
   return (
     <section className="job-posting" aria-labelledby={`posting-${diff.applicationId}`}>
@@ -161,7 +135,7 @@ function JobPosting({ diff }: { readonly diff: ResumeDiff }): ReactElement | nul
         </h3>
         {/* The link is the more valuable of the two, so it sits in the header
             where it is reachable without expanding anything. */}
-        {href !== null && (
+        {href !== undefined && (
           <a
             className="button button--secondary button--small"
             href={href}

@@ -15,6 +15,9 @@ import { leverAdapter } from "./lever.ts";
 import { ashbyAdapter } from "./ashby.ts";
 // The first paginated adapter; it lives beside the aggregators until the move parcel.
 import { smartrecruitersAdapter } from "../scout/adapters/smartrecruiters.ts";
+// Written but unregistered; held to the same apply-URL rule so registering it later
+// cannot reopen the hole.
+import { workableAdapter } from "../scout/adapters/workable.ts";
 // The registry, the shared row builder, and the board-read helpers the Scout loops on.
 import {
   boardWentEmpty,
@@ -584,9 +587,44 @@ test("an unparseable later page fails the whole board, keeping no partial postin
   assert.equal(result.ok, false);
 });
 
+// --- apply_url: only http(s) may be stored, on every adapter ------------------------
+
+// apply_url is `text not null` and JobInsert requires it, so toJobInsert has no way to
+// say "absent". The scheme check therefore runs at PARSE, where absence already has a
+// defined path: the posting is skipped with a reason. One payload per adapter, each
+// carrying only script/data URLs in every field that adapter reads.
+const UNSAFE_APPLY_PAYLOADS = [
+  ["greenhouse", greenhouseAdapter, { jobs: [{ id: 1, title: "Engineer", absolute_url: "javascript:alert(1)", updated_at: "2026-10-20T00:00:00Z" }] }],
+  ["lever", leverAdapter, [{ id: "l1", text: "Engineer", applyUrl: "javascript:alert(1)", hostedUrl: " JavaScript:alert(1)" }]],
+  ["ashby", ashbyAdapter, { jobs: [{ id: "a1", title: "Engineer", isListed: true, applyUrl: "javascript:alert(1)", jobUrl: "data:text/html,<script>x</script>" }] }],
+  ["smartrecruiters", smartrecruitersAdapter, { content: [{ id: "s1", name: "Engineer", applyUrl: "javascript:alert(1)" }] }],
+  ["workable", workableAdapter, { name: "W", jobs: [{ title: "Engineer", url: "javascript:alert(1)" }] }],
+] as const;
+
+test("a javascript: apply URL is dropped before toJobInsert, on every adapter", () => {
+  for (const [name, adapter, payload] of UNSAFE_APPLY_PAYLOADS) {
+    const result = adapter.parse(payload);
+    // Not a crash and not a failed board: an ordinary parse with the posting skipped.
+    assert.equal(result.ok, true, `${name} must parse, not fail`);
+    if (!result.ok) continue;
+    assert.equal(result.postings.length, 0, `${name} stored an unsafe apply URL`);
+    assert.equal(result.skipped.length, 1, `${name} must record why it skipped`);
+  }
+});
+
+// An unsafe FIRST candidate must not cost a posting whose fallback field is fine.
+test("an unsafe apply URL falls through to the adapter's next safe candidate", () => {
+  const result = leverAdapter.parse([
+    { id: "l2", text: "Engineer", applyUrl: "javascript:alert(1)", hostedUrl: "https://jobs.lever.co/zomato/l2" },
+  ]);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.postings[0]?.applyUrl, "https://jobs.lever.co/zomato/l2");
+});
+
 // apply_url reaches the dashboard as an <a href>, and React 18 still renders a
-// `javascript:` href. A board-supplied URL that is not https must never be stored.
-test("smartrecruiters skips a posting whose only apply URL is not https", () => {
+// `javascript:` href. A board-supplied URL that is not http(s) must never be stored.
+test("smartrecruiters skips a posting whose only apply URL is not http(s)", () => {
   const result = smartrecruitersAdapter.parse({
     content: [{ id: "x1", name: "Engineer", applyUrl: "javascript:alert(document.cookie)" }],
   });
@@ -597,9 +635,9 @@ test("smartrecruiters skips a posting whose only apply URL is not https", () => 
   assert.equal(result.skipped.length, 1);
 });
 
-// A non-https candidate is treated as absent, so the canonical fallback still applies,
+// A non-http(s) candidate is treated as absent, so the canonical fallback still applies,
 // and the payload's company/id segments are encoded rather than becoming path structure.
-test("smartrecruiters rejects a non-https apply URL and encodes the fallback URL", () => {
+test("smartrecruiters rejects a non-http(s) apply URL and encodes the fallback URL", () => {
   const result = smartrecruitersAdapter.parse({
     content: [{ id: "7/../x", name: "Engineer", applyUrl: "data:text/html,hi", company: { identifier: "a/b", name: "A" } }],
   });

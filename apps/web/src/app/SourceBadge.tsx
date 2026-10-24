@@ -21,6 +21,8 @@
 
 import type { ReactElement } from 'react';
 import type { DiscoverySource, JobSourceRef } from '../data/contract';
+// The shared http(s)-only gate; source_refs urls are board- or LLM-supplied.
+import { safeHref } from './safeHref.ts';
 
 import './SourceBadge.css';
 
@@ -91,7 +93,9 @@ function toBadgeInfo(
   refs: readonly JobSourceRef[],
 ): BadgeInfo {
   const ref = refs.find((r) => r.provider === source) ?? refs[0];
-  const url = ref?.url ?? undefined;
+  // http(s) only: this URL reaches window.open, and a stored `javascript:` ref would
+  // run there. Undefined makes the badge non-clickable rather than unsafe.
+  const url = safeHref(ref?.url);
   const refMeta = ref?.metadata as Record<string, unknown> | undefined | null;
 
   const isLinkedInPost =
