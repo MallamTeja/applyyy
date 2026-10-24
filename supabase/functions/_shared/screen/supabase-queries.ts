@@ -243,8 +243,10 @@ export function supabaseScreenQueries(client: { from(table: string): unknown }, 
 
     // Stage 0's config. RLS scopes this to the signed-in user, so a plain select returns
     // at most that user's own row — no filter is needed and none is applied.
+    // us_work_authorized needs migration 20261024190000 applied FIRST: before it, this
+    // select fails, and the loader stops the run with a named error (never a silent pass).
     searchPreferences(): Promise<ScreenQueryResult<SearchPreferencesRow>> {
-      return Promise.resolve(db.from("search_preferences").select("titles, keywords, excluded_keywords")).then(
+      return Promise.resolve(db.from("search_preferences").select("titles, keywords, excluded_keywords, us_work_authorized")).then(
         (response) => toResult(response, (rows) => rows as SearchPreferencesRow[]),
       );
     },

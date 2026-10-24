@@ -22,6 +22,8 @@ import { screenJob, type ScreenableJob, type ScreenContext } from "../filter/cas
 // Stage 0, which runs AHEAD of the cascade rather than as a tenth rule — Teja asked that
 // the cascade not change, and a title comparison is cheaper than any rule in it.
 import { screenTechRole, type TechGatePreferences } from "./tech-gate.ts";
+// Stage 0b, the US work-authorisation gate: same outside-the-cascade placement, same reason.
+import { screenUsWorkAuth } from "./work-auth-gate.ts";
 // Row shapes from the schema owner. Never redefined — a redefined type drifts.
 import type { FilterRuleRow, JobInsert, JobRow } from "../contracts/shared-types.ts";
 
@@ -79,6 +81,17 @@ export interface DroppedJob {
   readonly title: string;
   readonly ruleType: string;
   readonly reason: string;
+}
+
+// Both stage-0 gates' config, loaded together from one `search_preferences` row.
+//
+// AN EXTENSION, NOT AN EDIT, OF TechGatePreferences: the matcher's tech pre-gate reads only
+// the three tech lists, and widening that type would force a work-auth answer on a caller
+// that has no use for it. `usWorkAuthorized` is REQUIRED (not optional) so every screening
+// caller must state it; null is the explicit "never answered", which keeps the gate open.
+export interface ScreenPreferences extends TechGatePreferences {
+  // true = may work in the US; false = may not (US-auth jobs drop); null = unanswered.
+  readonly usWorkAuthorized: boolean | null;
 }
 
 // Everything one screened batch produced.
@@ -161,7 +174,7 @@ export function planScreenedApplications(
   // caller omit the gate and silently screen without stage 0 — the wrong answer has to
   // be unrepresentable, not merely discouraged. An open gate is expressed by passing
   // empty preferences, which is a decision a reader can see at the call site.
-  preferences: TechGatePreferences,
+  preferences: ScreenPreferences,
 ): ScreenedBatchPlan {
   // Accumulators. Built as mutable locals and returned as readonly, so a caller cannot
   // reach back in and edit a plan after it was decided.
@@ -192,6 +205,28 @@ export function planScreenedApplications(
       // matching nothing configured), so the two are never spelled here.
       inserts.push({ job_id: entry.jobId, status: "dropped_filter", drop_reason: techVerdict.code });
       dropped.push({ jobId: entry.jobId, title: entry.row.title, ruleType: techVerdict.code, reason: techVerdict.reason });
+      continue;
+    }
+
+    // STAGE 0b: a job that needs US work authorisation, for a user who said they have none.
+    // After the tech gate because it reads the whole description (dearer than a title
+    // match); before the cascade because it is still I/O-free and ends a hopeless posting
+    // before any rule or Gemini call is spent on it.
+    const authVerdict = screenUsWorkAuth(
+      // The three texts the gate judges by; nothing else about the job matters to it.
+      { title: entry.row.title, locationRaw: entry.row.location_raw ?? null, description: entry.row.description_raw ?? null },
+      // The user's answer; null (unanswered) opens the gate and warns.
+      preferences.usWorkAuthorized,
+    );
+    // The open-gate warning is the only sign the setting was never answered.
+    if ("warning" in authVerdict) warnings.add(authVerdict.warning);
+    // A drop is recorded under the gate's own code, exactly like the tech gate's.
+    if (authVerdict.drop) {
+      // drop_reason names the stage, never one of the nine cascade rules.
+      inserts.push({ job_id: entry.jobId, status: "dropped_filter", drop_reason: authVerdict.code });
+      // The prose names the signal that matched, so a wrong drop is diagnosable.
+      dropped.push({ jobId: entry.jobId, title: entry.row.title, ruleType: authVerdict.code, reason: authVerdict.reason });
+      // Nothing after a drop runs.
       continue;
     }
 

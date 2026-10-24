@@ -23,8 +23,8 @@
 import type { ScreenContext } from "../filter/cascade.ts";
 // Row shapes from the schema owner. Never redefined.
 import type { FilterRuleRow } from "../contracts/shared-types.ts";
-// Stage 0's config shape, so the loader hands back something the gate can use directly.
-import type { TechGatePreferences } from "./tech-gate.ts";
+// Stage 0's config shape, so the loader hands back something the gates can use directly.
+import type { ScreenPreferences } from "./screen-batch.ts";
 
 // One query's outcome, in the shape postgrest already returns.
 //
@@ -85,6 +85,10 @@ export interface SearchPreferencesRow {
   readonly titles: readonly string[] | null;
   readonly keywords: readonly string[] | null;
   readonly excluded_keywords: readonly string[] | null;
+  // Teja's US work-authorisation answer for the work-auth gate. Optional in the TYPE
+  // because a row read before migration 20261024190000 has no such key; absent and null
+  // both mean "never answered", and the gate stays open for that.
+  readonly us_work_authorized?: boolean | null;
 }
 
 // What a successful load hands the caller: the rules and the context, together, because
@@ -95,7 +99,7 @@ export interface LoadedScreenContext {
   readonly context: ScreenContext;
   // Stage 0's config, carried alongside rather than fetched separately, so the gate and
   // the cascade can never be run against config loaded at two different moments.
-  readonly preferences: TechGatePreferences;
+  readonly preferences: ScreenPreferences;
 }
 
 // Success or an explained failure. Mirrors `PortResult` in `_shared/agent/port.ts` — a
@@ -206,6 +210,10 @@ export async function loadScreenContext(queries: ScreenQueries, now: Date): Prom
         titles: preferencesRow?.titles ?? [],
         keywords: preferencesRow?.keywords ?? [],
         excludedKeywords: preferencesRow?.excluded_keywords ?? [],
+        // ONLY a real boolean is an answer. A missing row, a missing key, null, or any
+        // non-boolean junk all collapse to null = unanswered, which opens the gate rather
+        // than dropping on missing data (CLAUDE.md section 6).
+        usWorkAuthorized: typeof preferencesRow?.us_work_authorized === "boolean" ? preferencesRow.us_work_authorized : null,
       },
       // Passed through untouched, `sort_order` included — the cascade sorts on it, so
       // re-deriving or reordering here would silently reshape the whole cascade.

@@ -183,7 +183,8 @@ test("search preferences are loaded and mapped for the tech gate", async () => {
 test("a missing preferences row yields an open gate rather than an error", async () => {
   const result = await loadScreenContext(queries({ searchPreferences: () => Promise.resolve({ rows: [], error: null }) }), NOW);
   assert.equal(result.ok, true);
-  assert.deepEqual(result.ok && result.value.preferences, { titles: [], keywords: [], excludedKeywords: [] });
+  // usWorkAuthorized null = unanswered: the work-auth gate is open too, never a "No".
+  assert.deepEqual(result.ok && result.value.preferences, { titles: [], keywords: [], excludedKeywords: [], usWorkAuthorized: null });
 });
 
 // An ERROR is still an error, even though an empty result is not. The same distinction
@@ -208,3 +209,33 @@ test("null array columns map to empty lists", async () => {
   );
   assert.deepEqual(result.ok && result.value.preferences.titles, []);
 });
+
+// --- stage-0b preference: US work authorisation --------------------------------------
+
+// Only a genuine boolean is an answer. The column is nullable (null = never answered), a row
+// read before migration 20261024190000 has no key at all, and junk must never pass for "No".
+for (const [name, stored, expected] of [
+  // Teja's answer.
+  ["false", false, false],
+  // Authorised.
+  ["true", true, true],
+  // Never answered.
+  ["null", null, null],
+  // Key absent (row from before the migration).
+  ["absent", undefined, null],
+  // A string is not a boolean; reading "false" as No would be a lenient parser deciding.
+  ["the string \"false\"", "false", null],
+] as const) {
+  // One named test per stored shape.
+  test(`us_work_authorized ${name} maps to ${String(expected)}`, async () => {
+    // A row carrying the stored value, everything else empty.
+    const row = { titles: [], keywords: [], excluded_keywords: [], ...(stored === undefined ? {} : { us_work_authorized: stored }) };
+    // Loaded through the real mapper; the cast lets the junk case reach it as junk would.
+    const result = await loadScreenContext(
+      queries({ searchPreferences: () => Promise.resolve({ rows: [row as never], error: null }) }),
+      NOW,
+    );
+    // Mapped exactly.
+    assert.equal(result.ok && result.value.preferences.usWorkAuthorized, expected);
+  });
+}
