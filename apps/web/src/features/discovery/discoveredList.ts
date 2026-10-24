@@ -149,6 +149,70 @@ export function loadedOfText(loaded: number, total: number | null): string {
   return `${loaded} loaded of ${total}`;
 }
 
+/* Exact per-lane counts from the status-count read (useApplicationCounts, one RPC for every
+ * status). `filteredOut` is the screener's dropped_filter, not this page's local preview. */
+export interface LaneCounts {
+  // Rows still waiting for the normalizer and screener.
+  readonly discovered: number;
+  // Rows the screener passed: the "Ready to tailor" lane.
+  readonly ready: number;
+  // Rows the screener dropped.
+  readonly filteredOut: number;
+}
+
+/* The read's per-status counts as lane counts, or null when the read gave no answer.
+ * A status absent from the RPC's rows has zero rows, but ONLY a read that succeeded proves that
+ * (useApplicationCounts.ts: "absent rather than zero"). Loading, failed, signed out and unconfigured
+ * prove nothing, so they return null and nothing downstream may act on a number. */
+export function laneCountsFrom(kind: string, counts: Readonly<Partial<Record<string, number>>>): LaneCounts | null {
+  // 'rows' and 'empty' are the two states where the database actually answered.
+  if (kind !== 'rows' && kind !== 'empty') return null;
+  // Absent from a successful read = none at that status.
+  return { discovered: counts['discovered'] ?? 0, ready: counts['passed_filters'] ?? 0, filteredOut: counts['dropped_filter'] ?? 0 };
+}
+
+/* Which lane the page opens on (2026-10-24, Teja: "get me rid of this"). After the prescreen drain
+ * `discovered` held 0 and 2,511 rows waited at passed_filters, and the page opened on the empty lane.
+ * It opens on "Ready to tailor" only when Discovered is provably empty AND Ready has work; otherwise
+ * on Discovered as it always did, including when the counts are unknown (no evidence, no switch). */
+export function initialLane(counts: LaneCounts | null): Lane {
+  // The one case where the default lane is certainly empty and the other certainly is not.
+  return counts !== null && counts.discovered === 0 && counts.ready > 0 ? 'ready' : 'discovered';
+}
+
+/* The sentence for an empty list, chosen from the EXACT lane count (2026-10-24).
+ * An empty grid has two different causes: the lane itself holds no rows, or it has rows and the
+ * operator's search, selects or local cascade hid every loaded one. The page used to blame the
+ * filters for both, so after the prescreen drain emptied `discovered` it told Teja to adjust filters
+ * on a lane with nothing in it. Only a count of exactly 0 proves the first cause; null (the count
+ * failed) proves nothing, so it falls back to the filter wording rather than claim an empty lane. */
+export function emptyListMessage(
+  // Which lane is on screen.
+  lane: Lane,
+  // Which view tab is on; only the Matched tab's sentence blames the local cascade.
+  viewTab: 'matched' | 'all' | 'dropped',
+  // The lane's exact count from the head query; null when that query failed.
+  laneTotal: number | null,
+  // Where the screened rows went, from the status-count read; null when that read gave no answer.
+  counts: LaneCounts | null = null,
+): string {
+  // The lane is really empty, and the count query said so.
+  if (laneTotal === 0) {
+    // Discovered empties when the screener has judged everything; with counts, say exactly where they went.
+    if (lane === 'discovered' && counts !== null) return `Every discovered job has been screened: ${counts.ready.toLocaleString('en-US')} are in "${LANES.ready.label}", ${counts.filteredOut.toLocaleString('en-US')} filtered out.`;
+    // Without counts the cause is still known, only the numbers are not. Drops are stored as
+    // dropped_filter, which no page lists (the "Filtered Out" tab is only this page's local preview).
+    return lane === 'discovered'
+      ? `Nothing is waiting to be screened: every discovered job has already been through the screener. Jobs it passed are in "${LANES.ready.label}"; jobs it dropped are stored as filtered and not listed here.`
+      // The ready lane empties when nothing has passed the screener, or every row was already sent on.
+      : 'Nothing is ready to tailor: no job is waiting after the screener right now. New ones arrive when the scout finds postings that pass it.';
+  }
+  // Rows exist (or the count is unknown) and the Matched tab is empty: the local cascade is the cause.
+  if (viewTab === 'matched') return 'No jobs match your active Tech constraint and Filter Cascade rules. Try adjusting your search or checking "Filtered Out" to inspect dropped postings.';
+  // Any other tab emptied by search or a filter select.
+  return `No loaded ${LANES[lane].label} jobs match your current criteria.`;
+}
+
 // Whether Load more should show: only when the exact total says rows remain.
 export function hasMoreRows(loaded: number, total: number | null): boolean {
   // ponytail: an unknown total hides the button; add a "last page was full" fallback if counts fail often.

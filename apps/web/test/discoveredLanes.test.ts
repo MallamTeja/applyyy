@@ -23,6 +23,9 @@ import {
   pageLimit,
   postedDate,
   sortItems,
+  emptyListMessage,
+  initialLane,
+  laneCountsFrom,
 } from '../src/features/discovery/discoveredList.ts';
 // The engine's real step lists, so the mapping is compared against the source of truth, not a copy.
 import { DISCOVERED_STEPS, PASSED_FILTERS_STEPS } from '../src/features/pipeline/rowPipeline.ts';
@@ -233,5 +236,94 @@ describe('posted date marker', () => {
     // Ten days "in the future" cannot be clock skew; refuse the phrase, keep the day.
     const d = postedDate(row('1', 't', 'c', '2026-10-28T12:00:00+00:00', 'exact').job, NOW);
     assert.equal(d.text, 'Posted 2026-10-28');
+  });
+});
+
+/* The empty-list sentence (2026-10-24). After the prescreen drain, `discovered` held 0 rows and the
+ * page told Teja "No jobs match your active Tech constraint and Filter Cascade rules": it blamed his
+ * filters for a lane that was empty because every row had been screened. The sentence must be chosen
+ * from the EXACT lane count, never from the filtered length alone. */
+describe('empty list message', () => {
+  // Each case names its cause; the twin proves the filter sentence still fires when it is true.
+  it('an empty discovered lane with a known count of 0 says every row was screened, not that filters hid it', () => {
+    // The live case: the count query answered 0 for `discovered`.
+    const message = emptyListMessage('discovered', 'matched', 0);
+    // Positive shape: the cause, and where the passed rows went.
+    assert.match(message, /already been through the screener/);
+    // Names the lane the passed rows moved to, so the operator knows where to look.
+    assert.match(message, /Ready to tailor/);
+    // And never the filter-blame sentence, which is the bug.
+    assert.doesNotMatch(message, /Filter Cascade rules/);
+  });
+
+  it('TWIN: rows exist but every loaded one was filtered out locally, so the filters ARE the cause', () => {
+    // 300 rows at `discovered`, none matching: blaming the filters is now correct.
+    assert.match(emptyListMessage('discovered', 'matched', 300), /Tech constraint and Filter Cascade rules/);
+  });
+
+  it('a failed count never claims the lane is empty', () => {
+    // null is "unknown": the sentence may not assert that everything was screened.
+    assert.doesNotMatch(emptyListMessage('discovered', 'matched', null), /already been through the screener/);
+  });
+
+  it('an empty ready lane says nothing has passed the screener yet, in its own words', () => {
+    // The ready lane at 0 rows: a different cause, a different sentence.
+    assert.match(emptyListMessage('ready', 'all', 0), /Nothing is ready to tailor/);
+  });
+
+  it('a non-empty lane emptied by search keeps the plain "match your current criteria" sentence', () => {
+    // Search or a filter select emptied the loaded rows of a lane that has rows.
+    assert.equal(emptyListMessage('ready', 'all', 2511), 'No loaded Ready to tailor jobs match your current criteria.');
+  });
+});
+
+/* Opening lane and the screened counts (2026-10-24, Teja: "get me rid of this"). With discovered=0
+ * and 2,511 at passed_filters, the page opened on an empty Discovered lane. It must open where the
+ * work is, and only from a status read that actually answered. */
+describe('opening lane', () => {
+  // One fixture for every case below, so each case differs from the live shape in one field only.
+  // The live shape after the prescreen drain: nothing to screen, 2,511 ready, 19,047 dropped.
+  const DRAINED = { discovered: 0, ready: 2511, filteredOut: 19047 };
+
+  it('discovered=0 and passed_filters>0 opens on Ready to tailor', () => {
+    // The case Teja hit.
+    assert.equal(initialLane(DRAINED), 'ready');
+  });
+
+  it('TWIN: rows still waiting at discovered keep the page on Discovered', () => {
+    // The ordinary day: new postings to screen, so the page opens where it always did.
+    assert.equal(initialLane({ ...DRAINED, discovered: 12 }), 'discovered');
+  });
+
+  it('both lanes empty stays on Discovered, the page the operator expects', () => {
+    // Switching to an equally empty lane would only move the empty state somewhere less familiar.
+    assert.equal(initialLane({ discovered: 0, ready: 0, filteredOut: 5 }), 'discovered');
+  });
+
+  it('an unanswered status read never moves the page', () => {
+    // null = loading, failed, signed out or unconfigured: no evidence, so no switch.
+    assert.equal(initialLane(null), 'discovered');
+  });
+
+  // The mapping is where "absent means zero" is decided, so it is pinned by value.
+  it('a successful read maps absent statuses to 0 and the screener statuses to their lanes', () => {
+    // `discovered` absent from a successful read means none at that status.
+    assert.deepEqual(laneCountsFrom('rows', { passed_filters: 2511, dropped_filter: 19047 }), DRAINED);
+  });
+
+  it('an empty successful read is all zeroes; any other state is no answer', () => {
+    // 'empty' is the one other state that proves zero.
+    assert.deepEqual(laneCountsFrom('empty', {}), { discovered: 0, ready: 0, filteredOut: 0 });
+    // A failed read is not evidence of zero; it must stay unknown.
+    assert.equal(laneCountsFrom('failed', {}), null);
+  });
+
+  // Exact equality, not a pattern: the numbers and the lane name are the whole point of the sentence.
+  it('an empty discovered lane with counts names where every row went, with the numbers', () => {
+    // The sentence Teja asked for, built from the live counts.
+    assert.equal(
+      emptyListMessage('discovered', 'matched', 0, DRAINED),
+      'Every discovered job has been screened: 2,511 are in "Ready to tailor", 19,047 filtered out.',
+    );
   });
 });

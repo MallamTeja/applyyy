@@ -66,7 +66,9 @@ import type { PipelineStep } from '../pipeline/rowPipeline.ts';
 // The real invoke/read deps, or null on an unconfigured machine (the button then explains itself).
 import { liveRowPipelineDeps } from '../pipeline/rowPipelineDeps.ts';
 // The tested list logic: lanes, paging, sort, the date marker and the honest counter text.
-import { DISCOVERED_LIST_SELECT, LANES, SORT_OPTIONS, appendUnique, hasMoreRows, isCurrentLane, keysetFilter, loadedOfText, pageLimit, postedDate, sortItems } from './discoveredList.ts';
+import { DISCOVERED_LIST_SELECT, LANES, SORT_OPTIONS, appendUnique, emptyListMessage, hasMoreRows, initialLane, isCurrentLane, keysetFilter, laneCountsFrom, loadedOfText, pageLimit, postedDate, sortItems } from './discoveredList.ts';
+// Every status's count in one RPC (application_status_counts), reused rather than a new per-lane query.
+import { useApplicationCounts } from '../../data/useApplicationCounts.ts';
 // Type only: the job row as the narrowed select delivers it, derived from DISCOVERED_JOB_COLUMNS.
 import type { DiscoveredJob, DiscoveredListRow } from './discoveredList.ts';
 // Types for the lane switch, the load modes and the sort select.
@@ -112,13 +114,40 @@ export function DiscoveredJobsPage(): ReactElement {
      loadData must refuse (isCurrentLane) or it would load the old lane's rows under the new label.
      Set at click time in switchLane, before React re-renders, so no window exists. */
   const laneRef = useRef<Lane>('discovered');
+  /* True once the opening lane is decided, by the counts below or by the operator's own click.
+     Either way the page never auto-switches again: a lane Teja picked is never taken from him. */
+  const openingLaneSettled = useRef(false);
   // The lane switch: the ref first (in-flight closures see it at once), then the state (re-render + reload).
   const switchLane = (key: Lane): void => {
+    // An operator's choice ends the opening-lane decision, even if the counts arrive later.
+    openingLaneSettled.current = true;
     // Synchronous, so a settle landing before the re-render is already refused.
     laneRef.current = key;
     // Rebuilds loadData for the new lane, whose effect runs the full load.
     setLane(key);
   };
+  // Every status's exact count in one existing RPC: where screened rows went, and which lane has work.
+  const { state: countsState, counts: statusCounts } = useApplicationCounts();
+  // Lane-shaped counts, or null until the read actually answers (the tested rule in discoveredList.ts).
+  const laneCounts = useMemo(() => laneCountsFrom(countsState.kind, statusCounts), [countsState.kind, statusCounts]);
+  /* Opening lane: once the counts answer, open where the work is. After the prescreen drain Discovered
+     held 0 rows while 2,511 waited in Ready to tailor, and the page opened on the empty lane. */
+  useEffect(() => {
+    // Decided already (by an earlier answer or a click), or no evidence yet: do nothing.
+    if (openingLaneSettled.current || laneCounts === null) return;
+    // Decided now, so a later refetch can never yank the page to another lane.
+    openingLaneSettled.current = true;
+    // The tested choice: Ready only when Discovered is provably empty and Ready is not.
+    const target = initialLane(laneCounts);
+    // Ref and state together, as switchLane does, so an in-flight Discovered load is refused.
+    if (target !== laneRef.current) {
+      // Synchronous, so the stale Discovered load sees the new lane before it writes.
+      laneRef.current = target;
+      // Rebuilds loadData for the new lane, whose effect runs the full load.
+      setLane(target);
+    }
+    // Re-runs when the read answers; the settled ref makes every later run (a refetch) a no-op.
+  }, [laneCounts]);
   // The lane's status and step list, from the one tested mapping.
   const laneSpec = LANES[lane];
   /* The Matched / Filtered Out split is this page's local preview of the screener. On the ready lane
@@ -745,11 +774,22 @@ export function DiscoveredJobsPage(): ReactElement {
         </div>
       ) : loadError !== null ? /* After a failed load the banner above is the whole answer; "no jobs match" would be a false claim. */ null : filteredItems.length === 0 ? (
         <div className="discovery__empty">
-          <p>
-            {viewTab === 'matched'
-              ? 'No jobs match your active Tech constraint and Filter Cascade rules. Try adjusting your search or checking "Filtered Out" to inspect dropped postings.'
-              : `No loaded ${laneSpec.label} jobs match your current criteria.`}
-          </p>
+          {/* Chosen from the exact lane count, so an empty lane is never blamed on the filters. */}
+          <p>{emptyListMessage(lane, viewTab, laneTotal, laneCounts)}</p>
+          {/* An empty discovered lane means the rows moved on; one click takes the operator to them. */}
+          {lane === 'discovered' && laneTotal === 0 && (
+            <button
+              /* Not a submit: the page has no form. */
+              type="button"
+              /* The page's existing small-button look. */
+              className="chip-btn"
+              /* The same lane switch the buttons above use, so the reload and the ref stay in step. */
+              onClick={() => switchLane('ready')}
+            >
+              {/* Named from the shared mapping, so a renamed lane cannot leave a stale label here. */}
+              Open {LANES.ready.label}
+            </button>
+          )}
         </div>
       ) : (
         <div className="discovery__grid">
