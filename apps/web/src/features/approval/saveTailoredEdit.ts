@@ -17,10 +17,11 @@ import type { MasterProfile, ResolvedResume } from '../../data/contract';
 // Builder-1's pure module: one definition of "a resume", and R0 enforced at the write boundary.
 import { deepEqual, isResumeShape, onlyTextChanged } from './tailoredEdits';
 
-/* Closed union, so the event log can only ever name one of five operator actions. The two skill
-   kinds (T3) record a selection change: the event ref is the MASTER skill's id and before/after
-   carry its name, so the log alone says which skill went on or came off. */
-export type EditEventKind = 'resume_edit' | 'resume_remove' | 'resume_reset' | 'resume_add_skill' | 'resume_remove_skill';
+/* Closed union, so the event log can only ever name one of six operator actions. The skill kinds
+   (T3) record a selection change: the event ref is the MASTER skill's id and before/after carry its
+   name, so the log alone says which skill went on or came off. resume_attest_skill is the one that
+   also moved the pin: the operator vouched for a skill the old master lacked (attestSkill.ts). */
+export type EditEventKind = 'resume_edit' | 'resume_remove' | 'resume_reset' | 'resume_add_skill' | 'resume_remove_skill' | 'resume_attest_skill';
 
 /* What the database holds NOW, read back after an unknown or refused write. */
 export interface StoredRow {
@@ -227,6 +228,12 @@ type SaveArgs = {
   expectedUpdatedAt: string;
   // What the operator did, for the append-only log.
   event: { kind: EditEventKind; ref: string; before: string | null; after: string | null };
+  /* Only for an attested skill: the row moves to a NEW master version. All three pins travel in
+     the same single-row UPDATE (tailored_profile's, the column, tailor_refs'), because a pin that
+     disagrees with tailor_refs makes the page's rebuild refuse and switches editing off. The caller
+     has already proven the tailor's claims rebuild identically at this version (attestSkill.ts);
+     `master` and `original` above must be the NEW version's. Absent on every ordinary edit. */
+  repin?: { version: number; tailorRefs: unknown };
 };
 
 /* The history note, written once the resume is KNOWN stored. One function, so the success path
@@ -290,9 +297,28 @@ export async function saveTailoredEdit(
   }
   /* R0 at the boundary (fix 5): only bullet text, the summary, removed/restored bullets and (T3)
      master skills added after the tailor's own may differ. A change to master_text would make an edit read as traced, so it never leaves here. */
-  if (!onlyTextChanged(args.previous, args.resume, args.original, args.master)) {
+  /* A re-pin must be internally consistent before anything is sent: the resume and tailor_refs
+     both name the target version, so the three pins cannot be written disagreeing. */
+  if (args.repin !== undefined) {
+    // tailor_refs is untyped JSON from the row; its pin is read by shape.
+    const refsPin = (args.repin.tailorRefs as { master_version?: unknown } | null)?.master_version;
+    // Either side naming another version would store a row the page then refuses to rebuild.
+    if (args.resume.master_version !== args.repin.version || refsPin !== args.repin.version) {
+      return { ok: false, reason: 'not_text_only', message: 'the new master version did not match on every pin, so nothing was sent.' };
+    }
+  }
+  /* R0 runs UNCHANGED for a re-pin: the previous resume is relabelled to the new version, so the
+     pin is the only extra difference allowed, and every other key is held to the same rule. */
+  const previousAtPin = args.repin === undefined ? args.previous : { ...args.previous, master_version: args.repin.version };
+  if (!onlyTextChanged(previousAtPin, args.resume, args.original, args.master)) {
     return { ok: false, reason: 'not_text_only', message: 'the edit changed more than text, so nothing was sent.' };
   }
+  /* The columns this save writes: the resume always; on a re-pin, the other two pins with it, in
+     the same statement, so no reader can see the row half re-pinned. */
+  const changes =
+    args.repin === undefined
+      ? { tailored_profile: args.resume }
+      : { tailored_profile: args.resume, master_version: args.repin.version, tailor_refs: args.repin.tailorRefs };
 
   // The write's result, or the fact that it threw.
   let rows: unknown;
@@ -311,7 +337,7 @@ export async function saveTailoredEdit(
        - select: returns the rows actually written, so they can be counted. */
     const result = await client
       .from('applications')
-      .update({ tailored_profile: args.resume })
+      .update(changes)
       .eq('id', args.applicationId)
       .eq('status', 'awaiting_approval')
       .eq('updated_at', args.expectedUpdatedAt)

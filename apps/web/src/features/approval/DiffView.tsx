@@ -70,10 +70,15 @@ export type EditAction =
   | { readonly kind: 'reset'; readonly target: EditTarget }
   // T3: add an unselected master skill / take back one the operator added. Imported, not
   // redeclared, so the page and this view can never disagree on the arm's shape.
-  | SkillEditAction;
+  | SkillEditAction
+  // The operator vouches for a skill the master LACKS: it goes into a new master version first,
+  // then onto this resume (attestSkill.ts). Carries a name, unlike the T3 arms, because there is
+  // no master node to point at yet; `category` is one of the master's own groups.
+  | { readonly kind: 'attest_skill'; readonly keyword: string; readonly category: string };
 
-/* A save either landed or it did not; the reason is shown to the operator verbatim. */
-export type EditResult = { readonly ok: true } | { readonly ok: false; readonly reason: string };
+/* A save either landed or it did not; the reason is shown to the operator verbatim. An attest
+   also hands back the master skill it put on the resume, which is what its Undo removes. */
+export type EditResult = { readonly ok: true; readonly skillRef?: string | undefined } | { readonly ok: false; readonly reason: string };
 
 /* Pure presentation component - no data access, no Supabase. */
 export interface DiffViewProps {
@@ -90,6 +95,9 @@ export interface DiffViewProps {
   /* The page is approving or rejecting this row right now: no edit may land mid-approval and
      Approve must not fire twice, so every control waits. */
   readonly locked?: boolean | undefined;
+  /* The pinned master's skill groups, offered when the operator vouches for a missing skill.
+     Absent (or empty) means no attest offer: a skill with no honest group cannot be printed. */
+  readonly attestCategories?: readonly string[] | undefined;
 }
 
 /* --- The job being approved against ------------------------------------- */
@@ -187,6 +195,8 @@ export function CoverageBar({
   diff,
   onEdit,
   busy,
+  // The master's skill groups: present means a missing keyword can be vouched for here.
+  attestCategories,
 }: {
   readonly diff: ResumeDiff;
   /* T3: the save path for "add this master skill". Optional because the bar is also rendered
@@ -194,6 +204,8 @@ export function CoverageBar({
   readonly onEdit?: ((action: EditAction) => Promise<EditResult>) | null | undefined;
   /* A save is in flight somewhere in this diff; one write at a time per resume. */
   readonly busy?: boolean | undefined;
+  /* The master's skill groups; with a save path, a keyword the master lacks becomes a vouch-and-add. */
+  readonly attestCategories?: readonly string[] | undefined;
 }): ReactElement {
   /* The last failed add, shown under the chips. Declared before the unmeasured early return
      because hooks must run in the same order on every render. */
@@ -201,8 +213,73 @@ export function CoverageBar({
   /* What the polite live region says after a successful add. The clicked chip unmounts on success
      and focus falls to <body>, so without this a screen-reader user hears nothing at all. */
   const [addedNotice, setAddedNotice] = useState<string>('');
+  /* The keyword awaiting the operator's "yes, I have this" (null = no question open). A visible
+     question, not a one-click add: the click is an attestation, and the auditor exists to stop
+     claims nobody stands behind. */
+  const [pendingAttest, setPendingAttest] = useState<string | null>(null);
+  /* The group chosen for the pending skill; the renderer prints skills grouped, so it matters. */
+  const [attestCategory, setAttestCategory] = useState<string>('');
+  /* The last vouched-for skill, so its Undo can take it back off this resume before approval. */
+  const [lastAttested, setLastAttested] = useState<{ readonly name: string; readonly ref: string } | null>(null);
   /* The add offers exist only with a save path; without one the chips stay today's plain spans. */
   const addable = onEdit ? diff.coverage.addable : undefined;
+  /* Vouching needs a save path AND at least one honest group to print the skill under. */
+  const canAttest = Boolean(onEdit) && (attestCategories?.length ?? 0) > 0;
+
+  /* Open the question for one missing keyword, defaulting to the master's first group. */
+  function askAttest(keyword: string): void {
+    // A new question clears the last failure, so the operator is not shown a stale reason.
+    setAddError(null);
+    // The default group; the select lets the operator change it before confirming.
+    setAttestCategory(attestCategories?.[0] ?? '');
+    // Shows the question under the chips.
+    setPendingAttest(keyword);
+  }
+
+  /* The operator said yes: master first, then this resume (the page does both). */
+  async function confirmAttest(): Promise<void> {
+    // Unreachable without a save path or an open question; narrows the types.
+    if (!onEdit || pendingAttest === null) return;
+    // Held so the question can close before the await without losing the name.
+    const keyword = pendingAttest;
+    // Cleared first, so a re-attempt is re-announced.
+    setAddedNotice('');
+    // One save; the page writes the master version and then the re-pinned resume.
+    const result = await onEdit({ kind: 'attest_skill', keyword, category: attestCategory });
+    // The question closes either way; a failure is shown under the chips.
+    setPendingAttest(null);
+    // Refused or unknown: nothing to undo, only a reason to show.
+    if (!result.ok) {
+      // Said where the click happened; the page's message names what (if anything) was stored.
+      setAddError(result.reason);
+      // No Undo offer and no success notice for a save that did not land.
+      return;
+    }
+    // Remembered for Undo only when the page named the skill it added.
+    setLastAttested(result.skillRef ? { name: keyword, ref: result.skillRef } : null);
+    // The chip flips to ✓ on the redraw; the live region says so for screen readers.
+    setAddedNotice(`Added ${keyword} to your master profile and this resume`);
+  }
+
+  /* Undo before approval: the existing remove path takes the skill back off THIS resume. The master
+     keeps it: master versions are immutable, and it is a true claim the operator made. */
+  async function undoAttest(): Promise<void> {
+    // Nothing to undo, or no save path.
+    if (!onEdit || lastAttested === null) return;
+    // The T3 removal of an operator-added skill.
+    const result = await onEdit({ kind: 'remove_skill', ref: lastAttested.ref });
+    // A refused undo is named; the skill is still on the resume.
+    if (!result.ok) {
+      // Shown under the chips, where the Undo was clicked.
+      setAddError(result.reason);
+      // The Undo offer stays, so the operator can try again.
+      return;
+    }
+    // Announced for screen readers, since the clicked Undo unmounts.
+    setAddedNotice(`Removed ${lastAttested.name} from this resume`);
+    // The Undo offer retires: there is nothing left on the resume to take back.
+    setLastAttested(null);
+  }
 
   /* Add one master skill, but only after the operator affirms they have it: the auditor exists to
      stop fabricated claims, and a one-click add with no question would be a fabrication button. */
@@ -387,6 +464,33 @@ Only add skills you actually have.`);
               </button>
             );
           }
+          /* The master was checked and lacks it: offer to vouch for it. A real button, like the Add above. */
+          if (offer === null && canAttest) {
+            // The chip becomes the control; nothing is written until the question is answered.
+            return (
+              <button
+                // One chip per distinct keyword, so the keyword is a stable React key.
+                key={kw}
+                // Never a form submit, even if the bar is ever rendered inside a form.
+                type="button"
+                // Same look as the master-skill Add, so both offers read as one kind of control.
+                className="kw-chip kw-chip--missing kw-chip--addable"
+                // Says where the skill will go before the click, not after.
+                title="Not in your master profile — click to add it there and to this resume"
+                // One write at a time per resume, and one open question at a time.
+                disabled={busy === true || pendingAttest !== null}
+                // Opens the question only; the write waits for the explicit confirm.
+                onClick={() => askAttest(kw)}
+              >
+                {/* Still missing until the add lands. */}
+                ✕ {kw}{' '}
+                {/* Drawn as a pill so the chip reads as a control, like the master-skill Add. */}
+                <span className="kw-chip__add">＋ Add {kw}</span>
+                {/* Spoken only: where it goes, which the visible "Add" leaves implicit. */}
+                <span className="visually-hidden"> to your master profile and this resume</span>
+              </button>
+            );
+          }
           // Not addable here: today's chip, with a title that says why when the master was checked.
           return (
             <span
@@ -403,7 +507,60 @@ Only add skills you actually have.`);
       {/* One way out for keywords the master lacks: add them to the master itself, where they are
           the operator's own claim, not to this resume. A plain <a> (not a router Link) because the
           bar also renders outside any Router in tests; it navigates only and writes nothing. */}
-      {missingKeywords.some((kw) => addable?.get(kw) === null) ? (
+      {/* The question a vouch-and-add needs answered: is it true, and where does it print. */}
+      {pendingAttest !== null ? (
+        // A named group, so a screen reader announces the question as one unit with its controls.
+        <div className="coverage__attest" role="group" aria-label={`Add ${pendingAttest}`}>
+          {/* The attestation, stated plainly: this becomes the operator's own claim. */}
+          <p className="coverage__attest-question">
+            {/* The skill named, both places it will go, and the condition under which to say yes. */}
+            Add {pendingAttest} to your master profile and this resume? Only if you have real experience with it.
+          </p>
+          {/* The group it prints under; only the master's existing groups, so no stray heading appears. */}
+          <label className="coverage__attest-group">
+            {/* The visible label text, which also names the select for assistive tech. */}
+            Group{' '}
+            {/* Locked mid-save, so what is sent is what the operator sees. */}
+            <select value={attestCategory} disabled={busy === true} onChange={(e) => setAttestCategory(e.target.value)}>
+              {/* One option per existing group, in master order. */}
+              {(attestCategories ?? []).map((category) => (
+                // The group name is unique in the list (skillGroups dedupes), so it is a stable key.
+                <option key={category} value={category}>
+                  {/* Shown exactly as the resume will print it. */}
+                  {category}
+                </option>
+              ))}
+            </select>
+          </label>
+          {/* Confirm: the one click that writes. */}
+          <button type="button" className="button button--small" disabled={busy === true} onClick={() => void confirmAttest()}>
+            {/* Names the skill, so the button says exactly what it will do. */}
+            Add {pendingAttest}
+          </button>
+          {/* Cancel sends nothing at all. */}
+          <button type="button" className="button button--ghost button--small" disabled={busy === true} onClick={() => setPendingAttest(null)}>
+            {/* Plain word: closing the question is the whole effect. */}
+            Cancel
+          </button>
+        </div>
+      ) : null}
+
+      {/* Undo, until approval: takes the vouched-for skill back off this resume. */}
+      {lastAttested !== null ? (
+        // Visible confirmation that persists until Undo or a reload, unlike the spoken notice.
+        <p className="coverage__attest-done">
+          {/* Says both places it went, so Undo's narrower reach is not a surprise. */}
+          Added {lastAttested.name} to your master profile and this resume.{' '}
+          {/* Locked mid-save like every other control in this view. */}
+          <button type="button" className="button button--ghost button--small" disabled={busy === true} onClick={() => void undoAttest()}>
+            {/* Takes it off this resume only; the master version is immutable and keeps it. */}
+            Undo
+          </button>
+        </p>
+      ) : null}
+
+      {/* The way out when vouching is not offered here (no save path, or no groups to print under). */}
+      {!canAttest && missingKeywords.some((kw) => addable?.get(kw) === null) ? (
         <p className="coverage__master-link">
           <a href="/master-profile">Add missing skills to your master profile</a>
         </p>
@@ -1001,6 +1158,8 @@ export function DiffView({
   editDisabledReason,
   hasCoverLetter,
   locked,
+  // Passed straight to the coverage bar, the only place a missing keyword is offered.
+  attestCategories,
 }: DiffViewProps): ReactElement {
   // Every claim still in the resume; claims on edited or removed lines are already gone.
   const claims = useMemo(() => collectFlaggedClaims(diff), [diff]);
@@ -1124,8 +1283,9 @@ export function DiffView({
           </p>
         </div>
 
-        {/* T3: given the save path so a missing keyword the master can supply becomes an Add. */}
-        <CoverageBar diff={diff} onEdit={runEdit} busy={busy} />
+        {/* T3: given the save path so a missing keyword the master can supply becomes an Add, and
+            (with the master's groups) one it lacks becomes a vouch-and-add. */}
+        <CoverageBar diff={diff} onEdit={runEdit} busy={busy} attestCategories={attestCategories} />
       </header>
 
       {/* The job, before the verdict on the resume. Reading order is the

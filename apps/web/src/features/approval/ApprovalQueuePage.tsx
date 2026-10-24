@@ -75,6 +75,8 @@ import {
 // buildSettleArgs: the RPC arguments, with the stamp passed through byte-for-byte (item 4).
 import { buildSettleArgs, confirmFresh, confirmSettle, isNoAnswer, saveTailoredEdit } from './saveTailoredEdit';
 import type { EditEventKind, StoredRow } from './saveTailoredEdit';
+// Vouching for a skill the master lacks: master version first, then the re-pinned resume.
+import { attestSkill } from './attestSkill';
 // The submitted resume and its master side by side, rendered by the worker's own renderer,
 // so every row can be SEEN before it is approved. Shared with the pipeline history page.
 import { ResumePreview } from '../resume-preview/ResumePreview';
@@ -126,6 +128,17 @@ interface RowSource {
   readonly original: ResolvedResume | null;
   // Whether a generated cover letter exists, which an edit does not regenerate.
   readonly hasCoverLetter: boolean;
+  // applications.tailor_refs as loaded (untyped JSON): an attested skill re-pins it with the resume.
+  readonly tailorRefs: unknown;
+}
+
+/* The pinned master's skill groups, in master order, offered when vouching for a missing skill.
+   Only existing groups: the resume prints skills grouped, so a new group would be a new heading. */
+function skillGroups(source: RowSource | undefined): string[] | undefined {
+  // A row never loaded has no master, so no offer.
+  if (source === undefined) return undefined;
+  // Distinct, first appearance wins, blanks dropped.
+  return [...new Set(source.master.skills.map((skill) => skill.category))].filter((group) => group.trim() !== '');
 }
 
 /* Every action the page saves: DiffView's text actions plus T3's skill actions. A union rather
@@ -146,11 +159,15 @@ const EVENT_KIND: Readonly<Record<PageEditAction['kind'], EditEventKind>> = {
   add_skill: 'resume_add_skill',
   // T3: an operator-added skill taken back off.
   remove_skill: 'resume_remove_skill',
+  // A skill the operator vouched for: new master version, then this resume, re-pinned.
+  attest_skill: 'resume_attest_skill',
 };
 
 /* The event's ref: the line key for text actions, the MASTER skill id for skill actions, so the
    log names exactly which skill went on or came off (its name rides in before/after). */
 function eventRef(action: PageEditAction): string {
+  // An attest has no master id until it lands; attestSkill.ts writes its own event with the real one.
+  if (action.kind === 'attest_skill') return action.keyword;
   // Skill actions carry the master ref directly; there is no line target to key.
   return action.kind === 'add_skill' || action.kind === 'remove_skill' ? action.ref : editKey(action.target);
 }
@@ -171,7 +188,11 @@ function announcementFor(
 ): string {
   // One sentence per action; a literal table could not carry the skill name, so a ternary over the closed union.
   const what =
-    kind === 'add_skill'
+    // The attest arm first: it is the only action that also wrote the master, and must say so.
+    kind === 'attest_skill'
+      ? // Both places it went, so the master write is never silent.
+        `Added ${outcome.after ?? 'the skill'} to your master profile and this resume.`
+      : kind === 'add_skill'
       ? // An add carries the new skill's name in `after`.
         `Added ${outcome.after ?? 'the skill'} to this resume.`
       : kind === 'remove_skill'
@@ -559,6 +580,8 @@ export function ApprovalQueuePage(): ReactElement {
             original,
             // Any stored letter, even empty-but-present, was written before the edit.
             hasCoverLetter: app.cover_letter !== null && app.cover_letter !== undefined,
+            // The tailor's record, needed again only if the operator vouches for a skill.
+            tailorRefs: app.tailor_refs,
           });
         }
 
@@ -923,9 +946,17 @@ export function ApprovalQueuePage(): ReactElement {
   /* Put one row's resume on screen and in the refs, rebuilt against the SAME pinned master and
      original as the load. The single place a row's displayed resume changes after load, so the
      diff, preview, Download, bucket and stamp can never describe different versions. */
-  function adoptRow(applicationId: string, resume: ResolvedResume, updatedAt: string): void {
-    // The load inputs; static after load, so the render closure is safe here.
-    const source = sources.get(applicationId);
+  function adoptRow(
+    // The row to redraw.
+    applicationId: string,
+    // The resume now stored for it.
+    resume: ResolvedResume,
+    // The stamp that resume was stored at; the next edit must present it.
+    updatedAt: string,
+    // An attest re-pins the row, so it hands in the NEW source; the render closure still holds the old one.
+    source: RowSource | undefined = sources.get(applicationId),
+    // No return value: the refs and the rendered state ARE the result.
+  ): void {
     // A row this page never loaded has nothing to rebuild.
     if (source === undefined) return;
     // Same adapter, same pinned master, same original: only the resume differs.
@@ -979,6 +1010,95 @@ export function ApprovalQueuePage(): ReactElement {
     adoptRow(applicationId, stored.resume, stored.updatedAt);
   }
 
+  /* VOUCHING FOR A SKILL THE MASTER LACKS. Not a pure edit of this resume: attestSkill writes a new
+     master version first, then the resume with all three pins moved to it. Called only from editRow,
+     after its guards (not mid-approval, one save at a time, loaded, pin unchanged since load). */
+  async function attestRow(
+    // The row being reviewed.
+    applicationId: string,
+    // What the operator vouched for, and the group it prints under.
+    action: { readonly keyword: string; readonly category: string },
+    // The row's load inputs, which the re-pin replaces.
+    source: RowSource,
+    // The tailor's version at the current pin; editRow has proven it non-null.
+    original: ResolvedResume,
+    // The latest saved resume.
+    current: ResolvedResume,
+    // The stamp it was read or saved at.
+    stamp: string,
+    // The connected client; editRow refused a null one.
+    client: NonNullable<typeof supabase>,
+    // The same result shape as any edit, so DiffView locks, reports and undoes it the same way.
+  ): Promise<EditResult> {
+    // Emptied first, so the same sentence twice is still re-announced.
+    setAnnouncement('');
+    // The bucket before, to tell whether the save moved the row.
+    const previousDiff = latestDiffs.current.get(applicationId);
+    // Marked before the await, so a batch approval skips this row while it saves.
+    editing.current.add(applicationId);
+    // Declared outside the try so the result survives the finally.
+    let attested: Awaited<ReturnType<typeof attestSkill>>;
+    // try/finally, so the per-row lock is released even if attestSkill throws.
+    try {
+      // Master version first, then the re-pinned resume; it never throws by design.
+      attested = await attestSkill(client, {
+        // The row being written.
+        applicationId,
+        // The chip's keyword, which becomes the skill's printed name.
+        keyword: action.keyword,
+        // The group the operator picked.
+        category: action.category,
+        // The latest saved resume, so the add never builds on an older one.
+        current,
+        // The tailor's version at the current pin, for the rebuild proof.
+        original,
+        // The tailor's record, re-pinned in the same write as the resume.
+        tailorRefs: source.tailorRefs,
+        // Optimistic concurrency, same as every other edit.
+        expectedUpdatedAt: stamp,
+        // A fresh master node id; NodeIds must be unique across the whole master.
+        newSkillId: `skill_${crypto.randomUUID()}`,
+      });
+    // Runs on success, refusal and throw alike.
+    } finally {
+      // Released whatever happened.
+      editing.current.delete(applicationId);
+    }
+    // Not saved, or not known to be saved.
+    if (!attested.ok) {
+      // A refused or unknown row write: show what IS stored, as every other edit does.
+      if (attested.stored !== undefined) {
+        // Redrawn from the database, never from the operator's attempt.
+        adoptStored(applicationId, attested.stored);
+        // Page-level, because the whole row may have changed.
+        toast.error(attested.message);
+      }
+      // The master write is never silent: if a version was made, the operator is told it exists.
+      // "Not saved" stays true for the resume; the master half is spelled out after the reason.
+      return notSaved(attested.masterInserted ? `${attested.message} ${action.keyword} was added to your master profile; this resume was not changed.` : attested.message);
+    }
+    // The row now traces to the new version: its master, original and tailor_refs move with it.
+    const nextSource: RowSource = { ...source, master: attested.master, original: attested.original, tailorRefs: attested.tailorRefs };
+    // Published for later renders and edits.
+    setSources((previous) => new Map(previous).set(applicationId, nextSource));
+    // Redrawn against the NEW source now; the closure would still hold the old pin's master.
+    adoptRow(applicationId, attested.resume, attested.updatedAt, nextSource);
+    // Bucket before and after, derived the same way the render partitions the queue.
+    const from = previousDiff === undefined ? undefined : deriveBucket(previousDiff);
+    // adoptRow just put the rebuilt diff in the ref synchronously, so this is the bucket it renders in.
+    const nextDiff = latestDiffs.current.get(applicationId);
+    // Bucket after; undefined only for a row never loaded, which editRow's guards refused.
+    const to = nextDiff === undefined ? undefined : deriveBucket(nextDiff);
+    // Page-level only on a move; an in-bucket attest is announced by CoverageBar's own region.
+    if (from !== to) setAnnouncement(announcementFor('attest_skill', { before: null, after: action.keyword }, from, to));
+    // A move needs the page to place focus.
+    if (from !== undefined && to !== undefined && from !== to) setPendingFocusId(applicationId);
+    // Saved; only the history note is missing.
+    if (!attested.eventRecorded) toast.error('The skill was saved, but it could not be added to the application history.');
+    // The skill's master id, which CoverageBar's Undo removes.
+    return { ok: true, skillRef: attested.skillRef };
+  }
+
   /* THE EDIT PATH: click -> pure edit -> saveTailoredEdit -> state replaced with the SAVED
      resume (or, if the save is refused or unconfirmed, with what IS stored). Nothing is shown as
      changed until the database has accepted it, so the preview, the Download and the score can
@@ -1009,6 +1129,9 @@ export function ApprovalQueuePage(): ReactElement {
     }
     // No client, no write; say so instead of pretending.
     if (supabase === null) return notSaved('not connected to the database.');
+
+    // Vouching for a missing skill also writes the master, so it has its own path (attestRow above).
+    if (action.kind === 'attest_skill') return attestRow(applicationId, action, source, source.original, current, stamp, supabase);
 
     /* The pure operation. Each returns a NEW resume, touching only one bullet's text or the
        summary (R0), and refuses empty, oversized or unknown-ref edits before any write. */
@@ -1292,6 +1415,8 @@ export function ApprovalQueuePage(): ReactElement {
                     hasCoverLetter={sources.get(diff.applicationId)?.hasCoverLetter === true}
                     /* Locks edits and Approve while this row's approve/reject is in flight. */
                     locked={settling.has(diff.applicationId)}
+                    /* The pinned master's groups, so a missing keyword can be vouched for and printed in one. */
+                    attestCategories={skillGroups(sources.get(diff.applicationId))}
                   />
                   {/* The diff stays expanded (Bucket B is never collapsed); the
                       rendered document is an extra, opened on demand because it is tall. */}
@@ -1434,6 +1559,8 @@ export function ApprovalQueuePage(): ReactElement {
                         hasCoverLetter={sources.get(diff.applicationId)?.hasCoverLetter === true}
                         /* Same lock as Bucket B, including during the batch. */
                         locked={settling.has(diff.applicationId)}
+                        /* Same vouch-and-add groups as Bucket B. */
+                        attestCategories={skillGroups(sources.get(diff.applicationId))}
                       />
                     </div>
                   ) : null}

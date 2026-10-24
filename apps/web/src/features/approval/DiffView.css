@@ -303,6 +303,32 @@
   font-size: var(--size-xs);
 }
 
+/* The vouch-and-add question and its Undo line: one row of text and controls under the chips. */
+.coverage__attest,
+/* ...and the Undo line after a landed add, which shares the same one-row layout. */
+.coverage__attest-done {
+  /* Separated from the chips it refers to, like the master link. */
+  margin-top: var(--gap-2);
+  /* Text, select and buttons on one line, wrapping on a narrow screen instead of overflowing. */
+  display: flex;
+  /* Wraps rather than forcing horizontal scroll at phone width. */
+  flex-wrap: wrap;
+  /* Controls line up with the text's middle. */
+  align-items: center;
+  /* Breathing room between the question and its controls. */
+  gap: var(--gap-2);
+  /* Same reading size as the other notes under the chips. */
+  font-size: var(--size-xs);
+}
+
+/* The question takes the full first row, so the controls sit together beneath it. */
+.coverage__attest-question {
+  /* A whole line to itself: the attestation must be read before the button. */
+  flex-basis: 100%;
+  /* The paragraph's default margin would double the gap above. */
+  margin: 0;
+}
+
 /* --- The fabrication alert -------------------------------------------- */
 
 /* The ONLY dark surface in the application. Its scarcity is the signal: a dark
