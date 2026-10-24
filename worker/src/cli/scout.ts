@@ -26,6 +26,8 @@ import { evaluateBoardIdentity } from '../../../supabase/functions/_shared/ats/i
 import { identityGate } from '../scout/identity-gate.ts';
 // Every page of a board through plain HTTP, kept in its own module for the same reason.
 import { readBoardPages } from '../scout/board-pages.ts';
+// The emptied-board refusal (a dead SR token soft-200s as an empty board), pure for the same reason.
+import { emptyBoardGate } from '../scout/empty-board-gate.ts';
 import type { AtsProvider, JobInsert } from '../../../packages/shared-types/src/tables.ts';
 
 function required(name: string): string {
@@ -46,6 +48,9 @@ interface WatchlistRow {
   first_polled_at: string | null;
   last_polled_at: string | null;
   consecutive_failures: number;
+  // The last SUCCESSFUL poll's posting count, null before the first one: the baseline the
+  // emptied-board gate compares against.
+  last_poll_job_count: number | null;
 }
 
 const BATCH_SIZE = 50;
@@ -158,7 +163,9 @@ async function main(): Promise<void> {
   // Query active company watchlist boards
   const { data: boards, error: boardsErr } = await client
     .from('company_watchlist')
-    .select('id, ats_provider, board_token, company_name, company_slug, poll_count, first_polled_at, last_polled_at, consecutive_failures')
+    // last_poll_job_count is read for the emptied-board gate; without it every board would
+    // look "never polled" and the gate could never fire.
+    .select('id, ats_provider, board_token, company_name, company_slug, poll_count, first_polled_at, last_polled_at, consecutive_failures, last_poll_job_count')
     .eq('enabled', true)
     .in('ats_provider', supportedProviders())
     .order('last_polled_at', { ascending: true, nullsFirst: true });
@@ -205,6 +212,8 @@ async function main(): Promise<void> {
   // durable record is each board's consecutive_failures, and agent_runs.error_detail is for
   // database errors, which a mis-tokened board is not.
   let totalIdentityMismatch = 0;
+  // Boards that had postings last poll and none now; log-only for the same reason.
+  let totalEmptiedBoards = 0;
   const now = new Date();
 
   // THE SCREENER'S CONTEXT, LOADED ONCE FOR THE WHOLE RUN. The rules, the blocklist, the
@@ -286,6 +295,29 @@ async function main(): Promise<void> {
         noteError(`${board.company_name}: record identity mismatch`, mismatchMarkErr);
         // Counted for the closing summary line.
         totalIdentityMismatch += 1;
+        // Skip every write for this board.
+        continue;
+      }
+
+      // EMPTIED BOARD, ALSO BEFORE ANY WRITE (mirrors scout-ats). SmartRecruiters soft-200s a
+      // nonexistent token as an empty board, which the identity guard cannot see; without this
+      // the success write below would reset consecutive_failures and store a 0 baseline.
+      const emptied = emptyBoardGate(board, parseResult.postings.length, now);
+      // Had postings last time, has none now.
+      if (!emptied.proceed) {
+        // The baseline is in the warning, so the Actions log shows what changed.
+        console.warn(`[applyy-scout] ⚠️ ${board.company_name}: ${emptied.warning}`);
+        // Failure mark only; last_poll_job_count stays the non-zero baseline. Checked, like
+        // every other mark, so a lost write cannot leave the board looking healthy.
+        const { error: emptyMarkErr } = await client
+          .from('company_watchlist')
+          // The pure gate built the payload, so this branch cannot drift from its test.
+          .update(emptied.watchlistUpdate)
+          .eq('id', board.id);
+        // Only a failed WRITE is a run error; an emptied board is board state.
+        noteError(`${board.company_name}: record emptied board`, emptyMarkErr);
+        // Counted for the closing summary line.
+        totalEmptiedBoards += 1;
         // Skip every write for this board.
         continue;
       }
@@ -435,6 +467,8 @@ async function main(): Promise<void> {
   console.log(`[applyy-scout] total new application rows created: ${totalApplications}`);
   // Always printed, zero included: "0 mismatches" and "guard never ran" must not look alike.
   console.log(`[applyy-scout] boards skipped for identity mismatch: ${totalIdentityMismatch}`);
+  // Same always-print rule: "0 emptied" must not look like "gate never ran".
+  console.log(`[applyy-scout] boards failed for going empty: ${totalEmptiedBoards}`);
   // THE SCREENER'S OWN COUNTERS, reported separately from the discovery counters because
   // they answer a different question. The discovery numbers say the poll worked; these
   // say the CASCADE worked. (Corrected 2026-10-23: this said "filter_rules currently
