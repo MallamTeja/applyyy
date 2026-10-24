@@ -105,6 +105,15 @@ export interface AtsAdapter {
   // identity field (live probes 2026-10-24) — and the caller treats it as "check
   // inapplicable", never as a failure. Pure and synchronous, same as `parse`.
   readReportedIdentity(payload: unknown): string | null;
+  // Given the page just fetched, the URL of the NEXT page of this board, or null when
+  // that page was the last. OPTIONAL, unlike `readReportedIdentity`, because omitting
+  // it is a true statement rather than a skipped check: greenhouse, lever and ashby
+  // return a whole board in one response, and an adapter without this method is
+  // fetched exactly once, as before it existed. SmartRecruiters needs it — one response
+  // carries at most 100 postings (live probe 2026-10-24: Nagarro lists 585), so a
+  // single fetch would store a sixth of the board and report success. Pure and
+  // synchronous like `parse`; the loop that follows it is `collectBoardPages`.
+  nextPageUrl?(boardToken: string, payload: unknown): string | null;
 }
 
 // --- shared field readers -------------------------------------------------------

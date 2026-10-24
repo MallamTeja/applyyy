@@ -1,7 +1,7 @@
 // Scout-ATS — Edge Function Entrypoint
 //
 // Polls registered company boards from `company_watchlist` using dedicated ATS
-// adapters (Greenhouse, Lever, Ashby).
+// adapters (Greenhouse, Lever, Ashby, SmartRecruiters — the last one paged).
 // Deduplicates postings by canonical fingerprint into `public.jobs`, creates initial
 // `public.applications` records at status `discovered`, and updates polling telemetry.
 
@@ -13,7 +13,17 @@ import { haltedByKillSwitch } from "./gate.ts";
 // The board fetch, through the robots-gated shared transport (111791c closed every
 // httpFetch path; this import closes the one bare `fetch(` that remained here).
 import { fetchBoard } from "./poll-fetch.ts";
-import { getAdapter, supportedProviders, toJobInsert, type JobInsertContext } from "../_shared/ats/registry.ts";
+// The adapters, the row builder, and the board-read rules: `collectBoardPages` reads a
+// paged board in full or not at all, and `boardWentEmpty` refuses a soft-200 emptied
+// board as a healthy one. Both are pure-ish and node-tested; this file is not.
+import {
+  boardWentEmpty,
+  collectBoardPages,
+  getAdapter,
+  supportedProviders,
+  toJobInsert,
+  type JobInsertContext,
+} from "../_shared/ats/registry.ts";
 // The board-identity guard: a wrong token can answer 200 with a DIFFERENT company's
 // jobs (the 2026-10-23 'tcs'→Thornbury incident), so a provider-reported identity is
 // compared against the watchlist row before anything from the response is persisted.
@@ -51,6 +61,9 @@ interface WatchlistRow {
   readonly first_polled_at: string | null;
   readonly last_polled_at: string | null;
   readonly consecutive_failures: number;
+  // Postings the last SUCCESSFUL poll stored; null until one succeeds. The baseline the
+  // emptied-board rule compares against.
+  readonly last_poll_job_count: number | null;
 }
 
 interface PollSummary {
@@ -196,7 +209,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // 2. Query active watchlist boards
   let query = db
     .from("company_watchlist")
-    .select("id, ats_provider, board_token, company_name, company_slug, poll_count, first_polled_at, last_polled_at, consecutive_failures")
+    .select("id, ats_provider, board_token, company_name, company_slug, poll_count, first_polled_at, last_polled_at, consecutive_failures, last_poll_job_count")
     .eq("enabled", true)
     .in("ats_provider", supportedProviders());
 
@@ -307,20 +320,22 @@ Deno.serve(async (req: Request): Promise<Response> => {
       continue;
     }
 
-    const requestUrl = adapter.buildRequestUrl(board.board_token);
-
     try {
-      // Robots-gated transport (poll-fetch.ts): a disallow throws RobotsDisallowedError
-      // BEFORE the board is contacted, and a non-ok status throws HttpError — both land
-      // in the catch below, which does the same failure bookkeeping the old inline
-      // `!response.ok` branch did. The transport sends the identity header itself.
-      const response = await fetchBoard(requestUrl);
-      // Null is only possible under a notFound override this caller does not use; the
-      // guard beats a blind non-null assertion (CLAUDE.md §6) and the catch records it.
-      if (response === null) throw new Error("unexpected null response from fetchBoard");
-
-      const payload = await response.json();
-      const parseResult = adapter.parse(payload);
+      // EVERY PAGE OF THE BOARD, or a failure. One response carries the whole board for
+      // greenhouse/lever/ashby; SmartRecruiters returns 100 at a time, and storing only
+      // page one would ALSO feed liveness a partial view. Each page goes through the
+      // robots-gated transport (poll-fetch.ts): a disallow throws RobotsDisallowedError
+      // before the board is contacted, and a non-ok status throws HttpError — both land
+      // in the catch below. The transport sends the identity header itself.
+      const parseResult = await collectBoardPages(adapter, board.board_token, async (pageUrl) => {
+        // One page through the gated transport.
+        const response = await fetchBoard(pageUrl);
+        // Null is only possible under a notFound override this caller does not use; the
+        // guard beats a blind non-null assertion (CLAUDE.md §6) and the catch records it.
+        if (response === null) throw new Error("unexpected null response from fetchBoard");
+        // Decoded JSON for the adapter's pure parser.
+        return await response.json();
+      });
 
       if (!parseResult.ok) {
         await db
@@ -337,17 +352,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
           status: "failed",
           fetched: 0,
           inserted: 0,
-          error: `Parse error: ${parseResult.reason}`,
+          // "Board read failed", not "Parse error": a stalled cursor or the page cap
+          // lands here too, and the reason itself names which (and which page).
+          error: `Board read failed: ${parseResult.reason}`,
         });
         continue;
       }
 
       // IDENTITY GUARD, BEFORE ANY WRITE. The payload parsed, but does it belong to
-      // the company this watchlist row claims? Greenhouse reports a name in the same
-      // payload; lever/ashby report none and come back `no_signal`, which is NOT a
-      // failure — only a positive mismatch blocks the board. Evaluated after parse so
-      // a malformed payload is still recorded as the parse failure it really is.
-      const identity = evaluateBoardIdentity(adapter, payload, board.company_name);
+      // the company this watchlist row claims? Greenhouse and SmartRecruiters report a
+      // name in the same payload; lever/ashby report none and come back `no_signal`,
+      // which is NOT a failure — only a positive mismatch blocks the board. Evaluated
+      // after parse so a malformed payload is still recorded as the parse failure it
+      // really is. Page one answers for the board: one board is one company.
+      const identity = evaluateBoardIdentity(adapter, parseResult.firstPayload, board.company_name);
       if (identity.verdict === "mismatch") {
         // Same bookkeeping as a parse failure — this IS a failing board (wrong token,
         // renamed company, or a stranger's board), and the existing counter is what
@@ -372,6 +390,42 @@ Deno.serve(async (req: Request): Promise<Response> => {
           error: `Identity mismatch: board reports "${identity.reported}", watchlist says "${board.company_name}" — nothing persisted`,
         });
         // Nothing from this response may be written.
+        continue;
+      }
+
+      // EMPTIED BOARD, ALSO BEFORE ANY WRITE. A board that listed postings last time
+      // and lists none now is most often a token gone bad — SmartRecruiters soft-200s a
+      // nonexistent token as an empty board, which the identity guard above cannot see.
+      // Failed rather than "ok, 0": `last_poll_job_count` is NOT overwritten, so the
+      // board keeps failing visibly until postings return or a human looks.
+      if (boardWentEmpty(board.last_poll_job_count, parseResult.postings.length)) {
+        // The same failure bookkeeping as the other refusals.
+        await db
+          .from("company_watchlist")
+          .update({
+            // One more consecutive failure: the counter the health page reads.
+            consecutive_failures: (board.consecutive_failures || 0) + 1,
+            // Polled now, so the rotation moves on to the boards behind this one.
+            last_polled_at: now.toISOString(),
+            // last_poll_job_count deliberately absent: it stays the non-zero baseline.
+          })
+          // This board's row only.
+          .eq("id", board.id);
+        // Both numbers, so the health page shows what changed without a re-poll.
+        summaries.push({
+          // Which board, by the token a human would correct.
+          board: board.board_token,
+          // Which provider soft-200'd.
+          provider: board.ats_provider,
+          // Failed, so it counts toward error_count and the all-failed run verdict.
+          status: "failed",
+          // Nothing fetched counts and nothing was written.
+          fetched: 0,
+          inserted: 0,
+          // The diagnosis, with the baseline it was compared to.
+          error: `Board went empty: last poll stored ${board.last_poll_job_count}, this poll found 0 — check the token`,
+        });
+        // An empty read has nothing to write, and liveness must not run on it.
         continue;
       }
 

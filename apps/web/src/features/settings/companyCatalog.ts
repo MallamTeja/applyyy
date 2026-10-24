@@ -102,7 +102,8 @@ export type BoardVerification =
        * behind it is just a stronger-sounding guess. */
       readonly evidence: 'parsed-board-json';
     }
-  /* Probed and refuted: no board on greenhouse/lever/ashby under any plausible
+  /* Probed and refuted: no board on a provider the scout can poll (greenhouse,
+   * lever, ashby, and since 2026-10-24 smartrecruiters) under any plausible
    * slug. The row is KEPT rather than deleted — a half-removed catalog is worse
    * than a marked one — but nothing here may be offered as pollable. */
   | {
@@ -544,8 +545,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'smartrecruiters',
     atsIdentifier: 'Canva',
     cooldown: { interview: '6 Months', screening: 'None' },
-    /* Probed 2026-10-23: greenhouse/lever 404; real board is SmartRecruiters token Canva — unpollable until an adapter exists. */
-    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'smartrecruiters (live, 97 postings via /v1/companies/Canva; NO scout adapter yet)' }),
+    /* Probed 2026-10-23: greenhouse/lever 404; real board is SmartRecruiters token Canva. Re-probed 2026-10-24 when the SR adapter was registered: /v1/companies/Canva/postings = 97, company.name "Canva". */
+    verification: verified(BOARD_PROBE_DATE_2026_10_24, 97),
   },
 
   /* ---- Added 2026-09-17: boards the probe found and the catalog lacked. ----
@@ -757,8 +758,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     // The legal-entity token read off phonepe.com's feed, not name-derived; SR's postings response names it "PHONEPE LIMITED".
     atsIdentifier: 'PHONEPELIMITED',
     cooldown: { interview: '6 Months', screening: 'None' },
-    /* Probed 2026-10-24: greenhouse phonepe still 404; SR /v1/companies/PHONEPELIMITED/postings = 118, matching the 118 PUBLIC rows of phonepe.com's own feed. Kept on the no-board arm like Canva/Nagarro because no SR scout adapter exists, so it must not be offered as pollable. */
-    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_24, { confidence: 'confirmed', portal: 'smartrecruiters (live, 118 postings via /v1/companies/PHONEPELIMITED/postings; NO scout adapter yet)' }),
+    /* Probed 2026-10-24: greenhouse phonepe still 404; SR /v1/companies/PHONEPELIMITED/postings = 118, matching the 118 PUBLIC rows of phonepe.com's own feed. Verified the same day the SR adapter was registered; "PHONEPE LIMITED" passes the identity guard against "PhonePe" (identity.test.ts pins the pair). */
+    verification: verified(BOARD_PROBE_DATE_2026_10_24, 118),
   },
   {
     name: 'Swiggy',
@@ -915,8 +916,8 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     atsProvider: 'smartrecruiters',
     atsIdentifier: 'Nagarro1',
     cooldown: { interview: '3–6 Months', screening: 'None' },
-    /* Probed 2026-10-23: token 'nagarro' nonexistent; real SR token is 'Nagarro1' — unpollable until an adapter exists. */
-    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'smartrecruiters (live, 582 postings via /v1/companies/Nagarro1; NO scout adapter yet)' }),
+    /* Probed 2026-10-23: token 'nagarro' nonexistent; real SR token is 'Nagarro1'. Re-probed 2026-10-24 when the SR adapter was registered: /v1/companies/Nagarro1/postings = 585 (six 100-posting pages), company.name "Nagarro". */
+    verification: verified(BOARD_PROBE_DATE_2026_10_24, 585),
   },
   {
     name: 'Persistent Systems',

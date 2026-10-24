@@ -1,4 +1,4 @@
-// Tests for the three ATS adapters and the shared row builder.
+// Tests for the ATS adapters, the shared row builder, and the paginated board read.
 //
 // THE TEST THAT MATTERS MOST IN THIS FILE is "the same job on two boards produces the
 // same fingerprint". Everything else here checks that one adapter reads one board
@@ -13,8 +13,17 @@ import assert from "node:assert/strict";
 import { greenhouseAdapter } from "./greenhouse.ts";
 import { leverAdapter } from "./lever.ts";
 import { ashbyAdapter } from "./ashby.ts";
-// The registry and the shared row builder.
-import { getAdapter, supportedProviders, toJobInsert, type JobInsertContext } from "./registry.ts";
+// The first paginated adapter; it lives beside the aggregators until the move parcel.
+import { smartrecruitersAdapter } from "../scout/adapters/smartrecruiters.ts";
+// The registry, the shared row builder, and the board-read helpers the Scout loops on.
+import {
+  boardWentEmpty,
+  collectBoardPages,
+  getAdapter,
+  supportedProviders,
+  toJobInsert,
+  type JobInsertContext,
+} from "./registry.ts";
 // Shared helpers with behaviour worth pinning in their own right.
 import { classifyEmploymentType, classifyWorkArrangement, stripHtml } from "./types.ts";
 
@@ -446,21 +455,165 @@ test("an injection payload in a job description survives to the row verbatim", a
 // already contains `workable`, `smartrecruiters` and `unknown`. That is a real state,
 // not a bug, and it must not crash the poll.
 test("an unsupported provider returns null rather than throwing", () => {
-  // Phase 2, not yet built.
+  // Written (scout/adapters/workable.ts) but deliberately not registered yet.
   assert.equal(getAdapter("workable"), null);
   // And a genuinely unroutable board.
   assert.equal(getAdapter("unknown"), null);
-  // While the three shipped ones resolve.
+  // While the shipped ones resolve.
   assert.equal(getAdapter("greenhouse"), greenhouseAdapter);
   assert.equal(getAdapter("lever"), leverAdapter);
   assert.equal(getAdapter("ashby"), ashbyAdapter);
+  assert.equal(getAdapter("smartrecruiters"), smartrecruitersAdapter);
 });
 
 // The Scout selects watchlist rows by this list, so a board it cannot handle is never
 // claimed in the first place.
-test("supportedProviders reports exactly the three shipped adapters", () => {
+test("supportedProviders reports exactly the four shipped adapters", () => {
   // Sorted so the assertion does not depend on map insertion order.
-  assert.deepEqual([...supportedProviders()].sort(), ["ashby", "greenhouse", "lever"]);
+  assert.deepEqual([...supportedProviders()].sort(), ["ashby", "greenhouse", "lever", "smartrecruiters"]);
+});
+
+// --- pagination: SmartRecruiters caps one response at 100 postings -------------------
+
+// One SmartRecruiters page as the live API ships it (probed 2026-10-24): an
+// offset/limit/totalFound envelope around `content`, each posting naming its company.
+function srPage(offset: number, limit: number, totalFound: number, ids: readonly string[]) {
+  return {
+    offset,
+    limit,
+    totalFound,
+    content: ids.map((id) => ({
+      id,
+      name: `Software Engineer ${id}`,
+      company: { identifier: "Nagarro1", name: "Nagarro" },
+      releasedDate: "2026-10-20T07:00:00.000Z",
+      location: { city: "Gurugram", country: "in", remote: false },
+    })),
+  };
+}
+
+// A fake transport that serves fixtures by exact URL and records every request, so a
+// test can assert both what was collected and which URLs were asked for.
+function fixtureFetcher(byUrl: ReadonlyMap<string, unknown>) {
+  // Every URL requested, in order.
+  const requested: string[] = [];
+  // The fetcher itself; an unknown URL throws, as an HttpError 404 would.
+  const fetchJson = async (url: string): Promise<unknown> => {
+    requested.push(url);
+    if (!byUrl.has(url)) throw new Error(`fixture has no page for ${url}`);
+    return byUrl.get(url);
+  };
+  return { requested, fetchJson };
+}
+
+// The SR endpoint, pinned like the other three.
+const SR_BASE = "https://api.smartrecruiters.com/v1/companies/Nagarro1/postings";
+
+test("smartrecruiters builds its documented public endpoint", () => {
+  assert.equal(smartrecruitersAdapter.buildRequestUrl("Nagarro1"), SR_BASE);
+});
+
+// THE BUG THIS PARCEL EXISTS FOR: Nagarro lists 585 postings and SR returns 100 per
+// response. A one-request poll would store 17% of the board and report success.
+test("pagination pulls all pages of a paged board", async () => {
+  // Three pages of two, five postings in all.
+  const { requested, fetchJson } = fixtureFetcher(new Map<string, unknown>([
+    [SR_BASE, srPage(0, 2, 5, ["a", "b"])],
+    [`${SR_BASE}?offset=2&limit=2`, srPage(2, 2, 5, ["c", "d"])],
+    [`${SR_BASE}?offset=4&limit=2`, srPage(4, 2, 5, ["e"])],
+  ]));
+  const result = await collectBoardPages(smartrecruitersAdapter, "Nagarro1", fetchJson);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  // Every posting from every page, in page order.
+  assert.deepEqual(result.postings.map((p) => p.atsJobId), ["a", "b", "c", "d", "e"]);
+  // Exactly the three page URLs, and no fourth request past the last page.
+  assert.deepEqual(requested, [SR_BASE, `${SR_BASE}?offset=2&limit=2`, `${SR_BASE}?offset=4&limit=2`]);
+  assert.equal(result.pages, 3);
+  // The identity guard reads the first page's payload.
+  assert.deepEqual(result.firstPayload, srPage(0, 2, 5, ["a", "b"]));
+});
+
+// An adapter without `nextPageUrl` keeps its one-request behaviour exactly.
+test("a single-response adapter is fetched exactly once", async () => {
+  const url = greenhouseAdapter.buildRequestUrl("zomato");
+  const { requested, fetchJson } = fixtureFetcher(new Map<string, unknown>([[url, GREENHOUSE_PAYLOAD]]));
+  const result = await collectBoardPages(greenhouseAdapter, "zomato", fetchJson);
+  assert.equal(result.ok, true);
+  assert.deepEqual(requested, [url]);
+});
+
+// A board whose API never says "last page" must not loop forever inside one Edge
+// function's wall clock. Hitting the cap FAILS the board: a truncated read would
+// store part of it and report success, the fail-open this parcel closes.
+test("a page cap stops a runaway pagination loop", async () => {
+  // Every request answers with a full page that claims a million more postings.
+  let calls = 0;
+  const fetchJson = async (url: string): Promise<unknown> => {
+    calls += 1;
+    const offset = Number(new URL(url).searchParams.get("offset") ?? "0");
+    return srPage(offset, 1, 1_000_000, [`p${offset}`]);
+  };
+  const result = await collectBoardPages(smartrecruitersAdapter, "Nagarro1", fetchJson, 3);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /page cap/);
+  // The cap bounds the requests, not just the result.
+  assert.equal(calls, 3);
+});
+
+// A next-page URL equal to the current one is a stuck cursor; fail now rather than
+// spin to the cap re-reading the same page.
+test("a pagination cursor that does not advance fails the board", async () => {
+  // An adapter whose next page is always its first page.
+  const stuck = { ...smartrecruitersAdapter, nextPageUrl: () => SR_BASE };
+  const { fetchJson } = fixtureFetcher(new Map<string, unknown>([[SR_BASE, srPage(0, 2, 5, ["a", "b"])]]));
+  const result = await collectBoardPages(stuck, "Nagarro1", fetchJson);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /did not advance/);
+});
+
+// One malformed page fails the whole board: a board read is all or nothing.
+test("an unparseable later page fails the whole board, keeping no partial postings", async () => {
+  const { fetchJson } = fixtureFetcher(new Map<string, unknown>([
+    [SR_BASE, srPage(0, 2, 4, ["a", "b"])],
+    [`${SR_BASE}?offset=2&limit=2`, { offset: 2, limit: 2, totalFound: 4 }],
+  ]));
+  const result = await collectBoardPages(smartrecruitersAdapter, "Nagarro1", fetchJson);
+  assert.equal(result.ok, false);
+});
+
+// The adapter's half of pagination, pinned directly.
+test("smartrecruiters stops paging at the last page and on a malformed envelope", () => {
+  // offset 4 + limit 2 covers totalFound 5: no next page.
+  assert.equal(smartrecruitersAdapter.nextPageUrl?.("Nagarro1", srPage(4, 2, 5, ["e"])), null);
+  // A zero limit can never advance, so it must not produce a next page.
+  assert.equal(smartrecruitersAdapter.nextPageUrl?.("Nagarro1", srPage(0, 0, 5, [])), null);
+  // A string where a count belongs is not a count (`Number("")` is 0, CLAUDE.md §6).
+  assert.equal(smartrecruitersAdapter.nextPageUrl?.("Nagarro1", { offset: "0", limit: 100, totalFound: 585, content: [] }), null);
+  // A legacy bare-array response carries no cursor at all.
+  assert.equal(smartrecruitersAdapter.nextPageUrl?.("Nagarro1", []), null);
+});
+
+// --- an emptied board: a soft-200 must not read as "0 postings, healthy" -------------
+
+// SR answers a NONEXISTENT token with 200 and `{"totalFound":0,"content":[]}`, and the
+// identity guard reads that as no_signal. So a board that HAD postings and now has none
+// is a failure signal (wrong or retired token), never a quiet success.
+test("a previously-nonzero board returning zero postings is a failure signal", () => {
+  // Nagarro had 585 last poll and now reports none: fail.
+  assert.equal(boardWentEmpty(585, 0), true);
+});
+
+// The rule must not fire on healthy states, or it fails boards that are fine.
+test("an empty board is not a failure when it was empty or never polled", () => {
+  // Empty last time too: a quiet hiring quarter, not news.
+  assert.equal(boardWentEmpty(0, 0), false);
+  // Never polled successfully: no baseline to compare against.
+  assert.equal(boardWentEmpty(null, 0), false);
+  // Fewer postings is ordinary churn, not an emptied board.
+  assert.equal(boardWentEmpty(585, 3), false);
 });
 
 // --- the shared classifiers -----------------------------------------------------

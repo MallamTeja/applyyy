@@ -15,10 +15,13 @@
 // producing a `JobInsert` — it returns a `ParsedPosting`, and only this module can
 // finish the job.
 
-// The three shipped adapters.
+// The shipped adapters.
 import { ashbyAdapter } from "./ashby.ts";
 import { greenhouseAdapter } from "./greenhouse.ts";
 import { leverAdapter } from "./lever.ts";
+// SmartRecruiters satisfies the same contract but lives beside the aggregators in
+// scout/adapters/; moving it here is a separate parcel, so it is imported in place.
+import { smartrecruitersAdapter } from "../scout/adapters/smartrecruiters.ts";
 // The adapter contract.
 import type { AtsAdapter, ParsedPosting } from "./types.ts";
 // The shared dedupe primitive. Async because it hashes.
@@ -42,13 +45,17 @@ const ADAPTERS: ReadonlyMap<AtsProvider, AtsAdapter> = new Map([
   ["lever" as AtsProvider, leverAdapter],
   // Ashby: genuine publication date, and the only board exposing unlisted postings.
   ["ashby" as AtsProvider, ashbyAdapter],
+  // SmartRecruiters: the first PAGED board (100 postings per response), so it is also
+  // the first adapter with `nextPageUrl`. Registered 2026-10-24 for Canva, Nagarro and
+  // PhonePe. Workable is written too but stays unregistered until it has a parcel.
+  ["smartrecruiters" as AtsProvider, smartrecruitersAdapter],
 ]);
 
 // Look up the adapter for a watchlist row's provider.
 //
 // Returns null rather than throwing for a provider we have no adapter for. That is a
-// real state, not a bug: `company_watchlist.ats_provider` is an enum that already
-// contains `workable` and `smartrecruiters` (Phase 2) and `unknown`, so a row can
+// real state, not a bug: `company_watchlist.ats_provider` is an enum that also
+// contains `workable` (written, not yet registered) and `unknown`, so a row can
 // legitimately name a board this build cannot poll. The Scout records it and moves on
 // rather than crashing the poll and taking the other boards down with it.
 export function getAdapter(provider: AtsProvider): AtsAdapter | null {
@@ -59,6 +66,93 @@ export function getAdapter(provider: AtsProvider): AtsAdapter | null {
 // rows, so a board it cannot handle is never claimed in the first place.
 export function supportedProviders(): readonly AtsProvider[] {
   return [...ADAPTERS.keys()];
+}
+
+// --- reading a whole board ---------------------------------------------------------
+
+// The most pages one board read may take. ponytail: 20 pages is 2,000 postings at SR's
+// 100-per-page window, about 3x the biggest board polled today (Nagarro, 585 on
+// 2026-10-24). A board past the cap FAILS rather than truncating; raise the cap, or
+// stream pages into the batch writer, if a real board ever reaches it.
+export const MAX_BOARD_PAGES = 20;
+
+// One board read, all pages or nothing. A closed union for the same reason as
+// `AtsParseResult`: a failed read is ordinary data the caller records, never a throw.
+export type BoardPagesResult =
+  // Every page fetched and parsed. `firstPayload` is kept because the identity guard
+  // reads the provider's own payload, and one board is one company, so page one is
+  // enough to answer for the rest.
+  | {
+      readonly ok: true;
+      readonly firstPayload: unknown;
+      readonly postings: readonly ParsedPosting[];
+      readonly skipped: readonly string[];
+      readonly pages: number;
+    }
+  // Some page failed to parse, the cursor stalled, or the cap was hit. Nothing from
+  // any page is returned: a partial board would be stored as if it were the whole one,
+  // and liveness would then read every missing posting as closed.
+  | { readonly ok: false; readonly reason: string };
+
+// Read every page of one board through `fetchJson`, following the adapter's
+// `nextPageUrl` until it says the last page has been read.
+//
+// THE TRANSPORT IS INJECTED, which is what lets node --test drive the whole loop with
+// fixtures: scout-ats/index.ts calls Deno.serve on import and cannot be loaded by node.
+// A fetch error (robots refusal, non-ok status) is NOT caught here; it propagates to
+// the caller's catch, which already does the failed-board bookkeeping for it.
+export async function collectBoardPages(
+  adapter: AtsAdapter,
+  boardToken: string,
+  fetchJson: (url: string) => Promise<unknown>,
+  maxPages: number = MAX_BOARD_PAGES,
+): Promise<BoardPagesResult> {
+  // The first page's URL comes from the same builder single-page adapters use.
+  let url = adapter.buildRequestUrl(boardToken);
+  // Accumulated across pages, in page order.
+  const postings: ParsedPosting[] = [];
+  const skipped: string[] = [];
+  // Page one's raw payload, for the identity guard.
+  let firstPayload: unknown = undefined;
+  // Bounded by the cap, so a board that never says "last page" cannot spin.
+  for (let page = 1; page <= maxPages; page += 1) {
+    // One request per page, through whatever transport the caller supplied.
+    const payload = await fetchJson(url);
+    // Remember the first page for the identity check.
+    if (page === 1) firstPayload = payload;
+    // Each page is parsed on its own, by the same pure parser as a single-page board.
+    const parsed = adapter.parse(payload);
+    // One bad page fails the board; name the page so the health page shows where.
+    if (!parsed.ok) return { ok: false, reason: `page ${page}: ${parsed.reason}` };
+    // Keep this page's results.
+    postings.push(...parsed.postings);
+    skipped.push(...parsed.skipped);
+    // Ask the adapter for the next page. No method means a single-response board.
+    const next = adapter.nextPageUrl?.(boardToken, payload) ?? null;
+    // No next page: the board has been read in full.
+    if (next === null) return { ok: true, firstPayload, postings, skipped, pages: page };
+    // A cursor that points back at this page would re-read it until the cap.
+    if (next === url) return { ok: false, reason: `pagination cursor did not advance past page ${page}` };
+    // Move on.
+    url = next;
+  }
+  // Still more pages after the cap: fail rather than store a truncated board.
+  return { ok: false, reason: `page cap of ${maxPages} reached before the last page` };
+}
+
+// True when a board that listed postings on its last successful poll now lists none.
+//
+// WHY THAT IS A FAILURE AND NOT "0 POSTINGS, HEALTHY": SmartRecruiters answers a
+// NONEXISTENT token with 200 and `{"totalFound":0,"content":[]}`. That parses cleanly,
+// and the identity guard reads an empty board as no_signal, so a retired or mistyped
+// token would otherwise report a healthy, quiet board forever. A real company emptying
+// its whole board between two polls is rare; a token going bad is the common cause.
+// Applies to every provider: a board emptying overnight is worth a look anywhere.
+export function boardWentEmpty(previousJobCount: number | null, currentJobCount: number): boolean {
+  // Postings present now: not empty, whatever came before.
+  if (currentJobCount > 0) return false;
+  // Never polled successfully (null) or empty last time too: no change to report.
+  return previousJobCount !== null && previousJobCount > 0;
 }
 
 // Everything `toJobInsert` needs that a posting cannot know about itself.

@@ -47,6 +47,23 @@ const SMARTRECRUITERS_API_ORIGIN = "https://api.smartrecruiters.com";
 // Used for fallback URL construction when explicit apply links are missing.
 const SMARTRECRUITERS_JOBS_ORIGIN = "https://jobs.smartrecruiters.com";
 
+// The postings endpoint for one company, without a page window. A module function
+// rather than a `this.buildRequestUrl` call so `nextPageUrl` cannot lose its receiver
+// when the adapter is spread or destructured. The token is encoded so a value typed
+// into the watchlist cannot reshape the request path.
+function postingsUrl(boardToken: string): string {
+  // Construct the public SmartRecruiters company postings API URL.
+  return `${SMARTRECRUITERS_API_ORIGIN}/v1/companies/${encodeURIComponent(boardToken)}/postings`;
+}
+
+// True for a non-negative whole number — the only shape a page cursor may take. A
+// typeof check first, because `Number.isInteger("5")` is false but a lenient coercion
+// elsewhere would make "5" (or "", which coerces to 0) look like a cursor.
+function isCount(value: unknown): value is number {
+  // Numbers only, whole, and never negative.
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
 // Extract human-readable location prose from a SmartRecruiters job entry.
 //
 // SmartRecruiters provides `location` as an object with `city`, `region`, and `country`.
@@ -144,8 +161,37 @@ export const smartrecruitersAdapter: AtsAdapter = {
   //
   // Encodes boardToken using encodeURIComponent to prevent path injection vulnerabilities.
   buildRequestUrl(boardToken: string): string {
-    // Construct and return public SmartRecruiters company postings API URL.
-    return `${SMARTRECRUITERS_API_ORIGIN}/v1/companies/${encodeURIComponent(boardToken)}/postings`;
+    // The first page carries no query: SR's default window is already offset 0, limit 100.
+    return postingsUrl(boardToken);
+  },
+
+  // SmartRecruiters pages its listing: `{ offset, limit, totalFound, content }`, and the
+  // limit is clamped to 100 server-side (live probe 2026-10-24: `?limit=500` answers
+  // `limit: 100`). The next page starts where this one's window ends.
+  //
+  // Every cursor field must be a genuine non-negative integer, and limit must be
+  // positive. Anything else returns null (this page is the last) rather than guessing:
+  // `Number("")` is 0, and a zero limit would request the same page forever.
+  // ponytail: a malformed cursor on a big board reads only its first page. The
+  // liveness mass-disappearance guard refuses to mark jobs dead from a read that
+  // short, so the damage is lost coverage, not lost data.
+  nextPageUrl(boardToken: string, payload: unknown): string | null {
+    // A bare array (the legacy shape parse also accepts) carries no cursor.
+    if (!isRecord(payload)) return null;
+    // The three cursor fields, read raw so their types can be checked.
+    const offset = payload["offset"];
+    const limit = payload["limit"];
+    const totalFound = payload["totalFound"];
+    // Integers only, so a string "100" or a fractional value is no cursor.
+    if (!isCount(offset) || !isCount(limit) || !isCount(totalFound)) return null;
+    // A zero limit never advances.
+    if (limit === 0) return null;
+    // Where the next window would start.
+    const nextOffset = offset + limit;
+    // At or past the reported total: this page was the last.
+    if (nextOffset >= totalFound) return null;
+    // Same endpoint, the next window. Keeps this page's limit so windows never overlap.
+    return `${postingsUrl(boardToken)}?offset=${nextOffset}&limit=${limit}`;
   },
 
   // SmartRecruiters DOES report identity: each posting in `.content[]` carries a

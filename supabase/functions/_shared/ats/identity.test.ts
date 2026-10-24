@@ -16,6 +16,10 @@ import { companyIdentityMatches, evaluateBoardIdentity } from "./identity.ts";
 import { greenhouseAdapter } from "./greenhouse.ts";
 import { leverAdapter } from "./lever.ts";
 import { ashbyAdapter } from "./ashby.ts";
+// The two adapters that live beside the aggregators. Both declare a real identity
+// read, and until this file imported them neither read had a test (7501a95 said so).
+import { smartrecruitersAdapter } from "../scout/adapters/smartrecruiters.ts";
+import { workableAdapter } from "../scout/adapters/workable.ts";
 
 // The real incident: the watchlist row says Tata, the board says Thornbury. The only
 // shared token is the generic word "Services", which must not be enough to pass.
@@ -135,4 +139,58 @@ test("an ashby payload yields no identity signal", () => {
 test("an empty greenhouse board yields no identity signal", () => {
   const verdict = evaluateBoardIdentity(greenhouseAdapter, { jobs: [] }, "DoorDash");
   assert.equal(verdict.verdict, "no_signal");
+});
+
+// --- smartrecruiters and workable: identity arrives with the postings -----------------
+
+// A smartrecruiters page as the live API ships it (probed 2026-10-24): every posting
+// carries `company.name` (the display name) and `company.identifier` (the token echo).
+function smartrecruitersPayload(companyName: string) {
+  return {
+    offset: 0,
+    limit: 100,
+    totalFound: 1,
+    content: [
+      {
+        id: "744000146635269",
+        name: "Associate Staff Engineer",
+        company: { identifier: "PHONEPELIMITED", name: companyName },
+        releasedDate: "2026-10-23T12:13:23.023Z",
+      },
+    ],
+  };
+}
+
+// THE LIVE PAIR. The watchlist row seeded 2026-10-24 says "PhonePe"; SR reports the
+// legal entity "PHONEPE LIMITED". If this ever stops matching, the board fails as an
+// identity mismatch the moment SR is registered.
+test("the live PhonePe watchlist name matches the smartrecruiters legal-entity name", () => {
+  const verdict = evaluateBoardIdentity(smartrecruitersAdapter, smartrecruitersPayload("PHONEPE LIMITED"), "PhonePe");
+  assert.deepEqual(verdict, { verdict: "match", reported: "PHONEPE LIMITED" });
+});
+
+// The guard must still bite on smartrecruiters: a token pointing at another company.
+test("a smartrecruiters board reporting a different company is a mismatch", () => {
+  const verdict = evaluateBoardIdentity(smartrecruitersAdapter, smartrecruitersPayload("Ubisoft"), "Nagarro");
+  assert.deepEqual(verdict, { verdict: "mismatch", reported: "Ubisoft" });
+});
+
+// SR's soft-200 for a NONEXISTENT token: an empty board, so no company to read. The
+// verdict is no_signal; the emptied-board rule in the registry is what catches it.
+test("a smartrecruiters soft-200 for a nonexistent token yields no identity signal", () => {
+  const verdict = evaluateBoardIdentity(smartrecruitersAdapter, { offset: 0, limit: 100, totalFound: 0, content: [] }, "Nagarro");
+  assert.equal(verdict.verdict, "no_signal");
+});
+
+// Workable's widget endpoint names the account at the top level beside `jobs`
+// (probed 2026-10-24: account 'printful' -> "Printful").
+test("a workable board reporting its own name matches", () => {
+  const verdict = evaluateBoardIdentity(workableAdapter, { name: "Printful", jobs: [] }, "Printful");
+  assert.deepEqual(verdict, { verdict: "match", reported: "Printful" });
+});
+
+// And bites when the account belongs to someone else.
+test("a workable board reporting a different company is a mismatch", () => {
+  const verdict = evaluateBoardIdentity(workableAdapter, { name: "Thornbury Community Services", jobs: [] }, "Printful");
+  assert.deepEqual(verdict, { verdict: "mismatch", reported: "Thornbury Community Services" });
 });
