@@ -206,8 +206,9 @@ repo: there is **no `graphify-out/`** (checked 2026-10-24), so graph engineering
 naming the recon split — the natural partitions are `supabase/functions/<fn>/`,
 `supabase/functions/_shared/`, `apps/web/src/features/<area>/`, `apps/web/src/data/`,
 `worker/src/`. Peers have **no Supabase MCP**: the brief must carry every live-DB fact,
-or tell the worker to send SQL to the orchestrator. Budget default: ≤3 recon subagents
-per worker, measure before fixing.
+or tell the worker to send SQL to the orchestrator. Budget default: ≤4 recon subagents
+per worker (raised from 3 on 2026-10-24: Teja asked for more fan-out for speed), measure
+before fixing.
 
 **Ponytail when writing, editing or refactoring code (asked for 2026-10-24).** The
 `ponytail` plugin loads in every session; apply its ladder to every code change here:
