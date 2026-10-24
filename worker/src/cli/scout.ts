@@ -1,7 +1,8 @@
 // Scout-ATS CLI Runner — `pnpm --filter '@applyy/worker' run scout`
 //
 // Polls registered company boards in `public.company_watchlist` using native ATS
-// adapters (Greenhouse, Lever, Ashby).
+// adapters (every provider `supportedProviders()` lists), reading every page of a
+// paginated board.
 // Deduplicates postings into `public.jobs` and seeds initial `public.applications`
 // rows in status 'discovered'.
 
@@ -23,6 +24,8 @@ import { dedupeByFingerprint, persistJobBatch, watchlistPollUpdate, type Prepare
 import { evaluateBoardIdentity } from '../../../supabase/functions/_shared/ats/identity.ts';
 // What to do with a verdict, kept pure in its own module because this file runs main() on import.
 import { identityGate } from '../scout/identity-gate.ts';
+// Every page of a board through plain HTTP, kept in its own module for the same reason.
+import { readBoardPages } from '../scout/board-pages.ts';
 import type { AtsProvider, JobInsert } from '../../../packages/shared-types/src/tables.ts';
 
 function required(name: string): string {
@@ -173,7 +176,8 @@ async function main(): Promise<void> {
   }
 
   if (!boards || boards.length === 0) {
-    console.log('[applyy-scout] no enabled company boards found for supported providers (greenhouse, lever, ashby).');
+    // Derived from the registry, so the list cannot go stale when a provider is added (as SR was).
+    console.log(`[applyy-scout] no enabled company boards found for supported providers (${supportedProviders().join(', ')}).`);
     // Close the run row before returning. Without this the row opened above stays
     // 'running' forever, and the health page reads a permanently-running row as the
     // signature of a CRASH — see 20260909234800_supporting_tables.sql, which opens
@@ -237,37 +241,18 @@ async function main(): Promise<void> {
       continue;
     }
 
-    const requestUrl = adapter.buildRequestUrl(board.board_token);
     console.log(`[applyy-scout] polling ${board.company_name} on ${board.ats_provider} (${board.board_token})...`);
 
     try {
-      const res = await fetch(requestUrl, {
-        headers: {
-          'Accept': 'application/json',
-          'User-Agent': 'applyy-scout/1.0 (+https://github.com/MallamTeja/applyyy)',
-        },
-      });
-
-      if (!res.ok) {
-        console.warn(`[applyy-scout] ⚠️ ${board.company_name} returned HTTP ${res.status}: ${res.statusText}`);
-        // Checked: an unrecorded failure leaves `consecutive_failures` low, so a
-        // dead board never looks dead enough to disable.
-        const { error: failMarkErr } = await client
-          .from('company_watchlist')
-          .update({
-            consecutive_failures: (board.consecutive_failures || 0) + 1,
-            last_polled_at: now.toISOString(),
-          })
-          .eq('id', board.id);
-        noteError(`${board.company_name}: record poll failure`, failMarkErr);
-        continue;
-      }
-
-      const payload = await res.json();
-      const parseResult = adapter.parse(payload);
+      // EVERY PAGE, OR A FAILED BOARD. A paginated board (SmartRecruiters, 100 per page)
+      // read as one response stored page one only. A non-ok page now THROWS into the
+      // catch below, which records the failure exactly as the old non-ok branch did.
+      const parseResult = await readBoardPages(adapter, board.board_token);
 
       if (!parseResult.ok) {
-        console.warn(`[applyy-scout] ⚠️ ${board.company_name} parse failed: ${parseResult.reason}`);
+        // "Board read failed" rather than "parse failed": a stalled cursor or the page cap
+        // lands here too, and the reason names which, and on which page.
+        console.warn(`[applyy-scout] ⚠️ ${board.company_name} board read failed: ${parseResult.reason}`);
         // Checked: an unrecorded failure leaves `consecutive_failures` low, so a
         // dead board never looks dead enough to disable.
         const { error: failMarkErr } = await client
@@ -284,7 +269,8 @@ async function main(): Promise<void> {
       // IDENTITY BEFORE ANY WRITE. Checked after parse so a malformed payload is still
       // recorded as the parse failure it really is; checked before toJobInsert so a
       // stranger's postings never reach jobs, applications, or the screener.
-      const identity = identityGate(evaluateBoardIdentity(adapter, payload, board.company_name), board, now);
+      // Page one's payload answers for the board: one board is one company (as scout-ats does).
+      const identity = identityGate(evaluateBoardIdentity(adapter, parseResult.firstPayload, board.company_name), board, now);
       // A positive mismatch: nothing from this response may be persisted.
       if (!identity.proceed) {
         // Both spellings in the Actions log, so the token or the row can be fixed without re-polling.
