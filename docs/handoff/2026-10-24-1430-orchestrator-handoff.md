@@ -1,6 +1,7 @@
 # Orchestrator handoff — 2026-10-24 14:30 IST (from applyyy-aa)
 
-Supersedes `2026-10-24-0036-orchestrator-handoff.md` (kept only as history; its rescue
+Supersedes the 00:36 handoff, deleted as stale on 2026-10-24 (history:
+`git show f44e209:docs/handoff/2026-10-24-0036-orchestrator-handoff.md`; its rescue
 branches no longer exist). Re-measure before acting: every count below has its regenerating
 command, and counts are timestamps, not facts.
 

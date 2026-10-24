@@ -1,7 +1,8 @@
 # Board re-probes — 2026-10-24 (~11:00 IST)
 
 Re-probe of the 4 dead/empty boards flagged "re-probe later" in
-`docs/handoff/2026-10-24-0036-orchestrator-handoff.md` and
+the 00:36 orchestrator handoff (deleted as stale 2026-10-24; read it with
+`git show f44e209:docs/handoff/2026-10-24-0036-orchestrator-handoff.md`) and
 `docs/harvest/2026-10-23-watchlist-expansion.md`. One read-only probe agent per
 board; every verdict below is backed by a probe URL + HTTP status + an identity
 check (the greenhouse/tcs→Thornbury trap: a 200 can be the wrong company).
