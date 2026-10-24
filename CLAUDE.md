@@ -205,8 +205,9 @@ green claim on a command that never ran your code.
 repo: there is **no `graphify-out/`** (checked 2026-10-24), so graph engineering means
 naming the recon split — the natural partitions are `supabase/functions/<fn>/`,
 `supabase/functions/_shared/`, `apps/web/src/features/<area>/`, `apps/web/src/data/`,
-`worker/src/`. Peers have **no Supabase MCP**: the brief must carry every live-DB fact,
-or tell the worker to send SQL to the orchestrator. Budget default: ≤4 recon subagents
+`worker/src/`. **Peers may or may not have the Supabase MCP** (a peer read live rows
+through it on 2026-10-24; others lacked it): put every live-DB fact in the brief anyway,
+let a peer run SELECTs if it can, and route every live WRITE to the orchestrator (§2). Budget default: ≤4 recon subagents
 per worker (raised from 3 on 2026-10-24: Teja asked for more fan-out for speed), measure
 before fixing.
 
