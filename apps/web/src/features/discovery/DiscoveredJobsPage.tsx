@@ -576,9 +576,11 @@ export function DiscoveredJobsPage(): ReactElement {
             className="chip-btn"
             style={{ fontWeight: 600, /* --accent is always defined; a hex fallback would only mask a typo'd token. */ color: 'var(--accent)', borderColor: 'var(--accent)' }}
             onClick={() => setDiscoveryModalMode('remote')}
-            title="Discover international remote jobs from open tech feeds"
+            /* The feeds run daily on a schedule now; the button explains that rather than scanning. */
+            title="Remote feeds are scouted automatically every day at 07:00 IST"
           >
-            🌐 Scout Remote Feeds
+            {/* "(daily)" so the label no longer promises a scan on click. */}
+            🌐 Remote Feeds (daily)
           </button>
 
           <button

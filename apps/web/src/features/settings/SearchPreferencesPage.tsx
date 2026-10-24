@@ -829,9 +829,11 @@ export function SearchPreferencesPage(): ReactElement {
                 }
               }}
               disabled={saving || loading}
-              title="Save search preferences and immediately scout open global remote tech feeds"
+              /* Saves, then explains the daily remote scout; there is no on-demand remote scan any more. */
+              title="Save search preferences; remote feeds are scouted automatically every day at 07:00 IST"
             >
-              🌐 Save & Find Remote Jobs Now
+              {/* No "Now": the scan runs on its daily schedule, not on this click. */}
+              🌐 Save & See Remote Scouting
             </button>
             <button
               type="submit"

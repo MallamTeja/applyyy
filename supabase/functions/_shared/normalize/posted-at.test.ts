@@ -211,3 +211,21 @@ test("a null greenhouse updated_at falls back to first_seen_at on an established
   // And it is the timestamp we keep.
   assert.equal(result.postedAt, FIRST_SEEN.toISOString());
 });
+
+// REMOTE FEEDS (2026-10-24): RemoteOK, Jobicy and Arbeitnow publish real dates in three
+// JSON types. Before this variant the worker carried a local copy of this policy, and the
+// old CLI stamped every row 'unknown', which FAILS the staleness rule.
+test("remote_feed: a real ISO date or epoch is exact", () => {
+  // RemoteOK / Jobicy ISO-shaped strings.
+  assert.deepEqual(extractPostedAt({ source: "remote_feed", published: "2026-09-08T09:30:00+00:00" }, ESTABLISHED_BOARD), { postedAt: "2026-09-08T09:30:00.000Z", postedAtSource: "exact" });
+  // Arbeitnow epoch SECONDS, normalised to milliseconds.
+  assert.equal(extractPostedAt({ source: "remote_feed", published: 1757323800 }, ESTABLISHED_BOARD).postedAtSource, "exact");
+});
+
+test("remote_feed: junk dates are derived from first sighting, never exact and never unknown", () => {
+  // "-5" is the V8 trap (read as 2001); 0 and 5 are placeholder epochs; prose and absence carry nothing.
+  for (const published of ["-5", 0, 5, null, undefined, "soon"]) {
+    // The shared fallback: our own sighting, honestly labelled.
+    assert.deepEqual(extractPostedAt({ source: "remote_feed", published }, ESTABLISHED_BOARD), { postedAt: FIRST_SEEN.toISOString(), postedAtSource: "derived" });
+  }
+});

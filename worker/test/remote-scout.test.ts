@@ -4,7 +4,7 @@
 // two modules and is pinned here.
 import { describe, expect, it } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { REMOTE_FEED_URLS, parseArbeitnow, parseJobicy, parseRemoteOK, remotePostedAt } from '../src/scout/remote-feeds.ts';
+import { REMOTE_FEED_URLS, parseArbeitnow, parseJobicy, parseRemoteOK, remotePreparedJob } from '../src/scout/remote-feeds.ts';
 import { runRemoteScout } from '../src/scout/remote-run.ts';
 
 // One RemoteOK item; only the fields the parser reads.
@@ -62,22 +62,26 @@ describe('apply URL gate', () => {
   });
 });
 
-describe('posted date', () => {
+describe('posted date (shared extractPostedAt, remote_feed variant)', () => {
   // A fixed sighting clock.
   const SEEN = new Date('2026-10-24T08:00:00Z');
+  // One feed posting whose publish value each case swaps; everything else is a valid posting.
+  // Through the real parser, so the test exercises exactly what a feed would produce.
+  const posting = (published: unknown) => parseRemoteOK([LEGAL, { ...remoteOkItem('https://example.com/apply'), date: published }]).jobs[0]!;
 
-  it('a real feed date is exact, from ISO strings and from epoch seconds', () => {
-    // RemoteOK / Jobicy style ISO.
-    expect(remotePostedAt('2026-10-23T10:00:00+00:00', SEEN)).toEqual({ posted_at: '2026-10-23T10:00:00.000Z', posted_at_source: 'exact' });
-    // Arbeitnow style epoch seconds.
-    expect(remotePostedAt(1761300000, SEEN).posted_at_source).toBe('exact');
+  it('a remote row with a real date is exact, through the shared extractor', async () => {
+    // The row the persist path would write.
+    // A RemoteOK-style ISO date.
+    const { row } = await remotePreparedJob(posting('2026-10-23T10:00:00+00:00'), SEEN);
+    // The feed's own date, at full confidence.
+    expect([row.posted_at, row.posted_at_source]).toEqual(['2026-10-23T10:00:00.000Z', 'exact']);
   });
 
-  it('an unusable date is our sighting as derived, NEVER unknown (unknown fails the staleness rule)', () => {
-    // The Date.parse trap (year -5), epoch 0, absent and garbage all degrade the same way.
-    for (const bad of ['-5', 0, null, undefined, 'soon']) {
-      expect(remotePostedAt(bad, SEEN)).toEqual({ posted_at: SEEN.toISOString(), posted_at_source: 'derived' });
-    }
+  it('a remote row with a junk date is derived from first sighting, NEVER unknown (unknown fails the staleness rule)', async () => {
+    // The V8 trap: "-5" parses as a 2001 date if nothing checks its shape first.
+    const { row } = await remotePreparedJob(posting('-5'), SEEN);
+    // Our sighting, honestly labelled; 'unknown' would mean the cold-start guard fired.
+    expect([row.posted_at, row.posted_at_source]).toEqual([SEEN.toISOString(), 'derived']);
   });
 });
 

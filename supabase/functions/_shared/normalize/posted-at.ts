@@ -55,7 +55,12 @@ export type PostedAtInput =
   // Adzuna: genuine `created`, ISO string.
   | { readonly source: "adzuna"; readonly created: string | null }
   // Aggregated LinkedIn/Naukri: sometimes relative prose, often nothing at all.
-  | { readonly source: "aggregator"; readonly relativeText: string | null };
+  | { readonly source: "aggregator"; readonly relativeText: string | null }
+  // Remote job feeds (RemoteOK `date`/`epoch`, Jobicy `pubDate`, Arbeitnow `created_at`,
+  // worker/src/scout/remote-feeds.ts): a genuine publish date, but the TYPE varies by feed
+  // (ISO-shaped string, epoch seconds or epoch milliseconds), so the raw value is passed in
+  // and judged here rather than in a per-feed local copy of this policy (2026-10-24).
+  | { readonly source: "remote_feed"; readonly published: unknown };
 
 // Milliseconds in a day, named so the relative-date arithmetic below reads as
 // arithmetic rather than as a magic constant.
@@ -197,8 +202,28 @@ function readSourceDate(
       // Anchor the offset to the injected clock, never to the wall clock.
       return { date: new Date(context.now.getTime() - daysAgo * MS_PER_DAY), confidence: "derived" };
     }
+    // Remote feeds publish a true date whose JSON type depends on the feed.
+    case "remote_feed": {
+      // Shape first, parse second (CLAUDE.md section 6). A number is epoch seconds below
+      // 1e12 and milliseconds above it; a string must START like an ISO date, because V8
+      // reads "-5" as a date in 2001 and a lenient parse would call that `exact`.
+      const raw = input.published;
+      // Epoch numbers, normalised to milliseconds; parseEpochMillis rejects 0 and negatives.
+      const date = typeof raw === "number"
+        ? parseEpochMillis(raw < 1e12 ? raw * 1000 : raw)
+        // ISO-shaped strings only ("2026-10-22 09:00:00", "2026-10-23T10:00:00+00:00").
+        : typeof raw === "string" && /^\d{4}-\d{2}-\d{2}/.test(raw) ? parseTimestamp(raw) : null;
+      // Anything else (absent, prose, junk, a tiny epoch that lands in 1970): no verdict.
+      if (date === null || date.getTime() < EARLIEST_REMOTE_POSTING) return null;
+      // A genuine publish date.
+      return { date, confidence: "exact" };
+    }
   }
 }
+
+// The earliest believable remote-feed publish date. An epoch like 5 survives
+// parseEpochMillis (it is positive) but means 1970, which is a placeholder, not a posting.
+const EARLIEST_REMOTE_POSTING = Date.UTC(2000, 0, 1);
 
 // The extractor. Every discovered job goes through this before it is written, so
 // that `posted_at` and `posted_at_source` are always decided in one place.

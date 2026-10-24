@@ -17,8 +17,8 @@ import { readHttpUrl, readString } from '../../../supabase/functions/_shared/ats
 import { jobFingerprint } from '../../../supabase/functions/_shared/normalize/fingerprint.ts';
 // Types for the row this module emits.
 import type { AtsProvider, EmploymentType, JobInsert, JobSourceRef } from '../../../packages/shared-types/src/tables.ts';
-// The confidence union for posted_at, from its owning module.
-import type { PostedAtSource } from '../../../packages/shared-types/src/enums.ts';
+// THE shared freshness policy, the same one the ATS scout's toJobInsert uses ('remote_feed' variant).
+import { extractPostedAt } from '../../../supabase/functions/_shared/normalize/posted-at.ts';
 // The persist path's unit: a row plus how to rebuild it against a stored first sighting.
 import type { PreparedJob } from './persist-jobs.ts';
 
@@ -55,7 +55,7 @@ export interface RemoteJob {
   readonly salaryMax: number | null;
   // Currency the feed states, or its documented default.
   readonly salaryCurrency: string;
-  // The feed's raw publish value (ISO string or epoch); judged by remotePostedAt.
+  // The feed's raw publish value (ISO string or epoch); judged by extractPostedAt's remote_feed branch.
   readonly published: unknown;
 }
 
@@ -118,7 +118,7 @@ function toRemoteJob(
     salaryMax: keys.salaryMax === undefined ? null : salary(record[keys.salaryMax]),
     // Stated currency, else the feed's default.
     salaryCurrency: (keys.currency === undefined ? null : readString(record, keys.currency)) ?? keys.currencyDefault,
-    // Judged later by remotePostedAt; kept raw so this parse never throws on a bad date.
+    // Judged later by extractPostedAt; kept raw so this parse never throws on a bad date.
     published: record[keys.published],
   };
 }
@@ -184,30 +184,6 @@ export function parseArbeitnow(body: unknown): RemoteParse {
   }));
 }
 
-// The earliest believable publish date. Rejects Date.parse traps like "-5" (year -5) and
-// epoch 0 placeholders, which would otherwise read as real, ancient postings (§6).
-const EARLIEST_POSTING = Date.UTC(2000, 0, 1);
-
-// posted_at and its confidence for a remote posting. Mirrors extractPostedAt's rule
-// (_shared/normalize/posted-at.ts): a real publish date is `exact`; anything unusable
-// falls back to our first sighting as `derived`. NEVER `unknown`: that value means "board
-// not yet trusted" and FAILS the screener's staleness rule, and these feeds list only their
-// newest postings, so "first seen" is a sound stand-in. A local copy because PostedAtInput
-// has no variant for these feeds and _shared is outside this change.
-export function remotePostedAt(published: unknown, firstSeenAt: Date): { posted_at: string; posted_at_source: PostedAtSource } {
-  // Epoch numbers: seconds (Arbeitnow, RemoteOK `epoch`) or milliseconds, told apart by size.
-  const millis = typeof published === 'number'
-    ? (published < 1e12 ? published * 1000 : published)
-    // Strings must START like an ISO date (RemoteOK `date`, Jobicy `pubDate` "2026-10-22 09:00:00").
-    // Shape first, parse second: V8 reads "-5" as a date in 2001, so a lenient parse alone
-    // would turn junk into an `exact` posting date (§6: never ask a lenient parser).
-    : typeof published === 'string' && /^\d{4}-\d{2}-\d{2}/.test(published) ? new Date(published).getTime() : NaN;
-  // A believable instant is the feed's real publish date.
-  if (Number.isFinite(millis) && millis >= EARLIEST_POSTING) return { posted_at: new Date(millis).toISOString(), posted_at_source: 'exact' };
-  // Otherwise our own sighting, honestly labelled as inferred.
-  return { posted_at: firstSeenAt.toISOString(), posted_at_source: 'derived' };
-}
-
 // Which ATS would submit this posting, from its apply URL's host. 'other' when none matches.
 function detectAtsProvider(url: string): AtsProvider {
   // Lower-cased once so the host checks ignore casing.
@@ -247,6 +223,10 @@ async function remoteRow(job: RemoteJob, now: Date, firstSeenAt: Date): Promise<
   const fingerprint = await jobFingerprint({ company: job.company, title: job.title, location: job.location });
   // Which ATS the apply URL points at.
   const atsProvider = detectAtsProvider(job.applyUrl);
+  // The shared extractor. isFirstPollOfBoard is FALSE on purpose: a feed lists only its newest
+  // postings, so "first seen" is sound, and the cold-start guard's `unknown` would FAIL the
+  // screener's staleness rule for every undated remote job (the bug the old CLI shipped).
+  const { postedAt: posted_at, postedAtSource: posted_at_source } = extractPostedAt({ source: "remote_feed", published: job.published }, { now, firstSeenAt, isFirstPollOfBoard: false });
   // The per-source sighting record.
   const sourceRef: JobSourceRef = {
     // These feeds are not ATS vendors; 'other' is the honest discovery source.
@@ -290,8 +270,10 @@ async function remoteRow(job: RemoteJob, now: Date, firstSeenAt: Date): Promise<
     discovered_via: ['other'],
     // The sighting record built above.
     source_refs: [sourceRef],
-    // A real date as `exact`, else our sighting as `derived` (remotePostedAt).
-    ...remotePostedAt(job.published, firstSeenAt),
+    // A real date as `exact`, else our sighting as `derived`: decided by the shared extractor.
+    posted_at,
+    // Its confidence, from the same call; never `unknown` here (see the context below).
+    posted_at_source,
     // Salary bounds when the feed stated positive numbers; the salary gate reads them.
     salary_min: job.salaryMin,
     salary_max: job.salaryMax,

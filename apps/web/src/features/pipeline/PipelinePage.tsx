@@ -203,7 +203,8 @@ export function PipelinePage(): ReactElement {
             className="btn-dispatch btn-dispatch--remote"
             onClick={() => setDiscoveryMode('remote')}
           >
-            🌍 Find Remote Jobs (Global)
+            {/* Opens the daily-schedule explanation; the browser no longer scans the feeds itself. */}
+            🌍 Remote Jobs (daily scout)
           </button>
           <button
             type="button"
