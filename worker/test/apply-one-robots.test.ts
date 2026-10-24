@@ -442,6 +442,8 @@ function fakeRunGateway(batches: ClaimedApplication[][]) {
   const gateway: RunGateway = {
     openRun: async () => ({ id: 'run-1' }),
     closeRun: async () => {},
+    // Required on RunGateway since the unknown-outcome note (claim-loop.ts); this file never produces one.
+    appendApplicationNote: async () => {},
     // Enabled: the kill switch is not under test.
     isSystemEnabled: async () => true,
     sweepStaleClaims: async () => {},

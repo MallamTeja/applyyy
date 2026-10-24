@@ -176,3 +176,55 @@ describe('rail badge count', () => {
     assert.equal(lanes.manualActionCount({ applying: 1 }), 0);
   });
 });
+
+describe('unknown-submit cause, joined by application_id (2026-10-24)', () => {
+  // Two needs_verification rows, parsed exactly as the queue's read parses them.
+  const rowA = () => queue.parseQueueRow('needs_verification', { ...gitlabRaw('https://example.com/a'), id: 'aaaaaaaa-0000-4000-8000-000000000001' });
+  // The second row, a different application.
+  const rowB = () => queue.parseQueueRow('needs_verification', { ...gitlabRaw('https://example.com/b'), id: 'bbbbbbbb-0000-4000-8000-000000000002' });
+  // The worker's notes, deliberately out of order, plus an older note for A and one malformed event.
+  const events = [
+    // B's only cause.
+    { application_id: 'bbbbbbbb-0000-4000-8000-000000000002', created_at: '2026-10-24T07:20:00Z', detail: { kind: 'submit_outcome_unknown', detail: 'responses: 500 https://b code=server-error', run_id: 'run-b' } },
+    // A's OLDER cause, which must lose.
+    { application_id: 'aaaaaaaa-0000-4000-8000-000000000001', created_at: '2026-10-24T06:00:00Z', detail: { kind: 'submit_outcome_unknown', detail: 'old cause', run_id: 'run-a0' } },
+    // A's newest cause, which must win.
+    { application_id: 'aaaaaaaa-0000-4000-8000-000000000001', created_at: '2026-10-24T07:19:00Z', detail: { kind: 'submit_outcome_unknown', detail: 'responses: 422 https://a code=captcha-failed', run_id: 'run-a1' } },
+    // A note of another kind for A, even newer: not a cause, so it must be ignored.
+    { application_id: 'aaaaaaaa-0000-4000-8000-000000000001', created_at: '2026-10-24T08:00:00Z', detail: { kind: 'something_else', detail: 'not a cause' } },
+  ];
+
+  it('picks the newest valid cause per application, whatever the server order', () => {
+    // Exactly one cause per row, the newest of the right kind.
+    assert.deepEqual([...queue.newestUnknownCauses(events)].sort(), [
+      ['aaaaaaaa-0000-4000-8000-000000000001', 'responses: 422 https://a code=captcha-failed'],
+      ['bbbbbbbb-0000-4000-8000-000000000002', 'responses: 500 https://b code=server-error'],
+    ]);
+  });
+
+  it('shows each row its OWN cause only: no cross-talk between two rows', () => {
+    // Both rows parse.
+    const a = rowA(); const b = rowB();
+    // Non-null, or the assertions below would be vacuous.
+    assert.ok(a !== null && b !== null);
+    // Folded in by exact id.
+    const [ra, rb] = queue.withUnknownCauses([a, b], queue.newestUnknownCauses(events), null);
+    // A carries A's cause and not B's.
+    assert.match(ra!.reason, /code=captcha-failed/);
+    // Positive shape for B: its own code.
+    assert.match(rb!.reason, /code=server-error/);
+    // And A's text names nothing of B's (the two codes are disjoint).
+    assert.equal(ra!.reason.includes('server-error'), false);
+  });
+
+  it('a failed cause read keeps the rows and says the cause could not be read', () => {
+    // One row.
+    const a = rowA();
+    // Parsed.
+    assert.ok(a !== null);
+    // The events read failed.
+    const [ra] = queue.withUnknownCauses([a], new Map(), 'permission denied');
+    // The generic sentence stays, and the failure is said.
+    assert.match(ra!.reason, /^Submit outcome unknown: .*The recorded cause could not be read: permission denied/);
+  });
+});

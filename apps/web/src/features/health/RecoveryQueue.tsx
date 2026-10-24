@@ -134,6 +134,55 @@ export function parseQueueRow(status: ApplicationStatus, raw: unknown): QueueRow
   return { id: r.id, stamp: r.updated_at, label: rowLabel(r.id, r.jobs), leaseUntil, applyHref: rowApplyHref(r.jobs), reason: queueReason(status, r.block_reason, r.failure_reason) };
 }
 
+/* The cause of an unknown submit, as the worker records it (claim-loop.ts, 2026-10-24): one 'note'
+   in application_events per unknown outcome, detail {kind:'submit_outcome_unknown', detail, run_id}.
+   Read by application_id, an exact join, so a row only ever shows ITS OWN cause. Returns the newest
+   valid cause per application; malformed events are skipped, never guessed into a sentence. */
+export function newestUnknownCauses(events: unknown): ReadonlyMap<string, string> {
+  // Newest cause and its timestamp per application, while scanning.
+  const best = new Map<string, { at: number; cause: string }>();
+  // Not a list: no causes, rather than a crash on the health page.
+  if (!Array.isArray(events)) return new Map();
+  // Each event proven field by field.
+  for (const raw of events) {
+    // Loose read, then checks.
+    const e = raw as { application_id?: unknown; created_at?: unknown; detail?: unknown } | null;
+    // The join key must be a real string.
+    if (typeof e?.application_id !== 'string') continue;
+    // A timestamp is needed to pick the newest; an unparseable one cannot win.
+    const at = typeof e.created_at === 'string' ? Date.parse(e.created_at) : Number.NaN;
+    // Skipped rather than treated as oldest or newest.
+    if (!Number.isFinite(at)) continue;
+    // The payload, loosely.
+    const d = e.detail as { kind?: unknown; detail?: unknown } | null | undefined;
+    // Only this note kind, with a non-empty cause string.
+    if (d?.kind !== 'submit_outcome_unknown' || typeof d.detail !== 'string' || d.detail.trim() === '') continue;
+    // The current best for this application, if any.
+    const prev = best.get(e.application_id);
+    // Newest wins, whatever order the server returned.
+    if (prev === undefined || at > prev.at) best.set(e.application_id, { at, cause: d.detail });
+  }
+  // Just the causes.
+  return new Map([...best].map(([id, v]) => [id, v.cause]));
+}
+
+/* The needs_verification rows with their recorded cause folded into the reason line. A row with no
+   cause keeps the generic sentence; `causeReadError` (the events read failed) is SAID on every row,
+   so "no cause shown" is never mistaken for "no cause recorded". */
+export function withUnknownCauses(rows: readonly QueueRow[], causes: ReadonlyMap<string, string>, causeReadError: string | null): QueueRow[] {
+  // One pass; each row looks up only its own id.
+  return rows.map((row) => {
+    // This row's cause, by exact id.
+    const cause = causes.get(row.id);
+    // Found: the cause first, then the same instruction the generic line gives.
+    if (cause !== undefined) return { ...row, reason: `Submit outcome unknown: ${cause}. Check the posting or your inbox before choosing; never resubmit blind.` };
+    // The read failed: say so, keeping the generic line.
+    if (causeReadError !== null) return { ...row, reason: `${row.reason} (The recorded cause could not be read: ${causeReadError})` };
+    // No note for this row (e.g. swept before notes existed): the generic line stands.
+    return row;
+  });
+}
+
 /* Button text for the two manual-action queues (needs_verification, blocked_needs_human): the words
    the operator thinks in, not the status names. Exported so the page and the test share one wording. */
 export function manualActionVerb(to: ApplicationStatus): string {
@@ -240,7 +289,27 @@ export function RecoveryQueue(props: {
       // Counted on the raw answer, before validation, so a skipped row cannot hide the overflow.
       const more = (data ?? []).length > QUEUE_LIMIT;
       // The validated list, trimmed to the cap.
-      apply({ kind: 'rows', rows: rows.slice(0, QUEUE_LIMIT), more });
+      const shown = rows.slice(0, QUEUE_LIMIT);
+      // Only the unknown-outcome lane has recorded causes, and only when it has rows to explain.
+      if (status !== 'needs_verification' || shown.length === 0) return apply({ kind: 'rows', rows: shown, more });
+      // The worker's notes for exactly these rows: an IN list of their ids, never a text search.
+      const notes = await supabase
+        // The append-only log, under RLS ("read own events").
+        .from('application_events')
+        // The join key, the timestamp that picks the newest, and the payload.
+        .select('application_id, created_at, detail')
+        // Exactly the rows on screen.
+        .in('application_id', shown.map((r) => r.id))
+        // Notes only; status changes and claims carry no cause.
+        .eq('event_type', 'note')
+        // This note kind only (a JSON path filter, evaluated by PostgREST).
+        .eq('detail->>kind', 'submit_outcome_unknown')
+        // Newest first, so the cap below keeps the useful end.
+        .order('created_at', { ascending: false })
+        // A few notes per row at most; the cap only bounds a pathological log.
+        .limit(QUEUE_LIMIT * 4);
+      // A failed cause read must not hide the rows: they show, each saying the cause could not be read.
+      apply({ kind: 'rows', rows: withUnknownCauses(shown, notes.error ? new Map() : newestUnknownCauses(notes.data), notes.error ? notes.error.message || 'unknown error' : null), more });
     } catch {
       // A throwing client is a failed read, shown as one, and still only if this read is the newest.
       apply({ kind: 'error', message: 'The queue could not be read.' });

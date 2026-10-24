@@ -112,6 +112,10 @@ function fakeGateway(overrides: Partial<RunGateway> = {}) {
     releaseClaim: async () => {
       calls.push('release');
     },
+    // Recorded like every other write, so a note appearing in an unexpected test shows in `calls`.
+    appendApplicationNote: async () => {
+      calls.push('note');
+    },
     uploadScreenshot: async () => 'screens/a.png',
     uploadResume: async () => 'resumes/a.pdf',
     // `runApplierBatch` ITSELF NEVER CALLS THIS — it is required here only
@@ -800,6 +804,84 @@ describe('submit cap and circuit breaker', () => {
     expect(closed[0]).toMatchObject({ status: 'succeeded', error_count: 0 });
     // But the cause is on the row, with the board's own code.
     expect(closed[0]?.['error_detail']).toEqual(expect.stringMatching(/circuit breaker: submit outcome unknown.*code=captcha-failed/));
+  });
+
+  it('an unknown outcome appends exactly one note to THAT application, carrying the cause and the run id', async () => {
+    // THE ROW-SCOPED CAUSE (2026-10-24). The run row's error_detail names the cause, but a human checking
+    // a needs_verification row reads the ROW; a free-text join from run to row is a guess. So the loop
+    // appends one application_events note for the row itself, which the queue reads by application_id.
+    const { gateway } = capQueueGateway(ids(1));
+    // Every note appended, with the row it was appended to.
+    const notes: Array<{ id: string; detail: Record<string, unknown> }> = [];
+    // Recorded, not stubbed, so "exactly one" is an assertion.
+    gateway.appendApplicationNote = async (id, detail) => {
+      // One entry per append.
+      notes.push({ id, detail });
+    };
+    // The GitLab-shaped refusal, as submit() describes it.
+    const { openPage } = scriptedPages({
+      submit: () => ({ kind: 'unconfirmed', detail: 'no confirmation within 45000ms; responses: 422 https://boards.greenhouse.io/gitlab/jobs/1 code=captcha-failed' }),
+    });
+
+    // Live, so the submit actually happens.
+    await runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false', APPLY_MAX_SUBMITS: '10' }, clock: frozenClock });
+
+    // Exactly one note, on app-1, with the closed shape the queue validates and the run that wrote it.
+    expect(notes).toEqual([
+      { id: 'app-1', detail: { kind: 'submit_outcome_unknown', detail: expect.stringMatching(/code=captcha-failed/), run_id: 'run-1' } },
+    ]);
+  });
+
+  it('a failed note insert leaves the outcome unknown and the run going', async () => {
+    // The note is diagnosis, not state: if it cannot be written, the row must stay exactly the unknown
+    // it is (swept to needs_verification later), and the run must close as it would have.
+    const { gateway } = capQueueGateway(ids(1));
+    // Every closeRun update, to read the run row's final state.
+    const closed: Array<Record<string, unknown>> = [];
+    // Captured the same way as the error_detail test above.
+    gateway.closeRun = async (_id, update) => {
+      // The run row's update.
+      closed.push(update);
+    };
+    // The real gateway throws on a supabase {error}; this is that throw.
+    gateway.appendApplicationNote = async () => {
+      // An RLS refusal, the realistic failure.
+      throw new Error('appendApplicationNote failed: new row violates row-level security policy');
+    };
+    // Same refused submit.
+    const { openPage } = scriptedPages({
+      submit: () => ({ kind: 'unconfirmed', detail: 'responses: 422 https://boards.greenhouse.io/gitlab/jobs/1 code=captcha-failed' }),
+    });
+
+    // Must not throw.
+    const summary = await runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false', APPLY_MAX_SUBMITS: '10' }, clock: frozenClock });
+
+    // Still one unknown, never an error and never a submit.
+    expect(summary).toMatchObject({ outcomeUnknown: 1, errors: 0, submitted: 0 });
+    // The run row closes as a succeeded run with the breaker's cause, exactly as without the note.
+    expect(closed[0]).toMatchObject({ status: 'succeeded', error_count: 0 });
+    // The cause still reaches the run row.
+    expect(closed[0]?.['error_detail']).toEqual(expect.stringMatching(/submit outcome unknown.*code=captcha-failed/));
+  });
+
+  it('a confirmed submit appends no note', async () => {
+    // Non-vacuity: the note is for unknown outcomes only, not every submit.
+    const { gateway } = capQueueGateway(ids(1));
+    // Any note at all would fail this test.
+    const notes: string[] = [];
+    // Recorded.
+    gateway.appendApplicationNote = async (id) => {
+      // Should never run.
+      notes.push(id);
+    };
+    // A proven send.
+    const { openPage } = scriptedPages({ submit: () => ({ kind: 'confirmed', evidence: 'test' }) });
+
+    // Live.
+    await runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false', APPLY_MAX_SUBMITS: '10' }, clock: frozenClock });
+
+    // Nothing appended.
+    expect(notes).toEqual([]);
   });
 
   it('a clean live run leaves error_detail null', async () => {

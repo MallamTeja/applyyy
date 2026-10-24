@@ -97,6 +97,8 @@ test('a full dry-run batch fills, screenshots and submits NOTHING', async () => 
     isSystemEnabled: async () => true,
     sweepStaleClaims: async () => {},
     claimApplications: async () => queue.shift() ?? [],
+    // Required on RunGateway since the unknown-outcome note (claim-loop.ts); a dry run never produces one.
+    appendApplicationNote: async () => {},
     fetchAnswers: async () => answers,
     sessionExpiresAtEpochSeconds: () => Math.floor(Date.now() / 1000) + 3600,
     refreshSession: async () => {},

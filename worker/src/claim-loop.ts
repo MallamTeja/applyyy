@@ -47,6 +47,10 @@ export interface RunGateway extends ApplierGateway {
   isSystemEnabled(): Promise<boolean>;
   sweepStaleClaims(): Promise<void>;
   claimApplications(claimedBy: string, limit: number): Promise<ClaimedApplication[]>;
+  // Appends one 'note' to THIS application's own event log (application_events, append-only). REQUIRED,
+  // so a gateway that cannot record an unknown submit's cause on its row does not compile. Throws on a
+  // database error, like every other write here; the loop decides what a failure means.
+  appendApplicationNote(applicationId: string, detail: Record<string, unknown>): Promise<void>;
   fetchAnswers(): Promise<readonly AnswerBankRow[]>;
   // Optional so older gateways keep working; absent means no profile fills, the safe direction.
   // Declared on the loop's gateway type so the loop can fetch the profile without a cast.
@@ -412,6 +416,24 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
           else if (outcome.kind === 'submit_outcome_unknown') outcomeUnknown += 1;
           // Exhaustiveness: a new ApplyOutcome arm fails to compile here until it is counted.
           else assertNever(outcome);
+
+          // THE CAUSE GOES ON THE ROW (2026-10-24). The run row's error_detail names an unknown submit's
+          // cause, but the human checking that application reads the ROW, and a run-to-row join on free
+          // text would be a guess. So one note is appended to this application's own event log, which
+          // the System health queue reads by application_id: an exact join.
+          if (outcome.kind === 'submit_outcome_unknown') {
+            try {
+              // The closed shape the queue validates: kind, the submit's own detail, and the run that saw it.
+              await gateway.appendApplicationNote(row.id, { kind: 'submit_outcome_unknown', detail: outcome.error, run_id: run.id });
+            } catch (noteError) {
+              // A FAILED NOTE CHANGES NOTHING ELSE. The note is diagnosis, not state: the row stays the
+              // unknown it is (swept to needs_verification later), the run's tallies and status are
+              // untouched, and the cause still reaches the run row's error_detail. Logged, then on.
+              console.warn(`[claim-loop] could not record the unknown-outcome cause on ${row.id}: ${
+                noteError instanceof Error ? noteError.message : String(noteError)
+              }; the outcome stays unknown`);
+            }
+          }
 
           // TRIP THE BREAKER on the first outcome that would repeat for every row: an
           // unconfirmed or failed submit (we cannot tell whether it went out), or a captcha

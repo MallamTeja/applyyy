@@ -124,6 +124,28 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
       unwrap(await client.from('agent_runs').update(update).eq('id', runId), 'closeRun');
     },
 
+    async appendApplicationNote(applicationId, detail) {
+      // A plain INSERT: application_events is append-only (a trigger forbids update and delete), and its
+      // "append own events" policy admits agent 'applier' only with a valid x-applyy-agent-key header,
+      // which this client already sends. user_id is carried explicitly rather than left to auth.uid().
+      unwrap(
+        await client.from('application_events').insert({
+          // The app user this worker signs in as; RLS requires it to equal auth.uid().
+          user_id: config.userId,
+          // The one application the note is about: the exact key the queue joins on.
+          application_id: applicationId,
+          // An existing application_event_type value; no migration.
+          event_type: 'note',
+          // Who wrote it, so the log separates the worker's notes from a person's.
+          agent: 'applier',
+          // The structured payload.
+          detail,
+        }),
+        // Named in the thrown message, so a failure says which write failed.
+        'appendApplicationNote',
+      );
+    },
+
     async isSystemEnabled() {
       const data = unwrap(
         await client
