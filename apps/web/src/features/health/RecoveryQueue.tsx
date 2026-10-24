@@ -20,6 +20,9 @@
  *    queues are where the operator finishes a captcha-blocked submit or checks an unconfirmed one by
  *    hand. The link goes through safeHref: apply_url is UNTRUSTED board data, and a javascript: URL
  *    must never become a clickable href.
+ *  - A row the Gmail tracker matched to an "application received" email shows that receipt (2026-10-24),
+ *    because it is the evidence for "I applied": the email page lists interview mail only, so this was
+ *    the receipt's only possible screen. No match shows nothing; a malformed email row is dropped.
  */
 
 // Hooks for the read, the per-row locks, the outcome notes and the stale-read guard.
@@ -44,6 +47,14 @@ import { safeHref } from '../../app/safeHref';
 /* How many rows one queue shows. One more is fetched, so "there are more" is a fact, not a guess. */
 const QUEUE_LIMIT = 50;
 
+/* The queue's one read. email_events embeds through its only FK to applications
+   (matched_application_id), so the receipts arrive with the rows: no second round trip, and RLS
+   ("own email events") limits them to this user's mail. Exported so a test pins the embed. */
+export const RECOVERY_SELECT = 'id, updated_at, claim_expires_at, block_reason, failure_reason, jobs:job_id(title, company_name, apply_url), email_events(subject, received_at, classification)';
+
+// The start of an ISO timestamp as PostgREST writes timestamptz. Date.parse alone would read '-5' as year -5.
+const ISO_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+
 /* One stuck row, as much as the operator needs to recognise it and as the move needs to send it. */
 interface QueueRow {
   // The row's id, also the lock key.
@@ -58,6 +69,9 @@ interface QueueRow {
   readonly applyHref: string | undefined;
   // Why the row is waiting, in one sentence (queueReason).
   readonly reason: string;
+  // The newest matched "application received" email as "YYYY-MM-DD HH:MM UTC — subject", or null.
+  // UTC is fixed so the screen and the tests agree; the subject is rendered as text, so React escapes it.
+  readonly receipt: string | null;
 }
 
 /* The read's three honest states: an empty list is only ever shown after a SUCCESSFUL read. */
@@ -120,19 +134,47 @@ function queueReason(status: ApplicationStatus, blockReason: unknown, failureRea
   return `At ${status}`;
 }
 
+/* The newest valid application_received email among a row's embedded email_events, or null. Each
+   email proves its shape: a missing subject or date is dropped, never printed as "undefined". */
+function newestReceipt(emails: unknown): string | null {
+  // A to-many embed is an array; anything else (absent, null, an object) carries no receipt.
+  if (!Array.isArray(emails)) return null;
+  // The best so far, with its instant for the comparison.
+  let best: { at: number; receipt: string } | null = null;
+  // Each embedded email, proven field by field.
+  for (const raw of emails) {
+    // Loose read, then checks.
+    const e = raw as { subject?: unknown; received_at?: unknown; classification?: unknown } | null;
+    // Only the receipt kind; interview or rejection mail matched to the row is another screen's job.
+    if (e?.classification !== 'application_received') continue;
+    // A real, non-blank subject, or the sentence would have nothing to say.
+    if (typeof e.subject !== 'string' || e.subject.trim() === '') continue;
+    // The ISO shape first, then the parse: a lenient parse alone accepts '-5'.
+    if (typeof e.received_at !== 'string' || !ISO_STAMP.test(e.received_at)) continue;
+    // The instant, for "newest" and for the UTC rendering.
+    const at = Date.parse(e.received_at);
+    // An impossible date (month 13) passes the regex but not the parse.
+    if (!Number.isFinite(at)) continue;
+    // Newest wins, whatever order PostgREST returned the embed in.
+    if (best === null || at > best.at) best = { at, receipt: `${new Date(at).toISOString().slice(0, 16).replace('T', ' ')} UTC — ${e.subject.trim()}` };
+  }
+  // Just the receipt.
+  return best?.receipt ?? null;
+}
+
 /* One raw row of the queue's select, validated into a QueueRow, or null when it cannot be moved
    safely. Exported so a test parses exactly what the read parses. */
 export function parseQueueRow(status: ApplicationStatus, raw: unknown): QueueRow | null {
   // Anything but an object has no fields to read.
   if (typeof raw !== 'object' || raw === null) return null;
   // Read loosely, then each field is proven below.
-  const r = raw as { id?: unknown; updated_at?: unknown; claim_expires_at?: unknown; block_reason?: unknown; failure_reason?: unknown; jobs?: unknown };
+  const r = raw as { id?: unknown; updated_at?: unknown; claim_expires_at?: unknown; block_reason?: unknown; failure_reason?: unknown; jobs?: unknown; email_events?: unknown };
   // Both are required for a guarded move; a row missing either is skipped, not guessed.
   if (typeof r.id !== 'string' || typeof r.updated_at !== 'string') return null;
   // A lease is a string or absent; anything else counts as no lease.
   const leaseUntil = typeof r.claim_expires_at === 'string' ? r.claim_expires_at : null;
-  // Shaped for the table.
-  return { id: r.id, stamp: r.updated_at, label: rowLabel(r.id, r.jobs), leaseUntil, applyHref: rowApplyHref(r.jobs), reason: queueReason(status, r.block_reason, r.failure_reason) };
+  // Shaped for the table; a bad email only loses the receipt, never the row.
+  return { id: r.id, stamp: r.updated_at, label: rowLabel(r.id, r.jobs), leaseUntil, applyHref: rowApplyHref(r.jobs), reason: queueReason(status, r.block_reason, r.failure_reason), receipt: newestReceipt(r.email_events) };
 }
 
 /* The cause of an unknown submit, as the worker records it (claim-loop.ts, 2026-10-24): one 'note'
@@ -268,8 +310,8 @@ export function RecoveryQueue(props: {
       const { data, error } = await supabase
         // The rows themselves, under RLS (only this user's).
         .from('applications')
-        // What the table and the move need: the lease for applying, the reasons, and the apply URL.
-        .select('id, updated_at, claim_expires_at, block_reason, failure_reason, jobs:job_id(title, company_name, apply_url)')
+        // What the table and the move need: the lease, the reasons, the apply URL and any receipt.
+        .select(RECOVERY_SELECT)
         // This queue's status only.
         .eq('status', status)
         // Longest-stuck first.
@@ -483,6 +525,14 @@ export function RecoveryRowView(props: {
         {row.label}
         {/* Why it is waiting, before anything else, so the operator knows what to check. */}
         <span className="recovery__reason">{row.reason}</span>
+        {/* The tracker's evidence that the application landed, when an email matched; nothing otherwise. */}
+        {row.receipt !== null ? (
+          /* Same line style as the reason it qualifies; role=note so it reads as supporting evidence. */
+          <span className="recovery__reason" role="note">
+            {/* Date first (it answers "when"), then the subject (it answers "which email"). */}
+            Receipt received {row.receipt}
+          </span>
+        ) : null}
         {/* The posting itself, to finish or check the application by hand; safeHref already vetted it. */}
         {row.applyHref !== undefined ? (
           /* New tab so the queue stays open; noopener noreferrer so the employer page gets no handle back. */
