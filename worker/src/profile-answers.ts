@@ -102,10 +102,14 @@ const SYNONYMS: ReadonlyMap<string, ProfileField> = new Map<string, ProfileField
   ['linkedin_profile', 'linkedin'],
   ['linkedin_url', 'linkedin'],
   ['linkedin_profile_url', 'linkedin'],
+  // "LinkedIn Link", the same phrasing Greenhouse forms use for GitHub (see github_link).
+  ['linkedin_link', 'linkedin'],
   // GitHub.
   ['github', 'github'],
   ['github_profile', 'github'],
   ['github_url', 'github'],
+  // "Github Link" (Aiven's form, 2026-10-24). github_username is deliberately absent: a handle, not a URL.
+  ['github_link', 'github'],
   // Website / portfolio.
   ['website', 'website'],
   ['portfolio', 'website'],

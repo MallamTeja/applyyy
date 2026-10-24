@@ -159,3 +159,33 @@ describe('resolveProfileAnswer - name, city, location, company, phone synonyms',
     }
   });
 });
+
+// "Github Link" stayed unanswered on Aiven's kit (run 40098564239, 2026-10-24) although master v3
+// carries a GitHub link: the label normalises to github_link, which the closed table lacked.
+// Rule: an exact normalised key only, so "GitHub username" (a handle, not a URL) stays unmapped.
+describe('"<site> Link" labels', () => {
+  // The base fixture plus a LinkedIn link, so both sites can resolve.
+  const withLinkedIn = { identity: { ...profile.identity, links: [...profile.identity.links, { id: '3', label: 'LinkedIn', url: 'https://linkedin.com/in/teja' }] } } as unknown as MasterProfile;
+
+  test('"Github Link" copies the master\'s GitHub link', () => {
+    // The exact Greenhouse label from the Aiven form.
+    expect(resolveProfileAnswer(f('Github Link', undefined, 'text'), profile)).toBe('https://github.com/teja');
+  });
+
+  test('"Github Link" with no GitHub link in the master stays unanswered', () => {
+    // Same identity, minus the GitHub link.
+    const noGithub = { identity: { ...profile.identity, links: [{ id: '1', label: 'Portfolio', url: 'https://teja.dev' }] } } as unknown as MasterProfile;
+    // Nothing to copy: never the portfolio in its place.
+    expect(resolveProfileAnswer(f('Github Link', undefined, 'text'), noGithub)).toBeNull();
+  });
+
+  test('"GitHub username" is not a link field and stays unanswered', () => {
+    // A URL in a username box would be wrong, so the key is deliberately absent.
+    expect(resolveProfileAnswer(f('GitHub username', undefined, 'text'), profile)).toBeNull();
+  });
+
+  test('"LinkedIn Link" copies the master\'s LinkedIn link', () => {
+    // The same phrasing for the other link site.
+    expect(resolveProfileAnswer(f('LinkedIn Link', undefined, 'text'), withLinkedIn)).toBe('https://linkedin.com/in/teja');
+  });
+});
