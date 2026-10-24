@@ -47,6 +47,11 @@ export interface VerifiedPosting {
   readonly adapter: AtsAdapter;
   // The board's own record. The LLM's title/company never reach this.
   readonly posting: ParsedPosting;
+  // The employer the PROVIDER says this board belongs to (adapter.readReportedIdentity over
+  // the whole board payload), or null when the provider offers no identity signal. Carried
+  // as a fact, not a verdict: core has no watchlist knowledge, so the comparison happens in
+  // handler.ts once the watchlist names are loaded.
+  readonly reportedIdentity: string | null;
 }
 
 // A candidate we refused, with the reason the UI shows.
@@ -240,6 +245,9 @@ export async function discover(
       const parsed = adapter.parse(fetched.payload);
       // An unparseable body is the board's problem, not a hallucination.
       if (!parsed.ok) return fail(`board_parse_failed: ${parsed.reason}`);
+      // Read once per board: identity is a property of the board, and only the full payload
+      // carries it (a single posting's rawPayload is not what the adapter contract reads).
+      const reportedIdentity = adapter.readReportedIdentity(fetched.payload);
       // Exact-id lookup per wanted posting.
       for (const w of board.wanted) {
         // Ids compared case-insensitively because UUID case carries no meaning.
@@ -254,7 +262,7 @@ export async function discover(
         // Two URLs for one posting (e.g. the /apply variant) collapse to one verified row.
         if (verified.some((v) => v.adapter === adapter && v.posting.atsJobId === hit.atsJobId)) continue;
         // Keep the BOARD's record; the URL contributed only the id we looked up.
-        verified.push({ parsedUrl: { provider: board.provider, token: board.token, jobId: w.jobId }, adapter, posting: hit });
+        verified.push({ parsedUrl: { provider: board.provider, token: board.token, jobId: w.jobId }, adapter, posting: hit, reportedIdentity });
       }
     })
   ));

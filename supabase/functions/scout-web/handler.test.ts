@@ -15,6 +15,8 @@ interface Spy {
   persisted: unknown[][];
   runs: RunPatch[];
   searches: number;
+  // Boards the handler asked the store to mark as identity mismatches, as "provider:token".
+  mismatchMarks: string[];
 }
 
 // Build deps with overridable pieces; defaults are the happy path.
@@ -27,7 +29,7 @@ function makeDeps(opts: {
   watchlist?: { ok: true; names: ReadonlyMap<string, { companyName: string; companySlug: string }> } | { ok: false; reason: string };
 }): { deps: HandlerDeps; spy: Spy } {
   // Observations shared with the test.
-  const spy: Spy = { persisted: [], runs: [], searches: 0 };
+  const spy: Spy = { persisted: [], runs: [], searches: 0, mismatchMarks: [] };
   // The faked connection.
   const conn: Connection = {
     userId: "app-user",
@@ -60,6 +62,11 @@ function makeDeps(opts: {
       persist: (rows) => {
         spy.persisted.push([...rows]);
         return Promise.resolve(opts.persistResult ?? { inserted: rows.length, errors: [] });
+      },
+      // Record which boards were marked; null = the write landed.
+      markBoardIdentityMismatch: (provider, token) => {
+        spy.mismatchMarks.push(`${provider}:${token}`);
+        return Promise.resolve(null);
       },
     },
     // Count paid model calls so the kill-switch test can assert zero.
@@ -324,6 +331,85 @@ test("a failed watchlist read falls back to the token and is reported, not swall
   assert.equal(res.status, 200);
   assert.equal((await res.json()).jobs[0].company_name, "acme");
   assert.match(spy.runs[0]?.error_detail ?? "", /watchlist_lookup: rls denied/);
+});
+
+// ---- Board-identity guard (the 2026-10-23 'tcs'→Thornbury fail-open) ----
+
+// The same one-posting board, but its payload reports the employer it belongs to.
+function boardNamed(companyName: string) {
+  return { jobs: [{ ...GH_BOARD.jobs[0], company_name: companyName }] };
+}
+// The user tracks greenhouse:acme under this name.
+const TRACKED_ACME = new Map([["greenhouse:acme", { companyName: "Acme Inc", companySlug: "acme-inc" }]]);
+
+test("identity: a tracked board answering as a different company persists nothing and is marked", async () => {
+  const { deps, spy } = makeDeps({ watchlist: { ok: true, names: TRACKED_ACME } });
+  // The token resolves, but to a stranger's board.
+  const res = await handleScoutWeb(post("good"), { ...deps, fetchBoard: () => Promise.resolve({ ok: true as const, payload: boardNamed("Thornbury Community Services") }) });
+  const body = await res.json();
+  // Not an error answer: the run worked, it refused a wrong board.
+  assert.equal(res.status, 200);
+  // Nothing from that board reached the store.
+  assert.equal(spy.persisted.length, 0);
+  assert.equal(body.verified, 0);
+  assert.equal(body.inserted, 0);
+  // Counted in the response, the same field name scout-ats reports.
+  assert.equal(body.identity_mismatch, 1);
+  // The watchlist row is marked failing, exactly once.
+  assert.deepEqual(spy.mismatchMarks, ["greenhouse:acme"]);
+  // Refused postings stay visible with their reason.
+  assert.ok(body.rejected.some((r: { reason: string }) => r.reason === "identity_mismatch"));
+  // A refused board is board state, not a run error (mirrors scout-ats).
+  assert.equal(spy.runs[0]?.error_count, 0);
+});
+
+test("identity: a tracked board whose reported name matches is persisted as before", async () => {
+  const { deps, spy } = makeDeps({ watchlist: { ok: true, names: TRACKED_ACME } });
+  // Legal-suffix drift is still the same employer.
+  const res = await handleScoutWeb(post("good"), { ...deps, fetchBoard: () => Promise.resolve({ ok: true as const, payload: boardNamed("Acme, Inc.") }) });
+  const body = await res.json();
+  assert.equal(body.verified, 1);
+  assert.equal(spy.persisted.length, 1);
+  assert.equal(body.identity_mismatch, 0);
+  assert.deepEqual(spy.mismatchMarks, []);
+});
+
+test("identity: an untracked board has nothing to compare against and is persisted", async () => {
+  // scout-web legitimately finds boards the user does not track.
+  const { deps, spy } = makeDeps({});
+  const res = await handleScoutWeb(post("good"), { ...deps, fetchBoard: () => Promise.resolve({ ok: true as const, payload: boardNamed("Thornbury Community Services") }) });
+  const body = await res.json();
+  assert.equal(body.verified, 1);
+  assert.equal(spy.persisted.length, 1);
+  assert.equal(body.identity_mismatch, 0);
+  assert.deepEqual(spy.mismatchMarks, []);
+});
+
+test("identity: a tracked board with no identity signal is persisted, never failed", async () => {
+  // GH_BOARD carries no company_name — the same no_signal case as every lever/ashby board.
+  const { deps, spy } = makeDeps({ watchlist: { ok: true, names: TRACKED_ACME } });
+  const res = await handleScoutWeb(post("good"), deps);
+  const body = await res.json();
+  assert.equal(body.verified, 1);
+  assert.equal(spy.persisted.length, 1);
+  assert.equal(body.identity_mismatch, 0);
+  assert.deepEqual(spy.mismatchMarks, []);
+});
+
+test("discover surfaces the board's reported identity, or null when the payload has none", async () => {
+  // One run per payload; the reader is the adapter's, so this pins that core asks it.
+  for (const [payload, expected] of [[boardNamed("Acme Inc"), "Acme Inc"], [GH_BOARD, null]] as const) {
+    const result = await discover(
+      {
+        search: () => Promise.resolve({ text: "https://job-boards.greenhouse.io/acme/jobs/111", urls: [] }),
+        fetchBoard: () => Promise.resolve({ ok: true as const, payload }),
+        resolveRedirect: () => Promise.resolve({ ok: false as const, reason: "unused" }),
+      },
+      "p",
+      5,
+    );
+    assert.equal(result.verified[0]?.reportedIdentity, expected);
+  }
 });
 
 test("companyFor ignores blank, non-string and oversized board names", () => {

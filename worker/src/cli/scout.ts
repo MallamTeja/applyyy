@@ -18,6 +18,11 @@ import { loadScreenContext } from '../../../supabase/functions/_shared/screen/co
 import { supabaseScreenQueries } from '../../../supabase/functions/_shared/screen/supabase-queries.ts';
 // The dedupe + insert/refresh split that keeps one fingerprint from poisoning a batch.
 import { dedupeByFingerprint, persistJobBatch, watchlistPollUpdate, type PreparedJob } from '../scout/persist-jobs.ts';
+// The board-identity guard, shared with scout-ats: a wrong token can answer 200 with a
+// DIFFERENT company's jobs (2026-10-23 'tcs'→Thornbury), and this file is the one on cron.
+import { evaluateBoardIdentity } from '../../../supabase/functions/_shared/ats/identity.ts';
+// What to do with a verdict, kept pure in its own module because this file runs main() on import.
+import { identityGate } from '../scout/identity-gate.ts';
 import type { AtsProvider, JobInsert } from '../../../packages/shared-types/src/tables.ts';
 
 function required(name: string): string {
@@ -192,6 +197,10 @@ async function main(): Promise<void> {
 
   let totalDiscovered = 0;
   let totalApplications = 0;
+  // Boards skipped because they answered as a different company. Log-only by design: the
+  // durable record is each board's consecutive_failures, and agent_runs.error_detail is for
+  // database errors, which a mis-tokened board is not.
+  let totalIdentityMismatch = 0;
   const now = new Date();
 
   // THE SCREENER'S CONTEXT, LOADED ONCE FOR THE WHOLE RUN. The rules, the blocklist, the
@@ -269,6 +278,29 @@ async function main(): Promise<void> {
           })
           .eq('id', board.id);
         noteError(`${board.company_name}: record poll failure`, failMarkErr);
+        continue;
+      }
+
+      // IDENTITY BEFORE ANY WRITE. Checked after parse so a malformed payload is still
+      // recorded as the parse failure it really is; checked before toJobInsert so a
+      // stranger's postings never reach jobs, applications, or the screener.
+      const identity = identityGate(evaluateBoardIdentity(adapter, payload, board.company_name), board, now);
+      // A positive mismatch: nothing from this response may be persisted.
+      if (!identity.proceed) {
+        // Both spellings in the Actions log, so the token or the row can be fixed without re-polling.
+        console.warn(`[applyy-scout] ⚠️ ${board.company_name}: ${identity.warning}`);
+        // Checked like the other failure marks: an unrecorded mismatch would keep a
+        // stranger's board looking healthy forever.
+        const { error: mismatchMarkErr } = await client
+          .from('company_watchlist')
+          // The pure gate built the payload, so this branch cannot drift from its test.
+          .update(identity.watchlistUpdate)
+          .eq('id', board.id);
+        // Only a failed WRITE is a run error; the mismatch itself is board state.
+        noteError(`${board.company_name}: record identity mismatch`, mismatchMarkErr);
+        // Counted for the closing summary line.
+        totalIdentityMismatch += 1;
+        // Skip every write for this board.
         continue;
       }
 
@@ -415,6 +447,8 @@ async function main(): Promise<void> {
   console.log(`[applyy-scout] scan completed.`);
   console.log(`[applyy-scout] total jobs processed: ${totalDiscovered}`);
   console.log(`[applyy-scout] total new application rows created: ${totalApplications}`);
+  // Always printed, zero included: "0 mismatches" and "guard never ran" must not look alike.
+  console.log(`[applyy-scout] boards skipped for identity mismatch: ${totalIdentityMismatch}`);
   // THE SCREENER'S OWN COUNTERS, reported separately from the discovery counters because
   // they answer a different question. The discovery numbers say the poll worked; these
   // say the CASCADE worked. (Corrected 2026-10-23: this said "filter_rules currently

@@ -177,6 +177,35 @@ Deno.serve(withErrorBoundary("scout-web", async (req: Request): Promise<Response
           // Count of new applications plus any errors.
           return { inserted: apps?.length ?? 0, errors };
         },
+        // The identity-mismatch bump, same columns scout-ats writes for a failing board.
+        async markBoardIdentityMismatch(provider, token) {
+          // Read first: the increment needs the current count, which loadWatchlistNames does not
+          // carry. A concurrent scout-ats poll can race this read, and the cost is one lost +1 on
+          // a board that is failing anyway — the same stale-read scout-ats itself accepts.
+          const { data, error } = await db
+            .from("company_watchlist")
+            // Only the column the increment needs.
+            .select("id, consecutive_failures")
+            // Provider AND token: tokens repeat across ATSes, so one alone could hit another board.
+            .eq("ats_provider", provider)
+            // The token the handler found mismatched.
+            .eq("board_token", token)
+            // RLS confines this to the user's rows, so at most one matches.
+            .maybeSingle();
+          // A failed read is reported, never mistaken for "nothing to mark".
+          if (error) return error.message;
+          // The handler only marks boards it found tracked, so a missing row means it vanished mid-run.
+          if (!data) return "watchlist row not found";
+          // Same bookkeeping as a parse failure; `|| 0` tolerates a null count, as scout-ats does.
+          const { error: updateError } = await db
+            .from("company_watchlist")
+            // One more failure, and stamp the poll so the board rotates like any polled board.
+            .update({ consecutive_failures: (data.consecutive_failures || 0) + 1, last_polled_at: new Date().toISOString() })
+            // By primary key, now that it is known.
+            .eq("id", data.id);
+          // Null means the write landed.
+          return updateError ? updateError.message : null;
+        },
       };
       // Everything the handler needs, with search bound to the same session.
       return { ok: true, userId: client.userId, db, store, search: makeSearch(db) };

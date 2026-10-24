@@ -8,6 +8,9 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { authorizeCaller, readKillSwitch, type CallerAuthClient, type KillSwitchClient } from "../_shared/db/gates.ts";
 // The shared row builder, so fingerprints match what scout-ats would have produced.
 import { toJobInsert } from "../_shared/ats/registry.ts";
+// The guard's lenient comparator, shared with scout-ats and the CLI so all three scouts
+// agree on what "the same company" means.
+import { companyIdentityMatches } from "../_shared/ats/identity.ts";
 // Row shape from the schema owner; never redefined here.
 import type { JobInsert } from "../_shared/contracts/shared-types.ts";
 // The pure pipeline and its seam types.
@@ -68,6 +71,10 @@ export interface Store {
   ): Promise<{ ok: true; names: ReadonlyMap<string, WatchlistName> } | { ok: false; reason: string }>;
   // Upserts jobs then inserts applications at 'discovered'. Reports, never throws.
   persist(rows: readonly JobInsert[]): Promise<{ inserted: number; errors: string[] }>;
+  // Counts an identity mismatch against the tracked board's watchlist row (consecutive_failures+1,
+  // last_polled_at), the same bookkeeping scout-ats does. Null when the write landed, else the
+  // reason. Reports, never throws.
+  markBoardIdentityMismatch(provider: string, token: string): Promise<string | null>;
 }
 
 // An authenticated connection and everything bound to it.
@@ -272,13 +279,55 @@ export async function handleScoutWeb(req: Request, deps: HandlerDeps): Promise<R
     // A failed read degrades dedupe, not correctness, so it is an error entry, not an abort.
     else lookupErrors.push(`watchlist_lookup: ${looked.reason}`);
   }
+
+  // THE BOARD-IDENTITY GUARD. A tracked board's token can answer 200 with a DIFFERENT company's
+  // jobs (2026-10-23 'tcs'→Thornbury); companyFor() would then stamp the watchlist's name on a
+  // stranger's postings. Only a board that is tracked AND reports an identity can be checked:
+  //   - untracked: nothing to compare against, and companyFor() names it from the board's own
+  //     payload, so no wrong name can be attached — persisting it is safe;
+  //   - no signal (lever, ashby, a payload without company_name): the check is inapplicable,
+  //     which is not a failure (same stance as scout-ats).
+  // A failed watchlist read leaves every board "untracked", which falls into the safe case above.
+  const mismatchedBoards = new Map<string, { provider: string; token: string }>();
+  // Every posting of a board carries the same reportedIdentity, so checking each is idempotent.
+  for (const v of found.verified) {
+    // Same key the names map is built with.
+    const key = boardKey(v.parsedUrl.provider, v.parsedUrl.token);
+    // The user's row for this board, if tracked.
+    const watch = names.get(key);
+    // Untracked or no signal: the guard does not apply.
+    if (watch === undefined || v.reportedIdentity === null) continue;
+    // A positive disagreement is the only thing that blocks a board.
+    if (!companyIdentityMatches(watch.companyName, v.reportedIdentity)) {
+      // Map, so a board with several postings is marked once.
+      mismatchedBoards.set(key, { provider: v.parsedUrl.provider, token: v.parsedUrl.token });
+    }
+  }
+  // Mismatched boards contribute nothing to rows, counts or the response's job list.
+  const kept = found.verified.filter((v) => !mismatchedBoards.has(boardKey(v.parsedUrl.provider, v.parsedUrl.token)));
+  // Refused postings stay visible with their reason; the board's own URL, since the posting is real.
+  const identityRejections = found.verified
+    // Exactly the postings `kept` dropped.
+    .filter((v) => mismatchedBoards.has(boardKey(v.parsedUrl.provider, v.parsedUrl.token)))
+    // Same Rejection shape the UI already renders.
+    .map((v) => ({ url: v.posting.applyUrl, reason: "identity_mismatch" }));
+  // Count each mismatch against its watchlist row so the health page sees a failing board.
+  for (const board of mismatchedBoards.values()) {
+    // Logged with the board, so the token or the row can be corrected without re-running.
+    console.warn(`[scout-web] identity_mismatch: ${board.provider}/${board.token} reports a different company than its watchlist row; nothing persisted`);
+    // The mark itself failing is a database error, reported like the lookup's.
+    const markError = await conn.store.markBoardIdentityMismatch(board.provider, board.token);
+    // Null means the write landed.
+    if (markError !== null) lookupErrors.push(`identity_mark ${board.provider}/${board.token}: ${markError}`);
+  }
+
   // The name and slug each verified posting gets, computed once and shared by rows and response.
-  const companies = found.verified.map((v) =>
+  const companies = kept.map((v) =>
     // Watchlist row, then the board's own field, then the token. See companyFor() for why.
     companyFor(names.get(boardKey(v.parsedUrl.provider, v.parsedUrl.token)) ?? null, v.posting.rawPayload, v.parsedUrl.token)
   );
   // Build job rows from the BOARD's data only; the model's words never reach here.
-  const rows = await Promise.all(found.verified.map((v, i) =>
+  const rows = await Promise.all(kept.map((v, i) =>
     // Verified postings only: this is the single place the board's data becomes a jobs row.
     toJobInsert(v.posting, v.adapter, {
       // Watchlist name when tracked (same fingerprint as scout-ats), else the board's, else the token.
@@ -328,8 +377,8 @@ export async function handleScoutWeb(req: Request, deps: HandlerDeps): Promise<R
     errorSamples: found.errorSamples,
     // Save failures.
     persistErrors,
-    // What was available to save.
-    verified: found.verified.length,
+    // What was available to save: identity-refused postings were never available.
+    verified: kept.length,
     // What was actually saved.
     inserted,
   });
@@ -348,7 +397,7 @@ export async function handleScoutWeb(req: Request, deps: HandlerDeps): Promise<R
   });
 
   // Everything verified failed to save: that is an error answer, not an empty success.
-  if (found.verified.length > 0 && inserted === 0 && persistErrors.length > 0) {
+  if (kept.length > 0 && inserted === 0 && persistErrors.length > 0) {
     // 500: our persistence layer failed, not the caller's request.
     return json(500, { status: "error", message: "persist_failed" });
   }
@@ -359,12 +408,14 @@ export async function handleScoutWeb(req: Request, deps: HandlerDeps): Promise<R
     status: "ok",
     // Candidates examined.
     proposed: found.proposed,
-    // Candidates confirmed in a live board.
-    verified: found.verified.length,
+    // Candidates confirmed in a live board whose identity was not refused.
+    verified: kept.length,
     // Applications rows newly created (existing ones are never touched).
     inserted,
+    // Boards refused for answering as a different company; same field name scout-ats reports.
+    identity_mismatch: mismatchedBoards.size,
     // Display data comes from the board, never from the model.
-    jobs: found.verified.map((v, i) => ({
+    jobs: kept.map((v, i) => ({
       // Board's title.
       title: v.posting.title,
       // The same name the jobs row got, so the UI never shows a different employer than was stored.
@@ -377,6 +428,6 @@ export async function handleScoutWeb(req: Request, deps: HandlerDeps): Promise<R
       location_raw: v.posting.locationRaw,
     })),
     // Every refused candidate with its reason, so nothing disappears silently.
-    rejected: found.rejected,
+    rejected: [...found.rejected, ...identityRejections],
   });
 }
