@@ -335,8 +335,17 @@ export async function saveFilterRules(
  * 1. Tech & Engineering constraint (if techOnly is active)
  * 2. Active Filter Cascade rules (experience, title blocklist, location allowlist, etc.)
  */
+/* The job fields the cascade reads, and only those (2026-10-24). A full JobRow still fits, so every
+ * existing caller compiles; a narrowed row (the /discovered select, DiscoveredJob) fits too without a
+ * cast, and if a rule ever reads a new field, tsc points at every caller whose select lacks it. */
+export type CascadeJobFields = Pick<
+  JobRow,
+  // Each field below is read by one of the rules in evaluateJobMatch; add here when a rule reads more.
+  'title' | 'locations' | 'location_raw' | 'work_arrangement' | 'employment_type' | 'min_experience_years' | 'requires_advanced_degree' | 'description_raw'
+>;
+
 export function evaluateJobMatch(
-  job: JobRow,
+  job: CascadeJobFields,
   rules: readonly FilterRuleConfig[],
   techOnly: boolean = true,
 ): { passed: boolean; dropReason?: string } {

@@ -6,7 +6,7 @@
  * a plain function of its arguments, which test/discoveredLanes.test.ts asserts by value. No React,
  * no supabase import, on purpose: keep it that way or the tests lose their footing. */
 
-// Type only: the joined job row the cards render; erased at runtime, so node --test needs no loader.
+// Type only: the full jobs row, which DiscoveredJob narrows; erased at runtime, so node --test needs no loader.
 import type { JobRow } from '../../data/contract.ts';
 // The engine's two step lists; the lane mapping must point at THESE, never at a local copy. The id
 // shape check validates the keyset cursor before it is interpolated into a filter.
@@ -37,6 +37,73 @@ export const LANES: Readonly<Record<Lane, LaneSpec>> = {
 
 // Rows per fetch. The same cap the page always had; Load more fetches the next page of this size.
 export const PAGE_SIZE = 300;
+
+/* The jobs columns the /discovered page actually reads, and NOTHING else (2026-10-24).
+ * The list used to embed job:job_id(*), which shipped every column, including raw_payload (the
+ * board's raw JSON, ~37% of the bytes, rendered nowhere), ×300 rows: ~4.45 MB per page load.
+ * DiscoveredJob is DERIVED from this tuple, so a reader that needs a column the select dropped
+ * fails tsc instead of reading undefined at runtime. Add a column here, never with a cast.
+ * description_raw STAYS: the filter cascade's degree rule, the search box and the card preview
+ * all read it, and dropping it would silently change the Matched / Filtered Out split. */
+export const DISCOVERED_JOB_COLUMNS = [
+  // The card's React key and appendUnique's fallback key.
+  'id',
+  // Card heading, search, sort, tech constraint, title blocklist.
+  'title',
+  // Card, search, sort, company filter, cooldown lookup.
+  'company_name',
+  // Location pill and the cascade's location rule.
+  'location_raw',
+  // Search and the cascade's location rule.
+  'locations',
+  // Pill, arrangement filter, cascade.
+  'work_arrangement',
+  // Pill, type filter, cascade.
+  'employment_type',
+  // Preview, search, JD modal, and the cascade's degree regex.
+  'description_raw',
+  // The card's and the modal's "open posting" link.
+  'apply_url',
+  // The provider filter.
+  'ats_provider',
+  // SourceBadge.
+  'discovered_via',
+  // SourceBadge.
+  'source_refs',
+  // The posted-date pill and the "posted" sort.
+  'posted_at',
+  // How much the posted-date pill may believe posted_at.
+  'posted_at_source',
+  // The cascade's experience rule.
+  'min_experience_years',
+  // The cascade's degree rule.
+  'requires_advanced_degree',
+  // The salary pill.
+  'salary_min',
+  // The salary pill.
+  'salary_max',
+  // The salary pill.
+  'salary_currency',
+] as const;
+
+// A jobs row as this page receives it: exactly the selected columns, so tsc guards the select.
+export type DiscoveredJob = Pick<JobRow, (typeof DISCOVERED_JOB_COLUMNS)[number]>;
+
+// One row of the list query. Named for supabase-js's select generic, because a select built at
+// runtime is a plain string, which the library's type-level parser cannot read.
+export interface DiscoveredListRow {
+  // The application's id.
+  readonly id: string;
+  // The application's status (the lane's).
+  readonly status: string;
+  // The application's created_at: the sort key and keyset cursor.
+  readonly created_at: string;
+  // The embedded job, or null when the job row is missing; the page skips those.
+  readonly job: DiscoveredJob | null;
+}
+
+// The list query's PostgREST select, built from the tuple so the two cannot drift apart.
+export const DISCOVERED_LIST_SELECT = `id, status, created_at, job:job_id(${DISCOVERED_JOB_COLUMNS.join(', ')})`;
 
 // How a load relates to what is on screen: replace (full), re-read the window (silent), or append (more).
 export type LoadMode = 'full' | 'silent' | 'more';
@@ -93,7 +160,7 @@ interface ListItem {
   // The application row's id; the page's key for a card.
   readonly applicationId?: string;
   // The joined job; only title, company_name, posted_at and posted_at_source are read here.
-  readonly job: JobRow;
+  readonly job: DiscoveredJob;
 }
 
 // Appends a fetched page, dropping rows already loaded. Offset paging shifts when new rows land on
@@ -125,7 +192,7 @@ const ISO_DATE = /^(\d{4}-\d{2}-\d{2})T/;
 
 // posted_at as epoch ms, or null when it is not the ISO shape. Shape first, because Date.parse("-5")
 // is year -5 and would sort as a real (very old) date.
-function postedMs(job: JobRow): number | null {
+function postedMs(job: DiscoveredJob): number | null {
   // A non-string or non-ISO value is not a date.
   if (typeof job.posted_at !== 'string' || !ISO_DATE.test(job.posted_at)) return null;
   // Shape is right; parse it.
@@ -202,7 +269,7 @@ export function postedAgo(iso: string, nowMs: number): string | null {
 
 // The card's posted-date pill: its text, its tooltip, and whether it is an estimate.
 // `nowMs` is injectable for tests; callers in the page pass nothing and get the real clock.
-export function postedDate(job: JobRow, nowMs: number = Date.now()): { readonly text: string; readonly title: string; readonly approximate: boolean } {
+export function postedDate(job: DiscoveredJob, nowMs: number = Date.now()): { readonly text: string; readonly title: string; readonly approximate: boolean } {
   // The date part of the ISO string; no timezone shift, the server's UTC day is the honest one.
   const day = typeof job.posted_at === 'string' ? ISO_DATE.exec(job.posted_at)?.[1] : undefined;
   // Malformed: say so instead of rendering a parsed guess.

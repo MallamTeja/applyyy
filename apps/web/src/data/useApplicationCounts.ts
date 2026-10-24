@@ -35,13 +35,10 @@ import { supabase, supabaseStatus } from './supabase.ts';
 import { classifyRead } from './readState.ts';
 import type { ReadState } from './readState.ts';
 import type { ApplicationStatus } from './contract';
-
-/* One row of the count query. Only the status column is selected - the narrowest
- * projection that answers the question, so no personal field is ever fetched
- * into the browser to be counted and discarded. */
-interface StatusRow {
-  readonly status: ApplicationStatus;
-}
+// The RPC's shape check, kept in its own module so node --test can reach it without the client.
+import { parseStatusCountRows } from './statusCounts.ts';
+// One validated row of the RPC: a status and its server-side count.
+import type { StatusCountRow } from './statusCounts.ts';
 
 /* Counts keyed by status. Partial because a status with no rows is ABSENT
  * rather than zero - the distinction the whole read layer is built on. A caller
@@ -51,7 +48,7 @@ export type StatusCounts = Readonly<Partial<Record<ApplicationStatus, number>>>;
 export interface ApplicationCounts {
   /* The classified read. A caller cannot reach counts without handling every
      not-an-answer case first. */
-  readonly state: ReadState<StatusRow>;
+  readonly state: ReadState<StatusCountRow>;
   /* Tallied per status, and only meaningful when `state.kind` is 'rows'. Empty
      otherwise - never a map of zeroes, which would be a fabricated answer. */
   readonly counts: StatusCounts;
@@ -68,7 +65,7 @@ export function useApplicationCounts(): ApplicationCounts {
      the classification is never stale relative to the facts. */
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [rows, setRows] = useState<readonly StatusRow[] | null>(null);
+  const [rows, setRows] = useState<readonly StatusCountRow[] | null>(null);
   const [signedIn, setSignedIn] = useState(false);
 
   useEffect(() => {
@@ -104,13 +101,14 @@ export function useApplicationCounts(): ApplicationCounts {
           return;
         }
 
-        /* The narrowest projection that answers the question. Counting client
-           side rather than with one aggregate per status keeps this to a single
-           request - eighteen statuses would otherwise be eighteen round trips
-           on a free tier. */
-        const { data, error: queryError } = await supabase
-          .from('applications')
-          .select('status');
+        /* ONE AGGREGATE ON THE SERVER, one row per status (2026-10-24). This used to
+           fetch `select=status` for every row and tally here, but hosted PostgREST
+           cuts every response at max_rows = 1000 WITHOUT an error, so at 21,560 rows
+           the page counted 1,000 of them: silently wrong. The GROUP BY returns at most
+           ~20 rows, which no cap can truncate, in one round trip. Defined in
+           supabase/migrations/20261024113000_dashboard_read_paths.sql (SECURITY
+           INVOKER, so RLS still scopes it to this user). */
+        const { data, error: queryError } = await supabase.rpc('application_status_counts');
 
         if (!live) return;
 
@@ -123,12 +121,21 @@ export function useApplicationCounts(): ApplicationCounts {
           return;
         }
 
-        /* `data` is typed as possibly-null by the client. Null here would mean
-           no error and no data, which should not happen - but treating it as an
-           empty array would manufacture a positive "there are none" answer out
-           of a state we do not understand. So it stays null and classifies as
-           still-loading rather than as empty. */
-        setRows(data as readonly StatusRow[] | null);
+        /* The exact shape or a failed read: a malformed answer must never become a
+           smaller count. Null data with no error is not this RPC's answer either,
+           so it fails the same check instead of reading as "no applications". */
+        const parsed = parseStatusCountRows(data);
+        // A shape failure is reported like any failed read, with the reason.
+        if (!parsed.ok) {
+          // The banner text names which row broke the contract.
+          setError(parsed.reason);
+          // The read is over; it failed.
+          setLoading(false);
+          // Nothing to tally.
+          return;
+        }
+        // Validated rows; an empty list is a real "no applications" and classifies as empty.
+        setRows(parsed.rows);
         setLoading(false);
       } catch (thrown) {
         if (!live) return;
@@ -147,7 +154,7 @@ export function useApplicationCounts(): ApplicationCounts {
 
   /* Classified on every render from the current facts, by the pure function
      that has a test for each branch. */
-  const state = classifyRead<StatusRow>({
+  const state = classifyRead<StatusCountRow>({
     clientPresent: supabase !== null,
     missingEnv: supabaseStatus.connected ? [] : supabaseStatus.missing,
     signedIn,
@@ -163,9 +170,10 @@ export function useApplicationCounts(): ApplicationCounts {
   const counts: Record<string, number> = {};
   if (state.kind === 'rows') {
     for (const row of state.rows) {
-      /* `?? 0` is safe on the ACCUMULATOR - it is counting, not reporting an
-         absence. The absence stays expressed by the key being missing. */
-      counts[row.status] = (counts[row.status] ?? 0) + 1;
+      /* The server already counted; each status arrives once (parseStatusCountRows
+         refuses a repeat), so this is an assignment, never a sum. A status with no
+         rows is absent from the GROUP BY, so its key stays missing, not zero. */
+      counts[row.status] = row.row_count;
     }
   }
 

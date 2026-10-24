@@ -37,7 +37,7 @@ import { Link } from 'react-router-dom';
 
 import { PageHeader } from '../../app/PageHeader';
 import { SourceBadge } from '../../app/SourceBadge';
-import type { DiscoverySource, JobRow } from '../../data/contract.ts';
+import type { DiscoverySource } from '../../data/contract.ts';
 import { supabase } from '../../data/supabase.ts';
 import { DiscoveryModal } from '../pipeline/DiscoveryModal';
 import { PipelineRunModal } from './PipelineRunModal';
@@ -64,7 +64,9 @@ import type { PipelineStep } from '../pipeline/rowPipeline.ts';
 // The real invoke/read deps, or null on an unconfigured machine (the button then explains itself).
 import { liveRowPipelineDeps } from '../pipeline/rowPipelineDeps.ts';
 // The tested list logic: lanes, paging, sort, the date marker and the honest counter text.
-import { LANES, SORT_OPTIONS, appendUnique, hasMoreRows, isCurrentLane, keysetFilter, loadedOfText, pageLimit, postedDate, sortItems } from './discoveredList.ts';
+import { DISCOVERED_LIST_SELECT, LANES, SORT_OPTIONS, appendUnique, hasMoreRows, isCurrentLane, keysetFilter, loadedOfText, pageLimit, postedDate, sortItems } from './discoveredList.ts';
+// Type only: the job row as the narrowed select delivers it, derived from DISCOVERED_JOB_COLUMNS.
+import type { DiscoveredJob, DiscoveredListRow } from './discoveredList.ts';
 // Types for the lane switch, the load modes and the sort select.
 import type { Lane, LoadMode, SortKey } from './discoveredList.ts';
 
@@ -74,7 +76,7 @@ import './DiscoveredJobsPage.css';
    treats company_name as optional (getCompanyCooldownInfo, the search filter), and a template string
    would print a missing one as "undefined — Engineer". Only the parts that are real, non-blank text;
    neither part -> a stated placeholder, never an empty name. */
-function jobLabel(job: JobRow): string {
+function jobLabel(job: DiscoveredJob): string {
   // Each part kept only when it is a string with visible characters.
   const parts = [job.company_name, job.title].filter((p): p is string => typeof p === 'string' && p.trim() !== '');
   // The joined name, or a placeholder that says the data was missing.
@@ -85,7 +87,7 @@ interface DiscoveredItem {
   readonly applicationId?: string;
   // The application's created_at: the list's sort key, and Load more's keyset cursor.
   readonly createdAt: string;
-  readonly job: JobRow;
+  readonly job: DiscoveredJob;
 }
 
 interface EvaluatedDiscoveredItem extends DiscoveredItem {
@@ -132,7 +134,7 @@ export function DiscoveredJobsPage(): ReactElement {
   const [selectedArrangement, setSelectedArrangement] = useState<string>('all');
   const [selectedType, setSelectedType] = useState<string>('all');
   const [selectedCompany, setSelectedCompany] = useState<string>('all');
-  const [activeJdModal, setActiveJdModal] = useState<JobRow | null>(null);
+  const [activeJdModal, setActiveJdModal] = useState<DiscoveredJob | null>(null);
   const [discoveryModalMode, setDiscoveryModalMode] = useState<'remote' | 'watchlist' | null>(null);
   const [pipelineModalOpen, setPipelineModalOpen] = useState<boolean>(false);
 
@@ -203,15 +205,6 @@ export function DiscoveredJobsPage(): ReactElement {
         return;
       }
 
-      // Load filter rules
-      const rules = await loadFilterRules();
-      // A newer load owns the page now.
-      if (stale()) return;
-      setFilterRules(rules);
-      // A failed rules read returns NO rules, so every job would read as "matched".
-      // Say so instead of presenting an unfiltered list as a filtered one.
-      const rulesError = getFilterRulesReadError();
-
       if (supabase === null) {
         // No backend: state it rather than render an empty explorer as "no jobs".
         setLoadError('Supabase is not configured, so no discovered jobs can be loaded.');
@@ -221,14 +214,18 @@ export function DiscoveredJobsPage(): ReactElement {
       // The list read, built in two steps so Load more can add its cursor.
       let query = supabase
         .from('applications')
-        // The job is joined because the cards render job fields; created_at is the keyset cursor.
-        .select('id, status, created_at, job:job_id(*)')
+        // Only the job columns the page reads (DISCOVERED_JOB_COLUMNS); created_at is the keyset cursor.
+        .select<string, DiscoveredListRow>(DISCOVERED_LIST_SELECT)
         // The selected lane's inventory, and only that.
         .eq('status', laneSpec.status);
       // Load more: only rows after the last loaded one, so rows that left the lane cannot shift a page.
       if (cursor !== null) query = query.or(cursor);
-      // Both reads in parallel: the paged list and the exact total are independent.
-      const [listResult, countResult] = await Promise.all([
+      // All three reads in parallel (2026-10-24): the rules were awaited alone first, adding a full
+      // browser round trip (~250 ms measured) before the list even started, though the cascade only
+      // needs them at render time, after the list arrives anyway.
+      const [rules, listResult, countResult] = await Promise.all([
+        // The filter cascade's rules; evaluated in the browser over the loaded rows.
+        loadFilterRules(),
         query
           // Newest found first, so unloaded pages are the oldest.
           .order('created_at', { ascending: false })
@@ -245,6 +242,11 @@ export function DiscoveredJobsPage(): ReactElement {
       ]);
       // The out-of-order case this guard exists for: drop a response a newer load superseded.
       if (stale()) return;
+      // Stored only now, with the list, so a superseded load cannot install its rules over a newer one.
+      setFilterRules(rules);
+      // A failed rules read returns NO rules, so every job would read as "matched".
+      // Say so instead of presenting an unfiltered list as a filtered one.
+      const rulesError = getFilterRulesReadError();
 
       // A failed read is an error state. The old code fell back to EVERY jobs row
       // regardless of status (and on a second failure, returned silently), so an
@@ -268,8 +270,8 @@ export function DiscoveredJobsPage(): ReactElement {
             applicationId: app.id,
             // The row's own sort key, kept for the next page's cursor.
             createdAt: app.created_at,
-            // The joined job row.
-            job: app.job as unknown as JobRow,
+            // The joined job row, typed as DISCOVERED_LIST_SELECT's columns by the select generic.
+            job: app.job,
           });
         }
       }

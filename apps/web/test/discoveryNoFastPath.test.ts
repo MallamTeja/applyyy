@@ -138,10 +138,11 @@ describe('what the page must still do', () => {
     assert.deepEqual(writes, [], 'status changes belong to the deployed agents, never to this page');
   });
 
-  it('still selects id and status with the joined job', async () => {
-    // The card needs the real application id for the button; status stays per the orchestrator rule.
-    // created_at joins them because it is the keyset cursor for Load more.
-    assert.ok(source.includes(".select('id, status, created_at, job:job_id(*)')"), 'the discovered query must keep id, status and the job join');
+  it('selects through the shared narrowed select, typed by its row', async () => {
+    // The select's VALUE (id, status, created_at and the named job columns) is pinned in
+    // discoveredLanes.test.ts; here the page must use that constant rather than an inline string,
+    // and must type the rows with DiscoveredListRow rather than casting them.
+    assert.ok(source.includes('.select<string, DiscoveredListRow>(DISCOVERED_LIST_SELECT)'), 'the discovered query must use DISCOVERED_LIST_SELECT with its row type');
   });
 });
 
