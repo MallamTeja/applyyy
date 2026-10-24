@@ -84,9 +84,10 @@ export function SearchPreferencesPage(): ReactElement {
   const [keywords, setKeywords] = useState<string>('Node.js, React, TypeScript, Python, REST APIs');
   const [excludedKeywords, setExcludedKeywords] = useState<string>('Senior, Lead, Principal, 5+ years');
   const [locations, setLocations] = useState<string>('Hyderabad, Bangalore, Pune, Remote');
-  // US work authorisation (search_preferences.us_work_authorized). Starts null, not false:
-  // null is "never answered", and the screener only drops US-auth jobs on an explicit No.
-  const [usWorkAuthorized, setUsWorkAuthorized] = useState<boolean | null>(null);
+  // Countries Teja may work in without a visa (search_preferences.work_authorized_countries),
+  // as the comma list the box shows. Starts empty, which saves as null = never set: the
+  // screener then drops nothing, so an unread row can never become "authorised nowhere".
+  const [workAuthCountries, setWorkAuthCountries] = useState<string>('');
 
   // Multi-select Employment Types
   const [selectedEmploymentTypes, setSelectedEmploymentTypes] = useState<Set<EmploymentType>>(
@@ -191,8 +192,8 @@ export function SearchPreferencesPage(): ReactElement {
           setExcludedKeywords(data.excluded_keywords.join(', '));
         }
         if (Array.isArray(data.locations) && data.locations.length > 0) setLocations(data.locations.join(', '));
-        // Only a real boolean is an answer; anything else stays "not answered".
-        if (typeof data.us_work_authorized === 'boolean') setUsWorkAuthorized(data.us_work_authorized);
+        // Only a real list is an answer; anything else leaves the box empty (never set).
+        if (Array.isArray(data.work_authorized_countries)) setWorkAuthCountries(data.work_authorized_countries.join(', '));
 
         if (Array.isArray(data.employment_types) && data.employment_types.length > 0) {
           setSelectedEmploymentTypes(new Set(data.employment_types as EmploymentType[]));
@@ -325,8 +326,8 @@ export function SearchPreferencesPage(): ReactElement {
       min_salary: minSalary.trim() ? Number(minSalary) : null,
       max_salary: maxSalary.trim() ? Number(maxSalary) : null,
       salary_currency: currency,
-      // Written as-is, null included, so an unanswered setting is never saved as a "No".
-      us_work_authorized: usWorkAuthorized,
+      // An empty box saves null (never set, gate open), never an empty list meaning "nowhere".
+      work_authorized_countries: parseList(workAuthCountries).length > 0 ? parseList(workAuthCountries) : null,
     };
 
     if (supabase === null) {
@@ -571,48 +572,29 @@ export function SearchPreferencesPage(): ReactElement {
               />
             </label>
 
-            {/* US work authorisation. The screener drops postings that NEED it only on an explicit No. */}
-            <div className="field field--wide">
-              {/* Named by id so the button group below can point at it. */}
-              <span className="field__label" id="us-work-auth-label">
-                Authorized to work in the US (citizen, green card, or a work visa)
-              </span>
-              {/* Says what each answer does, so the toggle is not a mystery switch. */}
+            {/* Work authorisation. The screener drops on-site/hybrid jobs located only outside these countries. */}
+            <label className="field field--wide">
+              {/* Teja's wording for the setting. */}
+              <span className="field__label">Countries I can work in without a visa</span>
+              {/* Says what the list does and what an empty box means, so it is not a mystery filter. */}
               <span className="field__help">
-                No: jobs that require US work authorization are dropped before matching. Not answered: nothing is dropped.
+                Comma-separated English country names, e.g. India, Nepal, Bhutan. On-site and hybrid jobs located only
+                outside these countries are dropped before matching; remote jobs are kept. Leave empty to drop nothing.
               </span>
-              {/* A group, so a screen reader announces the question with the two answers. */}
-              <div role="group" aria-labelledby="us-work-auth-label" style={{ display: 'flex', gap: '8px' }}>
-                {/* Yes: sets the draft only; nothing is written until Save. */}
-                <button
-                  /* Not a submit: the page's form submit is the Save path, and this is only a draft. */
-                  type="button"
-                  /* Same yes/no styling as the Answer Bank's boolean answers. */
-                  className={`answer-bank__bool-btn ${usWorkAuthorized === true ? 'answer-bank__bool-btn--active-yes' : ''}`}
-                  /* Pressed state for screen readers, since colour alone shows the choice. */
-                  aria-pressed={usWorkAuthorized === true}
-                  /* Draft only. */
-                  onClick={() => setUsWorkAuthorized(true)}
-                >
-                  {/* Plain word. */}
-                  Yes
-                </button>
-                {/* No: the screener then drops jobs that need US work authorization. */}
-                <button
-                  /* Not a submit, same as Yes. */
-                  type="button"
-                  /* Same yes/no styling as the Answer Bank's boolean answers. */
-                  className={`answer-bank__bool-btn ${usWorkAuthorized === false ? 'answer-bank__bool-btn--active-no' : ''}`}
-                  /* Pressed state for screen readers. */
-                  aria-pressed={usWorkAuthorized === false}
-                  /* Draft only. */
-                  onClick={() => setUsWorkAuthorized(false)}
-                >
-                  {/* Plain word. */}
-                  No
-                </button>
-              </div>
-            </div>
+              {/* Same comma-list control as the locations box above. */}
+              <input
+                /* Plain text: the list is short and edited rarely. */
+                type="text"
+                /* Same control styling as the other text fields. */
+                className="field__control"
+                /* The draft; nothing is written until Save. */
+                value={workAuthCountries}
+                /* Draft only. */
+                onChange={(e) => setWorkAuthCountries(e.target.value)}
+                /* The default list, shown as a hint. */
+                placeholder="India, Nepal, Bhutan"
+              />
+            </label>
           </div>
         </section>
 

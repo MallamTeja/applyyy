@@ -1,21 +1,27 @@
-// Tests for stage 0b — the US work-authorisation gate.
+// Tests for stage 0b — the work-authorisation gate.
 //
-// THE RULING THIS ENCODES (Teja, 2026-10-24 18:44 IST): "drop everything which need this us
-// auth and set this option in system like yes or no". Teja is in India with no US work
-// authorisation, so a posting that NEEDS it can only park on "are you authorized to work in
-// the US?" later. The gate drops it at the screener instead.
+// THE RULINGS THIS ENCODES (Teja, 2026-10-24):
+//   18:44 IST: "drop everything which need this us auth and set this option in system".
+//   19:13 IST, refining it: "i am ok with us jobs where i can work remotly, the jobs which needs
+//   visa and all, like i need to do on side or hybrid with us based in us office is not ok" and
+//   allowed = "indian + remote + india visa free countrys".
+// So: remote anywhere is KEPT; on-site / hybrid / unstated-arrangement jobs located only in
+// countries outside search_preferences.work_authorized_countries are DROPPED; a JD that
+// requires US citizenship / ITAR / clearance is DROPPED even when remote. "Visa-free" means
+// visa-free WORK, which for an Indian citizen is Nepal and Bhutan (treaty), hence the default.
 //
-// THE PROPERTY THESE TESTS PIN, in both directions (CLAUDE.md section 6):
-//   - a positive US signal drops (location provably US-only, or US-specific requirement text);
-//   - missing data never drops: an unanswered setting, an empty or placeless location with no
-//     text signal, and a location that ALSO names a non-US place all keep the job.
-// The phrase and location lists were measured on the live passed_filters rows (2535 jobs,
-// 2026-10-24) before this file was written; each false-positive case below is a real one.
+// THE PROPERTY PINNED IN BOTH DIRECTIONS (CLAUDE.md section 6): only a positive signal drops.
+// An unset list, an unknown place, a missing location and a remote part all keep the job.
+// Every location below is a real string from the 2535 live passed_filters rows (2026-10-24),
+// except the Nepal ones, which pin the default list.
 import { test } from "node:test";
 // Strict, so `drop: false` never quietly compares equal to undefined.
 import assert from "node:assert/strict";
 // Extension-suffixed specifier so this runs under Deno and `node --test` alike.
-import { screenUsWorkAuth } from "./work-auth-gate.ts";
+import { screenWorkAuth } from "./work-auth-gate.ts";
+
+// Teja's list as the migration seeds it.
+const TEJA = ["India", "Nepal", "Bhutan"] as const;
 
 // A job with neutral text, so each test changes only the one field it is about.
 const job = (locationRaw: string | null, description: string | null = "We build developer tools.") => ({
@@ -27,95 +33,115 @@ const job = (locationRaw: string | null, description: string | null = "We build 
   description,
 });
 
-// --- the setting -------------------------------------------------------------------
+// --- the setting ---------------------------------------------------------------------
 
-// Authorised users lose nothing, even on the most US-only posting there is.
-test("authorised (true): a US-only posting passes with no warning", () => {
-  // Plain pass: nothing to drop and nothing to report.
-  assert.deepEqual(screenUsWorkAuth(job("San Francisco, CA", "Must be a U.S. citizen."), true), { drop: false });
-});
-
-// Never answered is NOT "No": the gate opens and says so (section 6).
-test("unanswered (null): a US-only posting passes, and the gate warns that it is open", () => {
+// Never answered is NOT "nowhere": the gate opens and says so (section 6).
+test("unset list (null): an on-site US posting passes, and the gate warns that it is open", () => {
   // The verdict for an unanswered setting.
-  const verdict = screenUsWorkAuth(job("New York, NY"), null);
+  const verdict = screenWorkAuth(job("New York, NY"), null);
   // Not dropped.
   assert.equal(verdict.drop, false);
   // And the open gate is visible on the health page.
-  assert.match("warning" in verdict ? verdict.warning : "", /us_work_authorized/);
+  assert.match("warning" in verdict ? verdict.warning : "", /work_authorized_countries/);
 });
 
-// --- location: the main signal (1462 of 2535 live rows were US-only) ------------------
+// A user authorised in the US loses nothing there, US-requirement text included.
+test("a list containing the US keeps US on-site jobs and US-citizenship text", () => {
+  // "USA" resolves through the same place table the jobs do.
+  assert.equal(screenWorkAuth(job("San Francisco, CA", "Must be a U.S. citizen."), ["USA"]).drop, false);
+});
 
-// The common live shapes, each of which must drop for a user who said No.
+// An entry the place table cannot resolve is reported, so a typo is not silently ignored.
+test("an unrecognised country entry warns", () => {
+  // "Indai" is a typo; India still resolves, so the gate runs and warns about the rest.
+  const verdict = screenWorkAuth(job("Bengaluru"), ["India", "Indai"]);
+  // Kept (Bengaluru is India).
+  assert.equal(verdict.drop, false);
+  // The typo is named.
+  assert.match("warning" in verdict ? verdict.warning : "", /Indai/);
+});
+
+// --- location: dropped (every part is a named place outside the list, none remote) -----
+
+// The shapes that must drop for Teja.
 for (const location of [
-  // Bare city: 327 live rows read exactly this.
-  "San Francisco",
-  // City + state code.
-  "New York, NY",
-  // City + state + country.
-  "San Mateo, CA, United States",
-  // US-remote is still US-only: the employer needs US work authorisation for it.
-  "Remote - United States",
-  // Short form.
-  "Remote - US",
-  // Country alone.
-  "United States",
-  // Several US offices, all of them in the US.
-  "Seattle, WA; Austin, TX",
-  // The capital, with its dotted abbreviation.
-  "Washington, D.C.",
+  // Hybrid in a US office: the exact case Teja named.
+  "Hybrid - New York, NY",
+  // A named US city with no arrangement stated (327 live rows read exactly "San Francisco").
+  "San Francisco, CA",
+  // Aiven: on-site in Finland, outside the visa-free set.
+  "Helsinki, Uusimaa, Finland",
+  // Several cities, none authorised; "Tor" (Toronto) is not even needed to decide.
+  "NYC, Sea, SF, Tor",
+  // Several offices across countries, none authorised.
+  "Amsterdam; Chicago; London; New York",
+  // US + Canada, both outside the list.
+  "United States & Canada",
+  // A US city spelled with Ireland's capital (Dublin, CA): both readings are outside the list.
+  "US-CA-Dublin",
 ]) {
   // One named test per shape, so a failure says which one regressed.
-  test(`not authorised: US-only location "${location}" drops with code us_work_auth`, () => {
+  test(`Teja: "${location}" drops with code work_auth`, () => {
     // The verdict.
-    const verdict = screenUsWorkAuth(job(location), false);
+    const verdict = screenWorkAuth(job(location), TEJA);
     // Dropped under the gate's own code.
-    assert.equal(verdict.drop && verdict.code, "us_work_auth");
+    assert.equal(verdict.drop && verdict.code, "work_auth");
   });
 }
 
-// Locations the user CAN work in, or that do not tie the job to the US, keep it.
+// --- location: kept ---------------------------------------------------------------------
+
+// The shapes that must keep for Teja.
 for (const location of [
-  // India.
-  "Bengaluru, India",
-  // Hyderabad.
-  "Hyderabad",
-  // Europe.
-  "London, United Kingdom",
-  // Worldwide remote.
-  "Remote, Global",
-  // Placeless remote: no country named, so no location signal.
-  "Remote",
-  // Placeless arrangement.
-  "Hybrid",
-  // US offices MIXED with a non-US one: the India office does not need US authorisation.
+  // Remote in the US: Teja accepts US remote work.
+  "Remote, USA",
+  // Same, other spelling.
+  "Remote - United States",
+  // Remote in a region.
+  "Remote (EMEA)",
+  // India, by city alone.
+  "Bengaluru",
+  // India, hybrid.
+  "Hybrid in Bangalore, India",
+  // Nepal: visa-free work by treaty.
+  "Kathmandu, Nepal",
+  // Mixed: a remote alternative exists.
+  "SF or Remote (US/Canada)",
+  // Mixed, remote stated alongside named offices in one part.
+  "NYC, Toronto, Remote",
+  // Mixed: an India office is one of the options.
   "New York, NY; Bengaluru, India",
-  // Mixed with a place the gate does not know: an unknown part is not proven US, so keep.
-  "San Francisco; Bucharest",
-  // US or Canada: Canada is a non-US option, so the job does not NEED US authorisation.
-  "Remote (United States | Canada)",
-  // Toronto written with ", CA": the Canada city makes it non-US despite the state-like code.
-  "Toronto, CA",
+  // Unknown place: not provably outside the list (section 6).
+  "Cambridge",
+  // A region, not a country.
+  "North America",
+  // Arrangement only, no place at all.
+  "Hybrid",
+  // Missing.
+  "",
 ]) {
   // One named test per shape.
-  test(`not authorised: "${location}" with neutral text is kept`, () => {
+  test(`Teja: "${location}" with neutral text is kept`, () => {
     // Kept, with no drop code.
-    assert.equal(screenUsWorkAuth(job(location), false).drop, false);
+    assert.equal(screenWorkAuth(job(location), TEJA).drop, false);
   });
 }
 
-// --- text: the secondary signal, used ONLY when the location names no place ----------
+// A null location is missing data, never a drop.
+test("Teja: null location and null description are kept", () => {
+  // Nothing to judge by.
+  assert.equal(screenWorkAuth(job(null, null), TEJA).drop, false);
+});
 
-// US-specific requirement phrases from the live sample, on a placeless location.
+// --- text: a JD that legally needs US status drops, even when remote ---------------------
+
+// US-specific requirement phrases from the live sample.
 for (const text of [
   // The commonest wording.
   "You must be authorized to work in the United States.",
-  // Abbreviated country.
-  "Candidates must be legally authorized to work in the U.S. without sponsorship.",
   // Citizenship.
   "U.S. citizenship is required for this role.",
-  // ITAR US-person rule (muon-space, xai).
+  // ITAR US-person rule (muon-space, xai; the live "Legal Intern" row).
   "This role requires access to export controlled information; applicant must be a U.S. person.",
   // ITAR named.
   "Subject to ITAR.",
@@ -125,42 +151,19 @@ for (const text of [
   "Eligibility for a security clearance is required.",
 ]) {
   // Named by the phrase.
-  test(`not authorised: placeless "Remote" + "${text.slice(0, 40)}…" drops`, () => {
-    // The verdict.
-    const verdict = screenUsWorkAuth(job("Remote", text), false);
+  test(`Teja: "Remote" + "${text.slice(0, 40)}…" drops`, () => {
+    // The verdict on a remote job that still needs US status.
+    const verdict = screenWorkAuth(job("Remote", text), TEJA);
     // Dropped under the gate's code.
-    assert.equal(verdict.drop && verdict.code, "us_work_auth");
+    assert.equal(verdict.drop && verdict.code, "work_auth");
   });
 }
 
-// UNKNOWN location + no text signal = KEEP. The section-6 case the orchestrator named.
-test("not authorised: empty location and no text signal is kept (missing data never drops)", () => {
-  // Null location, neutral text.
-  assert.equal(screenUsWorkAuth(job(null), false).drop, false);
-  // Null location AND null description: still nothing to judge by.
-  assert.equal(screenUsWorkAuth(job("", null), false).drop, false);
+// Text never overrides an authorised location: the footer is boilerplate there.
+test("Teja: India location + US requirement text is kept (location outranks text)", () => {
+  // Roblox copies US wording onto its Gurugram jobs.
+  assert.equal(screenWorkAuth(job("Gurugram, India", "Must be authorized to work in the United States."), TEJA).drop, false);
 });
-
-// An UNRECOGNISED place is still a place: its footer text never drops it (live: "Zug",
-// "PL-Warsaw-Lixa C", "Ho Chi Minh City" are not in the gate's lists).
-for (const location of ["Zug", "PL-Warsaw-Lixa C", "Remote, East Coast"]) {
-  // One named test per shape.
-  test(`not authorised: unrecognised place "${location}" + US text is kept`, () => {
-    // US-citizenship text that WOULD drop a placeless "Remote" job.
-    assert.equal(screenUsWorkAuth(job(location, "U.S. citizenship is required."), false).drop, false);
-  });
-}
-
-// Arrangement-only locations count as placeless, so the text decides.
-for (const location of ["Hybrid", "N/A", "Remote - Multiple Locations", "In-Office"]) {
-  // One named test per shape.
-  test(`not authorised: arrangement-only "${location}" + US text drops`, () => {
-    // The text is the only signal, and it is US-specific.
-    const verdict = screenUsWorkAuth(job(location, "U.S. citizenship is required."), false);
-    // Dropped under the gate's code.
-    assert.equal(verdict.drop && verdict.code, "us_work_auth");
-  });
-}
 
 // Live false positives the phrase list must NOT fire on.
 for (const [name, text] of [
@@ -170,34 +173,28 @@ for (const [name, text] of [
   ["UK no-sponsorship", "You must have the right to work in the UK; we are unable to sponsor work visas."],
   // Cloudflare x39: an export LICENSE, not a person's status.
   ["export licence sponsorship", "Applicants who can be employed without sponsorship for an export license."],
-  // Roblox x31: US boilerplate on India and remote jobs.
+  // Roblox x31: US boilerplate.
   ["Roblox boilerplate", "We may not be able to employ candidates who have United States work authorization related to certain U.S. visa categories."],
   // Astera: hardware clearance.
   ["mechanical clearance", "Verify mechanical fit, alignment, clearance and airflow."],
-  // Singapore permanent resident.
-  ["Singapore PR", "Singapore Citizen or Singapore Permanent Resident only."],
+  // EEO boilerplate on most Cloudflare/Cadence rows.
+  ["EEO citizenship", "without regard to race, national origin, country of citizenship, or any other person's status"],
 ] as const) {
   // Named by the case.
-  test(`not authorised: placeless "Remote" + ${name} is kept`, () => {
-    // Kept: none of these says the job needs US authorisation.
-    assert.equal(screenUsWorkAuth(job("Remote", text), false).drop, false);
+  test(`Teja: "Remote" + ${name} is kept`, () => {
+    // Kept: none of these says the job needs US status.
+    assert.equal(screenWorkAuth(job("Remote", text), TEJA).drop, false);
   });
 }
 
-// Text on a NAMED non-US location never drops: the location is the stronger statement.
-test("not authorised: India location + US requirement text is kept (location outranks text)", () => {
-  // A Gurugram job that copied US boilerplate.
-  assert.equal(screenUsWorkAuth(job("Gurugram, India", "Must be authorized to work in the United States."), false).drop, false);
-});
-
 // The reason names what matched, so a wrong drop is diagnosable from the run summary.
 test("the drop reason names the matching signal", () => {
-  // A location drop says it was the location.
-  const byLocation = screenUsWorkAuth(job("Palo Alto, CA"), false);
+  // A location drop quotes the location.
+  const byLocation = screenWorkAuth(job("Palo Alto, CA"), TEJA);
   // Mentions the location text it judged.
   assert.match(byLocation.drop ? byLocation.reason : "", /Palo Alto, CA/);
-  // A text drop says which phrase.
-  const byText = screenUsWorkAuth(job("Remote", "Subject to ITAR."), false);
-  // Mentions the phrase family.
+  // A text drop names the phrase family.
+  const byText = screenWorkAuth(job("Remote", "Subject to ITAR."), TEJA);
+  // Mentions it.
   assert.match(byText.drop ? byText.reason : "", /itar/i);
 });
