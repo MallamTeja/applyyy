@@ -13,6 +13,8 @@ import { parseMaxSubmits, parseOnlyApplicationId, runApplierBatch } from '../cla
 import { createSupabaseGateway, type SupabaseLike } from '../supabase-gateway.ts';
 // The production robots.txt check (master-robots under the applier's own token).
 import { createRobotsCheck } from '../apply-one.ts';
+// The embedded-form resolver and its production lookup and fetch.
+import { createFormUrlResolver, fetchJson, supabaseBoardLookup } from '../form-url.ts';
 // The constant is read at startup so an operator opt-in this build cannot honour
 // is announced, not discovered row by row.
 import { createPlaywrightPage, SUBMISSION_IMPLEMENTED } from '../playwright-page.ts';
@@ -154,6 +156,8 @@ async function main(): Promise<void> {
       // The robots gate's ONLY production wiring: one check (and one cache) per run, so a
       // batch on one board fetches its robots.txt once.
       checkRobots: createRobotsCheck(),
+      // The applier's only wiring of the resolver: watchlist token, confirmed by Greenhouse's API.
+      resolveFormUrl: createFormUrlResolver(supabaseBoardLookup(client), fetchJson),
       env: process.env,
       clock: () => Math.floor(Date.now() / 1000),
       // The validated filter, or undefined for the whole queue.

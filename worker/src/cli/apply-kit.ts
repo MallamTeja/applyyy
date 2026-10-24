@@ -15,6 +15,8 @@
 import { chromium } from 'playwright';
 // The robots gate under the applier's token: the kit loads the same page the applier would.
 import { createRobotsCheck } from '../apply-one.ts';
+// The embedded-form resolver, shared with the applier.
+import { createFormUrlResolver, fetchJson, supabaseBoardLookup } from '../form-url.ts';
 // The kit itself, and its gateway over the supabase client.
 import { buildApplyKit, createKitGateway, type ApplyKitDetail } from '../apply-kit.ts';
 // The sweep: which rows are due, and the loop that builds them one by one.
@@ -119,6 +121,8 @@ async function main(): Promise<void> {
   // Closed in `finally`, whatever the kit does.
   // One gateway for every kit in this run: reads and the two allowed writes, no status method.
   const gateway = createKitGateway(client, { userId });
+  // One resolver for every kit in this run (single row and sweep alike), built once beside the gateway.
+  const formUrls = createFormUrlResolver(supabaseBoardLookup(client), fetchJson);
   // Builds ONE kit on its own fresh page, which is closed afterwards so a sweep does not pile pages up.
   const buildOne = async (id: string): Promise<ApplyKitDetail> => {
     // A fresh tab per row: one form's state never leaks into the next.
@@ -135,6 +139,8 @@ async function main(): Promise<void> {
         renderResume: renderer.render,
         // The applier's robots token, so the kit loads only what the applier may.
         checkRobots: createRobotsCheck(),
+        // The same resolver the applier uses, so the kit reads the form the applier would fill.
+        resolveFormUrl: formUrls,
         // The Actions run id when run there, so the note links back to its log.
         runId: process.env['GITHUB_RUN_ID'] ?? null,
         // The real clock for generated_at.

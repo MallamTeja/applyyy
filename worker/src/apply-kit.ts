@@ -21,6 +21,8 @@
 import type { AnswerBankRow, ApplicationStatus, MasterIdentity, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 // The pre-submit port this kit narrows, the renderer port, and the robots port: reused, not forked.
 import type { ApplicationPage, ResumeRenderer, RobotsCheck } from './apply-one.ts';
+// The applier's own form-URL resolver port, so the kit opens the same form the applier would.
+import type { FormUrlResolver } from './form-url.ts';
 // The control shape the extractor returns.
 import type { FormField } from './extract-fields.ts';
 // The one planner. Read-only reuse: a fork would let the kit and the bot disagree.
@@ -114,6 +116,8 @@ export interface BuildApplyKitInput {
   readonly renderResume: ResumeRenderer;
   // Required: the robots gate governs the page load, as in apply-one.
   readonly checkRobots: RobotsCheck;
+  // Optional for the reason apply-one gives: absent means the stored URL, today's behaviour.
+  readonly resolveFormUrl?: FormUrlResolver;
   // The CI run id, or null locally.
   readonly runId: string | null;
   // The clock, injected so generated_at is testable.
@@ -208,12 +212,15 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
   const answers = await gateway.fetchAnswers();
 
   // THE ROBOTS GATE, before the page load it governs. Only an explicit allow passes.
-  const robots = await input.checkRobots(row.applyUrl);
+  // The form's real URL first (an iframed Greenhouse form resolves to Greenhouse), so the gate asks about it.
+  const formUrl = input.resolveFormUrl === undefined ? row.applyUrl : await input.resolveFormUrl(row);
+  // The gate, on the URL that will be loaded.
+  const robots = await input.checkRobots(formUrl);
   // Refused, waiting or unreadable: the form is not opened, and nothing is written.
-  if (robots.kind !== 'allow') throw new Error(`apply kit: robots.txt did not allow ${row.applyUrl} (${robots.kind}: ${robots.reason})`);
+  if (robots.kind !== 'allow') throw new Error(`apply kit: robots.txt did not allow ${formUrl} (${robots.kind}: ${robots.reason})`);
 
   // Loading a form is fine from CI; only a submit trips the captcha.
-  await page.goto(row.applyUrl);
+  await page.goto(formUrl);
   // A wall on the page is worth knowing before Teja opens it.
   const wall = await page.detectBlocker();
   // The form's controls, read from the accessibility tree.
@@ -282,7 +289,8 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
     v: 1,
     generated_at: input.now().toISOString(),
     run_id: input.runId,
-    form_url: row.applyUrl,
+    // The page the fields were read from, so "Open the form" lands on the same form, not its wrapper.
+    form_url: formUrl,
     resume,
     fields: kitFields,
     warnings,

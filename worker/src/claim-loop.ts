@@ -30,6 +30,8 @@ import { canStartAnotherApplication, type RunWindowLimits } from './run-window.t
 import type { AnswerBankRow, MasterProfile } from '@applyy/shared-types';
 // The value import is for the circuit breaker, which acts only in a run that asked to submit.
 import { resolveSubmissionMode, type SubmissionEnv } from './submission-mode.ts';
+// The resolver port, threaded to applyToOne.
+import type { FormUrlResolver } from './form-url.ts';
 
 // This worker's identity, used for both the run row and the claim marker.
 const ACTING_AGENT: AgentName = 'applier';
@@ -78,6 +80,8 @@ export interface ClaimLoopInput {
   // The robots.txt gate, passed straight through to applyToOne. REQUIRED: a loop that
   // could be built without it would be an applier that never asks.
   readonly checkRobots: RobotsCheck;
+  // The embedded-form resolver, passed straight through to applyToOne (optional there, see why).
+  readonly resolveFormUrl?: FormUrlResolver;
   readonly env: SubmissionEnv;
   // Epoch seconds. Injected rather than read from Date.now() so budget
   // behaviour can be tested at a boundary without fake timers.
@@ -194,7 +198,7 @@ function assertNever(value: never): never {
 }
 
 export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary> {
-  const { gateway, openPage, env, clock, renderResume, checkRobots } = input;
+  const { gateway, openPage, env, clock, renderResume, checkRobots, resolveFormUrl } = input;
   // THE PER-RUN SUBMIT CAP, parsed BEFORE the run row opens, so a bad value stops the run
   // with nothing opened and nothing claimed (a startup failure, not a mid-run one).
   const maxSubmits = parseMaxSubmits(env['APPLY_MAX_SUBMITS']);
@@ -396,7 +400,8 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
         const page = await openPage();
         try {
           // The same profile object is reused for every row, which is the point of fetching it once.
-          const outcome = await applyToOne({ row, page, gateway, answers, profile, env, renderResume, checkRobots });
+          // resolveFormUrl rides along so an iframed Greenhouse posting is applied to on its real form.
+          const outcome = await applyToOne({ row, page, gateway, answers, profile, env, renderResume, checkRobots, resolveFormUrl });
 
           // Counted separately rather than collapsed into a success/failure
           // pair, because these four mean genuinely different things to the

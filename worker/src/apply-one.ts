@@ -43,6 +43,8 @@ import type { RenderedResume } from './render-resume-pdf.ts';
 // one needs a worker/package.json entry, which rewrites pnpm-lock.yaml. Same technique as
 // scripts/capture-fixture.ts; the package has no dependencies, so nothing needs installing.
 import { checkRobots, type RobotsCache, type RobotsVerdict } from '../../packages/master-robots/src/index.ts';
+// The embedded-form resolver port (form-url.ts): which URL is actually the form.
+import type { FormUrlResolver } from './form-url.ts';
 
 // This worker's identity in the status graph. Named once so no call site can
 // quietly claim to be a different agent and slip through an edge it may not use.
@@ -271,6 +273,12 @@ export interface ApplyToOneInput {
   // REQUIRED for the same reason as renderResume: an optional gate is a gate that can
   // have no caller. Required means a call site that forgets it does not compile.
   readonly checkRobots: RobotsCheck;
+  // Turns a careers page that iframes Greenhouse into the Greenhouse form (form-url.ts).
+  // OPTIONAL, unlike the two above, because its absence fails SAFE: no resolver means the
+  // stored URL is opened, which is the behaviour before it existed (the row parks for a
+  // human). An absent robots gate or renderer would instead fail OPEN or silently.
+  // `| undefined` because claim-loop forwards its own optional field as-is (exactOptionalPropertyTypes).
+  readonly resolveFormUrl?: FormUrlResolver | undefined;
 }
 
 /**
@@ -344,7 +352,10 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
   // THE ROBOTS GATE, before goto, because goto IS the request robots.txt governs: a
   // check after it would ask permission for a fetch already made. Only `allow` passes.
   // Every other verdict, including "could not read the policy", stops here (fail closed).
-  const robots = await input.checkRobots(row.applyUrl);
+  // Resolved FIRST, so robots.txt is asked about the URL that is actually opened below.
+  const formUrl = input.resolveFormUrl === undefined ? row.applyUrl : await input.resolveFormUrl(row);
+  // The gate, on the URL goto will load.
+  const robots = await input.checkRobots(formUrl);
   // Anything but an explicit allow ends this application before the page opens.
   if (robots.kind !== 'allow') {
     // One readable line for the event log, naming the gate's machine fact (source or wait).
@@ -388,7 +399,8 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
     return { kind: 'robots_refused', action: 'released', reason };
   }
 
-  await page.goto(row.applyUrl);
+  // The form itself: the resolved URL robots.txt just allowed, never the unchecked one.
+  await page.goto(formUrl);
 
   // Constraint #5. Checked before reading the form, because a captcha wall
   // means the fields we would extract are not the real application anyway.
