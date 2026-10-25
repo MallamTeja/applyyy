@@ -591,8 +591,8 @@ export function SearchPreferencesPage(): ReactElement {
                 value={workAuthCountries}
                 /* Draft only. */
                 onChange={(e) => setWorkAuthCountries(e.target.value)}
-                /* The default list, shown as a hint. */
-                placeholder="India, Nepal, Bhutan"
+                /* Says "not set" first: a bare country list in grey read as a SAVED value (browser proof, 2026-10-25). */
+                placeholder="Not set: filter off. e.g. India, Nepal, Bhutan"
               />
             </label>
           </div>
