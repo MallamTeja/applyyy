@@ -183,8 +183,8 @@ test("search preferences are loaded and mapped for the tech gate", async () => {
 test("a missing preferences row yields an open gate rather than an error", async () => {
   const result = await loadScreenContext(queries({ searchPreferences: () => Promise.resolve({ rows: [], error: null }) }), NOW);
   assert.equal(result.ok, true);
-  // usWorkAuthorized null = unanswered: the work-auth gate is open too, never a "No".
-  assert.deepEqual(result.ok && result.value.preferences, { titles: [], keywords: [], excludedKeywords: [], usWorkAuthorized: null });
+  // workAuthorizedCountries null = never set: the work-auth gate is open too, never "nowhere".
+  assert.deepEqual(result.ok && result.value.preferences, { titles: [], keywords: [], excludedKeywords: [], workAuthorizedCountries: null });
 });
 
 // An ERROR is still an error, even though an empty result is not. The same distinction
@@ -210,32 +210,34 @@ test("null array columns map to empty lists", async () => {
   assert.deepEqual(result.ok && result.value.preferences.titles, []);
 });
 
-// --- stage-0b preference: US work authorisation --------------------------------------
+// --- stage-0b preference: work-authorised countries ---------------------------------
 
-// Only a genuine boolean is an answer. The column is nullable (null = never answered), a row
-// read before migration 20261024190000 has no key at all, and junk must never pass for "No".
+// Only a non-empty list of real strings is an answer. The column is nullable (null = never set),
+// a row read before migration 20261024190000 has no key, and junk must never pass for a list.
 for (const [name, stored, expected] of [
-  // Teja's answer.
-  ["false", false, false],
-  // Authorised.
-  ["true", true, true],
-  // Never answered.
+  // Teja's list.
+  ["Teja's list", ["India", "Nepal", "Bhutan"], ["India", "Nepal", "Bhutan"]],
+  // Blank and non-string entries are dropped, the rest trimmed.
+  ["a list with junk entries", [" India ", "", 7, null], ["India"]],
+  // Never set.
   ["null", null, null],
   // Key absent (row from before the migration).
   ["absent", undefined, null],
-  // A string is not a boolean; reading "false" as No would be a lenient parser deciding.
-  ["the string \"false\"", "false", null],
+  // Empty is "never set", not "nowhere": one slip must not drop every on-site job.
+  ["an empty list", [], null],
+  // A string is not a list.
+  ["a bare string", "India", null],
 ] as const) {
   // One named test per stored shape.
-  test(`us_work_authorized ${name} maps to ${String(expected)}`, async () => {
+  test(`work_authorized_countries: ${name} maps to ${JSON.stringify(expected)}`, async () => {
     // A row carrying the stored value, everything else empty.
-    const row = { titles: [], keywords: [], excluded_keywords: [], ...(stored === undefined ? {} : { us_work_authorized: stored }) };
-    // Loaded through the real mapper; the cast lets the junk case reach it as junk would.
+    const row = { titles: [], keywords: [], excluded_keywords: [], ...(stored === undefined ? {} : { work_authorized_countries: stored }) };
+    // Loaded through the real mapper; the cast lets the junk cases reach it as junk would.
     const result = await loadScreenContext(
       queries({ searchPreferences: () => Promise.resolve({ rows: [row as never], error: null }) }),
       NOW,
     );
     // Mapped exactly.
-    assert.equal(result.ok && result.value.preferences.usWorkAuthorized, expected);
+    assert.deepEqual(result.ok && result.value.preferences.workAuthorizedCountries, expected);
   });
 }

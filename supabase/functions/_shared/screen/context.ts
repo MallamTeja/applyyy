@@ -85,10 +85,10 @@ export interface SearchPreferencesRow {
   readonly titles: readonly string[] | null;
   readonly keywords: readonly string[] | null;
   readonly excluded_keywords: readonly string[] | null;
-  // Teja's US work-authorisation answer for the work-auth gate. Optional in the TYPE
-  // because a row read before migration 20261024190000 has no such key; absent and null
-  // both mean "never answered", and the gate stays open for that.
-  readonly us_work_authorized?: boolean | null;
+  // The countries the user may work in without a visa, for the work-auth gate. Optional in the
+  // TYPE because a row read before migration 20261024190000 has no such key; absent and null
+  // both mean "never set", and the gate stays open for that.
+  readonly work_authorized_countries?: readonly string[] | null;
 }
 
 // What a successful load hands the caller: the rules and the context, together, because
@@ -127,6 +127,19 @@ function strictTimestampMs(value: string | null): number | null {
   const ms = Date.parse(value);
   // Only a finite instant is an answer.
   return Number.isFinite(ms) ? ms : null;
+}
+
+// The usable entries of a stored country list, or null when there are none. An EMPTY list is
+// read as "never set", not "nowhere": the Settings page saves null for an empty box, so an
+// empty array can only come from a hand edit, and reading it as "authorised nowhere" would drop
+// every on-site job on a single slip.
+function countryList(value: unknown): readonly string[] | null {
+  // Not a list at all: never set.
+  if (!Array.isArray(value)) return null;
+  // Real, non-blank strings only, trimmed.
+  const entries = value.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "").map((entry) => entry.trim());
+  // Nothing usable left: never set.
+  return entries.length > 0 ? entries : null;
 }
 
 // Fetch everything the cascade needs that is not on the job row.
@@ -210,10 +223,10 @@ export async function loadScreenContext(queries: ScreenQueries, now: Date): Prom
         titles: preferencesRow?.titles ?? [],
         keywords: preferencesRow?.keywords ?? [],
         excludedKeywords: preferencesRow?.excluded_keywords ?? [],
-        // ONLY a real boolean is an answer. A missing row, a missing key, null, or any
-        // non-boolean junk all collapse to null = unanswered, which opens the gate rather
-        // than dropping on missing data (CLAUDE.md section 6).
-        usWorkAuthorized: typeof preferencesRow?.us_work_authorized === "boolean" ? preferencesRow.us_work_authorized : null,
+        // ONLY a non-empty list of non-blank strings is an answer. A missing row or key, null,
+        // a non-array, or a list with nothing usable in it all collapse to null = never set,
+        // which opens the gate rather than dropping every on-site job (CLAUDE.md section 6).
+        workAuthorizedCountries: countryList(preferencesRow?.work_authorized_countries),
       },
       // Passed through untouched, `sort_order` included — the cascade sorts on it, so
       // re-deriving or reordering here would silently reshape the whole cascade.

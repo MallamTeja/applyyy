@@ -76,17 +76,17 @@ const TITLE_RULE = rule("title_blocklist", { blocked_titles: ["senior", "staff",
 // Stage-0 preferences that classify nothing, so the cascade tests above exercise the
 // cascade rather than the tech gate. Every job reaches the nine rules, which is the
 // behaviour the unconfigured-preferences branch guarantees.
-// usWorkAuthorized: true keeps stage 0b (the US work-auth gate) a silent no-op here, so these
-// tests see exactly the verdicts and warnings they saw before that gate existed.
-const OPEN_PREFS: ScreenPreferences = { titles: [], keywords: [], excludedKeywords: [], usWorkAuthorized: true };
+// workAuthorizedCountries: null leaves stage 0b (the work-auth gate) open, so these tests see
+// exactly the verdicts they saw before that gate existed (plus its one "gate open" warning).
+const OPEN_PREFS: ScreenPreferences = { titles: [], keywords: [], excludedKeywords: [], workAuthorizedCountries: null };
 
 // A configured gate, for the stage-0 tests at the end of this file.
 const TECH_PREFS: ScreenPreferences = {
   titles: ["engineer", "developer"],
   keywords: ["react"],
   excludedKeywords: ["sales", "recruiter"],
-  // Authorised, for the same reason as OPEN_PREFS: these tests are about the tech gate.
-  usWorkAuthorized: true,
+  // Open, for the same reason as OPEN_PREFS: these tests are about the tech gate.
+  workAuthorizedCountries: null,
 };
 
 // --- the JobInsert -> ScreenableJob adapter ---------------------------------------
@@ -336,65 +336,71 @@ test("a one-entry plan equals that entry's verdict inside a batch, including a w
   }
 });
 
-// --- stage 0b: the US work-authorisation gate (Teja, 2026-10-24) ----------------------
+// --- stage 0b: the work-authorisation gate (Teja, 2026-10-24) ------------------------
 
-// A user who answered No: the gate is live.
-const NOT_US_AUTHORISED: ScreenPreferences = { ...OPEN_PREFS, usWorkAuthorized: false };
+// Teja's list as the migration seeds it: the gate is live.
+const TEJA_PREFS: ScreenPreferences = { ...OPEN_PREFS, workAuthorizedCountries: ["India", "Nepal", "Bhutan"] };
 
-// A US-only posting is born dropped under the gate's own code, BEFORE the cascade runs: the
+// A US on-site posting is born dropped under the gate's own code, BEFORE the cascade runs: the
 // title rule below would also drop it, and the gate's code winning proves the order.
-test("not US-authorised: a US-only posting drops as us_work_auth ahead of the cascade", () => {
+test("work auth: a US on-site posting drops as work_auth ahead of the cascade", () => {
   const planned = planScreenedApplications(
     // US location, and a title the blocklist would also reject.
     [{ jobId: "us-1", row: { ...BASE_ROW, title: "Senior Backend Engineer", location_raw: "San Francisco, CA" } }],
     // The title blocklist is the cascade rule that loses the race.
     [TITLE_RULE],
     BASE_CONTEXT,
-    NOT_US_AUTHORISED,
+    TEJA_PREFS,
   );
   // Recorded under the gate's code, not title_blocklist.
-  assert.deepEqual(planned.inserts, [{ job_id: "us-1", status: "dropped_filter", drop_reason: "us_work_auth" }]);
-  // The run summary names the same code, with prose quoting the location.
-  assert.equal(planned.dropped[0]!.ruleType, "us_work_auth");
+  assert.deepEqual(planned.inserts, [{ job_id: "us-1", status: "dropped_filter", drop_reason: "work_auth" }]);
+  // The run summary names the same code.
+  assert.equal(planned.dropped[0]!.ruleType, "work_auth");
   // The prose quotes the location that decided it.
   assert.match(planned.dropped[0]!.reason, /San Francisco, CA/);
 });
 
 // The tech gate still runs first: a non-tech US posting is attributed to the cheaper gate.
-test("not US-authorised: the tech gate still runs first", () => {
+test("work auth: the tech gate still runs first", () => {
   const planned = planScreenedApplications(
     // An excluded title on a US location: both gates object.
     [{ jobId: "us-2", row: { ...BASE_ROW, title: "Sales Engineer", location_raw: "New York, NY" } }],
     // No cascade rules; only the two gates decide.
     [],
     BASE_CONTEXT,
-    // Tech config plus the work-auth No.
-    { ...TECH_PREFS, usWorkAuthorized: false },
+    // Tech config plus Teja's list.
+    { ...TECH_PREFS, workAuthorizedCountries: ["India"] },
   );
   // The tech gate's code wins, because it ran first.
   assert.equal(planned.inserts[0]!.drop_reason, "tech_gate");
 });
 
-// An India posting is untouched by the No, and goes on to the cascade.
-test("not US-authorised: an India posting passes through to the cascade", () => {
-  const planned = planScreenedApplications([{ jobId: "in-1", row: BASE_ROW }], [TITLE_RULE], BASE_CONTEXT, NOT_US_AUTHORISED);
-  // Passed: Bengaluru needs no US authorisation.
-  assert.equal(planned.inserts[0]!.status, "passed_filters");
+// India and US-remote postings are untouched, and go on to the cascade.
+test("work auth: India and US-remote postings pass through to the cascade", () => {
+  const planned = planScreenedApplications(
+    // BASE_ROW is Bengaluru; the second is remote in the US, which Teja accepts.
+    [{ jobId: "in-1", row: BASE_ROW }, { jobId: "us-r", row: { ...BASE_ROW, fingerprint: "fp-r", location_raw: "Remote, USA" } }],
+    [TITLE_RULE],
+    BASE_CONTEXT,
+    TEJA_PREFS,
+  );
+  // Both passed.
+  assert.deepEqual(planned.inserts.map((i) => i.status), ["passed_filters", "passed_filters"]);
 });
 
-// Never answered: nothing drops, and the open gate is reported once per batch.
-test("unanswered US work authorisation passes a US posting and warns", () => {
+// Never set: nothing drops, and the open gate is reported.
+test("work auth: an unset list passes a US on-site posting and warns", () => {
   const planned = planScreenedApplications(
-    // A US-only posting.
+    // A US on-site posting.
     [{ jobId: "us-3", row: { ...BASE_ROW, location_raw: "Seattle, WA" } }],
     // No cascade rules.
     [],
     BASE_CONTEXT,
-    // null = never answered.
-    { ...OPEN_PREFS, usWorkAuthorized: null },
+    // null = never set.
+    OPEN_PREFS,
   );
-  // Passed, because a missing answer is not a No.
+  // Passed, because a missing list is not "nowhere".
   assert.equal(planned.inserts[0]!.status, "passed_filters");
-  // The warning names the unanswered column.
-  assert.match(planned.warnings.join(" "), /us_work_authorized/);
+  // The warning names the unset column.
+  assert.match(planned.warnings.join(" "), /work_authorized_countries/);
 });
