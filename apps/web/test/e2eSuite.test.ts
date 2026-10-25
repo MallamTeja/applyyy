@@ -380,6 +380,11 @@ describe('Playwright E2E Operator Console Suite', () => {
     // Trigger Command Palette via Ctrl+K / Meta+K
     await page.keyboard.press('Control+k');
     await page.waitForSelector('.palette-modal');
+    // FLAKE FIX (CI 2026-10-24, ec455b8): the modal mounts BEFORE its open effect runs
+    // setQuery(''), so a fill() that lands first is wiped and the list goes back to unfiltered
+    // ("Approval queue" first). The effect focuses the input 50ms after that reset, so focus is
+    // the awaited state that proves the reset is done. A user types after focus too.
+    await page.locator('.palette-input:focus').waitFor();
 
     // Verify search input is focused and placeholder is present
     const isInputVisible = await page.locator('.palette-input').isVisible();
@@ -388,6 +393,9 @@ describe('Playwright E2E Operator Console Suite', () => {
     // Type query to filter to Answer Bank
     await page.locator('.palette-input').fill('Answer Bank');
     const items = page.locator('.palette-item');
+    // Wait for the re-render that filters the list: innerText() below is a one-shot read and
+    // would take whatever the DOM held mid-render. .catch so the named assertion reports a miss.
+    await items.first().filter({ hasText: /Answer Bank/i }).waitFor().catch(() => {});
     const count = await items.count();
     assert.ok(count >= 1, 'Filtered palette must show Answer Bank item');
 
@@ -397,18 +405,26 @@ describe('Playwright E2E Operator Console Suite', () => {
     // Press Enter to navigate
     await page.keyboard.press('Enter');
 
-    // Verify navigation occurred and palette closed
-    await page.waitForSelector('.page__title');
+    // Verify navigation occurred and palette closed. Waits on the URL, not '.page__title':
+    // the approvals page already has a title, so that wait passed before navigation happened.
+    await page.waitForURL('**/answer-bank').catch(() => {});
     const currentUrl = page.url();
     assert.ok(currentUrl.includes('/answer-bank'), 'URL must update to /answer-bank');
 
+    // The palette renders null when closed, so "detached" is the closed state to wait for.
+    await page.locator('.palette-modal').waitFor({ state: 'detached' }).catch(() => {});
     const isModalOpen = await page.locator('.palette-modal').isVisible().catch(() => false);
     assert.equal(isModalOpen, false, 'Command palette must close on navigation');
 
     // Test ESC closing behavior
     await page.keyboard.press('Control+k');
     await page.waitForSelector('.palette-modal');
+    // Same open-effect race as above: the effect also binds the Escape listener, so wait for
+    // the focus it sets last before pressing Escape.
+    await page.locator('.palette-input:focus').waitFor();
     await page.keyboard.press('Escape');
+    // Closing is a re-render too; wait for the modal to leave the DOM before reading it.
+    await page.locator('.palette-modal').waitFor({ state: 'detached' }).catch(() => {});
     const isModalClosedAfterEsc = await page.locator('.palette-modal').isVisible().catch(() => false);
     assert.equal(isModalClosedAfterEsc, false, 'Command palette must close on Escape key');
   });
@@ -445,6 +461,9 @@ describe('Playwright E2E Operator Console Suite', () => {
       const searchInput = page.locator('.answer-bank__search-input');
       // "relocate" matches exactly one seeded question, so the count is a precise check.
       await searchInput.fill('relocate');
+      // The search filters on a re-render, and count() is a one-shot read: wait until a second
+      // row is gone (at most one left) so the exact-count assertion reads the settled table.
+      await page.locator('.settings-table tbody tr').nth(1).waitFor({ state: 'detached' }).catch(() => {});
       // Rows left after the instant search.
       const filteredRows = await page.locator('.settings-table tbody tr').count();
       // Exactly one: more means the search didn't filter, zero means it over-filtered.
@@ -509,6 +528,8 @@ describe('Playwright E2E Operator Console Suite', () => {
     const closeBtn = page.locator('.drawer__close-btn');
     await closeBtn.click();
 
+    // Closing is a re-render; wait for the drawer to be hidden or gone before the one-shot read.
+    await page.locator('.drawer').waitFor({ state: 'hidden' }).catch(() => {});
     const isDrawerClosed = await page.locator('.drawer').isVisible().catch(() => false);
     assert.equal(isDrawerClosed, false, 'Pipeline drawer must close on close button click');
   });
@@ -570,10 +591,17 @@ describe('Playwright E2E Operator Console Suite', () => {
     const refreshBtn = page.locator('.email-monitor__toolbar .ingest__button');
     assert.equal(await refreshBtn.count(), 1, 'Refresh Interviews button must render');
 
-    // The mount-time sync has run (or failed) by now: the quiet one-line status is on
-    // screen, and in the e2e sandbox (no real gmail-sync function) it must be the failed
-    // or skipped wording — never a banner, and the page rendered regardless.
-    const statusLine = page.locator('p[title], p').filter({ hasText: /inbox|sync/ });
+    // The mount-time sync shows the quiet one-line status, and in the e2e sandbox (no real
+    // gmail-sync function) it must be the failed or skipped wording: never a banner, and the
+    // page rendered regardless.
+    // Only the SETTLED wordings: 'syncing inbox…' also says "inbox", so the old /inbox|sync/
+    // matched the moment the call started. The sandbox's catch-all mock answers gmail-sync with
+    // [], which syncGmailInbox fails closed on, so "failed" (or a debounce "skipped") is expected.
+    const statusLine = page.locator('p[title], p').filter({ hasText: /sync failed|sync skipped/ });
+    // FLAKE FIX (CI 2026-10-24, 446eb60): the line appears only after the async mount-time
+    // sync call settles, which can trail the title on a slow runner. count() is a one-shot read,
+    // so wait for the line first. .catch so the named assertion below reports a real miss.
+    await statusLine.first().waitFor().catch(() => {});
     assert.ok((await statusLine.count()) >= 1, 'The one-line sync status must render after mount');
   });
 
