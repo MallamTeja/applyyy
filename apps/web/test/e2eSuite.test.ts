@@ -12,7 +12,7 @@
  * 8. Master Profile Intake & Review surface
  * 9. Email Monitoring Dashboard (4 KPI cards, search, sync settings drawer, on-demand trigger)
  * 10. High-Legibility Typography Tokens (Inter) & Dark/Light Theme Switching
- * 11. System Health & Kill-Switch Telemetry
+ * 11. System Health: agent_runs reachability & agent freshness rendered from the read
  *
  * HOUSE STYLE:
  * Detailed comments for every assertion, selector, and state transition.
@@ -534,13 +534,22 @@ describe('Playwright E2E Operator Console Suite', () => {
     assert.equal(isDrawerClosed, false, 'Pipeline drawer must close on close button click');
   });
 
-  it('5. verifies Approval Queue page is clean of fake mock fixtures', async () => {
+  // Was vacuous until 2026-10-25: it checked that two fixture ids were absent from the HTML, and
+  // those ids exist nowhere in src/ or dist/, so it could never fail. Now it asserts what the queue
+  // renders FROM ITS DATA: the mocked applications read answers [], so a working page must show the
+  // loaded empty state. Hard-coded fixture rows would also turn it red (rows replace the empty state).
+  it('5. verifies Approval Queue renders its loaded empty state from the (mocked-empty) read', async () => {
+    // The page reads applications at awaiting_approval on mount; the route mock answers [].
     await page.goto(`${serverUrl}/approvals`, { waitUntil: 'domcontentloaded' });
-    await page.waitForSelector('.page__title');
-
-    const htmlContent = await page.content();
-    assert.ok(!htmlContent.includes('fixture-zomato-backend-intern'), 'Zero fake mock fixtures allowed');
-    assert.ok(!htmlContent.includes('fixture-swiggy-frontend-intern'), 'Zero fake mock fixtures allowed');
+    // The loaded-empty wording, not the class: the loading line shares `queue__empty`, so only the
+    // text proves the read finished and succeeded (ApprovalQueuePage.tsx:1276).
+    const emptyQueue = page.locator('p.queue__empty', { hasText: 'Queue is empty.' });
+    // Awaited state, not a one-shot read. .catch so the named assertion below reports a miss.
+    await emptyQueue.waitFor().catch(() => {});
+    // Present means the read succeeded and the page rendered zero rows from it.
+    assert.equal(await emptyQueue.count(), 1, 'A successful empty read must render "Queue is empty."');
+    // The error branch is its own alert (ApprovalQueuePage.tsx:1255); it must not show beside it.
+    assert.equal(await page.locator('.queue__failed').count(), 0, 'The queue-failed alert must not render on a successful read');
   });
 
   it('6. verifies Company Watchlist form and overview metrics', async () => {
@@ -560,18 +569,31 @@ describe('Playwright E2E Operator Console Suite', () => {
     assert.ok(hasSubmitBtn, 'Must render Add Board button');
   });
 
-  it('7. verifies Master Profile intake surface', async () => {
+  // Was vacuous until 2026-10-25: "Upload" is in a static h2, so it passed even when the stored
+  // profile failed to load. Now it asserts the load's OUTCOME: the PDF upload is enabled only
+  // once loadState is 'ready' (MasterProfilePage.tsx canReconcile), and stays disabled while
+  // loading or after a failed read. The "No profile stored yet" note and the "0 skills" counters
+  // are NOT used: they depend only on stored === null and render in all three states.
+  it('7. verifies Master Profile finishes its stored-profile read and unlocks the PDF upload', async () => {
+    // The page reads master_profiles (maybeSingle) on mount; the mock's [] reads as "none stored".
     await page.goto(`${serverUrl}/master-profile`, { waitUntil: 'domcontentloaded' });
+    // The header renders in the same commit as the loading notice, so the read has started.
     await page.waitForSelector('.page__title');
 
+    // Still the right screen, not an error boundary.
     const profileTitle = await page.locator('.page__title').first().textContent();
+    // The page's own title wording.
     assert.match(profileTitle ?? '', /Master profile/i);
 
-    const pageText = await page.locator('body').innerText();
-    assert.ok(
-      pageText.includes('Upload') || pageText.includes('JSON') || pageText.includes('Identity'),
-      'Master profile intake surface must be active',
-    );
+    // The loading notice leaves when the read settles either way; wait for that, not a guess.
+    await page.getByText('Loading your stored master profile').waitFor({ state: 'detached' }).catch(() => {});
+    // Located by its accessible name, so a class rename can't break it but a dropped label does.
+    const upload = page.getByLabel('Upload master resume PDF');
+    // Enabled is the success signal: disabled means still loading or the read failed.
+    assert.equal(await upload.isEnabled(), true, 'The PDF upload must be enabled after a successful profile read');
+    // The failed-read alert (MasterProfilePage.tsx:169) must not render; role scopes out the
+    // review panel's non-alert error notices that share the class.
+    assert.equal(await page.locator('.store-notice--bad[role="alert"]').count(), 0, 'The profile-load alert must not render');
   });
 
   it('8. verifies Email Intake & Monitoring dashboard, metric cards and edge-function sync', async () => {
@@ -651,17 +673,29 @@ describe('Playwright E2E Operator Console Suite', () => {
     }
   });
 
-  it('10. verifies System Health and Kill-Switch status indicators', async () => {
+  // Renamed 2026-10-25: HealthPage renders no kill-switch panel; this checks the agent_runs read.
+  it('10. verifies System Health reports the agent_runs read and renders agent freshness from it', async () => {
     await page.goto(`${serverUrl}/health`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('.page__title');
 
     const healthTitle = await page.locator('.page__title').first().textContent();
     assert.match(healthTitle ?? '', /System health/i);
 
-    const bodyText = await page.locator('body').innerText();
-    assert.ok(
-      bodyText.includes('Kill switch') || bodyText.includes('Database') || bodyText.includes('Agent'),
-      'Health page must display system telemetry',
-    );
+    // Was vacuous until 2026-10-25: it matched "Agent" in the static "Agent freshness" h2 (and
+    // "Kill switch", which this page never renders). Now it asserts what the agent_runs READ
+    // produced. The mock answers [] (the catch-all route), so a working page says the read
+    // succeeded and marks every agent as never run.
+    const reachable = page.locator('p.panel__clear', { hasText: 'Reachable: the agent_runs read succeeded' });
+    // The line appears only after the async read settles; wait for it rather than read once.
+    await reachable.waitFor().catch(() => {});
+    // Present means the connection panel saw a successful read (HealthPage.tsx:422).
+    assert.equal(await reachable.count(), 1, 'The connection panel must report the agent_runs read as reachable');
+    // The unreachable branch (HealthPage.tsx:428) must not render next to it.
+    assert.equal(await page.locator('.panel__degraded').count(), 0, 'The unreachable alert must not render on a successful read');
+    // The freshness table is built from the same rows, so an empty read marks agents "never run".
+    // Exact text: "has never run" and "Never run" (the keepalive panel) are different elements.
+    const neverRun = await page.locator('span.table__never', { hasText: /^never run$/ }).count();
+    // At least one agent row proves the table rendered from the read, not just its heading.
+    assert.ok(neverRun > 0, 'Agent freshness rows must render "never run" for an empty agent_runs read');
   });
 });
