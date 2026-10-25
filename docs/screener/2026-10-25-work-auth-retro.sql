@@ -1,6 +1,7 @@
 -- -----------------------------------------------------------------------------
 -- Work-authorisation retro drop, 2026-10-25. LIVE WRITES: the orchestrator runs them, one
--- statement per MCP execute_sql call, in order, reading each result before the next.
+-- block per MCP execute_sql call, in order, reading each result before the next. The one
+-- exception is STMT 1+2: a single begin ... commit block sent as ONE call (see its header).
 --
 -- WHY THIS EXISTS. The screener's new stage-0b work-auth gate
 -- (supabase/functions/_shared/screen/work-auth-gate.ts) only judges NEW jobs. The rows already
@@ -405,6 +406,17 @@ select count(*) filter (where d.why = 'location') as location_rows,
   join public.applications a on a.id = d.id
   join public.jobs j on j.id = a.job_id;
 
+-- STMT 1+2 (write, ONE execute_sql call): stamp the reason, then move the stamped rows, inside
+-- one explicit transaction. WHY ONE TRANSACTION: run as two calls, a stamped row sat at
+-- passed_filters between them, and a matcher run in that gap could score it, leaving a scored
+-- row carrying a stale 'work_auth' reason. Here the stamp's row locks are held until commit, so
+-- the matcher waits instead, and any failure (a PT409 below included) rolls BOTH back. A re-run
+-- is still safe: every write is limited to rows not yet written.
+-- NOT ONE STATEMENT ON PURPOSE: a CTE that stamps and calls advance_application_status in the
+-- same statement would update each row twice in one command, and the second (the function's)
+-- update would see neither the stamp nor the new updated_at.
+begin;
+
 -- STMT 1 (write): stamp the reason first. log_status_change copies drop_reason into the event
 -- detail, so stamping BEFORE the status move puts 'work_auth' on the event too. A same-status
 -- UPDATE is let through by guard_status_transition (it returns early when status is unchanged).
@@ -780,17 +792,10 @@ drop_set as (
 update public.applications a
    set drop_reason = 'work_auth'
  where a.id in (select id from drop_set)
+   -- Re-checked against the row's LATEST version when the update reaches it, so a row the
+   -- matcher scored after drop_set was read is skipped instead of stamped.
+   and a.status = 'passed_filters'
    and a.drop_reason is distinct from 'work_auth';
-
--- STMT 1b (write): Sigma and Perpay were moved to dropped_filter by hand on 2026-10-24 with
--- drop_reason left NULL. Their status is already right; only the reason is missing.
-update public.applications
-   set drop_reason = 'work_auth'
- -- Both ids are Teja's rows, dropped under the same ruling.
- where id in ('428f6cbc-dee9-4471-9da8-271750346d97', '634f6f48-a9db-49e0-835f-eaf7819530f8')
-   -- Only if still dropped and still unstamped, so this cannot clobber a later decision.
-   and status = 'dropped_filter'
-   and drop_reason is null;
 
 -- STMT 2 (write): move every stamped row through the one sanctioned path. The stamp from stmt 1
 -- IS the set, so no list is repeated here. 'human' is allowed on passed_filters -> dropped_filter.
@@ -804,7 +809,11 @@ with moved as materialized (
              'reason', 'work_auth',
              'decided_by', 'Teja 2026-10-24 19:13',
              'source', 'docs/screener/2026-10-25-work-auth-retro.sql'
-           )
+           ),
+           -- p_expected_updated_at, read in this same statement AFTER stmt 1's stamp (set_updated_at
+           -- moved it), so the function's stale-read gate is on: a row changed since this read
+           -- raises PT409, and the transaction rolls back whole.
+           a.updated_at
          ) as r
     from public.applications a
    -- Stamped by stmt 1 and not moved yet: the re-run condition.
@@ -813,6 +822,24 @@ with moved as materialized (
 )
 -- Reading (r).id forces every call to run; count is the number of rows moved.
 select count((r).id) as moved from moved;
+
+-- End of the STMT 1+2 transaction. The MCP may show only the last result of a multi-statement
+-- call, so STMT 3 below is the proof, not this block's output.
+commit;
+
+-- STMT 1b (write): Sigma and Perpay were moved to dropped_filter by hand on 2026-10-24 with
+-- drop_reason left NULL. Their status is already right; only the reason is missing.
+-- NO EVENT ON PURPOSE: a same-status UPDATE writes no application_events row, and none is
+-- needed. Both already carry their drop in the log (checked live 2026-10-25): a status_change
+-- plus a 'note' whose reason quotes Teja's 2026-10-24 18:44 ruling, at 13:15:21Z (Sigma) and
+-- 13:15:28Z (Perpay). This only fills the column so stmt 3's work_auth count includes them.
+update public.applications
+   set drop_reason = 'work_auth'
+ -- Both ids are Teja's rows, dropped under the same ruling.
+ where id in ('428f6cbc-dee9-4471-9da8-271750346d97', '634f6f48-a9db-49e0-835f-eaf7819530f8')
+   -- Only if still dropped and still unstamped, so this cannot clobber a later decision.
+   and status = 'dropped_filter'
+   and drop_reason is null;
 
 -- STMT 3 (read-only): the after picture. Expect stamped_still_passed = 0, and work_auth_dropped =
 -- stmt 0's total + 2 (Sigma, Perpay).
