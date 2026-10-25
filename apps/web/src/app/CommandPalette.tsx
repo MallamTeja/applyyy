@@ -99,7 +99,18 @@ export function CommandPalette({
     setSelectedIndex(0);
   }, [query]);
 
-  // Auto-focus input and bind Escape on open
+  // The latest onClose, for the Escape listener below. Read through a ref so the open effect does
+  // not depend on it: AppShell passes a new arrow on every render, and a dependency on it re-ran
+  // the reset (setQuery('')) on each shell re-render, wiping what the user had typed (2026-10-25).
+  const onCloseRef = useRef(onClose);
+  // Synced after every commit, so Escape (always pressed after a commit) calls the current callback.
+  useEffect(() => {
+    // The one write; nothing renders from a ref.
+    onCloseRef.current = onClose;
+  });
+
+  // Auto-focus input and bind Escape on open. Depends on isOpen ONLY, so the reset runs on the
+  // closed -> open transition and never again while the palette stays open.
   useEffect(() => {
     if (isOpen) {
       setQuery('');
@@ -109,13 +120,14 @@ export function CommandPalette({
       const handleGlobalKeyDown = (e: KeyboardEvent) => {
         if (e.key === 'Escape') {
           e.preventDefault();
-          onClose();
+          // Through the ref: the listener was bound at open, so a captured onClose could be stale.
+          onCloseRef.current();
         }
       };
       window.addEventListener('keydown', handleGlobalKeyDown);
       return () => window.removeEventListener('keydown', handleGlobalKeyDown);
     }
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   // Keyboard navigation: ArrowDown, ArrowUp, Enter
   const handleKeyDown = useCallback(

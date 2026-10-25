@@ -698,4 +698,55 @@ describe('Playwright E2E Operator Console Suite', () => {
     // At least one agent row proves the table rendered from the read, not just its heading.
     assert.ok(neverRun > 0, 'Agent freshness rows must render "never run" for an empty agent_runs read');
   });
+
+  // Regression for the palette-reset bug (2026-10-25): AppShell passed a fresh onClose on every
+  // render, CommandPalette's open effect depended on it, so ANY shell re-render while the palette
+  // was open re-ran setQuery('') and wiped what the user had typed. Test 2's residual flake at 6x
+  // throttle was this: the shell's counts read resolving mid-test. Here that read is HELD and
+  // released on purpose, so the re-render lands exactly while a query is typed, every run.
+  it('11. keeps the typed command-palette query when the app shell re-renders while it is open', async () => {
+    // Set by the gate below; the route handler waits on it, so the test decides when the answer lands.
+    let release: () => void = () => {};
+    // One promise, resolved once: every held request (mount read + refetch) is released together.
+    const gate = new Promise<void>((resolve) => {
+      // Captured so release() can open the gate from outside the handler.
+      release = resolve;
+    });
+    // Page-level route: Playwright gives it precedence over the context's catch-all [] for this RPC.
+    await page.route('**/rest/v1/rpc/application_status_counts', async (route) => {
+      // Hold the answer until the query has been typed.
+      await gate;
+      // Two blocked rows make the count non-zero, so AppShell renders its "needs you" badge from it.
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{ status: 'blocked_needs_human', row_count: 2 }]) });
+    });
+    // try/finally: the held route must not outlive this test, even when an assertion fails.
+    try {
+      // A full load remounts AppShell, so its mount-time counts read is the one held above.
+      await page.goto(`${serverUrl}/pipeline`, { waitUntil: 'domcontentloaded' });
+      // The shell has mounted and its counts read is now waiting on the gate.
+      await page.waitForSelector('.page__title');
+      // Open the palette the way a user does.
+      await page.keyboard.press('Control+k');
+      // The open effect focuses the input last, so its first (legitimate) reset is already done.
+      await page.locator('.palette-input:focus').waitFor();
+      // The query whose survival is under test.
+      await page.locator('.palette-input').fill('Answer Bank');
+      // Let the counts answer land: AppShell re-renders while the palette is open and typed into.
+      release();
+      // The badge's screen-reader sentence is rendered FROM that answer, so it proves the re-render committed.
+      await page.getByText('2 jobs need you to apply or verify by hand').waitFor({ state: 'attached' });
+      // Two animation frames: React flushes passive effects of a network-driven render asynchronously,
+      // so without this the read below could run before a buggy reset and pass for the wrong reason.
+      await page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+      // The typed text must still be there after the shell re-render.
+      assert.equal(await page.locator('.palette-input').inputValue(), 'Answer Bank', 'An AppShell re-render must not clear the typed palette query');
+    } finally {
+      // Open the gate in case an early step failed, so the held handler can finish.
+      release();
+      // Later tests get the context's catch-all answer for this RPC again.
+      await page.unroute('**/rest/v1/rpc/application_status_counts');
+      // Leave the palette closed for whatever runs next.
+      await page.keyboard.press('Escape');
+    }
+  });
 });
