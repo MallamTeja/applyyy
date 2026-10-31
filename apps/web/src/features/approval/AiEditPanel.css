@@ -1,0 +1,193 @@
+/* The AI box on the review page. Semantic tokens only (docs/ui/theming-convention.md), so light
+   and dark both follow tokens.css with no [data-theme] rules here. */
+
+/* The box: a tool panel between the edit note and the comparison toolbar. */
+.ai-edit {
+  /* Separated from the edit note above and the comparison toolbar below. */
+  margin-top: var(--gap-4);
+  /* Same inset as the other panels on this screen. */
+  padding: var(--gap-3) var(--gap-4);
+  /* A panel, not a sheet: it is a tool beside the resume, not part of it. */
+  background: var(--panel);
+  /* Hairline edge, like the coverage track. */
+  border: 1px solid var(--rule);
+  /* The control radius, matching the buttons inside it. */
+  border-radius: var(--radius-control);
+}
+
+/* The box's heading. */
+.ai-edit__title {
+  /* Section-label size, same as the coverage title. */
+  font-size: var(--size-sm);
+  /* Medium weight: a label, not a headline. */
+  font-weight: 500;
+}
+
+/* The one-line contract under the heading, and the token / dropped lines under the answer. */
+.ai-edit__hint,
+.ai-edit__meta {
+  /* Read once; kept small. */
+  font-size: var(--size-xs);
+  /* Muted: neither is a verdict. */
+  color: var(--ink-muted);
+  /* Tight under the title. */
+  margin-top: var(--gap-1);
+}
+
+/* The instruction box. */
+.ai-edit__input {
+  /* Full width of the panel. */
+  width: 100%;
+  /* Space from the hint. */
+  margin-top: var(--gap-2);
+  /* Body size, so what is typed is readable. */
+  font: inherit;
+  /* Same. */
+  font-size: var(--size-base);
+  /* Inset for the text. */
+  padding: var(--gap-2);
+  /* The input sits on the sheet colour, a step off the panel. */
+  background: var(--sheet);
+  /* Text colour follows the theme. */
+  color: var(--text-primary);
+  /* Hairline edge. */
+  border: 1px solid var(--rule);
+  /* Matches the buttons. */
+  border-radius: var(--radius-control);
+  /* Only taller, never wider: width is the panel's. */
+  resize: vertical;
+}
+
+/* Suggest and Apply all, side by side. */
+.ai-edit__actions {
+  /* Buttons in a row. */
+  display: flex;
+  /* Spaced. */
+  gap: var(--gap-2);
+  /* Under the input. */
+  margin-top: var(--gap-2);
+}
+
+/* A failed ask, or a refused apply under its suggestion. */
+.ai-edit__error {
+  /* The fabrication red is the screen's only error colour. */
+  color: var(--fabricated);
+  /* Small. */
+  font-size: var(--size-sm);
+  /* Tight. */
+  margin-top: var(--gap-1);
+}
+
+/* An empty live region takes no room. */
+.ai-edit__error:empty {
+  /* Kept in the tree so announcements still fire; just not drawn. */
+  display: none;
+}
+
+/* Everything that arrives with an answer. */
+.ai-edit__answer {
+  /* Separated from the controls. */
+  margin-top: var(--gap-3);
+}
+
+/* The AI's own sentence about its change. */
+.ai-edit__note {
+  /* Secondary text: the AI's own words about its change. */
+  color: var(--text-secondary);
+  /* Small. */
+  font-size: var(--size-sm);
+}
+
+/* The proposals. */
+.ai-edit__list {
+  /* The numbers are noise; each item is boxed instead. */
+  list-style: none;
+  /* No indent. */
+  padding: 0;
+  /* Under the note. */
+  margin-top: var(--gap-2);
+  /* Items stacked. */
+  display: grid;
+  /* Spaced. */
+  gap: var(--gap-2);
+}
+
+/* One proposal as a card. */
+.ai-edit__item {
+  /* Change on the left, button on the right, error underneath. */
+  display: grid;
+  /* The change takes the room. */
+  grid-template-columns: 1fr auto;
+  /* Spaced. */
+  gap: var(--gap-1) var(--gap-3);
+  /* Button level with the first line. */
+  align-items: start;
+  /* Inset. */
+  padding: var(--gap-2) var(--gap-3);
+  /* On the sheet, so each proposal reads as a card on the panel. */
+  background: var(--sheet);
+  /* Hairline edge. */
+  border: 1px solid var(--rule);
+  /* Matches the panel. */
+  border-radius: var(--radius-control);
+}
+
+/* An applied edit is done; the traced wash says "this is now on the resume". */
+.ai-edit__item--applied {
+  /* Same green the diff uses for traced lines. */
+  background: var(--traced-wash);
+}
+
+/* A refusal spans both columns under the change. */
+.ai-edit__item > .ai-edit__error {
+  /* Full width. */
+  grid-column: 1 / -1;
+}
+
+/* The before/after block inside a card. */
+.ai-edit__change {
+  /* Body size. */
+  font-size: var(--size-sm);
+  /* Old and new stacked. */
+  display: grid;
+  /* Tight. */
+  gap: var(--gap-1);
+}
+
+/* "Summary" or "Bullet": which part of the resume the edit lands on. */
+.ai-edit__where {
+  /* A small label for which part of the resume. */
+  font-size: var(--size-xs);
+  /* Muted. */
+  color: var(--ink-muted);
+}
+
+/* The text going away. */
+.ai-edit__old {
+  /* Muted: it is going away. */
+  color: var(--ink-muted);
+}
+
+/* The proposed wording. */
+.ai-edit__new {
+  /* No underline: the box already says this is the proposal. */
+  text-decoration: none;
+  /* Full colour. */
+  color: var(--text-primary);
+}
+
+/* The new-number warning. */
+.ai-edit__warn {
+  /* A new number needs checking: the fabrication colour, because an untrue number is one. */
+  color: var(--fabricated-strong);
+  /* Small. */
+  font-size: var(--size-xs);
+}
+
+/* "Applied" in place of the button. */
+.ai-edit__done {
+  /* The traced green. */
+  color: var(--traced);
+  /* Small. */
+  font-size: var(--size-sm);
+}

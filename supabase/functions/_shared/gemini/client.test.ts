@@ -1192,3 +1192,53 @@ test("429 last_error goes through withGoogleError: key shapes redacted, size bou
   // Bounded: the 50-entry details array is not dumped (cap 200 + status line + model tag).
   assert.ok(stored.length < 320, `stored ${stored.length} chars`);
 });
+
+// --- TOKEN-COST CONTROLS (2026-10-31, resume-assist) --------------------------------
+// The two halves of the contract: a caller that sets `generation` gets it on the wire, and a
+// caller that does not sends EXACTLY the body it sent before the option existed.
+
+// Runs one call through a fake fetch and returns the request body Google would have received.
+async function capturedRequestBody(extra: Partial<Parameters<typeof generateGeminiContent>[1]>): Promise<Record<string, unknown>> {
+  // One key, claimed once.
+  const db = fakeClient({ claimSequence: [{ data: 1, error: null }] });
+  // Zero-spacing pacer so the test is instant.
+  const pacer = new GeminiPacer({ minIntervalMs: 0, clock: createVirtualClock(1000) });
+  // Filled by the fake fetch.
+  let body = "";
+  // Answers 200 with a minimal candidate, recording what was sent.
+  const fakeFetch: typeof fetch = async (_input, init) => {
+    // The serialised request, exactly as it would go over the network.
+    body = String(init?.body);
+    // A well-formed success, so the call completes.
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "{}" }] } }] }), { status: 200 });
+  };
+  // The call under test; `extra` carries the options the case varies.
+  await generateGeminiContent(db, {
+    readKey: keysFrom({ 1: "k1" }),
+    pacer,
+    fetchSeam: fakeFetch,
+    prompt: { systemInstruction: "s", userContent: "u", responseSchema: { type: "OBJECT" } },
+    ...extra,
+  });
+  // Parsed so assertions can read fields.
+  return JSON.parse(body) as Record<string, unknown>;
+}
+
+test("generateGeminiContent sends maxOutputTokens and thinkingLevel when generation is set", async () => {
+  // Both cost controls set.
+  const sent = await capturedRequestBody({ generation: { maxOutputTokens: 900, thinkingLevel: "low" } });
+  // Schema keys first, then the cost keys, under the REST names generateContent reads.
+  assert.deepEqual(sent.generationConfig, {
+    responseMimeType: "application/json",
+    responseSchema: { type: "OBJECT" },
+    maxOutputTokens: 900,
+    thinkingConfig: { thinkingLevel: "low" },
+  });
+});
+
+test("generateGeminiContent without generation sends the pre-2026-10-31 body unchanged", async () => {
+  // No cost controls: every existing caller.
+  const sent = await capturedRequestBody({});
+  // Exactly the schema half, nothing added: a red here means an existing caller's bill changed.
+  assert.deepEqual(sent.generationConfig, { responseMimeType: "application/json", responseSchema: { type: "OBJECT" } });
+});

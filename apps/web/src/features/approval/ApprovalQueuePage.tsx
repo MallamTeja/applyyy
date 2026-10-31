@@ -81,6 +81,8 @@ import { attestSkill } from './attestSkill';
 // so every row can be SEEN before it is approved. Shared with the pipeline history page.
 import { ResumePreview } from '../resume-preview/ResumePreview';
 import { supabase } from '../../data/supabase';
+// The AI box's ask: the resume-assist edge function, never-throwing (2026-10-31).
+import { requestAssist } from './aiEdit';
 // Newest arrival in review first; pure, so the order is testable without rendering the page.
 import { newestInReviewFirst } from './queueOrder';
 
@@ -1417,6 +1419,8 @@ export function ApprovalQueuePage(): ReactElement {
                     locked={settling.has(diff.applicationId)}
                     /* The pinned master's groups, so a missing keyword can be vouched for and printed in one. */
                     attestCategories={skillGroups(sources.get(diff.applicationId))}
+                    /* The AI box's ask; its proposals come back through onEdit like any hand edit. */
+                    onAssist={(body) => requestAssist(supabase, body)}
                   />
                   {/* The diff stays expanded (Bucket B is never collapsed); the
                       rendered document is an extra, opened on demand because it is tall. */}
@@ -1561,6 +1565,8 @@ export function ApprovalQueuePage(): ReactElement {
                         locked={settling.has(diff.applicationId)}
                         /* Same vouch-and-add groups as Bucket B. */
                         attestCategories={skillGroups(sources.get(diff.applicationId))}
+                        /* Same AI box as Bucket B. */
+                        onAssist={(body) => requestAssist(supabase, body)}
                       />
                     </div>
                   ) : null}

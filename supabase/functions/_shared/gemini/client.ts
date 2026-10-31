@@ -623,6 +623,19 @@ export interface GenerateGeminiOptions {
   // with defaults: 4 attempts x 25s + 13.75s backoff = 113.75s, so callers on a short Edge budget
   // should pass a smaller `timeoutMs` and/or `maxRetries`.
   readonly timeoutMs?: number;
+  // TOKEN-COST CONTROLS (2026-10-31, resume-assist). Absent = the request body is
+  // byte-identical to before, so no existing caller changes behaviour or bill.
+  readonly generation?: {
+    // Hard cap on billed output. Gemini counts THINKING tokens inside this cap and bills
+    // them as output (5x the input price on 3.8-flash), so it bounds the worst-case cost of
+    // one call. Too low truncates the JSON; the caller sees finishReason "MAX_TOKENS".
+    readonly maxOutputTokens?: number;
+    // How much the model may think before answering. A closed union of the levels EVERY
+    // model this file can resolve to accepts: 3.5-flash-lite and 3.6-flash also take
+    // "minimal", but 3.8-flash (the code default) answers it with a 400, so it is left out
+    // and cannot be expressed. https://ai.google.dev/gemini-api/docs/thinking
+    readonly thinkingLevel?: "low" | "medium" | "high";
+  };
 }
 
 export interface GeminiResponseBody {
@@ -638,6 +651,19 @@ export interface GeminiResponseBody {
     // API output, and the consumer must shape-check it rather than inherit a guess here.
     readonly groundingMetadata?: unknown;
   }>;
+  // The token counts Google bills on. It was always in the body; it is typed now so a
+  // caller can report cost instead of guessing it. Every field optional: a response that
+  // omits one is still a valid response, and the reader must shape-check the numbers.
+  readonly usageMetadata?: {
+    // Input tokens, including any served from the implicit cache.
+    readonly promptTokenCount?: number;
+    // Of those, the ones served from cache (billed at a discount).
+    readonly cachedContentTokenCount?: number;
+    // Visible output tokens.
+    readonly candidatesTokenCount?: number;
+    // Thinking tokens, billed as output but never shown.
+    readonly thoughtsTokenCount?: number;
+  };
 }
 
 export async function generateGeminiContent(
@@ -669,6 +695,21 @@ export async function generateGeminiContent(
     };
   }
 
+  // The cost half of generationConfig, each key only when the caller set it, so a caller
+  // that sets nothing sends exactly the body it sent before this option existed.
+  const costConfig = {
+    // The output cap, thinking included.
+    ...(options.generation?.maxOutputTokens !== undefined ? { maxOutputTokens: options.generation.maxOutputTokens } : {}),
+    // The thinking level, under the REST field generateContent reads it from.
+    ...(options.generation?.thinkingLevel !== undefined ? { thinkingConfig: { thinkingLevel: options.generation.thinkingLevel } } : {}),
+  };
+  // The JSON-mode half, unchanged in shape and key order from before.
+  const schemaConfig = options.prompt.responseSchema
+    ? { responseMimeType: "application/json", responseSchema: options.prompt.responseSchema }
+    : {};
+  // Both halves merged; schema keys first so a schema-only body serialises as it always did.
+  const generationConfig = { ...schemaConfig, ...costConfig };
+
   const requestBody = {
     contents: [
       {
@@ -679,12 +720,8 @@ export async function generateGeminiContent(
     systemInstruction: {
       parts: [{ text: options.prompt.systemInstruction }],
     },
-    generationConfig: options.prompt.responseSchema
-      ? {
-          responseMimeType: "application/json",
-          responseSchema: options.prompt.responseSchema,
-        }
-      : undefined,
+    // Undefined when both halves are empty: JSON.stringify drops the key, as it always did.
+    generationConfig: Object.keys(generationConfig).length > 0 ? generationConfig : undefined,
     // Forwarded only when given: an empty or absent `tools` key is an ungrounded call, and
     // omitting the key keeps every existing caller's request byte-identical.
     ...(options.tools !== undefined && options.tools.length > 0 ? { tools: options.tools } : {}),

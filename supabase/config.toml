@@ -234,3 +234,10 @@ verify_jwt = true
 [functions.scout-web]
 # True: the gateway rejects anonymous calls before any quota is spent.
 verify_jwt = true
+
+# New function (2026-10-31): the AI box on the review page proposes resume edits.
+# The browser calls it through functions.invoke('resume-assist') with the signed-in
+# user's JWT, and every call spends Gemini quota, so no tokenless caller is legitimate.
+[functions.resume-assist]
+# True: the gateway rejects anonymous calls before any quota is spent.
+verify_jwt = true

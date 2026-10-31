@@ -50,6 +50,10 @@ import { SourceBadge } from '../../app/SourceBadge';
 /* The shared http(s)-only gate for every href built from stored data. */
 import { safeHref } from '../../app/safeHref.ts';
 import type { DiscoverySource } from '../../data/contract';
+/* The AI box: proposes edits that apply through this view's own save path. */
+import { AiEditPanel } from './AiEditPanel';
+/* Types only: the ask and answer of the AI box. */
+import type { AssistBody, AssistResult } from './aiEdit';
 
 import './DiffView.css';
 
@@ -98,6 +102,9 @@ export interface DiffViewProps {
   /* The pinned master's skill groups, offered when the operator vouches for a missing skill.
      Absent (or empty) means no attest offer: a skill with no honest group cannot be printed. */
   readonly attestCategories?: readonly string[] | undefined;
+  /* The AI box's ask (2026-10-31). Absent means no AI box; its proposals apply through onEdit,
+     so a screen without a save path never shows it. */
+  readonly onAssist?: ((body: AssistBody) => Promise<AssistResult>) | undefined;
 }
 
 /* --- The job being approved against ------------------------------------- */
@@ -1160,6 +1167,8 @@ export function DiffView({
   locked,
   // Passed straight to the coverage bar, the only place a missing keyword is offered.
   attestCategories,
+  // The AI box's ask; absent hides the box.
+  onAssist,
 }: DiffViewProps): ReactElement {
   // Every claim still in the resume; claims on edited or removed lines are already gone.
   const claims = useMemo(() => collectFlaggedClaims(diff), [diff]);
@@ -1321,6 +1330,12 @@ export function DiffView({
       {/* D4: the reason editing is off, once, above the lines it applies to. */}
       {onEdit !== undefined && editDisabledReason ? (
         <p className="diff__edit-note">{editDisabledReason}</p>
+      ) : null}
+
+      {/* The AI box, only where an edit could honestly land: a save path, an ask, and editing on.
+          Keyed by row so a new row never shows the previous row's proposals. */}
+      {runEdit !== null && onAssist !== undefined && !editDisabledReason ? (
+        <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} />
       ) : null}
 
       {/* View Mode Toolbar */}
