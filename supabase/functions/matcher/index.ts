@@ -71,7 +71,7 @@ import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 import { parseApplicationIdParam, parseUuidParam } from "../_shared/http/application-id.ts";
 // The score threshold: decides advance (-> scored), drop (-> dropped_filter) or refuse. Pure,
 // so its boundaries are table-tested in match/score-threshold.test.ts rather than only here.
-import { decideScoreThreshold } from "../_shared/match/score-threshold.ts";
+import { decideScoreThreshold, isHumanPicked } from "../_shared/match/score-threshold.ts";
 // Per-invocation deadline: plans each Gemini call from the time left and stops between rows.
 import { createDeadline, deadlineNote, runBatchWithDeadline, shortenedBudgetNote, type CallOptions } from "../_shared/agent/deadline.ts";
 // The status-guarded score write and the stamp-guarded status move; extracted so both guards
@@ -338,7 +338,9 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     // Target applications table for queue row lookup.
     .from("applications")
     // Select application ID and joined job details columns required by scorer.
-    .select("id, job_id, jobs (title, company_name, description_raw, location_raw, min_experience_years, employment_type)")
+    // discovered_via (2026-10-31): a 'manual' entry marks a human-pasted job, which skips the
+    // pre-gate and the score floor (isHumanPicked).
+    .select("id, job_id, jobs (title, company_name, description_raw, location_raw, min_experience_years, employment_type, discovered_via)")
     // Filter applications where status equals 'passed_filters'.
     .eq("status", "passed_filters")
     // Narrow to the one requested row; the status filter stays, so a wrong-status id yields
@@ -475,6 +477,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
         location_raw?: string | null;
         min_experience_years?: number | string | null;
         employment_type?: string;
+        // The human-pick marker; read through isHumanPicked, which shape-checks it.
+        discovered_via?: unknown;
       } | null;
 
       // Construct EvalCase input object matching eval gate interface for scorer.
@@ -513,7 +517,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
         // STEP 0: Gate the score BEFORE any write. An unreadable score (NaN, null, wrong scale)
         // FAILS CLOSED: nothing is written, the row stays at passed_filters, and the reason
         // lands in `failures` — never advanced, never dropped on a number that is not one.
-        const threshold = decideScoreThreshold(matchScore.score);
+        // A human-pasted job advances whatever its score; an unreadable score still fails closed.
+        const threshold = decideScoreThreshold(matchScore.score, isHumanPicked(job?.discovered_via));
         // The refusal branch: report it and move on to the next row.
         if (threshold.kind === "invalid") {
           // Counted as a failure so the run's error_count and error_detail show it.
@@ -609,7 +614,10 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   }, () => {
     // Counted for the run summary; the row itself is not touched.
     preGateSurvivorCount += 1;
-  })), { deadline, targeted: applicationId !== null });
+  }),
+    // A human-pasted job is never judged by the title/keyword gate (job-link-intake).
+    (row) => isHumanPicked((row.jobs as unknown as { discovered_via?: unknown } | null)?.discovered_via),
+  ), { deadline, targeted: applicationId !== null });
   // The sweep cursor, computed by the tested pure function from what was PROCESSED, so the
   // response never claims "done" while rows are unjudged (see nextSweepCursor).
   const cursorOut = nextSweepCursor({

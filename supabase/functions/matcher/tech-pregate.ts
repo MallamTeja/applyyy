@@ -195,8 +195,13 @@ export function withTechPreGate<R extends { readonly id: string }, C>(
   onGated: (row: R, outcome: Exclude<PreGateOutcome, { kind: "continue" }>) => void,
   // The real scorer; never called for a row the gate dropped, skipped or failed.
   score: (row: R, call: C) => Promise<void>,
+  // OPTIONAL (2026-10-31): rows the gate must not judge at all, i.e. jobs the human picked by
+  // pasting a link. Defaults to "none", so every existing caller and test is unchanged.
+  skipGate: (row: R) => boolean = () => false,
 ): (row: R, call: C) => Promise<void> {
   return async (row, call) => {
+    // The human already chose this job; the title/keyword gate exists to choose for them.
+    if (skipGate(row)) return await score(row, call);
     // Judge and, if rejected, drop — before anything that could spend a Gemini call. Any
     // throw (e.g. a null element inside a text[] config column reaching `.trim()`) becomes
     // this row's error: the gate sits OUTSIDE the scorer's per-row try/catch, and

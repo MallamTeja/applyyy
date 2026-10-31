@@ -434,14 +434,15 @@ test('status graph parity — the TS mirror matches the transitions seeded into 
   await t.test('exactly one backward edge is machine-walkable, and it is `interview -> oa_pending`', () => {
     // "Backward" is defined by APPLICATION_STATUSES declaration order, which is
     // pipeline order (and Postgres's sort order for the enum). Six comments across the
-    // repo claimed there are NO backward edges; there are seven, and they are the
+    // repo claimed there are NO backward edges; there are eight (the eighth,
+    // dropped_filter -> passed_filters, added 2026-10-31 for pasted links), and they are the
     // recovery lanes. The property actually worth protecting is that all but one are
     // human-only — a reader who believes "no backward edges" concludes the actor check
     // on reverse moves is redundant, and it is the whole safety property.
     const rank = new Map(contract.APPLICATION_STATUSES.map((s, i) => [s as string, i]));
     const backward = seeded.filter((s) => rank.get(s.to)! < rank.get(s.from)!);
 
-    assert.equal(backward.length, 7, `expected 7 backward edges, found ${backward.length}: ${backward.map(key).join(', ')}`);
+    assert.equal(backward.length, 8, `expected 8 backward edges, found ${backward.length}: ${backward.map(key).join(', ')}`);
 
     const machineWalkable = backward.filter((s) => s.agents.some((a) => a !== 'human'));
     // Back to ONE on 2026-10-23 (Teja): `needs_verification -> applied` returned to

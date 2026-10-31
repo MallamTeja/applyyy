@@ -77,7 +77,8 @@ export interface WebScoutClient {
 }
 
 // Narrowing helper: a plain object, not null or an array, before any property is read.
-function isRecord(value: unknown): value is Record<string, unknown> {
+// Exported (2026-10-31) for AddJobLinkPanel, which validates its function's body the same way.
+export function isRecord(value: unknown): value is Record<string, unknown> {
   // typeof null is 'object', and arrays are objects, so both are excluded explicitly.
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -154,7 +155,8 @@ export const UPSTREAM_MESSAGE = 'Gemini is overloaded right now — try again in
 
 // supabase-js puts non-2xx bodies behind error.context (a fetch Response). Read it
 // defensively: it may be absent, already consumed, or not JSON.
-async function readErrorBody(error: unknown): Promise<unknown> {
+// Exported (2026-10-31) so AddJobLinkPanel reads its function's refusals the same way.
+export async function readErrorBody(error: unknown): Promise<unknown> {
   // No object means no context to read.
   if (!isRecord(error)) return null;
   // The Response lives under `context` in FunctionsHttpError.

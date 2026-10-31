@@ -67,10 +67,16 @@ const IN_FLIGHT: readonly ApplicationStatus[] = [
   'interview',
 ];
 
+/* Closed on the board although the graph has a way back out (2026-10-31): a pasted link can
+   re-add a dropped job (dropped_filter -> passed_filters, human-only), which makes the status
+   non-terminal. Thousands of dropped rows still belong under Closed, not In Flight. */
+const CLOSED_WITH_A_WAY_BACK: readonly ApplicationStatus[] = ['dropped_filter'];
+
 function groupOf(status: ApplicationStatus): BoardGroup {
   if (NEEDS_YOU.includes(status)) return 'needs_you';
   if (IN_FLIGHT.includes(status)) return 'in_flight';
-  if (isTerminal(status)) return 'closed';
+  // Checked beside isTerminal so the explicit list above keeps Dropped where it always sat.
+  if (isTerminal(status) || CLOSED_WITH_A_WAY_BACK.includes(status)) return 'closed';
   return 'in_flight';
 }
 
@@ -108,10 +114,11 @@ function StatusColumn({
 }): ReactElement {
   const humanMoves = nextStatuses(status, 'human');
   const controlHome = humanControlLocation(status);
-  const terminal = isTerminal(status);
+  // The Closed group's styling, by group rather than isTerminal, so Dropped keeps its look.
+  const closed = groupOf(status) === 'closed';
 
   return (
-    <section className={terminal ? 'column column--terminal' : 'column'}>
+    <section className={closed ? 'column column--terminal' : 'column'}>
       <header
         className="column__head column__head--interactive"
         onClick={() => onOpenDrawer(status)}

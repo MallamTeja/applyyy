@@ -45,6 +45,8 @@ import { DiscoveryModal } from '../pipeline/DiscoveryModal';
 import { PipelineRunModal } from './PipelineRunModal';
 // Internet job search via the scout-web Edge Function; inserts land in this page's inventory.
 import { WebScoutPanel } from './WebScoutPanel';
+// Paste one job link: it skips every filter and runs straight to the Approval queue (2026-10-31).
+import { AddJobLinkPanel } from './AddJobLinkPanel.tsx';
 import { getCompanyCooldownInfo } from '../settings/companyCatalog.ts';
 import {
   evaluateJobMatch,
@@ -595,6 +597,22 @@ export function DiscoveredJobsPage(): ReactElement {
           </button>
         </div>
       </section>
+
+      {/* Above web search: a link the human already chose outranks anything the scouts propose.
+          Same mount rule as the panel below: nothing to call without a client. */}
+      {supabase !== null && (
+        <AddJobLinkPanel
+          // The real functions client.
+          client={supabase}
+          // The same deps the Discovered cards run agents with.
+          pipelineDeps={liveRowPipelineDeps}
+          // Reload so the added (or revived) row shows in the lists.
+          onAdded={() => {
+            // Same reload the scout panels use.
+            void loadData();
+          }}
+        />
+      )}
 
       {/* Beside the header's scout/run buttons because it is another discovery source.
           Only mounted with a real client: the panel cannot do anything without one.

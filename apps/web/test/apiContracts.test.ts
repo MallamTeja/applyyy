@@ -161,7 +161,10 @@ describe('Pipeline Status Graph & Human Lane Transitions', () => {
   it('correctly partitions terminal vs non-terminal pipeline stages', () => {
     assert.equal(isTerminal('offer'), true);
     assert.equal(isTerminal('rejected'), true);
-    assert.equal(isTerminal('dropped_filter'), true);
+    // Not terminal since 2026-10-31: a pasted link re-adds a dropped job (dropped_filter -> passed_filters).
+    assert.equal(isTerminal('dropped_filter'), false);
+    // dropped_duplicate still has no way out.
+    assert.equal(isTerminal('dropped_duplicate'), true);
     assert.equal(isTerminal('awaiting_approval'), false);
     assert.equal(isTerminal('interview'), false);
   });

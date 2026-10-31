@@ -12,11 +12,11 @@
  * conflated them and produced a false all-clear, which is worse than no check
  * at all - so the predicate is now stated in each name:
  *
- *   HUMAN_ONLY_LANES      allowedAgents === ['human']      (11 edges)
+ *   HUMAN_ONLY_LANES      allowedAgents === ['human']      (13 edges)
  *     No automation will ever help. These need PROMINENT controls, because a
  *     person is the only thing that can move the row, ever.
  *
- *   HUMAN_REACHABLE_LANES allowedAgents.includes('human')  (31 edges)
+ *   HUMAN_REACHABLE_LANES allowedAgents.includes('human')  (34 edges)
  *     A human is permitted, often as a fallback for an agent. These still need
  *     controls, because the agent may not be running - and section 14 says a
  *     dead scheduled job is silent. `applying -> needs_verification` is the
@@ -27,8 +27,8 @@
  * COVERAGE IS CHECKED PER SOURCE STATUS, not per edge. A screen that renders
  * rows in status X and builds its buttons from `nextStatuses(X, 'human')`
  * covers every human-reachable edge out of X at once, and keeps covering them
- * when the schema stream adds one. Fifteen source statuses to claim rather
- * than thirty-one edges to transcribe - and transcribing edges by hand is what
+ * when the schema stream adds one. Sixteen source statuses to claim rather
+ * than thirty-four edges to transcribe - and transcribing edges by hand is what
  * produced the bug this file was rewritten to fix.
  *
  * Naming the pattern: the status graph is the single source of truth for the
@@ -171,6 +171,10 @@ const SCREENS_BY_SOURCE_STATUS: Readonly<
   passed_filters: { screen: 'Pipeline, discard on the card', readiness: 'affordance_only' },
   scored: { screen: 'Pipeline, discard on the card', readiness: 'affordance_only' },
   tailored: { screen: 'Pipeline, discard on the card', readiness: 'affordance_only' },
+  /* The way back out of a drop (2026-10-31, migration 20261031200000): pasting the job's link in
+   * Discovery's "Add a job by link" panel. job-link-intake sends dropped_filter -> passed_filters
+   * through advance_application_status as 'human', so the move is real, hence operable. */
+  dropped_filter: { screen: 'Discovery, Add a job by link (paste its link again)', readiness: 'operable' },
 
   /* --- The recovery queues on System health --------------------------- */
 

@@ -71,6 +71,18 @@
 }
 
 /* Focus ring for keyboard users; base.css has a global rule, this makes the intent local. */
+/* A full-row text box (AddJobLinkPanel's pasted job text): own line, room for a paragraph. */
+.web-scout__input--block {
+  /* Takes the whole row of the wrapping form instead of sharing it with the button. */
+  flex-basis: 100%;
+  /* Enough for a few lines of a pasted post. */
+  min-height: 6rem;
+  /* Only taller, never wider than the panel. */
+  resize: vertical;
+  /* Textareas default to a monospace font; match the input beside it. */
+  font-family: inherit;
+}
+
 .web-scout__input:focus-visible,
 .web-scout__link:focus-visible,
 .web-scout__rejected summary:focus-visible {

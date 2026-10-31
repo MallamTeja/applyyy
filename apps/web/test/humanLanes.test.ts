@@ -190,11 +190,13 @@ test('OPERABLE_HUMAN_CONTROLS is exactly the edges the approval and recovery que
     'blocked_needs_human->dropped_filter',
     'blocked_needs_human->failed',
     'failed->needs_verification',
+    // 2026-10-31: job-link-intake re-adds a dropped job when its link is pasted.
+    'dropped_filter->passed_filters',
   ];
   // Sorted on both sides so order in the graph does not matter, only membership.
   assert.deepEqual(OPERABLE_HUMAN_CONTROLS.map(key).sort(), [...expected].sort());
   // Stated as a number too, because the panel shows the number.
-  assert.equal(OPERABLE_HUMAN_CONTROLS.length, 9);
+  assert.equal(OPERABLE_HUMAN_CONTROLS.length, 10);
 });
 
 test('the held edge is counted inoperable and never operable', () => {

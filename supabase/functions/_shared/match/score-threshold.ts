@@ -45,7 +45,18 @@ export type ScoreThresholdDecision =
 //
 // `unknown` on purpose: the value crosses a boundary (an LLM response, parsed), so the
 // type cannot be trusted and the SHAPE is validated here instead of assumed.
-export function decideScoreThreshold(score: unknown): ScoreThresholdDecision {
+// True when a human picked this job by pasting its link (job-link-intake tags discovered_via
+// with 'manual'). Shape-checked: anything but an array holding that exact value is "not picked",
+// so a missing or malformed column can never wave a scouted row past the floor.
+export function isHumanPicked(discoveredVia: unknown): boolean {
+  // Array first, so a string "manual" (a mis-typed embed) does not count.
+  return Array.isArray(discoveredVia) && discoveredVia.includes("manual");
+}
+
+// humanPicked (2026-10-31): a job the human chose by link is never dropped for a low score; the
+// floor exists to choose FOR the human among scouted jobs. The score is still validated and
+// written, so the approval card shows the fit honestly. Defaults false: every other caller unchanged.
+export function decideScoreThreshold(score: unknown, humanPicked = false): ScoreThresholdDecision {
   // A score must be a number; a numeric string means something upstream mis-parsed.
   if (typeof score !== "number") {
     // `String()` keeps null/undefined readable in the failure entry.
@@ -67,7 +78,7 @@ export function decideScoreThreshold(score: unknown): ScoreThresholdDecision {
   // Banded by the rubric's own function, so the band in the event matches the dashboard.
   const band = bandForScore(score);
   // `>=` because the floor itself belongs to the human-review band (rubric.ts:63).
-  if (score >= MATCH_ADVANCE_FLOOR) {
+  if (score >= MATCH_ADVANCE_FLOOR || humanPicked) {
     // Reviewable or better: on to the Tailor.
     return { kind: "advance", score, band };
   }

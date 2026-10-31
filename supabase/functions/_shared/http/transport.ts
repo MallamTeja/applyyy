@@ -460,6 +460,11 @@ export async function httpFetch(
       continue;
     }
 
+    // A redirect the caller asked to handle itself (redirect: "manual") is an answer, not an
+    // error: the caller reads Location and re-checks the next hop (job-link-intake's SSRF guard).
+    // Before 2026-10-31 no caller used "manual", so this changes no existing behaviour.
+    if (cfg.redirect === "manual" && response.status >= 300 && response.status < 400) return response;
+
     // Any other non-2xx is terminal: a 400 will still be a 400 next time.
     if (!response.ok) {
       throw new HttpError(url, response.status, response.statusText, attemptNumber);

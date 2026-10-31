@@ -106,7 +106,7 @@ that one function's deploys and says nothing about age.
 ```
 Web:      cd apps/web && ./node_modules/.bin/tsc --noEmit && ./node_modules/.bin/vite build
 Tests:    node --test "<glob>"            # from the right cwd
-Deno:     cd supabase/functions && deno check --reload _shared/ */   # all 14 functions
+Deno:     cd supabase/functions && deno check --reload _shared/ */   # every function: count with ls */index.ts
 ```
 CI (`ci.yml`) runs the Deno check with a file-count assertion, plus a web tsc + vite build.
 

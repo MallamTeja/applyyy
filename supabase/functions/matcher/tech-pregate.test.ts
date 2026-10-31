@@ -436,3 +436,37 @@ test("matcher wiring: the scorer goes through selectScorer(mode, …), and the m
   // ...and in the right order.
   assert.ok(parseAt < runAt, `mode parsed at ${parseAt}, after agent_runs opened at ${runAt}`);
 });
+
+// --- skipGate: the human-pasted job (job-link-intake, 2026-10-31) ---------------------
+
+test("matcher pre-gate: a human-picked row skips the gate and reaches the scorer, with no drop written", async () => {
+  // The gate's client; its events list proves no drop was written.
+  const { db, events } = fakeRow();
+  // Rows the scorer received.
+  const scored: string[] = [];
+  // Rows the gate handled itself (must stay empty).
+  const gated: string[] = [];
+  const handler = withTechPreGate<Row, string>(
+    db,
+    PREFS,
+    readJob,
+    // A gated row would land here.
+    (row) => gated.push(row.id),
+    // The scorer the human-picked row must reach.
+    async (row) => {
+      scored.push(row.id);
+    },
+    // Only this id is human-picked.
+    (row) => row.id === "picked",
+  );
+  // The same non-engineering posting the gate drops in the test above.
+  await handler({ id: "picked", job: PARTNERSHIPS }, "call-1");
+  // An ordinary row is still gated, so the skip is per row, not global. "a1" is the id fakeRow models.
+  await handler({ id: "a1", job: PARTNERSHIPS }, "call-2");
+  // THE PROPERTY: the pasted job was scored, never judged by the title/keyword gate.
+  assert.deepEqual(scored, ["picked"]);
+  // And the scouted twin was still dropped by the gate.
+  assert.deepEqual(gated, ["a1"]);
+  // Exactly one drop event: the scouted row's, none for the picked one.
+  assert.equal(events.length, 1);
+});

@@ -67,7 +67,8 @@ export interface ScorerPrompt {
 // prompt can see that something was removed instead of wondering why the text reads
 // strangely. A silent deletion would make an attack invisible in exactly the artifact
 // someone would use to investigate one.
-function neutralizeFenceSequences(untrusted: string): string {
+// Exported (2026-10-31) so job-link-intake fences a pasted page with the SAME rule instead of a copy.
+export function neutralizeFenceSequences(untrusted: string): string {
   return untrusted.replace(/[<>]{3,}/g, "[removed-fence-like-sequence]");
 }
 

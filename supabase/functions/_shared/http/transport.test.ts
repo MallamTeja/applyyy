@@ -624,3 +624,40 @@ describe("robots gate", () => {
     assert.equal(state.robotsCalls, 1);
   });
 });
+
+// The redirect branch: a caller that asks for `redirect: "manual"` must get the 3xx back
+// to read Location itself (job-link-intake re-checks every hop against its SSRF guard).
+// Both directions are pinned: manual returns the 3xx, the default still throws on it.
+describe("redirect: 'manual' returns a 3xx instead of throwing", () => {
+  test("manual mode hands the 302 and its Location back to the caller", async () => {
+    // The hop the caller must re-check; a fixed value so the header read can be compared exactly.
+    const next = "https://example.test/next";
+    // One scripted 302 carrying Location: the shape a real server sends for a moved page.
+    const state = stubFetch([() => new Response(null, { status: 302, headers: { location: next } })]);
+    // Called with manual mode, which is the only switch that should turn a 3xx into an answer.
+    const response = await httpFetch("https://example.test/start", { redirect: "manual" });
+    // The 3xx itself came back, not a thrown HttpError and not a followed 200.
+    assert.equal(response?.status, 302);
+    // Location survived the trip: it is the whole reason the caller asked for manual mode.
+    assert.equal(response?.headers.get("location"), next);
+    // Exactly one target attempt: a 3xx is an answer, so it must never enter the retry loop.
+    assert.equal(state.calls, 1);
+    // The option reached fetch itself; otherwise a real runtime would follow the hop unseen.
+    assert.equal(state.inits[0]?.redirect, "manual");
+  });
+
+  test("the default (follow) mode still throws HttpError on a 302 that reaches it", async () => {
+    // A stubbed fetch does not follow redirects, so this 302 stands in for a hop the runtime
+    // could not resolve; the new branch must not have widened what counts as success.
+    stubFetch([() => new Response(null, { status: 302, headers: { location: "https://example.test/next" } })]);
+    // No `redirect` option at all: the default path is exactly what is under test.
+    await assert.rejects(httpFetch("https://example.test/start"), (err: unknown) => {
+      // Class check first, because callers branch on `instanceof HttpError`.
+      assert.ok(err instanceof HttpError);
+      // The status is carried through, so a caller can tell a redirect failure from a 4xx/5xx.
+      assert.equal(err.status, 302);
+      // A validator must return true for assert.rejects to accept the rejection.
+      return true;
+    });
+  });
+});

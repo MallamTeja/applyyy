@@ -241,3 +241,11 @@ verify_jwt = true
 [functions.resume-assist]
 # True: the gateway rejects anonymous calls before any quota is spent.
 verify_jwt = true
+
+# New function (2026-10-31), not yet deployed, so there is no live value to match.
+# The browser calls it through functions.invoke('job-link-intake') from AddJobLinkPanel with the
+# signed-in user's JWT; it fetches arbitrary pasted links and spends Gemini quota, so a
+# tokenless caller must be refused at the gateway before either happens.
+[functions.job-link-intake]
+# True: the gateway rejects anonymous calls; authorizeCaller() inside is the second layer.
+verify_jwt = true

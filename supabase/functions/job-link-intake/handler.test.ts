@@ -1,0 +1,235 @@
+// job-link-intake handler: the request gates, the ATS-vs-page decision, and the revive rule.
+// Run with: node --test "supabase/functions/job-link-intake/*.test.ts"
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { atsTarget, handleJobLinkIntake, parseIntakeBody, persistManualJob, REVIVE_FROM, type IntakeDeps, type IntakeStore, type StoredApplication } from "./handler.ts";
+import type { JobInsert } from "../_shared/contracts/shared-types.ts";
+// Moved to fetch-page.ts (2026-10-31) so redirect hops share it; still pinned here for the pasted link.
+import { isBlockedHost } from "./fetch-page.ts";
+
+// One live Greenhouse posting, the shape the greenhouse adapter parses.
+const GH_BOARD = {
+  jobs: [{ id: 111, title: "Senior Engineer", absolute_url: "https://job-boards.greenhouse.io/acme/jobs/111", location: { name: "Bengaluru, India" }, content: "&lt;p&gt;Build things&lt;/p&gt;" }],
+};
+
+// Long enough to pass MIN_JOB_TEXT_CHARS, so the pasted-text path skips the fetch.
+const POST_TEXT = "We are hiring a Backend Engineer at Globex in Hyderabad. ".repeat(6);
+
+// A valid JSON-mode answer, wrapped the way Gemini returns it.
+function geminiAnswer(fields: Record<string, unknown>) {
+  // ok outcome with one text part holding the JSON.
+  return { ok: true as const, keyIndex: 0, attempts: 1, data: { candidates: [{ content: { parts: [{ text: JSON.stringify(fields) }] } }] } };
+}
+
+// A job the model extracted cleanly.
+const GOOD_FIELDS = { is_job_posting: true, title: "Backend Engineer", company_name: "Globex", location: "Hyderabad, India", work_arrangement: "onsite", employment_type: "full_time" };
+
+// Records every effect, so tests assert what was (and was not) called.
+interface Spy {
+  jobs: JobInsert[];
+  tags: string[][];
+  moves: { id: string; detail: Record<string, unknown> }[];
+  pageFetches: number;
+  boardFetches: number;
+  extracts: number;
+}
+
+// A fake store honouring the real contract: values, never throws.
+function fakeStore(spy: Spy, opts: { existing?: { discoveredVia: string[]; disappearedAt?: string | null }; application?: StoredApplication; moveError?: string | null } = {}): IntakeStore {
+  // Mirrors the real store's read-back.
+  return {
+    watchlistName: () => Promise.resolve({ ok: true as const, name: null }),
+    upsertJob: (row) => {
+      // Records the row the handler built.
+      spy.jobs.push(row);
+      // An existing row keeps its own sources; a new one has the row's.
+      return Promise.resolve({ ok: true as const, job: { id: "job-1", discoveredVia: opts.existing?.discoveredVia ?? (row.discovered_via ?? []), disappearedAt: opts.existing?.disappearedAt ?? null } });
+    },
+    tagManual: (_id, via) => {
+      // Records the tag write.
+      spy.tags.push([...via]);
+      return Promise.resolve(null);
+    },
+    upsertApplication: () => Promise.resolve({ ok: true as const, application: opts.application ?? { id: "11111111-1111-4111-8111-111111111111", status: "passed_filters", created: true } }),
+    moveToPassedFilters: (id, detail) => {
+      // Records the human move.
+      spy.moves.push({ id, detail });
+      return Promise.resolve(opts.moveError ?? null);
+    },
+  };
+}
+
+// Deps with every seam faked; options flip the branch under test.
+function makeDeps(opts: { killOn?: boolean; pageFails?: boolean; html?: string; extract?: unknown; store?: Parameters<typeof fakeStore>[1] } = {}): { deps: IntakeDeps; spy: Spy } {
+  const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
+  const deps: IntakeDeps = {
+    connect: () =>
+      Promise.resolve({
+        ok: true as const,
+        userId: "app-user",
+        db: {
+          // "good" is the app user's token; anything else is refused.
+          auth: { getUser: (jwt: string) => Promise.resolve(jwt === "good" ? { data: { user: { id: "app-user" } }, error: null } : { data: { user: null }, error: { message: "bad" } }) },
+          // The kill-switch read.
+          from: () => ({ select: () => Promise.resolve({ data: [{ system_enabled: opts.killOn ?? true }], error: null }) }),
+        },
+        store: fakeStore(spy, opts.store),
+      }),
+    fetchBoard: () => {
+      // Counted so the page path can prove it never touched a board.
+      spy.boardFetches += 1;
+      return Promise.resolve({ ok: true as const, payload: GH_BOARD });
+    },
+    fetchPage: () => {
+      // Counted so the pasted-text path can prove it never fetched.
+      spy.pageFetches += 1;
+      return Promise.resolve(opts.pageFails ? { ok: false as const, reason: "the site does not allow automated reading" } : { ok: true as const, html: opts.html ?? `<html><body><p>${POST_TEXT}</p></body></html>` });
+    },
+    extract: () => {
+      // Counted so the ATS path can prove it spent no Gemini call.
+      spy.extracts += 1;
+      return Promise.resolve((opts.extract ?? geminiAnswer(GOOD_FIELDS)) as Awaited<ReturnType<IntakeDeps["extract"]>>);
+    },
+    now: () => new Date("2026-10-31T10:00:00Z"),
+  };
+  return { deps, spy };
+}
+
+// A POST with the app user's token.
+function post(body: unknown, token = "good"): Request {
+  return new Request("https://fn.local/job-link-intake", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+}
+
+test("isBlockedHost refuses IP literals, single-label and internal names, and allows real hosts", () => {
+  for (const host of ["127.0.0.1", "169.254.169.254", "[::1]", "localhost", "intranet", "db.internal", "printer.local"]) assert.equal(isBlockedHost(host), true, host);
+  for (const host of ["www.linkedin.com", "careers.example.com", "job-boards.greenhouse.io"]) assert.equal(isBlockedHost(host), false, host);
+});
+
+test("parseIntakeBody: https only, no userinfo or port, blank text is absence", () => {
+  assert.equal(parseIntakeBody({ url: "http://example.com/job" }).ok, false);
+  assert.equal(parseIntakeBody({ url: "https://user@example.com/job" }).ok, false);
+  assert.equal(parseIntakeBody({ url: "https://example.com:8443/job" }).ok, false);
+  assert.equal(parseIntakeBody({ url: "https://10.0.0.1/job" }).ok, false);
+  assert.equal(parseIntakeBody({ url: "not a link" }).ok, false);
+  assert.equal(parseIntakeBody({}).ok, false);
+  const ok = parseIntakeBody({ url: "  https://www.linkedin.com/posts/x  ", text: "   " });
+  assert.ok(ok.ok);
+  assert.equal(ok.value.text, null);
+});
+
+test("atsTarget: the link itself, else exactly one ATS link in the text", () => {
+  // Direct board link.
+  assert.deepEqual(atsTarget(new URL("https://job-boards.greenhouse.io/acme/jobs/111"), null), { provider: "greenhouse", token: "acme", jobId: "111" });
+  // A post whose only ATS link is a Lever posting (the /apply twin collapses into it).
+  const lever = "https://jobs.lever.co/globex/0b1c2d3e-0000-4000-8000-000000000001";
+  assert.equal(atsTarget(new URL("https://www.linkedin.com/posts/x"), `Apply: ${lever} or ${lever}/apply`)?.provider, "lever");
+  // Two different postings: ambiguous, so no target.
+  assert.equal(atsTarget(new URL("https://www.linkedin.com/posts/x"), "https://job-boards.greenhouse.io/a/jobs/1 https://job-boards.greenhouse.io/a/jobs/2"), null);
+});
+
+test("ATS link: built from the live board, tagged manual, no page fetch and no Gemini call", async () => {
+  const { deps, spy } = makeDeps();
+  const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111" }), deps);
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  assert.equal(body.status, "ok");
+  assert.equal(body.source, "ats_board");
+  assert.equal(body.application_status, "passed_filters");
+  assert.deepEqual(spy.jobs[0]?.discovered_via, ["manual"]);
+  assert.equal(spy.jobs[0]?.ats_provider, "greenhouse");
+  assert.equal(spy.pageFetches + spy.extracts, 0);
+});
+
+test("ATS link for a posting no longer on the board: posting_closed, nothing written", async () => {
+  const { deps, spy } = makeDeps();
+  const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/999" }), deps);
+  assert.equal(res.status, 422);
+  assert.equal((await res.json()).status, "posting_closed");
+  assert.equal(spy.jobs.length, 0);
+});
+
+test("pasted text: no fetch; the row keeps the pasted text and claims no ATS adapter", async () => {
+  const { deps, spy } = makeDeps();
+  const res = await handleJobLinkIntake(post({ url: "https://www.linkedin.com/posts/globex-hiring", text: POST_TEXT }), deps);
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  assert.equal(body.source, "pasted_text");
+  assert.equal(spy.pageFetches, 0);
+  const row = spy.jobs[0];
+  assert.equal(row?.title, "Backend Engineer");
+  assert.equal(row?.company_name, "Globex");
+  assert.equal(row?.ats_provider, "unknown");
+  assert.equal(row?.description_raw, POST_TEXT.trim());
+  assert.deepEqual(row?.discovered_via, ["manual"]);
+  // No trusted ATS link in the post, so the pasted permalink is the apply target.
+  assert.equal(row?.apply_url, "https://www.linkedin.com/posts/globex-hiring");
+});
+
+test("a page the site will not let us read, with no text: needs_text, no Gemini call", async () => {
+  const { deps, spy } = makeDeps({ pageFails: true });
+  const res = await handleJobLinkIntake(post({ url: "https://www.linkedin.com/jobs/view/123" }), deps);
+  assert.equal(res.status, 422);
+  assert.equal((await res.json()).status, "needs_text");
+  assert.equal(spy.extracts, 0);
+});
+
+test("a JS shell page with almost no text: needs_text", async () => {
+  const { deps } = makeDeps({ html: "<html><body><div id=root></div><script>var x = 1;</script></body></html>" });
+  const res = await handleJobLinkIntake(post({ url: "https://careers.example.com/job/1" }), deps);
+  assert.equal((await res.json()).status, "needs_text");
+});
+
+test("the model says it is not one job: not_a_job, nothing written", async () => {
+  const { deps, spy } = makeDeps({ extract: geminiAnswer({ ...GOOD_FIELDS, is_job_posting: false }) });
+  const res = await handleJobLinkIntake(post({ url: "https://careers.example.com/jobs", text: POST_TEXT }), deps);
+  assert.equal((await res.json()).status, "not_a_job");
+  assert.equal(spy.jobs.length, 0);
+});
+
+test("Gemini out of budget: 429 quota", async () => {
+  const { deps } = makeDeps({ extract: { ok: false, reason: "all_keys_cooling", attempts: 0 } });
+  const res = await handleJobLinkIntake(post({ url: "https://careers.example.com/job/1", text: POST_TEXT }), deps);
+  assert.equal(res.status, 429);
+  assert.equal((await res.json()).status, "quota");
+});
+
+test("gates: no token is 401; kill switch off is 409 and nothing is fetched", async () => {
+  const anon = makeDeps();
+  assert.equal((await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111" }, "bad"), anon.deps)).status, 401);
+  const off = makeDeps({ killOn: false });
+  const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111" }), off.deps);
+  assert.equal(res.status, 409);
+  assert.equal(off.spy.boardFetches, 0);
+});
+
+test("REVIVE_FROM is exactly the three statuses the migration gives a human edge into passed_filters", () => {
+  assert.deepEqual([...REVIVE_FROM].sort(), ["deduped", "discovered", "dropped_filter"]);
+});
+
+test("persistManualJob: a scouted row a filter dropped is tagged manual, then moved back as the human", async () => {
+  const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
+  const store = fakeStore(spy, { existing: { discoveredVia: ["greenhouse"] }, application: { id: "app-9", status: "dropped_filter", created: false } });
+  const saved = await persistManualJob(store, { fingerprint: "fp", title: "t", company_name: "c", company_slug: "c", apply_url: "https://x.example/j", posted_at: "2026-10-31T00:00:00Z", discovered_via: ["manual"] }, "https://x.example/j");
+  assert.ok(saved.ok);
+  assert.equal(saved.revivedFrom, "dropped_filter");
+  assert.equal(saved.application.status, "passed_filters");
+  assert.deepEqual(spy.tags, [["greenhouse", "manual"]]);
+  assert.equal(spy.moves[0]?.detail["reason"], "pasted_link");
+});
+
+test("persistManualJob: a row already at the approval queue is left exactly where it is", async () => {
+  const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
+  const store = fakeStore(spy, { existing: { discoveredVia: ["manual"] }, application: { id: "app-9", status: "awaiting_approval", created: false } });
+  const saved = await persistManualJob(store, { fingerprint: "fp", title: "t", company_name: "c", company_slug: "c", apply_url: "https://x.example/j", posted_at: "2026-10-31T00:00:00Z" }, "https://x.example/j");
+  assert.ok(saved.ok);
+  assert.equal(saved.revivedFrom, null);
+  assert.equal(spy.moves.length, 0);
+  assert.equal(spy.tags.length, 0);
+});
+
+test("persistManualJob: a refused move is reported, never claimed as moved", async () => {
+  const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
+  const store = fakeStore(spy, { existing: { discoveredVia: ["manual"] }, application: { id: "app-9", status: "dropped_filter", created: false }, moveError: "illegal transition" });
+  const saved = await persistManualJob(store, { fingerprint: "fp", title: "t", company_name: "c", company_slug: "c", apply_url: "https://x.example/j", posted_at: "2026-10-31T00:00:00Z" }, "https://x.example/j");
+  assert.equal(saved.ok, false);
+});

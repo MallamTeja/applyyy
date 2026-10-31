@@ -100,3 +100,32 @@ for (const [input, label] of INVALID) {
     assert.match((decision as { reason: string }).reason, /^invalid_match_score:/);
   });
 }
+
+// --- humanPicked (2026-10-31): a job the human pasted by link is never dropped for its score ---
+
+// The unit's second export, imported here beside its tests.
+import { isHumanPicked } from "./score-threshold.ts";
+
+test("humanPicked: a score below the floor still advances, with its honest band", () => {
+  // 10 drops for a scouted row...
+  assert.equal(decideScoreThreshold(10).kind, "drop");
+  // ...and advances for a pasted one, keeping the real score.
+  const picked = decideScoreThreshold(10, true);
+  assert.equal(picked.kind, "advance");
+  assert.equal(picked.kind === "advance" && picked.score, 10);
+});
+
+test("humanPicked: an unreadable score still fails closed", () => {
+  // The pick waives the floor, never the shape check.
+  assert.equal(decideScoreThreshold(Number.NaN, true).kind, "invalid");
+  assert.equal(decideScoreThreshold("80", true).kind, "invalid");
+});
+
+test("isHumanPicked: only an array holding 'manual' counts", () => {
+  // The marker job-link-intake writes.
+  assert.equal(isHumanPicked(["manual"]), true);
+  // Alongside a board source, after a scouted row was pasted.
+  assert.equal(isHumanPicked(["greenhouse", "manual"]), true);
+  // Every malformed or absent value is "not picked", so it can never wave a row past the floor.
+  for (const value of [undefined, null, "manual", [], ["greenhouse"], { 0: "manual" }]) assert.equal(isHumanPicked(value), false, JSON.stringify(value));
+});

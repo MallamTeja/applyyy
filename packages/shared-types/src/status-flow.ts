@@ -53,11 +53,12 @@ export interface StatusTransition {
  *
  * BUT DO NOT READ THAT AS "THE GRAPH HAS NO BACKWARD EDGES" — corrected 2026-09-10,
  * because the previous wording ended "there is no backward path for a bug to wander
- * down" and that is false. SEVEN backward edges exist, deliberately, and they are the
+ * down" and that is false. EIGHT backward edges exist, deliberately, and they are the
  * recovery lanes: `audit_flagged→tailored`, `interview→oa_pending`,
  * `blocked_needs_human→applied`, `blocked_needs_human→dropped_filter`,
  * `needs_verification→applied`, `needs_verification→approved`,
- * `failed→needs_verification`.
+ * `failed→needs_verification`, and (2026-10-31) `dropped_filter→passed_filters`,
+ * the human re-adding a dropped job by pasting its link.
  *
  * The true statement is narrower and is what the prose above was reaching for: no
  * backward edge exists on the AUTOMATED FORWARD PATH, and every backward edge except
@@ -77,9 +78,17 @@ export const STATUS_TRANSITIONS: readonly StatusTransition[] = [
   { from: 'discovered', to: 'failed', allowedAgents: ['normalizer', 'human'], note: 'Unparseable posting.' },
 
   // ---- The cheap deterministic filter cascade, before any LLM spend ---------
-  { from: 'deduped', to: 'passed_filters', allowedAgents: ['screener'], note: 'Survived every enabled filter rule.' },
+  // Human added 2026-10-31 (20261031200000): a pasted link takes a deduped row past the screener.
+  { from: 'deduped', to: 'passed_filters', allowedAgents: ['screener', 'human'], note: 'Survived every enabled filter rule.' },
   { from: 'deduped', to: 'dropped_filter', allowedAgents: ['screener', 'human'], note: 'A filter rule rejected it; drop_reason names the rule.' },
   { from: 'deduped', to: 'failed', allowedAgents: ['screener', 'human'], note: 'Screener could not evaluate the row.' },
+
+  // ---- Re-entry by pasted link (20261031200000) ------------------------------
+  // job-link-intake moves an existing row here as the human. Human-only, so no agent ever un-drops a row.
+  // A scouted row still waiting for the normalizer skips dedupe and the screener.
+  { from: 'discovered', to: 'passed_filters', allowedAgents: ['human'], note: "Human pasted this job's link: it skips dedupe and every filter." },
+  // A dropped row comes back: the human overrules the filter for this one job. Makes dropped_filter non-terminal.
+  { from: 'dropped_filter', to: 'passed_filters', allowedAgents: ['human'], note: "Human pasted this job's link: a human overrules the filter that dropped it." },
 
   // ---- Matching -------------------------------------------------------------
   { from: 'passed_filters', to: 'scored', allowedAgents: ['matcher'], note: 'Gemini attached a fit score.' },
