@@ -16,6 +16,37 @@ P1 = wrong behaviour on a reached path. P2 = latent, drift, or hardening.
 
 ---
 
+## Fix status (updated 2026-11-01 16:45 IST)
+
+Every fix below has a red-on-revert test and was gated in a clean worktree pinned to the
+commit. Deploys ran from a worktree pinned to the commit SHA.
+
+| Finding | Status | Commit | Deployed |
+|---|---|---|---|
+| W5 zero form fields block submit | **fixed** | `50ac7e3` | worker (runs from main) |
+| W4 unusable approved rows | **fixed** | `50ac7e3` | worker |
+| W10 daily cap | **fixed** (daily cap only). The other two columns are measured, not wired: `freshness_window_days=3` would drop 440/615 `passed_filters` rows; `max_applications_per_company_per_week=2` would drop 0 today. Ruling still open. | `50ac7e3` | worker |
+| W14 skill-gap caller check | **fixed** | `2aac3c0` | skill-gap v16 (`72be0e3`) |
+| W22 orphaned satellites | **wired**: `satellites.yml` runs daily at 18:53 IST. `APPLYY_SATELLITES_LIVE=true` was set after two manual runs; the second was all green. | `2aac3c0`, `72be0e3` | all five redeployed |
+| (new) skill-gap crashed on its first live run (`s.toLowerCase is not a function`: skills are `{id,name,category}` nodes) | **fixed** | `72be0e3` | skill-gap |
+| W8 browser scout fallback | **deleted** | `af3c7f0` | Vercel |
+| W9 Health "has never run" | **fixed** | `af3c7f0` | Vercel |
+| W11 Vercel ignore step | **fixed** | `af3c7f0` | Vercel |
+| W6 tracker replay sweep | **fixed** | `2dbe677` | email-tracker-intake v25 |
+| W7 same-company tie | **fixed** | `2dbe677` | email-tracker-intake v25 |
+| W2 matcher usable-job gate | **fixed** | `4d57ce0` | matcher v31 |
+| W3 paste fills description | **fixed** | `4d57ce0` | job-link-intake v3 |
+| W1 SmartRecruiters descriptions | **dropped by ruling.** SR `robots.txt` is `Disallow: /` for all but LinkedInBot; Teja ruled "honor robots". All 12 SR boards were disabled (live write, 2026-11-01). The detail-fetch patch is kept out of the repo. SR job pages (`jobs.smartrecruiters.com`) answer robots.txt with an HTML soft-200, so paste and the applier refuse them too: SR jobs can only be applied to by hand. | none | n/a |
+| **W39 (new)** the two scouts disagreed on robots | **fixed.** The worker scout had no robots gate (it was the only path scouting SR and Ashby). Both scouts now gate. Ruling: a 401 robots.txt is "no rules" for board reads only (api.ashbyhq.com answers 401); the applier stays strict. | `ad19be5` | scout-ats v29, scout-web v20 |
+
+Open decisions from the fixes: whether a human paste may revive a `failed` row (needs a
+`failed → passed_filters` edge); whether to add a short-description threshold (tailor and
+matcher together); whether to wire or delete `matcher/freshness-queue.ts`; whether referral
+should draft only for `scored`-or-later rows (it currently drafts 5/day from 615
+`passed_filters`); interview-prep reads its batch before skipping packed rows.
+
+---
+
 ## Root causes (read this first)
 
 Most P1s trace back to **three missing shared rules**. Fixing each rule once, at the stage
