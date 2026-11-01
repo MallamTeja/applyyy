@@ -76,6 +76,8 @@ test("buildAssistPrompt puts the instruction last and keeps the system text stab
   assert.equal(first.userContent.split("\n").slice(0, -1).join("\n"), second.userContent.split("\n").slice(0, -1).join("\n"));
   // Bullets travel under their short ids.
   assert.match(first.userContent, /^b1: Cut p95 latency by 30%\.$/m);
+  // The auditor's vocabulary is in the system text, so rewrites tend to pass the audit.
+  assert.match(first.systemInstruction, /^Prefer words already in the bullet or SKILLS, plus these: .*\bengineered\b.*\. Other words get flagged for review\.$/m);
 });
 
 test("parseAssistOps keeps valid ops and drops unknown ids, no-ops and second claims", () => {

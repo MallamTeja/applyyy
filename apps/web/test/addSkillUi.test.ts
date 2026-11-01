@@ -8,7 +8,10 @@
  *      no "can't be edited yet" text and never click-to-type.
  *   3. Click-to-edit a11y: the text button's name comes from its content ("Edit: " + the runs),
  *      not an aria-label that would hide the runs' spoken verdicts.
- *   4. Add asks for confirmation first (source shape: a static render cannot click).
+ *   4. (Removed 2026-11-01.) Add used to ask a window.confirm first. Teja ruled it redundant: an
+ *      addable skill is already in the operator's own master, and addSkill() refusing any other ref
+ *      (addSkill.test.ts "refuses a ref that is not a master skill") is the control that answers
+ *      "do you have this skill?". A master-less skill still goes through the in-page vouch question.
  *
  * Import shape: only modules that exist today are imported in before(); every new behaviour is
  * looked up inside its own test, so a missing implementation FAILS that test instead of
@@ -343,41 +346,3 @@ describe('click-to-edit: the text button is named by its content', () => {
   });
 });
 
-describe('add asks first (source shape)', () => {
-  // The component source; a static render cannot click Add or answer a confirm().
-  const source = readFileSync(new URL('../src/features/approval/DiffView.tsx', import.meta.url), 'utf8');
-
-  it('every add_skill action is sent only after window.confirm with the honesty sentence', () => {
-    // Object-literal add_skill actions (comma after the kind), not the type union's `;` arm.
-    const sends = [...source.matchAll(/kind:\s*['"]add_skill['"]\s*,/g)].map((m) => m.index!);
-    // Positive: there is at least one, or the loop below proves nothing.
-    assert.ok(sends.length > 0, "no { kind: 'add_skill', ... } action found in DiffView.tsx");
-    // Each one must sit in a confirmed branch.
-    for (const at of sends) {
-      // The nearest confirm call before this send.
-      const confirmAt = source.lastIndexOf('window.confirm(', at);
-      // A send with no confirm before it skips the question.
-      assert.ok(confirmAt >= 0, `add_skill at ${at} has no window.confirm before it`);
-      // The span from the question to the send.
-      const between = source.slice(confirmAt, at);
-      // Close together, so the confirm belongs to this handler (not one far up the file).
-      assert.ok(between.length < 1500, `window.confirm is ${between.length} chars before add_skill; expected it in the same handler`);
-      // The confirm's message carries the honesty sentence verbatim.
-      assert.match(between, /Only add skills you actually have\./);
-      // What precedes the call: either an if-condition, or a const the answer is stored in.
-      const lead = source.slice(Math.max(0, confirmAt - 40), confirmAt);
-      // The answer's variable name, when stored (e.g. `const sure = window.confirm(...)`).
-      const stored = lead.match(/const\s+(\w+)\s*=\s*$/)?.[1];
-      // Only three shapes gate correctly. A NEGATED early exit on the stored answer: `if (!sure) return`.
-      const storedExit = stored !== undefined && new RegExp(`if\\s*\\(\\s*!\\s*${stored}\\s*\\)\\s*return\\b`).test(between);
-      // A negated early exit on the call itself: `if (!window.confirm(...)) return`.
-      const directExit = /if\s*\(\s*!\s*$/.test(lead) && /^window\.confirm\([\s\S]*?\)\s*\)\s*return\b/.test(between);
-      // The send nested in the affirmative branch: `if (window.confirm(...)) {`.
-      const nested = /if\s*\(\s*$/.test(lead) && /^window\.confirm\([\s\S]*?\)\s*\)\s*\{/.test(between);
-      // An inverted `if (sure) return;` matches none of these, so it fails here by name.
-      const gated = storedExit || directExit || nested;
-      // Named, so a confirm whose answer is ignored reads as exactly that.
-      assert.ok(gated, `window.confirm's answer does not gate add_skill: ${JSON.stringify(lead)}`);
-    }
-  });
-});

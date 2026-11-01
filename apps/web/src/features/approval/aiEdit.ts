@@ -18,6 +18,9 @@
 import type { ResumeDiff } from './diffModel';
 // Type-only import from the view: the action union is declared there, beside the controls.
 import type { EditAction } from './DiffView';
+/* The auditor's own rule 5 and tokenizer, imported by relative path (as diffAdapter.ts imports
+   jd-keywords) so the advice shown before Apply is the audit's definition, never a copy. */
+import { bulletGroundingGaps, tokenizeText } from '../../../../../supabase/functions/_shared/audit/detector.ts';
 
 /* The body the edge function validates (resume-assist/assist.ts parseAssistRequest). */
 export interface AssistBody {
@@ -71,7 +74,22 @@ export interface AssistDraft {
   readonly refs: ReadonlyMap<string, string>;
   // Short id (and "summary") -> the text the id stood for when the ask was sent.
   readonly before: ReadonlyMap<string, string | null>;
+  // Short id -> the master bullet it rewords: what the auditor compares a bullet against.
+  readonly masterText: ReadonlyMap<string, string | null>;
+  // Every token of every master skill name, which the auditor also allows in any bullet.
+  readonly skillTokens: ReadonlySet<string>;
+  // Every master skill name, lower-cased, so a card can say whether Apply also adds it to the master.
+  readonly masterSkills: ReadonlySet<string>;
 }
+
+/* What the audit would say about one AI edit, shown BEFORE Apply. Advice only (2026-10-31):
+   it never blocks Apply and never changes the row's status. A closed union so "not checked"
+   can never be shown as "clean". */
+export type AuditAdvice =
+  // Rule 5 ran: the numbers and words the master does not supply (both empty = grounded).
+  | { readonly kind: 'checked'; readonly metrics: readonly string[]; readonly terms: readonly string[] }
+  // The audit has no rule for this edit, said as such.
+  | { readonly kind: 'not_checked'; readonly why: string };
 
 /* The slice of supabase-js this file calls; structural, so a test passes a fake. */
 export interface AssistClient {
@@ -104,6 +122,12 @@ export function buildAssistDraft(diff: ResumeDiff, categories: readonly string[]
   const refs = new Map<string, string>();
   // Short id -> text at ask time.
   const before = new Map<string, string | null>();
+  // Short id -> master bullet text, for the audit advice.
+  const masterText = new Map<string, string | null>();
+  // Master skill tokens; empty until the skills line is read.
+  let skillTokens = new Set<string>();
+  // Master skill names; empty until the skills line is read.
+  let masterSkills = new Set<string>();
   // The bullets sent.
   const bullets: { id: string; text: string }[] = [];
   // The summary, null until a summary line is found.
@@ -124,6 +148,8 @@ export function buildAssistDraft(diff: ResumeDiff, categories: readonly string[]
       refs.set(id, line.editTarget.ref);
       // Remembered so the panel can show before -> after.
       before.set(id, text);
+      // The master bullet this one rewords (diffAdapter sets it from bullet.master_text).
+      masterText.set(id, line.masterText);
       // Sent.
       bullets.push({ id, text });
     } else if (line.kind === 'summary') {
@@ -132,6 +158,11 @@ export function buildAssistDraft(diff: ResumeDiff, categories: readonly string[]
     } else if (line.kind === 'skills') {
       // The printed skills, comma-separated as rendered.
       skills = lineText(line.tailoredRuns);
+      // This line's masterText is EVERY master skill name joined (diffAdapter.ts:424), so its
+      // tokens are exactly the auditor's MasterIndex.skillTokens.
+      skillTokens = new Set(tokenizeText(line.masterText ?? ''));
+      // The same joined names, split back into whole names for the "already in your master" check.
+      masterSkills = new Set((line.masterText ?? '').split(',').map((name) => name.trim().toLowerCase()).filter((name) => name !== ''));
     }
   }
   // The summary is editable under its reserved id.
@@ -149,8 +180,30 @@ export function buildAssistDraft(diff: ResumeDiff, categories: readonly string[]
     skills,
     categories: shortList(categories),
   };
-  // Sent with the maps the answer needs.
-  return { body, refs, before };
+  // Sent with the maps the answer and the audit advice need.
+  return { body, refs, before, masterText, skillTokens, masterSkills };
+}
+
+/* The audit's verdict on one AI op, or null for an op that changes no wording. */
+export function auditAdvice(op: AssistOp, draft: AssistDraft): AuditAdvice | null {
+  // A removal or a skill changes no bullet wording; skills are checked by the attest path instead.
+  if (op.op !== 'edit') return null;
+  /* The auditor checks only the summary's source refs, never its wording, so no verdict is given;
+     the server's "numbers new versus the current text" list is the one signal left, so it is shown. */
+  if (op.id === 'summary') {
+    // Said only when there are any.
+    const numbers = op.newNumbers.length > 0 ? ` New numbers: ${op.newNumbers.join(', ')}.` : '';
+    // Not a pass: the audit has no rule here.
+    return { kind: 'not_checked', why: `The audit does not check summary wording.${numbers}` };
+  }
+  // The master bullet this one rewords.
+  const master = draft.masterText.get(op.id);
+  // No master text means no comparison; never reported as clean.
+  if (master === undefined || master === null) return { kind: 'not_checked', why: 'No master bullet to compare against.' };
+  // Rule 5, the auditor's own function.
+  const gaps = bulletGroundingGaps(op.text, master, draft.skillTokens);
+  // Each word once: the auditor's list keeps repeats, which only add noise on a card.
+  return { kind: 'checked', metrics: [...new Set(gaps.metrics)], terms: [...new Set(gaps.terms)] };
 }
 
 /* Turn one op into the page's action, or null when its id is not on this resume. */

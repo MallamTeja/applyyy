@@ -47,8 +47,11 @@ export type AuditFindingKind = AuditFinding['kind'];
  * ALLOWLIST DESIGN:
  * Any word not in this set and not present in master bullet text or skills
  * is treated as an ungrounded claim or technology token.
+ *
+ * Exported (2026-10-31) so the review page's AI box can tell the model which words pass,
+ * from this one list rather than a copy that drifts from what the auditor enforces.
  */
-const ALLOWED_RHETORICAL_WORDS: ReadonlySet<string> = new Set([
+export const ALLOWED_RHETORICAL_WORDS: ReadonlySet<string> = new Set([
   // Articles and prepositions
   "a", "an", "the", "and", "or", "for", "with", "in", "of", "to", "on", "at",
   // Conjunctions and relational tokens
@@ -107,6 +110,40 @@ export function extractMetrics(text: string): string[] {
 
   // Return extracted digit strings array or an empty array if no matches found
   return matches ?? [];
+}
+
+/**
+ * Rule 5, the content and metric fidelity check, for ONE bullet: the numbers and the words in
+ * `text` that its master bullet, the master's skill names and the allowlist do not supply.
+ *
+ * One function so the auditor and the review page's AI box (apps/web aiEdit.ts) apply the same
+ * definition of "grounded" (2026-10-31). Order and duplicates are kept exactly as the auditor's
+ * finding reasons have always printed them.
+ *
+ * @param text The bullet text being judged.
+ * @param masterText The master bullet it rewords.
+ * @param skillTokens Tokens of every master skill name (MasterIndex.skillTokens).
+ * @returns The ungrounded metrics and the ungrounded word tokens; both empty means grounded.
+ */
+export function bulletGroundingGaps(
+  text: string,
+  masterText: string,
+  skillTokens: ReadonlySet<string>,
+): { readonly metrics: readonly string[]; readonly terms: readonly string[] } {
+  // Every number the master bullet states.
+  const masterMetrics = new Set(extractMetrics(masterText));
+  // Numbers in the text the master bullet does not state: invented or inflated.
+  const metrics = extractMetrics(text).filter((m) => !masterMetrics.has(m));
+  // The master bullet's own words are always allowed.
+  const allowedTokens = new Set(tokenizeText(masterText));
+  // So is any word of any master skill name.
+  for (const token of skillTokens) allowedTokens.add(token);
+  // And the fixed rhetorical vocabulary.
+  for (const token of ALLOWED_RHETORICAL_WORDS) allowedTokens.add(token);
+  // Words that are not numbers and come from none of the three sources.
+  const terms = tokenizeText(text).filter((token) => !/^\d+$/.test(token) && !allowedTokens.has(token));
+  // Both lists; the caller decides how to report them.
+  return { metrics, terms };
 }
 
 /**
@@ -403,14 +440,11 @@ export function detectAuditFindings(
           // Content & Metric Fidelity Checks against master bullet text
           const masterText = bullet.master_text ?? masterBulletInfo.bullet.text;
 
-          // Extract metrics from tailored bullet text
-          const tailoredMetrics = extractMetrics(bullet.text);
+          // Rule 5 in its one shared definition (also run by the review page's AI box).
+          const gaps = bulletGroundingGaps(bullet.text, masterText, index.skillTokens);
 
-          // Extract metrics from master bullet text into a Set
-          const masterMetrics = new Set(extractMetrics(masterText));
-
-          // Identify invented or inflated metrics
-          const inventedMetrics = tailoredMetrics.filter((m) => !masterMetrics.has(m));
+          // Invented or inflated metrics.
+          const inventedMetrics = gaps.metrics;
 
           // If invented metrics exist, push audit finding
           if (inventedMetrics.length > 0) {
@@ -429,34 +463,8 @@ export function detectAuditFindings(
             });
           }
 
-          // Build allowed vocabulary set for this bullet
-          const allowedTokens = new Set<string>();
-
-          // Add all tokens from master bullet text
-          for (const token of tokenizeText(masterText)) {
-            // Add token to set
-            allowedTokens.add(token);
-          }
-
-          // Add all tokens from candidate's master skill names
-          for (const token of index.skillTokens) {
-            // Add token to set
-            allowedTokens.add(token);
-          }
-
-          // Add all allowable rhetorical words
-          for (const token of ALLOWED_RHETORICAL_WORDS) {
-            // Add token to set
-            allowedTokens.add(token);
-          }
-
-          // Extract tokens from tailored bullet text
-          const tailoredTokens = tokenizeText(bullet.text);
-
-          // Find tokens that are not numbers and not present in allowed tokens set
-          const ungroundedTokens = tailoredTokens.filter(
-            (token) => !/^\d+$/.test(token) && !allowedTokens.has(token),
-          );
+          // Words the master bullet, the master skills and the allowlist do not supply.
+          const ungroundedTokens = gaps.terms;
 
           // If ungrounded terms exist, push audit finding
           if (ungroundedTokens.length > 0) {

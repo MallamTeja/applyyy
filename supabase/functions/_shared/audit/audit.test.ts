@@ -815,3 +815,26 @@ test("auditApplication flags summary referencing missing node ID", () => {
   // Assert summary_unsupported finding exists in findings
   assert.ok(hasSummaryFinding);
 });
+
+// --- bulletGroundingGaps: rule 5 in its one shared definition (2026-10-31) -----------------
+// The auditor and the review page's AI box both call this, so a verb swap the master never
+// used is flagged the same way in both places.
+test("bulletGroundingGaps flags a word and a number the master bullet does not supply", async () => {
+  // Imported here so this block stays self-contained in an existing suite.
+  const { bulletGroundingGaps } = await import("./detector.ts");
+  // "Cut" -> "Reduced" is honest, but "reduced" is in neither the master text nor the allowlist.
+  const gaps = bulletGroundingGaps("Reduced p95 latency by 40% using Kafka", "Cut p95 latency by 30%", new Set(["kafka"]));
+  // 40 is new; 95 is in the master text ("p95" splits to "p" and "95"), so only 40 is flagged.
+  assert.deepEqual(gaps.metrics, ["40"]);
+  // "using" is allowlisted and "kafka" is a master skill token, so only "reduced" is flagged.
+  assert.deepEqual(gaps.terms, ["reduced"]);
+});
+
+test("bulletGroundingGaps passes a rewording that stays inside the master and the allowlist", async () => {
+  // Same import as above.
+  const { bulletGroundingGaps } = await import("./detector.ts");
+  // Every word comes from the master bullet or the allowlist ("built", "using").
+  const gaps = bulletGroundingGaps("Built billing API using Postgres", "billing API on Postgres", new Set());
+  // Grounded: nothing to flag.
+  assert.deepEqual(gaps, { metrics: [], terms: [] });
+});

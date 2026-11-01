@@ -37,10 +37,10 @@ const diff = {
   coverage: { jdKeywords: ['Kafka', 'TypeScript'], honestlyMatched: ['TypeScript'], matchedByFabrication: [], matchedByEdit: [] },
   lines: [
     { id: 's', kind: 'summary', tailoredRuns: [run('Ships APIs.')], editTarget: { kind: 'summary' }, editState: 'original' },
-    { id: 'x1', kind: 'bullet', tailoredRuns: [run('Built '), run('a billing API.')], editTarget: { kind: 'bullet', ref: 'exp_1_b1' }, editState: 'original' },
+    { id: 'x1', kind: 'bullet', masterText: 'Built a billing API on Postgres.', tailoredRuns: [run('Built '), run('a billing API.')], editTarget: { kind: 'bullet', ref: 'exp_1_b1' }, editState: 'original' },
     { id: 'x2', kind: 'bullet', tailoredRuns: [run('Gone.')], editTarget: { kind: 'bullet', ref: 'exp_1_b2' }, editState: 'removed' },
     { id: 'x3', kind: 'bullet', tailoredRuns: [run('Locked.')], editTarget: null, editState: 'original' },
-    { id: 'skills', kind: 'skills', tailoredRuns: [run('TypeScript, Postgres')], editTarget: { kind: 'skills' }, editState: 'original' },
+    { id: 'skills', kind: 'skills', masterText: 'TypeScript, Postgres, Kafka', tailoredRuns: [run('TypeScript, Postgres')], editTarget: { kind: 'skills' }, editState: 'original' },
   ],
 } as never;
 
@@ -137,5 +137,35 @@ describe('AiEditPanel', () => {
     assert.match(html, /<h3[^>]*class="ai-edit__title"[^>]*>Ask AI to edit this resume<\/h3>/);
     // The button exists and is disabled on an empty instruction.
     assert.match(html, /<button[^>]*disabled=""[^>]*>Suggest edits<\/button>/);
+  });
+});
+
+describe('auditAdvice (the audit as advice, 2026-11-01)', () => {
+  it("runs the auditor's rule 5 on a bullet edit against its master text", () => {
+    // Master bullet "Built a billing API on Postgres."; master skills include Kafka.
+    const draft = ai.buildAssistDraft(diff, ['Tools'], 'x');
+    // "Reduced" is in neither the master bullet nor the allowlist; Kafka is a master skill; 40 is new.
+    const advice = ai.auditAdvice({ op: 'edit', id: 'b0', text: 'Reduced billing API latency 40% using Kafka.', newNumbers: ['40'] }, draft);
+    // Flagged words and numbers, each once.
+    assert.deepEqual(advice, { kind: 'checked', metrics: ['40'], terms: ['reduced', 'latency'] });
+    // A rewording inside the master and the allowlist is grounded.
+    assert.deepEqual(ai.auditAdvice({ op: 'edit', id: 'b0', text: 'Built billing API using Postgres.', newNumbers: [] }, draft), { kind: 'checked', metrics: [], terms: [] });
+  });
+
+  it('says "not checked" for the summary instead of reporting it clean, and nothing for a removal', () => {
+    // Same draft.
+    const draft = ai.buildAssistDraft(diff, ['Tools'], 'x');
+    // The auditor has no wording rule for summaries; the new numbers are still shown.
+    assert.deepEqual(ai.auditAdvice({ op: 'edit', id: 'summary', text: 'Ships 3 APIs.', newNumbers: ['3'] }, draft), {
+      kind: 'not_checked',
+      why: 'The audit does not check summary wording. New numbers: 3.',
+    });
+    // A removal changes no wording.
+    assert.equal(ai.auditAdvice({ op: 'remove', id: 'b0' }, draft), null);
+  });
+
+  it("knows the master's skills, so a card can say when Apply also saves one there", () => {
+    // Lower-cased whole names from the skills line's master text.
+    assert.deepEqual([...ai.buildAssistDraft(diff, [], 'x').masterSkills], ['typescript', 'postgres', 'kafka']);
   });
 });

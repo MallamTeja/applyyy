@@ -176,12 +176,18 @@
   color: var(--text-primary);
 }
 
-/* The new-number warning. */
-.ai-edit__warn {
-  /* A new number needs checking: the fabrication colour, because an untrue number is one. */
+/* What the audit would flag, or a master claim Apply would add: read before the click. */
+.ai-edit__audit {
+  /* The fabrication colour, because an ungrounded number or word is what the audit calls one. */
   color: var(--fabricated-strong);
   /* Small. */
   font-size: var(--size-xs);
+}
+
+/* The audit found nothing to flag. */
+.ai-edit__audit--clean {
+  /* The traced green the diff uses for grounded lines. */
+  color: var(--traced);
 }
 
 /* "Applied" in place of the button. */

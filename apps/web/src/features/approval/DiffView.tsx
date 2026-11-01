@@ -288,17 +288,14 @@ export function CoverageBar({
     setLastAttested(null);
   }
 
-  /* Add one master skill, but only after the operator affirms they have it: the auditor exists to
-     stop fabricated claims, and a one-click add with no question would be a fabrication button. */
+  /* Add one master skill on one click. Until 2026-11-01 a native confirm asked "Only add skills you
+     actually have" first; Teja ruled it redundant: the skill is already in the operator's OWN master
+     profile, which is the claim, and addSkill() refuses any ref the master lacks (addSkill.test.ts).
+     A popup on every add only trained a reflex OK. A skill the master lacks still goes through the
+     in-page vouch question below, never a one-click add. */
   async function addSkill(skill: AddedSkill): Promise<void> {
     // Unreachable without a save path (no button is rendered then); narrows the type.
     if (!onEdit) return;
-    // Native confirm: simple, keyboard-accessible, and impossible to style into a dark pattern.
-    const sure = window.confirm(`Add "${skill.name}" to this resume?
-
-Only add skills you actually have.`);
-    // Cancel means nothing is sent at all.
-    if (!sure) return;
     // A new attempt clears the old failure.
     setAddError(null);
     // Emptied first, so adding the same name twice in a row still changes the text and is re-announced.
