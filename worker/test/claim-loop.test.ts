@@ -1134,6 +1134,34 @@ describe('runApplierBatch — the Settings daily cap (W10)', () => {
     expect(summary.stoppedReason).toMatch(/max_applications_per_day/);
   });
 
+  it('W10: a submit the form refuses in THIS run costs no daily-cap slot, the rule sentSince follows', async () => {
+    // Code-review finding #10, run side: cap 1, nothing sent in the window.
+    const { gateway } = threeRowGateway(async () => ({ maxPerDay: 1, sentSince: 0 }));
+    // Pages handed out so far, so only the FIRST row's form refuses.
+    let opened = 0;
+
+    // Live run: the first form rejects the click (applying -> blocked_needs_human, nothing
+    // sent, no breaker); the second confirms.
+    const summary = await runApplierBatch({
+      gateway,
+      // Counts each page, so the refusal lands on the first row only.
+      openPage: async () => (++opened === 1 ? { ...stubPage(), submit: async () => ({ kind: 'rejected_by_form', labels: ['Email'] }) as const } : stubPage()),
+      // Live, so the cap applies.
+      env: { DRY_RUN: 'false' },
+      // Fixed time, as every W10 test.
+      clock: frozenClock,
+      // The shared renderer stub.
+      renderResume,
+    });
+
+    // The refused row parked for a human.
+    expect(summary.blocked).toBe(1);
+    // THE assertion: the one cap slot went to a real send, not to the refusal.
+    expect(summary.submitted).toBe(1);
+    // And the cap, not the queue, ended the run.
+    expect(summary.stoppedReason).toMatch(/max_applications_per_day/);
+  });
+
   it('W10: a cap already used up in the last 24 h claims nothing at all', async () => {
     // Settings says 2 a day and 2 went out in the window.
     const { gateway, calls } = threeRowGateway(async () => ({ maxPerDay: 2, sentSince: 2 }));

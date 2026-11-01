@@ -602,10 +602,18 @@ describe('createSupabaseGateway.fetchLatestProfile', () => {
 // entered `applying` in the window. Every failure must THROW: the loop treats a throw as
 // "submit nothing", and any quiet default here would be "no cap".
 describe('createSupabaseGateway.fetchDailyCap (W10)', () => {
-  /** A client answering the two reads, recording every filter the gateway applies. */
+  /** One application_events row, as the behavioural count below filters it. */
+  type EventRow = Record<string, unknown>;
+  /** A count answer: either canned, or computed from rows by the gateway's own filters. */
+  type CountAnswer = { count: unknown; error: { message: string } | null } | { rows: readonly EventRow[] };
+
+  /** A client answering the three reads, recording every filter the gateway applies. */
   function capClient(
     settings: { data: unknown; error: { message: string } | null },
-    events: { count: unknown; error: { message: string } | null },
+    events: CountAnswer,
+    // Rows sitting at `applying` right now. Defaults to none, so a test about the event
+    // count is not disturbed by the in-flight read.
+    inFlight: { count: unknown; error: { message: string } | null } = { count: 0, error: null },
   ) {
     // Every table read, with its columns, options and filters, in call order.
     const reads: Array<{ table: string; columns: string; options: unknown; filters: Array<[string, string, unknown]> }> = [];
@@ -639,10 +647,37 @@ describe('createSupabaseGateway.fetchDailyCap (W10)', () => {
               // Chainable.
               return chain;
             },
+            // Set-membership filter: the submit edges' from/to statuses.
+            in: (column: string, values: unknown) => {
+              // Recorded with its operator.
+              read.filters.push(['in', column, values]);
+              // Chainable.
+              return chain;
+            },
             // The settings read ends here.
             maybeSingle: async () => settings,
-            // The count read is awaited directly, as supabase-js query builders are thenables.
-            then: (resolve: (value: unknown) => void) => resolve({ data: null, ...events }),
+            // The count reads are awaited directly, as supabase-js query builders are thenables.
+            then: (resolve: (value: unknown) => void) => {
+              // The in-flight read is the one on `applications`; its answer is canned.
+              if (table === 'applications') return resolve({ data: null, ...inFlight });
+              // A canned event answer is returned as given (errors and soft failures).
+              if (!('rows' in events)) return resolve({ data: null, ...events });
+              // Otherwise count the rows that pass EVERY recorded filter, the way Postgres
+              // would: so the test checks which events count, not which filter calls were made.
+              const count = events.rows.filter((row) =>
+                // Every filter must hold for the row to count.
+                read.filters.every(([op, column, value]) =>
+                  // eq: exact match; in: membership; gte: ISO timestamps compare as strings.
+                  op === 'eq' ? row[column] === value
+                    : op === 'in' ? (value as unknown[]).includes(row[column])
+                      : op === 'gte' ? String(row[column]) >= String(value)
+                        // An operator this fake does not know fails the row, never passes it.
+                        : false,
+                ),
+              ).length;
+              // Shaped like a head-only exact count.
+              return resolve({ data: null, count, error: null });
+            },
           };
           // Handed to the gateway.
           return chain;
@@ -656,28 +691,80 @@ describe('createSupabaseGateway.fetchDailyCap (W10)', () => {
   // The window start every test passes.
   const since = '2026-10-31T08:00:00.000Z';
 
-  it('W10 gateway: reads max_applications_per_day for this user and counts status_change into applying since the window start', async () => {
-    // Cap 5, two entered `applying` in the window.
-    const { client, reads } = capClient({ data: { max_applications_per_day: 5 }, error: null }, { count: 2, error: null });
+  it('W10 gateway: reads max_applications_per_day for this user and counts submit attempts (in flight + recorded) since the window start', async () => {
+    // Cap 5, two submit edges in the window, one row mid-submit right now.
+    const { client, reads } = capClient({ data: { max_applications_per_day: 5 }, error: null }, { count: 2, error: null }, { count: 1, error: null });
     // The gateway under test.
     const gateway = createSupabaseGateway(client, { userId: 'u1' });
 
-    // Both halves come back as read.
-    expect(await gateway.fetchDailyCap(since)).toEqual({ maxPerDay: 5, sentSince: 2 });
+    // Both halves come back as read; sent is the recorded edges plus the in-flight row.
+    expect(await gateway.fetchDailyCap(since)).toEqual({ maxPerDay: 5, sentSince: 3 });
     // The setting, for THIS user (two users share the table live).
     expect(reads[0]).toMatchObject({ table: 'system_settings', columns: 'max_applications_per_day', filters: [['eq', 'user_id', 'u1']] });
-    // The count: a head-only exact count, never a row download.
-    expect(reads[1]).toMatchObject({ table: 'application_events', options: { count: 'exact', head: true } });
-    // Filtered to this user's status changes into `applying`, inside the window.
-    expect(reads[1]?.filters).toEqual(
-      // Order-independent: the filter set is the contract, not the call order.
+    // In-flight BEFORE events: a row finishing between the two reads is then counted
+    // twice (safe), never zero times (the reverse order would lose it).
+    expect(reads.map((read) => read.table)).toEqual(['system_settings', 'applications', 'application_events']);
+    // In flight: this user's rows at `applying`, as a head-only exact count.
+    expect(reads[1]).toMatchObject({ options: { count: 'exact', head: true } });
+    // Order-independent: the filter set is the contract, not the call order.
+    expect(reads[1]?.filters).toEqual(expect.arrayContaining([['eq', 'user_id', 'u1'], ['eq', 'status', 'applying']]));
+    // The recorded half: a head-only exact count, never a row download.
+    expect(reads[2]).toMatchObject({ options: { count: 'exact', head: true } });
+    // Filtered to this user's submit edges, inside the window.
+    expect(reads[2]?.filters).toEqual(
+      // Order-independent, as above.
       expect.arrayContaining([
         ['eq', 'user_id', 'u1'],
         ['eq', 'event_type', 'status_change'],
-        ['eq', 'to_status', 'applying'],
+        ['in', 'from_status', ['applying', 'blocked_needs_human']],
+        ['in', 'to_status', ['applied', 'needs_verification']],
         ['gte', 'created_at', since],
       ]),
     );
+  });
+
+  /** A status_change event for user u1 inside the window, unless a field overrides it. */
+  function ev(from: string | null, to: string | null, extra: EventRow = {}): EventRow {
+    // Every field the gateway filters on, defaulted to "counts if the edge counts".
+    return { user_id: 'u1', event_type: 'status_change', from_status: from, to_status: to, created_at: '2026-10-31T12:00:00.000Z', ...extra };
+  }
+
+  it('blocked-before-submit rows do not count against the daily cap', async () => {
+    // Code-review finding #10: five rows entered `applying` earlier today and were parked
+    // before any submit click. Nothing was sent, so a cap of 5 must still have 5 left.
+    const rows = [1, 2, 3, 4, 5].flatMap(() => [ev('approved', 'applying'), ev('applying', 'blocked_needs_human')]);
+    // Cap 5, the live default region; no row is mid-submit right now.
+    const { client } = capClient({ data: { max_applications_per_day: 5 }, error: null }, { rows });
+    // THE assertion: zero sent, not five.
+    expect(await createSupabaseGateway(client, { userId: 'u1' }).fetchDailyCap(since)).toEqual({ maxPerDay: 5, sentSince: 0 });
+  });
+
+  it('W10 gateway: each real submit attempt counts once, and nothing else counts', async () => {
+    // The events the window can hold, live shapes from application_status_transitions.
+    const rows = [
+      // COUNTS: the applier's submit landed.
+      ev('applying', 'applied'),
+      // COUNTS: the sweeper found a stranded submit; the outcome is unknown, it may have been sent.
+      ev('applying', 'needs_verification', { agent: 'sweeper' }),
+      // COUNTS: assisted-submit (or a hand submit) of a parked row, recorded by the human.
+      ev('blocked_needs_human', 'applied', { agent: 'human' }),
+      // Not a new attempt: confirms an unknown that was counted when it reached needs_verification.
+      ev('needs_verification', 'applied', { agent: 'human' }),
+      // Not an attempt: entering `applying` is not sending (this was the bug).
+      ev('approved', 'applying'),
+      // Not an attempt: parked before submit.
+      ev('applying', 'blocked_needs_human'),
+      // Not a status change at all.
+      ev(null, null, { event_type: 'note' }),
+      // Another user's submit: two users share the table live.
+      ev('applying', 'applied', { user_id: 'u2' }),
+      // Before the window.
+      ev('applying', 'applied', { created_at: '2026-10-30T12:00:00.000Z' }),
+    ];
+    // Cap 5, nothing in flight.
+    const { client } = capClient({ data: { max_applications_per_day: 5 }, error: null }, { rows });
+    // Exactly the three attempts.
+    expect(await createSupabaseGateway(client, { userId: 'u1' }).fetchDailyCap(since)).toEqual({ maxPerDay: 5, sentSince: 3 });
   });
 
   it('W10 gateway: no settings row reads as no daily cap (the documented null)', async () => {
@@ -712,7 +799,17 @@ describe('createSupabaseGateway.fetchDailyCap (W10)', () => {
       // A fresh client per case, with a valid cap so only the count is under test.
       const { client } = capClient({ data: { max_applications_per_day: 5 }, error: null }, events);
       // Each must throw: zero sent would let the cap be blown past.
-      await expect(createSupabaseGateway(client, { userId: 'u1' }).fetchDailyCap(since)).rejects.toThrow(/applying/);
+      await expect(createSupabaseGateway(client, { userId: 'u1' }).fetchDailyCap(since)).rejects.toThrow(/submit attempts/);
+    }
+  });
+
+  it('W10 gateway: a failed or missing in-flight count throws instead of reading as nothing in flight', async () => {
+    // The same two failure shapes, on the `applying` read this time.
+    for (const inFlight of [{ count: 1, error: { message: 'timeout' } }, { count: null, error: null }]) {
+      // A valid cap and a valid event count, so only the in-flight read is under test.
+      const { client } = capClient({ data: { max_applications_per_day: 5 }, error: null }, { count: 0, error: null }, inFlight);
+      // Each must throw, naming the in-flight read.
+      await expect(createSupabaseGateway(client, { userId: 'u1' }).fetchDailyCap(since)).rejects.toThrow(/in flight/);
     }
   });
 });

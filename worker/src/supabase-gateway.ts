@@ -399,11 +399,37 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
         // The value is quoted so the log shows exactly what was stored.
         throw new Error(`fetchDailyCap: max_applications_per_day is ${JSON.stringify(raw)}, not a positive integer; refusing to submit`);
       }
-      // Every application that entered `applying` in the window, whichever agent moved it
-      // (the applier, or assisted-submit for a human): each one may have been sent, and the
-      // setting caps applications per day, not one sender's share. Head-only exact count,
-      // so no rows are downloaded. Filtered to this user like the settings read.
-      const { count, error } = await client
+      // "Sent" means a SUBMIT ATTEMPT, the same thing the loop counts for its own run
+      // (submitted + outcomeUnknown). It is NOT "entered `applying`": a row parked at
+      // blocked_needs_human before any click went through `applying` too, and counting it
+      // let five early blocks use up a cap of 5 with nothing sent (code-review finding #10).
+      // Two halves, both head-only exact counts filtered to this user like the settings read.
+      //
+      // Half 1, IN FLIGHT: rows sitting at `applying` right now. Each is either a concurrent
+      // run mid-submit or an earlier run's unknown outcome the sweeper has not reached yet
+      // (the loop reads this cap BEFORE it sweeps, and the worker never writes
+      // needs_verification itself). Either may have been sent, so both count: fail closed.
+      // Read FIRST: a row that finishes between the two reads is then counted twice (safe),
+      // never zero times. ponytail: no window here, so a row stuck at `applying` for days
+      // costs one slot until the sweep that follows this read moves it on.
+      const inFlight = await client
+        // The live rows, not their history.
+        .from('applications')
+        // Count only; no rows come back.
+        .select('id', { count: 'exact', head: true })
+        // This user's rows.
+        .eq('user_id', config.userId)
+        // Mid-submit, or stranded mid-submit.
+        .eq('status', 'applying');
+      // Half 2, RECORDED: the submit edges in the window. from IN x to IN is a cross product,
+      // and it is exactly the three submit edges because blocked_needs_human ->
+      // needs_verification is not an edge (application_status_transitions; the BEFORE UPDATE
+      // guard refuses it). The three: applying -> applied (the applier's submit landed),
+      // applying -> needs_verification (the sweeper's "outcome unknown"), and
+      // blocked_needs_human -> applied (a human's submit, e.g. assisted-submit, which parks
+      // BEFORE the human clicks). needs_verification -> applied is left out: it confirms an
+      // attempt already counted when it reached needs_verification.
+      const recorded = await client
         // The append-only history: a status_change row is written by every transition.
         .from('application_events')
         // Count only; no rows come back.
@@ -412,19 +438,26 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
         .eq('user_id', config.userId)
         // Status changes only, not notes or LLM calls.
         .eq('event_type', 'status_change')
-        // Into `applying`: the one edge every submit attempt crosses.
-        .eq('to_status', 'applying')
+        // Out of the two states a submit is made from.
+        .in('from_status', ['applying', 'blocked_needs_human'])
+        // Into the two states a submit can end in.
+        .in('to_status', ['applied', 'needs_verification'])
         // Inside the trailing window the loop computed.
         .gte('created_at', sinceIso);
-      // supabase-js reports a failure as a value; surfaced as a throw.
-      if (error) throw new Error(`fetchDailyCap: count applying events failed: ${error.message}`);
-      // A missing count with no error is still not zero: fail closed on the shape.
-      if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) {
-        // Quoted, so the log shows what came back.
-        throw new Error(`fetchDailyCap: count of applying events is ${JSON.stringify(count)}; refusing to submit`);
-      }
-      // Both halves, validated.
-      return { maxPerDay: raw, sentSince: count };
+      // Each half validated the same way, labelled so the log says which read failed.
+      const counted = (label: string, result: { count: unknown; error: { message: string } | null }): number => {
+        // supabase-js reports a failure as a value; surfaced as a throw.
+        if (result.error) throw new Error(`fetchDailyCap: count ${label} failed: ${result.error.message}`);
+        // A missing count with no error is still not zero: fail closed on the shape.
+        if (typeof result.count !== 'number' || !Number.isSafeInteger(result.count) || result.count < 0) {
+          // Quoted, so the log shows what came back.
+          throw new Error(`fetchDailyCap: count ${label} is ${JSON.stringify(result.count)}; refusing to submit`);
+        }
+        // The validated count.
+        return result.count;
+      };
+      // Both halves, validated; their sum is what may already have gone out.
+      return { maxPerDay: raw, sentSince: counted('rows in flight at applying', inFlight) + counted('submit attempts', recorded) };
     },
 
     async uploadScreenshot(applicationId, bytes) {

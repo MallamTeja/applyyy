@@ -60,8 +60,8 @@ export interface RunGateway extends ApplierGateway {
   // database error, like every other write here; the loop decides what a failure means.
   appendApplicationNote(applicationId: string, detail: Record<string, unknown>): Promise<void>;
   fetchAnswers(): Promise<readonly AnswerBankRow[]>;
-  // W10: the Settings "Daily Application Cap" and how many applications entered `applying`
-  // since `sinceIso`. REQUIRED, so a gateway that cannot enforce the cap does not compile.
+  // W10: the Settings "Daily Application Cap" and how many submit attempts were made since
+  // `sinceIso` (see DailyCap.sentSince). REQUIRED, so a gateway that cannot enforce the cap does not compile.
   // Throws when either half cannot be read or has the wrong shape; the loop lets that end
   // the run (fail CLOSED), because "unknown" must never read as "no cap".
   fetchDailyCap(sinceIso: string): Promise<DailyCap>;
@@ -98,7 +98,11 @@ export interface DailyCap {
   // reads the same row's system_enabled and returns nothing without it. The column is
   // NOT NULL (default 35) today, so this branch is reachable only through that missing row.
   readonly maxPerDay: number | null;
-  // Applications that entered `applying` inside the window: each one may have been sent.
+  // SUBMIT ATTEMPTS that may have gone out: rows at `applying` right now (mid-submit, or an
+  // unknown outcome not yet swept) plus the window's submit edges (applying -> applied |
+  // needs_verification, blocked_needs_human -> applied). The same definition as this run's
+  // own `submitted + outcomeUnknown`. NOT "entered `applying`": a row parked before any click
+  // sent nothing (code-review finding #10). The gateway's fetchDailyCap holds the query.
   readonly sentSince: number;
 }
 
@@ -305,6 +309,8 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
     }
     // THE SETTINGS DAILY CAP (W10): whatever went out in the last 24 h plus this run's
     // attempts may not exceed it. So the effective cap is min(per-run, daily - sent).
+    // Both sides count submit attempts only, so a row this run parks before submitting
+    // costs no slot here, just as an earlier run's parked row costs none in sentSince.
     // ponytail: read once per run, so two runs overlapping in time could each spend the
     // same remainder; a DB-side count at claim time is the upgrade if runs ever overlap.
     if (daily !== null && daily.maxPerDay !== null && daily.sentSince + attempts >= daily.maxPerDay) {
