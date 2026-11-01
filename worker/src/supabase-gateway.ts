@@ -26,7 +26,8 @@
 // THE WORKER CANNOT DO ANYTHING TEJA COULD NOT DO FROM THE DASHBOARD.
 // MasterProfile types the return value so callers get the real shape, not any.
 import type { AgentName, ApplicationStatus, AtsProvider, MasterProfile, ResolvedResume } from '@applyy/shared-types';
-import type { RunGateway } from './claim-loop.ts';
+// UnusableClaim is the W4 shape for a claimed row with nowhere to go (lease kept, never opened).
+import type { RunGateway, UnusableClaim } from './claim-loop.ts';
 import type { ClaimedApplication } from './apply-one.ts';
 
 /** What a Supabase-shaped client must offer. Deliberately minimal. */
@@ -236,19 +237,22 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
       // A Map so each claimed row finds its job in one lookup, same as the URL map above.
       const jobById = new Map((jobs ?? []).map((job) => [job.id, job]));
 
-      // Rows that can actually be navigated to, each paired with its URL. Built
-      // in a loop rather than one filter, because the rejected rows need an
-      // awaited release and a filter callback cannot await.
-      const usable: Array<{ row: (typeof rows)[number]; url: string }> = [];
+      // Every claimed row, in claim order: workable ones paired with their URL, unusable
+      // ones NAMED. Built in a loop rather than one filter, because the liveness-unknown
+      // case below still needs an awaited release and a filter callback cannot await.
+      const claimed: Array<{ row: (typeof rows)[number]; url: string } | UnusableClaim> = [];
       for (const row of rows) {
         // Trimmed so a whitespace-only URL counts as missing, not as a target.
         const url = urlByJobId.get(row.job_id)?.trim();
-        // FAIL CLOSED: no URL means there is nowhere honest to go. Released, not
-        // failed — a status write needs a legal edge, and this is a data gap a
-        // human can fix, not a verdict on the application. The reason lands in
-        // `application_events` so "why was this never attempted" has an answer.
+        // FAIL CLOSED: no URL means there is nowhere honest to go. Returned as UNUSABLE
+        // with its lease still held (W4). It used to be released here, which made it the
+        // oldest claimable row again: five of them at the head of the queue made every
+        // claim look empty. The claim loop now holds it (dry) or parks it (live), and the
+        // reason still lands in `application_events` either way.
         if (!url) {
-          await releaseApplierClaim(row.id, `no apply_url on job ${row.job_id}; not attempted`);
+          // Named, with the job, so "why was this never attempted" has an answer.
+          claimed.push({ id: row.id, unusable: 'no_apply_url', reason: `no apply_url on job ${row.job_id}; not attempted` });
+          // Not workable: on to the next row.
           continue;
         }
         // Always defined here: a job missing from the map had no URL and already took the no-URL release above.
@@ -269,44 +273,55 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
         }
         // A non-null timestamp means the posting dropped off its board: nowhere live to go.
         // `!= null` (loose) so only a real timestamp trips it; null and undefined both mean not dead.
+        // NOT the liveness-unknown case above: that one is a schema or select bug that would
+        // hit EVERY row, so parking it would sweep the whole approved queue to the human lane.
         if (job?.disappeared_at != null) {
-          // Same release path as the no-URL gap: a status write needs a legal edge.
-          await releaseApplierClaim(
-            // Targets exactly this row's lease.
-            row.id,
+          // Same as the no-URL gap (W4): named and returned with its lease, never released here.
+          claimed.push({
+            // This row, whose lease the loop now owns.
+            id: row.id,
+            // The machine-readable cause for the park detail.
+            unusable: 'posting_disappeared',
             // Distinct token so health queries can count dead postings; the timestamp shows how long it has been dead.
-            `posting_disappeared: job ${row.job_id} disappeared at ${job.disappeared_at}; not attempted`,
-          );
-          // Not usable, so skipped like the other release cases.
+            reason: `posting_disappeared: job ${row.job_id} disappeared at ${job.disappeared_at}; not attempted`,
+          });
+          // Not workable: on to the next row.
           continue;
         }
         // Kept with its row so the mapping below needs no second lookup.
-        usable.push({ row, url });
+        claimed.push({ row, url });
       }
 
-      return usable.map(
-        ({ row, url }): ClaimedApplication => ({
-          id: row.id,
-          status: 'approved',
-          // Present and non-empty by construction: the loop above dropped
-          // every row without one, so no `?? ''` fallback can reintroduce the
-          // empty string that `page.goto` throws on.
-          applyUrl: url,
-          // Passed through UNVALIDATED and un-defaulted on purpose. Coercing a
-          // missing snapshot to an empty resume here would produce a blank PDF
-          // that renders, uploads and attaches without complaint; leaving the
-          // null intact means the attachment planner refuses the application
-          // and a human sees why. `??` rather than a bare read so `undefined`
-          // (column absent from the payload) and SQL NULL mean the same thing.
-          tailoredProfile: row.tailored_profile ?? null,
-          // The employer's name, for the planner's "previously worked at <company>" check.
-          // Null when absent, never "": the planner REFUSES that question on null, which is
-          // the safe answer when we do not know who the employer is.
-          employerName: jobById.get(row.job_id)?.company_name?.trim() || null,
-          // The job's ATS, for the Workday guard. `??` so an absent key and SQL NULL both
-          // read as null ("no provider"); the guard's host check still runs on null.
-          atsProvider: jobById.get(row.job_id)?.ats_provider ?? null,
-        }),
+      return claimed.map(
+        (entry): ClaimedApplication | UnusableClaim => {
+          // Unusable entries pass through unchanged; only workable rows are mapped.
+          if ('unusable' in entry) return entry;
+          // The workable pair, unpacked for the mapping below.
+          const { row, url } = entry;
+          // The row the browser will open.
+          return {
+            id: row.id,
+            status: 'approved',
+            // Present and non-empty by construction: the loop above named
+            // every row without one UNUSABLE, so no `?? ''` fallback can reintroduce the
+            // empty string that `page.goto` throws on.
+            applyUrl: url,
+            // Passed through UNVALIDATED and un-defaulted on purpose. Coercing a
+            // missing snapshot to an empty resume here would produce a blank PDF
+            // that renders, uploads and attaches without complaint; leaving the
+            // null intact means the attachment planner refuses the application
+            // and a human sees why. `??` rather than a bare read so `undefined`
+            // (column absent from the payload) and SQL NULL mean the same thing.
+            tailoredProfile: row.tailored_profile ?? null,
+            // The employer's name, for the planner's "previously worked at <company>" check.
+            // Null when absent, never "": the planner REFUSES that question on null, which is
+            // the safe answer when we do not know who the employer is.
+            employerName: jobById.get(row.job_id)?.company_name?.trim() || null,
+            // The job's ATS, for the Workday guard. `??` so an absent key and SQL NULL both
+            // read as null ("no provider"); the guard's host check still runs on null.
+            atsProvider: jobById.get(row.job_id)?.ats_provider ?? null,
+          };
+        },
       );
     },
 
@@ -359,6 +374,57 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
     async fetchAnswers() {
       const data = unwrap(await client.from('answer_bank').select('*').limit(1000), 'fetchAnswers');
       return (Array.isArray(data) ? data : []) as never[];
+    },
+
+    // W10: the Settings daily cap and what already went out in the window. Every failure
+    // THROWS, because the loop reads a throw as "submit nothing" and any quiet default here
+    // would read as "no cap" (CLAUDE.md §6: validate the positive shape).
+    async fetchDailyCap(sinceIso) {
+      // This user's row only: two users share system_settings live.
+      const settings = unwrap(
+        // maybeSingle: no row is a legal answer (see DailyCap), more than one is an error.
+        await client.from('system_settings').select('max_applications_per_day').eq('user_id', config.userId).maybeSingle(),
+        // Names the setting, so the run's error_detail says which read failed.
+        'fetchDailyCap: read max_applications_per_day',
+      ) as Record<string, unknown> | null;
+      // A row whose select dropped the column is a code bug, not "no cap": fail closed.
+      if (settings !== null && !('max_applications_per_day' in settings)) {
+        // Thrown, never defaulted.
+        throw new Error('fetchDailyCap: max_applications_per_day missing from the settings read; refusing to submit');
+      }
+      // No row reads as null, the documented "no daily cap" (DailyCap.maxPerDay).
+      const raw = settings === null ? null : settings['max_applications_per_day'];
+      // The positive shape: null, or a positive safe integer. Zero, a string or a fraction is not a cap.
+      if (raw !== null && !(typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0)) {
+        // The value is quoted so the log shows exactly what was stored.
+        throw new Error(`fetchDailyCap: max_applications_per_day is ${JSON.stringify(raw)}, not a positive integer; refusing to submit`);
+      }
+      // Every application that entered `applying` in the window, whichever agent moved it
+      // (the applier, or assisted-submit for a human): each one may have been sent, and the
+      // setting caps applications per day, not one sender's share. Head-only exact count,
+      // so no rows are downloaded. Filtered to this user like the settings read.
+      const { count, error } = await client
+        // The append-only history: a status_change row is written by every transition.
+        .from('application_events')
+        // Count only; no rows come back.
+        .select('id', { count: 'exact', head: true })
+        // This user's history.
+        .eq('user_id', config.userId)
+        // Status changes only, not notes or LLM calls.
+        .eq('event_type', 'status_change')
+        // Into `applying`: the one edge every submit attempt crosses.
+        .eq('to_status', 'applying')
+        // Inside the trailing window the loop computed.
+        .gte('created_at', sinceIso);
+      // supabase-js reports a failure as a value; surfaced as a throw.
+      if (error) throw new Error(`fetchDailyCap: count applying events failed: ${error.message}`);
+      // A missing count with no error is still not zero: fail closed on the shape.
+      if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) {
+        // Quoted, so the log shows what came back.
+        throw new Error(`fetchDailyCap: count of applying events is ${JSON.stringify(count)}; refusing to submit`);
+      }
+      // Both halves, validated.
+      return { maxPerDay: raw, sentSince: count };
     },
 
     async uploadScreenshot(applicationId, bytes) {

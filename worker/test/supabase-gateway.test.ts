@@ -433,12 +433,14 @@ describe('createSupabaseGateway.claimApplications', () => {
     // One claim.
     const claimed = await gateway.claimApplications('applier:run-1', 5);
     // The provider arrives verbatim; the guard keys on exactly this value.
-    expect(claimed.map((row) => row.atsProvider)).toEqual(['workday']);
+    // Narrowed first: an unusable entry has no provider, and this row must not be one.
+    expect(claimed.map((row) => ('atsProvider' in row ? row.atsProvider : 'unusable'))).toEqual(['workday']);
   });
 
-  it('releases, and never returns, a row whose job has no apply_url', async () => {
-    // A row with nowhere to go must not reach `page.goto`. Released with a reason
-    // so the row stays `approved` and a human can see why it was not attempted.
+  it('W4: returns a no-apply_url row as UNUSABLE and keeps its lease, so the loop can hold or park it', async () => {
+    // A row with nowhere to go must not reach `page.goto`. It used to be released here,
+    // which made it the oldest claimable row again: five of them starved the queue (W4).
+    // Now it comes back named, lease kept, and the claim loop decides hold vs park.
     const { client, rpcCalls } = claimClient(
       [
         { id: 'app-1', job_id: 'job-1', tailored_profile: null },
@@ -450,15 +452,17 @@ describe('createSupabaseGateway.claimApplications', () => {
 
     const claimed = await gateway.claimApplications('applier:run-1', 5);
 
-    // Only the row with a real URL survives.
-    expect(claimed.map((row) => row.id)).toEqual(['app-2']);
-    // The empty-URL row got its lease back, with the reason naming the column.
-    const release = rpcCalls.find((call) => call.fn === 'release_application_claim');
-    expect(release?.args).toMatchObject({ p_application_id: 'app-1', p_agent: 'applier' });
-    expect((release?.args as { p_reason: string }).p_reason).toMatch(/apply_url/);
+    // Both rows come back, in claim order; only the second carries a URL.
+    expect(claimed.map((row) => row.id)).toEqual(['app-1', 'app-2']);
+    // The empty-URL row is named unusable, with a reason naming the column and the job.
+    expect(claimed[0]).toMatchObject({ id: 'app-1', unusable: 'no_apply_url', reason: expect.stringMatching(/apply_url.*job-1/) });
+    // And it carries NO applyUrl, so it cannot be handed to the browser by mistake.
+    expect(claimed[0]).not.toHaveProperty('applyUrl');
+    // Lease kept: releasing here is exactly what put it back at the head of the queue.
+    expect(rpcCalls.filter((call) => call.fn === 'release_application_claim')).toEqual([]);
   });
 
-  it('releases a row whose posting disappeared, keeps the live one', async () => {
+  it('W4: returns a disappeared posting as UNUSABLE and keeps its lease, keeps the live one usable', async () => {
     // Two rows, two jobs: one live (null), one dead (an ISO timestamp from scout-ats).
     // Arrange: one live and one dead job, so the test proves the filter splits them rather than blocking all.
     const { client, rpcCalls } = claimClient(
@@ -486,15 +490,17 @@ describe('createSupabaseGateway.claimApplications', () => {
     // Act: claim, which does the jobs read and the release.
     const claimed = await gateway.claimApplications('applier:run-1', 5);
 
-    // Only the live posting is handed to the browser.
-    expect(claimed.map((row) => row.id)).toEqual(['app-live']);
-    // The dead one got its lease back, with the reason naming the cause.
-    // Guards: the dead row is released, not failed, so its status stays legal.
-    const release = rpcCalls.find((call) => call.fn === 'release_application_claim');
-    // Guards: the right row is released, by the applier agent.
-    expect(release?.args).toMatchObject({ p_application_id: 'app-dead', p_agent: 'applier' });
-    // Guards: the reason names the cause, so 'why not attempted' is answerable later.
-    expect((release?.args as { p_reason: string }).p_reason).toMatch(/posting_disappeared/);
+    // Only the live posting carries a URL for the browser.
+    expect(claimed.filter((row) => 'applyUrl' in row).map((row) => row.id)).toEqual(['app-live']);
+    // The dead one is named unusable; the reason keeps the token health queries count.
+    expect(claimed.find((row) => row.id === 'app-dead')).toMatchObject({
+      // Machine-readable cause, for the park detail.
+      unusable: 'posting_disappeared',
+      // The token and the timestamp, so 'why not attempted' is answerable later.
+      reason: expect.stringMatching(/posting_disappeared.*2026-10-01/),
+    });
+    // Lease kept: the claim loop holds it (dry) or parks it (live).
+    expect(rpcCalls.filter((call) => call.fn === 'release_application_claim')).toEqual([]);
   });
 
   it('fails closed when the job has no disappeared_at key at all', async () => {
@@ -588,5 +594,125 @@ describe('createSupabaseGateway.fetchLatestProfile', () => {
     const { client } = profileClient({ data: null, error: { message: 'boom' } });
     // A swallowed error would quietly drop every profile fill and look like an empty profile.
     await expect(createSupabaseGateway(client, { userId: 'u1' }).fetchLatestProfile!()).rejects.toThrow(/boom/);
+  });
+});
+
+// W10 (docs/audit/2026-11-01-wiring-audit.md): the Settings "Daily Application Cap" was
+// written by the web app and read by nothing. The gateway now reads it and counts what
+// entered `applying` in the window. Every failure must THROW: the loop treats a throw as
+// "submit nothing", and any quiet default here would be "no cap".
+describe('createSupabaseGateway.fetchDailyCap (W10)', () => {
+  /** A client answering the two reads, recording every filter the gateway applies. */
+  function capClient(
+    settings: { data: unknown; error: { message: string } | null },
+    events: { count: unknown; error: { message: string } | null },
+  ) {
+    // Every table read, with its columns, options and filters, in call order.
+    const reads: Array<{ table: string; columns: string; options: unknown; filters: Array<[string, string, unknown]> }> = [];
+    // The shared fake for everything else.
+    const base = fakeClient();
+    // Only `from` differs.
+    const client: SupabaseLike = {
+      // Inherits rpc, storage and auth.
+      ...base.client,
+      // A chain that records each filter and resolves at the terminal call.
+      from: (table: string) => ({
+        // The select starts a recorded read.
+        select: (columns: string, options?: unknown) => {
+          // One record per read.
+          const read = { table, columns, options, filters: [] as Array<[string, string, unknown]> };
+          // Stored before any filter, so a read with no filter still shows.
+          reads.push(read);
+          // The chain object; each filter returns it again.
+          const chain = {
+            // Equality filter.
+            eq: (column: string, value: unknown) => {
+              // Recorded with its operator.
+              read.filters.push(['eq', column, value]);
+              // Chainable.
+              return chain;
+            },
+            // Lower bound filter: the window start.
+            gte: (column: string, value: unknown) => {
+              // Recorded with its operator.
+              read.filters.push(['gte', column, value]);
+              // Chainable.
+              return chain;
+            },
+            // The settings read ends here.
+            maybeSingle: async () => settings,
+            // The count read is awaited directly, as supabase-js query builders are thenables.
+            then: (resolve: (value: unknown) => void) => resolve({ data: null, ...events }),
+          };
+          // Handed to the gateway.
+          return chain;
+        },
+      }),
+    };
+    // Both returned.
+    return { client, reads };
+  }
+
+  // The window start every test passes.
+  const since = '2026-10-31T08:00:00.000Z';
+
+  it('W10 gateway: reads max_applications_per_day for this user and counts status_change into applying since the window start', async () => {
+    // Cap 5, two entered `applying` in the window.
+    const { client, reads } = capClient({ data: { max_applications_per_day: 5 }, error: null }, { count: 2, error: null });
+    // The gateway under test.
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    // Both halves come back as read.
+    expect(await gateway.fetchDailyCap(since)).toEqual({ maxPerDay: 5, sentSince: 2 });
+    // The setting, for THIS user (two users share the table live).
+    expect(reads[0]).toMatchObject({ table: 'system_settings', columns: 'max_applications_per_day', filters: [['eq', 'user_id', 'u1']] });
+    // The count: a head-only exact count, never a row download.
+    expect(reads[1]).toMatchObject({ table: 'application_events', options: { count: 'exact', head: true } });
+    // Filtered to this user's status changes into `applying`, inside the window.
+    expect(reads[1]?.filters).toEqual(
+      // Order-independent: the filter set is the contract, not the call order.
+      expect.arrayContaining([
+        ['eq', 'user_id', 'u1'],
+        ['eq', 'event_type', 'status_change'],
+        ['eq', 'to_status', 'applying'],
+        ['gte', 'created_at', since],
+      ]),
+    );
+  });
+
+  it('W10 gateway: no settings row reads as no daily cap (the documented null)', async () => {
+    // maybeSingle's "no row" answer.
+    const { client } = capClient({ data: null, error: null }, { count: 0, error: null });
+    // The gateway under test.
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+    // Null cap, so only the per-run cap applies.
+    expect(await gateway.fetchDailyCap(since)).toEqual({ maxPerDay: null, sentSince: 0 });
+  });
+
+  it('W10 gateway: a malformed cap throws instead of reading as a number', async () => {
+    // Zero, a string, a fraction and a row whose select dropped the column: none is a cap.
+    for (const data of [{ max_applications_per_day: 0 }, { max_applications_per_day: '35' }, { max_applications_per_day: 1.5 }, {}]) {
+      // A fresh client per shape.
+      const { client } = capClient({ data, error: null }, { count: 0, error: null });
+      // Each must throw, naming the setting.
+      await expect(createSupabaseGateway(client, { userId: 'u1' }).fetchDailyCap(since)).rejects.toThrow(/max_applications_per_day/);
+    }
+  });
+
+  it('W10 gateway: a failed settings read throws', async () => {
+    // supabase-js reports the failure as a VALUE, not a throw.
+    const { client } = capClient({ data: null, error: { message: 'permission denied' } }, { count: 0, error: null });
+    // Must surface as a throw.
+    await expect(createSupabaseGateway(client, { userId: 'u1' }).fetchDailyCap(since)).rejects.toThrow(/permission denied/);
+  });
+
+  it('W10 gateway: a failed or missing count throws instead of reading as zero sent', async () => {
+    // An {error} value, and a null count with no error (a soft failure).
+    for (const events of [{ count: 3, error: { message: 'timeout' } }, { count: null, error: null }]) {
+      // A fresh client per case, with a valid cap so only the count is under test.
+      const { client } = capClient({ data: { max_applications_per_day: 5 }, error: null }, events);
+      // Each must throw: zero sent would let the cap be blown past.
+      await expect(createSupabaseGateway(client, { userId: 'u1' }).fetchDailyCap(since)).rejects.toThrow(/applying/);
+    }
   });
 });

@@ -246,6 +246,8 @@ describe('runApplierBatch and the workday guard', () => {
       closeRun: async () => {},
       // No unknown outcomes here.
       appendApplicationNote: async () => {},
+      // Required since W10 (the Settings daily cap); no cap, so the Workday park is all that is tested.
+      fetchDailyCap: async () => ({ maxPerDay: null, sentSince: 0 }),
       // The kill switch is not under test.
       isSystemEnabled: async () => true,
       // Not under test.

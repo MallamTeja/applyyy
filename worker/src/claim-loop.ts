@@ -13,7 +13,10 @@
 // Batching is therefore not a performance tweak; it is the difference between
 // fitting the budget and not having a product. The reasoning lives here, beside
 // the loop, because THE CHANGE THAT BREAKS IT WILL LOOK LIKE AN IMPROVEMENT.
-import type { AgentName } from '@applyy/shared-types';
+// BlockReason types the W4 park's block_reason, so a typo fails to compile.
+import type { AgentName, BlockReason } from '@applyy/shared-types';
+// The one status-write gate, so a W4 park walks a checked edge like every other park.
+import { guardedAdvance } from './guarded-advance.ts';
 import {
   applyToOne,
   type ApplicationPage,
@@ -48,12 +51,20 @@ export interface RunGateway extends ApplierGateway {
   // Read for OBSERVABILITY, not for safety — see the call site.
   isSystemEnabled(): Promise<boolean>;
   sweepStaleClaims(): Promise<void>;
-  claimApplications(claimedBy: string, limit: number): Promise<ClaimedApplication[]>;
+  // A claimed row is either workable or named UNUSABLE (W4). Unusable rows come back with
+  // their lease still held instead of being released inside the gateway, because a release
+  // made them the oldest claimable rows again and five of them starved the whole queue.
+  claimApplications(claimedBy: string, limit: number): Promise<Array<ClaimedApplication | UnusableClaim>>;
   // Appends one 'note' to THIS application's own event log (application_events, append-only). REQUIRED,
   // so a gateway that cannot record an unknown submit's cause on its row does not compile. Throws on a
   // database error, like every other write here; the loop decides what a failure means.
   appendApplicationNote(applicationId: string, detail: Record<string, unknown>): Promise<void>;
   fetchAnswers(): Promise<readonly AnswerBankRow[]>;
+  // W10: the Settings "Daily Application Cap" and how many applications entered `applying`
+  // since `sinceIso`. REQUIRED, so a gateway that cannot enforce the cap does not compile.
+  // Throws when either half cannot be read or has the wrong shape; the loop lets that end
+  // the run (fail CLOSED), because "unknown" must never read as "no cap".
+  fetchDailyCap(sinceIso: string): Promise<DailyCap>;
   // Optional so older gateways keep working; absent means no profile fills, the safe direction.
   // Declared on the loop's gateway type so the loop can fetch the profile without a cast.
   fetchLatestProfile?(): Promise<MasterProfile | null>;
@@ -63,6 +74,32 @@ export interface RunGateway extends ApplierGateway {
   // credentials, so this is always available and an expiring token is
   // recoverable rather than fatal.
   refreshSession(): Promise<void>;
+}
+
+/**
+ * A claimed row with nowhere honest to go, found before any page opened (W4, wiring
+ * audit 2026-11-01). Its own shape, with NO applyUrl, so the compiler refuses to hand it
+ * to applyToOne: the loop must narrow it away first.
+ */
+export interface UnusableClaim {
+  // The application id, whose lease this run still holds.
+  readonly id: string;
+  // The closed set of causes; the park detail carries it for the human queue to group on.
+  readonly unusable: 'no_apply_url' | 'posting_disappeared';
+  // One readable line naming the job, for the event log and the release reason.
+  readonly reason: string;
+}
+
+/** W10: the Settings daily cap and what has already been sent inside its window. */
+export interface DailyCap {
+  // system_settings.max_applications_per_day. NULL MEANS "NO DAILY CAP", only the per-run
+  // cap (APPLY_MAX_SUBMITS) applies. Chosen so a user with no settings row is not blocked
+  // by this read; such a user is already blocked upstream, because claim_applications
+  // reads the same row's system_enabled and returns nothing without it. The column is
+  // NOT NULL (default 35) today, so this branch is reachable only through that missing row.
+  readonly maxPerDay: number | null;
+  // Applications that entered `applying` inside the window: each one may have been sent.
+  readonly sentSince: number;
 }
 
 /** Injected dependencies, so the whole loop is testable without a browser. */
@@ -235,7 +272,9 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
   // (and a dry run released) is never processed twice in one run.
   const seen = new Set<string>();
   // Re-claimed rows whose lease we keep until the end; see the re-claim guard.
-  const held: string[] = [];
+  // Each carries its release reason, because unusable rows (W4) are held here too and
+  // their release must say why they were never attempted, not "already processed".
+  const held: Array<{ id: string; reason: string }> = [];
   // Rows claimed while APPLY_ONLY_ID names a different one. HELD like the above,
   // not released on sight: a released row is the oldest unclaimed one again, so
   // the next claim would hand it straight back instead of reaching the target.
@@ -247,6 +286,10 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
   // low makes EVERY submit unconfirmed; without this one run would park the whole queue at
   // needs_verification, each row needing Teja to check an employer site by hand.
   let breakerReason: string | null = null;
+  // W10: the Settings daily cap, read once before the first claim of a LIVE run. Null
+  // until read, and stays null in a dry run (nothing is sent, so there is nothing to cap)
+  // or when the setting is null (no daily cap; see DailyCap).
+  let daily: DailyCap | null = null;
 
   /** Why to stop before the next application on this run's own budget, or null to go on. */
   // Separate from gateBeforeNextApplication: that gate is about time and auth, this one is
@@ -260,8 +303,68 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
     if (attempts >= maxSubmits) {
       return `APPLY_MAX_SUBMITS reached (${attempts} of ${maxSubmits} submit attempts); stopped claiming`;
     }
+    // THE SETTINGS DAILY CAP (W10): whatever went out in the last 24 h plus this run's
+    // attempts may not exceed it. So the effective cap is min(per-run, daily - sent).
+    // ponytail: read once per run, so two runs overlapping in time could each spend the
+    // same remainder; a DB-side count at claim time is the upgrade if runs ever overlap.
+    if (daily !== null && daily.maxPerDay !== null && daily.sentSince + attempts >= daily.maxPerDay) {
+      // Names the setting, the window count and this run's share, so the log is checkable.
+      return `max_applications_per_day reached (${daily.sentSince} in the last 24 h + ${attempts} this run, cap ${daily.maxPerDay}); stopped claiming`;
+    }
     // Under the cap and the breaker untripped.
     return null;
+  }
+
+  /**
+   * W4: an unusable row is kept out of every later claim in this run. A LIVE run parks it
+   * `approved -> blocked_needs_human` (an edge the applier may walk), so a human sees why
+   * it was never attempted. A DRY run writes no status, so it is HELD and released once at
+   * run end, like the re-claim guard's rows.
+   */
+  async function setAsideUnusable(row: UnusableClaim): Promise<void> {
+    // Dry run: no status write of any kind, so hold the lease and say so in the log.
+    if (!live) {
+      // One line, like formatDryRunLine, so the dry-run log names every row it skipped.
+      console.log(`[applyy] dry run ${row.id}: not attempted (${row.reason})`);
+      // Released at run end with the dry-run prefix every dry release carries.
+      held.push({ id: row.id, reason: `dry_run: ${row.reason}` });
+      // Nothing else to do in a dry run.
+      return;
+    }
+    // Guarded per row: a failed park must not end the run, as a failed application does not.
+    try {
+      // The guarded edge every other park uses, so the transition graph is enforced.
+      await guardedAdvance(gateway, {
+        // This row.
+        applicationId: row.id,
+        // Always approved: the claim only takes approved rows.
+        from: 'approved',
+        // The human lane.
+        to: 'blocked_needs_human',
+        // The applier names itself.
+        agent: ACTING_AGENT,
+        // What the dashboard filters on and what the operator reads.
+        detail: {
+          // `other`: neither a form shape nor a question; the cause rides beside it.
+          block_reason: 'other' satisfies BlockReason,
+          // Machine-readable cause, so the human queue can group these.
+          unusable: row.unusable,
+          // Why, in words, naming the job.
+          reason: row.reason,
+          // No page was opened, so there is no screenshot (accepted, as for robots and Workday).
+          screenshot_storage_path: null,
+        },
+      });
+      // Parked for a human: counted with the other parks.
+      blocked += 1;
+    } catch (error) {
+      // Counted, so the run closes `failed` with the reason instead of a quiet success.
+      errors += 1;
+      // The reason the health page shows.
+      stoppedReason = `continued after error: ${error instanceof Error ? error.message : String(error)}`;
+      // Still ours and still approved: held so the next claim cannot hand it straight back.
+      held.push({ id: row.id, reason: row.reason });
+    }
   }
 
   /**
@@ -318,6 +421,13 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
       return summarise();
     }
 
+    // THE SETTINGS DAILY CAP (W10), read before anything is claimed, and only when this run
+    // may submit. The window is the trailing 24 h from the injected clock: timezone-free, so
+    // no "which midnight" question can widen it. A failed or malformed read THROWS here, into
+    // the run-level catch: the run closes `failed` naming the cause and claims nothing. That
+    // is the fail-closed direction; falling back to "no cap" is the fail-open one.
+    if (live) daily = await gateway.fetchDailyCap(new Date((clock() - 24 * 60 * 60) * 1000).toISOString());
+
     // Sweep BEFORE claiming. Cheap, and it turns a crashed previous run into a
     // self-healing one; sweeping afterwards would leave last night's stranded
     // rows invisible for another whole day. It is also what routes a row stuck
@@ -366,7 +476,8 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
       const unseen = rows.filter((row) => !seen.has(row.id));
       // Recorded before any work, so a row that throws is never retried either.
       for (const row of rows) {
-        if (seen.has(row.id)) held.push(row.id);
+        // Already processed this run: keep its lease so the next claim moves past it.
+        if (seen.has(row.id)) held.push({ id: row.id, reason: 'already processed earlier in this run' });
         else seen.add(row.id);
       }
       // THE APPLY_ONLY_ID FILTER, applied to the claimed page and nowhere else, so
@@ -401,6 +512,20 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
         }
 
         claimed += 1;
+
+        // W4: a row with no apply_url or a disappeared posting. Handled HERE, after the
+        // gates (a kill switch still stops a park) and before any page opens (there is
+        // nothing to open). Never released on sight: that put it back at the head of the
+        // queue, every claim came back empty, and newer approved rows were never tried.
+        if ('unusable' in row) {
+          // Live parks it for a human; dry holds it. Either way the next claim moves past it.
+          await setAsideUnusable(row);
+          // APPLY_ONLY_ID naming an unusable row: its one attempt is this set-aside.
+          if (row.id === input.onlyApplicationId) targetDone = true;
+          // No page, no form: on to the next row.
+          continue;
+        }
+
         // Opened per application so one poisoned page cannot corrupt the next.
         const page = await openPage();
         try {
@@ -520,8 +645,9 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
     // Give back every re-claimed row exactly once. Held rather than released
     // on sight, because releasing would make it the oldest unclaimed row again
     // and the very next claim would return it instead of new work.
-    for (const id of held) {
-      await gateway.releaseClaim(id, 'already processed earlier in this run');
+    for (const { id, reason } of held) {
+      // Each with the reason it was held for.
+      await gateway.releaseClaim(id, reason);
     }
 
     // Give back every row the APPLY_ONLY_ID filter set aside, untouched and still

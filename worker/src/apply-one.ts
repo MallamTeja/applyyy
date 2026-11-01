@@ -322,7 +322,23 @@ export interface ApplyToOneInput {
  * separate. What they share is the shape the dashboard reads — id and label —
  * which is all any consumer below actually touches.
  */
-export type ApplicationBlocker = FillBlocker | ResumeAttachmentBlocker;
+export type ApplicationBlocker = FillBlocker | ResumeAttachmentBlocker | FormShapeBlocker;
+
+/**
+ * A PAGE-level stop: what was opened is not an application form at all (W5, wiring
+ * audit 2026-11-01). Its own member rather than a FillBlocker reason, because the
+ * FillBlocker vocabulary is per QUESTION and maps to `unanswerable_question`
+ * (shared-types ANSWER_BLOCK_REASONS); "there are no questions" has no question to
+ * answer, so it maps to the row-level `unsupported_form` instead.
+ */
+export interface FormShapeBlocker {
+  // The row id, because no control is at fault (the same convention as no_resume_snapshot).
+  readonly id: string;
+  // Human-readable, because this string reaches the dry-run log and Teja's queue.
+  readonly label: string;
+  // One value today. A closed union so a new page-level stop has to be named here.
+  readonly reason: 'no_form_fields';
+}
 
 /** What happened. A discriminated union so no caller can ignore a case. */
 export type ApplyOutcome =
@@ -511,13 +527,27 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
   // submitted — and all three of those decisions read this one boolean.
   // `let` (not const) because a fill that the live page rejects can still turn a viable
   // application into a blocked one after this point; see the catch below.
-  let wouldSubmit = detected === null && plan.canProceed && attachment.canProceed;
+  // THE EMPTY-PAGE GATE (W5). Zero extracted fields means a job description, an iframe
+  // shell or a form that never rendered. Both planners answer "nothing to refuse" there,
+  // which read as "ready", and a live run then clicked whatever submit button the page
+  // had (a search box, a newsletter form). Absence of a form is never a form that is done.
+  // ponytail: emptiness only. A page whose one field is a search box still passes; an
+  // "is there an email field" check is the upgrade, once the profile synonym table is
+  // exported (profile-answers.ts) rather than copied here.
+  const formShapeBlockers: FormShapeBlocker[] =
+    // Checked on the RAW extraction, before any planner skips a kind (planFill skips files).
+    fields.length === 0
+      ? [{ id: row.id, label: 'No application form fields were found on the opened page', reason: 'no_form_fields' }]
+      : [];
+  // All four gates. Each one alone can only say "no", so a missing gate fails closed.
+  let wouldSubmit = detected === null && formShapeBlockers.length === 0 && plan.canProceed && attachment.canProceed;
 
   // Every blocker from every layer, in one list. Merged at the point of decision
   // so no downstream consumer has to remember that there are two sources; a
   // second array would eventually be reported by one caller and not the other.
   // Mutable for the same reason as wouldSubmit: the fill loop may append a late blocker.
-  const blockers: ApplicationBlocker[] = [...plan.blockers, ...attachment.blockers];
+  // The page-level blocker first, because it explains why the other two lists are empty.
+  const blockers: ApplicationBlocker[] = [...formShapeBlockers, ...plan.blockers, ...attachment.blockers];
 
   // The rendered artifact, kept out here so both the dry-run exit and the real
   // status write can name it. Null until a viable application actually needs one.
@@ -694,7 +724,14 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
     // §8.6: a reason code, not a new status. A captcha and an unanswerable
     // question need the identical operator action, so they share a handler and
     // differ only in the explanation.
-    const reason: BlockReason = detected ?? 'unanswerable_question';
+    // A wall wins (it hides the real form). Then "no form at all" is a coverage gap,
+    // `unsupported_form`, because there is no question for Teja to answer. Only then
+    // is it the per-question `unanswerable_question`.
+    const reason: BlockReason =
+      // The page-level wall the detector named, if any.
+      detected ??
+      // The W5 empty page, before the per-question default.
+      (formShapeBlockers.length > 0 ? 'unsupported_form' : 'unanswerable_question');
 
     await guardedAdvance(gateway, {
       applicationId: row.id,

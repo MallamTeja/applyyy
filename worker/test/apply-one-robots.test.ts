@@ -445,6 +445,8 @@ function fakeRunGateway(batches: ClaimedApplication[][]) {
     closeRun: async () => {},
     // Required on RunGateway since the unknown-outcome note (claim-loop.ts); this file never produces one.
     appendApplicationNote: async () => {},
+    // Required since W10 (the Settings daily cap); no cap here, so only the per-run cap applies.
+    fetchDailyCap: async () => ({ maxPerDay: null, sentSince: 0 }),
     // Enabled: the kill switch is not under test.
     isSystemEnabled: async () => true,
     sweepStaleClaims: async () => {},

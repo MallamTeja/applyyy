@@ -1288,3 +1288,84 @@ describe('applyToOne — optional EEO option mismatch', () => {
     expect(outcome.kind).toBe('blocked');
   });
 });
+
+// W5 (docs/audit/2026-11-01-wiring-audit.md): an apply_url that lands on a job description,
+// an iframe shell or an unrendered JS form extracts ZERO fields. Both planners then had
+// nothing to refuse, so wouldSubmit came out true and a live run clicked whatever
+// `form button[type="submit"]` the page had, a search box or a newsletter form included.
+describe('applyToOne — a page with no form fields (W5)', () => {
+  /** fakeGateway plus each advance's detail, which fakeGateway drops and block_reason needs. */
+  function recordingGateway() {
+    // Every advance with its detail, in order.
+    const advances: Array<{ to: string; detail: Record<string, unknown> | undefined }> = [];
+    // The shared fake for every other port, so only the one method under test differs.
+    const base = fakeGateway();
+    // Spread-and-override, as the fill-rejection suite above does.
+    const gateway: ApplierGateway = {
+      // Release, uploads and artifact writes behave exactly as in every other test.
+      ...base.gateway,
+      // Records the detail instead of discarding it.
+      advanceStatus: async (_id, to, _agent, detail) => {
+        // Asserted after the run, so the test reads top-down.
+        advances.push({ to, detail });
+      },
+    };
+    // The released list rides along so the dry-run test can assert the hand-back.
+    return { gateway, advances, released: base.released };
+  }
+
+  it('W5 live: zero extracted fields parks approved -> blocked_needs_human as unsupported_form and never submits', async () => {
+    // The page opened, showed no captcha, and the extractor found nothing to fill.
+    const { page, submit } = fakePage({ extractFields: async () => [] });
+    // Fresh recorder, so nothing leaks from other tests.
+    const { gateway, advances } = recordingGateway();
+
+    // DRY_RUN false: the run is authorised to submit, which is exactly when this matters.
+    const outcome = await applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+
+    // THE assertion: no click on a page that is not an application form.
+    expect(submit).not.toHaveBeenCalled();
+    // One write, straight to the human lane; never through `applying`.
+    expect(advances.map((advance) => advance.to)).toEqual(['blocked_needs_human']);
+    // Row-level reason: a coverage gap in form shapes, not a question Teja can answer.
+    expect(advances[0]?.detail).toMatchObject({ block_reason: 'unsupported_form' });
+    // The outcome names the same reason, so the claim loop logs it as a park.
+    expect(outcome).toMatchObject({ kind: 'blocked', reason: 'unsupported_form' });
+  });
+
+  it('W5 dry run: zero extracted fields reports wouldSubmit=false with a no_form_fields blocker', async () => {
+    // Same empty page as the live test.
+    const { page, submit } = fakePage({ extractFields: async () => [] });
+    // Dry runs write no status, so only the release is asserted.
+    const { gateway, advances, released } = recordingGateway();
+
+    // Unset DRY_RUN is the dry run the trust period reads.
+    const outcome = await applyToOne({ row, page, gateway, answers, env: {}, renderResume: fakeRenderer().render });
+
+    // Nothing sent and nothing moved.
+    expect(submit).not.toHaveBeenCalled();
+    // A dry run never writes status.
+    expect(advances).toEqual([]);
+    // Handed back untouched.
+    expect(released).toEqual(['app-1']);
+    // The log line reads "would NOT submit" and names why, instead of "would submit".
+    expect(outcome).toMatchObject({ kind: 'dry_run_complete', wouldSubmit: false });
+    // The blocker is named, so the dry-run log says what is wrong with the page.
+    expect(outcome.kind === 'dry_run_complete' ? outcome.blockers.map((blocker) => blocker.reason) : []).toEqual(['no_form_fields']);
+  });
+
+  it('W5 non-vacuity: one answerable field still submits, so the guard keys on emptiness alone', async () => {
+    // The default page has one answerable field.
+    const { page, submit } = fakePage();
+    // Fresh recorder.
+    const { gateway, advances } = recordingGateway();
+
+    // Live run.
+    await applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+
+    // A guard that parked every form would pass both tests above; this one would catch it.
+    expect(submit).toHaveBeenCalledTimes(1);
+    // The full legal path.
+    expect(advances.map((advance) => advance.to)).toEqual(['applying', 'applied']);
+  });
+});

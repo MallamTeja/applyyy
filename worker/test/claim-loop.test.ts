@@ -103,6 +103,14 @@ function fakeGateway(overrides: Partial<RunGateway> = {}) {
       return batches.shift() ?? [];
     },
     fetchAnswers: async () => answers,
+    // W10's port. Default: no Settings cap and nothing sent, so only the per-run cap
+    // applies and every older test keeps its meaning. Recorded so a dry run's skip shows.
+    fetchDailyCap: async () => {
+      // Ordering record, like every other call.
+      calls.push('dailyCap');
+      // No daily cap: the documented meaning of a null setting.
+      return { maxPerDay: null, sentSince: 0 };
+    },
     sessionExpiresAtEpochSeconds: () => 2_000_000,
     refreshSession: async () => {
       calls.push('refresh');
@@ -980,5 +988,216 @@ describe('submit cap and circuit breaker', () => {
     expect(summary.dryRun).toBe(2);
     // The breaker did not fire.
     expect(summary.stoppedReason).not.toMatch(/circuit breaker/);
+  });
+});
+
+// W4 (docs/audit/2026-11-01-wiring-audit.md): the gateway used to RELEASE a claimed row with
+// no apply_url or a disappeared posting and drop it from the batch. claim_applications orders
+// by created_at, so five such rows at the head of the queue came back on every claim, every
+// claim then looked empty, and the run reported "queue drained" while newer rows waited.
+describe('runApplierBatch — unusable rows at the head of the queue (W4)', () => {
+  /**
+   * A gateway whose claim behaves like the real RPC: the oldest `approved` rows that nobody
+   * currently leases, up to `limit`. Stateful on purpose, because the bug is about which
+   * rows come back on the NEXT claim, which a scripted list of batches cannot show.
+   */
+  function queueGateway(unusableIds: readonly string[], usableIds: readonly string[]) {
+    // Oldest first, unusable rows at the head: exactly the audit's scenario.
+    const queue = [
+      // Each unusable row stands for a job with no apply_url.
+      ...unusableIds.map((id) => ({ id, unusable: true })),
+      // The newer rows that must still be reached.
+      ...usableIds.map((id) => ({ id, unusable: false })),
+    ];
+    // Ids whose lease this run holds; a leased row is skipped by the claim.
+    const leased = new Set<string>();
+    // Current status per row; only `approved` rows are claimable.
+    const status = new Map<string, string>(queue.map((row) => [row.id, 'approved']));
+    // Every status write, with its detail, so the park reason can be asserted.
+    const advances: Array<{ id: string; to: string; detail: Record<string, unknown> | undefined }> = [];
+    // Every release, with its reason.
+    const releases: Array<{ id: string; reason: string }> = [];
+    // The shared fake for every other port.
+    const { gateway, closed } = fakeGateway({
+      // The RPC's ordering and lease rules, over the queue above.
+      claimApplications: async (_claimedBy, limit) => {
+        // Oldest approved, unleased rows first, at most `limit` of them.
+        const picked = queue.filter((row) => status.get(row.id) === 'approved' && !leased.has(row.id)).slice(0, limit);
+        // Claiming leases them.
+        for (const row of picked) leased.add(row.id);
+        // Unusable rows come back NAMED, which is the gateway half of the fix.
+        return picked.map((row) =>
+          row.unusable
+            ? { id: row.id, unusable: 'no_apply_url' as const, reason: `no apply_url on job job-${row.id}; not attempted` }
+            : { id: row.id, status: 'approved' as const, applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null, atsProvider: null },
+        );
+      },
+      // A status write moves the row out of `approved` and ends the lease, as the RPC does.
+      advanceStatus: async (id, to, _agent, detail) => {
+        // Recorded for the assertions.
+        advances.push({ id, to, detail });
+        // The row is no longer claimable unless it is still approved.
+        status.set(id, to);
+        // The RPC clears the claim on a transition.
+        leased.delete(id);
+      },
+      // A release hands the row back at `approved`, claimable again.
+      releaseClaim: async (id, reason) => {
+        // Recorded for the assertions.
+        releases.push({ id, reason });
+        // Claimable again by the next claim.
+        leased.delete(id);
+      },
+    });
+    // Everything a test asserts on.
+    return { gateway, closed, advances, releases };
+  }
+
+  // The five unusable rows: one full batch (batch size 5).
+  const unusable = ['app-u1', 'app-u2', 'app-u3', 'app-u4', 'app-u5'];
+
+  it('W4 live: five unusable rows at the head are parked and the newer usable row is still submitted', async () => {
+    // Five dead rows ahead of one good one.
+    const { gateway, advances } = queueGateway(unusable, ['app-6']);
+
+    // A live run with the default batch of 5.
+    const summary = await runApplierBatch({ gateway, openPage: async () => stubPage(), env: { DRY_RUN: 'false' }, clock: frozenClock, renderResume, batchSize: 5 });
+
+    // THE starvation assertion: the newer row was reached and submitted.
+    expect(advances.filter((advance) => advance.id === 'app-6').map((advance) => advance.to)).toEqual(['applying', 'applied']);
+    // Each unusable row is parked for a human, in one write, straight from approved.
+    expect(advances.filter((advance) => advance.id !== 'app-6').map((advance) => [advance.id, advance.to])).toEqual(
+      // In claim order.
+      unusable.map((id) => [id, 'blocked_needs_human']),
+    );
+    // With a legal row-level reason and the machine-readable cause beside it.
+    expect(advances[0]?.detail).toMatchObject({ block_reason: 'other', unusable: 'no_apply_url' });
+    // Counted: one sent, five parked.
+    expect(summary).toMatchObject({ submitted: 1, blocked: 5 });
+  });
+
+  it('W4 dry: unusable rows are held (never advanced), released once at run end, and the newer row is still reached', async () => {
+    // The same queue.
+    const { gateway, advances, releases } = queueGateway(unusable, ['app-6']);
+
+    // A dry run.
+    const summary = await runApplierBatch({ gateway, openPage: async () => stubPage(), env: {}, clock: frozenClock, renderResume, batchSize: 5 });
+
+    // A dry run writes no status, unusable rows included.
+    expect(advances).toEqual([]);
+    // The newer row was reached and dry-run filled.
+    expect(summary.dryRun).toBe(1);
+    // Each unusable row released exactly once, named as a dry run, with the cause.
+    for (const id of unusable) {
+      // Exactly one release per unusable row: held, not released on sight.
+      expect(releases.filter((release) => release.id === id).map((release) => release.reason)).toEqual([
+        // The gateway's reason, under the dry-run prefix every dry release carries.
+        `dry_run: no apply_url on job job-${id}; not attempted`,
+      ]);
+    }
+    // The loop ended on an empty claim, not on a gate.
+    expect(summary.stoppedReason).toBe('queue drained');
+  });
+});
+
+// W10 (docs/audit/2026-11-01-wiring-audit.md): Settings writes
+// system_settings.max_applications_per_day and nothing read it, so "Daily Application Cap = 1"
+// still let a run submit up to APPLY_MAX_SUBMITS (3). The loop now reads it before claiming.
+describe('runApplierBatch — the Settings daily cap (W10)', () => {
+  /** Three workable rows, then an empty claim; enough to exceed any cap below 3. */
+  function threeRowGateway(fetchDailyCap: RunGateway['fetchDailyCap']) {
+    // One claimable row per id.
+    const row = (id: string) => ({ id, status: 'approved' as const, applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null, atsProvider: null });
+    // Batches served in order; the trailing [] ends the run.
+    const batches = [[row('app-1'), row('app-2'), row('app-3')], []];
+    // The shared fake, with the claim and the cap under test overridden.
+    return fakeGateway({
+      // Serves the batches above, recording the call so "claimed nothing" is assertable.
+      claimApplications: async () => batches.shift() ?? [],
+      // The cap under test.
+      fetchDailyCap,
+    });
+  }
+
+  it('W10: a daily cap of 1 with nothing sent in 24 h stops a live run after ONE submit, below APPLY_MAX_SUBMITS', async () => {
+    // Settings says 1 a day; nothing has gone out in the window.
+    const { gateway, calls } = threeRowGateway(async () => ({ maxPerDay: 1, sentSince: 0 }));
+
+    // Live, with the default per-run cap of 3.
+    const summary = await runApplierBatch({ gateway, openPage: async () => stubPage(), env: { DRY_RUN: 'false' }, clock: frozenClock, renderResume });
+
+    // THE assertion: the Settings cap, not the per-run cap, decided.
+    expect(summary.submitted).toBe(1);
+    // Exactly one row entered `applying`.
+    expect(calls.filter((call) => call === 'advance:applying')).toHaveLength(1);
+    // The stop names the Settings cap, so the run log says which limit ended it.
+    expect(summary.stoppedReason).toMatch(/max_applications_per_day/);
+  });
+
+  it('W10: a cap already used up in the last 24 h claims nothing at all', async () => {
+    // Settings says 2 a day and 2 went out in the window.
+    const { gateway, calls } = threeRowGateway(async () => ({ maxPerDay: 2, sentSince: 2 }));
+
+    // Live run.
+    const summary = await runApplierBatch({ gateway, openPage: async () => stubPage(), env: { DRY_RUN: 'false' }, clock: frozenClock, renderResume });
+
+    // Nothing sent.
+    expect(summary.submitted).toBe(0);
+    // Nothing claimed, so nothing has to be handed back.
+    expect(calls).not.toContain('claim');
+    // Said out loud.
+    expect(summary.stoppedReason).toMatch(/max_applications_per_day/);
+  });
+
+  it('W10: an unreadable cap fails CLOSED: nothing claimed, run closed failed naming the cause', async () => {
+    // The gateway could not read or validate the setting.
+    const { gateway, calls, closed } = threeRowGateway(async () => {
+      // What the gateway throws on an {error} or a malformed value.
+      throw new Error('fetchDailyCap: max_applications_per_day unreadable');
+    });
+
+    // A live run must not fall back to "no daily cap".
+    await expect(
+      // The run itself.
+      runApplierBatch({ gateway, openPage: async () => stubPage(), env: { DRY_RUN: 'false' }, clock: frozenClock, renderResume }),
+    ).rejects.toThrow(/max_applications_per_day/);
+    // Nothing claimed.
+    expect(calls).not.toContain('claim');
+    // The run row says failed, with the cause, so the health page shows it.
+    expect(closed[0]).toMatchObject({ status: 'failed', error_detail: expect.stringMatching(/max_applications_per_day/) });
+  });
+
+  it('W10: the window is the trailing 24 h from the injected clock (timezone-free)', async () => {
+    // Every window start the loop asks about.
+    const asked: string[] = [];
+    // Records the argument and imposes no cap.
+    const { gateway } = threeRowGateway(async (sinceIso) => {
+      // Recorded for the assertion.
+      asked.push(sinceIso);
+      // No cap, so the run proceeds normally.
+      return { maxPerDay: null, sentSince: 0 };
+    });
+
+    // Live run.
+    await runApplierBatch({ gateway, openPage: async () => stubPage(), env: { DRY_RUN: 'false' }, clock: frozenClock, renderResume });
+
+    // Exactly 86 400 s before the frozen clock, read once per run.
+    expect(asked).toEqual([new Date((1_000_000 - 86_400) * 1000).toISOString()]);
+  });
+
+  it('W10: a dry run never reads the cap, so a settings outage cannot stop a trust-period run', async () => {
+    // A cap read that would fail if it were called.
+    const { gateway, calls } = threeRowGateway(async () => {
+      // Never reached in a dry run.
+      throw new Error('should not be read in a dry run');
+    });
+
+    // Dry run.
+    const summary = await runApplierBatch({ gateway, openPage: async () => stubPage(), env: {}, clock: frozenClock, renderResume });
+
+    // All three rows were dry-run filled.
+    expect(summary.dryRun).toBe(3);
+    // And the cap was not read.
+    expect(calls).not.toContain('dailyCap');
   });
 });

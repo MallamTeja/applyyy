@@ -100,6 +100,8 @@ test('a full dry-run batch fills, screenshots and submits NOTHING', async () => 
     claimApplications: async () => queue.shift() ?? [],
     // Required on RunGateway since the unknown-outcome note (claim-loop.ts); a dry run never produces one.
     appendApplicationNote: async () => {},
+    // Required since W10 (the Settings daily cap); a dry run never reads it.
+    fetchDailyCap: async () => ({ maxPerDay: null, sentSince: 0 }),
     fetchAnswers: async () => answers,
     sessionExpiresAtEpochSeconds: () => Math.floor(Date.now() / 1000) + 3600,
     refreshSession: async () => {},
