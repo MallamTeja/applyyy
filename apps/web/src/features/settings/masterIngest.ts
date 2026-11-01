@@ -867,6 +867,8 @@ export function checkMasterProfile(raw: unknown): IngestResult {
      walks can do it line by line. */
   const undatedSections: readonly 'achievements'[] | readonly ('achievements' | 'certifications')[] =
     ['achievements', 'certifications'];
+  // Links found on achievements and certifications, for the same summary total.
+  let entryLinkCount = 0;
 
   for (const key of undatedSections) {
     const value = raw[key];
@@ -881,7 +883,19 @@ export function checkMasterProfile(raw: unknown): IngestResult {
     }
     counts[key] = value.length;
     value.forEach((node, index) => {
-      bulletCount += checkUndatedNode(node, key + '[' + String(index) + ']', ledger, findings);
+      // One path string, shared by the node walk and its links walk.
+      const path = key + '[' + String(index) + ']';
+      bulletCount += checkUndatedNode(node, path, ledger, findings);
+      /* Their OWN links, since d50775a (2026-11-01). OPTIONAL, unlike a project's:
+         every master before v9 lacks the key, so it is walked only when present and
+         an absent key is never reported or filled in. Without this walk a `links`
+         that is not an array reached `findDuplicateNodeIds` unchecked and THREW
+         (measured: "links.forEach is not a function"), losing the operator's paste,
+         and a blank url or link id was accepted. Same guard as the project walk. */
+      if (isRecord(node) && 'links' in node) {
+        // Counted into the summary's one links total, like the other link arrays.
+        entryLinkCount += checkLinkArray(node['links'], path + '.links', ledger, findings);
+      }
     });
   }
 
@@ -958,10 +972,10 @@ export function checkMasterProfile(raw: unknown): IngestResult {
       achievements: counts['achievements'] ?? 0,
       certifications: counts['certifications'] ?? 0,
       bullets: bulletCount,
-      /* All three link arrays summed. A per-array breakdown would invite the
-         operator to reconcile three numbers against a resume that shows links
+      /* Every link array summed. A per-array breakdown would invite the
+         operator to reconcile several numbers against a resume that shows links
          in one place. */
-      links: identityLinkCount + projectLinkCount + topLevelLinkCount,
+      links: identityLinkCount + projectLinkCount + entryLinkCount + topLevelLinkCount,
       hasSummary,
     },
   };

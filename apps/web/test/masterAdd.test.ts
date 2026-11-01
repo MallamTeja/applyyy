@@ -192,3 +192,51 @@ describe('parseBullets', () => {
     assert.deepEqual(bullets, [{ id: 'bullet-1', text: '#solo', tags: [] }]);
   });
 });
+
+// The editor half of d50775a: the add form writes entry links, and never writes an empty one.
+describe('certification and achievement links (optional since d50775a)', () => {
+  // The happy path, with the exact label shape v9 stored live.
+  it('stores a typed link on a new certification, shaped like the live v9 ones', () => {
+    // Label and url as Teja would type them; the label mirrors v9's 'Machine Learning credential'.
+    const result = add.addToMaster(base(), 'certification', { label: 'Machine Learning', description: 'IBM SkillsBuild', link_label: 'Machine Learning credential', link_url: 'https://example.invalid/ml' }, counterMint());
+    // Must pass the gate, which now walks entry links.
+    assert.equal(result.ok, true);
+    // Narrowing.
+    if (!result.ok) return;
+    // The link minted before the cert, so link-1 then cert-2.
+    assert.deepEqual(result.profile.certifications[1]?.links, [{ id: 'link-1', label: 'Machine Learning credential', url: 'https://example.invalid/ml' }]);
+  });
+
+  // Red-on-revert target: defaulting to links: [] turns this red (measured).
+  it('a new entry without a url gets NO links key, not an empty array', () => {
+    // No link typed.
+    const result = add.addToMaster(base(), 'achievement', { label: 'Top 20%' }, counterMint());
+    // Narrowed to the new achievement.
+    const added = result.ok ? result.profile.achievements[1] : undefined;
+    // Absent, matching every pre-v9 entry; an empty array would be a byte change.
+    assert.equal(added !== undefined && !('links' in added), true);
+  });
+
+  // Red-on-revert target: an ingest fill of links turns this red (measured).
+  it('a v8-shaped certification with no links key survives another add without gaining one', () => {
+    // The base certification has no links key, like every stored master before v9.
+    const result = add.addToMaster(base(), 'skill', { name: 'Go', category: 'Languages' }, counterMint());
+    // Narrowed to the untouched certification.
+    const cert = result.ok ? result.profile.certifications[0] : undefined;
+    // Still keyless after the ingest gate's copy-and-fill.
+    assert.equal(cert !== undefined && !('links' in cert), true);
+  });
+
+  // Both refusals happen before the ingest gate, so nothing reaches the database.
+  it('refuses a link url with no label, and a javascript: link url', () => {
+    // A url with no label would print as an empty anchor.
+    const unlabelled = add.addToMaster(base(), 'certification', { label: 'X', link_url: 'https://example.invalid/x' }, counterMint());
+    // Refused with the rule in words.
+    assert.deepEqual(unlabelled, { ok: false, message: 'Link label is required when a link URL is given.' });
+    // A script url, labelled.
+    const script = add.addToMaster(base(), 'achievement', { label: 'X', link_label: 'Y', link_url: 'javascript:alert(1)' }, counterMint());
+    // Refused by the http(s) gate.
+    assert.equal(script.ok, false);
+  });
+});
+

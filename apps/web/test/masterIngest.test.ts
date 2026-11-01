@@ -795,3 +795,57 @@ test('normalising absent keys never mutates the object that was passed in', () =
   /* Still absent on the caller's object afterwards. */
   assert.equal('description' in input['achievements'][0], false, 'checkMasterProfile wrote into its argument');
 });
+
+/* --- Certification and achievement links (optional, since d50775a) ---- */
+
+/* The fixture's certification and achievement, with a links array set on one of them.
+   Built from validProfile so every other section stays valid and only the links vary. */
+function withEntryLinks(section: 'certifications' | 'achievements', links: unknown): Record<string, any> {
+  // A fresh valid profile, so tests cannot leak into each other.
+  const profile = validProfile() as Record<string, any>;
+  // Only the first entry of the named section gains the key.
+  profile[section][0].links = links;
+  // The edited profile.
+  return profile;
+}
+
+// Red-on-revert target: removing the walk makes this throw instead of report (measured).
+test('a certification link is walked: a links value that is not an array is a finding, not a throw', () => {
+  // Before the walk this reached findDuplicateNodeIds and threw "links.forEach is not a function".
+  const result = checkMasterProfile(withEntryLinks('certifications', 'https://example.invalid/c'));
+  // Refused, with the path that names the field.
+  assert.equal(result.ok, false);
+  // The finding sits on the links array itself.
+  assert.ok(blockingPaths(result.findings).includes('certifications[0].links'));
+});
+
+// Red-on-revert target: only the walk checks label, url and id presence; the package does not.
+test('an achievement link with a blank url or a blank id is refused', () => {
+  // A blank url would render as an anchor to nowhere; a blank id can never be referenced.
+  const result = checkMasterProfile(withEntryLinks('achievements', [{ id: '', label: 'Profile', url: '  ' }]));
+  // Both problems reported on the one link.
+  assert.deepEqual(blockingPaths(result.findings).sort(), ['achievements[0].links[0].id', 'achievements[0].links[0].url']);
+});
+
+// Regression pin, NOT red-on-revert for the walk: the package duplicate check also catches it.
+test('a certification link id that collides with another node is refused', () => {
+  // 'skill-1' is the fixture's skill id; one global id space covers entry links too.
+  const result = checkMasterProfile(withEntryLinks('certifications', [{ id: 'skill-1', label: 'Credential', url: 'https://example.invalid/c' }]));
+  // Refused, on the later occurrence.
+  assert.ok(blockingPaths(result.findings).includes('certifications[0].links[0].id'));
+});
+
+// The accept path, the summary total, and the absent-key rule in one place.
+test('valid entry links are accepted and counted; an absent links key stays absent', () => {
+  // One link on the certification; the achievement keeps no links key, like every pre-v9 master.
+  const result = checkMasterProfile(withEntryLinks('certifications', [{ id: 'cert-1-link-1', label: 'Credential', url: 'https://example.invalid/c' }]));
+  // Accepted.
+  assert.equal(result.ok, true, JSON.stringify(result.findings));
+  // Narrowing for the reads below.
+  if (!result.ok) return;
+  // Identity 1 + project 1 + top-level 1 + this 1.
+  assert.equal(result.summary.links, 4);
+  // Never filled in: the approval page compares rebuilt entries byte for byte.
+  assert.equal('links' in result.profile.achievements[0]!, false);
+});
+

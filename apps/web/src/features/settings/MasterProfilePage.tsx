@@ -96,6 +96,29 @@ function Findings({ result }: { readonly result: IngestResult }): ReactElement {
   );
 }
 
+/* An entry's own links as badges. ONE component for projects, certifications and
+ * achievements (moved out of the project card on 2026-11-01 when certs and achievements
+ * gained `links?`), so every entry link renders through safeHref the same way and a
+ * javascript: or data: url becomes plain text, never an href. */
+function EntryLinks({ links }: { readonly links: MasterProfile['links'] | undefined }): ReactElement | null {
+  // Absent on every master before v9 and empty on most entries: draw nothing.
+  if (links === undefined || links.length === 0) return null;
+  // A row of badges under the entry's title.
+  return (
+    // Same inline layout the project card used before the move.
+    <div style={{ display: 'flex', gap: 'var(--gap-2)', marginTop: '4px' }}>
+      {/* One badge per link, in document order. */}
+      {links.map((l) => (
+        // New tab, no opener: the link leaves the console without handing it a window handle.
+        <a key={l.id} href={safeHref(l.url)} target="_blank" rel="noopener noreferrer" className="profile-link-badge">
+          {/* The label as stored; the resume prints the same text. */}
+          {l.label}
+        </a>
+      ))}
+    </div>
+  );
+}
+
 /* What a save tells the add form: the new version, or why nothing was written.
    A union, so the form cannot show "saved" over a refusal. */
 type AddSave = (kind: AddKind, values: AddValues) => Promise<{ ok: true; version: number } | { ok: false; message: string }>;
@@ -622,21 +645,8 @@ export function MasterProfilePage(): ReactElement {
                 <div className="profile-entry-card__top">
                   <div>
                     <h3 className="profile-entry-card__role">{proj.name}</h3>
-                    {proj.links && proj.links.length > 0 && (
-                      <div style={{ display: 'flex', gap: 'var(--gap-2)', marginTop: '4px' }}>
-                        {proj.links.map((l) => (
-                          <a
-                            key={l.id}
-                            href={safeHref(l.url)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="profile-link-badge"
-                          >
-                            {l.label}
-                          </a>
-                        ))}
-                      </div>
-                    )}
+                    {/* The project's live and source links. */}
+                    <EntryLinks links={proj.links} />
                   </div>
                   <div className="profile-entry-card__meta">
                     <span className="profile-entry-card__date">
@@ -734,6 +744,8 @@ export function MasterProfilePage(): ReactElement {
                     {cert.description && (
                       <span className="profile-entry-card__company">{cert.description}</span>
                     )}
+                    {/* The credential link, when the master has one (v9 onward). */}
+                    <EntryLinks links={cert.links} />
                   </div>
                   <code className="identifier">{cert.id}</code>
                 </div>
@@ -751,6 +763,8 @@ export function MasterProfilePage(): ReactElement {
             {stored.achievements.map((ach) => (
               <div key={ach.id} className="profile-entry-card">
                 <h3 className="profile-entry-card__role">{ach.label}</h3>
+                {/* The profile link, when the master has one (v9 onward). */}
+                <EntryLinks links={ach.links} />
                 <ul className="profile-bullet-list">
                   {ach.bullets.map((b) => (
                     <li key={b.id} className="profile-bullet-item">

@@ -76,6 +76,16 @@ const BULLETS_FIELD: AddField = {
   help: 'One bullet per line. End a line with #tags so the Tailor can match it to jobs.',
 };
 
+/* The optional link on a certification or achievement (the `links?` field since d50775a).
+   A label AND a url, like an identity link, because the resume prints the label as the
+   anchor text and a credential link has no fixed name the way a project's "GitHub" does. */
+const ENTRY_LINK_FIELDS: readonly AddField[] = [
+  // Printed as the anchor text; required only when a url is given (checked in addToMaster).
+  { key: 'link_label', label: 'Link label', required: false, placeholder: 'Credential' },
+  // Must be http(s); blank means the entry gets no links key at all.
+  { key: 'link_url', label: 'Link URL', required: false, placeholder: 'https://' },
+];
+
 /* The form for each kind. Required flags mirror checkMasterProfile's blocking checks, so the
    operator hears about a blank field before a version is attempted, not after. */
 export const ADD_FIELDS: Readonly<Record<AddKind, readonly AddField[]>> = {
@@ -142,19 +152,23 @@ export const ADD_FIELDS: Readonly<Record<AddKind, readonly AddField[]>> = {
     // Optional lines under the degree.
     BULLETS_FIELD,
   ],
-  // A certification is a label plus the detail after the dash.
+  // A certification is a label plus the detail after the dash, and optionally one link.
   certification: [
     // The certification name.
     { key: 'label', label: 'Certification', required: true },
     // Usually the issuer; null when blank.
     { key: 'description', label: 'Issuer / detail', required: false },
+    // The optional link pair, shared with achievements.
+    ...ENTRY_LINK_FIELDS,
   ],
-  // An achievement is the same two fields.
+  // An achievement is the same fields.
   achievement: [
     // The achievement itself.
     { key: 'label', label: 'Achievement', required: true },
     // The qualifying detail; null when blank.
     { key: 'description', label: 'Detail', required: false },
+    // The optional link pair, shared with certifications.
+    ...ENTRY_LINK_FIELDS,
   ],
 };
 
@@ -216,15 +230,22 @@ export function addToMaster(base: MasterProfile, kind: AddKind, values: AddValue
   if (missing !== undefined) return { ok: false, message: `${missing.label} is required.` };
 
   // Every URL field must be http(s): a javascript: link would be stored and later rendered.
-  for (const key of ['url', 'live_url', 'github_url']) {
+  for (const key of ['url', 'live_url', 'github_url', 'link_url']) {
     // Blank optional URLs are fine; they simply add no link.
     const url = read(values, key);
     // safeHref returns undefined for anything not http(s).
     if (url !== '' && safeHref(url) === undefined) return { ok: false, message: `${url} is not an http(s) link.` };
   }
 
+  // A link url with no label would print as an empty anchor on the resume.
+  if (read(values, 'link_url') !== '' && read(values, 'link_label') === '') return { ok: false, message: 'Link label is required when a link URL is given.' };
+
   // The bullets, parsed once; empty for kinds without a bullets field.
   const bullets = parseBullets(read(values, 'bullets'), mintId);
+  /* A certification or achievement's link, as a spread: `{ links: [...] }` when a url was typed,
+     `{}` otherwise. Never `links: []`: the key is optional and absent on every master before v9,
+     and the approval page compares rebuilt entries byte for byte, so an empty array is a change. */
+  const entryLinks = read(values, 'link_url') === '' ? {} : { links: [{ id: mintId('link'), label: read(values, 'link_label'), url: read(values, 'link_url') }] };
   // The next master, built per kind.
   let next: MasterProfile;
   // One branch per kind; the union makes a missing branch a compile error.
@@ -299,11 +320,11 @@ export function addToMaster(base: MasterProfile, kind: AddKind, values: AddValue
       break;
     case 'certification':
       // Undated by design (profile-nodes.ts); bullets empty, the label is the line.
-      next = { ...base, certifications: [...base.certifications, { id: mintId('cert'), label: read(values, 'label'), description: orNull(values, 'description'), bullets: [] }] };
+      next = { ...base, certifications: [...base.certifications, { id: mintId('cert'), label: read(values, 'label'), description: orNull(values, 'description'), bullets: [], ...entryLinks }] };
       break;
     case 'achievement':
       // Same shape as a certification, different section.
-      next = { ...base, achievements: [...base.achievements, { id: mintId('ach'), label: read(values, 'label'), description: orNull(values, 'description'), bullets: [] }] };
+      next = { ...base, achievements: [...base.achievements, { id: mintId('ach'), label: read(values, 'label'), description: orNull(values, 'description'), bullets: [], ...entryLinks }] };
       break;
   }
 
