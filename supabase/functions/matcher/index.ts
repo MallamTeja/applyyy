@@ -79,7 +79,7 @@ import { createDeadline, deadlineNote, runBatchWithDeadline, shortenedBudgetNote
 import { advanceScoredRow, writeMatchScore } from "./write-score.ts";
 // The permanent-failure exit (W2, 2026-11-01): the usable-job gate before Gemini, and the
 // settle step for answers that could not be read.
-import { settleModelFailures, withUsableJob, type MatcherFailureReason, type ModelAnswerFailure } from "./fail-exit.ts";
+import { settleModelFailures, withUsableJob, type MatcherFailureReason, type ModelAnswerFailure, type SettleClient } from "./fail-exit.ts";
 // Stage 0 re-applied before scoring, so a row the screener would now drop costs no Gemini call.
 import { nextSweepCursor, parseMatcherMode, PREGATE_ONLY_MAX_BATCH, selectScorer, withTechPreGate, type MatcherMode } from "./tech-pregate.ts";
 // The one mapper from a search_preferences row to the gate's config.
@@ -456,7 +456,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // reported as a note rather than an error, the same way pre-gate drops are.
   const failedReasons: MatcherFailureReason[] = [];
   // Rows whose model answer could not be read, held until the batch ends: settleModelFailures
-  // fails them only if some other row in this run was read (see fail-exit.ts).
+  // fails them only if some other row in this run was read (see fail-exit.ts), and only on the
+  // row's second strike in two separate runs; a first strike is recorded and retried.
   const heldModelFailures: ModelAnswerFailure[] = [];
 
   // Loop sequentially through each claimed application row retrieved from queue.
@@ -563,7 +564,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
         // lands in `failures` — never advanced, never dropped on a number that is not one.
         // A human-pasted job advances whatever its score; an unreadable score still fails closed.
         // W2 (2026-11-01): it is no longer retried forever. It is HELD, and settleModelFailures
-        // fails it after the batch if another row's score was readable this run.
+        // fails it after the batch if another row's score was readable this run AND this row was
+        // already unreadable in an earlier run (code-review #5: one bad answer is not the row).
         const threshold = decideScoreThreshold(matchScore.score, isHumanPicked(job?.discovered_via));
         // The refusal branch: report it and move on to the next row.
         if (threshold.kind === "invalid") {
@@ -655,8 +657,9 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
         // Tagged when the deadline cut this row's Gemini budget, so a deadline-caused timeout
         // is distinguishable from a real model timeout.
         const error = (err instanceof Error ? err.message : String(err)) + shortenedBudgetNote(call);
-        // W2: the model answered, and its answer was empty or unreadable. The same prompt gets
-        // the same answer, so it is held for the settle step instead of retried forever.
+        // W2: the model answered, and its answer was empty or unreadable. The same prompt OFTEN
+        // gets the same answer, but not always (LLM output varies), so it is held for the settle
+        // step, which fails it only on a second strike in a later run.
         if (modelAnswer !== null) {
           // Named by what the model gave: nothing, or text the scorer refused.
           heldModelFailures.push({ applicationId: row.id, reason: modelAnswer === "no_text" ? "gemini_returned_no_text" : "unreadable_score", detail: error });
@@ -680,8 +683,11 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   )), { deadline, targeted: applicationId !== null });
   // W2: settle the held answer failures. Proven when this run read at least one model answer
   // (a score or a score-floor drop); pre-gate drops do not count, since they made no call.
-  // Runs after the deadline check on purpose: at most one batch of rows, two round trips each.
-  const settled = await settleModelFailures(db, heldModelFailures, scoredCount + droppedCount > 0);
+  // Runs after the deadline check on purpose: at most one batch of rows, two round trips each,
+  // plus one strike read of application_events for the whole batch.
+  // Cast like normalizer's ExistingJobClient: supabase-js's generic select trips TS2589 against a
+  // structural chain. The fake in fail-exit.test.ts pins the chain the settle step really calls.
+  const settled = await settleModelFailures(db as unknown as SettleClient, heldModelFailures, scoredCount + droppedCount > 0);
   // Moved to failed: progress, reported in the note below.
   failedReasons.push(...settled.failed);
   // Lost races join the existing counter.

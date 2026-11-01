@@ -8,13 +8,15 @@ import { test } from "node:test";
 // Strict, so null and undefined are not conflated.
 import assert from "node:assert/strict";
 // Units under test.
-import { judgeUsableJob, settleModelFailures, withUsableJob, type UsableGateOutcome } from "./fail-exit.ts";
-// The client shape the fake must satisfy.
+import { judgeUsableJob, settleModelFailures, withUsableJob, type SettleClient, type UsableGateOutcome } from "./fail-exit.ts";
+// The client shape the gate's fake must satisfy.
 import type { MatchScoreClient } from "./write-score.ts";
 
 // One applications row plus the RPC. The write applies only when every .eq() matches,
 // every write bumps the stamp, a stale stamp is PT409, and a move appends an event.
-function fakeRow(opts: { status?: string } = {}) {
+// `log` stands in for application_events: the strike reads filter it the way PostgREST would,
+// and the strike inserts append to it, so one fake carried across two settle calls IS two runs.
+function fakeRow(opts: { status?: string; log?: Array<Record<string, unknown>>; historyError?: string } = {}) {
   // The row as the database holds it; the stamp is a counter so every write changes it.
   const row: Record<string, unknown> = {
     id: "a1",
@@ -33,8 +35,48 @@ function fakeRow(opts: { status?: string } = {}) {
   const events: Array<{ to: string; detail: Record<string, unknown> }> = [];
   // Every RPC call's args, so a test can check the agent and the stamp.
   const rpcArgs: Array<Record<string, unknown>> = [];
-  const db: MatchScoreClient = {
-    from(_table) {
+  // The application_events rows a strike read can see; seeded by a test to model earlier runs.
+  const log: Array<Record<string, unknown>> = opts.log ?? [];
+  // One column of one log row as a PostgREST filter reads it; only the `detail->>key` JSON
+  // path form is modelled, because it is the only one the strike read uses.
+  const column = (event: Record<string, unknown>, name: string) =>
+    name.startsWith("detail->>") ? (event.detail as Record<string, unknown> | undefined)?.[name.slice("detail->>".length)] : event[name];
+  const eventsTable = {
+    select(columns: string) {
+      // Collected so a row is returned only when ALL filters match, as SQL does.
+      const filters: Array<(event: Record<string, unknown>) => boolean> = [];
+      const query = {
+        eq(name: string, value: string) {
+          // Exact match on one column or JSON path.
+          filters.push((event) => column(event, name) === value);
+          return query;
+        },
+        in(name: string, values: readonly string[]) {
+          // Membership, as `.in()` sends it.
+          filters.push((event) => values.includes(column(event, name) as string));
+          return query;
+        },
+        then<T>(onFulfilled: (value: { data: unknown[] | null; error: { message: string } | null }) => T, onRejected?: (reason: unknown) => T) {
+          // supabase-js reports a failed read as `{ data: null, error }`, never a throw.
+          const result = opts.historyError !== undefined
+            ? { data: null, error: { message: opts.historyError } }
+            // Only the asked-for columns, so a select that forgets application_id shows up.
+            : { data: log.filter((event) => filters.every((f) => f(event))).map((event) => Object.fromEntries(columns.split(",").map((c) => [c.trim(), event[c.trim()]]))), error: null };
+          return Promise.resolve(result).then(onFulfilled, onRejected);
+        },
+      };
+      return query;
+    },
+    insert(values: Record<string, unknown>) {
+      // Appended as written; the live table forbids update and delete, and so does this fake.
+      log.push(values);
+      return Promise.resolve({ error: null });
+    },
+  };
+  const db: SettleClient = {
+    from(table) {
+      // The strike log is a different table from the row being written.
+      if (table === "application_events") return eventsTable as never;
       return {
         update(values) {
           // Recorded on attempt, before the WHERE is evaluated.
@@ -59,7 +101,7 @@ function fakeRow(opts: { status?: string } = {}) {
           };
           return builder;
         },
-      };
+      } as never;
     },
     rpc(_fn, args) {
       // Kept for assertions on what the caller sent.
@@ -76,7 +118,7 @@ function fakeRow(opts: { status?: string } = {}) {
       return Promise.resolve({ error: null });
     },
   };
-  return { db, row, updates, events, rpcArgs };
+  return { db, row, updates, events, rpcArgs, log };
 }
 
 // A queue row as the matcher's select returns it: every job column the verdict reads present.
@@ -196,29 +238,86 @@ test("usable gate: a row another run already moved is skipped_stale, with no rpc
   assert.equal(rpcArgs.length, 0);
 });
 
-test("settleModelFailures: when another row was scored this run, an unreadable answer fails its row", async () => {
-  // A row whose answer was held during the batch.
-  const { db, row, events } = fakeRow();
-  // proven = true: the model and the parser worked for some row in this run.
-  const out = await settleModelFailures(db, [{ applicationId: "a1", reason: "unreadable_score", detail: "invalid_match_score:not_a_number(NaN)" }], true);
-  // Terminal, with the named reason, so it stops being retried at the queue head.
+// The held answer the strike tests use. LLM output is not deterministic: a truncated JSON
+// (MAX_TOKENS) or a one-off glitch on one call says nothing about the next call.
+const UNREADABLE = { applicationId: "a1", reason: "unreadable_score", detail: "invalid_match_score:not_a_number(NaN)" } as const;
+
+test("settleModelFailures: first unreadable answer leaves the row at passed_filters and records a strike", async () => {
+  // Code-review finding #5 (2026-11-01): before this, one bad answer in a proven run failed the
+  // row for good, and only a human can move a row out of `failed`.
+  const { db, row, updates, rpcArgs, log } = fakeRow();
+  // Another row's strike from an earlier run, so the count is shown to be per row, not per log.
+  await settleModelFailures(db, [{ ...UNREADABLE, applicationId: "b9" }], true);
+  // proven = true: some other row's answer WAS read this run.
+  const out = await settleModelFailures(db, [UNREADABLE], true);
+  // THE FIX: still in the queue, so the next run asks the model again.
+  assert.equal(row.status, "passed_filters");
+  // No payload write and no move: the row is exactly as it was.
+  assert.equal(updates.length, 0);
+  assert.equal(rpcArgs.length, 0);
+  // The strike is durable: one appended event for a1, beside b9's.
+  const strikes = log.filter((event) => event.application_id === "a1");
+  assert.equal(strikes.length, 1);
+  // Typed and attributed so the next run's read finds it, and the history page reads it right.
+  assert.equal(strikes[0]?.event_type, "error");
+  assert.equal(strikes[0]?.agent, "matcher");
+  // The reason and the model's own words, for whoever reads the row's history.
+  assert.equal((strikes[0]?.detail as Record<string, unknown>).reason, "unreadable_score");
+  assert.equal((strikes[0]?.detail as Record<string, unknown>).detail, "invalid_match_score:not_a_number(NaN)");
+  // Nothing failed; the row is reported, so the run's error_detail shows the strike.
+  assert.deepEqual(out.failed, []);
+  assert.equal(out.failures.length, 1);
+  assert.match(out.failures[0]?.error ?? "", /first strike/);
+});
+
+test("settleModelFailures: second strike in a later run fails it", async () => {
+  // ONE fake across two settle calls: the log carries run 1's strike into run 2, as the table does.
+  const { db, row, events, log } = fakeRow();
+  // Run 1: the first strike, left at passed_filters.
+  await settleModelFailures(db, [UNREADABLE], true);
+  // Run 2: the same row is unreadable again while another row was read.
+  const out = await settleModelFailures(db, [UNREADABLE], true);
+  // Twice in two separate runs: now it is the row, not a glitch. Terminal, with its reason.
   assert.equal(row.status, "failed");
   assert.equal(row.failure_reason, "unreadable_score");
-  // The model's own words go to the event, not the reason column.
+  // The model's own words go to the move's event, not the reason column.
   assert.equal(events[0]?.detail.detail, "invalid_match_score:not_a_number(NaN)");
   // Counted as a failed row, not as a failure of the run.
   assert.deepEqual(out, { failed: ["unreadable_score"], skippedStale: 0, failures: [] });
+  // No second strike row: the move's own event is the record of the second one.
+  assert.equal(log.length, 1);
+});
+
+test("settleModelFailures: unreadable strike history never fails a row", async () => {
+  // An earlier run's real strike, made by the code under test so its shape is the real one.
+  const earlier = fakeRow();
+  await settleModelFailures(earlier.db, [UNREADABLE], true);
+  // This run: the same log, but the read of it fails (a grant or RLS change, a network drop).
+  const { db, row, updates, log } = fakeRow({ log: earlier.log, historyError: "permission denied for table application_events" });
+  // Proven, and a strike exists: only the unreadable history stands between the row and `failed`.
+  const out = await settleModelFailures(db, [UNREADABLE], true);
+  // FAIL-SAFE: unknown history means retry, never a permanent loss.
+  assert.equal(row.status, "passed_filters");
+  assert.equal(updates.length, 0);
+  // No strike appended either: without the history this run cannot say which strike it is.
+  assert.equal(log.length, 1);
+  // Reported with the read's own error, so Health shows why the row was left.
+  assert.deepEqual(out.failed, []);
+  assert.match(out.failures[0]?.error ?? "", /permission denied/);
 });
 
 test("settleModelFailures: when no row was scored this run, nothing is failed and the rows stay", async () => {
   // A model or parser regression makes EVERY answer unreadable; failing them all would empty
   // the queue into a status only a human can leave.
-  const { db, row, updates } = fakeRow();
+  const { db, row, updates, log } = fakeRow();
   // proven = false: nothing in this run was readable.
   const out = await settleModelFailures(db, [{ applicationId: "a1", reason: "gemini_returned_no_text", detail: "gemini_returned_no_text" }], false);
   // Untouched: no write, no move.
   assert.equal(row.status, "passed_filters");
   assert.equal(updates.length, 0);
+  // And no strike: an unproven run is no evidence against any one row, so a regression that
+  // lasts two runs cannot arm every row in the queue for failure.
+  assert.equal(log.length, 0);
   // Still reported as a failure of this run, so the run reads failed, not idle.
   assert.equal(out.failures.length, 1);
   // And no row counted as failed.
@@ -237,5 +336,6 @@ test("matcher wiring: the queue skips disappeared jobs and the usable gate runs 
   // The usable gate wraps the tech pre-gate, so even a human-picked row is checked first.
   assert.match(source, /runBatchWithDeadline\(rows \?\? \[\], withUsableJob\(/);
   // Held answer failures are settled with the "some row scored" proof.
-  assert.match(source, /settleModelFailures\(db, heldModelFailures, scoredCount \+ droppedCount > 0\)/);
+  // The cast is the only extra: the same db, the same held rows, the same proof.
+  assert.match(source, /settleModelFailures\(db as unknown as SettleClient, heldModelFailures, scoredCount \+ droppedCount > 0\)/);
 });
