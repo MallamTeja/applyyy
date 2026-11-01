@@ -1,5 +1,5 @@
-// Import MasterProfile for typing candidate data
-import type { MasterProfile } from "../contracts/shared-types.ts";
+// Import MasterProfile for typing candidate data, and MasterSkill for the node each skills entry is
+import type { MasterProfile, MasterSkill } from "../contracts/shared-types.ts";
 
 // Define the shape of a skill gap entry
 // Represents a missing skill for a particular job
@@ -35,15 +35,20 @@ export function computeSkillGaps(params: ComputeSkillGapParams): SkillGapEntry[]
         }));
     }
 
-    // Extract candidate skills from the profile, defaulting to empty array if missing
-    // Cast to any to safely check for skills array as MasterProfile might vary
-    const profileData = candidateProfile as any;
-    // Get the skills or default to empty array
-    const candidateSkills: string[] = profileData.skills || [];
-    
-    // Convert candidate skills to lowercase for case-insensitive comparison
+    // Extract candidate skills from the profile, defaulting to empty array if missing.
+    // Each entry is a MasterSkill node ({ id, name, category }), NOT a bare string: the old
+    // `as any` + string[] reading crashed the first production run (2026-11-01, "s.toLowerCase
+    // is not a function"). The type is the caller's claim about a JSON row, so the shape is
+    // still checked here; a non-array `skills` means no known skills, so every gap is reported.
+    const skillNodes: readonly MasterSkill[] = Array.isArray(candidateProfile.skills) ? candidateProfile.skills : [];
+
+    // Convert candidate skill names to lowercase for case-insensitive comparison
     // This ensures robust matching
-    const candidateSkillsLower = candidateSkills.map((s: string) => s.toLowerCase());
+    // flatMap lets one malformed node (null, a non-string or blank name) drop out on its own
+    // instead of throwing and losing the whole report, and never lets a non-string count as a skill.
+    const candidateSkillsLower = skillNodes.flatMap((node) =>
+        // Only a non-blank string name is a skill; `?.` survives a null slot in the stored array.
+        typeof node?.name === "string" && node.name.trim() !== "" ? [node.name.toLowerCase()] : []);
 
     // Create an array to hold the computed gaps
     const gaps: SkillGapEntry[] = [];
