@@ -49,7 +49,9 @@ export function makeFetchBoard(robotsCache: RobotsCache = new Map()): FetchBoard
       // default; the explicit cache is the per-isolate one). 'null' mode turns a 404
       // (dead board token) into null instead of a throw; two retries keep a
       // rate-limited host from eating the whole function's wall-clock budget.
-      const payload = await httpJson<unknown>(url, { notFound: "null", retry: { maxRetries: 2 }, robots: { cache: robotsCache } });
+      // 'scouting' because this URL is the SAME board-list API scout-ats polls (the adapter
+      // builds it), so the 2026-11-01 board-read rule applies: a 401 robots.txt is no rules.
+      const payload = await httpJson<unknown>(url, { notFound: "null", retry: { maxRetries: 2 }, robots: { cache: robotsCache, policy: "scouting" } });
       // A dead board means the model's URL cannot be real.
       if (payload === null) return { ok: false, reason: "board_not_found" };
       // Hand the raw payload to the adapter's own parser (in core.ts).

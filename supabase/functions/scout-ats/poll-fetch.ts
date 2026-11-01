@@ -34,8 +34,11 @@ export function fetchBoard(url: string, robotsCache?: RobotsCache, body?: string
     // clock. A non-ok status THROWS (HttpError) rather than returning, so the caller's
     // failure bookkeeping lives in its catch.
     retry: { maxRetries: 0 },
+    // The board-read robots policy (Teja, 2026-11-01): a 401 robots.txt is no rules
+    // (api.ashbyhq.com), while 403 and a published Disallow still refuse. The worker
+    // scout (worker/src/scout/board-pages.ts) passes the same policy, so both agree.
     // `exactOptionalPropertyTypes`: spread the cache only when a test supplies one,
-    // never pass an explicit undefined.
-    ...(robotsCache === undefined ? {} : { robots: { cache: robotsCache } }),
+    // never pass an explicit undefined; without one the transport's isolate cache applies.
+    robots: { policy: "scouting", ...(robotsCache === undefined ? {} : { cache: robotsCache }) },
   });
 }

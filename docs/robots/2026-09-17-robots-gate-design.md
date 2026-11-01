@@ -109,6 +109,42 @@ already records, at its own fetch site and written by a different session, that
 #5." Two sessions reaching the same rule from the same constraint independently is
 stronger support for it than any single ruling.
 
+### Exception, 2026-11-01 (Teja): a 401 robots.txt counts as no rules for scouting only
+
+**Ruling.** For board-list reads (scouting), a robots.txt that answers **401** counts as
+"no robots file", which is RFC 9309's own reading of a 4xx. **403 still refuses.** A
+published `Disallow` still refuses. The applier keeps the strict rule: 401 and 403 both
+refuse.
+
+**Why.** `api.ashbyhq.com/robots.txt` answers 401, but its public board API
+(`/posting-api/job-board/<token>`) answers 200. Under the strict rule, the gate refused
+all 75 enabled Ashby boards: 5,586 postings on their last poll (measured 2026-11-01).
+scout-ats was already refusing them. Only the ungated worker cron scout was still reading
+them. A 401 is a login wall in front of the file. It says nothing about bots. A 403 is the
+bot block this deviation exists for, so it keeps its verdict.
+
+**Mechanism.** `checkRobots(..., { policy: 'scouting' })`. `RobotsPolicy` is
+`'strict' | 'scouting'`, and the default is `'strict'`. The cache stores the host's
+answer, not the verdict, and the policy is applied on every call. That way, strict
+callers and scouting callers can share one cache.
+
+**Who passes 'scouting'.** The three board-list readers:
+- `worker/src/scout/board-pages.ts`
+- `supabase/functions/scout-ats/poll-fetch.ts`
+- `supabase/functions/scout-web/fetch-board.ts`
+
+Every other caller stays strict: `worker/src/apply-one.ts` and `job-link-intake`.
+
+**Measured verdicts under 'scouting' (2026-11-01).**
+
+| Provider | Verdict |
+|---|---|
+| greenhouse | allow |
+| lever | allow |
+| ashby | allow (401) |
+| workday | allow (3 tenants) |
+| smartrecruiters | refuse (`User-agent: * / Disallow: /`) |
+
 ---
 
 ## 5. The finding: upstream's soft-200 defence would refuse a host we have verified

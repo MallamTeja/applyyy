@@ -43,7 +43,24 @@ export interface CacheEntry {
 // two tests in the same process unable to contaminate each other.
 export type RobotsCache = Map<string, CacheEntry>;
 
+// WHICH READING OF A 401 ROBOTS.TXT APPLIES. A closed union, not a boolean, so a third
+// purpose has to be named and decided here rather than smuggled in as `true`.
+//   'strict'   — 401 and 403 both refuse (the deviation explained above). The DEFAULT,
+//                so every caller that says nothing (the applier, job-link-intake) keeps
+//                exactly the rule it had.
+//   'scouting' — board-list reads only. A 401 counts as "no robots file", RFC 9309's own
+//                reading of a 4xx. Teja ruled this 2026-11-01 after api.ashbyhq.com's
+//                robots.txt was measured answering 401 while its public board API
+//                answers 200: strict refused all 75 Ashby boards. 403 still refuses
+//                (a WAF block is the case the deviation exists for) and a published
+//                Disallow still refuses (SmartRecruiters' "User-agent: * Disallow: /").
+// See docs/robots/2026-09-17-robots-gate-design.md §4.
+export type RobotsPolicy = 'strict' | 'scouting';
+
 export interface RobotsOptions {
+  // Which reading of a 401 applies; absent = 'strict'. Decided per call, never cached:
+  // the cache holds what the host SAID, so a strict and a scouting caller can share one.
+  readonly policy?: RobotsPolicy;
   // The structural fetch seam. Injected rather than imported so the package stays
   // dependency-free and every test runs with no network.
   readonly fetcher?: RobotsFetcher;
@@ -103,7 +120,16 @@ const defaultFetcher: RobotsFetcher = async (url, init) => {
  * Exported because the decision table is the part most worth testing directly, and
  * because a caller holding a cached RobotsSource can re-decide without refetching.
  */
-export function verdictFor(source: RobotsSource, productToken: string, path: string): RobotsVerdict {
+export function verdictFor(
+  // What the host said, as fetch.ts classified it.
+  source: RobotsSource,
+  // Our product token, for group selection.
+  productToken: string,
+  // Path plus query, the part rules match against.
+  path: string,
+  // Defaults to the stricter reading, so an omitted policy can only ever refuse more.
+  policy: RobotsPolicy = 'strict',
+): RobotsVerdict {
   switch (source.kind) {
     case 'policy': {
       // Which group addresses us. Null means the file named neither our token nor
@@ -156,6 +182,19 @@ export function verdictFor(source: RobotsSource, productToken: string, path: str
 
     // THE DELIBERATE DEVIATION FROM RFC 9309. Reasoning at the top of this file.
     case 'refused-by-host':
+      // THE ONE SCOUTING EXCEPTION (RobotsPolicy above): a 401 is an auth wall on the
+      // file, not a statement about bots, so a board-list read treats it as no file.
+      // 403 never reaches this branch's allow, under any policy.
+      if (policy === 'scouting' && source.status === 401) {
+        return {
+          // The same answer a 404 gets: nothing published, nothing restricted.
+          kind: 'allow',
+          // Names the status AND the policy, so a log can tell this allow from a 404's.
+          reason: `robots.txt answered HTTP 401; the scouting policy reads that as no robots file (RFC 9309)`,
+          // No file read means no published delay. Unknown, not zero.
+          crawlDelayMs: null,
+        };
+      }
       return {
         kind: 'refuse',
         // The reason states the principle inline, because this is the verdict most
@@ -244,7 +283,9 @@ export async function checkRobots(
   // detect, which is why there is a test asserting two hosts fetch separately.
   const cached = cache?.get(robotsUrl);
   if (cached !== undefined && cached.expiresAtMs > now()) {
-    return verdictFor(cached.source, productToken, path);
+    // The caller's policy applies to the cached fact, so a strict entry never leaks
+    // its refusal into a scouting read of the same 401 (or the reverse).
+    return verdictFor(cached.source, productToken, path, options.policy);
   }
 
   // The one network call, behind the injected seam.
@@ -262,5 +303,6 @@ export async function checkRobots(
   const ttl = source.kind === 'policy' || source.kind === 'definitively-absent' ? successTtlMs : failureTtlMs;
   cache?.set(robotsUrl, { source, expiresAtMs: now() + ttl });
 
-  return verdictFor(source, productToken, path);
+  // Same policy pass-through as the cached branch; undefined falls to verdictFor's 'strict'.
+  return verdictFor(source, productToken, path, options.policy);
 }

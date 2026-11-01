@@ -44,7 +44,7 @@ import { parseRetryAfterMs } from "./retry-after.ts";
 // caller must remember to call is a comment, not a control. No recursion hazard: the
 // gate fetches robots.txt through its OWN default fetcher (bare global fetch), never
 // back through this transport.
-import { checkRobots, tokenFromUserAgentHeader, type RobotsCache } from "../../../../packages/master-robots/src/index.ts";
+import { checkRobots, tokenFromUserAgentHeader, type RobotsCache, type RobotsPolicy } from "../../../../packages/master-robots/src/index.ts";
 
 // Identifies this tool honestly. Matches the string `scout-ats/index.ts` already
 // sends, so a board operator reading their logs sees one identity for this system
@@ -160,7 +160,10 @@ export interface HttpRequestOptions {
   // production callers are board harvesters, which is exactly what robots governs).
   // `cache` overrides the module-level verdict cache; it exists for tests, which need
   // isolation from each other, and for a caller that wants its own TTL scope.
-  readonly robots?: false | { readonly cache?: RobotsCache };
+  // `policy` is master-robots' RobotsPolicy, absent = 'strict'. Only BOARD-LIST readers
+  // (scout-ats poll-fetch.ts, scout-web fetch-board.ts) pass 'scouting', where a 401
+  // robots.txt counts as no rules (Teja, 2026-11-01); every other caller stays strict.
+  readonly robots?: false | { readonly cache?: RobotsCache; readonly policy?: RobotsPolicy };
 }
 
 // Every option resolved to a concrete value.
@@ -318,7 +321,16 @@ export async function httpFetch(
     }
     // The verdict logic (shape-checked parse, soft-200 refusal, 4xx/5xx semantics) all
     // lives in master-robots; this transport only acts on the verdict.
-    const verdict = await checkRobots(url, productToken, { cache: options.robots?.cache ?? defaultRobotsCache });
+    // The policy is passed through, defaulting to 'strict' HERE rather than relying on
+    // master-robots' default, so `exactOptionalPropertyTypes` never sees an undefined.
+    // The shared isolate cache is safe across policies: it holds the host's answer, and
+    // the policy is applied to that answer on every call.
+    const verdict = await checkRobots(url, productToken, {
+      // The caller's cache, or the isolate's.
+      cache: options.robots?.cache ?? defaultRobotsCache,
+      // The caller's reading of a 401, or the strict one.
+      policy: options.robots?.policy ?? "strict",
+    });
     // Anything but an explicit allow refuses — 'wait' included, mirroring scout-web's
     // own gate: a transport that slept here would spend an Edge Function's wall clock
     // on one slow host's robots rate limit. crawlDelayMs on an allow is deliberately

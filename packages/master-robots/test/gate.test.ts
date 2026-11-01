@@ -8,7 +8,7 @@
 // backwards, granting access at the precise moment we have been blocked.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkRobots, robotsUrlFor } from '../src/gate.ts';
+import { checkRobots, robotsUrlFor, type RobotsCache } from '../src/gate.ts';
 import type { RobotsFetcher, RobotsResponse } from '../src/fetch.ts';
 import {
   ASHBY_API_DISALLOWED,
@@ -190,6 +190,62 @@ describe('the host refuses us — 401 and 403 refuse, against RFC 9309', () => {
     const verdict = await checkRobots('https://x.example/jobs', TOKEN, { fetcher: respondWith(401) });
     assert.equal(verdict.kind, 'refuse');
     if (verdict.kind === 'refuse') assert.equal(verdict.source, 'refused-by-host');
+  });
+});
+
+// Teja's ruling, 2026-11-01: for SCOUTING (board-list reads) a robots.txt that answers
+// 401 counts as "no robots file", RFC 9309's own reading of a 4xx. Measured cause:
+// api.ashbyhq.com/robots.txt answers 401 while its public board API answers 200, so the
+// strict rule refused 75 Ashby boards. 403 and a real Disallow still refuse; the
+// applier keeps the strict rule because it never passes the scouting policy.
+describe("the 'scouting' policy — 401 is no rules, nothing else moves", () => {
+  test('a 401 robots.txt ALLOWS a scouting read', async () => {
+    // The Ashby shape: an auth wall on robots.txt, nothing else said.
+    const verdict = await checkRobots('https://x.example/jobs', TOKEN, { fetcher: respondWith(401), policy: 'scouting' });
+    // Allowed, the same as a host that published no file at all.
+    assert.equal(verdict.kind, 'allow');
+    // The reason names the policy, so a log shows WHY a 401 passed.
+    if (verdict.kind === 'allow') assert.match(verdict.reason, /401.*scouting/);
+  });
+
+  test('the same 401 still REFUSES under the default (applier) policy', async () => {
+    // No policy passed: what apply-one does today, unedited.
+    const verdict = await checkRobots('https://x.example/jobs', TOKEN, { fetcher: respondWith(401) });
+    // Strict stays strict.
+    assert.equal(verdict.kind, 'refuse');
+    // Explicit 'strict' must agree with the default, or the default is a third policy.
+    const explicit = await checkRobots('https://x.example/jobs', TOKEN, { fetcher: respondWith(401), policy: 'strict' });
+    assert.equal(explicit.kind, 'refuse');
+  });
+
+  test('403 refuses under BOTH policies', async () => {
+    // 403 is the WAF block the deviation exists for; the ruling did not touch it.
+    for (const policy of ['strict', 'scouting'] as const) {
+      // One fresh fetch per policy, no cache, so neither answer leans on the other.
+      const verdict = await checkRobots('https://x.example/jobs', TOKEN, { fetcher: respondWith(403), policy });
+      // Refused, and refused as a block rather than as an outage.
+      assert.equal(verdict.kind, 'refuse', `policy ${policy}`);
+      if (verdict.kind === 'refuse') assert.equal(verdict.source, 'refused-by-host');
+    }
+  });
+
+  test('a real Disallow still refuses a scouting read (the SmartRecruiters shape)', async () => {
+    // api.smartrecruiters.com's live policy, measured 2026-11-01.
+    const body = 'User-agent: LinkedInBot\nAllow: /v1/companies/\nUser-agent: *\nDisallow: /';
+    // The scouting policy relaxes a 401 only, never a published rule.
+    const verdict = await checkRobots('https://x.example/v1/companies/acme/postings', TOKEN, { fetcher: respondWith(200, body), policy: 'scouting' });
+    assert.equal(verdict.kind, 'refuse');
+  });
+
+  test('one cache serves both policies: the 401 is stored as a fact, decided per call', async () => {
+    // Shared, as transport.ts shares one isolate cache across strict and scouting callers.
+    const cache: RobotsCache = new Map();
+    // First a strict caller fills the cache with the 401.
+    const strict = await checkRobots('https://x.example/jobs', TOKEN, { fetcher: respondWith(401), cache });
+    assert.equal(strict.kind, 'refuse');
+    // Then a scouting caller reads the SAME entry; a cached verdict would leak "refuse".
+    const scouting = await checkRobots('https://x.example/jobs', TOKEN, { fetcher: respondWith(401), cache, policy: 'scouting' });
+    assert.equal(scouting.kind, 'allow');
   });
 });
 

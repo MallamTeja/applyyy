@@ -42,6 +42,8 @@ export {
   type CacheEntry,
   type RobotsCache,
   type RobotsOptions,
+  // 'strict' (default) or 'scouting' (a 401 robots.txt is no rules; board reads only).
+  type RobotsPolicy,
 } from './gate.ts';
 
 // The fetch seam, so a caller can supply its own transport without this package

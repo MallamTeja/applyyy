@@ -62,6 +62,42 @@ test("an allowing robots answer lets the poll proceed", async () => {
   assert.equal(state.targetCalls, 1);
 });
 
+// --- The scouting robots policy (Teja, 2026-11-01): a 401 robots.txt is no rules ---
+// Script robots.txt to answer a bare status (no policy body), anything else is the board.
+function statusRobotsFetch(robotsStatus: number): { targetCalls: number } {
+  // Mutated by the stub, read after the awaited call settles.
+  const state = { targetCalls: 0 };
+  // One stub for the gate's robots fetch and the board fetch, as above.
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    // The gate's own fetch: just the status, the way api.ashbyhq.com answers 401.
+    if (String(url).endsWith("/robots.txt")) return new Response("", { status: robotsStatus, headers: { "content-type": "text/plain" } });
+    // The board endpoint, counted so the refusal case is non-vacuous.
+    state.targetCalls++;
+    return new Response("[]", { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  // Handed back for the assertions.
+  return state;
+}
+
+test("a 401 robots.txt lets the board poll proceed (scouting policy; the api.ashbyhq.com shape)", async () => {
+  // Ashby's API host answers 401 on robots.txt while its board API answers 200.
+  const state = statusRobotsFetch(401);
+  // Own cache, as every test here.
+  const response = await fetchBoard("https://api.example.com/posting-api/job-board/acme", new Map());
+  // The board was read, once.
+  assert.ok(response !== null && response.ok);
+  assert.equal(state.targetCalls, 1);
+});
+
+test("a 403 robots.txt still refuses the board poll", async () => {
+  // A host that blocks us outright; the ruling kept this a refusal.
+  const state = statusRobotsFetch(403);
+  // Typed refusal before contact.
+  await assert.rejects(() => fetchBoard("https://api.example.com/posting-api/job-board/acme", new Map()), RobotsDisallowedError);
+  // The board was never contacted.
+  assert.equal(state.targetCalls, 0);
+});
+
 // --- POST boards (Workday, 2026-11-01): a body means POST JSON, no body means GET ---
 
 // Like scriptedFetch, but keeps every request init the BOARD endpoint received, so a
