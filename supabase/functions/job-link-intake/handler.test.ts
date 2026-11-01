@@ -32,22 +32,36 @@ interface Spy {
   pageFetches: number;
   boardFetches: number;
   extracts: number;
+  // The description each tagManual call wrote (null = left untouched). Optional so the
+  // existing Spy literals stay valid; created on the first tag write.
+  fills?: Array<string | null>;
 }
 
 // A fake store honouring the real contract: values, never throws.
-function fakeStore(spy: Spy, opts: { existing?: { discoveredVia: string[]; disappearedAt?: string | null }; application?: StoredApplication; moveError?: string | null } = {}): IntakeStore {
+function fakeStore(spy: Spy, opts: { existing?: { discoveredVia: string[]; disappearedAt?: string | null; descriptionRaw?: string | null }; application?: StoredApplication; moveError?: string | null } = {}): IntakeStore {
   // Mirrors the real store's read-back.
   return {
     watchlistName: () => Promise.resolve({ ok: true as const, name: null }),
     upsertJob: (row) => {
       // Records the row the handler built.
       spy.jobs.push(row);
-      // An existing row keeps its own sources; a new one has the row's.
-      return Promise.resolve({ ok: true as const, job: { id: "job-1", discoveredVia: opts.existing?.discoveredVia ?? (row.discovered_via ?? []), disappearedAt: opts.existing?.disappearedAt ?? null } });
+      // An existing row keeps its own sources and description; a new one has the row's.
+      return Promise.resolve({
+        ok: true as const,
+        job: {
+          id: "job-1",
+          discoveredVia: opts.existing?.discoveredVia ?? (row.discovered_via ?? []),
+          disappearedAt: opts.existing?.disappearedAt ?? null,
+          // An existing row without a stated description has none; an explicit null stays null.
+          descriptionRaw: opts.existing ? (opts.existing.descriptionRaw ?? null) : (row.description_raw ?? null),
+        },
+      });
     },
-    tagManual: (_id, via) => {
+    tagManual: (_id, via, descriptionRaw) => {
       // Records the tag write.
       spy.tags.push([...via]);
+      // And the description it carried, so a test can tell "filled" from "left alone".
+      (spy.fills ??= []).push(descriptionRaw);
       return Promise.resolve(null);
     },
     upsertApplication: () => Promise.resolve({ ok: true as const, application: opts.application ?? { id: "11111111-1111-4111-8111-111111111111", status: "passed_filters", created: true } }),
@@ -60,7 +74,7 @@ function fakeStore(spy: Spy, opts: { existing?: { discoveredVia: string[]; disap
 }
 
 // Deps with every seam faked; options flip the branch under test.
-function makeDeps(opts: { killOn?: boolean; pageFails?: boolean; html?: string; extract?: unknown; store?: Parameters<typeof fakeStore>[1] } = {}): { deps: IntakeDeps; spy: Spy; runs: string[] } {
+function makeDeps(opts: { killOn?: boolean; pageFails?: boolean; html?: string; extract?: unknown; store?: Parameters<typeof fakeStore>[1]; board?: unknown } = {}): { deps: IntakeDeps; spy: Spy; runs: string[] } {
   const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
   // Every server pipeline run the handler started, in order (kept off Spy so its literals stay valid).
   const runs: string[] = [];
@@ -84,7 +98,8 @@ function makeDeps(opts: { killOn?: boolean; pageFails?: boolean; html?: string; 
     fetchBoard: () => {
       // Counted so the page path can prove it never touched a board.
       spy.boardFetches += 1;
-      return Promise.resolve({ ok: true as const, payload: GH_BOARD });
+      // The default board, unless a test serves one with a different posting.
+      return Promise.resolve({ ok: true as const, payload: opts.board ?? GH_BOARD });
     },
     fetchPage: () => {
       // Counted so the pasted-text path can prove it never fetched.
@@ -277,4 +292,100 @@ test("persistManualJob: a refused move is reported, never claimed as moved", asy
   const store = fakeStore(spy, { existing: { discoveredVia: ["manual"] }, application: { id: "app-9", status: "dropped_filter", created: false }, moveError: "illegal transition" });
   const saved = await persistManualJob(store, { fingerprint: "fp", title: "t", company_name: "c", company_slug: "c", apply_url: "https://x.example/j", posted_at: "2026-10-31T00:00:00Z" }, "https://x.example/j");
   assert.equal(saved.ok, false);
+});
+
+// --- W3 (wiring audit, 2026-11-01): a pasted link can fill a description the scout missed ---
+
+// A Greenhouse board whose one posting carries no description, the shape of the 13 live
+// SmartRecruiters rows (the SR list endpoint has none) on the one adapter these tests serve.
+const GH_BOARD_NO_DESCRIPTION = { jobs: [{ ...GH_BOARD.jobs[0], content: "" }] };
+
+// A JobInsert carrying the pasted page's description, for the persistManualJob tests.
+function pastedRow(description: string | null) {
+  // Only the fields persistManualJob reads matter; the rest satisfy the type.
+  return { fingerprint: "fp", title: "t", company_name: "c", company_slug: "c", apply_url: "https://x.example/j", posted_at: "2026-10-31T00:00:00Z", discovered_via: ["manual"], description_raw: description };
+}
+
+test("persistManualJob: a scouted row with no description takes the pasted description", async () => {
+  const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
+  // The live SR case: scouted, no description, still at passed_filters.
+  const store = fakeStore(spy, { existing: { discoveredVia: ["smartrecruiters"], descriptionRaw: null }, application: { id: "app-9", status: "passed_filters", created: false } });
+  // The paste carries a real description.
+  const saved = await persistManualJob(store, pastedRow(POST_TEXT.trim()), "https://x.example/j");
+  // Saved, so the server pipeline can run on it.
+  assert.ok(saved.ok);
+  // THE PROPERTY: the tag write carries the pasted description, so the matcher and tailor read it.
+  assert.deepEqual(spy.fills, [POST_TEXT.trim()]);
+  // Every other scouted field is kept: only the sources gain 'manual'.
+  assert.deepEqual(spy.tags, [["smartrecruiters", "manual"]]);
+});
+
+test("persistManualJob: a shorter stored description is replaced, even on a row already tagged manual", async () => {
+  const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
+  // Already manual and live: the fill is the only reason to write.
+  const store = fakeStore(spy, { existing: { discoveredVia: ["manual"], descriptionRaw: "Short JD." }, application: { id: "app-9", status: "passed_filters", created: false } });
+  // Longer than the stored text.
+  const saved = await persistManualJob(store, pastedRow(POST_TEXT.trim()), "https://x.example/j");
+  // Saved.
+  assert.ok(saved.ok);
+  // The fill alone triggered the write (before W3 this row was never written).
+  assert.deepEqual(spy.fills, [POST_TEXT.trim()]);
+});
+
+test("persistManualJob: a richer stored description is left untouched", async () => {
+  const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
+  // The scouted board text is longer than what was pasted: the employer's own words win.
+  const store = fakeStore(spy, { existing: { discoveredVia: ["greenhouse"], descriptionRaw: POST_TEXT.repeat(2) }, application: { id: "app-9", status: "passed_filters", created: false } });
+  // Shorter than the stored text.
+  const saved = await persistManualJob(store, pastedRow(POST_TEXT.trim()), "https://x.example/j");
+  // Saved.
+  assert.ok(saved.ok);
+  // Tagged manual (it was scouted), but the description is not touched.
+  assert.deepEqual(spy.tags, [["greenhouse", "manual"]]);
+  assert.deepEqual(spy.fills, [null]);
+});
+
+test("persistManualJob: a blank pasted description never replaces anything", async () => {
+  const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
+  // Already manual and live with no description; the paste has none either.
+  const store = fakeStore(spy, { existing: { discoveredVia: ["manual"], descriptionRaw: null }, application: { id: "app-9", status: "passed_filters", created: false } });
+  // Whitespace only: absence, which must never wipe or fill anything.
+  const saved = await persistManualJob(store, pastedRow("   "), "https://x.example/j");
+  // Saved.
+  assert.ok(saved.ok);
+  // Nothing to fill and nothing to tag: no write at all.
+  assert.equal(spy.fills, undefined);
+});
+
+test("ATS link whose board has no description: the pasted text becomes the description", async () => {
+  // The board lists the posting but says nothing about it.
+  const { deps, spy } = makeDeps({ board: GH_BOARD_NO_DESCRIPTION });
+  // The board link plus the human's copy of the job text.
+  const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111", text: POST_TEXT }), deps);
+  // Accepted.
+  assert.equal(res.status, 200);
+  // Still the board's row (provider, apply link, id), with the human's text as its description.
+  assert.equal(spy.jobs[0]?.ats_provider, "greenhouse");
+  assert.equal(spy.jobs[0]?.description_raw, POST_TEXT.trim());
+});
+
+test("ATS link whose board has a description: the board's text wins over the paste", async () => {
+  const { deps, spy } = makeDeps();
+  // The same paste, against the default board whose posting has a description.
+  const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111", text: POST_TEXT }), deps);
+  // Accepted.
+  assert.equal(res.status, 200);
+  // What the employer wrote, not the post around the link.
+  assert.match(String(spy.jobs[0]?.description_raw), /Build things/);
+});
+
+test("job-link-intake wiring: the store reads description_raw back and writes it only when given", async () => {
+  // index.ts runs Deno.serve on import, so its store is read as source (POSITIVE shape, §6).
+  const { readFileSync } = await import("node:fs");
+  // Resolved relative to this test file, independent of the cwd.
+  const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  // The read-back must carry the stored description, or every paste would look like a fill.
+  assert.match(source, /\.select\("id, discovered_via, disappeared_at, description_raw"\)/);
+  // The tag write sets description_raw only for a non-null fill; otherwise the column is not named.
+  assert.match(source, /\.\.\.\(descriptionRaw !== null \? \{ description_raw: descriptionRaw \} : \{\}\)/);
 });

@@ -87,7 +87,10 @@ export async function writeMatchScore(
 }
 
 // Two edges only: the matcher moves a row it scored to `scored` or `dropped_filter`.
-export type MatcherTargetStatus = "scored" | "dropped_filter";
+// THIRD EDGE (W2, 2026-11-01): `failed`, the live passed_filters -> failed edge the matcher
+// already owned and never took. Only fail-exit.ts sends it, for a row whose job is unusable or
+// whose model answer can never be read, so such a row stops being retried at the queue head.
+export type MatcherTargetStatus = "scored" | "dropped_filter" | "failed";
 
 // Same closed shape as the write: a refused stale stamp is the race lost, not a failure.
 export type MatchScoreAdvance =

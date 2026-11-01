@@ -53,7 +53,12 @@ export async function preGateRow(
 ): Promise<PreGateOutcome> {
   // A missing job is missing DATA, not an empty title: judged as "", it would be dropped as
   // tech_gate_unclassified, turning an absence into an answer (CLAUDE.md §6). Report it and
-  // leave the row where it is, as the screener does for the same case.
+  // leave the row where it is. CORRECTED 2026-11-01 (W2): this used to say "as the screener
+  // does", but the screener FAILS a row with no job (missing_job_record). The matcher does not,
+  // on purpose: its select is jobs!inner on a NOT NULL, ON DELETE CASCADE job_id, so a null
+  // embed here means a select that lost !inner (which nulls a DISAPPEARED job's embed), not a
+  // deleted job. fail-exit.ts's usable-job gate runs first and reports it the same way, so in
+  // the live wiring this branch is defence in depth.
   if (job === null) return { kind: "error", message: "pre-gate: job row missing for this application" };
   // The exact verdict the screener would give this posting today.
   const verdict = screenTechRole(job.title, job.descriptionRaw, preferences);

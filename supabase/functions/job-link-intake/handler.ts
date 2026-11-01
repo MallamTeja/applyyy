@@ -62,6 +62,9 @@ export interface StoredJob {
   readonly discoveredVia: readonly string[];
   // Non-null when a board stopped listing it; the tailor skips such rows, so a paste clears it.
   readonly disappearedAt: string | null;
+  // The stored description (W3, 2026-11-01): a scouted row can have none (every live
+  // SmartRecruiters row), and a paste that carries one must be able to fill it.
+  readonly descriptionRaw: string | null;
 }
 
 // What the store hands back about the application row.
@@ -81,7 +84,9 @@ export interface IntakeStore {
   // Insert-if-absent on (user_id, fingerprint), then read the row back either way.
   upsertJob(row: JobInsert): Promise<{ ok: true; job: StoredJob } | { ok: false; reason: string }>;
   // Add 'manual' to discovered_via and clear disappeared_at, on a row that already existed.
-  tagManual(jobId: string, discoveredVia: readonly string[]): Promise<string | null>;
+  // `descriptionRaw` (W3) also replaces the stored description when non-null; null leaves it
+  // untouched. REQUIRED, so a store cannot quietly drop the fill the handler decided on.
+  tagManual(jobId: string, discoveredVia: readonly string[], descriptionRaw: string | null): Promise<string | null>;
   // Insert-if-absent at passed_filters on (user_id, job_id), then read the row back either way.
   upsertApplication(jobId: string): Promise<{ ok: true; application: StoredApplication } | { ok: false; reason: string }>;
   // advance_application_status(id, 'passed_filters', 'human', detail). Null on success.
@@ -193,7 +198,8 @@ type Refusal = { readonly httpStatus: number; readonly body: Record<string, unkn
 type Built = { readonly row: JobInsert; readonly source: "ats_board" | "page" | "pasted_text" };
 
 // The ATS path: find the posting on the live board and build the row from the board's data.
-async function buildFromBoard(target: ParsedJobUrl, deps: IntakeDeps, store: IntakeStore, now: Date): Promise<Built | Refusal> {
+// `pastedText` (W3): the human's text, used only when the board itself has no description.
+async function buildFromBoard(target: ParsedJobUrl, deps: IntakeDeps, store: IntakeStore, now: Date, pastedText: string | null): Promise<Built | Refusal> {
   // The adapter owns the board URL and parser.
   const adapter = getAdapter(target.provider);
   // Unreachable unless the registry and urls.ts disagree; refuse rather than guess.
@@ -218,8 +224,14 @@ async function buildFromBoard(target: ParsedJobUrl, deps: IntakeDeps, store: Int
   const company = companyFor(watch.name, posting.rawPayload, target.token);
   // The shared row builder; isFirstPollOfBoard false because a human vouches the posting is current.
   const row = await toJobInsert(posting, adapter, { companyName: company.companyName, companySlug: company.companySlug, now, firstSeenAt: now, isFirstPollOfBoard: false });
+  // W3 (2026-11-01): a board with no description (every SmartRecruiters posting: its list
+  // endpoint carries none) takes the human's pasted text, by the page path's own rule (long
+  // enough to be a description, capped). A board that HAS one keeps it: the tailor must read
+  // what the employer wrote, not the post around the link.
+  const pastedDescription = (row.description_raw ?? "").trim() === "" && pastedText !== null && pastedText.length >= MIN_JOB_TEXT_CHARS ? pastedText.slice(0, MAX_SOURCE_CHARS) : null;
   // Found by a human, whatever board hosts it: this tag is what the matcher's bypass reads.
-  return { row: { ...row, discovered_via: ["manual"] }, source: "ats_board" };
+  // The pasted description rides along only when the board had none; every other field is the board's.
+  return { row: { ...row, discovered_via: ["manual"], ...(pastedDescription !== null ? { description_raw: pastedDescription } : {}) }, source: "ats_board" };
 }
 
 // The page path: pasted text when given, else the fetched page; then Gemini, then the shape check.
@@ -305,6 +317,16 @@ async function buildFromPage(req: IntakeRequest, deps: IntakeDeps, db: unknown, 
   return { row, source };
 }
 
+// The pasted description when it says more than the stored one, else null (leave the stored
+// one alone). Measured trimmed, so whitespace padding never wins, and a blank paste never
+// replaces anything (§6: absence must not become an answer, here a wiped description).
+function richerDescription(stored: string | null, pasted: string | null): string | null {
+  // Nothing pasted, or only whitespace: nothing to fill with.
+  if (pasted === null || pasted.trim() === "") return null;
+  // No stored text, or less of it: the paste fills the gap. Otherwise the scouted text stays.
+  return stored === null || stored.trim().length < pasted.trim().length ? pasted : null;
+}
+
 // Persist the row and make sure its application sits where the pipeline can carry it.
 export async function persistManualJob(store: IntakeStore, row: JobInsert, pastedUrl: string): Promise<
   | { ok: true; application: StoredApplication; revivedFrom: ApplicationStatus | null }
@@ -314,11 +336,16 @@ export async function persistManualJob(store: IntakeStore, row: JobInsert, paste
   const job = await store.upsertJob(row);
   // No job row, nothing to queue.
   if (!job.ok) return job;
+  // W3 (2026-11-01): the upsert ignores duplicates, so a scouted row with no description kept
+  // none and the paste's text was discarded; the matcher and tailor then refused the row.
+  // Null when the stored description already says as much or more.
+  const fill = richerDescription(job.job.descriptionRaw, row.description_raw ?? null);
   // A posting first found by a scout carries no 'manual' tag, so the matcher would still gate it.
   // Also clears disappeared_at: a human pasting the link is evidence it is live again.
-  if (!job.job.discoveredVia.includes("manual") || job.job.disappearedAt !== null) {
-    // Tag (and un-disappear) before the application moves, so the matcher reads the tag.
-    const tagError = await store.tagManual(job.job.id, [...new Set([...job.job.discoveredVia, "manual"])]);
+  // And fills a missing or shorter description, the only other column a paste may change.
+  if (!job.job.discoveredVia.includes("manual") || job.job.disappearedAt !== null || fill !== null) {
+    // Tag (and un-disappear, and fill) before the application moves, so the matcher reads them.
+    const tagError = await store.tagManual(job.job.id, [...new Set([...job.job.discoveredVia, "manual"])], fill);
     // Untagged, the row would be filtered: stop rather than queue it half-done.
     if (tagError !== null) return { ok: false, reason: `jobs_tag_manual: ${tagError}` };
   }
@@ -378,7 +405,8 @@ export async function handleJobLinkIntake(req: Request, deps: IntakeDeps): Promi
   // The board posting this points at, if any.
   const target = atsTarget(parsed.value.url, parsed.value.text);
   // Board data when there is a board; otherwise the page or the pasted text.
-  const built = target !== null ? await buildFromBoard(target, deps, conn.store, now) : await buildFromPage(parsed.value, deps, conn.db, now);
+  // The pasted text goes to the board path too, for a board with no description (W3).
+  const built = target !== null ? await buildFromBoard(target, deps, conn.store, now, parsed.value.text) : await buildFromPage(parsed.value, deps, conn.db, now);
   // Refusals carry their own status.
   if ("httpStatus" in built) return json(built.httpStatus, built.body);
   // Write it.

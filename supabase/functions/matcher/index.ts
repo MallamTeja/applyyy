@@ -77,6 +77,9 @@ import { createDeadline, deadlineNote, runBatchWithDeadline, shortenedBudgetNote
 // The status-guarded score write and the stamp-guarded status move; extracted so both guards
 // are unit-tested (write-score.test.ts).
 import { advanceScoredRow, writeMatchScore } from "./write-score.ts";
+// The permanent-failure exit (W2, 2026-11-01): the usable-job gate before Gemini, and the
+// settle step for answers that could not be read.
+import { settleModelFailures, withUsableJob, type MatcherFailureReason, type ModelAnswerFailure } from "./fail-exit.ts";
 // Stage 0 re-applied before scoring, so a row the screener would now drop costs no Gemini call.
 import { nextSweepCursor, parseMatcherMode, PREGATE_ONLY_MAX_BATCH, selectScorer, withTechPreGate, type MatcherMode } from "./tech-pregate.ts";
 // The one mapper from a search_preferences row to the gate's config.
@@ -340,7 +343,16 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     // Select application ID and joined job details columns required by scorer.
     // discovered_via (2026-10-31): a 'manual' entry marks a human-pasted job, which skips the
     // pre-gate and the score floor (isHumanPicked).
-    .select("id, job_id, jobs (title, company_name, description_raw, location_raw, min_experience_years, employment_type, discovered_via)")
+    // jobs!inner + disappeared_at (W2, 2026-11-01), the tailor's own select shape: `!inner` makes
+    // the .is() below drop the ROW, where a plain embed would only null it and the dead job's
+    // application would still arrive. disappeared_at is also what the usable-job gate's verdict
+    // (planTailorBatch) reads; without the column every row is a reported defect, never scored.
+    .select("id, job_id, jobs!inner (title, company_name, description_raw, location_raw, min_experience_years, employment_type, discovered_via, disappeared_at)")
+    // SKIPPED, NOT FAILED: a posting scout-ats saw drop off its board. planReappearances clears
+    // disappeared_at on a repost and the row rejoins this queue untouched; failing it would make
+    // that impossible. Filtered here, not per row, so 21 dead rows (2026-11-01) cannot fill the
+    // head of the oldest-first batch.
+    .is("jobs.disappeared_at", null)
     // Filter applications where status equals 'passed_filters'.
     .eq("status", "passed_filters")
     // Narrow to the one requested row; the status filter stays, so a wrong-status id yields
@@ -371,6 +383,11 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // Initialize total Gemini API call execution count counter.
   // Tracks LLM calls for health monitoring and telemetry.
   let geminiCallsCount = 0;
+  // What the model gave for the row in flight (W2): "no_text" when it answered with no text,
+  // "text" once the scorer holds its text. Reset per row beside callBudget and cleared when the
+  // scorer returns, so a throw is classed as an unreadable ANSWER only between those points,
+  // never for a transport failure (still null) or a later DB throw (cleared).
+  let modelAnswer: "no_text" | "text" | null = null;
 
   // Build Matcher scorer function instance with injected model caller seam.
   // Integrates prompt assembly, Gemini model transport, and fit rubric.
@@ -405,9 +422,13 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
       const text = outcome.data.candidates?.[0]?.content?.parts?.[0]?.text;
       // Validate that extracted text part is present and typed as string.
       if (typeof text !== "string") {
+        // The model answered and said nothing (a safety block): a property of this row's prompt.
+        modelAnswer = "no_text";
         // Throw Error object indicating model returned empty text response.
         throw new Error("gemini_returned_no_text");
       }
+      // From here until the scorer returns, a throw is the scorer refusing this text.
+      modelAnswer = "text";
       // Return raw model output text string to scorer parser.
       return text;
     },
@@ -431,6 +452,12 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // Initialize array holding individual application row processing failure records.
   // Captures per-row errors without halting whole batch execution.
   const failures: Array<{ applicationId: string; error: string }> = [];
+  // Reasons of the rows this run moved to failed (W2): progress, since each left the queue, and
+  // reported as a note rather than an error, the same way pre-gate drops are.
+  const failedReasons: MatcherFailureReason[] = [];
+  // Rows whose model answer could not be read, held until the batch ends: settleModelFailures
+  // fails them only if some other row in this run was read (see fail-exit.ts).
+  const heldModelFailures: ModelAnswerFailure[] = [];
 
   // Loop sequentially through each claimed application row retrieved from queue.
   // Sequentially executes scoring to prevent hitting LLM rate limits.
@@ -440,7 +467,20 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // The scorer below is wrapped by the pre-gate: it is reached ONLY for rows stage 0 lets
   // through, so a row the gate drops never gets a Gemini call (tech-pregate.test.ts proves
   // it with a spy). Rows the gate handles itself are counted in onGated.
-  const batch = await runBatchWithDeadline(rows ?? [], withTechPreGate(
+  // OUTERMOST: the usable-job gate (W2). It runs before the tech pre-gate AND before the
+  // human-pick bypass, because a pasted job with no description is refused by the tailor too.
+  const batch = await runBatchWithDeadline(rows ?? [], withUsableJob(
+    db,
+    // Counted by kind, into the same places the pre-gate's outcomes land.
+    (row, outcome) => {
+      // Moved to failed: progress, with its reason kept for the note.
+      if (outcome.kind === "failed") failedReasons.push(outcome.reason);
+      // Another run got there first: the existing lost-race counter.
+      else if (outcome.kind === "skipped_stale") skippedStaleCount += 1;
+      // A select defect or a failed write: a row failure of this run.
+      else failures.push({ applicationId: row.id, error: outcome.message });
+    },
+    withTechPreGate(
     db,
     // The config read above; re-judges the backlog against today's lists.
     techGatePreferences,
@@ -468,6 +508,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     selectScorer(mode, async (row, call) => {
     // Hand this row's planned timeout/retries to callLlm through the closure above.
     callBudget = call;
+    // No answer yet for this row; a previous row's state must not classify this row's throw.
+    modelAnswer = null;
       // Cast embedded job relation object to structured job fields interface.
       // Extracts job details parsed from joined database query.
       const job = row.jobs as unknown as {
@@ -513,16 +555,20 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
         // Execute scoring logic against job snapshot using instantiated scorer function.
         // Evaluates technical, experience, behavioral, and career dimensions.
         const matchScore = await scorer(evalCase);
+        // The scorer returned: any throw from here on is a write, not an unreadable answer.
+        modelAnswer = null;
 
         // STEP 0: Gate the score BEFORE any write. An unreadable score (NaN, null, wrong scale)
         // FAILS CLOSED: nothing is written, the row stays at passed_filters, and the reason
         // lands in `failures` — never advanced, never dropped on a number that is not one.
         // A human-pasted job advances whatever its score; an unreadable score still fails closed.
+        // W2 (2026-11-01): it is no longer retried forever. It is HELD, and settleModelFailures
+        // fails it after the batch if another row's score was readable this run.
         const threshold = decideScoreThreshold(matchScore.score, isHumanPicked(job?.discovered_via));
         // The refusal branch: report it and move on to the next row.
         if (threshold.kind === "invalid") {
-          // Counted as a failure so the run's error_count and error_detail show it.
-          failures.push({ applicationId: row.id, error: threshold.reason });
+          // Held, not written: the settle step decides whether it is this row's fault.
+          heldModelFailures.push({ applicationId: row.id, reason: "unreadable_score", detail: threshold.reason });
           // No write and no status move for this row.
           return;
         }
@@ -539,6 +585,9 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
           // if an earlier run wrote a drop and its RPC then failed, a retry that now scores
           // >= the floor would otherwise leave that stale reason on a `scored` row.
           drop_reason: threshold.kind === "drop" ? threshold.reason : null,
+          // CLEARED for the same reason (W2): a failure write whose move then errored leaves its
+          // failure_reason behind, and a retry that now scores must not carry it to `scored`.
+          failure_reason: null,
         });
 
         // Check if application payload database update encountered error.
@@ -602,13 +651,24 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
       } catch (err) {
         // Catch exceptions thrown during scoring or database writes and record error message.
         // Prevents single row exception from crashing batch run.
+        // Extract error message string from Error object or stringify unknown error.
+        // Tagged when the deadline cut this row's Gemini budget, so a deadline-caused timeout
+        // is distinguishable from a real model timeout.
+        const error = (err instanceof Error ? err.message : String(err)) + shortenedBudgetNote(call);
+        // W2: the model answered, and its answer was empty or unreadable. The same prompt gets
+        // the same answer, so it is held for the settle step instead of retried forever.
+        if (modelAnswer !== null) {
+          // Named by what the model gave: nothing, or text the scorer refused.
+          heldModelFailures.push({ applicationId: row.id, reason: modelAnswer === "no_text" ? "gemini_returned_no_text" : "unreadable_score", detail: error });
+          // Not a failure of this row yet; the settle step decides.
+          return;
+        }
+        // Transport, quota, timeout or a write: transient, so the row stays for the next run.
         failures.push({
           // Target application ID string.
           applicationId: row.id,
-          // Extract error message string from Error object or stringify unknown error.
-          // Tagged when the deadline cut this row's Gemini budget, so a deadline-caused timeout
-          // is distinguishable from a real model timeout.
-          error: (err instanceof Error ? err.message : String(err)) + shortenedBudgetNote(call),
+          // The message built above.
+          error,
         });
       }
   }, () => {
@@ -617,7 +677,17 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   }),
     // A human-pasted job is never judged by the title/keyword gate (job-link-intake).
     (row) => isHumanPicked((row.jobs as unknown as { discovered_via?: unknown } | null)?.discovered_via),
-  ), { deadline, targeted: applicationId !== null });
+  )), { deadline, targeted: applicationId !== null });
+  // W2: settle the held answer failures. Proven when this run read at least one model answer
+  // (a score or a score-floor drop); pre-gate drops do not count, since they made no call.
+  // Runs after the deadline check on purpose: at most one batch of rows, two round trips each.
+  const settled = await settleModelFailures(db, heldModelFailures, scoredCount + droppedCount > 0);
+  // Moved to failed: progress, reported in the note below.
+  failedReasons.push(...settled.failed);
+  // Lost races join the existing counter.
+  skippedStaleCount += settled.skippedStale;
+  // Unproven or failed moves are this run's failures.
+  failures.push(...settled.failures);
   // The sweep cursor, computed by the tested pure function from what was PROCESSED, so the
   // response never claims "done" while rows are unjudged (see nextSweepCursor).
   const cursorOut = nextSweepCursor({
@@ -646,7 +716,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // `partial` (enums.sql:190), and an empty queue (rows_in 0) is idle, not broken.
   // A batch where every row was DROPPED moved every row, so it counts as progress, not failure.
   // Pre-gate drops moved their rows too, so they count as progress alongside the other two.
-  const runStatus = (rows ?? []).length > 0 && scoredCount + droppedCount + techGateDroppedCount === 0 && failures.length > 0 ? "failed" : "succeeded";
+  // Rows this run moved to failed (W2) left the queue as well, so they count the same way.
+  const runStatus = (rows ?? []).length > 0 && scoredCount + droppedCount + techGateDroppedCount + failedReasons.length === 0 && failures.length > 0 ? "failed" : "succeeded";
   // The first few DISTINCT reasons, capped: ten rows failing the same way is one fact,
   // and error_detail is a health-page line, not a log. This is the FAILURE half only; a
   // deadline stop adds its own note below, so error_detail can be non-null with error_count 0.
@@ -667,7 +738,10 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // A sweep says so on Health, with its survivors, so it is never mistaken for a scoring run
   // that scored nothing.
   const sweepNote = mode.kind === "pregate_only" ? `pregate_only sweep: ${preGateSurvivorCount} survivor(s) left at passed_filters` : null;
-  const errorDetail = [failureDetail, stopNote, staleNote, preGateNote, sweepNote].filter((x) => x !== null).join(" | ") || null;
+  // Rows this run failed (W2), with their distinct reasons, so Health shows WHY rows left the
+  // queue as failed. A note, not an error: failing them was the run doing its job.
+  const failedNote = failedReasons.length > 0 ? `matcher_failed: ${failedReasons.length} row(s) moved to failed (${[...new Set(failedReasons)].join(", ")})` : null;
+  const errorDetail = [failureDetail, stopNote, staleNote, preGateNote, sweepNote, failedNote].filter((x) => x !== null).join(" | ") || null;
 
   // Check if valid agent run identifier exists for this execution.
   if (runId) {
@@ -716,6 +790,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     skipped_stale: skippedStaleCount,
     // Rows the pre-gate dropped before scoring, at zero Gemini cost.
     tech_gate_dropped: techGateDroppedCount,
+    // Rows moved to failed (W2): an unusable job, or an answer that could never be read.
+    failed: failedReasons.length,
     // Which run this was; a sweep also reports its survivors and where to resume.
     mode: mode.kind,
     // Sweep only: the cursor protocol the operator loops on until done is true.

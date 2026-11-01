@@ -120,20 +120,25 @@ function makeStore(db: SupabaseClient): IntakeStore {
       // Stop: nothing to link an application to.
       if (error) return { ok: false, reason: `jobs_upsert: ${error.message}` };
       // Either the new row or the pre-existing one; (user_id, fingerprint) is unique, so at most one.
-      const { data, error: readError } = await db.from("jobs").select("id, discovered_via, disappeared_at").eq("fingerprint", row.fingerprint).maybeSingle();
+      // description_raw (W3): the handler compares it with the paste to decide a fill.
+      const { data, error: readError } = await db.from("jobs").select("id, discovered_via, disappeared_at, description_raw").eq("fingerprint", row.fingerprint).maybeSingle();
       // A failed read is reported, never "not found".
       if (readError) return { ok: false, reason: `jobs_read: ${readError.message}` };
       // The upsert just ran, so absence means the insert was refused (e.g. RLS).
       if (!data) return { ok: false, reason: "jobs_read: row missing after upsert" };
       // discovered_via is a text[] enum array; anything else is a contract break.
       if (!Array.isArray(data.discovered_via)) return { ok: false, reason: "jobs_read: discovered_via is not an array" };
-      // Narrowed to the three facts the handler uses.
-      return { ok: true, job: { id: data.id as string, discoveredVia: data.discovered_via as string[], disappearedAt: (data.disappeared_at as string | null) ?? null } };
+      // A text column: a string or null, nothing else. An absent key (undefined) is a select
+      // that lost the column, and read as "no description" it would turn every paste into a fill.
+      if (data.description_raw !== null && typeof data.description_raw !== "string") return { ok: false, reason: "jobs_read: description_raw is neither text nor null" };
+      // Narrowed to the four facts the handler uses.
+      return { ok: true, job: { id: data.id as string, discoveredVia: data.discovered_via as string[], disappearedAt: (data.disappeared_at as string | null) ?? null, descriptionRaw: data.description_raw } };
     },
-    // Tag a pre-existing row as human-picked and live.
-    async tagManual(jobId, discoveredVia) {
-      // Both columns in one write.
-      const { error } = await db.from("jobs").update({ discovered_via: discoveredVia, disappeared_at: null }).eq("id", jobId);
+    // Tag a pre-existing row as human-picked and live, and fill its description when told to.
+    async tagManual(jobId, discoveredVia, descriptionRaw) {
+      // One write. description_raw is named only for a fill (W3), so a plain tag can never
+      // null out a scouted description; every other scouted column is left as it was.
+      const { error } = await db.from("jobs").update({ discovered_via: discoveredVia, disappeared_at: null, ...(descriptionRaw !== null ? { description_raw: descriptionRaw } : {}) }).eq("id", jobId);
       // Null means it landed.
       return error ? error.message : null;
     },
