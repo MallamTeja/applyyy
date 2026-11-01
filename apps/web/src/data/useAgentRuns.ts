@@ -69,7 +69,9 @@ import { pickRuleWarningRun } from './ruleWarnings.ts';
  * the window. Neither was true: live, tracker (170 rows) and scout_ats (177)
  * filled the window, the screener's newest run sat at rank 253, and no window
  * note was ever rendered. So the window still answers the busy agents in one
- * trip, and `readNewestBeyondWindow` below looks up only the agents it missed. */
+ * trip, and `readNewestBeyondWindow` below looks up only what it missed: the
+ * newest run of each agent outside it, and the newest success of each agent
+ * with none in hand (code-review finding #4). */
 export const RUN_WINDOW = 200;
 
 /* SEVEN COLUMNS, which is every column this page reads and no more.
@@ -117,51 +119,86 @@ export interface AgentRunRow extends AgentRunFacts {
  * this fix removes. The cost is a few empty reads on a young table.
  *
  * A lookup that returns an error or throws puts the agent in `failed`, never in
- * "no rows": a failed read is not evidence of absence (CLAUDE.md section 6). */
-async function readNewestBeyondWindow(
+ * "no rows": a failed read is not evidence of absence (CLAUDE.md section 6).
+ *
+ * THE LAST SUCCESS TOO (2026-11-01, code-review finding #4). The freshness
+ * table derives "last success" from the rows in hand. With only the newest run
+ * in hand, an agent whose newest run failed read "never once succeeded" though
+ * it succeeded hours earlier. So every agent with no `succeeded` row in hand -
+ * outside the window, or inside it with only failures there - also gets its
+ * newest success read. If either read for an agent fails, none of its lookup
+ * rows are kept: a newest run without its success would pose as the whole story.
+ *
+ * Exported so a unit test can drive it with a fake client. */
+export async function readNewestBeyondWindow(
   /* The configured client; the caller has already ruled out null. */
   client: NonNullable<typeof supabase>,
   /* The window's rows, to know which agents it already covers. */
   windowRows: readonly AgentRunRow[],
 ): Promise<{ rows: AgentRunRow[]; failed: Set<AgentName> }> {
-  // Runs found beyond the window, at most one per agent.
+  // Runs found beyond the window, at most two per agent (newest, newest success).
   const rows: AgentRunRow[] = [];
   // Agents whose lookup could not answer.
   const failed = new Set<AgentName>();
-  // The agents the window already covers need no second read.
+  // The agents the window already covers need no newest-run read.
   const seen = new Set(windowRows.map((row) => row.agent));
-  // Every roster agent the window did not reach, all at once.
+  // The agents with a success in hand need no success read.
+  const succeeded = new Set(windowRows.filter((row) => row.status === 'succeeded').map((row) => row.agent));
+  // Every roster agent, all at once; an agent the window fully answers makes no read.
   await Promise.all(
     // The roster drives this, like the table: an agent never listed is never checked.
-    AGENT_NAMES.filter((agent) => !seen.has(agent)).map(async (agent) => {
-      try {
-        // Same columns and order as the window, for one agent only.
-        const { data, error } = await client
-          .from('agent_runs')
-          .select(AGENT_RUN_COLUMNS)
-          // This agent's rows only.
-          .eq('agent', agent)
-          // Newest first, for the same crashed-run reason as the window.
-          .order('started_at', { ascending: false })
-          // The newest run is all the freshness table needs.
-          .limit(1);
-        // supabase-js reports failures as { error }; an array is the only answer shape.
-        if (error !== null || !Array.isArray(data)) {
-          // Unknown, not absent.
-          failed.add(agent);
-          // Nothing to add for this agent.
-          return;
-        }
-        // Zero rows is a real answer (never ran); one row is its newest run.
-        if (data.length > 0) rows.push(data[0] as AgentRunRow);
-      } catch {
-        // A thrown network failure is unknown, the same as a returned error.
+    AGENT_NAMES.map(async (agent) => {
+      // Both reads in parallel; null where the window already answers that question.
+      const [newest, success] = await Promise.all([
+        // Its newest run of any outcome, only when the window missed it.
+        seen.has(agent) ? null : readNewestRun(client, agent, false),
+        // Its newest success, only when none is in hand.
+        succeeded.has(agent) ? null : readNewestRun(client, agent, true),
+      ]);
+      // Either read failing makes the agent unknown, and drops both (see above).
+      if (newest?.ok === false || success?.ok === false) {
+        // Unknown, not absent.
         failed.add(agent);
+        // Nothing to add for this agent.
+        return;
       }
+      // Zero rows is a real answer (never ran); one row is its newest run.
+      if (newest?.row) rows.push(newest.row);
+      // A newest run that succeeded IS the newest success, so it is not added twice.
+      if (success?.row && newest?.row?.status !== 'succeeded') rows.push(success.row);
     }),
   );
   // Both halves together, so the caller sets them from one result.
   return { rows, failed };
+}
+
+/* One agent's newest run, or its newest SUCCEEDED run, as a closed result:
+ * `ok: false` for a read that could not answer, else the row or null for none.
+ * A closed union rather than null-vs-undefined, so "failed" and "no rows" can
+ * never be confused by a truthiness check (CLAUDE.md section 6). */
+async function readNewestRun(
+  /* The configured client, as above. */
+  client: NonNullable<typeof supabase>,
+  /* The roster agent to read. */
+  agent: AgentName,
+  /* True to read the newest `succeeded` run instead of the newest of any outcome. */
+  onlySucceeded: boolean,
+): Promise<{ ok: true; row: AgentRunRow | null } | { ok: false }> {
+  try {
+    // Same columns as the window, for one agent only.
+    let query = client.from('agent_runs').select(AGENT_RUN_COLUMNS).eq('agent', agent);
+    // The success clock reads successes only, so a newer failure cannot hide it.
+    if (onlySucceeded) query = query.eq('status', 'succeeded');
+    // Newest first, for the same crashed-run reason as the window; one row answers.
+    const { data, error } = await query.order('started_at', { ascending: false }).limit(1);
+    // supabase-js reports failures as { error }; an array is the only answer shape.
+    if (error !== null || !Array.isArray(data)) return { ok: false };
+    // Zero rows is a real answer; one row is the newest.
+    return { ok: true, row: (data[0] as AgentRunRow | undefined) ?? null };
+  } catch {
+    // A thrown network failure is unknown, the same as a returned error.
+    return { ok: false };
+  }
 }
 
 export interface AgentRunsRead {
@@ -207,8 +244,9 @@ export function useAgentRuns(): AgentRunsRead {
      would make an age creep upward while the page sits open, which looks like
      live data and is not - the underlying read is minutes old. */
   const [measuredAt, setMeasuredAt] = useState<number | null>(null);
-  /* Agents whose own newest-run lookup failed (W9). Empty until the lookups
-     settle; summarised as `lookup_failed`, never as "never run". */
+  /* Agents whose own newest-run or newest-success lookup failed (W9, #4). Empty
+     until the lookups settle; summarised as `lookup_failed`, never as "never
+     run" or "never succeeded". */
   const [lookupFailed, setLookupFailed] = useState<ReadonlySet<AgentName>>(new Set());
 
   useEffect(() => {

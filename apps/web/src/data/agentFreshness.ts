@@ -226,7 +226,9 @@ export type FreshnessVerdict =
   /* Added 2026-11-01 (wiring audit W9). The agent had no row in the 200-row
      window, and its own newest-run lookup FAILED. That proves nothing either
      way, so it must not fall through to `never_run`: a failed read reported as
-     "has never run" is missing data turned into a confident answer. */
+     "has never run" is missing data turned into a confident answer.
+     Widened 2026-11-01 (code-review #4): also an agent with no success in hand
+     whose newest-success lookup failed, which must not read "never succeeded". */
   | 'lookup_failed'
   /* A timestamp lies in the future. Refuse to judge rather than judge wrongly:
      a skewed clock makes a dead agent look alive, and a page that can be fooled
@@ -355,10 +357,11 @@ function verdictFor(
  * silence, a clock skew and a run in the future are each one line of test
  * setup instead of being untestable.
  *
- * `lookupFailed` names the agents whose own newest-run lookup failed
- * (`useAgentRuns.ts`, W9). With no run in hand, such an agent is
- * `lookup_failed`, never `never_run`. A run in hand still wins: a row is proof
- * the agent ran, whatever a later lookup did. Empty by default, so callers
+ * `lookupFailed` names the agents whose own newest-run or newest-success lookup
+ * failed (`useAgentRuns.ts`, W9 and code-review #4). With no success in hand,
+ * such an agent is `lookup_failed`, never `never_run` or a "never succeeded"
+ * `running_dry`. A success in hand still wins: that row proves the agent ran
+ * and succeeded, whatever a later lookup did. Empty by default, so callers
  * that read every row (and the tests) need not pass it. */
 export function summarizeAgentRuns(
   runs: readonly AgentRunFacts[],
@@ -423,10 +426,12 @@ export function summarizeAgentRuns(
       lastSuccess,
       successAgeMs,
       stuckRun,
-      /* Unknown beats "never": with no run in hand and a failed lookup, the
-         only true statement is that the page could not see this agent. */
+      /* Unknown beats "never": with no success in hand and a failed lookup,
+         neither "never ran" nor "never succeeded" is known (code-review #4:
+         the success lookup is the one that may have failed). No run in hand
+         implies no success in hand, so the W9 case is covered too. */
       verdict:
-        lastRun === null && lookupFailed.has(agent)
+        lastSuccess === null && lookupFailed.has(agent)
           ? 'lookup_failed'
           : verdictFor(cadence, heartbeatAgeMs, successAgeMs),
     };
@@ -467,8 +472,9 @@ export function describeVerdict(freshness: AgentFreshness): string {
       /* Stated as an absolute, because it is one. There is no age to report. */
       return 'has never run';
     case 'lookup_failed':
-      /* No claim about running at all: the page simply could not look. */
-      return 'its newest-run lookup failed, so whether it ran is unknown — reload to retry';
+      /* No claim about running or succeeding: the page simply could not look.
+         Names both clocks, since either lookup may be the one that failed (#4). */
+      return 'a run lookup failed, so when it last ran or succeeded is unknown — reload to retry';
     case 'clock_skew':
       return 'reported a run in the future — clock skew, so no age can be trusted';
     case 'age_only':

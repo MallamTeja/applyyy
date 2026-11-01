@@ -144,8 +144,12 @@ async function responseTextOf(error: unknown): Promise<string> {
  */
 export async function runWatchlistScan(
   onProgress?: (status: string) => void,
+  // The app's client by default; a test passes a fake whose invoke answers { data, error }
+  // like functions-js, since node --test has no module mocks without an experimental flag.
+  client: typeof supabase = supabase,
 ): Promise<WatchlistScanResult> {
-  if (supabase === null) {
+  // No client means no env: report it rather than call anything.
+  if (client === null) {
     return {
       ok: false,
       message: 'Supabase client is not configured.',
@@ -160,7 +164,7 @@ export async function runWatchlistScan(
 
   // invoke() attaches the session JWT, which scout-ats requires. It never throws: HTTP,
   // relay and network failures all come back as `error` (functions-js FunctionsClient).
-  const { data, error } = await supabase.functions.invoke('scout-ats', {
+  const { data, error } = await client.functions.invoke('scout-ats', {
     body: {},
   });
 
@@ -235,8 +239,15 @@ export async function runWatchlistScan(
     return {
       // We cannot say what happened, so it did not demonstrably succeed.
       ok: false,
-      // Include the body so the mismatch is diagnosable.
-      message: `Scout-ATS returned an unrecognised response: ${JSON.stringify(data).slice(0, 200)}`,
+      // Include the body so the mismatch is diagnosable. An empty body is named, not quoted:
+      // JSON.stringify(undefined) is undefined, and its .slice threw out of a function the
+      // modal trusts never to throw (code-review #9). `?? String(data)` covers any other
+      // value JSON cannot serialise (a function, a symbol) the same way.
+      message: `Scout-ATS returned an unrecognised response: ${
+        data === undefined || data === null || data === ''
+          ? 'an empty body'
+          : (JSON.stringify(data) ?? String(data)).slice(0, 200)
+      }`,
       // Unknown, reported as zero alongside ok:false so nothing reads it as success.
       boardsScanned: 0,
       // Same.
