@@ -10,7 +10,7 @@
 /* Type only: the element type the component returns. */
 import type { ReactElement } from 'react';
 /* Per-card run state for "Send through pipeline"; nothing else in the card is stateful. */
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 /* The app's own router link, so /approvals opens inside the SPA like every other in-app link. */
 import { Link } from 'react-router-dom';
 
@@ -387,8 +387,6 @@ export function SendThroughPipeline({
   onSettled,
   /* Names the job in the button's accessible name; the drawer passes none. */
   label,
-  /* Starts the run on mount, once (AddJobLinkPanel, 2026-10-31); every other caller waits for a click. */
-  autoStart = false,
 }: {
   /* The row to send; also the lock key. */
   readonly applicationId: string;
@@ -405,9 +403,6 @@ export function SendThroughPipeline({
   /* e.g. "Acme — Engineer". On a page of many cards, identical button names leave a screen-reader
      user unable to tell which job a button sends; omitted, the visible text stays the name. */
   readonly label?: string;
-  /* True: run once as soon as the card mounts, exactly as if the button had been clicked. The row
-     lock still applies, so a second card for the same id is refused like a second click. */
-  readonly autoStart?: boolean;
 }): ReactElement {
   /* True while THIS card's run is going; the module lock covers other instances. */
   const [running, setRunning] = useState(false);
@@ -498,22 +493,6 @@ export function SendThroughPipeline({
     /* The row was held elsewhere: say why nothing happened, instead of a silent no-op. */
     if (!run.started) setNote(ALREADY_RUNNING_MESSAGE);
   }
-
-  /* Set on the first auto-start, so a re-run effect (React StrictMode mounts effects twice in
-     development) cannot start a second run; the ref survives that remount, state would not help. */
-  const autoStarted = useRef(false);
-  /* The auto-start: once per mounted card, and only when asked for. */
-  useEffect(() => {
-    /* Not asked for, or already done for this card. */
-    if (!autoStart || autoStarted.current) return;
-    /* Marked before the call, so the second effect pass sees it. */
-    autoStarted.current = true;
-    /* The same path a click takes; start() handles its own errors and the lock. */
-    void start();
-    /* Mount-only on purpose: start() reads props at call time, and re-running on a prop change would
-       start a second run that nobody asked for. */
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoStart]);
 
   /* Disabled while this card runs, while another instance holds the lock, or with no client. */
   const disabled = running || isRowInFlight(applicationId) || deps === null;

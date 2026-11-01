@@ -1,17 +1,19 @@
 /* AddJobLinkPanel: paste ONE job link (a LinkedIn/X post, a careers page, an ATS posting) and the
  * job skips every filter, gets a tailored resume, and lands in the Approval queue.
- * The `job-link-intake` Edge Function adds the row at passed_filters; this panel then runs
- * matcher -> tailor -> auditor on it through the same SendThroughPipeline the Discovered cards use.
+ * The `job-link-intake` Edge Function adds the row at passed_filters AND runs matcher -> tailor ->
+ * auditor on it server-side (Teja, 2026-11-01: "no need of me pressing that button"), so the run
+ * survives a closed tab. This panel only watches the row's status; it offers the shared
+ * SendThroughPipeline button only when the server run stalls or was never started.
  * The client and the pipeline deps are injected, so tests need no network. */
 
-// Hooks only: one request, one result.
-import { useState } from 'react';
-// The run-the-agents card, shared with the drawer and the Discovered page (one lock, one progress list).
-import { SendThroughPipeline } from '../pipeline/DrawerAppCard.tsx';
+// One request, one result; the effect and refs drive the status watch.
+import { useEffect, useRef, useState } from 'react';
+// The fallback button (shared with the drawer and the Discovered cards) and the queue-link sentence.
+import { OutcomeNote, SendThroughPipeline } from '../pipeline/DrawerAppCard.tsx';
 // The agents a passed_filters row needs, their input statuses, and the uuid shape check.
 import { PASSED_FILTERS_STEPS, STEP_INPUT_STATUS, isApplicationId } from '../pipeline/rowPipeline.ts';
-// Type only: the deps SendThroughPipeline takes.
-import type { RowPipelineDeps } from '../pipeline/rowPipeline.ts';
+// Types only: the deps the watch reads with, and the outcome OutcomeNote draws.
+import type { RowPipelineDeps, RowPipelineOutcome } from '../pipeline/rowPipeline.ts';
 // http(s)-only href gate: the apply link came from a pasted page, so it is untrusted.
 import { safeHref } from '../../app/safeHref.ts';
 // The same defensive reader WebScoutPanel uses for a function's non-2xx body.
@@ -24,8 +26,10 @@ export type IntakeSource = 'ats_board' | 'page' | 'pasted_text';
 
 // A validated 200 body.
 export interface IntakeOk {
-  // The row to run the agents on.
+  // The row the agents run on.
   readonly applicationId: string;
+  // True when the server started matcher -> tailor -> auditor; false sends the human to the button.
+  readonly pipelineStarted: boolean;
   // Where the row stands right after intake.
   readonly applicationStatus: string;
   // True only when this paste created the application.
@@ -72,6 +76,9 @@ export function parseIntakeOk(body: unknown): IntakeOk | null {
   if (typeof body.application_status !== 'string' || typeof body.created !== 'boolean') return null;
   // revived_from is a status or null, never undefined.
   if (body.revived_from !== null && typeof body.revived_from !== 'string') return null;
+  // Absent means a function from before the server run (deployed 2026-11-01): read as "not
+  // started", which shows the manual button, the safe side. Present, it must be a boolean.
+  if (body.pipeline_started !== undefined && typeof body.pipeline_started !== 'boolean') return null;
   // Closed set.
   if (body.source !== 'ats_board' && body.source !== 'page' && body.source !== 'pasted_text') return null;
   // The job summary.
@@ -84,6 +91,8 @@ export function parseIntakeOk(body: unknown): IntakeOk | null {
   return {
     // Proven a uuid above.
     applicationId: body.application_id,
+    // Only an explicit true counts as a started run.
+    pipelineStarted: body.pipeline_started === true,
     // Proven a string.
     applicationStatus: body.application_status,
     // Proven a boolean.
@@ -164,6 +173,137 @@ export function describeAdded(result: IntakeOk): string {
   return `Already in the pipeline at ${result.applicationStatus}: nothing to redo.`;
 }
 
+// How often the panel re-reads the row while the server runs the agents.
+export const RUN_POLL_MS = 4_000;
+// The server run shares the intake request's 150 s wall clock (_shared/agent/deadline.ts), so a
+// row still mid-chain 180 s after the response is no longer being moved by it.
+export const RUN_STALL_MS = 180_000;
+
+// What the watch shows. Closed, so every status lands in exactly one phase.
+export type ServerRunView =
+  // The server is still on it; the text names the agent at work.
+  | { readonly phase: 'running'; readonly text: string }
+  // The row reached the Approval queue.
+  | { readonly phase: 'ready' }
+  // The run ended somewhere other than the queue; nothing more will happen on its own.
+  | { readonly phase: 'stopped'; readonly text: string }
+  // The run should have finished by now and did not: the human gets the button.
+  | { readonly phase: 'stalled'; readonly text: string };
+
+// The agent each in-progress status is waiting on, in the words the panel shows.
+const RUN_STEP_TEXT: Readonly<Record<string, string>> = {
+  // The matcher's input.
+  passed_filters: 'Scoring the fit (matcher)…',
+  // The tailor's input.
+  scored: 'Tailoring your resume (tailor)…',
+  // The auditor's inputs.
+  tailored: 'Checking the tailored resume (auditor)…',
+  // Same agent, mid-way.
+  audit_clean: 'Checking the tailored resume (auditor)…',
+  // Same agent, mid-way.
+  audit_flagged: 'Checking the tailored resume (auditor)…',
+};
+
+// One status read (null when unreadable) plus the time since the response, mapped to what to show.
+export function describeServerRun(status: string | null, elapsedMs: number): ServerRunView {
+  // The goal.
+  if (status === 'awaiting_approval') return { phase: 'ready' };
+  // Pasted rows skip the score floor, so a matcher drop means it could not score the job at all.
+  if (status === 'dropped_filter') return { phase: 'stopped', text: 'The matcher could not score this job, so it was dropped. Paste the link again to retry.' };
+  // The normalizer's verdict, if a scouted copy won the dedupe.
+  if (status === 'dropped_duplicate') return { phase: 'stopped', text: 'Dropped: the same posting is already in the pipeline.' };
+  // An agent gave up on the row.
+  if (status === 'failed') return { phase: 'stopped', text: 'An agent failed on this job. See System health, failed rows.' };
+  // Mid-chain (or unreadable, which may be a blip): still running until the server's clock is up.
+  if (status === null || RUN_STEP_TEXT[status] !== undefined) {
+    // Past the server's wall clock: nothing is moving it any more.
+    if (elapsedMs >= RUN_STALL_MS) return { phase: 'stalled', text: status === null ? 'The job’s status could not be read. Send it through by hand:' : `The server run stopped at ${status}. Send it through by hand:` };
+    // Still inside the window.
+    return { phase: 'running', text: status === null ? 'Checking on the run…' : (RUN_STEP_TEXT[status] ?? 'Running…') };
+  }
+  // Anywhere else (a human moved it meanwhile): report it and stop watching.
+  return { phase: 'stopped', text: `Now at ${status}.` };
+}
+
+// The ready outcome OutcomeNote already words and links (one sentence app-wide for "reached the queue").
+const READY_OUTCOME: RowPipelineOutcome = { kind: 'ready_for_approval', finalStatus: 'awaiting_approval' };
+
+// Watches a server run by re-reading the row's status; the button appears only on a stall.
+export function ServerRunWatch(props: {
+  // The row the server is running.
+  applicationId: string;
+  // The status the intake response reported, so the first frame needs no read.
+  startStatus: string;
+  // The status reader (and the fallback button's deps); null means nothing can be read here.
+  deps: RowPipelineDeps | null;
+  // "Company — Title", for the fallback button's accessible name.
+  label: string;
+  // Called once when the run settles, so the page reloads its lists.
+  onSettled?: (() => void) | undefined;
+}) {
+  // Destructured once for readability.
+  const { applicationId, startStatus, deps, label, onSettled } = props;
+  // No reader means no way to follow the run: straight to the button, which explains itself.
+  const [view, setView] = useState<ServerRunView>(() => describeServerRun(startStatus, deps === null ? RUN_STALL_MS : 0));
+  // When this watch began; a ref so an effect re-run cannot reset the stall clock.
+  const startedAt = useRef(Date.now());
+  // True once a final phase is shown, so a re-run effect never polls again.
+  const settled = useRef(view.phase !== 'running');
+  // The latest callback, so a parent re-render (every keystroke) does not restart the poll.
+  const onSettledRef = useRef(onSettled);
+  // Kept current after every render.
+  useEffect(() => {
+    // Read at settle time, never captured stale.
+    onSettledRef.current = onSettled;
+  });
+  // The poll: one read every RUN_POLL_MS until a final phase.
+  useEffect(() => {
+    // Nothing to read with, or already done.
+    if (deps === null || settled.current) return;
+    // False after unmount, so a late read never sets state.
+    let live = true;
+    // Interval, not a recursive timeout: a slow read cannot stretch the cadence.
+    const timer = setInterval(() => {
+      // readStatus never throws: an unreadable row is null.
+      void deps.readStatus(applicationId).then((status) => {
+        // Unmounted, or another tick already settled it.
+        if (!live || settled.current) return;
+        // Mapped by the tested pure function.
+        const next = describeServerRun(status, Date.now() - startedAt.current);
+        // Shown.
+        setView(next);
+        // Keep polling while the server is on it.
+        if (next.phase === 'running') return;
+        // Final: stop for good.
+        settled.current = true;
+        // No more reads.
+        clearInterval(timer);
+        // The row left the Ready lane (or stalled): the page reloads its lists.
+        onSettledRef.current?.();
+      });
+    }, RUN_POLL_MS);
+    // Unmount or a new row: stop this poll.
+    return () => {
+      // Late reads are ignored.
+      live = false;
+      // No more ticks.
+      clearInterval(timer);
+    };
+  }, [applicationId, deps]);
+  // The sentence in a live region, plus the button only when the human must act.
+  return (
+    <div>
+      {/* Polite and always mounted, so each step change is announced. */}
+      <div aria-live="polite">
+        {/* The queue sentence and link are OutcomeNote's, shared with every Send button. */}
+        {view.phase === 'ready' ? <OutcomeNote outcome={READY_OUTCOME} httpStatus={null} /> : <p className="web-scout__meta">{view.text}</p>}
+      </div>
+      {/* The hand-off: the engine skips the agents that already ran and resumes at the stalled one. */}
+      {view.phase === 'stalled' && <SendThroughPipeline applicationId={applicationId} deps={deps} steps={PASSED_FILTERS_STEPS} label={label} />}
+    </div>
+  );
+}
+
 // Pure view, so tests render every state without a DOM.
 export function AddJobLinkView(props: {
   // Which of the closed states to draw.
@@ -178,11 +318,13 @@ export function AddJobLinkView(props: {
   onTextChange: (value: string) => void;
   // Starts one intake; the view never calls the network itself.
   onSubmit: () => void;
-  // Handed to the agent-run card; null renders it disabled with a reason.
+  // The status reader for the watch, and the fallback button's deps; null renders the button disabled with a reason.
   pipelineDeps: RowPipelineDeps | null;
+  // Called when the server run settles, so the page can reload its lists; optional for tests.
+  onRunSettled?: (() => void) | undefined;
 }) {
   // Destructured once for readability.
-  const { state, url, text, onUrlChange, onTextChange, onSubmit, pipelineDeps } = props;
+  const { state, url, text, onUrlChange, onTextChange, onSubmit, pipelineDeps, onRunSettled } = props;
   // Disables the button so a double click cannot add twice.
   const running = state.kind === 'running';
   // One landmark, labelled by its heading.
@@ -266,10 +408,27 @@ export function AddJobLinkView(props: {
           </p>
           {/* Why the next step is (or is not) running. */}
           <p className="web-scout__meta">{describeAdded(state.result)}</p>
-          {/* Keyed by id so a second paste mounts a fresh card, which auto-starts once for that row. */}
-          {needsAgents(state.result.applicationStatus) && (
+          {/* The server is running the agents: follow it. Keyed by id, so a second paste starts a fresh watch. */}
+          {state.result.pipelineStarted && (
+            <ServerRunWatch
+              /* A new row means a new watch with its own stall clock. */
+              key={state.result.applicationId}
+              /* The row the server is running. */
+              applicationId={state.result.applicationId}
+              /* The first frame, from the response itself. */
+              startStatus={state.result.applicationStatus}
+              /* The status reader, and the fallback button's deps. */
+              deps={pipelineDeps}
+              /* Names the job in the fallback button's accessible name. */
+              label={`${state.result.companyName} — ${state.result.title}`}
+              /* The page reloads once the row leaves the Ready lane. */
+              onSettled={onRunSettled}
+            />
+          )}
+          {/* No server run (a function from before 2026-11-01) but agents still owe work: the button, by hand. */}
+          {!state.result.pipelineStarted && needsAgents(state.result.applicationStatus) && (
             <SendThroughPipeline
-              /* A new row means a new card, so autoStart fires once per pasted job. */
+              /* A second paste mounts a fresh card. */
               key={state.result.applicationId}
               /* The row the function just added or revived. */
               applicationId={state.result.applicationId}
@@ -277,8 +436,6 @@ export function AddJobLinkView(props: {
               deps={pipelineDeps}
               /* matcher -> tailor -> auditor: the row already sits past every filter. */
               steps={PASSED_FILTERS_STEPS}
-              /* Teja asked for no extra click: pasting the link is the instruction to tailor. */
-              autoStart
               /* Names the job in the button's accessible name. */
               label={`${state.result.companyName} — ${state.result.title}`}
             />
@@ -319,13 +476,15 @@ export function AddJobLinkPanel(props: {
       onTextChange={setText}
       // Injected so the view never imports a client.
       pipelineDeps={props.pipelineDeps}
+      // The row has moved on: the page reloads, so it leaves the Ready to tailor list.
+      onRunSettled={props.onAdded}
       // Closes over the current inputs.
       onSubmit={() => {
         // Synchronous flip so the button disables before the await.
         setState({ kind: 'running' });
         // runJobLinkIntake never throws.
         void runJobLinkIntake(props.client, url, text).then((next) => {
-          // Commit the outcome (an ok mounts the auto-starting agent run).
+          // Commit the outcome (an ok mounts the watch on the server's run).
           setState(next);
           // A new or revived row: the page reloads its lists.
           if (next.kind === 'ok') props.onAdded?.();

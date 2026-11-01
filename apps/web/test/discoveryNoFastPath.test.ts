@@ -46,7 +46,12 @@ before(async () => {
  * a guard that forbids describing the bug it guards against will be deleted by the first
  * person it inconveniences. Match the shape that would actually reintroduce the defect.
  */
-describe('DiscoveredJobsPage performs no status mutation', () => {
+// Retitled 2026-11-01: the page now has ONE human status move, Reject/Undo, and it lives in
+// rejectJob.ts (agent 'human'; reject goes to dropped_filter, undo back to the status it left, and
+// only where both human edges exist; pinned in discoveredReject.test.ts). What this block forbids
+// is unchanged: the page itself calling the RPC
+// or stamping an AGENT's verdict.
+describe('DiscoveredJobsPage forges no agent transition and calls no status RPC itself', () => {
   it('never calls the advance_application_status RPC', async () => {
     // The page's only direct database mutation was this RPC. Its absence is the whole
     // ruling in one assertion: the page may CREATE discovered rows, never advance them.

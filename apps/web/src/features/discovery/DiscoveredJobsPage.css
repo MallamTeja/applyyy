@@ -451,8 +451,10 @@
 /* Empty (the usual state): out of .discovery's flex flow, so it takes no gap slot and the page looks
    as it did before the feature. Not display:none, which drops it from the accessibility tree and makes
    the first result mount a fresh live region, the lost announcement the always-mounted div prevents.
-   React renders an empty list as no nodes at all, so :empty really matches. */
-.discovery__send-results:empty {
+   React renders an empty list as no nodes at all, so :empty really matches. The Reject status line
+   (2026-11-01) is always mounted for the same reason, so it shares the rule. */
+.discovery__send-results:empty,
+.discovery__reject-status:empty {
   /* Absolute boxes are not flex items, so the parent's gap skips it. */
   position: absolute;
 }
@@ -478,6 +480,37 @@
   padding-top: 0;
   /* Right side of the footer row, so the step list grows under the button, not under the link. */
   align-items: flex-end;
+}
+
+/* The Reject status line (2026-11-01): "Rejected Acme — Engineer." then its Undo, on one row. */
+.discovery__reject-status {
+  /* Sentence and button side by side. */
+  display: flex;
+  /* A long job name wraps the button below instead of overflowing on a narrow screen. */
+  flex-wrap: wrap;
+  /* Baseline, so the sentence and the button's label share a text line. */
+  align-items: baseline;
+  /* Same rhythm as the send strip's rows. */
+  gap: var(--gap-2);
+}
+
+/* Reject sits just left of Send: the auto margin takes the footer's free space, so the Apply link
+   stays left and the two row actions pack right instead of Reject floating in the middle. */
+.job-card__reject {
+  /* Absorbs the space-between gap on its left. */
+  margin-left: auto;
+  /* Level with the Send button even while Send's step list grows the footer downwards. */
+  align-self: flex-start;
+}
+
+/* A Reject that did not land, under the card's footer. Semantic tokens only (theming convention). */
+.job-card__reject-error {
+  /* The card's own gap already spaces it. */
+  margin: 0;
+  /* The footer's text size. */
+  font-size: var(--size-sm);
+  /* The danger ink base.css gives .button--reject, so the error matches the button that failed. */
+  color: var(--fabricated-strong);
 }
 
 /* Lane switch (Discovered | Ready to tailor). Reuses .discovery__tab-btn for the buttons, so this

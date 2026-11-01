@@ -2,10 +2,12 @@
 // this file only plugs the real network, Gemini and database into the handler's seams.
 //
 // Contract: POST { url: string, text?: string } with the app user's JWT.
-// 200 { status:'ok', application_id, application_status, created, revived_from, source, job }
+// 200 { status:'ok', application_id, pipeline_started, application_status, created, revived_from, source, job }
 // 4xx/5xx { status, message } where status is one of needs_text | not_a_job | posting_closed |
-// quota | upstream_unavailable | disabled | unauthorized | error. The browser then runs
-// matcher -> tailor -> auditor on application_id (apps/web AddJobLinkPanel).
+// quota | upstream_unavailable | disabled | unauthorized | error. After a 200 with
+// pipeline_started, THIS function runs matcher -> tailor -> auditor on application_id in the
+// background (EdgeRuntime.waitUntil), so the run survives the tab closing (Teja, 2026-11-01:
+// "no need of me pressing that button"). The browser only watches the row's status.
 
 // Signs in as the app user; every query below runs under that user's RLS.
 import { createAppUserClient } from "../_shared/db/client.ts";
@@ -25,8 +27,63 @@ import { makeFetchBoard } from "../scout-web/fetch-board.ts";
 import { handleJobLinkIntake, type IntakeStore } from "./handler.ts";
 // Row and status types for the narrow casts below.
 import type { ApplicationStatus } from "../_shared/contracts/shared-types.ts";
+// The engine behind the web's "Send through pipeline", reused so the server run and a manual
+// click share every stop rule (skip, halt, no progress). It imports nothing, so Deno loads it as is.
+import { PASSED_FILTERS_STEPS, runRowPipeline, type RowPipelineDeps } from "../../../apps/web/src/features/pipeline/rowPipeline.ts";
 // The client type the Gemini helper takes (scout-web reads it the same way; client.ts does not export it).
 type SupabaseClient = Parameters<typeof generateGeminiContent>[0];
+// Supabase's background-task hook. Deno's own types do not declare it.
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void };
+
+// The engine's two effects over the signed-in app-user client: the same calls the browser deps
+// make (apps/web rowPipelineDeps.ts), so each agent sees an identical request. Neither throws.
+function makeChainDeps(db: SupabaseClient): RowPipelineDeps {
+  // The deps object.
+  return {
+    // One agent call for one row; the id rides in the query string, as the browser sends it.
+    async invoke(step, applicationId) {
+      // A throw is a failed call, never an escape from the engine.
+      try {
+        // The client carries the app user's session, which each agent's caller gate requires.
+        const { data, error } = await db.functions.invoke(`${step}?application_id=${encodeURIComponent(applicationId)}`);
+        // supabase-js reports HTTP failures in `error`; the engine stops on ok:false.
+        if (error) return { ok: false, httpStatus: null, body: { error: error.message } };
+        // The body goes to the engine, which checks it for halts and per-row failures.
+        return { ok: true, httpStatus: null, body: data };
+      } catch (err) {
+        // No response at all.
+        return { ok: false, httpStatus: null, body: { error: err instanceof Error ? err.message : String(err) } };
+      }
+    },
+    // The database is the only judge of where the row went.
+    async readStatus(applicationId) {
+      // RLS scopes the read to the app user's own rows.
+      const { data, error } = await db.from("applications").select("status").eq("id", applicationId).maybeSingle();
+      // Only a string is a status; an error or a missing row is "could not read".
+      return error === null && typeof data?.status === "string" ? data.status : null;
+    },
+  };
+}
+
+// Runs matcher -> tailor -> auditor for one row after the response, and logs where it ended.
+// ponytail: one isolate runs all three agents, so the whole chain shares this request's 150 s wall
+// clock (_shared/agent/deadline.ts). A slow tailor can be cut off mid-chain; the row then waits at
+// scored/tailored and the panel offers "Send through pipeline". Upgrade: one invocation per step.
+function startServerPipeline(db: SupabaseClient, applicationId: string): void {
+  // Built eagerly, so the run proceeds even where waitUntil is missing (it just is not kept alive).
+  const run = runRowPipeline(makeChainDeps(db), applicationId, PASSED_FILTERS_STEPS)
+    // The outcome lands in the function logs, the one place a background run can report to.
+    .then((outcome) => console.log(JSON.stringify({ event: "job_link_pipeline", application_id: applicationId, outcome })))
+    // The engine does not throw; this is the backstop that keeps an unhandled rejection out of the isolate.
+    .catch((err) => console.error(JSON.stringify({ event: "job_link_pipeline_crashed", application_id: applicationId, error: String(err) })));
+  // Keeps the isolate alive past the response until the run settles.
+  try {
+    // Supabase edge runtime: the documented background-task hook.
+    EdgeRuntime.waitUntil(run);
+  } catch {
+    // Plain Deno (local tooling) has no EdgeRuntime; the run above already started.
+  }
+}
 
 // One robots cache per isolate, as scout-web does.
 const fetchBoard = makeFetchBoard();
@@ -155,8 +212,8 @@ Deno.serve(withErrorBoundary("job-link-intake", (req) =>
       const client = await createAppUserClient();
       // The reason stays in the log.
       if (!client.ok) return { ok: false, reason: client.reason };
-      // Client for the gates and Gemini, store for the writes.
-      return { ok: true, userId: client.userId, db: client.db, store: makeStore(client.db) };
+      // Client for the gates and Gemini, store for the writes, and the server pipeline run.
+      return { ok: true, userId: client.userId, db: client.db, store: makeStore(client.db), runPipeline: (id) => startServerPipeline(client.db, id) };
     },
   })
 ));

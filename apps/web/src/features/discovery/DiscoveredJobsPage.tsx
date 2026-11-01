@@ -23,6 +23,13 @@
  * the row with its own agent key under RLS. The browser invokes and re-reads; it writes
  * no status. Any other affordance here still needs its own ruling.
  *
+ * REJECT, by its own ruling (Teja, 2026-11-01: "i want a reject button on every card job we have in
+ * the page"). The page's one status write: a human move, passed_filters -> dropped_filter as 'human',
+ * through rejectJob.ts (one closed pair of moves, reject and its Undo, nothing else). One click, no
+ * confirm, because the graph has the human edge back and the status line offers it as Undo. The card
+ * leaves only once the database confirms; a refusal or a lost answer keeps it, with the reason on it.
+ * The button shows only where canReject says both edges exist, so the Discovered lane has none.
+ *
  * TWO LANES (2026-10-09). "Discovered" is the raw inventory above; "Ready to tailor" shows rows the
  * deployed screener already moved to `passed_filters`, so the operator can browse them, pick the
  * ones he wants, and send each through matcher -> tailor -> auditor. The lane -> {status, steps}
@@ -31,7 +38,8 @@
  * search, filters, tabs and sort all run in the browser over the loaded pages only.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+// useReducer only as a re-render trigger: the per-row lock is a module Set React cannot observe.
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { Link } from 'react-router-dom';
 
@@ -58,7 +66,12 @@ import {
 } from '../settings/filtersStore.ts';
 import type { FilterRuleConfig } from '../settings/filtersStore.ts';
 // The drawer's per-row button, reused so both lanes share one lock, one step list and one set of sentences.
-import { OutcomeNote, SendThroughPipeline } from '../pipeline/DrawerAppCard.tsx';
+// isRowInFlight + withRowLock: Reject takes the SAME per-row lock, so a card never rejects and sends at once.
+import { OutcomeNote, SendThroughPipeline, isRowInFlight, withRowLock } from '../pipeline/DrawerAppCard.tsx';
+// The tested Reject/Undo pieces: which lanes may reject, the one write, and its sentences.
+import { canReject, describeReject, moveRejectedJob } from './rejectJob.ts';
+// Type only: the status a rejected card came from, kept so Undo can return it there.
+import type { ApplicationStatus } from '../../data/contract.ts';
 // Type only: one finished run's answer, kept here after the card unmounts on reload.
 import type { SendResult } from '../pipeline/DrawerAppCard.tsx';
 // The id shape check the engine also enforces; the step lists now come from the lane mapping.
@@ -161,6 +174,21 @@ export function DiscoveredJobsPage(): ReactElement {
      Without this, "Dropped by the screener" would flash and vanish. Each entry keeps the step list
      it ran with, so its sentence stays right after a lane switch. */
   const [sendResults, setSendResults] = useState<readonly { readonly applicationId: string; readonly label: string; readonly steps: readonly PipelineStep[]; readonly result: SendResult }[]>([]);
+  /* Re-renders the page so every card re-reads isRowInFlight. The lock is a module-level Set (shared
+     with the drawer), so React cannot see it change; the page bumps this when a lock is taken or freed. */
+  const [, bumpLockView] = useReducer((n: number) => n + 1, 0);
+  /* A failed Reject's sentence, per card. Per card, not one line: rejects run concurrently while the
+     operator triages, and a second card's success must never overwrite the first card's failure. */
+  const [rejectErrors, setRejectErrors] = useState<Readonly<Record<string, string | null>>>({});
+  /* The status line: the latest Reject (with Undo) or Undo outcome. `undo` is what Undo needs to send
+     the row back; null once undone. ponytail: one line, so an Undo landing after a newer Reject
+     replaces that line and its Undo; a list like sendResults is the upgrade if that ever bites. */
+  const [rejectNote, setRejectNote] = useState<{
+    // The sentence from describeReject.
+    readonly text: string;
+    // The row, its lane status and the names the sentences use; null when there is nothing to undo.
+    readonly undo: { readonly applicationId: string; readonly from: ApplicationStatus; readonly label: string; readonly laneLabel: string } | null;
+  } | null>(null);
   /* The loaded rows, readable inside loadData without making items a dependency (which would
      rebuild loadData, and so rerun the load effect, on every page). Synced after each render. */
   const itemsRef = useRef<readonly DiscoveredItem[]>([]);
@@ -317,6 +345,74 @@ export function DiscoveredJobsPage(): ReactElement {
     // Claims a new sequence, which also makes any in-flight Load more from the old lane stale.
     void loadData();
   }, [loadData]);
+
+  // Whether this lane's cards get Reject: both the reject edge and Undo's way back must be human moves.
+  const laneCanReject = canReject(laneSpec.status);
+
+  /* One card's Reject: one click, no confirm (reversible; see rejectJob.ts). Runs under the card's row
+     lock, so its Send is disabled meanwhile and a running Send refuses it. */
+  const rejectCard = async (applicationId: string, label: string): Promise<void> => {
+    // Narrowed once; the button is only rendered with a client, so null here is a forced call.
+    const client = supabase;
+    // Nothing to call without a client.
+    if (client === null) return;
+    // The lane NOW: Undo returns the row here, and its sentence names it.
+    const from = laneSpec.status;
+    // Same moment, so the sentence and the target cannot disagree.
+    const laneLabel = laneSpec.label;
+    // The same lock Send takes; released in its finally before the state writes below.
+    const run = await withRowLock(applicationId, async () => {
+      // Re-render with the lock held: this card's Reject and Send now read as in flight.
+      bumpLockView();
+      // A previous failure is not this attempt's.
+      setRejectErrors((prev) => ({ ...prev, [applicationId]: null }));
+      // The one write; never throws.
+      return moveRejectedJob(client, { kind: 'reject', applicationId, from });
+    });
+    // A Send holds the row. Its button disables Reject, so only a click racing the re-render lands here.
+    if (!run.started) {
+      // Said on the card rather than ignored, and nothing was written.
+      setRejectErrors((prev) => ({ ...prev, [applicationId]: 'This row is being sent through the pipeline; reject it once the run ends.' }));
+      // Nothing was attempted, so nothing else to settle.
+      return;
+    }
+    // Only a CONFIRMED move removes the card (section 6: never on an unconfirmed write).
+    if (run.value.kind === 'moved') {
+      // Gone at once, so triaging hundreds stays one click per card.
+      setItems((prev) => prev.filter((item) => item.applicationId !== applicationId));
+      // The latest reject owns the status line and its Undo.
+      setRejectNote({ text: describeReject(run.value, 'reject', label, laneLabel), undo: { applicationId, from, label, laneLabel } });
+      // The loaded window and the exact lane total re-read, the same settle a Send gets.
+      void loadData('silent');
+      // Done; the failure path below is for every other outcome.
+      return;
+    }
+    // Refused or no answer: the card stays, with the database's reason on it.
+    setRejectErrors((prev) => ({ ...prev, [applicationId]: describeReject(run.value, 'reject', label, laneLabel) }));
+  };
+
+  /* Undo for the status line's reject: dropped_filter back to the lane it came from, as 'human'. */
+  const undoReject = async (): Promise<void> => {
+    // What this render's line offers; a later line is a later render's closure.
+    const target = rejectNote?.undo ?? null;
+    // Narrowed once, as in rejectCard.
+    const client = supabase;
+    // Nothing to undo, or nothing to call.
+    if (target === null || client === null) return;
+    // The row's lock, so a double click cannot send two undos.
+    const run = await withRowLock(target.applicationId, async () => {
+      // Re-render so the Undo button disables while the call runs.
+      bumpLockView();
+      // The way back; moveRejectedJob refuses it locally if the lane has no human edge back.
+      return moveRejectedJob(client, { kind: 'undo', applicationId: target.applicationId, from: target.from });
+    });
+    // A second click while the first runs: the first one's outcome will land.
+    if (!run.started) return;
+    // Done: the line says so and drops Undo. Not done: the reason, and Undo stays for a retry (safe).
+    setRejectNote({ text: describeReject(run.value, 'undo', target.label, target.laneLabel), undo: run.value.kind === 'moved' ? null : target });
+    // The card comes back on the re-read, along with the lane total.
+    if (run.value.kind === 'moved') void loadData('silent');
+  };
 
   const handleToggleTechOnly = () => {
     const next = !techOnly;
@@ -766,6 +862,37 @@ export function DiscoveredJobsPage(): ReactElement {
         )}
       </div>
 
+      {/* The Reject status line: the latest reject and its Undo, or the Undo's outcome. Polite and
+          always mounted for the same reason as the strip above (a region that mounts WITH its first
+          content is often not announced); empty, the CSS takes it out of the flex flow. */}
+      <div className="discovery__reject-status" aria-live="polite">
+        {/* Nothing until the first reject. */}
+        {rejectNote !== null && (
+          <>
+            {/* "Rejected Acme — Engineer." or the Undo's sentence. */}
+            <span>{rejectNote.text}</span>
+            {/* Only while there is a confirmed reject to take back. */}
+            {rejectNote.undo !== null && (
+              <button
+                /* Not a submit: the page has no form. */
+                type="button"
+                /* The strip's existing small-button look, as Clear results uses. */
+                className="chip-btn"
+                /* Disabled while this row's undo runs, so a double click cannot send two. */
+                disabled={isRowInFlight(rejectNote.undo.applicationId)}
+                /* The promise is handled inside undoReject; nothing here awaits it. */
+                onClick={() => void undoReject()}
+                /* Starts with the visible text (label-in-name), then names the job it restores. */
+                aria-label={`Undo: ${rejectNote.undo.label}`}
+              >
+                {/* The visible name. */}
+                Undo
+              </button>
+            )}
+          </>
+        )}
+      </div>
+
       {/* Grid of Job Cards */}
       {loading ? (
         <div className="discovery__empty">
@@ -884,8 +1011,10 @@ export function DiscoveredJobsPage(): ReactElement {
                 </div>
               )}
 
-              {/* Card Footer Actions */}
-              <div className="job-card__footer">
+              {/* Card Footer Actions. The onClick only OBSERVES: a Send click takes the row lock inside the
+                  button's own handler, then bubbles here, and the re-render disables this card's Reject.
+                  SendThroughPipeline exposes no start callback, so the bubble is the hook. */}
+              <div className="job-card__footer" onClick={() => bumpLockView()}>
                 <a
                   href={safeHref(job.apply_url)}
                   target="_blank"
@@ -895,6 +1024,27 @@ export function DiscoveredJobsPage(): ReactElement {
                 >
                   <span>Apply Link ↗</span>
                 </a>
+
+                {/* Reject (Teja's ruling, 2026-11-01): one click, passed_filters -> dropped_filter as
+                    'human', undoable from the status line. Only where canReject says the lane has both
+                    human edges, only with a client, and only for a real-shaped id the RPC can address. */}
+                {laneCanReject && supabase !== null && isApplicationId(applicationId) && (
+                  <button
+                    /* Not a submit: the page has no form. */
+                    type="button"
+                    /* The app's outlined "destructive but recoverable" look; job-card__reject places it. */
+                    className="button button--reject button--small job-card__reject"
+                    /* Off while this row's Send or Reject holds the shared lock. */
+                    disabled={isRowInFlight(applicationId)}
+                    /* The promise is handled inside rejectCard; nothing here awaits it. */
+                    onClick={() => void rejectCard(applicationId, jobLabel(job))}
+                    /* Starts with the visible text (label-in-name), then names the job, as Send does. */
+                    aria-label={`Reject: ${jobLabel(job)}`}
+                  >
+                    {/* The visible name. */}
+                    Reject
+                  </button>
+                )}
 
                 {/* Per-card "Send through pipeline" (Teja's ruling, 2026-10-08 16:08). A button
                     on a card claims to act on that card, and this one does: it passes THIS
@@ -927,7 +1077,12 @@ export function DiscoveredJobsPage(): ReactElement {
                       // null: a refused click (another run holds the row, and ITS settle reloads),
                       // or a throw the engine and deps are written never to make, which the card
                       // reports itself. No result to keep, and no reload owed by this click.
-                      if (result === null) return;
+                      if (result === null) {
+                        // A throw still released the lock; re-render so this card's Reject re-enables.
+                        bumpLockView();
+                        // Nothing else to do for a null settle.
+                        return;
+                      }
                       // Newest first, one entry per row, so a re-send replaces its old line.
                       // The lane's steps travel with the result, so its sentence survives a lane switch.
                       setSendResults((prev) => [{ applicationId, label: jobLabel(job), steps: laneSpec.steps, result }, ...prev.filter((r) => r.applicationId !== applicationId)]);
@@ -937,6 +1092,14 @@ export function DiscoveredJobsPage(): ReactElement {
                   />
                 )}
               </div>
+              {/* A Reject that did not land: the card stayed, and this says why. role=alert because a
+                  failed write is the one thing here the operator must not miss. */}
+              {applicationId !== undefined && rejectErrors[applicationId] && (
+                <p className="job-card__reject-error" role="alert">
+                  {/* describeReject's sentence, with the database's code and words. */}
+                  {rejectErrors[applicationId]}
+                </p>
+              )}
             </article>
           ))}
         </div>

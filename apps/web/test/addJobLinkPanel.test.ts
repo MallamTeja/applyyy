@@ -31,6 +31,8 @@ before(async () => {
 const okBody = (over: Record<string, unknown> = {}) => ({
   status: 'ok',
   application_id: '11111111-1111-4111-8111-111111111111',
+  // Since 2026-11-01 the function runs the agents itself and says so.
+  pipeline_started: true,
   application_status: 'passed_filters',
   created: true,
   revived_from: null,
@@ -70,6 +72,37 @@ describe('parseIntakeOk', () => {
     assert.equal(panel.parseIntakeOk(okBody({ job: undefined })), null);
     assert.equal(panel.parseIntakeOk(okBody({ revived_from: undefined })), null);
   });
+
+  it('pipeline_started: true is a started run; absent (an older function) is not; a non-boolean is refused', () => {
+    assert.equal(panel.parseIntakeOk(okBody())?.pipelineStarted, true);
+    // Absent falls to the manual button, the safe side.
+    assert.equal(panel.parseIntakeOk(okBody({ pipeline_started: undefined }))?.pipelineStarted, false);
+    // A truthy string is not a boolean (repo CLAUDE.md §6).
+    assert.equal(panel.parseIntakeOk(okBody({ pipeline_started: 'yes' })), null);
+  });
+});
+
+describe('describeServerRun', () => {
+  it('names the agent at work while inside the server window', () => {
+    assert.deepEqual(panel.describeServerRun('passed_filters', 0), { phase: 'running', text: 'Scoring the fit (matcher)…' });
+    assert.deepEqual(panel.describeServerRun('scored', 60_000), { phase: 'running', text: 'Tailoring your resume (tailor)…' });
+    assert.equal(panel.describeServerRun('audit_flagged', 1).phase, 'running');
+    // An unreadable status may be a blip: keep watching.
+    assert.equal(panel.describeServerRun(null, 1).phase, 'running');
+  });
+
+  it('the queue is ready; drops and failures stop without a button', () => {
+    assert.deepEqual(panel.describeServerRun('awaiting_approval', 5), { phase: 'ready' });
+    for (const s of ['dropped_filter', 'dropped_duplicate', 'failed', 'approved']) assert.equal(panel.describeServerRun(s, 5).phase, 'stopped', s);
+  });
+
+  it('mid-chain at the stall line is stalled, one millisecond before is still running', () => {
+    assert.equal(panel.describeServerRun('scored', panel.RUN_STALL_MS - 1).phase, 'running');
+    assert.equal(panel.describeServerRun('scored', panel.RUN_STALL_MS).phase, 'stalled');
+    assert.equal(panel.describeServerRun(null, panel.RUN_STALL_MS).phase, 'stalled');
+    // A finished row is never "stalled", however late the read.
+    assert.equal(panel.describeServerRun('awaiting_approval', panel.RUN_STALL_MS * 2).phase, 'ready');
+  });
 });
 
 describe('runJobLinkIntake', () => {
@@ -108,15 +141,30 @@ describe('AddJobLinkView', () => {
     assert.match(html, /<p id="add-job-link-needs-text"/);
   });
 
-  it('renders the agent run for a row that still needs agents', () => {
+  it('a server-started run shows its progress and NO button to press (Teja, 2026-11-01)', () => {
     const result = panel.parseIntakeOk(okBody());
-    const html = view({ kind: 'ok', result });
-    assert.match(html, /class="[^"]*drawer__send-button/);
+    // A working status reader: with none, the watch is (correctly) stalled from the start.
+    const deps = { invoke: () => Promise.resolve({ ok: true, httpStatus: 200, body: {} }), readStatus: () => Promise.resolve('passed_filters') };
+    const html = render(h(panel.AddJobLinkView, { state: { kind: 'ok', result } as never, url: '', text: '', onUrlChange: () => {}, onTextChange: () => {}, onSubmit: () => {}, pipelineDeps: deps }));
+    assert.match(html, /Scoring the fit \(matcher\)…/);
+    assert.doesNotMatch(html, /drawer__send-button/);
     assert.match(html, /href="https:\/\/www\.linkedin\.com\/posts\/x"/);
   });
 
+  it('a stalled watch hands the human the button (no reader means stalled from the start)', () => {
+    const html = render(h(panel.ServerRunWatch, { applicationId: '11111111-1111-4111-8111-111111111111', startStatus: 'scored', deps: null, label: 'Globex — Backend Engineer' }));
+    assert.match(html, /The server run stopped at scored/);
+    assert.match(html, /class="[^"]*drawer__send-button/);
+  });
+
+  it('a function that started no run, for a row that still needs agents, gets the manual button', () => {
+    const result = panel.parseIntakeOk(okBody({ pipeline_started: undefined }));
+    const html = view({ kind: 'ok', result });
+    assert.match(html, /class="[^"]*drawer__send-button/);
+  });
+
   it('renders no agent run for a row already at the approval queue', () => {
-    const result = panel.parseIntakeOk(okBody({ created: false, application_status: 'awaiting_approval' }));
+    const result = panel.parseIntakeOk(okBody({ created: false, application_status: 'awaiting_approval', pipeline_started: false }));
     const html = view({ kind: 'ok', result });
     assert.doesNotMatch(html, /drawer__send-button/);
     assert.equal(panel.needsAgents('awaiting_approval'), false);

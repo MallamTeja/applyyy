@@ -168,7 +168,11 @@ const SCREENS_BY_SOURCE_STATUS: Readonly<
    * the row away before any tailoring was spent on it. */
   discovered: { screen: 'Pipeline, discard on the card', readiness: 'affordance_only' },
   deduped: { screen: 'Pipeline, discard on the card', readiness: 'affordance_only' },
-  passed_filters: { screen: 'Pipeline, discard on the card', readiness: 'affordance_only' },
+  /* Operable since 2026-11-01: every "Ready to tailor" card on Discovered jobs has a Reject that sends
+   * passed_filters -> dropped_filter through advance_application_status as 'human'
+   * (features/discovery/rejectJob.ts). Its other human move, -> failed, has no control, so it is held
+   * in HELD_HUMAN_EDGES below rather than counted operable. */
+  passed_filters: { screen: 'Discovered jobs, Reject on the Ready to tailor card', readiness: 'operable' },
   scored: { screen: 'Pipeline, discard on the card', readiness: 'affordance_only' },
   tailored: { screen: 'Pipeline, discard on the card', readiness: 'affordance_only' },
   /* The way back out of a drop (2026-10-31, migration 20261031200000): pasting the job's link in
@@ -216,7 +220,11 @@ const SCREENS_BY_SOURCE_STATUS: Readonly<
  * this list the only choices were to over-claim the status (counting the
  * dangerous move as operable) or to under-claim it (leaving the two safe moves
  * dead). A held edge counts as INOPERABLE below, so the coverage numbers stay
- * honest either way. */
+ * honest either way.
+ *
+ * The same tool covers an edge that is not dangerous, just not built, out of a
+ * status whose screen performs its OTHER move (passed_filters, 2026-11-01). There
+ * the reason says why no button exists, and advanceRecovery refuses the move. */
 export const HELD_HUMAN_EDGES: ReadonlyArray<{
   // The source status of the held move.
   readonly from: ApplicationStatus;
@@ -233,6 +241,16 @@ export const HELD_HUMAN_EDGES: ReadonlyArray<{
      * application if the first one landed (constraint #7). Off until Teja
      * rules on it. */
     reason: 'Held: would re-arm a real submission; Teja has not ruled.',
+  },
+  {
+    // The Ready to tailor lane, whose card performs only the sibling move (Reject).
+    from: 'passed_filters',
+    // The human move out of it that no control performs.
+    to: 'failed',
+    /* 2026-11-01: the Ready to tailor card offers Reject (-> dropped_filter)
+     * only. Marking a row failed by hand was never asked for, and claiming it
+     * would make the passed_filters claim an over-claim. */
+    reason: 'Not offered: the Ready to tailor card has Reject only; no screen marks a row failed by hand.',
   },
 ];
 

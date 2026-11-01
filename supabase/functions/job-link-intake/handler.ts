@@ -33,6 +33,9 @@ import { companyFor, slugFromToken, type FetchBoardFn, type WatchlistName } from
 import { checkPublicUrl } from "./fetch-page.ts";
 // Page-to-text, the prompt, and the shape check on the model's answer.
 import { buildExtractPrompt, MAX_SOURCE_CHARS, MIN_JOB_TEXT_CHARS, pageText, parseExtraction } from "./extract.ts";
+// The web engine's step tables (an import-free module), so "does this row need the chain" is the
+// same rule the browser's Send button uses; a local copy would drift from it.
+import { PASSED_FILTERS_STEPS, STEP_INPUT_STATUS } from "../../../apps/web/src/features/pipeline/rowPipeline.ts";
 
 // Longest URL accepted: far above any real job link, low enough that the body stays tiny.
 const MAX_URL_CHARS = 2_000;
@@ -43,6 +46,13 @@ const MAX_TEXT_CHARS = 100_000;
 // adds these three human edges into passed_filters). Every other status is left alone: rows
 // already moving forward need nothing, and rows at awaiting_approval or later must not be reset.
 export const REVIVE_FROM: readonly ApplicationStatus[] = ["discovered", "deduped", "dropped_filter"];
+
+// True when matcher, tailor or auditor still has work on a row in this status. awaiting_approval
+// and later match no step, so a re-pasted link never re-runs agents on a finished row.
+export function needsChain(status: string): boolean {
+  // Any step whose input status this is.
+  return PASSED_FILTERS_STEPS.some((step) => STEP_INPUT_STATUS[step].includes(status));
+}
 
 // What the store hands back about the job row after the upsert.
 export interface StoredJob {
@@ -56,7 +66,7 @@ export interface StoredJob {
 
 // What the store hands back about the application row.
 export interface StoredApplication {
-  // applications.id, which the browser then runs matcher -> tailor -> auditor on.
+  // applications.id, which the server then runs matcher -> tailor -> auditor on (Connection.runPipeline).
   readonly id: string;
   // Where the row stands now.
   readonly status: ApplicationStatus;
@@ -81,7 +91,19 @@ export interface IntakeStore {
 // What connect() yields: the signed-in client (for the gates and Gemini) and the store.
 export type Connection =
   // Signed in as the app user.
-  | { readonly ok: true; readonly userId: string; readonly db: CallerAuthClient & KillSwitchClient; readonly store: IntakeStore }
+  | {
+      readonly ok: true;
+      // The app user's id, for the caller check.
+      readonly userId: string;
+      // The signed-in client, for the gates and Gemini.
+      readonly db: CallerAuthClient & KillSwitchClient;
+      // Every write.
+      readonly store: IntakeStore;
+      // Starts matcher -> tailor -> auditor for one row on the SERVER, after the response is sent
+      // (Teja, 2026-11-01: a pasted job runs through the pipeline with no button press). Never
+      // awaited and never throws, so the outcome of the run can never change this response.
+      readonly runPipeline: (applicationId: string) => void;
+    }
   // Sign-in failed; the reason is logged, never returned.
   | { readonly ok: false; readonly reason: string };
 
@@ -310,7 +332,7 @@ export async function persistManualJob(store: IntakeStore, row: JobInsert, paste
   const moveError = await store.moveToPassedFilters(app.application.id, { reason: "pasted_link", url: pastedUrl, from: app.application.status });
   // The guard refused (e.g. the migration is not applied): say so, never pretend it moved.
   if (moveError !== null) return { ok: false, reason: `advance_to_passed_filters: ${moveError}` };
-  // Moved; the browser now runs matcher -> tailor -> auditor on it.
+  // Moved; the handler then starts matcher -> tailor -> auditor on it, server-side.
   return { ok: true, application: { ...app.application, status: "passed_filters" }, revivedFrom: app.application.status };
 }
 
@@ -363,12 +385,18 @@ export async function handleJobLinkIntake(req: Request, deps: IntakeDeps): Promi
   const saved = await persistManualJob(conn.store, built.row, parsed.value.url.toString());
   // A failed write is reported, never a quiet success.
   if (!saved.ok) return json(503, { status: "error", message: `Saving the job failed: ${saved.reason}` });
-  // What the browser needs to run the agents and show the human what was added.
+  // Only a row the agents can still move gets a run; the decision is reported, never guessed by the browser.
+  const pipelineStarted = needsChain(saved.application.status);
+  // Started only after the row is saved, so the agents never race the write they read.
+  if (pipelineStarted) conn.runPipeline(saved.application.id);
+  // What the browser needs to follow the run and show the human what was added.
   return json(200, {
     // Envelope.
     status: "ok",
-    // The row to run matcher -> tailor -> auditor on.
+    // The row the server is running matcher -> tailor -> auditor on.
     application_id: saved.application.id,
+    // True when that server run was started; false for a row already at the queue or later.
+    pipeline_started: pipelineStarted,
     // Where it stands now (passed_filters for a new or revived row).
     application_status: saved.application.status,
     // True only for a brand-new application.

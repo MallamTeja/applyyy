@@ -192,11 +192,26 @@ test('OPERABLE_HUMAN_CONTROLS is exactly the edges the approval and recovery que
     'failed->needs_verification',
     // 2026-10-31: job-link-intake re-adds a dropped job when its link is pasted.
     'dropped_filter->passed_filters',
+    // 2026-11-01: Reject on every Ready to tailor card (DiscoveredJobsPage, rejectJob.ts).
+    'passed_filters->dropped_filter',
   ];
   // Sorted on both sides so order in the graph does not matter, only membership.
   assert.deepEqual(OPERABLE_HUMAN_CONTROLS.map(key).sort(), [...expected].sort());
   // Stated as a number too, because the panel shows the number.
-  assert.equal(OPERABLE_HUMAN_CONTROLS.length, 10);
+  assert.equal(OPERABLE_HUMAN_CONTROLS.length, 11);
+});
+
+test('passed_filters is operable for Reject only; its -> failed move is held, not claimed', () => {
+  // The Discovered page's Reject performs this edge, so the status is claimed operable.
+  assert.equal(controlReadiness('passed_filters'), 'operable');
+  // Named for the screen that has the button, since this string is rendered on the Pipeline board.
+  assert.equal(humanControlLocation('passed_filters'), 'Discovered jobs, Reject on the Ready to tailor card');
+  // Readiness is per source status, so the sibling edge no button performs must be held...
+  assert.notEqual(heldReason('passed_filters', 'failed'), null);
+  // ...and counted inoperable, never operable: the over-claim this file exists to prevent.
+  assert.ok(INOPERABLE_HUMAN_CONTROLS.map(key).includes('passed_filters->failed'));
+  // The accept twin: an exact-edge hold, so Reject's own edge still fires.
+  assert.equal(heldReason('passed_filters', 'dropped_filter'), null);
 });
 
 test('the held edge is counted inoperable and never operable', () => {

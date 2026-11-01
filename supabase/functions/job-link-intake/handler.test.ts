@@ -2,7 +2,7 @@
 // Run with: node --test "supabase/functions/job-link-intake/*.test.ts"
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { atsTarget, handleJobLinkIntake, parseIntakeBody, persistManualJob, REVIVE_FROM, type IntakeDeps, type IntakeStore, type StoredApplication } from "./handler.ts";
+import { atsTarget, handleJobLinkIntake, needsChain, parseIntakeBody, persistManualJob, REVIVE_FROM, type IntakeDeps, type IntakeStore, type StoredApplication } from "./handler.ts";
 import type { JobInsert } from "../_shared/contracts/shared-types.ts";
 // Moved to fetch-page.ts (2026-10-31) so redirect hops share it; still pinned here for the pasted link.
 import { isBlockedHost } from "./fetch-page.ts";
@@ -60,8 +60,10 @@ function fakeStore(spy: Spy, opts: { existing?: { discoveredVia: string[]; disap
 }
 
 // Deps with every seam faked; options flip the branch under test.
-function makeDeps(opts: { killOn?: boolean; pageFails?: boolean; html?: string; extract?: unknown; store?: Parameters<typeof fakeStore>[1] } = {}): { deps: IntakeDeps; spy: Spy } {
+function makeDeps(opts: { killOn?: boolean; pageFails?: boolean; html?: string; extract?: unknown; store?: Parameters<typeof fakeStore>[1] } = {}): { deps: IntakeDeps; spy: Spy; runs: string[] } {
   const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
+  // Every server pipeline run the handler started, in order (kept off Spy so its literals stay valid).
+  const runs: string[] = [];
   const deps: IntakeDeps = {
     connect: () =>
       Promise.resolve({
@@ -74,6 +76,10 @@ function makeDeps(opts: { killOn?: boolean; pageFails?: boolean; html?: string; 
           from: () => ({ select: () => Promise.resolve({ data: [{ system_enabled: opts.killOn ?? true }], error: null }) }),
         },
         store: fakeStore(spy, opts.store),
+        // Records the start; the real one hands the run to EdgeRuntime.waitUntil.
+        runPipeline: (id: string) => {
+          runs.push(id);
+        },
       }),
     fetchBoard: () => {
       // Counted so the page path can prove it never touched a board.
@@ -92,7 +98,7 @@ function makeDeps(opts: { killOn?: boolean; pageFails?: boolean; html?: string; 
     },
     now: () => new Date("2026-10-31T10:00:00Z"),
   };
-  return { deps, spy };
+  return { deps, spy, runs };
 }
 
 // A POST with the app user's token.
@@ -200,6 +206,45 @@ test("gates: no token is 401; kill switch off is 409 and nothing is fetched", as
   const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111" }), off.deps);
   assert.equal(res.status, 409);
   assert.equal(off.spy.boardFetches, 0);
+});
+
+test("a saved row starts the server pipeline exactly once, for that row, and says so", async () => {
+  // A brand-new row at passed_filters (the fake store's default).
+  const { deps, runs } = makeDeps();
+  const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111" }), deps);
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  // Teja's ask (2026-11-01): no button press; the server runs it.
+  assert.deepEqual(runs, ["11111111-1111-4111-8111-111111111111"]);
+  // The browser follows the run instead of starting its own.
+  assert.equal(body.pipeline_started, true);
+});
+
+test("a re-pasted link for a row already at the approval queue starts nothing", async () => {
+  // The row exists and is past every agent.
+  const { deps, runs } = makeDeps({ store: { existing: { discoveredVia: ["manual"] }, application: { id: "22222222-2222-4222-8222-222222222222", status: "awaiting_approval", created: false } } });
+  const body = await (await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111" }), deps)).json();
+  // Re-running tailor here would overwrite a resume the human may already be reviewing.
+  assert.deepEqual(runs, []);
+  assert.equal(body.pipeline_started, false);
+});
+
+test("refusals start no pipeline: closed posting, unreadable page, not a job, no token", async () => {
+  // Each case below stops before any row is saved, so nothing may run.
+  const closed = makeDeps();
+  await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/999" }), closed.deps);
+  const unreadable = makeDeps({ pageFails: true });
+  await handleJobLinkIntake(post({ url: "https://www.linkedin.com/posts/x" }), unreadable.deps);
+  const notJob = makeDeps({ extract: geminiAnswer({ ...GOOD_FIELDS, is_job_posting: false }) });
+  await handleJobLinkIntake(post({ url: "https://careers.example.com/x", text: POST_TEXT }), notJob.deps);
+  const anon = makeDeps();
+  await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111" }, "bad"), anon.deps);
+  assert.deepEqual([...closed.runs, ...unreadable.runs, ...notJob.runs, ...anon.runs], []);
+});
+
+test("needsChain: the matcher/tailor/auditor inputs need the chain; the queue and later do not", () => {
+  for (const s of ["passed_filters", "scored", "tailored", "audit_clean", "audit_flagged"]) assert.equal(needsChain(s), true, s);
+  for (const s of ["awaiting_approval", "approved", "applied", "dropped_filter", "failed", "discovered"]) assert.equal(needsChain(s), false, s);
 });
 
 test("REVIVE_FROM is exactly the three statuses the migration gives a human edge into passed_filters", () => {
