@@ -1,0 +1,47 @@
+-- WHY THIS MIGRATION EXISTS (2026-11-01).
+--
+-- Teja rewrote the master resume (v4 -> v9 in two days: +40 skills, a new project, a new
+-- internship, credential links). Every row already in the Approval queue was tailored
+-- against an OLDER master (live at 17:13 IST: v3 x2, v6 x1, v7 x14, v8 x11, v9 x1), so the
+-- resumes waiting for approval no longer match the current master. Teja asked
+-- for them to "flow through the pipeline from start": re-scored by the matcher and
+-- re-tailored and re-audited against the latest master.
+--
+-- No edge could carry them back. awaiting_approval leads only to approved or dropped_filter,
+-- and approved leads only to applying or blocked_needs_human. The workaround through
+-- dropped_filter (awaiting_approval -> dropped_filter -> passed_filters) would have written
+-- two PERMANENT events per row saying Teja declined the job and re-pasted its link -- false
+-- history in an append-only log (application_events forbids update and delete). Teja chose
+-- an honest edge instead (asked 2026-11-01 17:16 IST, "B: new edge").
+--
+-- passed_filters is the target, not scored: the matcher's score was computed against the
+-- old master too, and only the matcher's queue is passed_filters. The matcher and the tailor
+-- both load the LATEST master (matcher/index.ts:278, tailor/index.ts:169), so a re-run lands
+-- on whatever master is current when it runs. The old tailored_profile stays on the row
+-- (frozen at passed_filters by guard_tailored_profile_freeze) until the tailor overwrites it
+-- at scored; persist.ts also clears the stale cover letter in that write.
+--
+-- HUMAN-ONLY, like every other backward edge but interview -> oa_pending: re-tailoring is a
+-- decision about truth (see audit_flagged -> tailored), and an agent that could walk these
+-- would re-spend Gemini quota on its own say-so. The caller passes detail.reason so the
+-- event log says why each row came back.
+--
+-- approved -> passed_filters does NOT weaken constraint 15: it leads OUT of approved, away
+-- from applying. awaiting_approval -> approved stays the only human door in, and
+-- approved -> applying stays the only edge into applying. If the applier holds a claim on
+-- the row when a human moves it back, advance_application_status releases the lease, and the
+-- applier's own approved -> applying move is then refused by the guard (no edge from
+-- passed_filters to applying). No stale PDF can ride along: the worker renders the resume from
+-- tailored_profile at submit time (worker/src/render-resume-pdf.ts:20).
+--
+-- Not re-runnable as written (plain insert): run once, like every graph migration here. The
+-- insert uses the multi-row form the parity test parses
+-- (packages/shared-types/test/enum-parity.test.ts), so the TS mirror in
+-- packages/shared-types/src/status-flow.ts is checked against it.
+
+-- Two new edges, both human-only.
+insert into public.application_status_transitions (from_status, to_status, allowed_agents, note) values
+  -- A row waiting for approval whose resume was tailored against an older master: rerun it from scoring.
+  ('awaiting_approval', 'passed_filters', array['human']::public.agent_name[], 'Human sends it back to be re-scored and re-tailored, e.g. after the master changed.'),
+  -- An approved row not yet submitted: the human withdraws the approval so a newer master can be tailored in.
+  ('approved', 'passed_filters', array['human']::public.agent_name[], 'Human withdraws the approval to re-score and re-tailor before anything is sent.');

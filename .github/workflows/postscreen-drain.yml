@@ -1,0 +1,318 @@
+# Drains the post-screen queues on demand: pages the whole `passed_filters` queue through the
+# matcher (?limit=25), then the whole `scored` queue through the tailor (?limit=10), then the
+# whole `tailored` queue through the auditor (?limit=10). The sibling of prescreen-drain.yml,
+# which drains the two stages BEFORE this one (normalizer, screener).
+# Exists because nothing calls these three agents on a schedule: only run-one.yml (one row
+# per dispatch, ~1 billed Actions minute each), job-link-intake (one pasted link) and the web
+# runner (10 rows per click) do. Measured 2026-11-01 17:13 IST: 190 rows had waited at
+# passed_filters since 2026-09-18, and Teja asked for the whole Approval queue to be re-run
+# after master v9, which sends ~40 more rows back to passed_filters.
+# Same credential story as prescreen-drain.yml: the app-user secrets live only in this repo's
+# Actions secrets. The matcher DROPS rows below the score threshold and drops are one-way, so
+# every abort below fails CLOSED: any response we cannot read exactly stops the run.
+name: applyy post-screen drain
+
+# Manual trigger ONLY, same ruling as pregate-sweep and prescreen-drain (Teja 2026-10-09): a
+# run that drops rows and spends Gemini quota must happen while someone watches the log.
+on:
+  workflow_dispatch:
+    # The one input: rehearse without touching anything.
+    inputs:
+      # Prints the plan (URLs, caps, stop rules) and exits before sign-in, so the
+      # dispatcher can check the run's shape without spending a single request.
+      dry_count_only:
+        # Shown in the Actions UI beside the checkbox.
+        description: 'Print the plan only; no sign-in, no function calls'
+        # A boolean input renders as a checkbox, so there is no free text to validate.
+        type: boolean
+        # Default is the real drain: the dispatcher opts INTO the rehearsal, not out of the run.
+        default: false
+
+# Read-only token. The job never checks out code or writes to the repo; it only talks
+# to Supabase with its own credentials.
+permissions:
+  # Nothing else is granted; contents:read is the floor GitHub allows.
+  contents: read
+
+# One drain at a time: two concurrent drains would page the same queues and race each
+# other's claims, doubling Gemini spend for no gain.
+concurrency:
+  # A fixed key, because a drain has no per-row scope to key on.
+  group: postscreen-drain
+  # Never cancel mid-drain: a half-drained queue is fine, a killed request mid-write is not.
+  cancel-in-progress: false
+
+# A single job: the three stages are sequential by design (each one's output is the next one's input).
+jobs:
+  # Named for what it does, so the Actions list is readable.
+  drain:
+    # Same runner image as the other workflows. Its preinstalled Node (>= 20) has
+    # global fetch, which is all this job needs: no checkout, no install, no third-party action.
+    runs-on: ubuntu-latest
+    # Every page makes Gemini calls, so pages run near the functions' ~150 s wall clock. About
+    # 25 pages across the three stages at that pace is ~60 min; this cap leaves room for slow
+    # pages and stops a hung run from burning the monthly Actions minutes.
+    timeout-minutes: 150
+    # Steps run top to bottom; a non-zero exit stops the job.
+    steps:
+      # The whole drain in one step, so the secrets exist ONLY here. No `uses:` step runs
+      # in this job at all, so no third-party action ever sees the password.
+      - name: Drain passed_filters through matcher, scored through tailor, tailored through auditor
+        # Node ESM from stdin. The quoted 'JS' delimiter stops bash expanding anything
+        # inside, so the script text is exactly what is written here.
+        run: |
+          # Fail on any error, unset variable or failed pipe stage.
+          set -euo pipefail
+          # Node reads the module from stdin; --input-type=module enables top-level await.
+          node --input-type=module <<'JS'
+          // The three stages, declared up front so the plan log and the loop read ONE source.
+          // limit: the matcher's MAX_BATCH_SIZE (matcher/index.ts:93); the tailor and auditor run
+          // at their default 10 because each row is one or more Gemini calls and a page must
+          // finish inside the function's wall clock. A larger ask is clamped, never an error.
+          // pageCap: hard ceiling well above the live backlog (~230 passed_filters / 25 = 10
+          // pages; a deadline-cut page reads fewer) so a queue that never shrinks stops red.
+          const STAGES = [
+            // Stage 1: passed_filters -> scored | dropped_filter | failed.
+            { name: 'matcher', limit: 25, pageCap: 40 },
+            // Stage 2: scored -> tailored | failed.
+            { name: 'tailor', limit: 10, pageCap: 40 },
+            // Stage 3: tailored -> audit_clean | audit_flagged -> awaiting_approval.
+            { name: 'auditor', limit: 10, pageCap: 40 },
+          ];
+          // Consecutive pages that read rows but advance none before the run stops red. A
+          // Gemini outage (every key cooling, or 503 "high demand") leaves each row in
+          // `failures` at its input status, and oldest-first the same rows refill every
+          // page head: without this cap the loop would re-spend quota on them forever.
+          const STALL_CAP = 3;
+
+          // Abort: one place that prints the reason and exits red. Never prints a secret,
+          // because no caller passes one in.
+          function abort(reason) {
+            // ::error:: surfaces the reason on the run summary, not only in the log.
+            console.log(`::error::ABORT: ${reason}`);
+            // Non-zero so the run shows red, never green-with-nothing-done.
+            process.exit(1);
+          }
+
+          // Reads an env var and refuses an empty one: a missing secret is an empty string
+          // in Actions, and an empty URL or key must not become a request.
+          function required(name) {
+            // Read once.
+            const value = process.env[name] ?? '';
+            // Empty means the secret is not set; stop before any network call.
+            if (value === '') abort(`missing ${name}`);
+            // Non-empty from here on.
+            return value;
+          }
+
+          // The rehearsal: the checkbox arrives as the string 'true' or 'false'.
+          const dryCountOnly = process.env.DRY_COUNT_ONLY === 'true';
+          // Origin only, trailing slash removed, so the URLs below never get a double slash.
+          // Not required() in dry mode: the plan must print even before secrets exist.
+          const base = (process.env.SUPABASE_URL ?? '').replace(/\/+$/, '');
+
+          // The plan, printed on every run so the log always states the rules it ran under.
+          for (const stage of STAGES) {
+            // One line per stage: URL shape, page size and cap.
+            console.log(`plan: POST ${base || '<SUPABASE_URL>'}/functions/v1/${stage.name}?limit=${stage.limit}, page cap ${stage.pageCap}`);
+          }
+          // The stop rules, verbatim, so a reader of the log can check the run against them.
+          console.log(`plan: a stage ends when a page reads 0 rows; ${STALL_CAP} consecutive pages that read rows but advance none abort the run`);
+          // The abort rules, likewise.
+          console.log('plan: abort on non-2xx, non-JSON, missing/ill-typed fields, or a kill-switch halt (skipped_disabled)');
+          // The rehearsal ends here, before sign-in.
+          if (dryCountOnly) {
+            // Says plainly that nothing was called, so a green dry run is not mistaken for a drain.
+            console.log('dry_count_only: plan printed; no sign-in, no function call made.');
+            // Green: the rehearsal did what it was asked.
+            process.exit(0);
+          }
+
+          // Real run: every credential must be present.
+          const url = required('SUPABASE_URL');
+          // The ANON key: all authority comes from the app user's JWT, never this key.
+          const anonKey = required('SUPABASE_ANON_KEY');
+          // The app user the three functions' authorizeCaller() requires (_shared/db/gates.ts).
+          const email = required('APPLYY_APP_USER_EMAIL');
+          // Masked by GitHub; never logged here.
+          const password = required('APPLYY_APP_USER_PASSWORD');
+          // Refuse a non-https URL: the password must never travel in clear text.
+          if (!url.startsWith('https://')) abort('SUPABASE_URL is not https');
+          // The email is a secret too; GitHub masks registered secrets, this makes it explicit.
+          console.log(`::add-mask::${email}`);
+          // Per-request ceiling. Above the edge functions' own wall clock (~150s), so a
+          // normal slow page finishes; a hung socket rejects and the run exits red.
+          const REQUEST_TIMEOUT_MS = 180_000;
+
+          // Sign in over the Auth REST endpoint: the same session prescreen-drain.yml gets,
+          // without installing supabase-js.
+          const authRes = await fetch(`${base}/auth/v1/token?grant_type=password`, {
+            // GoTrue's password grant is a POST.
+            method: 'POST',
+            // The gateway wants the anon key; the body is JSON.
+            headers: { apikey: anonKey, 'content-type': 'application/json' },
+            // JSON.stringify escapes the values, so no credential can break the body.
+            body: JSON.stringify({ email, password }),
+            // A hung sign-in rejects instead of holding the job to timeout-minutes.
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          });
+          // Read as text first: an error page must not crash the parse and hide the status.
+          const authText = await authRes.text();
+          // Only the status is logged; the body may echo the email.
+          if (!authRes.ok) abort(`sign-in failed: HTTP ${authRes.status}`);
+          // Parsed inside try: a soft-200 HTML page is a failure, not a session.
+          let session;
+          // JSON or abort.
+          try { session = JSON.parse(authText); } catch { abort('sign-in returned non-JSON'); }
+          // The token must be a non-empty string; anything else is not a session.
+          const token = typeof session?.access_token === 'string' ? session.access_token : '';
+          // Never continue unauthenticated.
+          if (token === '') abort('sign-in returned no access_token');
+          // Mask the JWT before anything could print it.
+          console.log(`::add-mask::${token}`);
+
+          // Requires a field to be a non-negative integer, named in the abort so the
+          // operator sees WHICH field broke the shape (CLAUDE.md §6: validate the shape,
+          // never ask a lenient parser whether it gave up).
+          function requireCount(body, key, stage) {
+            // Number.isInteger refuses NaN, strings and floats in one check.
+            if (!Number.isInteger(body[key]) || body[key] < 0) abort(`${stage}: ${key} is missing or not a non-negative integer`);
+            // Proven; the caller may read it.
+            return body[key];
+          }
+
+          // Requires a field to be an array and returns its length. `failures` and `skipped`
+          // are arrays on every 200 these three functions send (each has exactly one final
+          // jsonResponse(200) besides the kill switch), so an absent one is a changed shape.
+          function requireListLength(body, key, stage) {
+            // Array.isArray refuses null, objects and strings.
+            if (!Array.isArray(body[key])) abort(`${stage}: ${key} is missing or not an array`);
+            // Proven; the caller reads only the length.
+            return body[key].length;
+          }
+
+          // Strict shape check of one page. Returns {processed, advanced, errored, summary}
+          // or aborts. advanced = rows that LEFT the stage's input status this page; a page
+          // where processed > 0 but advanced === 0 re-reads the same rows next time.
+          function readPage(stage, httpStatus, text) {
+            // Any non-2xx stops the run: 400 bad params, 401/403 auth, 409 no master, 500, 503.
+            if (httpStatus < 200 || httpStatus > 299) abort(`${stage}: HTTP ${httpStatus}: ${text.slice(0, 200)}`);
+            // Parsed or abort: a platform timeout page is not a drain result.
+            let body;
+            // JSON or abort.
+            try { body = JSON.parse(text); } catch { abort(`${stage}: non-JSON response: ${text.slice(0, 120)}`); }
+            // Must be an object, not null, an array or a scalar.
+            if (body === null || typeof body !== 'object' || Array.isArray(body)) abort(`${stage}: body is not an object`);
+            // The kill switch answers 200 with no counters (matcher/index.ts:275,
+            // tailor/index.ts:164, auditor/index.ts:192); named BEFORE the shape check so the
+            // log says WHY.
+            if (body.status === 'skipped_disabled') abort(`${stage}: pipeline is disabled (${body.status})`);
+            // Rows that errored in place this page (transport, quota or write failures): they
+            // stay at the input status. Same field and meaning on all three agents.
+            const errored = requireListLength(body, 'failures', stage);
+            // Matcher page (matcher/index.ts:770-808). rows_in is the queue read.
+            if (stage === 'matcher') {
+              // Every row moved off passed_filters: scored, dropped below the threshold, dropped
+              // by the tech pre-gate, or moved to failed. skipped_stale (another run's claim)
+              // is neither moved nor an error, so it counts toward processed only.
+              const advanced = requireCount(body, 'scored', stage) + requireCount(body, 'dropped', stage)
+                + requireCount(body, 'tech_gate_dropped', stage) + requireCount(body, 'failed', stage);
+              // The rows the matcher read this page.
+              return { processed: requireCount(body, 'rows_in', stage), advanced, errored, summary: body.status ?? 'ok' };
+            }
+            // Tailor page (tailor/index.ts:388-412). No rows_in field: the read is the sum.
+            if (stage === 'tailor') {
+              // Persisted resumes (-> tailored) and honest validator refusals (-> failed).
+              const tailored = requireCount(body, 'tailored', stage);
+              // Refusals move the row to failed (status_transition_guard: scored -> failed by tailor).
+              const refused = requireCount(body, 'refused', stage);
+              // Skips are read but NOT counted as advanced: liveness_unknown and
+              // posting_disappeared stay at scored (tailor/index.ts:292), so counting them
+              // would let a stuck queue head look like progress. A false stall abort is safe
+              // (rerun); a false "progress" would spin to the page cap.
+              const skipped = requireListLength(body, 'skipped', stage);
+              // Read = every row the batch planned plus every row that errored.
+              return { processed: tailored + refused + skipped + errored, advanced: tailored + refused, errored, summary: body.status ?? 'ok' };
+            }
+            // Auditor page (auditor/index.ts:489-513). No rows_in field either.
+            // audited: rows that reached awaiting_approval (clean + flagged break it down);
+            // resumed: rows stranded between the two RPCs, moved on; failed: permanent failures.
+            const advanced = requireCount(body, 'audited', stage) + requireCount(body, 'resumed', stage) + requireCount(body, 'failed', stage);
+            // Read = every row that moved plus every row that errored.
+            return { processed: advanced + errored, advanced, errored, summary: body.status ?? 'ok' };
+          }
+
+          // Grand totals for the final summary line.
+          let totalAdvanced = 0;
+          // Rows read across the whole run, for the same line.
+          let totalProcessed = 0;
+
+          // Stages run strictly in order: each stage's output IS the next stage's input.
+          for (const stage of STAGES) {
+            // Pages spent in this stage; the stage's own cap bounds them.
+            let pages = 0;
+            // Consecutive stalled pages (processed > 0, advanced 0); reset by any progress.
+            let stalled = 0;
+
+            // Page loop: each page re-reads the head of the queue, because advanced rows
+            // leave the input status - there is no cursor to carry.
+            while (true) {
+              // Hard cap: stop red rather than spin on a queue that never ends.
+              if (pages >= stage.pageCap) abort(`${stage.name}: page cap ${stage.pageCap} reached before the queue emptied`);
+              // Counted before the request so a failing request still counts.
+              pages += 1;
+              // The page request: empty POST, app-user JWT plus anon key, limit in the query
+              // string because none of the three functions reads a body for a batch run.
+              const res = await fetch(`${base}/functions/v1/${stage.name}?limit=${stage.limit}`, {
+                // All three treat every non-OPTIONS method alike; POST matches the other callers.
+                method: 'POST',
+                // The token is masked; these headers are never logged.
+                headers: { authorization: `Bearer ${token}`, apikey: anonKey },
+                // A rejected (timed-out) request throws at top level: Node exits 1, fail closed.
+                signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+              });
+              // Text first, so readPage can quote a non-JSON body.
+              const page = readPage(stage.name, res.status, await res.text());
+
+              // Run totals for the summary.
+              totalProcessed += page.processed;
+              // Same.
+              totalAdvanced += page.advanced;
+              // One line per page in the log: counts only, never a secret.
+              console.log(`${stage.name} page ${pages}: processed=${page.processed} advanced=${page.advanced} errored=${page.errored} status=${page.summary}`);
+
+              // The queue is empty: this stage is done.
+              if (page.processed === 0) break;
+              // Progress check: a page that read rows but moved none would re-read the
+              // same head next time (no cursor exists). Count it toward the stall cap.
+              if (page.advanced === 0) {
+                // One more stalled page.
+                stalled += 1;
+                // Cap reached: the head of the queue is stuck; a human must look at it.
+                if (stalled >= STALL_CAP) abort(`${stage.name}: ${STALL_CAP} consecutive pages advanced 0 rows; head of queue is stuck`);
+              } else {
+                // Any progress resets the window: only CONSECUTIVE stalls count.
+                stalled = 0;
+              }
+            }
+            // Stage boundary line, so the log shows where each stage ended.
+            console.log(`${stage.name}: queue drained in ${pages} page(s)`);
+          }
+
+          // The summary line the orchestrator reads.
+          console.log(`CLEAN: all three queues drained; processed=${totalProcessed} advanced=${totalAdvanced}`);
+          // Green.
+          process.exit(0);
+          JS
+        # Credentials exist ONLY for this step: the same secret names prescreen-drain.yml uses.
+        env:
+          # The rehearsal flag, passed through env, never interpolated into the script.
+          DRY_COUNT_ONLY: ${{ inputs.dry_count_only }}
+          # Public project URL, stored as a secret for parity with apply.yml.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          # The ANON key: authority comes from the app user's JWT.
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # The app user the functions authorize.
+          APPLYY_APP_USER_EMAIL: ${{ secrets.APPLYY_APP_USER_EMAIL }}
+          # Masked in logs by GitHub; never echoed by this workflow.
+          APPLYY_APP_USER_PASSWORD: ${{ secrets.APPLYY_APP_USER_PASSWORD }}

@@ -242,11 +242,27 @@ test('every human-reachable status is either unclaimed or has a readiness', () =
 test('a status nothing claims returns null rather than a placeholder string', () => {
   /* The accept twin for `humanControlLocation`: it must be capable of returning
      null, or the "no screen claims it" bucket could never be non-empty and the
-     check would be structurally incapable of firing. `approved` is a good
-     probe - it is reached only by a human approval and left only by the
-     Applier, so no human-reachable edge leaves it and no screen claims it. */
-  assert.equal(humanControlLocation('approved'), null);
-  assert.equal(controlReadiness('approved'), null);
+     check would be structurally incapable of firing. `audit_clean` is the
+     probe - it is reached and left only by the Auditor, so no human-reachable
+     edge leaves it and no screen claims it. (`approved` was the probe until
+     2026-11-01, when approved -> passed_filters gave it a human move.) */
+  assert.equal(humanControlLocation('audit_clean'), null);
+  assert.equal(controlReadiness('audit_clean'), null);
+});
+
+test('the master-change re-run edges are claimed but never counted operable', () => {
+  /* Both moves were added 2026-11-01 (migration 20261101173000) and no screen
+     performs either yet. `approved` is claimed as affordance_only (the Pipeline
+     column shows the move disabled); the Approval queue's re-run move is HELD
+     because that screen IS operable for approve and decline. Counting either as
+     operable would be the false all-clear this file exists to prevent. */
+  assert.equal(controlReadiness('approved'), 'affordance_only');
+  // A held edge always explains itself; null here would let the button fire.
+  assert.notEqual(heldReason('awaiting_approval', 'passed_filters'), null);
+  // Neither re-run edge may appear in the operable bucket.
+  const operable = new Set(OPERABLE_HUMAN_CONTROLS.map(key));
+  assert.ok(!operable.has(key({ from: 'awaiting_approval', to: 'passed_filters' })));
+  assert.ok(!operable.has(key({ from: 'approved', to: 'passed_filters' })));
 });
 
 /* --- isHumanOnlyLane -------------------------------------------------- */

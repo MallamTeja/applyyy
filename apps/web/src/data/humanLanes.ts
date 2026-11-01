@@ -12,11 +12,11 @@
  * conflated them and produced a false all-clear, which is worse than no check
  * at all - so the predicate is now stated in each name:
  *
- *   HUMAN_ONLY_LANES      allowedAgents === ['human']      (13 edges)
+ *   HUMAN_ONLY_LANES      allowedAgents === ['human']      (15 edges)
  *     No automation will ever help. These need PROMINENT controls, because a
  *     person is the only thing that can move the row, ever.
  *
- *   HUMAN_REACHABLE_LANES allowedAgents.includes('human')  (34 edges)
+ *   HUMAN_REACHABLE_LANES allowedAgents.includes('human')  (36 edges)
  *     A human is permitted, often as a fallback for an agent. These still need
  *     controls, because the agent may not be running - and section 14 says a
  *     dead scheduled job is silent. `applying -> needs_verification` is the
@@ -27,8 +27,8 @@
  * COVERAGE IS CHECKED PER SOURCE STATUS, not per edge. A screen that renders
  * rows in status X and builds its buttons from `nextStatuses(X, 'human')`
  * covers every human-reachable edge out of X at once, and keeps covering them
- * when the schema stream adds one. Sixteen source statuses to claim rather
- * than thirty-four edges to transcribe - and transcribing edges by hand is what
+ * when the schema stream adds one. Seventeen source statuses to claim rather
+ * than thirty-six edges to transcribe - and transcribing edges by hand is what
  * produced the bug this file was rewritten to fix.
  *
  * Naming the pattern: the status graph is the single source of truth for the
@@ -153,6 +153,14 @@ const SCREENS_BY_SOURCE_STATUS: Readonly<
    * false all-clear this file exists to prevent. */
   audit_flagged: { screen: 'Approval queue, send back for re-tailoring', readiness: 'affordance_only' },
 
+  /* Withdraw an approval to re-run the row on a newer master (2026-11-01, migration
+   * 20261101173000). Before that day `approved` had no human out-edge at all. Its one
+   * human move, -> passed_filters, is shown DISABLED on the Pipeline board's column
+   * (PipelinePage builds it from nextStatuses), and no screen performs it yet: the
+   * operator runs it through advance_application_status as 'human'. So affordance_only,
+   * never operable - claiming operable would be the false all-clear this file prevents. */
+  approved: { screen: 'Pipeline, disabled move on the card (re-run after a master change)', readiness: 'affordance_only' },
+
   /* --- The pipeline board --------------------------------------------- */
 
   /* Post-apply statuses are shared with the email Tracker. The board is
@@ -251,6 +259,17 @@ export const HELD_HUMAN_EDGES: ReadonlyArray<{
      * only. Marking a row failed by hand was never asked for, and claiming it
      * would make the passed_filters claim an over-claim. */
     reason: 'Not offered: the Ready to tailor card has Reject only; no screen marks a row failed by hand.',
+  },
+  {
+    // The Approval queue lane, whose screen performs approve and decline only.
+    from: 'awaiting_approval',
+    // The re-run move added 2026-11-01 (migration 20261101173000).
+    to: 'passed_filters',
+    /* The Approval queue has no "re-run on the latest master" button yet; the first
+     * re-run (master v9, 2026-11-01) was sent through advance_application_status by
+     * the operator. Held so awaiting_approval's operable claim stays true for the
+     * moves it does perform, and the coverage numbers count this one as inoperable. */
+    reason: 'Not offered: the Approval queue has no re-run button yet; a re-run after a master change is sent by the operator.',
   },
 ];
 

@@ -53,12 +53,14 @@ export interface StatusTransition {
  *
  * BUT DO NOT READ THAT AS "THE GRAPH HAS NO BACKWARD EDGES" — corrected 2026-09-10,
  * because the previous wording ended "there is no backward path for a bug to wander
- * down" and that is false. EIGHT backward edges exist, deliberately, and they are the
+ * down" and that is false. TEN backward edges exist, deliberately, and they are the
  * recovery lanes: `audit_flagged→tailored`, `interview→oa_pending`,
  * `blocked_needs_human→applied`, `blocked_needs_human→dropped_filter`,
  * `needs_verification→applied`, `needs_verification→approved`,
- * `failed→needs_verification`, and (2026-10-31) `dropped_filter→passed_filters`,
- * the human re-adding a dropped job by pasting its link.
+ * `failed→needs_verification`, (2026-10-31) `dropped_filter→passed_filters`,
+ * the human re-adding a dropped job by pasting its link, and (2026-11-01)
+ * `awaiting_approval→passed_filters` and `approved→passed_filters`, the human
+ * re-running a row after the master changed.
  *
  * The true statement is narrower and is what the prose above was reaching for: no
  * backward edge exists on the AUTOMATED FORWARD PATH, and every backward edge except
@@ -127,6 +129,15 @@ export const STATUS_TRANSITIONS: readonly StatusTransition[] = [
   // the most expensive human task in the system, manufactured by a graph gap rather than
   // by any real ambiguity.
   { from: 'approved', to: 'blocked_needs_human', allowedAgents: ['applier'], note: 'Applier hit a blocker on an approved row. Set block_reason in the SAME update — applications_blocked_has_reason requires it. Exists so a blocked row need not travel through `applying`: a crash between an approved->applying write and an applying->blocked write leaves the row at `applying`, the sweeper routes it to needs_verification, and a human then hand-verifies an application that was never submitted.' },
+  // ---- Re-run after the master changed (2026-11-01, migration 20261101173000) -
+  // Teja rewrote the master (v4 -> v9 in two days) and the queue held resumes tailored
+  // against v3..v8. These two human-only BACKWARD edges send a row to the matcher's queue
+  // so it is re-scored, re-tailored and re-audited on the latest master. Without them the
+  // only way back was via dropped_filter, which writes a false "declined" event forever.
+  // Both lead AWAY from applying, so constraint 15 is untouched.
+  { from: 'awaiting_approval', to: 'passed_filters', allowedAgents: ['human'], note: 'Human sends it back to be re-scored and re-tailored, e.g. after the master changed.' },
+  // Withdraws an approval before submission; the applier's later approved -> applying is refused by the guard.
+  { from: 'approved', to: 'passed_filters', allowedAgents: ['human'], note: 'Human withdraws the approval to re-score and re-tailor before anything is sent.' },
 
   // ---- Submission: the one non-idempotent leg ------------------------------
   // 'tracker' since 20261009235000 (Teja, 2026-10-09): a DKIM/SPF-verified ATS receipt
