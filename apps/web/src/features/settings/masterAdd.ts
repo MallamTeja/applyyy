@@ -194,7 +194,13 @@ function orNull(values: AddValues, key: string): string | null {
 
 /* One bullet per non-blank line; trailing `#tag` words become that bullet's tags.
  * Only TRAILING tags, so "Ranked #1 of 300 teams" keeps its "#1" as text. A line that is
- * nothing but tags keeps its last word as text rather than becoming an empty bullet. */
+ * nothing but tags keeps its last word as text rather than becoming an empty bullet.
+ * A tag must START WITH A LETTER (fixed 2026-11-01): "ranked #1" at the END of a line was
+ * peeled as tag "1" and printed "ranked" with the rank gone, and "#100DaysOfCode" is a
+ * name to print, not a keyword a job would match. The trade is deliberate: a digit-led
+ * tech tag ("#3d") now stays visible text the operator can fix in the preview, where the
+ * old rule silently deleted printed resume words. Letter-led tags with digits ("#k8s")
+ * still peel. */
 export function parseBullets(text: string, mintId: MintId): MasterBullet[] {
   // Lines, trimmed, blanks dropped.
   const lines = text.split('\n').map((line) => line.trim()).filter((line) => line !== '');
@@ -204,8 +210,9 @@ export function parseBullets(text: string, mintId: MintId): MasterBullet[] {
     const words = line.split(/\s+/);
     // Tags in the order written.
     const tags: string[] = [];
-    // Peel while the last word is a #tag, but never the only word left.
-    while (words.length > 1 && /^#[\w-]+$/.test(words[words.length - 1] ?? '')) {
+    // Peel while the last word is a letter-led #tag, but never the only word left.
+    // `[A-Za-z]` first so "#1" and "#100DaysOfCode" stay text (see the header).
+    while (words.length > 1 && /^#[A-Za-z][\w-]*$/.test(words[words.length - 1] ?? '')) {
       // Without the '#', matching how stored tags look.
       tags.unshift((words.pop() ?? '').slice(1));
     }

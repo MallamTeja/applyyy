@@ -191,6 +191,30 @@ describe('parseBullets', () => {
     // One bullet, the tag kept as its text rather than an empty bullet.
     assert.deepEqual(bullets, [{ id: 'bullet-1', text: '#solo', tags: [] }]);
   });
+
+  // A TRAILING '#1' is a rank, not a tag: peeling it printed "ranked" with the number gone.
+  it('keeps a trailing "#1" as text instead of peeling it as a tag', () => {
+    // The line from the review finding, rank last.
+    const bullets = add.parseBullets('Won the national hackathon, ranked #1', counterMint());
+    // Whole line kept; a purely numeric word is never a tag.
+    assert.deepEqual(bullets, [{ id: 'bullet-1', text: 'Won the national hackathon, ranked #1', tags: [] }]);
+  });
+
+  // A digit-led hashtag is a name (a challenge, a campaign), not a Tailor keyword.
+  it('keeps a trailing digit-led hashtag like #100DaysOfCode as text', () => {
+    // Digit-led, so it stays printed on the resume.
+    const bullets = add.parseBullets('Finished #100DaysOfCode', counterMint());
+    // Text intact, no tag.
+    assert.deepEqual(bullets, [{ id: 'bullet-1', text: 'Finished #100DaysOfCode', tags: [] }]);
+  });
+
+  // Over-fix guard: a letter-led tag that CONTAINS digits is still a tag.
+  it('still peels letter-led tags that contain digits, like #k8s', () => {
+    // Two documented-syntax tags, one with digits inside.
+    const bullets = add.parseBullets('Ran the cluster #k8s #go2', counterMint());
+    // Both peeled, in written order.
+    assert.deepEqual(bullets, [{ id: 'bullet-1', text: 'Ran the cluster', tags: ['k8s', 'go2'] }]);
+  });
 });
 
 // The editor half of d50775a: the add form writes entry links, and never writes an empty one.

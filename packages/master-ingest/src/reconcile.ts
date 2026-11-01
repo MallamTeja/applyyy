@@ -1067,8 +1067,19 @@ function rebuildLinkedEntry<T extends LinkedEntry>(
     links: reconcileFlatSection<MasterLink>(
       /* THIS entry's previous links only - decision 1, one level down. */
       previousNode?.links ?? [],
-      /* The parse's links for this entry; a PDF parse has none (see master-pdf). */
-      node.links ?? [],
+      /* The parse's links for this entry - OR, WHEN THE KEY IS ABSENT, THE STORED
+         ENTRY'S OWN LINKS (fixed 2026-11-01).
+         Absent and `[]` are different statements from a parse. `[]` says "this
+         entry has no links" and is a real removal: reconciled like identity and
+         project links, the drop reported. Absent says NOTHING - master-pdf
+         extract.ts builds every achievement and certification without the key,
+         because a PDF has no way to carry an entry's links. Reading that as `[]`
+         reported every stored Credly/LeetCode link dropped on every PDF re-upload,
+         and review offers no "keep", so accepting lost them for good. Feeding the
+         stored links back through this SAME walk carries each by its own URL key
+         (exact, never reviewable), so no second policy and no second row shape.
+         An unmatched parent has `previousNode === null`, so it still gets `[]`. */
+      node.links ?? previousNode?.links ?? [],
       /* Filed under the link kind, like every other link row. */
       'link',
       /* Report path, e.g. `certifications[1].links[0]`. */

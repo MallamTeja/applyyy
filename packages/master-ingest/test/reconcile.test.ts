@@ -1341,21 +1341,62 @@ describe('certification and achievement links are reconciled inside their own en
   });
 
   /* THE REALISTIC RE-UPLOAD: the PDF parser does not attach annotation links to
-     certs (master-pdf extract.ts files every annotation under identity.links), so
-     a re-upload hands in the cert with no links. The cert must carry and the
-     credential link must be REPORTED dropped - visible in review, never a silent
-     loss. */
-  it('reports a stored cert link as dropped when the re-parse has none', () => {
-    /* What a PDF re-upload hands in: the same certs, rebuilt with no links key. */
+     certs or achievements (master-pdf extract.ts builds both with NO `links` key
+     and files every annotation under identity.links), so a re-upload hands the
+     entries in key-absent.
+     THIS TEST USED TO ASSERT THE OPPOSITE - that the credential link is reported
+     dropped. That was data loss with a receipt: review gates Accept on ticking
+     each dropped row and offers no "keep", and a PDF can NEVER carry the link
+     back, so every accepted re-upload stored `links: []` and lost every Credly /
+     LeetCode link for good. An absent key is a source that SAYS NOTHING about
+     links, so the stored ones are kept (carried by their own URL key, the same
+     walk identity and project links use). Twin of the explicit-`[]` test below. */
+  it('keeps stored entry links when the re-parse cannot carry them (absent key)', () => {
+    /* What a PDF re-upload hands in: the same entries, rebuilt with no links key. */
     const incoming = reparse({
       ...previous,
+      /* Achievements key-absent, exactly as extract.ts builds them... */
+      achievements: previous.achievements.map((a) => achievement(a.id, a.label, a.description)),
+      /* ...and certifications too. */
       certifications: previous.certifications.map((c) => certification(c.id, c.label, c.description)),
+    });
+    /* Non-vacuity: the incoming cert really is key-absent, not `links: []`. */
+    assert.equal('links' in (incoming.certifications[0] ?? {}), false, 'incoming carries a links key; test is vacuous');
+    /* Reconcile against the stored side that has the credential link. */
+    const result = reconcileMasterProfile({ previous, incoming, mintId: makeMinter('new') });
+    /* The cert still carries: the parent was never in question. */
+    assert.equal(result.profile.certifications[0]?.id, 'cert_ml');
+    /* The credential link survives under its stored id... */
+    assert.equal(entryLinkIdAt(result.profile, 'certifications', 0, 0), 'link_cert_ml');
+    /* ...with its URL intact, not just its id... */
+    assert.equal(result.profile.certifications[0]?.links?.[0]?.url, 'https://www.credly.com/badges/example');
+    /* ...and so does the achievement's, through the same rebuild. */
+    assert.equal(entryLinkIdAt(result.profile, 'achievements', 0, 0), 'link_leetcode');
+    /* Nothing reported dropped: nothing was. */
+    assert.deepEqual(result.report.dropped, []);
+    /* Nothing minted: a kept link is the stored node, not new content. */
+    assert.deepEqual(result.report.minted, []);
+  });
+
+  /* TWIN of the test above, differing in ONE dimension: the incoming cert says
+     `links: []` instead of omitting the key. A source that CAN carry links (a
+     pasted JSON master) and lists none is a real removal, so the incoming side
+     stays authoritative and the drop is reported - the rule identity and project
+     links follow. Guards against a fix that keeps stored links whenever the
+     incoming list is EMPTY rather than ABSENT. */
+  it('still reports a stored cert link dropped when the re-parse says links: []', () => {
+    /* The same certs, each with an explicit empty links list. */
+    const incoming = reparse({
+      ...previous,
+      certifications: previous.certifications.map((c) => certification(c.id, c.label, c.description, [], [])),
     });
     /* Reconcile against the stored side that has the credential link. */
     const result = reconcileMasterProfile({ previous, incoming, mintId: makeMinter('new') });
-    /* The cert still carries: losing a link is not losing the cert. */
+    /* The cert carries... */
     assert.equal(result.profile.certifications[0]?.id, 'cert_ml');
-    /* And exactly the credential link is reported - visible in review, never silent. */
+    /* ...its stored list is empty, as the source said... */
+    assert.deepEqual(result.profile.certifications[0]?.links, []);
+    /* ...and exactly the credential link is reported - visible in review, never silent. */
     assert.deepEqual(result.report.dropped.map((d) => d.id), ['link_cert_ml']);
   });
 

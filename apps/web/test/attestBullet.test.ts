@@ -34,12 +34,16 @@ registerHooks({
 let attest: typeof import('../src/features/approval/attestBullet.ts');
 // The pure edits, for building fixtures and for the Undo step.
 let edits: typeof import('../src/features/approval/tailoredEdits.ts');
+// The owner of the refusal wording, so a test can compare against it rather than copy it.
+let store: typeof import('../src/features/settings/masterStore.ts');
 
 before(async () => {
   // Loaded after the hooks so its own extensionless imports resolve.
   attest = await import('../src/features/approval/attestBullet.ts');
   // Same.
   edits = await import('../src/features/approval/tailoredEdits.ts');
+  // Same; read for storeRefusalMessage and classifyStoreFailure.
+  store = await import('../src/features/settings/masterStore.ts');
 });
 
 // The pinned version every fixture starts from.
@@ -283,6 +287,63 @@ describe('attestBullet: one click puts the line in the master, then on the resum
     assert.equal(callsOf(calls, 'master_profiles', 'insert').length, 1);
     // Not one write to the application row.
     assert.equal(callsOf(calls, 'applications', 'update').length, 0);
+  });
+
+  /* ONE WORDING FOR A REFUSED MASTER INSERT (review finding, 2026-11-01). attestBullet kept a
+     line-for-line copy of masterStore.storeRefusalMessage, so the add forms and this path could
+     drift apart on the next edit to either. Pinned through the REAL path: each error goes through
+     the real classifier inside storeMasterProfile, and the message must be storeRefusalMessage's. */
+  it('words every refused master insert exactly as storeRefusalMessage does', async () => {
+    // One PostgREST-shaped error per refusal kind, with the kind it must classify as.
+    const cases = [
+      // Unique content hash: this master already exists.
+      { kind: 'identical', error: { code: '23505', message: 'duplicate key value violates unique constraint "master_profiles_user_content_hash_key"' } },
+      // Unique version: a concurrent save took the number.
+      { kind: 'version_race', error: { code: '23505', message: 'duplicate key value violates unique constraint "master_profiles_user_version_key"' } },
+      // RLS refused the row.
+      { kind: 'not_authenticated', error: { code: '42501', message: 'new row violates row-level security policy' } },
+      // Anything else keeps the database's words.
+      { kind: 'failed', error: { code: 'XX000', message: 'insert refused' } },
+    ] as const;
+    for (const c of cases) {
+      // Non-vacuity: the fixture error really is the kind it is named for.
+      const outcome = store.classifyStoreFailure(c.error);
+      // A mislabelled case would test some other branch twice.
+      assert.equal(outcome.kind, c.kind, `fixture for ${c.kind} classifies as ${outcome.kind}`);
+      // The attest path refused by exactly this insert error.
+      const out = await run({ masterInsert: { data: null, error: c.error } }).done;
+      // Refused, or the comparison below is meaningless.
+      assert.equal(out.ok, false, `${c.kind} must refuse`);
+      // The owner's sentence, inside attestBullet's own frame, and nothing else.
+      if (!out.ok) assert.equal(out.message, `could not add it to your master profile: ${store.storeRefusalMessage(outcome as never)}.`, c.kind);
+    }
+  });
+
+  /* The test above passes on a faithful COPY too, which is the drift risk itself. This is the red
+     half: the owner's literal sentences may appear in exactly one source file. Derived from
+     storeRefusalMessage at run time, so a rewording moves with it instead of breaking this. */
+  it('keeps the refusal wording in one source file, masterStore.ts', async () => {
+    // Node stdlib only: a recursive listing and a read.
+    const { readdirSync, readFileSync } = await import('node:fs');
+    // The web source root, beside this test directory.
+    const srcRoot = new URL('../src/', import.meta.url);
+    // Every TS/TSX source file, as forward-slash paths relative to src/.
+    const files = readdirSync(srcRoot, { recursive: true, encoding: 'utf8' })
+      // Normalised so the assertion reads the same on Windows and CI.
+      .map((p) => p.replaceAll('\\', '/'))
+      // Code only.
+      .filter((p) => /\.tsx?$/.test(p));
+    // Non-vacuity: the walk found the tree, not an empty directory.
+    assert.ok(files.length > 20, `only ${files.length} source files found`);
+    // The two sentences only the owner should write out ('failed' echoes the db; RLS's is generic).
+    for (const kind of ['identical', 'version_race'] as const) {
+      // The owner's words, read from the owner.
+      const sentence = store.storeRefusalMessage({ kind });
+      // Every file that spells the sentence out.
+      const homes = files.filter((p) => readFileSync(new URL(p, srcRoot), 'utf8').includes(sentence));
+      // Exactly one home.
+      assert.deepEqual(homes, ['features/settings/masterStore.ts'], `"${sentence}" is written out in: ${homes.join(', ')}`);
+    }
   });
 
   it('refuses when the latest master would change a claim the tailor made, and writes nothing', async () => {

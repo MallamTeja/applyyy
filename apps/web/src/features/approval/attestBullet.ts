@@ -15,7 +15,7 @@
 // Types only: the resume and master shapes from the app's single contract seam.
 import type { MasterProfile, ResolvedResume } from '../../data/contract';
 // The newest stored master, and the insert-only version writer; reused, never re-implemented.
-import { loadCurrentMasterProfile, storeMasterProfile } from '../settings/masterStore';
+import { loadCurrentMasterProfile, storeMasterProfile, storeRefusalMessage } from '../settings/masterStore';
 // The ingest gate: fills the nullable keys the table's check constraint demands, and refuses a
 // malformed or duplicate-id profile before it can become a version.
 import { checkMasterProfile } from '../settings/masterIngest';
@@ -159,19 +159,6 @@ function plan(target: MasterProfile, version: number, args: AttestBulletArgs): P
   return { ok: true, refs, original, resume: added.resume };
 }
 
-/* Why a master insert was refused, in words. A literal per named outcome, so a new outcome in
-   masterStore's union fails to compile here instead of reading as a generic failure. */
-function insertRefusal(stored: Exclude<Awaited<ReturnType<typeof storeMasterProfile>>, { kind: 'stored' }>): string {
-  // The database's own words for an unclassified failure.
-  if (stored.kind === 'failed') return stored.message;
-  // This exact master content already exists as an older version (unique content hash).
-  if (stored.kind === 'identical') return 'an identical master profile version already exists';
-  // Two saves raced for the next version number; a retry resolves it.
-  if (stored.kind === 'version_race') return 'another master profile save happened at the same moment; try again';
-  // The only outcome left: RLS refused the insert.
-  return 'you are not signed in';
-}
-
 /* One click: the bullet into the master as a new version, then onto this resume, re-pinned. Never
    throws: every path ends in an AttestBulletOutcome, like attestSkill and saveTailoredEdit. */
 export async function attestBullet(client: Client, args: AttestBulletArgs): Promise<AttestBulletOutcome> {
@@ -234,7 +221,9 @@ export async function attestBullet(client: Client, args: AttestBulletArgs): Prom
   // Insert-only; the database assigns the version and the content hash.
   const stored = await storeMasterProfile(client, target);
   // Each refusal named: nothing has been written anywhere yet.
-  if (stored.kind !== 'stored') return { ok: false, message: `could not add it to your master profile: ${insertRefusal(stored)}.`, masterInserted: false };
+  // Worded by masterStore, which owns StoreOutcome: this file kept a copy until 2026-11-01, and two
+  // copies of one sentence drift apart the first time only one is edited.
+  if (stored.kind !== 'stored') return { ok: false, message: `could not add it to your master profile: ${storeRefusalMessage(stored)}.`, masterInserted: false };
   // The real number, which a concurrent save could have pushed past latest+1.
   const version = stored.version;
 
