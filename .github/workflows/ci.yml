@@ -155,6 +155,50 @@ jobs:
           [ "$total" -gt 0 ] || { echo "no edge tests ran"; exit 1; }
 
   # ---------------------------------------------------------------------------
+  # (b2) packages/shared-types tests (added 2026-11-01). They hold the contract's
+  # parity checks, e.g. "every table in the migrations has a Row type". No job ran
+  # them, so 4f53c25 landed a table without a Row type on a green main (fixed in
+  # 7c182f6). Same shape as (b): Node 24 strips types, and the tests import only
+  # node builtins and ../src, so no install and no lockfile write.
+  # ---------------------------------------------------------------------------
+  shared-types-tests:
+    # A readable name in the PR checks list.
+    name: node --test (shared-types)
+    # Linux runner, as above.
+    runs-on: ubuntu-latest
+    # A few dozen tests that run in under a second; ten minutes is a hang.
+    timeout-minutes: 10
+    steps:
+      # The source to test.
+      - name: Checkout
+        # Same pin as every other job.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Node 24 is required: it is the version that strips TypeScript natively.
+      - name: Install Node
+        # Same pin as the edge-tests job.
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        # The runtime the tests are written against.
+        with:
+          # Same major as every other Node job here.
+          node-version: '24'
+      # Run the suite and refuse a vacuous or partial pass.
+      - name: node --test, and assert tests ran
+        run: |
+          # From the repo root, because the glob is root-relative (CLAUDE.md §5).
+          # Actions' bash runs with pipefail, so a failing test fails this line despite tee.
+          node --test "packages/shared-types/test/**/*.test.ts" 2>&1 | tee shared-types-tests.log
+          # Only the summary line ("ℹ tests 27"), never a test title containing the words.
+          total=$(grep -E 'ℹ tests [0-9]+$' shared-types-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
+          # A before() hook that cannot import CANCELS tests: neither passed nor failed (CLAUDE.md §5).
+          cancelled=$(grep -E 'ℹ cancelled [0-9]+$' shared-types-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
+          # Printed so both counts are visible in the job log.
+          echo "shared-types tests: $total, cancelled: $cancelled"
+          # `fail 0` beside `tests 0` is a glob that matched nothing, not a pass.
+          [ "$total" -gt 0 ] || { echo "no shared-types tests ran"; exit 1; }
+          # A cancelled test proved nothing.
+          [ "$cancelled" -eq 0 ] || { echo "$cancelled shared-types tests were cancelled"; exit 1; }
+
+  # ---------------------------------------------------------------------------
   # (c) Web app: typecheck, production build, tests. The build matters on its own:
   # Vercel deploys whatever this builds, and nothing else in CI builds apps/web.
   # ---------------------------------------------------------------------------
