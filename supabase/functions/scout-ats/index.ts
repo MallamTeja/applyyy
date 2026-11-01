@@ -329,9 +329,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
       // robots-gated transport (poll-fetch.ts): a disallow throws RobotsDisallowedError
       // before the board is contacted, and a non-ok status throws HttpError — both land
       // in the catch below. The transport sends the identity header itself.
-      const parseResult = await collectBoardPages(adapter, board.board_token, async (pageUrl) => {
-        // One page through the gated transport.
-        const response = await fetchBoard(pageUrl);
+      const parseResult = await collectBoardPages(adapter, board.board_token, async (pageUrl, body) => {
+        // One page through the gated transport. A body (Workday) makes it a JSON POST;
+        // without one it is the same GET as before. No robots cache override here.
+        const response = await fetchBoard(pageUrl, undefined, body);
         // Null is only possible under a notFound override this caller does not use; the
         // guard beats a blind non-null assertion (CLAUDE.md §6) and the catch records it.
         if (response === null) throw new Error("unexpected null response from fetchBoard");

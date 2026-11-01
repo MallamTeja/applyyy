@@ -71,3 +71,61 @@ describe('readBoardPages', () => {
     await expect(readBoardPages(FAKE_ADAPTER, 'acme', impl)).rejects.toThrow(/HTTP 404/);
   });
 });
+
+// POST boards (Workday, 2026-11-01). The rule must match scout-ats's poll-fetch.ts: a
+// body means POST JSON, no body means the unchanged GET, so the two scouts agree.
+describe('readBoardPages request method', () => {
+  // A fetch double that records every request init and answers one empty page.
+  function capturingFetch() {
+    // Inits in request order.
+    const inits: RequestInit[] = [];
+    // The double itself; a real Response, as the real fetch returns.
+    const impl = (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      // Keep exactly what the transport sent.
+      inits.push(init ?? {});
+      // One page that parses to nothing and names no successor.
+      return Promise.resolve(new Response(JSON.stringify({ ids: [], next: null }), { status: 200 }));
+    };
+    // Both, for the assertions.
+    return { impl: impl as typeof fetch, inits };
+  }
+
+  it('a page with a body is POSTed as JSON', async () => {
+    // The fake adapter plus a body builder: its presence is what makes a board POST.
+    const postAdapter = { ...FAKE_ADAPTER, requestBody: () => '{"offset":0}' } as AtsAdapter;
+    // A fresh recorder for this test only.
+    const { impl, inits } = capturingFetch();
+    // One board read through the real transport.
+    await readBoardPages(postAdapter, 'acme', impl);
+    // One request: POST, JSON content type beside the usual headers, the body unchanged.
+    expect(inits).toEqual([
+      {
+        // Workday's list endpoint answers anything but POST with 400.
+        method: 'POST',
+        // The two identity headers every page carries, plus the JSON declaration.
+        headers: {
+          // Every adapter parses JSON.
+          Accept: 'application/json',
+          // The scout's contactable identity, unchanged.
+          'User-Agent': 'applyy-scout/1.0 (+https://github.com/MallamTeja/applyyy)',
+          // Only on the POST path.
+          'Content-Type': 'application/json',
+        },
+        // Passed through untouched.
+        body: '{"offset":0}',
+      },
+    ]);
+  });
+
+  it('a page without a body is fetched exactly as before', async () => {
+    // A fresh recorder for this test only.
+    const { impl, inits } = capturingFetch();
+    // The plain fake adapter has no requestBody, like every pre-Workday board.
+    await readBoardPages(FAKE_ADAPTER, 'acme', impl);
+    // Byte-identical to the pre-Workday init: headers only, no method, no body.
+    expect(inits).toEqual([
+      // Exactly the init the single-fetch code has always sent.
+      { headers: { Accept: 'application/json', 'User-Agent': 'applyy-scout/1.0 (+https://github.com/MallamTeja/applyyy)' } },
+    ]);
+  });
+});

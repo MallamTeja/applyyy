@@ -34,9 +34,19 @@ export function readBoardPages(
   fetchImpl: typeof fetch = fetch,
 ): Promise<BoardPagesResult> {
   // The shared loop owns pagination, the cursor-stall check and the page cap.
-  return collectBoardPages(adapter, boardToken, async (pageUrl) => {
-    // One request per page, same headers as page one.
-    const res = await fetchImpl(pageUrl, { headers: REQUEST_HEADERS });
+  return collectBoardPages(adapter, boardToken, async (pageUrl, body) => {
+    // One request per page, same headers as page one. A body (Workday, 2026-11-01)
+    // makes it a JSON POST, because Workday's list endpoint answers GET with 400; no
+    // body keeps the exact GET every other board has always had. scout-ats's
+    // poll-fetch.ts applies the same rule, so the two scouts request pages alike.
+    const init: RequestInit =
+      // No body: the exact pre-Workday GET init, byte for byte.
+      body === undefined
+        ? { headers: REQUEST_HEADERS }
+        // A body: POST it, declared as JSON beside the usual identity headers.
+        : { method: 'POST', headers: { ...REQUEST_HEADERS, 'Content-Type': 'application/json' }, body };
+    // The page; a URL fragment (Workday's cursor) is never sent by fetch.
+    const res = await fetchImpl(pageUrl, init);
     // A non-ok page THROWS rather than returning its body: an error page fed to the
     // parser could parse as an empty board (CLAUDE.md §6). scout.ts's catch records it.
     if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText} on ${pageUrl}`);

@@ -469,13 +469,15 @@ test("an unsupported provider returns null rather than throwing", () => {
   assert.equal(getAdapter("lever"), leverAdapter);
   assert.equal(getAdapter("ashby"), ashbyAdapter);
   assert.equal(getAdapter("smartrecruiters"), smartrecruitersAdapter);
+  // Workday is registered (2026-11-01); checked by provider so no new import is needed.
+  assert.equal(getAdapter("workday")?.provider, "workday");
 });
 
 // The Scout selects watchlist rows by this list, so a board it cannot handle is never
 // claimed in the first place.
-test("supportedProviders reports exactly the four shipped adapters", () => {
+test("supportedProviders reports exactly the five shipped adapters", () => {
   // Sorted so the assertion does not depend on map insertion order.
-  assert.deepEqual([...supportedProviders()].sort(), ["ashby", "greenhouse", "lever", "smartrecruiters"]);
+  assert.deepEqual([...supportedProviders()].sort(), ["ashby", "greenhouse", "lever", "smartrecruiters", "workday"]);
 });
 
 // --- pagination: SmartRecruiters caps one response at 100 postings -------------------

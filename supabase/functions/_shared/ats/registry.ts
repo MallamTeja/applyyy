@@ -22,6 +22,8 @@ import { leverAdapter } from "./lever.ts";
 // SmartRecruiters satisfies the same contract but lives beside the aggregators in
 // scout/adapters/; moving it here is a separate parcel, so it is imported in place.
 import { smartrecruitersAdapter } from "../scout/adapters/smartrecruiters.ts";
+// Workday lives beside SmartRecruiters for the same reason; discovery only, POST paging.
+import { workdayAdapter } from "../scout/adapters/workday.ts";
 // The adapter contract.
 import type { AtsAdapter, ParsedPosting } from "./types.ts";
 // The identity verdict boardRefusal acts on. Type-only: the verdict is computed by the
@@ -52,6 +54,11 @@ const ADAPTERS: ReadonlyMap<AtsProvider, AtsAdapter> = new Map([
   // the first adapter with `nextPageUrl`. Registered 2026-10-24 for Canva, Nagarro and
   // PhonePe. Workable is written too but stays unregistered until it has a parcel.
   ["smartrecruiters" as AtsProvider, smartrecruitersAdapter],
+  // Workday: the first POST board (the list endpoint answers GET with 400), 20 postings
+  // a page, total on page one only. Registered 2026-11-01 for the 17 tenants verified
+  // that day (docs/harvest/2026-11-01-workday-coverage.md). Discovery only: applying
+  // through Workday routes to a human.
+  ["workday" as AtsProvider, workdayAdapter],
 ]);
 
 // Look up the adapter for a watchlist row's provider.
@@ -103,10 +110,15 @@ export type BoardPagesResult =
 // fixtures: scout-ats/index.ts calls Deno.serve on import and cannot be loaded by node.
 // A fetch error (robots refusal, non-ok status) is NOT caught here; it propagates to
 // the caller's catch, which already does the failed-board bookkeeping for it.
+//
+// `body`, when the transport receives one, means POST it as JSON; undefined means the
+// plain GET every board used before Workday (2026-11-01). Both callers (scout-ats's
+// poll-fetch.ts, the worker's board-pages.ts) implement that same rule, so the two
+// scouts agree on how a page is requested as well as on what a complete board is.
 export async function collectBoardPages(
   adapter: AtsAdapter,
   boardToken: string,
-  fetchJson: (url: string) => Promise<unknown>,
+  fetchJson: (url: string, body?: string) => Promise<unknown>,
   maxPages: number = MAX_BOARD_PAGES,
 ): Promise<BoardPagesResult> {
   // The first page's URL comes from the same builder single-page adapters use.
@@ -118,19 +130,25 @@ export async function collectBoardPages(
   let firstPayload: unknown = undefined;
   // Bounded by the cap, so a board that never says "last page" cannot spin.
   for (let page = 1; page <= maxPages; page += 1) {
+    // A POST board's body for this page; GET boards have no builder and send none.
+    const body = adapter.requestBody?.(boardToken, url);
+    // A body the adapter cannot build fails the board BEFORE any request is sent.
+    if (body === null) return { ok: false, reason: `page ${page}: request for this page could not be built` };
     // One request per page, through whatever transport the caller supplied.
-    const payload = await fetchJson(url);
+    const payload = await fetchJson(url, body);
     // Remember the first page for the identity check.
     if (page === 1) firstPayload = payload;
     // Each page is parsed on its own, by the same pure parser as a single-page board.
-    const parsed = adapter.parse(payload);
+    // The token is passed for adapters whose postings link relative to the board.
+    const parsed = adapter.parse(payload, boardToken);
     // One bad page fails the board; name the page so the health page shows where.
     if (!parsed.ok) return { ok: false, reason: `page ${page}: ${parsed.reason}` };
     // Keep this page's results.
     postings.push(...parsed.postings);
     skipped.push(...parsed.skipped);
     // Ask the adapter for the next page. No method means a single-response board.
-    const next = adapter.nextPageUrl?.(boardToken, payload) ?? null;
+    // The current URL goes along for adapters whose cursor lives in it (Workday).
+    const next = adapter.nextPageUrl?.(boardToken, payload, url) ?? null;
     // No next page: the board has been read in full.
     if (next === null) return { ok: true, firstPayload, postings, skipped };
     // A cursor that points back at this page would re-read it until the cap.

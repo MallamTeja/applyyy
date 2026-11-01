@@ -46,6 +46,8 @@ const SELECTABLE_ATS_PROVIDERS: readonly AtsProvider[] = [
   'ashby',
   'workable',
   'smartrecruiters',
+  // Selectable since the scout's Workday adapter landed (2026-11-01).
+  'workday',
 ];
 
 /* --- What a board token looks like per provider ----------------------- */
@@ -75,6 +77,13 @@ const PROVIDER_HINTS: Readonly<Partial<Record<AtsProvider, ProviderHint>>> = {
   smartrecruiters: {
     where: 'The company identifier in the SmartRecruiters careers URL.',
     example: 'careers.smartrecruiters.com/ExampleCo -> token is ExampleCo',
+  },
+  // Workday's token packs three URL parts (tenant, wd number, site); the scout parses
+  // it with one strict shape, so the hint spells that shape out exactly. An optional
+  // `?facet=id,id` narrows a big board, but it is not hand-entered here.
+  workday: {
+    where: 'Tenant, wd number and site from the Workday careers URL, as tenant.wdN/site.',
+    example: 'exampleco.wd5.myworkdayjobs.com/en-US/ExampleCareers -> token is exampleco.wd5/ExampleCareers',
   },
   unknown: {
     where: 'Not a board to poll.',

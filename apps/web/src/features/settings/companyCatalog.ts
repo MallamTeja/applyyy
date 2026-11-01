@@ -57,7 +57,10 @@ export type SupportedAtsProvider =
   | 'lever'
   | 'ashby'
   | 'workable'
-  | 'smartrecruiters';
+  | 'smartrecruiters'
+  // Workday boards are pollable since 2026-11-01 (scout adapter workday.ts), so a
+  // catalog row may name one; kept in step with the shared ATS_PROVIDERS tuple.
+  | 'workday';
 
 /* One date for the whole sweep, so a reader can tell at a glance that every
  * `probedOn` below came from the SAME run rather than from rows aged

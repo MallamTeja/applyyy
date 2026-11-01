@@ -96,7 +96,13 @@ export interface AtsAdapter {
   // clock, no database. That is what lets every adapter be covered by cheap
   // table-driven tests against a saved fixture (PROJECT_PLAN §19) rather than only
   // being exercised against a live board that changes underneath the test.
-  parse(payload: unknown): AtsParseResult;
+  //
+  // `boardToken` is OPTIONAL and only Workday reads it (2026-11-01): Workday postings
+  // carry a path relative to the board (`/job/...`), so building an absolute apply
+  // link needs the tenant and site the token names. Optional so every existing
+  // adapter and every single-posting caller (job-link-intake, scout-web) keeps
+  // compiling unchanged; an adapter that NEEDS it must fail the parse without it.
+  parse(payload: unknown, boardToken?: string): AtsParseResult;
   // Read the company identity the PROVIDER ITSELF reports in this payload, or null
   // when the provider offers none. REQUIRED, not optional: an optional method would
   // let a new adapter silently skip the identity guard, and the whole point (the
@@ -113,7 +119,21 @@ export interface AtsAdapter {
   // carries at most 100 postings (live probe 2026-10-24: Nagarro lists 585), so a
   // single fetch would store a sixth of the board and report success. Pure and
   // synchronous like `parse`; the loop that follows it is `collectBoardPages`.
-  nextPageUrl?(boardToken: string, payload: unknown): string | null;
+  //
+  // `currentUrl` is the page just fetched (added 2026-11-01 for Workday, whose later
+  // pages report `total: 0`, so the payload alone cannot say where the board ends and
+  // the cursor must travel in the URL). Adapters that page from the payload alone
+  // (SmartRecruiters) simply ignore it. AN UNREADABLE CURSOR MUST RETURN `currentUrl`
+  // ITSELF, never null: the loop fails a cursor that does not advance, while null
+  // would store the pages read so far as the whole board.
+  nextPageUrl?(boardToken: string, payload: unknown, currentUrl: string): string | null;
+  // The JSON body to POST for this page, or null when the page's request cannot be
+  // built (a malformed token or cursor), which fails the board before anything is
+  // sent. OPTIONAL, and its PRESENCE IS THE METHOD: an adapter without it is fetched
+  // with a plain GET exactly as before, so no existing board changes. Workday needs it
+  // (2026-11-01): its list endpoint answers GET with 400 and takes the page window
+  // only in a POST body. Pure and synchronous like `parse`.
+  requestBody?(boardToken: string, pageUrl: string): string | null;
 }
 
 // --- shared field readers -------------------------------------------------------

@@ -182,6 +182,12 @@ export const ATS_PROVIDERS = [
   /** We have an apply URL but no adapter recognises it. Routes to a human. */
   'unknown',
   'other',
+  /**
+   * Workday careers sites (2026-11-01). Discovery only; applying routes to a human.
+   * LAST because migration 20261101124500 APPENDS it (`add value`, no BEFORE/AFTER),
+   * and enum-parity.test.ts asserts this tuple's order against the replayed SQL.
+   */
+  'workday',
 ] as const;
 /** Union of every legal `jobs.ats_provider` / `company_watchlist.ats_provider` value. */
 export type AtsProvider = (typeof ATS_PROVIDERS)[number];

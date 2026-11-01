@@ -1,0 +1,21 @@
+-- Adds 'workday' to public.ats_provider, so company_watchlist and jobs rows can name
+-- Workday careers boards (scout adapter: supabase/functions/_shared/scout/adapters/workday.ts).
+--
+-- WHY IT EXISTS. On 2026-11-01, 89 India-hiring companies matched none of the five
+-- supported providers. A careers-page sweep plus one live POST each verified 19 of them
+-- on Workday (docs/harvest/2026-11-01-workday-coverage.md). Without this value a
+-- watchlist row cannot say "workday", so the adapter would never be selected.
+--
+-- WHY ITS OWN FILE. `add value` cannot be USED until its transaction commits, and the
+-- CLI wraps each migration in one. Nothing here uses the value and nothing else is
+-- bundled with it, so there is no partial-apply path.
+--
+-- `if not exists` makes a re-run a no-op. No BEFORE/AFTER: the value APPENDS after
+-- 'other', which is the order packages/shared-types ATS_PROVIDERS mirrors (and the
+-- order enum-parity.test.ts asserts).
+--
+-- DEPLOY ORDER: this migration first, then the scout-ats deploy, then the seed snippet
+-- (supabase/snippets/2026-11-01-seed-watchlist-workday.sql). Code that writes 'workday'
+-- must not run before the value exists.
+-- Appended after 'other'; the TS mirror lists it last for the same reason.
+alter type public.ats_provider add value if not exists 'workday';

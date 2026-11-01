@@ -11,13 +11,24 @@ import { httpFetch } from "../_shared/http/index.ts";
 // module-level per-isolate cache; production passes nothing and shares that default.
 import type { RobotsCache } from "../../../packages/master-robots/src/index.ts";
 
-/** Fetch one board's posting list through the robots-gated shared transport. */
-export function fetchBoard(url: string, robotsCache?: RobotsCache): Promise<Response | null> {
+/**
+ * Fetch one board's posting list through the robots-gated shared transport.
+ *
+ * `body` (Workday, 2026-11-01) makes the request a JSON POST: Workday's list endpoint
+ * answers GET with 400 and takes its page window only in a body. Without a body the
+ * request is the exact GET every other board has always received. The same rule lives
+ * in worker/src/scout/board-pages.ts, so the two scouts request pages identically.
+ * Third, after the test-only `robotsCache`, so existing callers and tests are unchanged.
+ */
+export function fetchBoard(url: string, robotsCache?: RobotsCache, body?: string): Promise<Response | null> {
   // Options spelled once; the server and the named test share them by construction.
   return httpFetch(url, {
     // Boards serve JSON. The transport sends our User-Agent identity itself
     // (DEFAULT_USER_AGENT — the same literal this call site used to hard-code).
-    headers: { "Accept": "application/json" },
+    // A POST also declares its JSON body; a GET keeps exactly its one header.
+    headers: body === undefined ? { "Accept": "application/json" } : { "Accept": "application/json", "Content-Type": "application/json" },
+    // POST only when there is a body; spread so a GET carries neither key.
+    ...(body === undefined ? {} : { method: "POST", body }),
     // Single attempt, this loop's pre-transport behavior: a many-board poll cannot
     // afford the default 7-attempt backoff schedule inside one Edge function's wall
     // clock. A non-ok status THROWS (HttpError) rather than returning, so the caller's
