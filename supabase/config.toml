@@ -194,32 +194,41 @@ verify_jwt = true
 
 # Live = true. Browser-invoked via the pipeline runner.
 [functions.tailor]
-# Matches live; the gateway rejects tokenless calls before any Gemini spend.
+# Matches live. The gateway rejects only TOKENLESS calls: the public anon key is a signed
+# JWT and passes it, so in-function authorizeCaller() is what keeps anonymous callers off
+# the Gemini spend (2026-11-01 wiring audit, W14).
 verify_jwt = true
 
-# Live = true. Browser-invoked; spends Gemini quota per row.
+# Live = true. No browser caller: invoked daily by .github/workflows/satellites.yml
+# (W22, 2026-11-01). Spends Gemini quota per row.
 [functions.follow-up]
 # Matches live; a tokenless caller must never reach the Gemini call.
 verify_jwt = true
 
-# Live = true. Spends Gemini quota per row.
+# Live = true. Invoked daily by .github/workflows/satellites.yml. Spends Gemini quota per row.
 [functions.cover-letter]
-# Matches live; gateway check keeps anonymous callers off the quota.
+# Matches live. The gateway passes the anon key (a signed JWT); authorizeCaller() is what
+# keeps anonymous callers off the quota.
 verify_jwt = true
 
-# Live = true. Spends Gemini quota; ?force no longer bypasses the kill switch (ba401be).
+# Live = true. Invoked daily by .github/workflows/satellites.yml.
+# Spends Gemini quota; ?force no longer bypasses the kill switch (ba401be).
 [functions.interview-prep]
 # Matches live; gateway plus in-function authorizeCaller().
 verify_jwt = true
 
-# Live = true. Spends Gemini quota and writes append-only application_events.
+# Live = true. Invoked daily by .github/workflows/satellites.yml.
+# Spends Gemini quota and writes append-only application_events.
 [functions.referral]
-# Matches live; an anonymous writer into an undeletable table must be stopped at the gate.
+# Matches live; an anonymous writer into an undeletable table must be stopped. The gateway
+# passes the anon key, so authorizeCaller() inside is the gate that stops it.
 verify_jwt = true
 
-# Live = true. Spends Gemini quota per run.
+# Live = true. Invoked daily by .github/workflows/satellites.yml. No Gemini call (pure
+# CPU); it writes skill_gap_reports.
 [functions.skill-gap]
-# Matches live; gateway check keeps anonymous callers off the quota.
+# Matches live. The gateway passes the anon key (a signed JWT); authorizeCaller(), added
+# 2026-11-01 (W14), is what refuses anonymous callers.
 verify_jwt = true
 
 # Live = true. Seeds and deletes test rows to prove RLS; must never be anonymous.
@@ -232,14 +241,16 @@ verify_jwt = true
 # which always sends the signed-in user's JWT, and it spends Gemini search-grounding
 # quota — so there is no legitimate tokenless caller and every reason to refuse one.
 [functions.scout-web]
-# True: the gateway rejects anonymous calls before any quota is spent.
+# True: the gateway rejects TOKENLESS calls. The anon key is a signed JWT and passes it, so
+# authorizeCaller() inside is what stops anonymous calls before any quota is spent.
 verify_jwt = true
 
 # New function (2026-10-31): the AI box on the review page proposes resume edits.
 # The browser calls it through functions.invoke('resume-assist') with the signed-in
 # user's JWT, and every call spends Gemini quota, so no tokenless caller is legitimate.
 [functions.resume-assist]
-# True: the gateway rejects anonymous calls before any quota is spent.
+# True: the gateway rejects TOKENLESS calls. The anon key is a signed JWT and passes it, so
+# authorizeCaller() inside is what stops anonymous calls before any quota is spent.
 verify_jwt = true
 
 # New function (2026-10-31), not yet deployed, so there is no live value to match.
@@ -247,5 +258,6 @@ verify_jwt = true
 # signed-in user's JWT; it fetches arbitrary pasted links and spends Gemini quota, so a
 # tokenless caller must be refused at the gateway before either happens.
 [functions.job-link-intake]
-# True: the gateway rejects anonymous calls; authorizeCaller() inside is the second layer.
+# True: the gateway rejects tokenless calls but passes the anon key (a signed JWT), so
+# authorizeCaller() inside is the layer that stops anonymous ones.
 verify_jwt = true

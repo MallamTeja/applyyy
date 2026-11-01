@@ -168,8 +168,9 @@ export const InterviewPrepPanel: React.FC<InterviewPrepPanelProps> = ({ applicat
 
   // Handle case where no data was found for the application
   if (!prepData) {
-    // Inform user that no data is available
-    return <div>No interview prep materials found for this application.</div>;
+    // Inform user that no data is available, and what makes it appear (W22, 2026-11-01): the
+    // satellites workflow calls interview-prep once a day for rows at the interview stage.
+    return <div>No interview prep materials yet. The daily satellites workflow generates a pack once this application reaches the interview stage.</div>;
   }
 
   // Render the main panel content

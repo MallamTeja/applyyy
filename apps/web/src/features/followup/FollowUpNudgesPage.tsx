@@ -193,7 +193,9 @@ export function FollowUpNudgesPage(): ReactElement {
         </div>
       ) : nudges.length === 0 ? (
         <div className="followup-page__empty">
-          <p>No pending follow-up nudges. Applications sitting for over 7 days will automatically appear here.</p>
+          {/* Names the real trigger (W22, 2026-11-01): nothing drafts nudges on its own; the
+              satellites workflow calls follow-up once a day, which drafts at most 5 per run. */}
+          <p>No pending follow-up nudges. The daily satellites workflow drafts up to 5 per run, for applications marked applied at least 7 days ago.</p>
         </div>
       ) : (
         <div className="followup-page__grid">

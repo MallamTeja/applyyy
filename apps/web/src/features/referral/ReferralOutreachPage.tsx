@@ -268,7 +268,9 @@ export function ReferralOutreachPage(): ReactElement {
         </div>
       ) : items.length === 0 ? (
         <div className="referral-page__empty">
-          <p>No drafted referral requests found. As applications pass screening, referral drafts will appear here.</p>
+          {/* Names the real trigger (W22, 2026-11-01): passing screening drafts nothing by itself;
+              the satellites workflow calls referral once a day for rows at passed_filters or scored. */}
+          <p>No drafted referral requests found. The daily satellites workflow drafts up to 5 per run, for applications that passed screening or were scored.</p>
         </div>
       ) : (
         <div className="referral-page__grid">

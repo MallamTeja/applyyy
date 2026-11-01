@@ -130,8 +130,10 @@ export const SkillGapPage: React.FC = () => {
           title was a bare h2, so it rendered 18px while every sibling page leads at 24px
           — and the document had no h1 at all (fixed 2026-10-23). */}
       <PageHeader path="skill-gap" />
-      {/* Empty is a real answer (no gaps recorded yet), stated rather than shown as a blank chart. */}
-      {reports.length === 0 && <p className="skill-gap-loading">No skill gaps recorded yet.</p>}
+      {/* Empty is a real answer (no gaps recorded yet), stated rather than shown as a blank chart.
+          The second sentence names the real trigger (W22, 2026-11-01): the satellites workflow
+          runs skill-gap once a day over scored and applied jobs; nothing else writes this table. */}
+      {reports.length === 0 && <p className="skill-gap-loading">No skill gaps recorded yet. The daily satellites workflow recounts them from scored and applied jobs.</p>}
       {/* Container for the horizontal bar chart */}
       <div className="skill-gap-chart">
         {/* One bar per missing skill, most-demanded first. */}
