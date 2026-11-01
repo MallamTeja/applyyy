@@ -75,9 +75,10 @@ function fakeGateway(overrides: Partial<RunGateway> = {}) {
       tailoredProfile: null;
       // Unknown employer: the stub form never asks "previously worked at", so null is harmless.
       employerName: null;
+      atsProvider: null; // Not a Workday row: the Workday guard stays out of the way.
     }>
   > = [
-    [{ id: 'app-1', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null }],
+    [{ id: 'app-1', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null, atsProvider: null }],
     [],
   ];
   const closed: Array<Record<string, unknown>> = [];
@@ -323,6 +324,7 @@ describe('runApplierBatch', () => {
           tailoredProfile: null,
           // No employer: these tests are about pacing, never about eligibility questions.
           employerName: null,
+          atsProvider: null, // Not a Workday row: the Workday guard stays out of the way.
         }));
       },
       releaseClaim: async (id) => {
@@ -362,8 +364,8 @@ describe('runApplierBatch', () => {
         return reads <= 2;
       },
       claimApplications: async () => [
-        { id: 'app-1', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null },
-        { id: 'app-2', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null },
+        { id: 'app-1', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null, atsProvider: null },
+        { id: 'app-2', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null, atsProvider: null },
       ],
       releaseClaim: async (id, reason) => {
         releases.push({ id, reason });
@@ -425,7 +427,7 @@ describe('APPLY_ONLY_ID', () => {
         // Leased on hand-out, exactly as the RPC does.
         for (const id of picked) leased.add(id);
         // Each row's applyUrl names it, so page navigations identify the row.
-        return picked.map((id) => ({ id, status: 'approved' as const, applyUrl: `http://127.0.0.1:1/${id}`, tailoredProfile: null, employerName: null }));
+        return picked.map((id) => ({ id, status: 'approved' as const, applyUrl: `http://127.0.0.1:1/${id}`, tailoredProfile: null, employerName: null, atsProvider: null }));
       },
       // Recorded per row so the assertions can say WHICH row moved.
       advanceStatus: async (id, to) => {
@@ -631,7 +633,7 @@ describe('submit cap and circuit breaker', () => {
         // Leased on hand-out, exactly as the RPC does.
         for (const id of picked) leased.add(id);
         // applyUrl names the row, so page navigations identify which row was worked on.
-        return picked.map((id) => ({ id, status: 'approved' as const, applyUrl: `http://127.0.0.1:1/${id}`, tailoredProfile: null, employerName: null }));
+        return picked.map((id) => ({ id, status: 'approved' as const, applyUrl: `http://127.0.0.1:1/${id}`, tailoredProfile: null, employerName: null, atsProvider: null }));
       },
       // Per row, so the assertions can say WHICH rows moved.
       advanceStatus: async (id, to) => {

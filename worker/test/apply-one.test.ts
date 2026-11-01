@@ -136,6 +136,7 @@ const row = {
   tailoredProfile: syntheticResume,
   // The employer the planner checks "previously worked at" against; any real name works here.
   employerName: 'GitLab',
+  atsProvider: null, // Not a Workday row: the Workday guard stays out of the way.
 } as const;
 
 /** A form that asks for a resume, exactly as the real Greenhouse DOM presents it. */

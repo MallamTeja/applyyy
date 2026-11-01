@@ -22,7 +22,7 @@
 // what makes §18.6's trust period work: after three days of screenshots, the
 // same rows are still sitting there when the flag is flipped.
 // MasterProfile is type-only: the planner needs the shape of identity facts, not a runtime dependency.
-import type { AgentName, AnswerBankRow, BlockReason, MasterProfile, ResolvedResume } from '@applyy/shared-types';
+import type { AgentName, AnswerBankRow, AtsProvider, BlockReason, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 import { guardedAdvance, type StatusWriter } from './guarded-advance.ts';
 // isEeoQuestion: the planner's own EEO test, reused by the fill loop's optional-EEO degrade.
 import { isEeoQuestion, planFill, type FillBlocker } from './plan-fill.ts';
@@ -249,6 +249,38 @@ export interface ClaimedApplication {
   // at <company>?". REQUIRED (nullable, not optional) so no construction site can forget
   // it; null means "unknown employer", on which the planner refuses that question.
   readonly employerName: string | null;
+  // `jobs.ats_provider`, for exactly one question: is this a board the applier must not
+  // open (Workday, 2026-11-01)? REQUIRED (nullable, not optional), like employerName, so
+  // no construction site can forget it: a forgotten optional field would switch the
+  // provider half of the Workday guard off without a sound. Null means the job row
+  // carried no provider; the host half of the guard still runs.
+  readonly atsProvider: AtsProvider | null;
+}
+
+// Workday's job hosts. A posting on either domain needs a Workday candidate account
+// before any form appears, which the applier cannot and must not create.
+const WORKDAY_APEXES = ['myworkdayjobs.com', 'myworkdaysite.com'] as const;
+
+/**
+ * True when the apply URL's HOST is a Workday host: an apex exactly, or a subdomain of
+ * one (a dot-anchored suffix, so `evilmyworkdayjobs.com` is not a match). The host
+ * comes from `new URL`, never from a substring of the raw string, so a Workday name in
+ * a path or query cannot match. An unparseable URL is not Workday; the robots gate
+ * refuses it downstream.
+ */
+export function isWorkdayApplyUrl(applyUrl: string): boolean {
+  // The parsed, lower-cased host; null when the string is not a URL.
+  let host: string;
+  // URL throws on garbage; that is "no host", not an error.
+  try {
+    // The WHATWG parser lower-cases the host and drops any port.
+    host = new URL(applyUrl).hostname;
+  } catch {
+    // No host, so no match.
+    return false;
+  }
+  // Exact apex, or a label boundary before it.
+  return WORKDAY_APEXES.some((apex) => host === apex || host.endsWith(`.${apex}`));
 }
 
 /** Everything one application needs, injected. */
@@ -319,6 +351,11 @@ export type ApplyOutcome =
   // happened to the row: parked at blocked_needs_human (a live, definite refusal) or
   // handed back untouched at `approved` (a dry run, a wait, or an indeterminate outage).
   | { readonly kind: 'robots_refused'; readonly action: 'parked' | 'released'; readonly reason: string }
+  // A board the applier must not open at all (Workday: account required, 2026-11-01).
+  // Like robots_refused, the page was NEVER opened: parked for a human in a live run,
+  // handed back untouched at `approved` in a dry run. Its own kind, not `blocked`,
+  // because `blocked` means "parked" and a dry run parks nothing.
+  | { readonly kind: 'ats_unsupported'; readonly action: 'parked' | 'released'; readonly reason: string }
   | { readonly kind: 'blocked'; readonly reason: BlockReason; readonly blockers: readonly ApplicationBlocker[] }
   // The submit threw. We do NOT know whether it landed, so no status is
   // written and the sweeper is left to route the row to a human.
@@ -348,6 +385,47 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
       : requested;
 
   // ---- Everything below happens while the row is still `approved` ----------
+
+  // THE WORKDAY GUARD, before robots and before goto, because nothing about this row may
+  // be fetched: applying on Workday needs a candidate account, which this system never
+  // creates, so the only honest outcome is a human applying by hand. Either signal is
+  // enough. The host catches a Workday link whatever its provider (a pasted link can
+  // arrive as `unknown`). The provider catches a tenant fronted on careers.company.com.
+  if (isWorkdayApplyUrl(row.applyUrl) || row.atsProvider === 'workday') {
+    // One line for the event log and the release reason.
+    const reason = 'Workday requires a candidate account; applying through Workday is out of scope, so a human applies by hand.';
+    // A live run parks in ONE write, the same guarded edge the robots park uses.
+    if (mode.submits) {
+      // approved -> blocked_needs_human, so the transition graph is enforced.
+      await guardedAdvance(gateway, {
+        // This row.
+        applicationId: row.id,
+        // Always approved here.
+        from: 'approved',
+        // The human lane.
+        to: 'blocked_needs_human',
+        // The applier names itself.
+        agent: ACTING_AGENT,
+        // What the dashboard filters on and what the operator reads.
+        detail: {
+          // The existing code for "the board demands an account before showing the form".
+          block_reason: 'login_required' satisfies BlockReason,
+          // Which board, so the human queue can group these.
+          unsupported_ats: 'workday',
+          // Why, in words.
+          reason,
+          // No page was opened, so there is no screenshot (accepted, as for robots).
+          screenshot_storage_path: null,
+        },
+      });
+      // Parked: the row waits for a human.
+      return { kind: 'ats_unsupported', action: 'parked', reason };
+    }
+    // A dry run never writes status: hand the row back untouched, named as a dry run.
+    await gateway.releaseClaim(row.id, `dry_run: ${reason}`);
+    // Released: nothing written, nothing opened.
+    return { kind: 'ats_unsupported', action: 'released', reason };
+  }
 
   // THE ROBOTS GATE, before goto, because goto IS the request robots.txt governs: a
   // check after it would ask permission for a fetch already made. Only `allow` passes.

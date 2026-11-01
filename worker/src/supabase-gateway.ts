@@ -25,7 +25,7 @@
 // The property this buys, on the one component that touches real employers:
 // THE WORKER CANNOT DO ANYTHING TEJA COULD NOT DO FROM THE DASHBOARD.
 // MasterProfile types the return value so callers get the real shape, not any.
-import type { AgentName, ApplicationStatus, MasterProfile, ResolvedResume } from '@applyy/shared-types';
+import type { AgentName, ApplicationStatus, AtsProvider, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 import type { RunGateway } from './claim-loop.ts';
 import type { ClaimedApplication } from './apply-one.ts';
 
@@ -225,9 +225,11 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
       const jobs = unwrap(
         // company_name rides the same read: the planner needs it to answer "previously worked at
         // <company>?", and a second round trip per batch would buy nothing.
-        await client.from('jobs').select('id, apply_url, disappeared_at, company_name').in('id', jobIds),
+        // ats_provider rides it too (2026-11-01): apply-one parks Workday jobs, and a tenant
+        // fronted on careers.company.com is recognisable only by this column, not its URL.
+        await client.from('jobs').select('id, apply_url, disappeared_at, company_name, ats_provider').in('id', jobIds),
         'claimApplications: read jobs.apply_url',
-      ) as Array<{ id: string; apply_url: string | null; disappeared_at?: string | null; company_name?: string | null }> | null;
+      ) as Array<{ id: string; apply_url: string | null; disappeared_at?: string | null; company_name?: string | null; ats_provider?: AtsProvider | null }> | null;
       // Keyed by job id so each claimed row finds its URL in one lookup.
       const urlByJobId = new Map((jobs ?? []).map((job) => [job.id, job.apply_url]));
       // Keyed the same way, whole record kept so the loop can test key PRESENCE.
@@ -301,6 +303,9 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
           // Null when absent, never "": the planner REFUSES that question on null, which is
           // the safe answer when we do not know who the employer is.
           employerName: jobById.get(row.job_id)?.company_name?.trim() || null,
+          // The job's ATS, for the Workday guard. `??` so an absent key and SQL NULL both
+          // read as null ("no provider"); the guard's host check still runs on null.
+          atsProvider: jobById.get(row.job_id)?.ats_provider ?? null,
         }),
       );
     },

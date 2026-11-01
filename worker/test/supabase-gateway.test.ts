@@ -410,11 +410,30 @@ describe('createSupabaseGateway.claimApplications', () => {
     // The URL must come from the join; '' here is the bug.
     expect(claimed).toEqual([
       // employerName is the trimmed jobs.company_name, the planner's "previously worked at" input.
-      { id: 'app-1', status: 'approved', applyUrl: 'https://boards.example/apply/1', tailoredProfile: null, employerName: 'GitLab' },
+      { id: 'app-1', status: 'approved', applyUrl: 'https://boards.example/apply/1', tailoredProfile: null, employerName: 'GitLab', atsProvider: null },
     ]);
     // Asked for by id, for exactly the claimed rows' jobs.
     // company_name rides the same read, so the employer costs no extra round trip.
-    expect(jobQueries).toEqual([{ columns: 'id, apply_url, disappeared_at, company_name', column: 'id', ids: ['job-1'] }]);
+    expect(jobQueries).toEqual([{ columns: 'id, apply_url, disappeared_at, company_name, ats_provider', column: 'id', ids: ['job-1'] }]);
+  });
+
+  // THE PROVIDER HALF OF THE WORKDAY GUARD (2026-11-01): apply-one parks a row whose job is
+  // a Workday board even when its apply URL is on the company's own careers domain. That
+  // only works if the gateway actually carries jobs.ats_provider onto the claimed row.
+  it('carries jobs.ats_provider onto the claimed row, so the applier can refuse Workday', async () => {
+    // A Workday job fronted on a careers domain: the provider is the only Workday signal.
+    const { client } = claimClient(
+      // The claimed row, real wire shape.
+      [{ id: 'app-1', job_id: 'job-1', tailored_profile: null }],
+      // The job row, read with its provider.
+      { data: [{ id: 'job-1', apply_url: 'https://careers.acme.example/job/R-1', disappeared_at: null, company_name: 'Acme', ats_provider: 'workday' }], error: null },
+    );
+    // The gateway under test.
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+    // One claim.
+    const claimed = await gateway.claimApplications('applier:run-1', 5);
+    // The provider arrives verbatim; the guard keys on exactly this value.
+    expect(claimed.map((row) => row.atsProvider)).toEqual(['workday']);
   });
 
   it('releases, and never returns, a row whose job has no apply_url', async () => {

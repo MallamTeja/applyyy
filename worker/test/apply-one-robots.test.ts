@@ -61,6 +61,7 @@ const row: ClaimedApplication = {
   applyUrl: APPLY_URL,
   tailoredProfile: null,
   employerName: 'GitLab',
+  atsProvider: null, // Not a Workday row: the Workday guard stays out of the way.
 };
 
 /**

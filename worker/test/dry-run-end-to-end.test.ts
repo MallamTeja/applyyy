@@ -84,6 +84,7 @@ test('a full dry-run batch fills, screenshots and submits NOTHING', async () => 
         tailoredProfile: syntheticResume,
         // The captured form is GitLab's, so that is the employer it is checked against.
         employerName: 'GitLab',
+        atsProvider: null, // Not a Workday row: the Workday guard stays out of the way.
       },
     ],
     [],

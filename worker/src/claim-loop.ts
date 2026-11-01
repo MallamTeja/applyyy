@@ -112,6 +112,9 @@ export interface RunSummary {
   // Rows robots.txt kept us from opening. Its own tally: a certain no-send is neither a
   // block a human must answer nor an unknown a human must check.
   readonly robotsRefused: number;
+  // Rows on a board the applier must not open (Workday, 2026-11-01). Its own tally for the
+  // same reason: never opened, so never sent, and not a form a human must finish.
+  readonly atsUnsupported: number;
   readonly errors: number;
   // Always populated, because "we did 12 today" must be distinguishable from
   // "the queue only had 12" and from "the kill switch was off" (§14).
@@ -222,6 +225,8 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
   let outcomeUnknown = 0;
   // Counted apart from outcomeUnknown, so a robots refusal never reads as "maybe sent".
   let robotsRefused = 0;
+  // Counted apart from blocked, so a Workday park never reads as an unanswered form.
+  let atsUnsupported = 0;
   let errors = 0;
   let stoppedReason = 'queue drained';
   // Distinguishes a deliberate no-op from a failure when the run is closed.
@@ -417,6 +422,8 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
           }
           // Not opened, so not sent: its own tally, and (below) it trips no breaker.
           else if (outcome.kind === 'robots_refused') robotsRefused += 1;
+          // Never opened either (Workday): its own tally, and like robots it trips no breaker.
+          else if (outcome.kind === 'ats_unsupported') atsUnsupported += 1;
           // Named rather than a bare else, so a new outcome kind cannot be miscounted as unknown.
           else if (outcome.kind === 'submit_outcome_unknown') outcomeUnknown += 1;
           // Exhaustiveness: a new ApplyOutcome arm fails to compile here until it is counted.
@@ -570,6 +577,8 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
       outcomeUnknown,
       // Reported beside outcomeUnknown so the run log separates "not sent" from "maybe sent".
       robotsRefused,
+      // Beside robotsRefused: the other "never opened, never sent" tally.
+      atsUnsupported,
       errors,
       stoppedReason,
     };
