@@ -39,10 +39,6 @@
 import type { ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
-/* The agent roster and the run-outcome vocabulary come from the schema, so an
-   agent added upstream appears here with no edit - an agent this page forgot to
-   list is an agent whose death nobody would notice. */
-import { AGENT_NAMES } from '../../data/contract';
 /* The four recovery panels list their stuck rows with working moves through this one component
    (2026-10-09), so the moves are built from the graph in one place rather than four. */
 import { RecoveryQueue, manualActionMeaning, manualActionVerb } from './RecoveryQueue';
@@ -71,6 +67,11 @@ import {
   formatAge,
   needsAttention,
   newestHeartbeat,
+  /* The roster: the schema's AGENT_NAMES minus `human` (an identity, not a scheduled
+     job), so an agent added upstream appears here with no edit - an agent this page
+     forgot to list is an agent whose death nobody would notice - while `human` no
+     longer renders a false "has never run" row (Teja, 2026-11-01). */
+  HEALTH_ROSTER,
 } from '../../data/agentFreshness';
 /* The read itself. Corrected 2026-11-01 (wiring audit W9): this comment used
    to say the panel renders a note about its RUN_WINDOW. It never did, and the
@@ -171,7 +172,8 @@ export function RuleWarningsNote({
 }
 
 /* Agent freshness panel: roster-driven table showing age since last run.
- * Driven by AGENT_NAMES roster, not query results, so missing agents are visible. */
+ * Driven by the HEALTH_ROSTER (AGENT_NAMES minus `human`), not query results, so
+ * missing agents are visible. */
 function AgentFreshnessPanel({
   read,
 }: {
@@ -238,7 +240,7 @@ function AgentFreshnessPanel({
             </tr>
           </thead>
           <tbody>
-            {AGENT_NAMES.map((agent) => {
+            {HEALTH_ROSTER.map((agent) => {
               /* Undefined whenever the read was not conclusive. Deliberately
                  NOT defaulted to a never-run entry: "we could not ask" and
                  "it has never run" are opposite claims. */

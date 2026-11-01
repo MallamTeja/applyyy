@@ -11,6 +11,9 @@ import { createSupabaseGateway, type SupabaseLike } from '../src/supabase-gatewa
 /** Builds a fake client that records the calls the gateway makes. */
 function fakeClient(overrides: Partial<SupabaseLike> = {}) {
   const rpcCalls: Array<{ fn: string; args: unknown }> = [];
+  // Every INSERT, with its table and payload, so a test can say WHICH agent a run row
+  // was opened for: "a row was written" alone cannot tell a sweeper row from an applier one.
+  const insertCalls: Array<{ table: string; payload: Record<string, unknown> }> = [];
   // Every bare UPDATE the gateway issues, recorded with the TABLE, the exact
   // PAYLOAD OBJECT and the filter. The payload is kept by reference and
   // inspected key-by-key rather than compared with toMatchObject, because the
@@ -44,9 +47,12 @@ function fakeClient(overrides: Partial<SupabaseLike> = {}) {
         }),
         limit: async () => ({ data: [], error: null }),
       }),
-      insert: () => ({
-        select: () => ({ single: async () => ({ data: { id: 'run-1' }, error: null }) }),
-      }),
+      insert: (payload: Record<string, unknown>) => {
+        // Recorded before returning, so even an insert whose result is never awaited shows up.
+        insertCalls.push({ table, payload });
+        // Same chain as before: `.select().single()` hands back the new row's id.
+        return { select: () => ({ single: async () => ({ data: { id: 'run-1' }, error: null }) }) };
+      },
       update: (payload: Record<string, unknown>) => ({
         eq: async (column: string, value: unknown) => {
           updateCalls.push({ table, payload, eq: [[column, value]] });
@@ -76,7 +82,7 @@ function fakeClient(overrides: Partial<SupabaseLike> = {}) {
   // `failUpdates` is a setter rather than a constructor argument so the SAME
   // fake can serve a healthy call and then a failing one, which is what lets
   // the unwrap test differ from the happy-path test in exactly one dimension.
-  return { client, rpcCalls, updateCalls, failUpdates: (message: string) => { updateError = { message }; } };
+  return { client, rpcCalls, insertCalls, updateCalls, failUpdates: (message: string) => { updateError = { message }; } };
 }
 
 /** Every field present. Tests below vary ONE field from this at a time. */
@@ -109,6 +115,42 @@ describe('createSupabaseGateway', () => {
     const gateway = createSupabaseGateway(client, { userId: 'u1' });
 
     await expect(gateway.sweepStaleClaims()).resolves.toBeUndefined();
+  });
+
+  it('records a sweeper agent_runs row: opened running, closed succeeded, rows_out = released + needs_verification', async () => {
+    // THE FALSE "HAS NEVER RUN" (2026-11-01). The sweep_stale_claims RPC writes no agent_runs
+    // row, so the Health page called the sweeper dead on every day it ran. The fake returns
+    // released 3 + needs_verification 1, two DISJOINT counts, so the row must say 4.
+    const { client, insertCalls, updateCalls } = fakeClient();
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    await gateway.sweepStaleClaims();
+
+    // Opened under the sweeper's OWN identity, never the applier's: a borrowed name would make
+    // the page say the applier ran when only the sweep did.
+    expect(insertCalls).toEqual([{ table: 'agent_runs', payload: { agent: 'sweeper' } }]);
+    // Closed on the row it opened, as a success carrying the swept count.
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0]?.table).toBe('agent_runs');
+    expect(updateCalls[0]?.eq).toEqual([['id', 'run-1']]);
+    expect(updateCalls[0]?.payload).toMatchObject({ status: 'succeeded', rows_out: 4, error_count: 0 });
+    // A real timestamp, so the page can compute an age from it.
+    expect(Number.isNaN(Date.parse(String(updateCalls[0]?.payload['finished_at'])))).toBe(false);
+  });
+
+  it('a failed sweep closes its sweeper row failed and still throws', async () => {
+    // A failed sweep must be a FAILED row, not a missing one and not a success: the page then says
+    // "runs, fails" with the reason, instead of "never ran". The throw still reaches the applier run.
+    const { client, updateCalls } = fakeClient({
+      rpc: async () => ({ data: null, error: { message: 'permission denied for function sweep_stale_claims' } }),
+    });
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+
+    await expect(gateway.sweepStaleClaims()).rejects.toThrow(/sweepStaleClaims failed: permission denied/);
+    // One close, failed, with the database's own message on the row.
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0]?.payload).toMatchObject({ status: 'failed', error_count: 1 });
+    expect(String(updateCalls[0]?.payload['error_detail'])).toMatch(/permission denied/);
   });
 
   it('moves a row through the RPC, never a bare update', async () => {

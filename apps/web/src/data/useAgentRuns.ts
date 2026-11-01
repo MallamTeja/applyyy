@@ -46,8 +46,9 @@ import { classifyRead } from './readState.ts';
 import type { ReadState } from './readState.ts';
 import { summarizeAgentRuns } from './agentFreshness.ts';
 import type { AgentFreshness, AgentRunFacts } from './agentFreshness.ts';
-/* The roster, so the per-agent lookups (W9) check every agent the table shows. */
-import { AGENT_NAMES } from './contract.ts';
+/* The roster the table shows (AGENT_NAMES minus `human`), so the per-agent lookups
+   (W9) check exactly those agents and spend no reads on an identity that never runs. */
+import { HEALTH_ROSTER } from './agentFreshness.ts';
 import type { AgentName } from './contract.ts';
 /* Picks which run's error_detail answers "which rules were skipped". */
 import { pickRuleWarningRun } from './ruleWarnings.ts';
@@ -147,7 +148,7 @@ export async function readNewestBeyondWindow(
   // Every roster agent, all at once; an agent the window fully answers makes no read.
   await Promise.all(
     // The roster drives this, like the table: an agent never listed is never checked.
-    AGENT_NAMES.map(async (agent) => {
+    HEALTH_ROSTER.map(async (agent) => {
       // Both reads in parallel; null where the window already answers that question.
       const [newest, success] = await Promise.all([
         // Its newest run of any outcome, only when the window missed it.

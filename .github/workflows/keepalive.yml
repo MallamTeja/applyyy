@@ -1,8 +1,9 @@
-# !! PENDING TEJA'S EXPLICIT APPROVAL — DO NOT ENABLE, PUSH OR TRIGGER. !!
-# This workflow PUSHES A COMMIT (see the final step), which is the class of
-# action Teja's standing "never push" rule exists to cover. Its presence in the
-# repo is NOT consent. applyyy-d8 has put the decision to him directly. Until he
-# answers, this file is a proposal that happens to be written in YAML.
+# STATUS: APPROVED. Teja approved this workflow, including its final step that
+# pushes a timestamp commit to the dedicated `automation-keepalive` branch, on
+# 2026-11-01 17:24 IST. The old "pending approval, do not enable" banner is gone
+# because that decision is made; the push still never targets main.
+# The ping step also records a `keepalive` agent_runs row (since 2026-11-01), so
+# the Health page shows when this last ran instead of "has never run".
 #
 # applyy — keepalive for the two silent deaths (PROJECT_PLAN.md §14).
 #
@@ -45,7 +46,8 @@ jobs:
     # NO job-level env (moved 2026-10-05). Job env reaches every action, every
     # install script, AND the branch-push step below, which runs with a
     # contents:write token — none of which need the app-user password. Only the
-    # ping reads these (worker/src/cli/keepalive.ts:37-40).
+    # ping reads these (the required() calls at the top of main() in
+    # worker/src/cli/keepalive.ts; cited by name because line numbers drift).
 
     steps:
       - name: Check out the repository
@@ -74,7 +76,7 @@ jobs:
       # of leaving Teja to believe the automation is fine.
       - name: Ping Supabase so the project does not pause
         run: pnpm --filter '@applyy/worker' run keepalive
-        # Step-scoped: the only reader of these (keepalive.ts:37-40).
+        # Step-scoped: the only reader of these (keepalive.ts main()'s required() calls).
         env:
           # The DB ping needs a real connection; without it the Supabase half of
           # this job is a no-op that looks like it worked.
@@ -90,15 +92,16 @@ jobs:
 
       # DEATH 2. Repository activity is what stops GitHub disabling the cron.
       #
-      # DECISION FOR TEJA — this step pushes a commit, which is the only way to
+      # APPROVED by Teja 2026-11-01 17:24 IST (was "DECISION FOR TEJA") — this
+      # step pushes a commit, which is the only way to
       # register repo activity from inside Actions. It is scoped as narrowly as
       # possible: the commit is made by github-actions[bot], contains only a
       # timestamp, and goes to a DEDICATED BRANCH, never to main. Teja's
       # main-branch history stays exactly as he wrote it.
       #
-      # If even that is unwanted, the alternative is a calendar reminder to open
-      # the repo every 60 days — which is a human keepalive, and humans forget,
-      # which is precisely the failure mode §14 exists to prevent.
+      # The rejected alternative was a calendar reminder to open the repo every 60
+      # days — a human keepalive, and humans forget, which is precisely the
+      # failure mode §14 exists to prevent.
       - name: Touch the keepalive timestamp on a dedicated branch
         run: |
           # Identify as the Actions bot, not as Teja; the commit log should make

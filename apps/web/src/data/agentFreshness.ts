@@ -155,12 +155,28 @@ export const AGENT_CADENCE: Readonly<Partial<Record<AgentName, Cadence>>> = {
      before it is called dead - far tighter than the 60-day deadline it guards,
      which is the point: the warning has to arrive with weeks to spare. */
   keepalive: { expected: 'weekly', staleAfterHours: 204 },
-  /* `human` is deliberately absent. It is an identity for attributing events,
-     not a scheduled job, so "the human has not run in 9 days" is a meaningless
-     sentence and a threshold for it would be noise. It still renders, as
-     `age_only`, because dropping a roster entry is the habit this page cannot
-     afford. */
+  /* `human` is deliberately absent, here AND from HEALTH_ROSTER below. It is
+     an identity for attributing events, not a scheduled job, so "the human has
+     not run in 9 days" is a meaningless sentence and a threshold for it would
+     be noise. This comment used to say it still rendered as `age_only`; it did
+     not - with no agent_runs row it rendered `never_run`, a permanent false
+     alarm. Teja ruled on 2026-11-01 to drop it from the roster instead. */
 };
+
+/* The agents the Health page lists: every `AgentName` EXCEPT `human`.
+ *
+ * "NEVER DROP A ROSTER ENTRY" STILL HOLDS, AND `human` IS ITS ONE EXCEPTION,
+ * because the rule protects scheduled jobs whose silence means death, and
+ * `human` is not a job. It is the identity a person's approvals and edits are
+ * attributed to; it never opens an `agent_runs` row, so on this page its only
+ * possible verdict was `never_run` - an alarm about something that cannot run.
+ * The exception is by NAME, not by "has no cadence": a new agent with no
+ * cadence must still get its row, which is what the rule exists to guarantee.
+ * Derived from AGENT_NAMES, so every agent the schema adds still appears. */
+export const HEALTH_ROSTER: readonly AgentName[] = AGENT_NAMES.filter(
+  /* One named exclusion; anything else in the schema is listed. */
+  (agent) => agent !== 'human',
+);
 
 /* --- Age formatting --------------------------------------------------- */
 
@@ -348,10 +364,10 @@ function verdictFor(
  * line of reasoning in the file. A table built from `GROUP BY agent` contains
  * no row for an agent that has never run - so the one agent whose failure is
  * total would be the one agent absent from the page, and its absence would look
- * like tidiness. So `AGENT_NAMES` drives the output and the rows only fill it
- * in. An agent the schema adds appears here automatically, reported as
- * `never_run` until it runs; an agent this page forgot to list is an agent
- * whose death nobody would notice.
+ * like tidiness. So `HEALTH_ROSTER` (AGENT_NAMES minus `human`, see its comment)
+ * drives the output and the rows only fill it in. An agent the schema adds
+ * appears here automatically, reported as `never_run` until it runs; an agent
+ * this page forgot to list is an agent whose death nobody would notice.
  *
  * `now` is a parameter rather than a `Date.now()` call so that a nine-day
  * silence, a clock skew and a run in the future are each one line of test
@@ -368,7 +384,8 @@ export function summarizeAgentRuns(
   now: number,
   lookupFailed: ReadonlySet<AgentName> = new Set(),
 ): readonly AgentFreshness[] {
-  return AGENT_NAMES.map((agent) => {
+  /* The roster, not the rows: a `human` row in `runs` is ignored, never listed. */
+  return HEALTH_ROSTER.map((agent) => {
     /* This agent's runs only. A linear filter per agent is O(agents × runs),
        which at twelve agents and a bounded run history is irrelevant, and it
        keeps the function readable - the query in `useAgentRuns.ts` caps the row

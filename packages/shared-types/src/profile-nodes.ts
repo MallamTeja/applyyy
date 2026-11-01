@@ -302,8 +302,16 @@ export interface MasterAchievement {
    * read PINNED old versions through a bare cast - so a required field would be a
    * type that lies about every stored row, and a reader calling `.map` on it would
    * crash on all of them. `?:` makes the compiler force every reader to write
-   * `?? []`, which is the truth of the data. Absent and `[]` mean the same thing:
-   * no links. Same `MasterLink` as identity and project links, so these ids join
+   * `?? []`, which is the truth of the data. For READERS, absent and `[]` mean the
+   * same thing: no links. The one exception is an INCOMING parse being reconciled
+   * (packages/master-ingest/src/reconcile.ts rebuildLinkedEntry, 2026-11-01): there an
+   * absent key means "the source said nothing" (a PDF parse cannot carry entry links),
+   * so the stored links are kept, while an explicit `[]` means "the source says none",
+   * so the drop is reported for review. Pinned by reconcile.test.ts "keeps stored
+   * entry links when the re-parse cannot carry them (absent key)" and its twin "still
+   * reports a stored cert link dropped when the re-parse says links: []" - collapsing
+   * the two at that site silently wipes every credential link on a PDF re-upload.
+   * Same `MasterLink` as identity and project links, so these ids join
    * the one global id space and are reconciled per-parent like project links.
    */
   links?: DocumentOrdered<MasterLink>;

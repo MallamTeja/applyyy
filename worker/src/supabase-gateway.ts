@@ -110,20 +110,28 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
     );
   }
 
-  return {
-    async openRun(agent: AgentName) {
-      // Opened before any work, so a crash leaves a visible stuck row.
-      // unwrap converts supabase-js's error-as-value into a throw, so a DB failure is not read as no profile.
-      const data = unwrap(
-        await client.from('agent_runs').insert({ agent }).select().single(),
-        'openRun',
-      );
-      return { id: (data as { id: string }).id };
-    },
+  // Local functions for the same `this` reason as releaseApplierClaim above: the sweep
+  // records its own sweeper run through these, and must not depend on how it was called.
+  async function openRun(agent: AgentName): Promise<{ id: string }> {
+    // Opened before any work, so a crash leaves a visible stuck row.
+    // unwrap converts supabase-js's error-as-value into a throw, so a DB failure is not read as no profile.
+    const data = unwrap(
+      await client.from('agent_runs').insert({ agent }).select().single(),
+      'openRun',
+    );
+    // Only the id leaves: it is all closeRun needs.
+    return { id: (data as { id: string }).id };
+  }
 
-    async closeRun(runId, update) {
-      unwrap(await client.from('agent_runs').update(update).eq('id', runId), 'closeRun');
-    },
+  // Closes a run by id. unwrap again, so a refused close throws instead of passing silently.
+  async function closeRun(runId: string, update: Record<string, unknown>): Promise<void> {
+    unwrap(await client.from('agent_runs').update(update).eq('id', runId), 'closeRun');
+  }
+
+  return {
+    // The port's two run methods ARE the locals, so the loop and the sweep share one write path.
+    openRun,
+    closeRun,
 
     async appendApplicationNote(applicationId, detail) {
       // A plain INSERT: application_events is append-only (a trigger forbids update and delete), and its
@@ -163,21 +171,57 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
     },
 
     async sweepStaleClaims() {
-      const data = unwrap(await client.rpc('sweep_stale_claims'), 'sweepStaleClaims');
+      // THE SWEEPER'S OWN agent_runs ROW (2026-11-01). The sweep_stale_claims RPC writes none,
+      // so the Health page called the sweeper "never run" on every day it ran. Recorded HERE,
+      // in the one function every sweep goes through, through the same openRun/closeRun the
+      // applier uses. Opened BEFORE the RPC, like every run: a crash mid-sweep then leaves a
+      // visible `running` row instead of nothing, and nothing reads the same as "never ran".
+      const run = await openRun('sweeper');
+      // Held outside the try so the failure branch can tell whether the RPC itself failed.
+      let data: unknown;
+      try {
+        // unwrap turns supabase-js's error-as-value into a throw, so a refused sweep is a failure.
+        data = unwrap(await client.rpc('sweep_stale_claims'), 'sweepStaleClaims');
+      } catch (error) {
+        // A FAILED row, with the database's own words: the page then reads "runs, fails"
+        // and points at error_detail, rather than "never ran" or a false success.
+        await closeRun(run.id, {
+          // The outcome the page's success clock ignores.
+          status: 'failed',
+          // When it failed, so the heartbeat still advances: the scheduler did fire.
+          finished_at: new Date().toISOString(),
+          // One error: the RPC call.
+          error_count: 1,
+          // The message unwrap built, e.g. "sweepStaleClaims failed: permission denied ...".
+          error_detail: error instanceof Error ? error.message : String(error),
+        });
+        // Rethrown unchanged: the applier run that called the sweep must still fail on it.
+        throw error;
+      }
       // `returns table (...)` arrives over PostgREST as an ARRAY OF ROWS, so
       // `data.released_count` would be `undefined` — no error, no crash, just a
       // metric that is quietly always blank. Indexed, and guarded because an
       // empty array is the normal case on a healthy day.
       const rows = Array.isArray(data) ? data : [];
-      const summary = rows[0] as { released_count?: number } | undefined;
-      // Read but not yet published as a health metric. The double-count this
-      // comment used to warn about was fixed in
-      // 20260910190000_fix_sweep_count_bootstrap_seed_and_blocked_edge.sql;
-      // 20260918213000 then replaced the function and a later migration is
-      // restoring it, so the RETURN SHAPE is in flux. Publishing a field name
-      // from a signature that is still moving would put a blank on the health
-      // page the day it changes — wire it once the restored sweep has landed.
-      void summary;
+      const summary = rows[0] as { released_count?: number; needs_verification_count?: number } | undefined;
+      // The return shape is settled: 20261004200000 restored (released_count,
+      // needs_verification_count) and 20261009130000 kept it (live, checked 2026-11-01).
+      // The two counts are DISJOINT (rows handed back to the queue vs rows parked for a
+      // human because they died mid-submit), so their sum is every row this sweep moved.
+      // A missing field counts 0 rather than NaN, so a blank never reaches the row.
+      const swept = (summary?.released_count ?? 0) + (summary?.needs_verification_count ?? 0);
+      // Closed as a success carrying the count. A close failure throws out of here on purpose:
+      // a run row that cannot be written is the same broken table the applier's own close needs.
+      await closeRun(run.id, {
+        // The sweep ran and returned.
+        status: 'succeeded',
+        // The heartbeat AND success clock the Health page reads.
+        finished_at: new Date().toISOString(),
+        // Every row the sweep moved; 0 is the normal healthy day.
+        rows_out: swept,
+        // Stated, not defaulted, so the row reads the same as the applier's.
+        error_count: 0,
+      });
     },
 
     async claimApplications(claimedBy, limit) {

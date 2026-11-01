@@ -30,6 +30,8 @@ import {
   describeRunErrors,
   describeVerdict,
   formatAge,
+  /* The page's roster: every identity but `human`. */
+  HEALTH_ROSTER,
   needsAttention,
   newestHeartbeat,
   summarizeAgentRuns,
@@ -131,12 +133,30 @@ test('every agent in the roster gets a row, even with no runs at all', () => {
      that has never run - so the agent whose failure is total would be the one
      missing from the page, and its absence would look like tidiness. */
   const summary = summarizeAgentRuns([], NOW);
-  assert.equal(summary.length, AGENT_NAMES.length);
+  /* Every identity EXCEPT `human`, and only `human`: built from AGENT_NAMES here rather than
+     from HEALTH_ROSTER, so a roster that quietly drops a second agent goes red. */
   assert.deepEqual(
     summary.map((entry) => entry.agent),
-    [...AGENT_NAMES],
+    AGENT_NAMES.filter((agent) => agent !== 'human'),
     'roster order must be preserved so the page order is stable',
   );
+  /* The page loops HEALTH_ROSTER, so it must be the same list the summary used. */
+  assert.deepEqual([...HEALTH_ROSTER], summary.map((entry) => entry.agent));
+});
+
+test('human is not on the health roster: it is an identity, not a scheduled job', () => {
+  /* THE FALSE "HAS NEVER RUN" (Teja's ruling, 2026-11-01). `human` attributes events; it never
+     writes an agent_runs row, so the roster-driven page reported it `never_run` forever - an
+     alarm about a job that does not exist. Removed rather than special-cased in the verdict. */
+  const summary = summarizeAgentRuns([], NOW);
+  assert.equal(
+    summary.some((entry) => entry.agent === 'human'),
+    false,
+    'human must not get a health row',
+  );
+  /* Even a stray `human` run row must not bring it back. */
+  const withRow = summarizeAgentRuns([run({ agent: 'human' })], NOW);
+  assert.equal(withRow.some((entry) => entry.agent === 'human'), false);
 });
 
 test('an agent with no runs reports never_run, not a zero age', () => {
@@ -322,12 +342,12 @@ test('a normal past timestamp is not treated as skew', () => {
 /* --- Unknown cadence ------------------------------------------------- */
 
 test('an agent with no configured cadence reports an age and no judgement', () => {
-  /* `human` is an identity for attributing events, not a scheduled job, so
-     "the human has not run in 9 days" is a meaningless sentence. It still
-     appears in the table, because dropping a roster entry is the habit this
-     page cannot afford. */
-  assert.equal(AGENT_CADENCE['human'], undefined);
-  const entry = forAgent([run({ agent: 'human' })], 'human');
+  /* `skill_gap` has no cadence yet (a phase-3 side agent with no schedule
+     chosen). It still appears in the table, reported as an age with no
+     judgement, because a missing cadence is cosmetic and a missing row is not.
+     It was `human` until 2026-11-01, when human left the roster. */
+  assert.equal(AGENT_CADENCE['skill_gap'], undefined);
+  const entry = forAgent([run({ agent: 'skill_gap' })], 'skill_gap');
   assert.equal(entry.verdict, 'age_only');
   assert.equal(entry.cadence, null);
   assert.equal(needsAttention(entry.verdict), false);
@@ -337,7 +357,8 @@ test('an agent with no configured cadence reports an age and no judgement', () =
 test('a never-run agent with no cadence still reports never_run', () => {
   /* Precedence: no runs at all outranks no cadence. The other order would
      report the most alarming state on the page as a configuration note. */
-  const entry = forAgent([], 'human');
+  /* A cadence-less agent still on the roster; `human` is no longer on it. */
+  const entry = forAgent([], 'skill_gap');
   assert.equal(entry.verdict, 'never_run');
 });
 
@@ -514,7 +535,8 @@ test('every verdict has a description, and none of them is a bare status word', 
     [],
     [run()],
     [run({ status: 'failed', finished_at: null })],
-    [run({ agent: 'human' })],
+    /* The age_only phrase, through a cadence-less agent still on the roster. */
+    [run({ agent: 'skill_gap' })],
   ];
   for (const runs of cases) {
     for (const entry of summarizeAgentRuns(runs, NOW)) {
