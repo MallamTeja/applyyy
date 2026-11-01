@@ -52,7 +52,8 @@ emptying it is the deliberate kill switch.
 
 **What runs on a schedule, what doesn't** *(corrected 2026-10-24 — the old claim
 "normalizer, screener, matcher, tailor and auditor have no cron" was stale)*:
-- Scheduled workflows: `apply.yml` (`30 2 * * *`), `scout.yml` (`0 */6 * * *`),
+- Scheduled workflows: `apply.yml` (`30 2 * * *`), `scout.yml` (`17 0,12 * * *`, twice a
+  day since 2026-11-01), `scout-remote.yml` (`30 1 * * *`), `apply-kit.yml` (`0 12 * * *`),
   `keepalive.yml` (`15 6 */3 * *`). No `pg_cron` (ruled out, `20261009220000`).
 - **Screening DOES run on cron:** `scout.yml` runs `worker/src/cli/scout.ts`, which
   screens at insert via `_shared/screen/screen-batch.ts` (its own line-11 comment:

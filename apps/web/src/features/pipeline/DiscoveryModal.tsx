@@ -75,10 +75,14 @@ export function DiscoveryModal({
                 {isRemote ? 'Remote Feeds: Daily Scout' : 'Scan Watchlist ATS Boards'}
               </h2>
               <p className="discovery-modal__subtitle">
-                {/* Remote: where the feeds now run; watchlist: unchanged. */}
+                {/* Remote: where the feeds now run. Watchlist: says the scan is ALSO automatic and
+                    how much one click covers, because "is this running daily?" was asked twice
+                    from this panel (2026-11-01). No clock times: scout.yml's cron is their one
+                    source, and GitHub starts it hours late anyway. The 10 is scout-ats
+                    DEFAULT_BOARD_LIMIT, since discoveryService sends no ?limit. */}
                 {isRemote
                   ? 'Runs on a schedule in GitHub Actions, through the same apply-link check and screener as the company-board scout.'
-                  : 'Polls Greenhouse, Lever, and Ashby boards registered in your Company Watchlist.'}
+                  : 'Polls Greenhouse, Lever, Ashby and SmartRecruiters boards in your Company Watchlist. Every board is scanned automatically twice a day; this button scans the 10 least recently polled boards now.'}
               </p>
             </div>
           </div>

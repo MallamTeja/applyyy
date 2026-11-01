@@ -118,7 +118,13 @@ export const AGENT_CADENCE: Readonly<Partial<Record<AgentName, Cadence>>> = {
      failure that looks most like success: everything downstream has nothing to
      do and reports itself perfectly healthy. 30 rather than 24 hours so a run
      that drifts by an hour is not called dead. */
-  scout_ats: { expected: 'every morning', staleAfterHours: 30 },
+  /* scout_ats runs twice a day since 2026-11-01 (.github/workflows/scout.yml,
+     `17 0,12 * * *`). GitHub started those runs 3-6 hours late here (measured
+     2026-10-29..11-01), so a healthy gap between two successes reaches ~18 hours;
+     20 flags ONE missed run under those delays without calling a late one dead.
+     The 30 above still governs the once-a-day aggregator below. A manual button
+     scan also writes `scout_ats`: it can make a dead schedule look alive, never the reverse. */
+  scout_ats: { expected: 'twice a day', staleAfterHours: 20 },
   scout_aggregator: { expected: 'every morning', staleAfterHours: 30 },
   /* Deterministic, cheap, runs with discovery. */
   normalizer: { expected: 'every morning', staleAfterHours: 30 },

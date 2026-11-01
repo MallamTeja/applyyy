@@ -1,16 +1,29 @@
 # applyy — scheduled ATS scout (job discovery).
 #
-# Regularly polls registered company career boards (Greenhouse, Lever, Ashby) from
-# public.company_watchlist, deduplicates postings by canonical fingerprint into
-# public.jobs, and creates initial public.applications rows at status 'discovered'.
+# Regularly polls registered company career boards (Greenhouse, Lever, Ashby,
+# SmartRecruiters) from public.company_watchlist, deduplicates postings by canonical
+# fingerprint into public.jobs, and screens each new posting at insert, so its
+# public.applications row is born at 'passed_filters' or 'dropped_filter' ('discovered'
+# only when the screener cannot load). Corrected 2026-11-01: this said 'discovered'.
 #
-# Fast and lightweight: requires NO Playwright or Chromium download (~10-15 seconds runtime).
+# Lightweight: requires NO Playwright or Chromium download. Not fast any more: each run
+# reads every enabled board, measured 9-12 minutes (2026-10-29..11-01, 16,772 postings),
+# where this once said ~10-15 seconds. The 15-minute job timeout below is the ceiling to
+# watch as the watchlist grows.
 name: applyy scout (ats discovery)
 
 on:
   schedule:
-    # Runs 4 times a day: 00:00, 06:00, 12:00, 18:00 UTC
-    - cron: '0 */6 * * *'
+    # Twice a day, 00:17 and 12:17 UTC (05:47 and 17:47 IST). Teja ruled 2026-11-01 that
+    # two runs are enough (it was every 6 hours): each run uses ~10 Actions minutes of this
+    # private repo's monthly quota, so this halves scout's share. 00:17 UTC collects the US
+    # working day for the Indian morning review; 12:17 UTC collects the Indian and European
+    # day. Minute 17, not 0: GitHub delays, and under heavy load drops, scheduled runs at
+    # the top of the hour; runs here started 3-6 hours late (measured 2026-10-29..11-01).
+    # Change together with what assumes this cadence: the Health threshold
+    # (apps/web/src/data/agentFreshness.ts) and the scan panel's "twice a day"
+    # (apps/web/src/features/pipeline/DiscoveryModal.tsx).
+    - cron: '17 0,12 * * *'
   workflow_dispatch:
     inputs:
       force:
