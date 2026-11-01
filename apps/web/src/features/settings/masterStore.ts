@@ -132,6 +132,21 @@ export type StoreOutcome =
 
 /* --- The pure half ------------------------------------------------------ */
 
+/* Why an insert was refused, in words for a person. A literal per named outcome, so a new
+   outcome in the union fails to compile here instead of reading as a generic failure.
+   Moved here from attestSkill.ts (2026-11-01) when the Master Profile page's add forms
+   needed the same sentences: this file owns StoreOutcome, so it owns their wording. */
+export function storeRefusalMessage(stored: Exclude<StoreOutcome, { kind: 'stored' }>): string {
+  // The database's own words for an unclassified failure.
+  if (stored.kind === 'failed') return stored.message;
+  // This exact master content already exists as an older version (unique content hash).
+  if (stored.kind === 'identical') return 'an identical master profile version already exists';
+  // Two saves raced for the next version number; a retry resolves it.
+  if (stored.kind === 'version_race') return 'another master profile save happened at the same moment; try again';
+  // The only outcome left: RLS refused the insert.
+  return 'you are not signed in';
+}
+
 /* The shape of a PostgREST error, narrowed structurally rather than imported.
  *
  * Structural because this must survive being handed a thrown `Error`, a null, a

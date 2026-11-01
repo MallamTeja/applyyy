@@ -15,12 +15,16 @@
  * 2. JSON Paste (Advanced): Paste handwritten JSON to run static integrity checks.
  */
 
-import { useCallback, useEffect, useState } from 'react';
-import type { ReactElement } from 'react';
+import { useCallback, useEffect, useId, useState } from 'react';
+import type { FormEvent, ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
 // Profile links are parsed out of an uploaded resume, so they get the same http(s) gate.
 import { safeHref } from '../../app/safeHref.ts';
+// The per-section add forms: which fields each kind asks for, and the save as a new version.
+import { ADD_FIELDS, saveMasterAddition } from './masterAdd';
+// The kind union and the typed values, so the form and the save agree on keys.
+import type { AddKind, AddValues } from './masterAdd';
 import { ingestMasterProfileText } from './masterIngest';
 import type { IngestResult } from './masterIngest';
 import { MasterUploadReview } from './MasterUploadReview';
@@ -92,6 +96,147 @@ function Findings({ result }: { readonly result: IngestResult }): ReactElement {
   );
 }
 
+/* What a save tells the add form: the new version, or why nothing was written.
+   A union, so the form cannot show "saved" over a refusal. */
+type AddSave = (kind: AddKind, values: AddValues) => Promise<{ ok: true; version: number } | { ok: false; message: string }>;
+
+/* One "+ Add" button that opens an inline form for one node kind.
+ * Inline rather than a modal: the new node appears in the list right above the form, so the
+ * operator sees it land where it will print. Fields come from ADD_FIELDS, so the form and
+ * addToMaster read the same keys and cannot drift. */
+// Destructured so the body reads each prop by name.
+function AddEntry({ kind, onSave, suggestions }: {
+  // Which node kind this form adds.
+  readonly kind: AddKind;
+  // Writes the new version; the page owns the client and the stored profile.
+  readonly onSave: AddSave;
+  // Optional dropdown hints per field key, e.g. existing skill groups.
+  readonly suggestions?: Readonly<Record<string, readonly string[]>>;
+}): ReactElement {
+  // Closed by default so seven sections do not show seven empty forms.
+  const [open, setOpen] = useState(false);
+  // What has been typed, by field key.
+  const [values, setValues] = useState<Record<string, string>>({});
+  // True while the insert is in flight, so a double click cannot store two versions.
+  const [saving, setSaving] = useState(false);
+  // The refusal, shown verbatim under the fields.
+  const [error, setError] = useState<string | null>(null);
+  // The last success, shown beside the button after the form closes.
+  const [saved, setSaved] = useState<number | null>(null);
+  // A unique prefix for datalist ids, since several forms share the page.
+  const listId = useId();
+
+  /* Submit: save, then close on success or keep the typed values on refusal. */
+  const submit = async (event: FormEvent): Promise<void> => {
+    // A form submit would otherwise reload the page.
+    event.preventDefault();
+    // Lock the form and clear the last refusal.
+    setSaving(true);
+    // A new attempt starts with no error on screen.
+    setError(null);
+    // The page reads the newest master, appends and inserts.
+    const outcome = await onSave(kind, values);
+    // Unlock either way.
+    setSaving(false);
+    // Refused: keep what was typed so nothing has to be retyped.
+    if (!outcome.ok) {
+      // Shown under the fields.
+      setError(outcome.message);
+      // Nothing else changes.
+      return;
+    }
+    // Landed: clear the form for the next add.
+    setValues({});
+    // Close it; the new node is now in the list above.
+    setOpen(false);
+    // Say which version it became.
+    setSaved(outcome.version);
+  };
+
+  // Closed: just the button, plus the last save's confirmation.
+  if (!open) {
+    // The closed state is small enough to return early.
+    return (
+      // The ingest row style: button and note side by side, wrapping on narrow screens.
+      <div className="ingest__actions">
+        {/* Opens the form; clears an old confirmation so it never reads as this add's result. */}
+        <button type="button" className="button" onClick={() => { setOpen(true); setSaved(null); }}>
+          {/* The plus sign marks it as an add, not an edit; every kind name reads as plain English. */}
+          ＋ Add {kind}
+        </button>
+        {/* Confirms the write with the database-assigned version. */}
+        {saved !== null && <span className="ingest__reassurance">Saved as master version {saved}.</span>}
+      </div>
+    );
+  }
+
+  // Open: the fields for this kind, then Save and Cancel.
+  return (
+    // The same panel style the watchlist and blocklist add forms use.
+    <form className="watchlist-add-form" onSubmit={(event) => void submit(event)}>
+      {/* One input per field, in the order ADD_FIELDS lists them. */}
+      {ADD_FIELDS[kind].map((field) => {
+        // Datalist hints for this field, if the page passed any.
+        const hints = suggestions?.[field.key];
+        // Shared props for input and textarea.
+        const common = {
+          // The base input style from base.css.
+          className: 'field__control',
+          // Controlled, so a refusal keeps the text.
+          value: values[field.key] ?? '',
+          // Native required: the browser blocks a blank submit before any network call.
+          required: field.required,
+          // Locked while saving.
+          disabled: saving,
+          // Example text.
+          placeholder: field.placeholder,
+        };
+        // One labelled field.
+        return (
+          // A wrapping <label>, so clicking the text focuses the input and getByLabel finds it.
+          <label key={field.key} className="field">
+            {/* The label, with a star on required fields. */}
+            <span className="field__label">{field.label}{field.required ? ' *' : ''}</span>
+            {/* Textarea or input, by the field's own flag. */}
+            {field.multiline ? (
+              // Bullets and summary need several lines.
+              <textarea {...common} rows={4} onChange={(e) => setValues({ ...values, [field.key]: e.target.value })} />
+            ) : (
+              // One line; linked to the datalist when hints exist.
+              <input {...common} type="text" list={hints ? `${listId}-${field.key}` : undefined} onChange={(e) => setValues({ ...values, [field.key]: e.target.value })} />
+            )}
+            {/* Native dropdown of existing values; free text still allowed. */}
+            {hints && (
+              // The id the input's `list` attribute points at.
+              <datalist id={`${listId}-${field.key}`}>
+                {/* One option per existing value. */}
+                {hints.map((hint) => <option key={hint} value={hint} />)}
+              </datalist>
+            )}
+            {/* Help line, e.g. the #tag syntax. */}
+            {field.help && <span className="field__help">{field.help}</span>}
+          </label>
+        );
+      })}
+      {/* The refusal, announced to screen readers. */}
+      {error !== null && <p className="watchlist-feedback watchlist-feedback--error" role="alert">{error}</p>}
+      {/* Same row style as the page's other primary actions. */}
+      <div className="ingest__actions">
+        {/* The primary action; disabled while the insert is in flight. */}
+        <button type="submit" className="ingest__button" disabled={saving}>
+          {/* Says it makes a new version, because master versions are never edited in place. */}
+          {saving ? 'Saving…' : 'Save as new version'}
+        </button>
+        {/* Close without writing; typed values are dropped. */}
+        <button type="button" className="button" disabled={saving} onClick={() => { setOpen(false); setValues({}); setError(null); }}>
+          {/* Plain word; nothing is written. */}
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
 export function MasterProfilePage(): ReactElement {
   /* Currently stored profile in Supabase, loaded on mount */
   const [stored, setStored] = useState<MasterProfile | null>(null);
@@ -142,6 +287,22 @@ export function MasterProfilePage(): ReactElement {
       live = false;
     };
   }, []);
+
+  /* Handler: every section's "+ Add" saves through here, then the page shows the new version. */
+  // useCallback so the seven AddEntry forms get a stable prop across re-renders.
+  const handleAdd = useCallback<AddSave>(async (kind, values) => {
+    // No client means nowhere to write.
+    if (supabase === null) return { ok: false, message: 'Not connected to the database.' };
+    // Reads the NEWEST master, appends, inserts version N+1.
+    const outcome = await saveMasterAddition(supabase, kind, values);
+    // The page now shows the version that was just stored, including the new node.
+    if (outcome.ok) setStored(outcome.profile);
+    // The form reads only ok, version and message; the extra profile field is harmless.
+    return outcome;
+  }, []);
+
+  /* Existing skill groups, offered as hints so a new skill joins a group instead of minting a near-duplicate. */
+  const skillGroups = [...new Set(stored?.skills.map((skill) => skill.category) ?? [])];
 
   /* Handler: process resume PDF file directly in the browser */
   const handlePdfUpload = useCallback(async (file: File) => {
@@ -320,23 +481,40 @@ export function MasterProfilePage(): ReactElement {
             No profile stored yet. Upload your master resume PDF above or paste JSON to populate.
           </p>
         )}
+        {/* Name and email are singletons; what identity can gain is another link. */}
+        {stored && <AddEntry kind="link" onSave={handleAdd} />}
       </section>
 
-      {/* 2. Executive Summary (if present) */}
-      {stored?.summary && (
+      {/* 2. Professional Summary: shown whenever a profile exists, so a missing one can be added. */}
+      {stored && (
+        // Same group shell as every other section.
         <section className="settings-group">
+          {/* Title left, node id right. */}
           <div className="section-head-with-meta">
+            {/* The section name. */}
             <h2 className="settings-group__title">Professional Summary</h2>
-            <span className="section-counter">
-              Node: <code className="identifier">{stored.summary.id}</code>
-            </span>
+            {/* The node id, only when there is a node. */}
+            {stored.summary && (
+              // Shown so a tailored summary's ref can be traced back by eye.
+              <span className="section-counter">
+                Node: <code className="identifier">{stored.summary.id}</code>
+              </span>
+            )}
           </div>
           <p className="settings-group__note">
             Human-maintained ground-truth summary. Reworded into tailored resumes referencing this node.
           </p>
-          <div className="profile-card">
-            <p style={{ margin: 0, lineHeight: 1.5 }}>{stored.summary.text}</p>
-          </div>
+          {/* One summary per master: show it, or offer to add it. */}
+          {stored.summary ? (
+            // The stored paragraph, verbatim.
+            <div className="profile-card">
+              {/* Unchanged rendering from before the add forms. */}
+              <p style={{ margin: 0, lineHeight: 1.5 }}>{stored.summary.text}</p>
+            </div>
+          ) : (
+            // No summary yet: the only state where adding one makes sense.
+            <AddEntry kind="summary" onSave={handleAdd} />
+          )}
         </section>
       )}
 
@@ -366,6 +544,8 @@ export function MasterProfilePage(): ReactElement {
         ) : (
           <p className="profile-empty-note">No skills stored yet.</p>
         )}
+        {/* Existing groups offered as hints, so a new skill joins one instead of minting a near-duplicate. */}
+        {stored && <AddEntry kind="skill" onSave={handleAdd} suggestions={{ category: skillGroups }} />}
       </section>
 
       {/* 4. Experience */}
@@ -420,6 +600,8 @@ export function MasterProfilePage(): ReactElement {
         ) : (
           <p className="profile-empty-note">No experience stored yet.</p>
         )}
+        {/* A new role, appended last; document order is resume order. */}
+        {stored && <AddEntry kind="experience" onSave={handleAdd} />}
       </section>
 
       {/* 5. Projects */}
@@ -485,6 +667,8 @@ export function MasterProfilePage(): ReactElement {
         ) : (
           <p className="profile-empty-note">No projects stored yet.</p>
         )}
+        {/* A new project with optional live and GitHub links. */}
+        {stored && <AddEntry kind="project" onSave={handleAdd} />}
       </section>
 
       {/* 6. Education */}
@@ -533,10 +717,12 @@ export function MasterProfilePage(): ReactElement {
         ) : (
           <p className="profile-empty-note">No education stored yet.</p>
         )}
+        {/* A new qualification. */}
+        {stored && <AddEntry kind="education" onSave={handleAdd} />}
       </section>
 
-      {/* 7. Certifications & Achievements */}
-      {stored && (stored.certifications.length > 0 || stored.achievements.length > 0) && (
+      {/* 7. Certifications & Achievements: shown whenever a profile exists, so the first one can be added. */}
+      {stored && (
         <section className="settings-group">
           <h2 className="settings-group__title">Certifications & Achievements</h2>
           <div className="profile-stack">
@@ -575,6 +761,9 @@ export function MasterProfilePage(): ReactElement {
               </div>
             ))}
           </div>
+          {/* Two separate resume sections, so two separate adds. */}
+          <AddEntry kind="certification" onSave={handleAdd} />
+          <AddEntry kind="achievement" onSave={handleAdd} />
         </section>
       )}
     </div>

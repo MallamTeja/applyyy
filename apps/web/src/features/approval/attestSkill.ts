@@ -12,8 +12,8 @@
 
 // Types only: the resume and master shapes from the app's single contract seam.
 import type { MasterProfile, ResolvedResume } from '../../data/contract';
-// The newest stored master, and the insert-only version writer; reused, never re-implemented.
-import { loadCurrentMasterProfile, storeMasterProfile } from '../settings/masterStore';
+// The newest stored master, the insert-only version writer and its refusal wording; reused, never re-implemented.
+import { loadCurrentMasterProfile, storeMasterProfile, storeRefusalMessage } from '../settings/masterStore';
 // The ingest gate: fills the nullable keys the table's check constraint demands, and refuses a
 // malformed or duplicate-id profile before it can become a version.
 import { checkMasterProfile } from '../settings/masterIngest';
@@ -110,19 +110,6 @@ const CHANGED_MASTER =
   // Names the safe alternative, so a refusal is never a dead end.
   'your master profile changed since this resume was tailored, so adding a skill here would also change other lines. Add it on the Master Profile page instead.';
 
-/* Why a master insert was refused, in words. A literal per named outcome, so a new outcome in
-   masterStore's union fails to compile here instead of reading as a generic failure. */
-function insertRefusal(stored: Exclude<Awaited<ReturnType<typeof storeMasterProfile>>, { kind: 'stored' }>): string {
-  // The database's own words for an unclassified failure.
-  if (stored.kind === 'failed') return stored.message;
-  // This exact master content already exists as an older version (unique content hash).
-  if (stored.kind === 'identical') return 'an identical master profile version already exists';
-  // Two saves raced for the next version number; a retry resolves it.
-  if (stored.kind === 'version_race') return 'another master profile save happened at the same moment; try again';
-  // The only outcome left: RLS refused the insert.
-  return 'you are not signed in';
-}
-
 export async function attestSkill(client: Client, args: AttestArgs): Promise<AttestOutcome> {
   // The printed name: the keyword as shown, trimmed.
   const name = args.keyword.trim();
@@ -180,7 +167,7 @@ export async function attestSkill(client: Client, args: AttestArgs): Promise<Att
     // Insert-only; the database assigns the version and the content hash.
     const stored = await storeMasterProfile(client, target);
     // Each refusal named: nothing has been written anywhere yet.
-    if (stored.kind !== 'stored') return { ok: false, message: `could not add it to your master profile: ${insertRefusal(stored)}.`, masterInserted: false };
+    if (stored.kind !== 'stored') return { ok: false, message: `could not add it to your master profile: ${storeRefusalMessage(stored)}.`, masterInserted: false };
     // The real number, which a concurrent save could have pushed past latest+1.
     version = stored.version;
     // From here on a master version exists.
