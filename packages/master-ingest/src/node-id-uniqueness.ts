@@ -40,7 +40,7 @@
  * duplication is worth flagging rather than hiding. See the package README.
  */
 
-import type { MasterBullet, MasterProfile, NodeId } from '@applyy/shared-types';
+import type { MasterBullet, MasterLink, MasterProfile, NodeId } from '@applyy/shared-types';
 import type { ReconciledKind } from './report.ts';
 
 /* One id and where it was found. The path uses the same dotted convention as
@@ -82,6 +82,26 @@ function pushBullets(
       path: parentPath + '.bullets[' + String(index) + ']',
       kind: 'bullet',
     });
+  });
+}
+
+/* Appends the links nested under one parent. Shared by achievements and
+ * certifications (2026-11-01) for the reason `pushBullets` is shared: two inline
+ * copies are two chances to spell the path differently. Kind is 'link', not the
+ * parent's kind, so a review UI files these in the link bucket a reviewer opens -
+ * the same choice the project-link walk makes. */
+function pushLinks(
+  /* The one flat inventory every kind is appended to - global, never per-section. */
+  into: NodeIdOccurrence[],
+  /* Already `?? []`-normalised by the caller, which is where absence is decided. */
+  links: readonly MasterLink[],
+  /* The owning entry's path, so the occurrence reads `certifications[1].links[0]`. */
+  parentPath: string,
+): void {
+  /* Index kept, because two links on one entry must report different paths. */
+  links.forEach((link, index) => {
+    /* Same path spelling as project links, so an operator searches one convention. */
+    into.push({ id: link.id, path: parentPath + '.links[' + String(index) + ']', kind: 'link' });
   });
 }
 
@@ -160,14 +180,9 @@ export function collectNodeIds(profile: MasterProfile): readonly NodeIdOccurrenc
        called out above as easy to forget - and the kind is 'link' rather than
        'project' because a review UI groups by kind, and a link filed under
        projects would be invisible in the link bucket a reviewer actually
-       opens. */
-    project.links.forEach((link, linkIndex) => {
-      found.push({
-        id: link.id,
-        path: path + '.links[' + String(linkIndex) + ']',
-        kind: 'link',
-      });
-    });
+       opens. Via `pushLinks` (2026-11-01), the one walk all three nested link
+       arrays share, so their paths cannot be spelled differently. */
+    pushLinks(found, project.links, path);
   });
 
   profile.education.forEach((education, index) => {
@@ -194,12 +209,18 @@ export function collectNodeIds(profile: MasterProfile): readonly NodeIdOccurrenc
     const path = 'achievements[' + String(index) + ']';
     found.push({ id: achievement.id, path, kind: 'achievement' });
     pushBullets(found, achievement.bullets, path);
+    /* Achievement links (2026-11-01), the fourth nested link array. `?? []`
+       because every stored v1-v8 achievement has no `links` key, and this walk
+       runs against the STORED profile on every re-upload. */
+    pushLinks(found, achievement.links ?? [], path);
   });
 
   profile.certifications.forEach((certification, index) => {
     const path = 'certifications[' + String(index) + ']';
     found.push({ id: certification.id, path, kind: 'certification' });
     pushBullets(found, certification.bullets, path);
+    /* Credential links, the fifth. Absent on v1-v8 for the same reason. */
+    pushLinks(found, certification.links ?? [], path);
   });
 
   /* Top-level links, which are a DIFFERENT array from `identity.links` in the

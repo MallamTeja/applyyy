@@ -94,8 +94,14 @@ export function achievement(
   label: string,
   description: string | null = null,
   bullets: readonly MasterBullet[] = [],
+  /* Credential/profile links, added to the contract 2026-11-01. OMITTED BY
+     DEFAULT, not defaulted to [] - every stored master v1-v8 has no `links` key
+     on its achievements, so the default fixture must stay in that shape or no
+     test would ever exercise the absent-key read path the readers must survive. */
+  links?: readonly MasterLink[],
 ): MasterAchievement {
-  return { id, label, description, bullets };
+  /* Absent links -> no key at all (the v1-v8 shape); present -> the key. */
+  return links === undefined ? { id, label, description, bullets } : { id, label, description, bullets, links };
 }
 
 /* A certification. Structurally identical to `achievement` and written out
@@ -107,8 +113,12 @@ export function certification(
   label: string,
   description: string | null = null,
   bullets: readonly MasterBullet[] = [],
+  /* Credential links. Omitted by default for the same reason as `achievement`:
+     the stored v1-v8 shape has no key, and that shape must stay the common one. */
+  links?: readonly MasterLink[],
 ): MasterCertification {
-  return { id, label, description, bullets };
+  /* Absent links -> no key at all (the v1-v8 shape); present -> the key. */
+  return links === undefined ? { id, label, description, bullets } : { id, label, description, bullets, links };
 }
 
 export function project(
@@ -311,6 +321,26 @@ export function reparse(source: MasterProfile): MasterProfile {
       return { ...l, id };
     });
 
+  /* Achievement and certification links (2026-11-01) get a THIRD positional
+     counter spanning both sections, for the same reason project links span all
+     projects: a parser numbering anchors down the page does not know which entry
+     it is under. Without this, `...c` would keep the STORED link ids and every
+     carry assertion on them would pass with the link reconciliation deleted. */
+  let entryLinkCount = 0;
+  const reparseEntryLinks = <T extends { readonly links?: readonly MasterLink[] }>(node: T): T => {
+    /* An absent key stays absent, so a v1-v8-shaped source reparses v1-v8-shaped. */
+    if (node.links === undefined) return node;
+    /* Present: re-identify every link positionally. */
+    return {
+      ...node,
+      links: node.links.map((l) => {
+        const id = 'p-elink-' + String(entryLinkCount);
+        entryLinkCount += 1;
+        return { ...l, id };
+      }),
+    };
+  };
+
   return {
     schema_version: 1,
     identity: {
@@ -343,12 +373,12 @@ export function reparse(source: MasterProfile): MasterProfile {
        does not restart at each heading. That shared counter is also what makes a
        cross-kind id collision expressible in a reparse at all. */
     achievements: source.achievements.map((a, i) => ({
-      ...a,
+      ...reparseEntryLinks(a),
       id: 'p-ach-' + String(i),
       bullets: reparseBullets(a.bullets),
     })),
     certifications: source.certifications.map((c, i) => ({
-      ...c,
+      ...reparseEntryLinks(c),
       id: 'p-cert-' + String(i),
       bullets: reparseBullets(c.bullets),
     })),

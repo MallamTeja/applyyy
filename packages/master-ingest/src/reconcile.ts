@@ -1022,6 +1022,112 @@ function reconcileSummary(
   return { ...incoming, id };
 }
 
+/* --- Links nested under an achievement or a certification --------------- */
+
+/* The fields both entry kinds share that link reconciliation needs. Structural,
+ * like `labelledEntryLabel`, so it cannot drift if one of the two interfaces
+ * gains a field the other lacks. `links` is OPTIONAL in the contract (absent on
+ * every stored v1-v8 entry), which is why every read below is `?? []`. */
+type LinkedEntry = BulletedNode & {
+  /* Read by labelledEntryLabel for the report's parent label. */
+  readonly label: string;
+  /* Same, and `undefined` admitted because v2 rows lack the key (see labelledEntryLabel). */
+  readonly description: string | null | undefined;
+  /* The pool being reconciled. Optional: absent on every stored v1-v8 entry. */
+  readonly links?: readonly MasterLink[];
+};
+
+/* Rebuilds an achievement or certification AND reconciles its links against
+ * THAT ONE matched entry's previous links (2026-11-01).
+ *
+ * THIS IS NOT OPTIONAL TIDYING. The rebuild these sections had before was
+ * `({ ...node, id, bullets })`, and the spread carries `node.links` through
+ * untouched - the PARSE'S throwaway link ids would have gone straight into the
+ * stored profile, the one thing this file's header says never happens. A test
+ * measured it: the reparse's `p-elink-1` came out where `link_cert_ml` belonged.
+ *
+ * Same per-parent pool as project links, for the same reason (decision 1): a
+ * credential URL reused under a different cert must not carry the id across.
+ * Returns a function rather than being one so `acc` is bound once at the call
+ * site, matching the inline lambdas the project section passes. */
+function rebuildLinkedEntry<T extends LinkedEntry>(
+  /* The shared report accumulator, so link rows land beside every other row. */
+  acc: Accumulator,
+): (node: T, id: NodeId, bullets: readonly MasterBullet[], previousNode: T | null, path: string) => T {
+  /* The exact signature `reconcileBulletedSection`'s `rebuild` expects. */
+  return (node, id, bullets, previousNode, path) => ({
+    /* Label and description verbatim from the incoming parse... */
+    ...node,
+    /* ...but the RECONCILED entry id, never the parse's throwaway... */
+    id,
+    /* ...and the bullets the generic already reconciled under this parent. */
+    bullets,
+    /* Always emitted, even when empty: from v9 on, every stored entry carries the
+       key, so the absent-key shape ages out instead of being re-stored forever. */
+    links: reconcileFlatSection<MasterLink>(
+      /* THIS entry's previous links only - decision 1, one level down. */
+      previousNode?.links ?? [],
+      /* The parse's links for this entry; a PDF parse has none (see master-pdf). */
+      node.links ?? [],
+      /* Filed under the link kind, like every other link row. */
+      'link',
+      /* Report path, e.g. `certifications[1].links[0]`. */
+      path + '.links',
+      /* The URL is the identity, same key as identity and project links. */
+      linkKey,
+      /* Pre-rendered "label <url>", shared by all link pools. */
+      linkLabel,
+      /* Carry or mint the id; everything else about the link is the incoming one. */
+      (link, linkId) => ({ ...link, id: linkId }),
+      {
+        /* The RECONCILED entry id - the one a pin would reference. */
+        parentId: id,
+        /* Rendered exactly as the bullets under the same entry render it. */
+        parentLabel: labelledEntryLabel(node),
+        /* Unmatched parent -> the empty pool is a cascade, not new content. */
+        noCandidateReason: previousNode === null ? 'new_parent' : 'no_candidate',
+      },
+      acc,
+    ),
+  });
+}
+
+/* A DELETED entry takes its links with it, listed one by one the way a deleted
+ * project's are: a pinned application references the LINK id, not the entry id.
+ * Reconciling against an EMPTY incoming pool makes every previous link unmatched,
+ * which is exactly "the entry is gone", and keeps the row shape defined once. */
+function dropLinkedEntryLinks<T extends LinkedEntry>(acc: Accumulator): (node: T, previousPath: string) => void {
+  /* The exact signature `reconcileBulletedSection`'s `dropNested` expects. */
+  return (node, previousPath) => {
+    /* Result discarded on purpose: only the `dropped` rows it records matter. */
+    reconcileFlatSection<MasterLink>(
+      /* The deleted entry's stored links; absent on v1-v8 reads as none. */
+      node.links ?? [],
+      /* Empty incoming pool: every previous link is unmatched, i.e. dropped. */
+      [],
+      /* Link kind, matching the live walk's rows. */
+      'link',
+      /* The STORED path, which is what an operator searches the old version for. */
+      previousPath + '.links',
+      /* Same identity key as the live walk, so the two cannot disagree. */
+      linkKey,
+      /* Same rendering as the live walk. */
+      linkLabel,
+      /* Never called with an empty incoming pool; required by the signature. */
+      (link, linkId) => ({ ...link, id: linkId }),
+      {
+        /* The STORED entry, since the previous side is what is being reported. */
+        parentId: node.id,
+        parentLabel: labelledEntryLabel(node),
+        /* Unreachable with an empty incoming pool; stated so no default decides it. */
+        noCandidateReason: 'no_candidate',
+      },
+      /* Rows go to the same report as the live walk's. */
+      acc,
+    );
+  };
+}
+
 /* --- The entry point ---------------------------------------------------- */
 
 /* Reconcile a freshly parsed master profile against the stored one.
@@ -1244,8 +1350,10 @@ export function reconcileMasterProfile(input: ReconcileInput): ReconcileOutput {
     'achievements',
     achievementKey,
     labelledEntryLabel,
-    (node, id, bullets) => ({ ...node, id, bullets }),
-    null,
+    /* Links reconciled inside THIS achievement (2026-11-01); see rebuildLinkedEntry. */
+    rebuildLinkedEntry<MasterAchievement>(acc),
+    /* A deleted achievement lists its link ids, not just its own. */
+    dropLinkedEntryLinks<MasterAchievement>(acc),
     acc,
   );
 
@@ -1256,8 +1364,10 @@ export function reconcileMasterProfile(input: ReconcileInput): ReconcileOutput {
     'certifications',
     certificationKey,
     labelledEntryLabel,
-    (node, id, bullets) => ({ ...node, id, bullets }),
-    null,
+    /* Credential links reconciled inside THIS certification. */
+    rebuildLinkedEntry<MasterCertification>(acc),
+    /* A deleted certification lists its credential link ids. */
+    dropLinkedEntryLinks<MasterCertification>(acc),
     acc,
   );
 

@@ -1217,6 +1217,169 @@ describe('project links are reconciled inside their own project', () => {
   });
 });
 
+/* CERTIFICATION AND ACHIEVEMENT LINKS (2026-11-01). Master v9 moves three
+   credential/profile URLs off the top-level `links` array onto the cert or
+   achievement they belong to. From then on they are nested id-bearing nodes
+   exactly like project links, and need the same per-parent reconciliation:
+   without it the `...node` spread in `rebuild` would ship the parse's THROWAWAY
+   link ids straight into the stored profile. */
+describe('certification and achievement links are reconciled inside their own entry', () => {
+  /* The link at a known position under a cert or achievement. `?.links?.` because
+     the key is optional - absent on every stored master before v9. */
+  const entryLinkIdAt = (
+    /* The reconciled output under test. */
+    profile: MasterProfile,
+    /* Which of the two linked sections. */
+    section: 'achievements' | 'certifications',
+    /* Position of the entry in its section. */
+    entryIndex: number,
+    /* Position of the link under that entry. */
+    linkIndex: number,
+  ): string | undefined => profile[section][entryIndex]?.links?.[linkIndex]?.id;
+
+  /* The v9 shape in miniature: one cert and one achievement, each carrying the
+     link id v9 hand-writes. */
+  const previous = profileOf({
+    achievements: [
+      /* The LeetCode line, with v9's profile link under it. */
+      achievement('ach_leetcode', 'LeetCode', null, [], [
+        link('link_leetcode', 'LeetCode profile', 'https://leetcode.com/example'),
+      ]),
+    ],
+    certifications: [
+      /* A cert WITH a credential link (v9 shape)... */
+      certification('cert_ml', 'Machine Learning', 'IBM SkillsBuild', [], [
+        link('link_cert_ml', 'Machine Learning credential', 'https://www.credly.com/badges/example'),
+      ]),
+      /* ...beside one with NO links key (v1-v8 shape), as v9 really mixes them. */
+      certification('cert_sql', 'SQL and Relational Databases', 'IBM Developer Skills Network'),
+    ],
+  });
+
+  /* TWIN A - the carry. The reparse hands in positional `p-elink-N` ids, so a
+     reconciler that skipped these links would ship `p-elink-*` and fail here. */
+  it('carries a cert link id and an achievement link id across a re-parse', () => {
+    /* The same document, re-identified positionally like a fresh parse. */
+    const incoming = reparse(previous);
+    /* Non-vacuity: the incoming ids really are throwaways. */
+    assert.equal(incoming.achievements[0]?.links?.[0]?.id, 'p-elink-0');
+    /* Reconcile against the stored side. */
+    const result = reconcileMasterProfile({ previous, incoming, mintId: makeMinter('new') });
+    /* The cert's credential link kept its stored id... */
+    assert.equal(entryLinkIdAt(result.profile, 'certifications', 0, 0), 'link_cert_ml');
+    /* ...and so did the achievement's, through the separate achievements wiring. */
+    assert.equal(entryLinkIdAt(result.profile, 'achievements', 0, 0), 'link_leetcode');
+    /* An unchanged re-upload mints nothing... */
+    assert.deepEqual(result.report.minted, []);
+    /* ...and drops nothing. */
+    assert.deepEqual(result.report.dropped, []);
+  });
+
+  /* TWIN B - the misattribution guard one level down. The identical credential
+     URL reappearing under a DIFFERENT cert must not carry the id: a link id that
+     says it belongs to "SQL" while it was "Machine Learning"'s credential is the
+     bullet-under-the-wrong-employer error in a new field. Differs from twin A in
+     one dimension only: which cert the link sits under. */
+  it('does not let a cert link id migrate to another cert on an exact URL match', () => {
+    /* The same two certs, with the credential moved from ML to SQL. */
+    const incoming = reparse({
+      ...previous,
+      certifications: [
+        /* ML loses the link... */
+        certification('cert_ml', 'Machine Learning', 'IBM SkillsBuild', [], []),
+        /* ...and the identical URL appears under SQL. */
+        certification('cert_sql', 'SQL and Relational Databases', 'IBM Developer Skills Network', [], [
+          link('throwaway', 'Machine Learning credential', 'https://www.credly.com/badges/example'),
+        ]),
+      ],
+    });
+    /* Reconcile against the stored side. */
+    const result = reconcileMasterProfile({ previous, incoming, mintId: makeMinter('new') });
+    /* The link now under SQL. */
+    const migrated = entryLinkIdAt(result.profile, 'certifications', 1, 0);
+    /* Must not have inherited ML's link id... */
+    assert.notEqual(migrated, 'link_cert_ml');
+    /* ...and must be a fresh mint, not some other carried id. */
+    assert.ok(migrated?.startsWith('new-'), 'it must be a freshly minted id');
+    /* And the original is reported dropped, naming the cert it hung under. */
+    const drop = result.report.dropped.find((d) => d.id === 'link_cert_ml');
+    /* At its stored path... */
+    assert.equal(drop?.previousPath, 'certifications[0].links[0]');
+    /* ...under its stored parent. */
+    assert.equal(drop?.parentId, 'cert_ml');
+  });
+
+  /* THE UPGRADE PATH FROM v8: the stored cert has NO links key and the incoming
+     one has a link. The pool must read as empty (not throw), and the mint must
+     say `no_candidate` - the parent carried, so the link is genuinely new. */
+  it('mints a link added to a v8-shaped cert that has no links key', () => {
+    /* The stored side in the v1-v8 shape: one cert, no links key. */
+    const v8 = profileOf({ certifications: [certification('cert_ml', 'Machine Learning', 'IBM SkillsBuild')] });
+    /* Non-vacuity: the stored side really is key-absent. */
+    assert.equal('links' in (v8.certifications[0] ?? {}), false, 'fixture carries a links key; test is vacuous');
+    /* The same cert, now carrying a credential link. */
+    const incoming = reparse({
+      ...v8,
+      certifications: [
+        certification('cert_ml', 'Machine Learning', 'IBM SkillsBuild', [], [
+          link('throwaway', 'Credential', 'https://www.credly.com/badges/example'),
+        ]),
+      ],
+    });
+    /* Reconcile: must not throw on the absent stored pool. */
+    const result = reconcileMasterProfile({ previous: v8, incoming, mintId: makeMinter('new') });
+    /* The cert itself carried. */
+    assert.equal(result.profile.certifications[0]?.id, 'cert_ml', 'the parent must have carried');
+    /* The one link row minted. */
+    const mint = result.report.minted.find((m) => m.kind === 'link');
+    /* At the nested path... */
+    assert.equal(mint?.path, 'certifications[0].links[0]');
+    /* ...as genuinely new content, since its parent matched... */
+    assert.equal(mint?.reason, 'no_candidate');
+    /* ...under the RECONCILED cert id. */
+    assert.equal(mint?.parentId, 'cert_ml');
+  });
+
+  /* THE REALISTIC RE-UPLOAD: the PDF parser does not attach annotation links to
+     certs (master-pdf extract.ts files every annotation under identity.links), so
+     a re-upload hands in the cert with no links. The cert must carry and the
+     credential link must be REPORTED dropped - visible in review, never a silent
+     loss. */
+  it('reports a stored cert link as dropped when the re-parse has none', () => {
+    /* What a PDF re-upload hands in: the same certs, rebuilt with no links key. */
+    const incoming = reparse({
+      ...previous,
+      certifications: previous.certifications.map((c) => certification(c.id, c.label, c.description)),
+    });
+    /* Reconcile against the stored side that has the credential link. */
+    const result = reconcileMasterProfile({ previous, incoming, mintId: makeMinter('new') });
+    /* The cert still carries: losing a link is not losing the cert. */
+    assert.equal(result.profile.certifications[0]?.id, 'cert_ml');
+    /* And exactly the credential link is reported - visible in review, never silent. */
+    assert.deepEqual(result.report.dropped.map((d) => d.id), ['link_cert_ml']);
+  });
+
+  /* A DELETED ACHIEVEMENT TAKES ITS LINKS WITH IT, and a pinned application that
+     rendered the link references the LINK id - so the link must be listed, not
+     inferred from the parent row. Same rule as a deleted project's links. */
+  it('reports a deleted achievement and every link under it', () => {
+    /* The achievement section emptied. */
+    const incoming = reparse({ ...previous, achievements: [] });
+    /* Reconcile against the stored side. */
+    const result = reconcileMasterProfile({ previous, incoming, mintId: makeMinter('new') });
+    /* Sorted so the assertion is about membership, not walk order. */
+    const droppedIds = result.report.dropped.map((d) => d.id).sort();
+    /* Both the entry AND its link - the dropNested hook is what adds the second. */
+    assert.deepEqual(droppedIds, ['ach_leetcode', 'link_leetcode']);
+    /* The link's own drop row. */
+    const linkDrop = result.report.dropped.find((d) => d.id === 'link_leetcode');
+    /* At its stored nested path... */
+    assert.equal(linkDrop?.previousPath, 'achievements[0].links[0]');
+    /* ...naming the achievement it hung under. */
+    assert.equal(linkDrop?.parentId, 'ach_leetcode');
+  });
+});
+
 /* ABSENT DESCRIPTION KEY (live 2026-10-24). master_profiles v2 stores two
    achievements with NO `description` key - absent, not null - and it is the
    `previous` profile of every future upload. labelledEntryLabel tested only

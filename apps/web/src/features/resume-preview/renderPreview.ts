@@ -173,8 +173,10 @@ export function masterAsResume(master: MasterProfile, masterVersion: number): Re
     })),
     // Achievements. `description ?? null`: stored masters omit the key when empty, and the
     // resolved type wants an explicit null rather than undefined.
-    achievements: master.achievements.map((a) => ({ ref: a.id, label: a.label, description: a.description ?? null, bullets: bullets(a.bullets) })),
-    // Certifications, same rule for description.
-    certifications: master.certifications.map((c) => ({ ref: c.id, label: c.label, description: c.description ?? null, bullets: bullets(c.bullets) })),
+    // `links ?? []` (2026-11-01): this mapping names fields one by one, so an unnamed
+    // field is DROPPED - and masters v1-v8 have no links key, so absent must mean [].
+    achievements: master.achievements.map((a) => ({ ref: a.id, label: a.label, description: a.description ?? null, bullets: bullets(a.bullets), links: a.links ?? [] })),
+    // Certifications, same rules for description and for credential links.
+    certifications: master.certifications.map((c) => ({ ref: c.id, label: c.label, description: c.description ?? null, bullets: bullets(c.bullets), links: c.links ?? [] })),
   };
 }

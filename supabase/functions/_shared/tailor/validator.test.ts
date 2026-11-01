@@ -1343,3 +1343,72 @@ test("a master with absent nullable keys resolves to explicit nulls, never undef
     assert.equal(node[key], null, `${label} should be null, got ${String(node[key])}`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// CERTIFICATION AND ACHIEVEMENT LINKS (2026-11-01). Master v9 puts credential and
+// profile URLs on the cert or achievement they prove. A link is not tailorable, so
+// the resolved resume must carry the MASTER's links by ref, and nothing the model
+// wrote. And every master before v9 has no `links` key at all, which must resolve to
+// NO key - not [] - so rebuildOriginal still reproduces every pre-v9 frozen
+// snapshot exactly (apps/web/test/tailorRefsWithoutSchemaVersion.test.ts).
+// ---------------------------------------------------------------------------
+
+// The master with one credential link on the cert and one profile link on the
+// achievement. An untyped handle so the test can add a key old fixtures lack.
+function masterWithEntryLinks(): MasterProfile {
+  // A private copy, so no other test sees the additions.
+  const master = masterClone();
+  // Untyped view for the writes.
+  const raw = master as unknown as Record<string, any>;
+  // cert-aws-ccp is certifications[0] in MASTER.
+  raw.certifications[0].links = [{ id: "link-cert-aws", label: "Credential", url: "https://www.credly.com/badges/aws" }];
+  // ach-sih is achievements[0] in MASTER.
+  raw.achievements[0].links = [{ id: "link-ach-sih", label: "Result", url: "https://sih.gov.in/result" }];
+  // Same object, now carrying links.
+  return master;
+}
+
+test("a tailored cert and achievement carry the master's links, by ref", () => {
+  // The awards tailoring selects both entries.
+  const result = validateTailoredProfile(withAwards(), masterWithEntryLinks(), PINNED_VERSION);
+  // Links are not a fabrication surface, so the tailoring stays valid.
+  assert.equal(result.ok, true, result.ok === false ? JSON.stringify(result.violations) : "");
+  if (!result.ok) return;
+  // The cert's credential link, exactly as the master holds it.
+  assert.deepEqual(result.resume.certifications[0]?.links, [
+    { id: "link-cert-aws", label: "Credential", url: "https://www.credly.com/badges/aws" },
+  ]);
+  // The achievement's link, from its own master node.
+  assert.deepEqual(result.resume.achievements[0]?.links, [
+    { id: "link-ach-sih", label: "Result", url: "https://sih.gov.in/result" },
+  ]);
+});
+
+test("links the model invents on a tailored cert are ignored; the master's win", () => {
+  // A model response that smuggles a `links` key onto its cert selection. The
+  // tailorer's shape check does not strip unknown keys, so this reaches the validator.
+  const tailored = withAwards() as unknown as Record<string, any>;
+  // The forged link points somewhere the human never put on their master.
+  tailored.certifications[0].links = [{ id: "forged", label: "Credential", url: "https://evil.example/fake-cert" }];
+  // Resolve against the real master.
+  const result = validateTailoredProfile(tailored as unknown as TailoredProfile, masterWithEntryLinks(), PINNED_VERSION);
+  // Still resolvable: the extra key is ignored, not a crash.
+  assert.equal(result.ok, true, result.ok === false ? JSON.stringify(result.violations) : "");
+  if (!result.ok) return;
+  // Only the master's link survives into the resume.
+  assert.deepEqual(result.resume.certifications[0]?.links?.map((l) => l.url), ["https://www.credly.com/badges/aws"]);
+});
+
+test("a v8-shaped master (no links key) resolves with no links key, so old rebuilds stay exact", () => {
+  // MASTER itself is the v1-v8 shape: no links key on either entry.
+  assert.equal("links" in (MASTER.certifications[0] ?? {}), false, "fixture carries links; this test would be vacuous");
+  // Resolve the awards tailoring against it.
+  const result = validateTailoredProfile(withAwards(), masterClone(), PINNED_VERSION);
+  // Valid, as before this change.
+  assert.equal(result.ok, true, result.ok === false ? JSON.stringify(result.violations) : "");
+  if (!result.ok) return;
+  // No key at all - neither [] nor an undefined-valued key - on the cert...
+  assert.equal("links" in (result.resume.certifications[0] ?? {}), false, "an absent master key gained a links key");
+  // ...or on the achievement: byte-identical to what the validator produced before v9.
+  assert.equal("links" in (result.resume.achievements[0] ?? {}), false, "an absent master key gained a links key");
+});

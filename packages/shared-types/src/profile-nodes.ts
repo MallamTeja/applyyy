@@ -290,6 +290,23 @@ export interface MasterAchievement {
   /** The qualifying detail after the label, e.g. "national finals, 300+ teams". Verbatim. Null when the label says everything. */
   description: string | null;
   bullets: DocumentOrdered<MasterBullet>;
+  /**
+   * Profile or proof URLs for this achievement, e.g. a LeetCode profile. Added
+   * 2026-11-01 so a link renders beside the line it proves instead of parking in
+   * the top-level `links` array, which no renderer reads.
+   *
+   * OPTIONAL, AND THAT BREAKS THIS FILE'S OWN "REQUIRED, POSSIBLY EMPTY" RULE ON
+   * PURPOSE. That rule (see `MasterProfile.achievements`) protects CONSTRUCTION
+   * sites; this field's danger is at READ sites. master_profiles is append-only,
+   * v1-v8 have no `links` key on any achievement, and the auditor and cover-letter
+   * read PINNED old versions through a bare cast - so a required field would be a
+   * type that lies about every stored row, and a reader calling `.map` on it would
+   * crash on all of them. `?:` makes the compiler force every reader to write
+   * `?? []`, which is the truth of the data. Absent and `[]` mean the same thing:
+   * no links. Same `MasterLink` as identity and project links, so these ids join
+   * the one global id space and are reconciled per-parent like project links.
+   */
+  links?: DocumentOrdered<MasterLink>;
 }
 
 /**
@@ -314,6 +331,8 @@ export interface MasterCertification {
   /** Whatever follows the dash, e.g. "Amazon Web Services". Verbatim. Null when absent. */
   description: string | null;
   bullets: DocumentOrdered<MasterBullet>;
+  /** Credential URLs (Credly, Coursera...). Optional for the read-site reason on `MasterAchievement.links`: absent on every stored v1-v8 cert. */
+  links?: DocumentOrdered<MasterLink>;
 }
 
 /**
@@ -547,6 +566,14 @@ export interface ResolvedAchievement {
   label: string;
   description: string | null;
   bullets: DocumentOrdered<ResolvedBullet>;
+  /* Copied whole from the master achievement by the validator, never from model
+     output - the same rule as `ResolvedProject.links`. OPTIONAL because a resolved
+     resume is FROZEN into `applications.tailored_profile`, and every snapshot
+     frozen before 2026-11-01 has no key here; the renderer reads those old
+     snapshots, so it must be forced to write `?? []`. The validator copies the
+     master's key AS HELD (absent stays absent), so rebuilding an old tailoring from
+     tailor_refs still reproduces its frozen snapshot exactly. */
+  links?: DocumentOrdered<MasterLink>;
 }
 
 /** A certification after resolution. Same shape and same reasoning as ResolvedAchievement. */
@@ -555,6 +582,8 @@ export interface ResolvedCertification {
   label: string;
   description: string | null;
   bullets: DocumentOrdered<ResolvedBullet>;
+  /* Credential links from the master by ref. Optional for the frozen-snapshot reason on `ResolvedAchievement.links`. */
+  links?: DocumentOrdered<MasterLink>;
 }
 
 /**

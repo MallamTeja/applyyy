@@ -516,6 +516,111 @@ function withNullables(mode: 'null' | 'absent'): ResolvedResume {
   return clone as unknown as ResolvedResume;
 }
 
+// A deep copy of the fixture with links attached to one cert and one achievement.
+// JSON round-trip rather than structuredClone so the copy is plain data, exactly
+// what a frozen `tailored_profile` read back from jsonb looks like.
+function withEntryLinks(links: {
+  readonly cert?: readonly MasterLink[];
+  readonly achievement?: readonly MasterLink[];
+}): ResolvedResume {
+  // Untyped clone: the test writes keys onto entries the fixture declares without them.
+  const clone = JSON.parse(JSON.stringify(zomatoBackendIntern)) as Record<string, any>;
+  // cert_meta_backend is certifications[0] in the fixture.
+  if (links.cert !== undefined) clone['certifications'][0]['links'] = links.cert;
+  // ach_sih is achievements[0] in the fixture.
+  if (links.achievement !== undefined) clone['achievements'][0]['links'] = links.achievement;
+  // Back to the contract type for the call under test.
+  return clone as unknown as ResolvedResume;
+}
+
+// The markup of one entry, from its data-ref to the start of the next entry, so
+// an assertion about cert A cannot be satisfied by an anchor printed under cert B.
+function entryHtml(html: string, ref: string): string {
+  // Start at this entry's anchor attribute.
+  const start = html.indexOf(`data-ref="${ref}"`);
+  // A missing ref would make every later assertion vacuous, so fail here instead.
+  assert.ok(start >= 0, `entry ${ref} not rendered; the slice would be vacuous`);
+  // Stop at the next entry, or at the section end for the last one.
+  const rest = html.slice(start + 1);
+  // Whichever boundary comes first.
+  const ends = [rest.indexOf('data-ref="'), rest.indexOf('</section>')].filter((i) => i >= 0);
+  // The entry body alone.
+  return html.slice(start, start + 1 + Math.min(...ends));
+}
+
+describe('renderUndatedEntry — certification and achievement links (2026-11-01)', () => {
+  // (a) THE FEATURE. A credential URL on a cert must reach the PDF as a real
+  // anchor, labelled, under THAT cert. Before this change the renderer had no
+  // links field to read, so this fails on the missing <a>, not on a typo.
+  it('renders a cert credential link as a labelled <a href> under that cert', () => {
+    const html = renderResumeHtml(withEntryLinks({
+      cert: [{ id: 'lnk_meta', label: 'Credential', url: 'https://coursera.org/verify/ABC123' }],
+    }));
+    // The anchor sits inside cert_meta_backend's own entry.
+    assert.ok(
+      entryHtml(html, 'cert_meta_backend').includes('<a href="https://coursera.org/verify/ABC123">Credential</a>'),
+      'the credential link did not render as an anchor under its cert',
+    );
+  });
+
+  // Achievements share the renderer but are a separate section and a separate
+  // field read; a renderer wired for certs alone passes the test above.
+  it('renders an achievement link under that achievement', () => {
+    const html = renderResumeHtml(withEntryLinks({
+      achievement: [{ id: 'lnk_lc', label: 'LeetCode profile', url: 'https://leetcode.com/example' }],
+    }));
+    // Under ach_sih, not anywhere in the document.
+    assert.ok(entryHtml(html, 'ach_sih').includes('<a href="https://leetcode.com/example">LeetCode profile</a>'));
+  });
+
+  // Two links on one entry use the same REAL-CHARACTER separator as project
+  // links, so a text extractor reads two tokens rather than one glued word.
+  it('separates two links on one cert with the shared link separator', () => {
+    const html = renderResumeHtml(withEntryLinks({
+      cert: [
+        { id: 'lnk_a', label: 'Credential', url: 'https://example.com/a' },
+        { id: 'lnk_b', label: 'Transcript', url: 'https://example.com/b' },
+      ],
+    }));
+    // Exactly the project-link join, so both sections read the same to a parser.
+    assert.ok(entryHtml(html, 'cert_meta_backend').includes(
+      '<a href="https://example.com/a">Credential</a><span class="resume__link-sep">•</span><a href="https://example.com/b">Transcript</a>',
+    ));
+  });
+
+  // safeHref is the control that stops a javascript: URL firing in the approval
+  // preview. A cert link is master data a human typed, so it gets the same gate.
+  it('neutralises a non-http credential URL to "#"', () => {
+    const html = renderResumeHtml(withEntryLinks({
+      cert: [{ id: 'lnk_bad', label: 'Credential', url: 'javascript:alert(1)' }],
+    }));
+    // Collapsed href, label still shown.
+    assert.ok(entryHtml(html, 'cert_meta_backend').includes('<a href="#">Credential</a>'));
+    // And the payload is nowhere in the document.
+    assert.equal(html.includes('javascript:'), false);
+  });
+
+  // (b) THE v8 SHAPE. Every resume frozen before 2026-11-01 has NO links key on
+  // its certs (the fixture is that shape). A renderer that called `.map` on the
+  // raw field would throw here, which is the approval-queue crash of 2026-10-24
+  // repeated in a new field.
+  it('renders a cert with no links key without crashing and without an anchor', () => {
+    // Non-vacuity: the fixture cert really has no key.
+    assert.equal('links' in (zomatoBackendIntern.certifications[0] ?? {}), false, 'fixture carries links; test is vacuous');
+    // Must not throw.
+    const html = renderResumeHtml(zomatoBackendIntern);
+    // And prints no link line for it.
+    const cert = entryHtml(html, 'cert_meta_backend');
+    assert.equal(cert.includes('<a '), false, 'an absent links key produced an anchor');
+    assert.equal(cert.includes('resume__entry-subtitle'), false, 'an absent links key produced an empty link line');
+  });
+
+  // Absent and [] are one meaning (no links), so they must be one output.
+  it('renders links: [] byte-identically to an absent links key', () => {
+    assert.equal(renderResumeHtml(withEntryLinks({ cert: [], achievement: [] })), renderResumeHtml(zomatoBackendIntern));
+  });
+});
+
 describe('renderResumeHtml — a nullable key that is ABSENT means the same as null', () => {
   it('an achievement with no description key renders like description: null', () => {
     // THE LIVE CRASH (approval queue, 2026-10-24): escapeHtml(undefined) threw

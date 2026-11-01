@@ -31,6 +31,8 @@
 // anti-fabrication defence, and a second definition of it would be the drift
 // that defence cannot survive.
 import type {
+  // The link node, shared by project, certification and achievement link lines.
+  MasterLink,
   ResolvedAchievement,
   ResolvedBullet,
   ResolvedCertification,
@@ -193,12 +195,17 @@ ${renderBullets(entry.bullets)}
 }
 
 /** Render one project. Every address the project has becomes the subtitle line. */
-function renderProject(entry: ResolvedProject): string {
+// One entry's links as a subtitle line: labelled anchors joined by a real
+// separator character, or '' when there are none. Extracted from renderProject on
+// 2026-11-01 when certifications and achievements gained links, so all three
+// sections emit byte-identical link markup - a second copy of the join would be
+// free to drift from the one test/ats-parse.test.ts holds.
+function renderLinkLine(links: readonly MasterLink[]): string {
   // EVERY link, not one: `links` replaced a single `url` slot precisely because
   // the real resume has a project with both a live deployment and a source
   // repository, and the single slot discarded one of the two on every upload.
   // A loop is therefore the contract's whole point, not a generalisation of it.
-  const anchors = entry.links.map(
+  const anchors = links.map(
     // The LABEL is the anchor text and the URL stays in the href. Three raw URLs
     // side by side is a line no recruiter reads and no parser gains from, and
     // `MasterLink` carries a label ('Live', 'Source') exactly so it can be the
@@ -224,7 +231,12 @@ function renderProject(entry: ResolvedProject): string {
   // no public address must print no subtitle div whatsoever, and an empty div
   // still occupies vertical space. A link whose label happens to be empty is a
   // different fact — it still has an address worth carrying into the PDF.
-  const subtitleHtml = anchors.length === 0 ? '' : `\n<div class="resume__entry-subtitle">${subtitle}</div>`;
+  return anchors.length === 0 ? '' : `\n<div class="resume__entry-subtitle">${subtitle}</div>`;
+}
+
+function renderProject(entry: ResolvedProject): string {
+  // The project's addresses, via the shared link line (see renderLinkLine).
+  const subtitleHtml = renderLinkLine(entry.links);
   return `<div class="resume__entry" data-ref="${escapeHtml(entry.ref)}">
 <div class="resume__entry-head">
 <h3 class="resume__entry-title">${escapeHtml(entry.name)}</h3>
@@ -295,11 +307,17 @@ function renderUndatedEntry(entry: ResolvedAchievement | ResolvedCertification):
   const descriptionHtml = description === null
     ? ''
     : `\n<div class="resume__entry-detail">${escapeHtml(description)}</div>`;
+  // Credential / profile links (2026-11-01), after the detail line so the name
+  // and issuer read first. `?? []` IS THE CONTROL: every resume frozen into
+  // applications.tailored_profile before this date has no `links` key here, and
+  // the approval queue renders those snapshots - `.map` on the raw field would
+  // repeat the 2026-10-24 crash in a new field. Absent and [] print nothing.
+  const linksHtml = renderLinkLine(entry.links ?? []);
   // data-ref anchors the entry to its master node so the approval diff view can
   // highlight this exact line, the same as every other entry kind. It is an
   // attribute, so a text extractor never sees it on the PDF.
   return `<div class="resume__entry" data-ref="${escapeHtml(entry.ref)}">
-${head}${descriptionHtml}
+${head}${descriptionHtml}${linksHtml}
 ${renderBullets(entry.bullets)}
 </div>`;
 }

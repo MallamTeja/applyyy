@@ -232,6 +232,76 @@ describe('the new node kinds, which are a fresh chance to get it wrong', () => {
     assert.equal(duplicates.length, 1);
     assert.deepEqual(duplicates[0]?.paths, ['summary', 'skills[0]']);
   });
+
+  /* CERTIFICATION LINKS (2026-11-01) are a FOURTH id-bearing link array, nested
+     under a cert exactly as project links nest under a project. A walk that
+     pushed the cert id and its bullets but not its links would leave this
+     collision undetected - and the link ids in master v9 are hand-written
+     (`link_cert_prompt_eng`), which is precisely where a typo-level collision
+     with an identity link is plausible. */
+  it('detects a certification link colliding with an identity link', () => {
+    /* One id used twice: at the root (identity) and nested under a cert. */
+    const profile = profileOf({
+      /* The root end of the collision. */
+      identityLinks: [link('collide', 'GitHub', 'https://github.com/example')],
+      certifications: [
+        /* The nested end: a credential link under a cert. */
+        certification('cert-ml', 'Machine Learning', 'IBM SkillsBuild', [], [
+          link('collide', 'Credential', 'https://www.credly.com/badges/example'),
+        ]),
+      ],
+    });
+    /* Both ends, in walk order, with the nested path spelled exactly. */
+    assert.deepEqual(findDuplicateNodeIds(profile)[0]?.paths, [
+      'identity.links[0]',
+      'certifications[0].links[0]',
+    ]);
+  });
+
+  /* ACHIEVEMENT LINKS are a separate walk segment from certification links, for
+     the same reason the parents are: a walk that added cert links and stopped
+     passes the test above and leaves this one red. Collides with a PROJECT link
+     so the case spans two nested link arrays, neither at the root. */
+  it('detects an achievement link colliding with a project link', () => {
+    /* One id used under two different nested link arrays. */
+    const profile = profileOf({
+      projects: [
+        /* First end: a project's source link. */
+        project('prj-1', 'Analyzer', [], [link('collide', 'Source', 'https://github.com/example/analyzer')]),
+      ],
+      achievements: [
+        /* Second end: an achievement's profile link. */
+        achievement('ach-lc', 'LeetCode', null, [], [link('collide', 'Profile', 'https://leetcode.com/example')]),
+      ],
+    });
+    /* Projects are walked before achievements, so this is the order. */
+    assert.deepEqual(findDuplicateNodeIds(profile)[0]?.paths, [
+      'projects[0].links[0]',
+      'achievements[0].links[0]',
+    ]);
+  });
+
+  /* THE v1-v8 SHAPE: no `links` key at all on a cert or an achievement. Every
+     stored master before v9 is this shape, and the walk is run against the
+     STORED profile on every re-upload - so a walk that called `.forEach` on the
+     raw field would throw on the very first upload after this change. */
+  it('walks a certification and an achievement that have no links key', () => {
+    /* Default builders omit `links`, i.e. the stored v1-v8 shape. */
+    const profile = profileOf({
+      /* One key-absent achievement... */
+      achievements: [achievement('ach-1', 'Winner')],
+      /* ...and one key-absent cert. */
+      certifications: [certification('cert-1', 'Certified')],
+    });
+    /* Non-vacuity: the fixtures really are key-absent, not `links: []`. */
+    assert.equal('links' in (profile.certifications[0] ?? {}), false, 'fixture carries a links key; test is vacuous');
+    assert.equal('links' in (profile.achievements[0] ?? {}), false, 'fixture carries a links key; test is vacuous');
+    /* Exactly the two parent ids, and no phantom link occurrences. */
+    assert.deepEqual(
+      collectNodeIds(profile).map((o) => o.path),
+      ['achievements[0]', 'certifications[0]'],
+    );
+  });
 });
 
 describe('the case both designs catch', () => {

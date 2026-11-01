@@ -692,6 +692,17 @@ export function validateTailoredProfile(
       // The live 2026-10-24 hole: master v2 stores achievements with no description key.
       description: nullIfAbsent(node.description),
       bullets,
+      // Profile/proof links (2026-11-01), from the MASTER node and nowhere else -
+      // `node` is the master achievement found by ref, so a `links` key the model
+      // wrote onto its selection is never read. Copied AS THE MASTER HOLDS IT: an
+      // absent key stays absent, NOT normalised to [] like nullIfAbsent does for
+      // description. Reason: rebuildOriginal re-runs this validator over old
+      // tailor_refs and the approval page derives "edited" from rebuild vs the
+      // frozen snapshot, so a rebuild must reproduce a pre-v9 snapshot byte for
+      // byte (measured: `links: []` broke tailorRefsWithoutSchemaVersion.test.ts).
+      // `links: node.links` would set an undefined-valued key, which deepEqual
+      // also tells apart from an absent one - hence the conditional spread.
+      ...(node.links === undefined ? {} : { links: node.links }),
     });
   }
 
@@ -732,6 +743,9 @@ export function validateTailoredProfile(
       // Nullable, same rule as an achievement's description.
       description: nullIfAbsent(node.description),
       bullets,
+      // Credential links from the master cert by ref, copied as held (absent stays
+      // absent) for the rebuild-equals-snapshot reason on the achievement's.
+      ...(node.links === undefined ? {} : { links: node.links }),
     });
   }
 
