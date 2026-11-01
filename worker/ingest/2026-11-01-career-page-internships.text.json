@@ -1,0 +1,47 @@
+[
+  {
+    "url": "https://jobs.ea.com/en_US/careers/JobDetail/Software-Engineer-Intern/215949",
+    "fetched_from": "https://jobs.ea.com/en_US/careers/JobDetail/Software-Engineer-Intern/215949",
+    "status": "closed",
+    "title": null,
+    "company": "Electronic Arts",
+    "location": null,
+    "text": null
+  },
+  {
+    "url": "https://jobs.ea.com/en_US/careers/JobDetail/Data-Science-Intern/215937",
+    "fetched_from": "https://jobs.ea.com/en_US/careers/JobDetail/Data-Science-Intern/215937",
+    "status": "closed",
+    "title": "Data Science Intern",
+    "company": "Electronic Arts",
+    "location": "Hyderabad, Telangana, India",
+    "text": "Data Science Intern - Electronic Arts\nLocations: Hyderabad, Telangana, India\nRole ID: 215937\nWorker Type: Intern - Temporary Employee\nStudio/Department: CT - Infrastructure & Platform\nWork Model: Hybrid\n\nDescription & Requirements\n\nElectronic Arts creates next-level entertainment experiences that inspire players and fans around the world. Here, everyone is part of the story. Part of a community that connects across the globe. A place where creativity thrives, new perspectives are invited, and ideas matter. A team where everyone makes play happen.\n\nEADP\n\nEA’s Digital Platform (EADP) organization is responsible for driving critical technology decisions and investments for EA on a global scale, across all divisions and studio teams. Technology and engineering leadership at EA is critical to making the industry’s best games & services and the EADP team is leading the way to providing cross-platform services that will keep our consumers connected with our games anytime, anywhere with anyone.\n\nAs a Data science intern, you will get hands-on experience of developing custom machine learning models to tackle real-world challenges within EA's games. EA’s network of games caters to tens of millions of monthly active users. You'll have the opportunity to build solutions that can scale at real time to handle several thousand requests per second and driving the player engagement of many of the industry’s most popular titles. If you like solving complex computing problems, are a passionate team player and thrive in a fast paced, ever changing development environment this is a great opportunity for you.\n\nLocation - Hyderabad\n\nResponsibilities\n\n- Work with Product Managers, senior engineers and peers to understand requirements, prototype & build large scale distributed applications\n\n- Develop and implement custom machine learning models\n\n- Clean, preprocess, and analyze large datasets, ensuring data quality and integrity.\n\n- Address and manage imbalanced datasets to optimize model performance.\n\n- Deploy and host machine learning models, ensuring their scalability and reliability in production environments.\n\n- Monitor and maintain models in production, implementing feedback loops for continuous improvement.\n\n- Identify and mitigate biases in models to ensure fairness and accuracy.\n\n- Collaborate with cross-functional teams to understand business needs and translate them into technical requirements.\n\n- Document processes and model performance, providing insights and recommendations.\n\nQualifications\n\n- Bachelor's/master’s degree in computer/software engineering, Computer Science or related concentration, equivalent and/or combination of education.\n\n- A solid foundation in Computer Science fundamentals, algorithms, design patterns, CI/CD processes, and data structures.\n\n- Proficiency in Python or R, with experience in libraries such as TensorFlow, PyTorch, or Scikit-learn.\n\n- Strong understanding of data preprocessing techniques and handling imbalanced datasets.\n\n- Familiarity with deploying models using cloud platforms (AWS, GCP, or Azure).\n\n- Knowledge of model evaluation metrics and techniques to identify and reduce bias.\n\n- Excellent problem-solving skills and attention to detail.\n\n- Strong communication skills, with the ability to explain complex concepts to non-technical stakeholders.\n\n- Good understanding of LLM architecture, fine-tuning, and training LLMs.\n\n- Robust understanding of AI agents.\n\n- Superb ability to take high level direction, work through ambiguity and drive to execution in an iterative model.\n\n- Superb ability to translate business requirements into technical design & architecture.\n\n- Ability to communicate ideas clearly and effectively.\n\nAbout Electronic Arts\n\nWe’re proud to have an extensive portfolio of games and experiences, locations around the world, and opportunities across EA. We value adaptability, resilience, creativity, and curiosity. From leadership that brings out your potential, to creating space for learning and experimenting, we empower you to do great work and pursue opportunities for growth.\n\nWe adopt a holistic approach to our benefits programs, emphasizing physical, emotional, financial, career, and community wellness to support a balanced life. Our packages are tailored to meet local needs and may include healthcare coverage, mental well-being support, retirement savings, paid time off, family leaves, complimentary games, and more. We nurture environments where our teams can always bring their best to what they do.\n\nElectronic Arts is an equal opportunity employer. All employment decisions are made without regard to race, color, national origin, ancestry, sex, gender, gender identity or expression, sexual orientation, age, genetic information, religion, disability, medical condition, pregnancy, marital status, family status, veteran status, or any other characteristic protected by law. We will also consider employment qualified applicants with criminal records in accordance with applicable law. EA also makes workplace accommodations for qualified individuals with disabilities as required by applicable law.\n\nThank you for your interest! This position is no longer accepting applications."
+  },
+  {
+    "url": "https://jobs.ea.com/en_US/careers/JobDetail/JAVA-Software-Engineer-Intern/215938",
+    "fetched_from": "https://jobs.ea.com/en_US/careers/JobDetail/JAVA-Software-Engineer-Intern/215938",
+    "status": "closed",
+    "title": null,
+    "company": "Electronic Arts",
+    "location": null,
+    "text": null
+  },
+  {
+    "url": "https://careers-shure.icims.com/jobs/5037/software-development-intern/job",
+    "fetched_from": "https://careers-shure.icims.com/jobs/5037/software-development-intern/job?in_iframe=1",
+    "status": "unreadable",
+    "title": "Software Development Intern",
+    "company": "Shure",
+    "location": "Hyderabad, Telangana, India",
+    "text": null
+  },
+  {
+    "url": "https://careers-shure.icims.com/jobs/5036/cloud-operations-intern/job",
+    "fetched_from": "https://careers-shure.icims.com/jobs/5036/cloud-operations-intern/job?in_iframe=1",
+    "status": "unreadable",
+    "title": "Cloud Operations Intern",
+    "company": "Shure",
+    "location": "IN-Telangana-Hyderabad",
+    "text": null
+  }
+]

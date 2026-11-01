@@ -1,0 +1,434 @@
+# Runs a checked-in list of job links through the job-link-intake edge function, one link
+# at a time, on demand. It does from CI what the dashboard's "Add a job by link" panel does
+# by hand, so a batch of career-page links needs no one at the browser pasting each one.
+# Exists here (not on the operator's PC) because the app-user credentials live only in this
+# repo's Actions secrets (set 2026-09-11 for apply.yml); same reason pregate-sweep.yml exists.
+# Every 200 starts matcher -> tailor -> auditor in the background, so each link spends
+# Gemini calls: the loop is paced, and dry_run defaults to ON.
+name: applyy ingest job links
+
+# Manual trigger ONLY: a list is a one-off batch, and each link spends Gemini quota, so a
+# run must start when someone chose that list and is watching the log, never on a cron.
+on:
+  workflow_dispatch:
+    # Two inputs: which list, and whether to really send it.
+    inputs:
+      # The list to ingest. The script refuses any path outside worker/ingest/*.links.json.
+      list:
+        # Shown in the Actions UI beside the text box.
+        description: 'Links file: worker/ingest/<name>.links.json (an array of {url, company, role})'
+        # Free text, so the script shape-checks it before reading anything.
+        type: string
+        # Today's batch, so the common dispatch needs no typing.
+        default: 'worker/ingest/2026-11-01-career-page-internships.links.json'
+      # The rehearsal: validates both files and prints what would be sent, then stops.
+      dry_run:
+        # Shown in the Actions UI beside the checkbox.
+        description: 'Print the plan only; no sign-in, no job-link-intake call'
+        # A checkbox: no free text to validate.
+        type: boolean
+        # Default is the rehearsal: the dispatcher opts INTO spending Gemini quota, not out of it.
+        default: true
+
+# Read-only token. The job only reads the list from the checkout and talks to Supabase
+# with its own credentials; it never writes to the repo.
+permissions:
+  # Checkout is the only GitHub API use; contents:read is the floor GitHub allows.
+  contents: read
+
+# One ingest at a time, whatever the list: two runs side by side would double the
+# background Gemini load and break the pacing that keeps a run under the free-tier RPM.
+concurrency:
+  # A fixed key, not keyed on the list, for exactly that reason.
+  group: ingest-links
+  # Never cancel mid-list: a queued second run waits instead of half-finishing the first.
+  cancel-in-progress: false
+
+# A single job: links go out one at a time, so there is nothing to parallelise.
+jobs:
+  # Named for what it does, so the Actions list is readable.
+  ingest:
+    # Same runner image as the other workflows.
+    runs-on: ubuntu-latest
+    # 40 links (the script's cap) x (45 s gap + one request) is about 40 minutes. 55 bounds
+    # a hung run AND stays under the app user's 1-hour JWT life (config.toml jwt_expiry =
+    # 3600), so the token signed in at the start cannot expire mid-list.
+    timeout-minutes: 55
+    # Steps run top to bottom; a non-zero exit stops the job.
+    steps:
+      # The list file lives in the repo, so the job needs the checkout.
+      - name: Check out the repository
+        # Same pin as run-one.yml and ci.yml.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        # Shallow, and no token left on disk.
+        with:
+          # One commit is enough to read a JSON file.
+          fetch-depth: 1
+          # Nothing here pushes, so the GITHUB_TOKEN need not sit in .git/config where
+          # the later step could read it.
+          persist-credentials: false
+      # Node 24, pinned, so the script runs on the same runtime as the worker everywhere.
+      - name: Set up Node
+        # Same pin as run-one.yml and ci.yml. Runs BEFORE the secrets step, so this
+        # third-party action never sees the password.
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        # Version only: the script uses built-ins and global fetch, so there is no install and no cache.
+        with:
+          # worker/package.json engines requires >= 24.
+          node-version: '24'
+      # The whole ingest in one step, so the secrets exist ONLY here. No `uses:` step runs
+      # after secrets are in scope, and no package is installed, so no third-party code sees them.
+      - name: Ingest the links through job-link-intake
+        # Node ESM from stdin. The quoted 'JS' delimiter stops bash expanding anything
+        # inside, so the script text is exactly what is written here.
+        run: |
+          # Fail on any error, unset variable or failed pipe stage.
+          set -euo pipefail
+          # Node reads the module from stdin; --input-type=module enables top-level await.
+          node --input-type=module <<'JS'
+          // Built-ins only: nothing is installed, so no dependency's code runs beside the secrets.
+          import { existsSync, readFileSync } from 'node:fs';
+          // Promise-based sleep for the pacing gaps; stdlib, nothing to hand-roll.
+          import { setTimeout as sleep } from 'node:timers/promises';
+
+          // Gap between links. Each 200 starts matcher -> tailor -> auditor in the background, a
+          // few Gemini calls apiece; 45 s keeps a run under the ~15 RPM free tier (gemini/client.ts:22).
+          const GAP_MS = 45_000;
+          // Wait before the one retry of a 429: long enough for a per-minute window to roll over.
+          const QUOTA_RETRY_MS = 90_000;
+          // Per-request ceiling, above the edge function's own ~150 s wall clock, so a slow
+          // Gemini read still finishes; a hung socket rejects instead of holding the job.
+          const REQUEST_TIMEOUT_MS = 180_000;
+          // Most links one run takes: 40 x (45 s + a request) fits timeout-minutes: 55. A longer
+          // list is refused up front rather than killed halfway by the job timeout.
+          const MAX_LINKS = 40;
+          // job-link-intake refuses a longer URL (handler.ts MAX_URL_CHARS); refusing here costs no request.
+          const MAX_URL_CHARS = 2_000;
+          // And a longer text (handler.ts MAX_TEXT_CHARS).
+          const MAX_TEXT_CHARS = 100_000;
+          // Pasted text shorter than this is IGNORED by the server, which fetches the page instead
+          // (extract.ts MIN_JOB_TEXT_CHARS); the plan must not claim text that will not be used.
+          const MIN_TEXT_CHARS = 200;
+          // Only a links file directly under worker/ingest/: no slash in the name, so the input
+          // cannot point the job at any other file in the checkout.
+          const LIST_PATH = /^worker\/ingest\/[A-Za-z0-9._-]+\.links\.json$/;
+          // An application_id is printed only after it proves to be a UUID.
+          const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+          // Every refusal status job-link-intake sends (handler.ts); any other status is an unknown shape.
+          const REFUSALS = new Set(['needs_text', 'not_a_job', 'posting_closed', 'quota', 'upstream_unavailable', 'disabled', 'unauthorized', 'error']);
+          // Where a saved job's fields came from (handler.ts Built["source"]).
+          const SOURCES = new Set(['ats_board', 'page', 'pasted_text']);
+
+          // Abort: one place that prints the reason and exits red. Never prints a secret,
+          // because no caller passes one in.
+          function abort(reason) {
+            // ::error:: surfaces the reason on the run summary, not only in the log.
+            console.log(`::error::ABORT: ${reason}`);
+            // Non-zero so the run shows red, never green-with-nothing-done.
+            process.exit(1);
+          }
+
+          // Reads an env var and refuses an empty one: a missing secret is an empty string
+          // in Actions, and an empty URL or key must not become a request.
+          function required(name) {
+            // Read once.
+            const value = process.env[name] ?? '';
+            // Empty means the secret is not set; stop before any network call.
+            if (value === '') abort(`missing ${name}`);
+            // Non-empty from here on.
+            return value;
+          }
+
+          // Normalised form of a URL, so "HTTPS://Host/x" and "https://host/x" count as one link.
+          // Returns null for a string that is not a URL; the caller names the entry.
+          function urlKey(raw) {
+            // new URL only parses; a throw means "not a URL".
+            try { return new URL(raw).href; } catch { return null; }
+          }
+
+          // ---- 1. The list: shape-checked in full before any network call (CLAUDE.md §6). ----
+          // The input arrives through env, never interpolated into this script.
+          const listPath = process.env.LIST_PATH ?? '';
+          // Path shape first, so a bad input is refused before the filesystem is touched.
+          if (!LIST_PATH.test(listPath)) abort(`list must be worker/ingest/<name>.links.json, got: ${listPath.slice(0, 120)}`);
+          // A missing file is a refusal, never an empty run.
+          if (!existsSync(listPath)) abort(`list file not found: ${listPath}`);
+          // Parsed inside try: a half-written file must stop the run, not become zero links.
+          let list;
+          // JSON or abort.
+          try { list = JSON.parse(readFileSync(listPath, 'utf8')); } catch (e) { abort(`list is not valid JSON: ${e.message}`); }
+          // 1..MAX_LINKS entries: an empty list would be a green run that did nothing.
+          if (!Array.isArray(list) || list.length === 0 || list.length > MAX_LINKS) abort(`list must be an array of 1 to ${MAX_LINKS} entries`);
+          // Normalised URL -> its 1-based position, for the duplicate check.
+          const seen = new Map();
+          // Each entry checked; the first bad one stops the whole run.
+          const links = list.map((entry, i) => {
+            // 1-based, matching the log lines.
+            const n = i + 1;
+            // A plain object, not null, an array or a scalar.
+            if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) abort(`entry ${n} is not an object`);
+            // Exactly these keys: a typo like "URL" must not silently become "no url".
+            const keys = Object.keys(entry).sort().join(',');
+            // Sorted, so key order in the file does not matter.
+            if (keys !== 'company,role,url') abort(`entry ${n} keys must be exactly url, company, role; got: ${keys}`);
+            // All three are needed for the log line; blank is as bad as absent.
+            for (const key of ['url', 'company', 'role']) {
+              // A non-empty string after trimming, or abort.
+              if (typeof entry[key] !== 'string' || entry[key].trim() === '') abort(`entry ${n} ${key} must be a non-empty string`);
+            }
+            // Trimmed so a stray space is not a different link.
+            const url = entry.url.trim();
+            // The server's own limit, checked here so it costs no request.
+            if (url.length > MAX_URL_CHARS) abort(`entry ${n} url is over ${MAX_URL_CHARS} characters`);
+            // Parsed for the scheme and credential checks below.
+            let parsed;
+            // A URL or abort.
+            try { parsed = new URL(url); } catch { abort(`entry ${n} url is not a URL: ${url.slice(0, 120)}`); }
+            // https only: the server refuses anything else, and http would be a wasted request.
+            if (parsed.protocol !== 'https:') abort(`entry ${n} url is not https: ${url.slice(0, 120)}`);
+            // user:pass@ in a link is refused by the server too; not printed, it may be a credential.
+            if (parsed.username !== '' || parsed.password !== '') abort(`entry ${n} url carries credentials`);
+            // The normalised form is what duplicates are compared on.
+            const key = parsed.href;
+            // A duplicate would ingest the same job twice and spend its Gemini calls twice.
+            if (seen.has(key)) abort(`entry ${n} duplicates entry ${seen.get(key)}: ${key}`);
+            // Remembered for the entries after this one.
+            seen.set(key, n);
+            // The validated link.
+            return { n, url, key, company: entry.company.trim(), role: entry.role.trim() };
+          });
+
+          // ---- 2. Optional pasted descriptions: <name>.text.json beside the list. ----
+          // Same name, .text.json; the path shape above guarantees this replace hits.
+          const textPath = listPath.replace(/\.links\.json$/, '.text.json');
+          // Normalised URL -> the description to send with it.
+          const texts = new Map();
+          // Absent is fine: every link is then sent as url only. Present means it must be well-formed.
+          if (existsSync(textPath)) {
+            // Parsed inside try: a broken text file must stop the run, not quietly send no text.
+            let entries;
+            // JSON or abort.
+            try { entries = JSON.parse(readFileSync(textPath, 'utf8')); } catch (e) { abort(`text file is not valid JSON: ${e.message}`); }
+            // An array of entries, nothing else.
+            if (!Array.isArray(entries)) abort('text file must be an array');
+            // URLs already seen in the text file: two descriptions for one link is ambiguous.
+            const textSeen = new Set();
+            // Each entry checked; other keys the writer adds are ignored.
+            entries.forEach((entry, i) => {
+              // 1-based, for the message.
+              const n = i + 1;
+              // A plain object with string url and status, or abort.
+              if (entry === null || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.url !== 'string' || typeof entry.status !== 'string') abort(`text entry ${n} needs a string url and status`);
+              // Same normalisation as the list, so the two files match on the same key.
+              const key = urlKey(entry.url.trim());
+              // Not a URL at all.
+              if (key === null) abort(`text entry ${n} url is not a URL`);
+              // One description per link.
+              if (textSeen.has(key)) abort(`text entry ${n} duplicates an earlier text entry: ${key}`);
+              // Remembered for the entries after this one.
+              textSeen.add(key);
+              // Only an ok entry carries a description; any other status (closed, unreadable) means
+              // none was captured, so it may name a link the list dropped (2026-11-01: closed EA links).
+              if (entry.status !== 'ok') return;
+              // An ok description for a link the list lacks means the two files disagree; never drop it silently.
+              if (!seen.has(key)) abort(`text entry ${n} is status ok but its url is not in the list: ${key}`);
+              // The server trims before measuring, so this measures the same way.
+              const text = typeof entry.text === 'string' ? entry.text.trim() : '';
+              // Too short is silently ignored by the server, too long is refused: both abort here.
+              if (text.length < MIN_TEXT_CHARS || text.length > MAX_TEXT_CHARS) abort(`text entry ${n} is status ok but its text is ${text.length} chars (needs ${MIN_TEXT_CHARS} to ${MAX_TEXT_CHARS})`);
+              // Sent with that link.
+              texts.set(key, text);
+            });
+          }
+
+          // ---- 3. The plan, printed on every run so the log states the rules it ran under. ----
+          // Only the exact string 'false' is a real run: a missing or odd value stays a rehearsal.
+          const dryRun = process.env.DRY_RUN !== 'false';
+          // Origin only, trailing slash removed, so the URLs below never get a double slash.
+          // Not required() in dry mode: the plan must print even before secrets exist.
+          const base = (process.env.SUPABASE_URL ?? '').replace(/\/+$/, '');
+          // What will be read.
+          console.log(`plan: ${links.length} links from ${listPath}; ${texts.size} with pasted text from ${textPath}`);
+          // What will be sent, and how fast.
+          console.log(`plan: POST ${base || '<SUPABASE_URL>'}/functions/v1/job-link-intake {url, text?}, one link at a time, ${GAP_MS / 1000}s apart; one retry after ${QUOTA_RETRY_MS / 1000}s on HTTP 429`);
+          // The stop and exit rules, verbatim, so a reader of the log can check the run against them.
+          console.log('plan: stop sending on HTTP 401, unauthorized or disabled; exit 1 if sign-in fails, sending stops early, or no link returns ok');
+          // The rehearsal: one line per link, then out, before sign-in.
+          if (dryRun) {
+            // What each request would carry.
+            for (const link of links) console.log(`${link.n}/${links.length} ${link.company} | ${link.role} | ${link.url} | text=${texts.has(link.key) ? `${texts.get(link.key).length} chars` : 'none'}`);
+            // Says plainly that nothing was called, so a green dry run is not mistaken for an ingest.
+            console.log('dry_run: plan printed; no sign-in, no job-link-intake call made.');
+            // Green: the rehearsal did what it was asked.
+            process.exit(0);
+          }
+
+          // ---- 4. Sign in: the same Auth REST call pregate-sweep.yml makes. ----
+          // Real run: every credential must be present.
+          const url = required('SUPABASE_URL');
+          // The ANON key: all authority comes from the app user's JWT, never this key.
+          const anonKey = required('SUPABASE_ANON_KEY');
+          // The app user job-link-intake's authorizeCaller() accepts.
+          const email = required('APPLYY_APP_USER_EMAIL');
+          // Masked by GitHub; never logged here.
+          const password = required('APPLYY_APP_USER_PASSWORD');
+          // Refuse a non-https URL: the password must never travel in clear text.
+          if (!url.startsWith('https://')) abort('SUPABASE_URL is not https');
+          // The email is a secret too; GitHub masks registered secrets, this makes it explicit.
+          console.log(`::add-mask::${email}`);
+          // GoTrue's password grant, without installing supabase-js.
+          let authRes;
+          // A network failure is a sign-in failure, reported without the request it carried.
+          try {
+            // POST, anon key at the gateway, JSON body.
+            authRes = await fetch(`${base}/auth/v1/token?grant_type=password`, {
+              // GoTrue's password grant is a POST.
+              method: 'POST',
+              // The gateway wants the anon key; the body is JSON.
+              headers: { apikey: anonKey, 'content-type': 'application/json' },
+              // JSON.stringify escapes the values, so no credential can break the body.
+              body: JSON.stringify({ email, password }),
+              // A hung sign-in rejects instead of holding the job to timeout-minutes.
+              signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+            });
+          } catch (e) {
+            // Only the error's name: its message could quote the request.
+            abort(`sign-in failed: ${e.name}`);
+          }
+          // Read as text first: an error page must not crash the parse and hide the status.
+          const authText = await authRes.text();
+          // Only the status is logged; the body may echo the email.
+          if (!authRes.ok) abort(`sign-in failed: HTTP ${authRes.status}`);
+          // Parsed inside try: a soft-200 HTML page is a failure, not a session.
+          let session;
+          // JSON or abort.
+          try { session = JSON.parse(authText); } catch { abort('sign-in returned non-JSON'); }
+          // The token must be a non-empty string; anything else is not a session.
+          const token = typeof session?.access_token === 'string' ? session.access_token : '';
+          // Never continue unauthenticated.
+          if (token === '') abort('sign-in returned no access_token');
+          // Mask the JWT before anything could print it.
+          console.log(`::add-mask::${token}`);
+
+          // ---- 5. One link at a time. ----
+          // One POST. Never throws: a network failure comes back as http 0 with a reason.
+          async function post(link) {
+            // fetch and the body read both sit inside the try, so a timeout on either is caught.
+            try {
+              // The same call the dashboard's AddJobLinkPanel makes through functions.invoke.
+              const res = await fetch(`${base}/functions/v1/job-link-intake`, {
+                // The function only accepts POST.
+                method: 'POST',
+                // App-user JWT plus anon key; the token is masked and these headers are never logged.
+                headers: { authorization: `Bearer ${token}`, apikey: anonKey, 'content-type': 'application/json' },
+                // text only when the text file had an ok description for this link.
+                body: JSON.stringify(texts.has(link.key) ? { url: link.url, text: texts.get(link.key) } : { url: link.url }),
+                // A hung request rejects and is recorded, instead of stalling the list.
+                signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+              });
+              // Text first, so classify() can quote a non-JSON body.
+              return { http: res.status, text: await res.text() };
+            } catch (e) {
+              // The request may still have reached the server; the log says "network", not "not sent".
+              return { http: 0, text: '', failure: `${e.name}: ${e.message}`.slice(0, 200) };
+            }
+          }
+
+          // Strict read of one response (CLAUDE.md §6: never ask a lenient parser whether it gave up).
+          // Only the exact ok shape counts as ok; anything unrecognised is invalid_response, never success.
+          function classify(http, text) {
+            // Parsed or invalid: a platform error page is not an answer.
+            let body;
+            // JSON or invalid.
+            try { body = JSON.parse(text); } catch { return { outcome: 'invalid_response', detail: `non-JSON: ${text.slice(0, 120)}` }; }
+            // Must be an object, not null, an array or a scalar.
+            if (body === null || typeof body !== 'object' || Array.isArray(body)) return { outcome: 'invalid_response', detail: 'body is not an object' };
+            // Success is exactly HTTP 200 with status ok.
+            if (http === 200 && body.status === 'ok') {
+              // Every field the log line prints, at the type handler.ts sends.
+              const shapeOk = typeof body.application_id === 'string' && UUID.test(body.application_id)
+                // A real boolean; null or absent is "unknown".
+                && typeof body.pipeline_started === 'boolean'
+                // Same.
+                && typeof body.created === 'boolean'
+                // Where the row stands now; never blank.
+                && typeof body.application_status === 'string' && body.application_status !== ''
+                // null, or the status it was revived from.
+                && (body.revived_from === null || (typeof body.revived_from === 'string' && body.revived_from !== ''))
+                // One of the three sources the handler names.
+                && SOURCES.has(body.source);
+              // A 200 missing any of these is not proof the job was saved.
+              if (!shapeOk) return { outcome: 'invalid_response', detail: 'status ok but a field is missing or ill-typed' };
+              // Proven.
+              return { outcome: 'ok', body };
+            }
+            // A refusal: an error status with a status the handler names and a string message.
+            if (http >= 400 && REFUSALS.has(body.status) && typeof body.message === 'string') return { outcome: body.status, detail: body.message.slice(0, 200) };
+            // Anything else (a gateway error shape, a 2xx that is not ok) is unknown, never success.
+            return { outcome: 'invalid_response', detail: `HTTP ${http} with an unknown body: ${text.slice(0, 120)}` };
+          }
+
+          // Count per outcome, for the summary.
+          const counts = {};
+          // Links actually sent; the rest are reported as not_sent.
+          let sent = 0;
+          // Why sending stopped early, or null when the whole list went out.
+          let stoppedBecause = null;
+          // In list order, one at a time.
+          for (const link of links) {
+            // Pace: wait before every link except the first, so no gap is spent after the last.
+            if (link.n > 1) await sleep(GAP_MS);
+            // Counted before the request, so a failed request still counts as sent.
+            sent += 1;
+            // The first attempt.
+            let res = await post(link);
+            // Rate limited: wait for the window to roll over, then retry exactly once.
+            if (res.http === 429) {
+              // Logged, so a slow run explains itself.
+              console.log(`${link.n}/${links.length} ${link.company} | http=429; retrying once in ${QUOTA_RETRY_MS / 1000}s`);
+              // The wait.
+              await sleep(QUOTA_RETRY_MS);
+              // The retry's result is the one recorded, whatever it is.
+              res = await post(link);
+            }
+            // A network failure is its own outcome; otherwise the strict read decides.
+            const result = res.failure ? { outcome: 'network', detail: res.failure } : classify(res.http, res.text);
+            // Tallied for the summary.
+            counts[result.outcome] = (counts[result.outcome] ?? 0) + 1;
+            // The ok body, or undefined for every other outcome.
+            const b = result.body;
+            // One line per link; '-' where the outcome carries no such field.
+            console.log(`${link.n}/${links.length} ${link.company} | ${link.role} | http=${res.http} status=${result.outcome} created=${b ? b.created : '-'} revived_from=${b ? (b.revived_from ?? 'null') : '-'} pipeline_started=${b ? b.pipeline_started : '-'} app_status=${b ? b.application_status : '-'} application_id=${b ? b.application_id : '-'}${result.detail ? ` detail=${JSON.stringify(result.detail)}` : ''}`);
+            // A rejected session or the kill switch refuses every later link too: stop spending the gaps.
+            if (res.http === 401 || result.outcome === 'unauthorized' || result.outcome === 'disabled') { stoppedBecause = `${result.outcome} (HTTP ${res.http}) at link ${link.n}`; break; }
+          }
+
+          // ---- 6. Summary and exit code. ----
+          // Links never sent because sending stopped early.
+          const notSent = links.length - sent;
+          // Shown only when non-zero, so a full run's summary stays short.
+          if (notSent > 0) counts.not_sent = notSent;
+          // One line, outcome=count, in a stable order.
+          console.log(`summary: ${Object.entries(counts).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${v}`).join(' ')} (of ${links.length})`);
+          // Red when the session or the kill switch stopped the list: the rest still needs sending.
+          if (stoppedBecause !== null) abort(`stopped early: ${stoppedBecause}; ${notSent} links not sent`);
+          // Red when nothing landed: a systemic failure, not a few bad links.
+          if ((counts.ok ?? 0) === 0) abort('no link returned ok');
+          // Green: at least one link landed; the per-link lines name the rest.
+          process.exit(0);
+          JS
+        # Inputs and credentials exist ONLY for this step, passed through env and never
+        # interpolated into the script, so a crafted input cannot inject shell or JS.
+        env:
+          # The list path; the script shape-checks it before reading anything.
+          LIST_PATH: ${{ inputs.list }}
+          # The rehearsal flag; anything but the exact string 'false' stays a rehearsal.
+          DRY_RUN: ${{ inputs.dry_run }}
+          # Public project URL, stored as a secret for parity with apply.yml.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          # The ANON key: authority comes from the app user's JWT.
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # The app user job-link-intake authorizes.
+          APPLYY_APP_USER_EMAIL: ${{ secrets.APPLYY_APP_USER_EMAIL }}
+          # Masked in logs by GitHub; never echoed by this workflow.
+          APPLYY_APP_USER_PASSWORD: ${{ secrets.APPLYY_APP_USER_PASSWORD }}
