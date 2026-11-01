@@ -83,6 +83,12 @@ import { ResumePreview } from '../resume-preview/ResumePreview';
 import { supabase } from '../../data/supabase';
 // The AI box's ask: the resume-assist edge function, never-throwing (2026-10-31).
 import { requestAssist } from './aiEdit';
+// The AI chat's memory: resume_chat_messages over the page's client (2026-11-01).
+import { createChatStore } from './resumeChat';
+
+/* One chat store for the page, built once: it holds no state, only the client. Undefined when the
+   app is not connected, which leaves the chat session-only rather than pretending to save. */
+const chatStore = supabase === null ? undefined : createChatStore(supabase);
 // Newest arrival in review first; pure, so the order is testable without rendering the page.
 import { newestInReviewFirst } from './queueOrder';
 
@@ -1421,6 +1427,8 @@ export function ApprovalQueuePage(): ReactElement {
                     attestCategories={skillGroups(sources.get(diff.applicationId))}
                     /* The AI box's ask; its proposals come back through onEdit like any hand edit. */
                     onAssist={(body) => requestAssist(supabase, body)}
+                    /* Where the chat keeps its chats; undefined when not connected. */
+                    chat={chatStore}
                   />
                   {/* The diff stays expanded (Bucket B is never collapsed); the
                       rendered document is an extra, opened on demand because it is tall. */}
@@ -1567,6 +1575,8 @@ export function ApprovalQueuePage(): ReactElement {
                         attestCategories={skillGroups(sources.get(diff.applicationId))}
                         /* Same AI box as Bucket B. */
                         onAssist={(body) => requestAssist(supabase, body)}
+                        /* Where the chat keeps its chats; undefined when not connected. */
+                        chat={chatStore}
                       />
                     </div>
                   ) : null}

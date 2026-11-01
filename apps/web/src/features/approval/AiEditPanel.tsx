@@ -1,77 +1,58 @@
-/* THE AI BOX on the review page (2026-10-31).
+/* THE AI CHAT on the review page (2026-10-31; a chat with memory since 2026-11-01).
  *
- * The operator says what to change; the AI proposes a short list of edits; each edit is applied
- * only by the operator's click, through the same save path as a hand edit (aiEdit.ts explains
- * why). Nothing here writes on its own, and the preview / "Download PDF" follow every applied
- * edit because the page re-renders the saved resume.
+ * The operator types what to change; the AI answers with a short note and a list of proposed
+ * edits; each edit is applied only by the operator's click, through the same save path as a hand
+ * edit (aiEdit.ts explains why). Nothing here writes the resume on its own, and the preview /
+ * "Download PDF" follow every applied edit because the page re-renders the saved resume.
+ *
+ * CHATS AND MEMORY. Every exchange is stored (resumeChat.ts, table resume_chat_messages), several
+ * chats per resume, picked from a native <select>. The next ask carries the active chat's last
+ * messages, so "make that shorter" works. Applied state is never stored: each card asks the
+ * resume (isApplied), so a reopened chat, or one after a Reset, tells the truth.
  *
  * THE AUDIT AS ADVICE, ON THE CARD (2026-11-01). Each bullet edit is run through the auditor's own
  * rule 5 (detector.ts bulletGroundingGaps) before Apply, and the card says which numbers and words
  * the master does not supply; a skill the master lacks says Apply saves it there too. Every apply
  * is one click: no popup, no block, no status change. Teja ruled native confirms out, since a
- * dialog on every click trains a reflex OK; the card is read before the click instead. The footer
- * counts flagged edits, so whether the audit should ever BLOCK is decided on measured numbers.
+ * dialog on every click trains a reflex OK; the card is read before the click instead. Each reply
+ * counts its flagged edits, so whether the audit should ever BLOCK is decided on measured numbers.
  *
- * Pure presentation: the ask and the save are both injected, so the component holds no client. */
+ * Pure presentation: the ask, the save and the chat store are all injected; no client here. */
 
-// useId ties labels to inputs without a global counter; useState holds the box's local state.
-import { useId, useState } from 'react';
+// useId ties labels to inputs; useState holds local state; useEffect loads and scrolls; useRef holds the log.
+import { useEffect, useId, useRef, useState } from 'react';
 // The return type of every component here.
 import type { ReactElement } from 'react';
 
-// Type only: the diff this box reads its context from.
+// Type only: the diff this chat reads its context from, and checks applied state against.
 import type { ResumeDiff } from './diffModel';
 // Type only: the action vocabulary and save result the page already understands.
 import type { EditAction, EditResult } from './DiffView';
-// The pure halves: build the ask, map an op to an action, run the audit's rule, format the bill.
-import { auditAdvice, buildAssistDraft, formatUsage, toEditAction } from './aiEdit';
-// Types for the answer.
-import type { AssistBody, AssistDraft, AssistOp, AssistResult, AssistUsage, AuditAdvice } from './aiEdit';
+// The pure halves: build the ask, resolve and apply ops, read applied state, format the bill.
+import { buildAssistDraft, formatUsage, isApplied, toEditAction, toStoredOp } from './aiEdit';
+// Types for the ask and its parts.
+import type { AssistBody, AssistResult, AuditAdvice, StoredOp } from './aiEdit';
+// The memory: grouping into chats and the window sent back as context.
+import { groupThreads, historyFor } from './resumeChat';
+// Types for stored messages and the injected store.
+import type { ChatMessage, ChatStore, NewChatMessage } from './resumeChat';
 
-// The box's own styles, beside it, like DiffView.css beside DiffView.
+// The chat's own styles, beside it, like DiffView.css beside DiffView.
 import './AiEditPanel.css';
 
-/* Where one suggestion stands. */
-type SuggestionStatus = 'pending' | 'applying' | 'applied' | 'failed';
+/* An Apply in flight or refused; applied state itself is derived from the resume. */
+type OpState = { readonly status: 'applying' } | { readonly status: 'failed'; readonly reason: string };
 
-/* One proposed edit and what happened to it. */
-interface Suggestion {
-  // Stable within one answer; the list never reorders.
-  readonly key: string;
-  // What the AI proposed.
-  readonly op: AssistOp;
-  // The page action it maps to; null when its id is not on this resume.
-  readonly action: EditAction | null;
-  // What the audit would say, computed once at ask time; null for ops that change no wording.
-  readonly advice: AuditAdvice | null;
-  // Where it stands.
-  readonly status: SuggestionStatus;
-  // Why it failed, in the save path's own words.
-  readonly reason: string | null;
+/* A key for one op of one message, stable across renders. */
+function opKey(message: ChatMessage, index: number): string {
+  // createdAt + role identifies a message even before it has a row id.
+  return `${message.createdAt}|${message.role}|${index}`;
 }
-
-/* One answer: the ask it came from, its suggestions, the note and the bill. */
-interface Answer {
-  // Holds the id -> text map the suggestions are shown against.
-  readonly draft: AssistDraft;
-  // In the AI's order.
-  readonly suggestions: readonly Suggestion[];
-  // The AI's one-line summary of what it changed.
-  readonly note: string;
-  // Ops the server could not map to this resume.
-  readonly dropped: number;
-  // What the ask cost.
-  readonly usage: AssistUsage;
-}
-
-/* NO POPUPS (Teja, 2026-11-01). Everything a confirm() used to ask is on the card BEFORE Apply:
-   the audit's flags in red, and for a skill the master lacks, that Apply saves it there too. A
-   native dialog on every click trained a reflex OK, which is worse than reading the card. */
 
 /* The audit's advice on one card. Words and numbers are listed so the operator judges each. */
 function AdviceLine({ advice }: { readonly advice: AuditAdvice }): ReactElement {
   // No rule for this edit: said, never shown as a pass.
-  if (advice.kind === 'not_checked') return <p className="ai-edit__meta">{advice.why}</p>;
+  if (advice.kind === 'not_checked') return <p className="ai-chat__meta">{advice.why}</p>;
   // The flagged parts, each list only when non-empty.
   const parts: string[] = [];
   // Numbers first: the costlier lie.
@@ -79,80 +60,58 @@ function AdviceLine({ advice }: { readonly advice: AuditAdvice }): ReactElement 
   // Then words.
   if (advice.terms.length > 0) parts.push(`words not in your master: ${advice.terms.join(', ')}`);
   // Grounded: said plainly, in the traced green.
-  if (parts.length === 0) return <p className="ai-edit__audit ai-edit__audit--clean">Audit: grounded in your master.</p>;
+  if (parts.length === 0) return <p className="ai-chat__audit ai-chat__audit--clean">Audit: grounded in your master.</p>;
   // Flagged: what the audit would mark, in the fabrication colour.
-  return <p className="ai-edit__audit">Audit would flag {parts.join('; ')}.</p>;
+  return <p className="ai-chat__audit">Audit would flag {parts.join('; ')}.</p>;
 }
 
-/* The before/after of one suggestion, with what the audit would say. */
-function SuggestionBody({
-  // The proposal.
-  op,
-  // Text by id at ask time.
-  before,
-  // The audit's rule on this op; null for ops that change no wording.
-  advice,
-  // Master skill names, lower-cased.
-  masterSkills,
-}: {
-  // One of the three op kinds.
-  readonly op: AssistOp;
-  // From the draft the ask was built from, so "before" is what the AI saw.
-  readonly before: ReadonlyMap<string, string | null>;
-  // Computed once per answer, not per render.
-  readonly advice: AuditAdvice | null;
-  // From the skills line's master text.
-  readonly masterSkills: ReadonlySet<string>;
-}): ReactElement {
-  // A new skill: name and group.
+/* What one stored op changes, with what the audit would say. */
+function OpBody({ op }: { readonly op: StoredOp }): ReactElement {
+  // A new skill: name, group, and whether Apply also makes it a master claim.
   if (op.op === 'add_skill') {
     // Stacked: the add, then what else Apply does.
     return (
-      <div className="ai-edit__change">
+      <div className="ai-chat__change">
         {/* The name in bold, since that is the claim being made. */}
         <span>
           Add skill <strong>{op.name}</strong> under {op.category}
         </span>
-        {/* Said before the click, where the popup used to ask it: Apply makes this a master claim. */}
-        {masterSkills.has(op.name.trim().toLowerCase()) ? null : (
-          <p className="ai-edit__audit">Not in your master profile yet: Apply saves it there too. Only apply if you have it.</p>
-        )}
+        {/* Said before the click, where the popup used to ask it. */}
+        {op.inMaster ? null : <p className="ai-chat__audit">Not in your master profile yet: Apply saves it there too. Only apply if you have it.</p>}
       </div>
     );
   }
-  // The text the id stood for when the ask was sent.
-  const old = before.get(op.id) ?? null;
   // A removal: the bullet that goes.
   if (op.op === 'remove') {
     // The whole bullet, struck, so the operator sees exactly what leaves the PDF.
     return (
-      <p className="ai-edit__change">
+      <p className="ai-chat__change">
         {/* <del> carries "removed" to screen readers, not only to the eye. */}
-        Remove bullet: <del className="ai-edit__old">{old}</del>
+        Remove bullet: <del className="ai-chat__old">{op.before}</del>
       </p>
     );
   }
-  // An edit: old struck through, new beside it, and any new numbers called out.
+  // An edit: old struck through, new beneath it, then the audit's advice.
   return (
     // Stacked, so a long bullet wraps instead of squeezing the button.
-    <div className="ai-edit__change">
+    <div className="ai-chat__change">
       {/* Which part of the resume the edit lands on. */}
-      <span className="ai-edit__where">{op.id === 'summary' ? 'Summary' : 'Bullet'}</span>
+      <span className="ai-chat__where">{op.target.kind === 'summary' ? 'Summary' : 'Bullet'}</span>
       {/* Absent old text (a new summary) shows nothing struck. */}
-      {old !== null ? <del className="ai-edit__old">{old}</del> : null}
+      {op.before !== null ? <del className="ai-chat__old">{op.before}</del> : null}
       {/* The proposed wording. */}
-      <ins className="ai-edit__new">{op.text}</ins>
+      <ins className="ai-chat__new">{op.text}</ins>
       {/* What the audit would say, read before Apply instead of asked in a popup. */}
-      {advice !== null ? <AdviceLine advice={advice} /> : null}
+      {op.advice !== null ? <AdviceLine advice={op.advice} /> : null}
     </div>
   );
 }
 
-/* The box itself. Mounted by DiffView only where an edit could land (a save path, editing on). */
+/* The chat itself. Mounted by DiffView only where an edit could land (a save path, editing on). */
 export function AiEditPanel({
-  // Read for the context of every ask.
+  // Read for the context of every ask, and for applied state.
   diff,
-  // Called once per applied suggestion.
+  // Called once per applied edit.
   onEdit,
   // Called once per ask.
   onAssist,
@@ -160,10 +119,12 @@ export function AiEditPanel({
   busy,
   // Where a new skill may be filed.
   categories,
+  // Where chats are kept; absent means this session only (tests, a screen without a client).
+  chat,
 }: {
   // The rendered diff: the AI's context is built from it, so it sees what the operator sees.
   readonly diff: ResumeDiff;
-  // The page's guarded save; one call per applied suggestion.
+  // The page's guarded save; one call per applied edit.
   readonly onEdit: (action: EditAction) => Promise<EditResult>;
   // The ask; injected so this component never holds a client.
   readonly onAssist: (body: AssistBody) => Promise<AssistResult>;
@@ -171,234 +132,370 @@ export function AiEditPanel({
   readonly busy: boolean;
   // The master's skill groups, the only places a new skill may be filed.
   readonly categories: readonly string[];
+  // The chat store; optional so render-only callers need not fake one.
+  readonly chat?: ChatStore | undefined;
 }): ReactElement {
-  // Ties the label to the textarea and the heading to the region.
+  // Ties labels to controls and the heading to the region.
   const baseId = useId();
+  // Every message of this resume's chats, oldest first.
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  // The chat being shown; a fresh id until the stored chats load.
+  const [chatId, setChatId] = useState<string>(() => crypto.randomUUID());
+  // The stored chats are loading; the composer waits so a first ask cannot land in a stale chat.
+  const [loading, setLoading] = useState<boolean>(chat !== undefined);
   // What the operator is typing.
   const [instruction, setInstruction] = useState<string>('');
   // An ask is in flight.
   const [asking, setAsking] = useState<boolean>(false);
-  // The last failed ask, in the function's words.
+  // The last failure (an ask, a load or a save), in plain words.
   const [error, setError] = useState<string | null>(null);
-  // The last answer, or null before the first ask.
-  const [answer, setAnswer] = useState<Answer | null>(null);
+  // Applies in flight or refused, by op key.
+  const [opStates, setOpStates] = useState<ReadonlyMap<string, OpState>>(new Map());
   // An Apply-all run is in progress, so its buttons wait.
   const [applyingAll, setApplyingAll] = useState<boolean>(false);
+  // The scrolling log, kept at its newest message.
+  const logRef = useRef<HTMLOListElement | null>(null);
 
-  /* Send the instruction with the current resume. */
+  // Load this resume's stored chats once per application.
+  useEffect(() => {
+    // No store: a session-only chat, nothing to load.
+    if (chat === undefined) return;
+    // Set when the row changes or the panel unmounts, so a late answer is ignored.
+    let stale = false;
+    // The read; never throws.
+    void chat.load(diff.applicationId).then((result) => {
+      // A newer row owns the panel now.
+      if (stale) return;
+      // Loading ends either way.
+      setLoading(false);
+      // A failed read is said; the chat still works for new messages.
+      if (result.kind === 'error') {
+        // Shown above the composer.
+        setError(result.message);
+        // Nothing to adopt.
+        return;
+      }
+      // Every stored message.
+      setMessages(result.messages);
+      // Open the most recently used chat, if any; otherwise keep the fresh id.
+      const newest = groupThreads(result.messages)[0];
+      // Only when a stored chat exists.
+      if (newest !== undefined) setChatId(newest.chatId);
+    });
+    // Cleanup marks the read stale.
+    return () => {
+      // Ignore whatever comes back.
+      stale = true;
+    };
+    // Re-run only when the store or the row changes.
+  }, [chat, diff.applicationId]);
+
+  // The active chat's messages, oldest first.
+  const active = messages.filter((m) => m.chatId === chatId);
+
+  // Keep the newest message in view whenever the active chat grows.
+  useEffect(() => {
+    // The log element, once rendered.
+    const log = logRef.current;
+    // Scrolled to the bottom: chat apps show the newest message.
+    if (log !== null) log.scrollTop = log.scrollHeight;
+    // A new message or a different chat.
+  }, [active.length, chatId]);
+
+  /* Send the instruction, with this chat's memory, and store the exchange. */
   async function ask(): Promise<void> {
-    // Blank, mid-ask or mid-save: nothing to send.
-    if (instruction.trim() === '' || asking || busy) return;
-    // Locks the button.
+    // The operator's words, trimmed.
+    const text = instruction.trim();
+    // Blank, mid-ask, mid-load or mid-save: nothing to send.
+    if (text === '' || asking || loading || busy) return;
+    // Locks the composer.
     setAsking(true);
     // A new ask clears the old failure.
     setError(null);
-    // Built from the diff as it is NOW, so it includes every edit already applied.
-    const draft = buildAssistDraft(diff, categories, instruction);
+    // Built from the diff as it is NOW (every applied edit included) plus the chat's last turns.
+    const draft = buildAssistDraft(diff, categories, text, historyFor(active));
     // The call; never throws.
     const result = await onAssist(draft.body);
-    // Unlocks.
-    setAsking(false);
-    // Said where the button is; the previous answer stays visible.
+    // A failed ask is said and nothing is stored; the instruction stays for a retry.
     if (result.kind === 'error') {
-      // The function's own message.
+      // Shown above the composer.
       setError(result.message);
+      // Unlocks.
+      setAsking(false);
       // Nothing else changes.
       return;
     }
-    // Each op paired with the action it maps to, all pending.
-    const suggestions = result.ops.map((op, index) => ({
-      // Stable within this answer.
-      key: String(index),
-      // As proposed.
-      op,
-      // The page action it maps to.
-      action: toEditAction(op, draft),
-      // The audit's rule, run now against the master text the ask was built from.
-      advice: auditAdvice(op, draft),
-      // Nothing applied yet.
-      status: 'pending' as const,
-      // No refusal yet.
-      reason: null,
-    }));
-    // Replaces the previous answer.
-    setAnswer({ draft, suggestions, note: result.note, dropped: result.dropped, usage: result.usage });
+    // Each op resolved to this resume's targets; null for an id the ask never sent.
+    const resolved = result.ops.map((op) => toStoredOp(op, draft));
+    // The ones that could be resolved.
+    const ops = resolved.filter((op): op is StoredOp => op !== null);
+    // Dropped by the server plus unresolved here: said in the stored note, so it survives a reload.
+    const dropped = result.dropped + (resolved.length - ops.length);
+    // The AI's note, or a plain sentence when it gave none.
+    const note = result.note !== '' ? result.note : ops.length > 0 ? `Proposed ${ops.length} edit(s).` : 'No edits proposed.';
+    // The stored note carries the drop count.
+    const content = (dropped > 0 ? `${note} (${dropped} proposed edit(s) did not fit this resume and were left out.)` : note).slice(0, 2000);
+    // The exchange, question and answer together.
+    const exchange: NewChatMessage[] = [
+      // The operator's message; no ops, no usage (the table check requires it).
+      { chatId, role: 'user', content: text, ops: null, usage: null },
+      // The reply, with its resolved ops and its bill.
+      { chatId, role: 'assistant', content, ops, usage: result.usage },
+    ];
+    // Stored when there is a store; the rows come back with ids and times.
+    const saved = chat === undefined ? null : await chat.save(diff.applicationId, exchange);
+    // Shown either way: a failed save keeps the answer usable, marked as unsaved.
+    if (saved !== null && saved.kind === 'ok') setMessages((current) => [...current, ...saved.messages]);
+    // Not stored (no store, or the save failed).
+    else {
+      // Local copies, so the cards still work this session.
+      const now = new Date().toISOString();
+      // Ids null: not in the database, so not in tomorrow's history.
+      setMessages((current) => [...current, ...exchange.map((m) => ({ ...m, id: null, createdAt: now }))]);
+      // Said, so the operator knows this exchange will not be remembered.
+      if (saved !== null && saved.kind === 'error') setError(saved.message);
+    }
+    // The composer empties for the next message.
+    setInstruction('');
+    // Unlocks.
+    setAsking(false);
   }
 
-  /* Change one suggestion's status, leaving the rest as they are. */
-  function mark(key: string, status: SuggestionStatus, reason: string | null): void {
+  /* Change one op's in-flight state; undefined clears it. */
+  function setOpState(key: string, state: OpState | undefined): void {
     // Functional update: several applies can resolve between renders.
-    setAnswer((current) =>
-      // No answer means nothing to mark; otherwise only the matching key changes.
-      current === null ? current :{ ...current, suggestions: current.suggestions.map((s) => (s.key === key ? { ...s, status, reason } : s)) },
-    );
+    setOpStates((current) => {
+      // Copied, never mutated.
+      const next = new Map(current);
+      // Cleared or set.
+      if (state === undefined) next.delete(key);
+      // Otherwise set.
+      else next.set(key, state);
+      // The new map.
+      return next;
+    });
   }
 
-  /* Apply one suggestion. Answers what happened, so Apply all knows whether to go on. */
-  async function apply(suggestion: Suggestion): Promise<'applied' | 'failed'> {
-    // An id that no longer maps cannot be applied.
-    if (suggestion.action === null) {
-      // Said on the suggestion itself.
-      mark(suggestion.key, 'failed', 'That part is no longer on this resume.');
-      // Reported.
-      return 'failed';
-    }
+  /* Apply one op through the page's guarded save. Answers whether it landed. */
+  async function apply(op: StoredOp, key: string): Promise<boolean> {
     // Shown as in progress. No popup: the card already showed every flag before this click.
-    mark(suggestion.key, 'applying', null);
-    // The page's guarded save.
-    const result = await onEdit(suggestion.action);
-    // Landed.
-    if (result.ok) {
-      // Marked done; the diff above re-renders with it.
-      mark(suggestion.key, 'applied', null);
-      // Reported.
-      return 'applied';
-    }
+    setOpState(key, { status: 'applying' });
+    // The page's save; a refusal comes back as a reason.
+    const result = await onEdit(toEditAction(op));
+    // Landed: the diff re-renders and isApplied turns the card to "Applied".
+    if (result.ok) setOpState(key, undefined);
     // Refused or unknown, in the save path's words.
-    mark(suggestion.key, 'failed', result.reason);
-    // Reported.
-    return 'failed';
+    else setOpState(key, { status: 'failed', reason: result.reason });
+    // Reported for Apply all.
+    return result.ok;
   }
 
-  /* Apply every pending suggestion in order; stop at the first failure. */
-  async function applyAll(): Promise<void> {
-    // Nothing to do without an answer.
-    if (answer === null) return;
-    // Snapshot of what is pending now; statuses change as the loop runs.
-    const pending = answer.suggestions.filter((s) => s.status === 'pending' || s.status === 'failed');
+  /* Apply every not-yet-applied op of one reply in order; stop at the first failure. */
+  async function applyAll(message: ChatMessage): Promise<void> {
     // Locks the buttons.
     setApplyingAll(true);
     // One at a time: each save writes the whole resume, so two in flight would race.
-    for (const suggestion of pending) {
-      // Applied or failed.
-      const outcome = await apply(suggestion);
+    for (const [index, op] of (message.ops ?? []).entries()) {
+      // Already on the resume: skipped.
+      if (isApplied(op, diff)) continue;
       // A failure usually means the row changed; later saves would fail the same way.
-      if (outcome === 'failed') break;
+      if (!(await apply(op, opKey(message, index)))) break;
     }
     // Unlocks.
     setApplyingAll(false);
   }
 
-  // What still waits for a click.
-  const open = answer?.suggestions.filter((s) => s.status === 'pending' || s.status === 'failed') ?? [];
-  // Bullet edits the audit rule ran on: the denominator of the flag count.
-  const audited = answer?.suggestions.filter((s) => s.advice?.kind === 'checked') ?? [];
-  // Of those, the ones it would flag: the number that decides whether the audit should ever block.
-  const flagged = audited.filter((s) => s.advice?.kind === 'checked' && (s.advice.metrics.length > 0 || s.advice.terms.length > 0));
-  // Every control waits while anything is in flight.
-  const locked = busy || asking || applyingAll;
+  /* Start an empty chat; stored chats stay in the picker. */
+  function newChat(): void {
+    // A fresh id; it becomes a stored chat with its first message.
+    setChatId(crypto.randomUUID());
+    // A stale failure belongs to the old chat.
+    setError(null);
+  }
 
-  // A labelled region, so a screen reader can jump to the AI box by name.
+  // Stored and local chats, most recently used first.
+  const threads = groupThreads(messages);
+  // Every control waits while anything is in flight.
+  const locked = busy || asking || applyingAll || loading;
+
+  // A labelled region, so a screen reader can jump to the chat by name.
   return (
-    <section className="ai-edit" aria-labelledby={`${baseId}-title`}>
-      {/* h3: a sub-section of the diff, under its own heading level. */}
-      <h3 id={`${baseId}-title`} className="ai-edit__title">
-        Ask AI to edit this resume
-      </h3>
-      {/* The contract in one line: proposals only, the operator applies. */}
-      <p className="ai-edit__hint">Say what to change. The AI proposes edits; nothing changes until you apply one.</p>
-      {/* A real label, hidden: the placeholder vanishes on typing and is no label. */}
-      <label className="visually-hidden" htmlFor={`${baseId}-input`}>
-        Instruction for the AI
-      </label>
-      {/* Two rows: an instruction is a sentence or two, and the box can be dragged taller. */}
-      <textarea
-        /* Matches the label's htmlFor. */
-        id={`${baseId}-input`}
-        /* Styled in AiEditPanel.css. */
-        className="ai-edit__input"
-        /* Short by default; resize: vertical in the CSS lets it grow. */
-        rows={2}
-        // The edge function's cap; longer is refused there anyway.
-        maxLength={500}
-        /* An example, so the first ask is a good one. */
-        placeholder="e.g. Add Kafka to skills and make the first bullet about latency"
-        /* Controlled, so ask() reads exactly what is shown. */
-        value={instruction}
-        /* Every keystroke kept. */
-        onChange={(event) => setInstruction(event.target.value)}
-        // Ctrl/Cmd+Enter sends, so the keyboard path matches the button.
-        onKeyDown={(event) => {
-          // Plain Enter stays a newline.
-          if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
-            // No newline inserted.
-            event.preventDefault();
-            // Same guards as the button.
-            void ask();
-          }
-        }}
-        /* Frozen while asking, so the instruction shown is the one that was sent. */
-        disabled={asking}
-      />
-      {/* The ask and, once there is an answer, the batch apply. */}
-      <div className="ai-edit__actions">
-        {/* Primary: the one action this box exists for. Disabled on blank, mid-ask and mid-save. */}
-        <button type="button" className="button button--primary button--small" onClick={() => void ask()} disabled={locked || instruction.trim() === ''}>
-          {/* The label says when an ask is in flight. */}
-          {asking ? 'Asking…' : 'Suggest edits'}
+    <section className="ai-chat" aria-labelledby={`${baseId}-title`}>
+      {/* Title, chat picker and New chat on one bar. */}
+      <div className="ai-chat__bar">
+        <h3 id={`${baseId}-title`} className="ai-chat__title">
+          AI resume chat
+        </h3>
+        {/* A real label, hidden: the select's value says which chat is open. */}
+        <label className="visually-hidden" htmlFor={`${baseId}-chats`}>
+          Past chats
+        </label>
+        {/* Native select: keyboard and screen-reader support for free, no custom dropdown. */}
+        <select id={`${baseId}-chats`} className="ai-chat__picker" value={chatId} onChange={(event) => setChatId(event.target.value)} disabled={locked}>
+          {/* The open chat before its first message is not stored yet, so it is listed by hand. */}
+          {threads.some((t) => t.chatId === chatId) ? null : <option value={chatId}>New chat</option>}
+          {/* Every stored chat, titled by its first instruction. */}
+          {threads.map((thread) => (
+            <option key={thread.chatId} value={thread.chatId}>
+              {thread.title}
+            </option>
+          ))}
+        </select>
+        {/* Starts a clean chat; earlier ones stay in the picker. */}
+        <button type="button" className="button button--secondary button--small" onClick={newChat} disabled={locked || active.length === 0}>
+          New chat
         </button>
-        {/* Offered only when more than one edit is waiting. */}
-        {open.length > 1 ? (
-          // Secondary: applying is the follow-up to asking.
-          <button type="button" className="button button--secondary button--small" onClick={() => void applyAll()} disabled={locked}>
-            {/* The count, so the operator knows how many saves one click makes. */}
-            Apply all ({open.length})
-          </button>
-        ) : null}
       </div>
-      {/* Polite: a failed ask is news, not an emergency. */}
-      <p className="ai-edit__error" role="status" aria-live="polite">
+
+      {/* The conversation; polite live region so a new reply is announced without stealing focus. */}
+      <ol ref={logRef} className="ai-chat__log" aria-live="polite">
+        {/* An empty chat explains itself instead of showing blank space. */}
+        {active.length === 0 ? (
+          <li className="ai-chat__empty">
+            {loading ? 'Loading chats…' : 'Say what to change, e.g. "Add Kafka to skills and make the first bullet about latency". The AI proposes; nothing changes until you apply.'}
+          </li>
+        ) : null}
+        {/* Each message in order. */}
+        {active.map((message) => {
+          // The operator's message: a bubble on the right.
+          if (message.role === 'user') {
+            return (
+              // Keyed by time and role: unique per exchange even before a row id exists.
+              <li key={`${message.createdAt}|user`} className="ai-chat__msg ai-chat__msg--user">
+                {message.content}
+              </li>
+            );
+          }
+          // The reply's proposals, with their applied state read from the resume.
+          const ops = message.ops ?? [];
+          // Ops not yet on the resume, for Apply all.
+          const open = ops.filter((op) => !isApplied(op, diff)).length;
+          // Bullet edits the audit rule ran on: the denominator of the flag count.
+          const audited = ops.filter((op) => op.op === 'edit' && op.advice?.kind === 'checked');
+          // Of those, the ones it would flag: the number that decides whether the audit should ever block.
+          const flagged = audited.filter((op) => op.op === 'edit' && op.advice?.kind === 'checked' && (op.advice.metrics.length > 0 || op.advice.terms.length > 0));
+          // The AI's reply: a bubble on the left with its cards.
+          return (
+            // Same keying as the user bubble.
+            <li key={`${message.createdAt}|assistant`} className="ai-chat__msg ai-chat__msg--ai">
+              {/* The AI's own sentence about what it changed. */}
+              <p className="ai-chat__note">{message.content}</p>
+              {/* The proposals, each with its own Apply. */}
+              {ops.length > 0 ? (
+                <ol className="ai-chat__ops">
+                  {ops.map((op, index) => {
+                    // This op's key for in-flight state.
+                    const key = opKey(message, index);
+                    // In flight or refused, if either.
+                    const state = opStates.get(key);
+                    // On the resume now: read from the diff, never stored.
+                    const applied = isApplied(op, diff);
+                    // One card.
+                    return (
+                      <li key={key} className={`ai-chat__op${applied ? ' ai-chat__op--applied' : ''}`}>
+                        <OpBody op={op} />
+                        {/* Applied items say so instead of offering the button again. */}
+                        {applied ? (
+                          <span className="ai-chat__done">Applied</span>
+                        ) : (
+                          <button
+                            type="button"
+                            /* Secondary: the primary action here is sending. */
+                            className="button button--secondary button--small"
+                            /* One guarded save through the page. */
+                            onClick={() => void apply(op, key)}
+                            /* Waits for any save, ask or batch. */
+                            disabled={locked || state?.status === 'applying'}
+                          >
+                            {/* A failed one is retried by the same button. */}
+                            {state?.status === 'applying' ? 'Applying…' : state?.status === 'failed' ? 'Retry' : 'Apply'}
+                          </button>
+                        )}
+                        {/* The save path's refusal, verbatim. */}
+                        {state?.status === 'failed' ? <p className="ai-chat__error">{state.reason}</p> : null}
+                      </li>
+                    );
+                  })}
+                </ol>
+              ) : null}
+              {/* The reply's footer: batch apply, flag count, bill. */}
+              <div className="ai-chat__foot">
+                {/* Offered only when more than one edit still waits. */}
+                {open > 1 ? (
+                  <button type="button" className="button button--secondary button--small" onClick={() => void applyAll(message)} disabled={locked}>
+                    {/* The count, so the operator knows how many saves one click makes. */}
+                    Apply all ({open})
+                  </button>
+                ) : null}
+                {/* The measurement: how many bullet edits the audit would flag. */}
+                {audited.length > 0 ? <span className="ai-chat__meta">Audit would flag {flagged.length} of {audited.length} bullet edits.</span> : null}
+                {/* What this ask cost; an unsaved reply says so. */}
+                <span className="ai-chat__meta">
+                  {message.usage !== null ? formatUsage(message.usage) : ''}
+                  {message.id === null ? ' Not saved to history.' : ''}
+                </span>
+              </div>
+            </li>
+          );
+        })}
+        {/* The pending reply, so the operator sees the ask is in flight. */}
+        {asking ? <li className="ai-chat__msg ai-chat__msg--ai ai-chat__meta">Thinking…</li> : null}
+      </ol>
+
+      {/* Any failure, polite: news, not an emergency. */}
+      <p className="ai-chat__error" role="status" aria-live="polite">
         {error ?? ''}
       </p>
-      {/* Nothing below until the first answer arrives. */}
-      {answer !== null ? (
-        // One block, so the whole answer is spaced from the controls together.
-        <div className="ai-edit__answer">
-          {/* The AI's own summary, or the reason it changed nothing. */}
-          {answer.note !== '' ? <p className="ai-edit__note">{answer.note}</p> : null}
-          {/* An empty list is said, not left as blank space. */}
-          {answer.suggestions.length === 0 ? (
-            // Said in the note style, since it is the AI's answer, not an error.
-            <p className="ai-edit__note">No edits proposed.</p>
-          ) : (
-            // Ordered: the list order is the apply order.
-            <ol className="ai-edit__list">
-              {/* In the AI's order, which is the order Apply all uses. */}
-              {answer.suggestions.map((suggestion) => (
-                <li key={suggestion.key} className={`ai-edit__item ai-edit__item--${suggestion.status}`}>
-                  {/* What changes, shown against the text it replaces. */}
-                  <SuggestionBody op={suggestion.op} before={answer.draft.before} advice={suggestion.advice} masterSkills={answer.draft.masterSkills} />
-                  {/* Applied items say so instead of offering the button again. */}
-                  {suggestion.status === 'applied' ? (
-                    <span className="ai-edit__done">Applied</span>
-                  ) : (
-                    <button
-                      type="button"
-                      /* Secondary: the primary action on this box is the ask. */
-                      className="button button--secondary button--small"
-                      /* One guarded save through the page. */
-                      onClick={() => void apply(suggestion)}
-                      /* Waits for any save, and an unmappable id can never apply. */
-                      disabled={locked || suggestion.status === 'applying' || suggestion.action === null}
-                    >
-                      {/* A failed one is retried by the same button. */}
-                      {suggestion.status === 'applying' ? 'Applying…' : suggestion.status === 'failed' ? 'Retry' : 'Apply'}
-                    </button>
-                  )}
-                  {/* The save path's refusal, verbatim. */}
-                  {suggestion.reason !== null ? <p className="ai-edit__error">{suggestion.reason}</p> : null}
-                </li>
-              ))}
-            </ol>
-          )}
-          {/* Proposals the server could not map to this resume, so a silent drop is visible. */}
-          {answer.dropped > 0 ? <p className="ai-edit__meta">{answer.dropped} proposed edit(s) did not fit this resume and were left out.</p> : null}
-          {/* The measurement: how many bullet edits the audit would flag, when any were checked. */}
-          {audited.length > 0 ? <p className="ai-edit__meta">Audit would flag {flagged.length} of {audited.length} bullet edits.</p> : null}
-          {/* What this ask cost, so the token bill is visible per click. */}
-          <p className="ai-edit__meta">{formatUsage(answer.usage)}</p>
-        </div>
-      ) : null}
+
+      {/* The composer: a form, so Enter-to-submit semantics and the button agree. */}
+      <form
+        className="ai-chat__composer"
+        /* The button and Ctrl/Cmd+Enter both end here. */
+        onSubmit={(event) => {
+          // No page reload.
+          event.preventDefault();
+          // Same guards as everywhere.
+          void ask();
+        }}
+      >
+        {/* A real label, hidden: the placeholder vanishes on typing and is no label. */}
+        <label className="visually-hidden" htmlFor={`${baseId}-input`}>
+          Message to the AI
+        </label>
+        <textarea
+          /* Matches the label. */
+          id={`${baseId}-input`}
+          /* Styled in AiEditPanel.css. */
+          className="ai-chat__input"
+          /* Short; resize: vertical lets it grow. */
+          rows={2}
+          // The edge function's cap; longer is refused there anyway.
+          maxLength={500}
+          /* Short, since the empty chat already shows an example. */
+          placeholder="Message the AI about this resume"
+          /* Controlled, so ask() reads exactly what is shown. */
+          value={instruction}
+          /* Every keystroke kept. */
+          onChange={(event) => setInstruction(event.target.value)}
+          /* Enter sends, Shift+Enter is a newline: the chat convention. */
+          onKeyDown={(event) => {
+            // Plain Enter only; Shift+Enter falls through as a newline, and IME composition is left alone.
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+              // No newline inserted.
+              event.preventDefault();
+              // Same guards as the button.
+              void ask();
+            }
+          }}
+          /* Frozen while asking, so the text shown is the text that was sent. */
+          disabled={asking}
+        />
+        {/* Primary: the one action the composer exists for. */}
+        <button type="submit" className="button button--primary button--small" disabled={locked || instruction.trim() === ''}>
+          {/* The label says when an ask is in flight. */}
+          {asking ? 'Sending…' : 'Send'}
+        </button>
+      </form>
     </section>
   );
 }

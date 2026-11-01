@@ -1,8 +1,8 @@
-/* The AI box on the review page. Semantic tokens only (docs/ui/theming-convention.md), so light
+/* The AI chat on the review page. Semantic tokens only (docs/ui/theming-convention.md), so light
    and dark both follow tokens.css with no [data-theme] rules here. */
 
-/* The box: a tool panel between the edit note and the comparison toolbar. */
-.ai-edit {
+/* The chat: a tool panel between the edit note and the comparison toolbar. */
+.ai-chat {
   /* Separated from the edit note above and the comparison toolbar below. */
   margin-top: var(--gap-4);
   /* Same inset as the other panels on this screen. */
@@ -15,61 +15,236 @@
   border-radius: var(--radius-control);
 }
 
-/* The box's heading. */
-.ai-edit__title {
+/* Title, chat picker and New chat on one line. */
+.ai-chat__bar {
+  /* In a row. */
+  display: flex;
+  /* Vertically centred with the controls. */
+  align-items: center;
+  /* Spaced. */
+  gap: var(--gap-2);
+  /* Wraps on a narrow screen instead of overflowing. */
+  flex-wrap: wrap;
+}
+
+/* The chat's heading. */
+.ai-chat__title {
   /* Section-label size, same as the coverage title. */
   font-size: var(--size-sm);
   /* Medium weight: a label, not a headline. */
   font-weight: 500;
+  /* Pushes the picker and button to the right. */
+  margin-right: auto;
 }
 
-/* The one-line contract under the heading, and the token / dropped lines under the answer. */
-.ai-edit__hint,
-.ai-edit__meta {
-  /* Read once; kept small. */
-  font-size: var(--size-xs);
-  /* Muted: neither is a verdict. */
-  color: var(--ink-muted);
-  /* Tight under the title. */
-  margin-top: var(--gap-1);
-}
-
-/* The instruction box. */
-.ai-edit__input {
-  /* Full width of the panel. */
-  width: 100%;
-  /* Space from the hint. */
-  margin-top: var(--gap-2);
-  /* Body size, so what is typed is readable. */
+/* The past-chats picker. */
+.ai-chat__picker {
+  /* Small, like the buttons beside it. */
   font: inherit;
   /* Same. */
-  font-size: var(--size-base);
-  /* Inset for the text. */
-  padding: var(--gap-2);
-  /* The input sits on the sheet colour, a step off the panel. */
+  font-size: var(--size-sm);
+  /* A long first instruction must not push the button off the bar. */
+  max-width: 18rem;
+  /* Inset. */
+  padding: var(--gap-1) var(--gap-2);
+  /* On the sheet colour, a step off the panel. */
   background: var(--sheet);
-  /* Text colour follows the theme. */
+  /* Text follows the theme. */
   color: var(--text-primary);
   /* Hairline edge. */
   border: 1px solid var(--rule);
   /* Matches the buttons. */
   border-radius: var(--radius-control);
-  /* Only taller, never wider: width is the panel's. */
-  resize: vertical;
 }
 
-/* Suggest and Apply all, side by side. */
-.ai-edit__actions {
-  /* Buttons in a row. */
+/* The conversation. */
+.ai-chat__log {
+  /* No list markers: bubbles carry the structure. */
+  list-style: none;
+  /* No indent. */
+  padding: 0;
+  /* Space from the bar. */
+  margin-top: var(--gap-3);
+  /* Bubbles stacked. */
   display: flex;
+  /* Top to bottom, oldest first. */
+  flex-direction: column;
   /* Spaced. */
   gap: var(--gap-2);
-  /* Under the input. */
+  /* A long chat scrolls inside the panel instead of pushing the diff off screen. */
+  max-height: 28rem;
+  /* The scroll. */
+  overflow-y: auto;
+}
+
+/* The empty-chat hint. */
+.ai-chat__empty {
+  /* Muted: it is a hint, not content. */
+  color: var(--ink-muted);
+  /* Small. */
+  font-size: var(--size-sm);
+}
+
+/* One message bubble. */
+.ai-chat__msg {
+  /* Inset. */
+  padding: var(--gap-2) var(--gap-3);
+  /* Hairline edge. */
+  border: 1px solid var(--rule);
+  /* Matches the controls. */
+  border-radius: var(--radius-control);
+  /* Body size. */
+  font-size: var(--size-sm);
+  /* Long words (URLs, tech names) wrap instead of overflowing the bubble. */
+  overflow-wrap: anywhere;
+}
+
+/* The operator's message: right side, accent wash. */
+.ai-chat__msg--user {
+  /* Right-aligned, the chat convention for "you". */
+  align-self: flex-end;
+  /* Never wider than most of the panel. */
+  max-width: 80%;
+  /* The accent wash marks it as the operator's. */
+  background: var(--accent-subtle);
+  /* Keeps the operator's line breaks. */
+  white-space: pre-wrap;
+}
+
+/* The AI's reply: full width, on the sheet, since it carries cards. */
+.ai-chat__msg--ai {
+  /* Left side. */
+  align-self: stretch;
+  /* On the sheet colour. */
+  background: var(--sheet);
+}
+
+/* The AI's one-line note. */
+.ai-chat__note {
+  /* Secondary text: the AI's own words. */
+  color: var(--text-secondary);
+}
+
+/* The proposals inside a reply. */
+.ai-chat__ops {
+  /* Cards, not numbers. */
+  list-style: none;
+  /* No indent. */
+  padding: 0;
+  /* Under the note. */
+  margin-top: var(--gap-2);
+  /* Stacked. */
+  display: grid;
+  /* Spaced. */
+  gap: var(--gap-2);
+}
+
+/* One proposal as a card. */
+.ai-chat__op {
+  /* Change on the left, button on the right, refusal underneath. */
+  display: grid;
+  /* The change takes the room. */
+  grid-template-columns: 1fr auto;
+  /* Spaced. */
+  gap: var(--gap-1) var(--gap-3);
+  /* Button level with the first line. */
+  align-items: start;
+  /* Inset. */
+  padding: var(--gap-2);
+  /* On the panel, so each card stands off the reply's sheet. */
+  background: var(--panel);
+  /* Hairline edge. */
+  border: 1px solid var(--rule);
+  /* Matches the rest. */
+  border-radius: var(--radius-control);
+}
+
+/* An applied edit is on the resume; the traced wash says so. */
+.ai-chat__op--applied {
+  /* Same green the diff uses for traced lines. */
+  background: var(--traced-wash);
+}
+
+/* A refusal spans both columns under the change. */
+.ai-chat__op > .ai-chat__error {
+  /* Full width. */
+  grid-column: 1 / -1;
+}
+
+/* The before/after block inside a card. */
+.ai-chat__change {
+  /* Old and new stacked. */
+  display: grid;
+  /* Tight. */
+  gap: var(--gap-1);
+}
+
+/* "Summary" or "Bullet": which part of the resume the edit lands on. */
+.ai-chat__where {
+  /* A small label. */
+  font-size: var(--size-xs);
+  /* Muted. */
+  color: var(--ink-muted);
+}
+
+/* The text going away. */
+.ai-chat__old {
+  /* Muted: it is going away. */
+  color: var(--ink-muted);
+}
+
+/* The proposed wording. */
+.ai-chat__new {
+  /* No underline: the card already says this is the proposal. */
+  text-decoration: none;
+  /* Full colour. */
+  color: var(--text-primary);
+}
+
+/* What the audit would flag, or a master claim Apply would add: read before the click. */
+.ai-chat__audit {
+  /* The fabrication colour, because an ungrounded number or word is what the audit calls one. */
+  color: var(--fabricated-strong);
+  /* Small. */
+  font-size: var(--size-xs);
+}
+
+/* The audit found nothing to flag. */
+.ai-chat__audit--clean {
+  /* The traced green the diff uses for grounded lines. */
+  color: var(--traced);
+}
+
+/* "Applied" in place of the button. */
+.ai-chat__done {
+  /* The traced green. */
+  color: var(--traced);
+}
+
+/* A reply's footer: Apply all, the flag count, the bill. */
+.ai-chat__foot {
+  /* In a row. */
+  display: flex;
+  /* Centred with the button. */
+  align-items: center;
+  /* Spaced. */
+  gap: var(--gap-3);
+  /* Wraps when narrow. */
+  flex-wrap: wrap;
+  /* Under the cards. */
   margin-top: var(--gap-2);
 }
 
-/* A failed ask, or a refused apply under its suggestion. */
-.ai-edit__error {
+/* Token counts, flag counts, hints. */
+.ai-chat__meta {
+  /* Read once; kept small. */
+  font-size: var(--size-xs);
+  /* Muted: none of it is a verdict. */
+  color: var(--ink-muted);
+}
+
+/* A failed ask, load, save or apply. */
+.ai-chat__error {
   /* The fabrication red is the screen's only error colour. */
   color: var(--fabricated);
   /* Small. */
@@ -79,121 +254,41 @@
 }
 
 /* An empty live region takes no room. */
-.ai-edit__error:empty {
+.ai-chat__error:empty {
   /* Kept in the tree so announcements still fire; just not drawn. */
   display: none;
 }
 
-/* Everything that arrives with an answer. */
-.ai-edit__answer {
-  /* Separated from the controls. */
-  margin-top: var(--gap-3);
-}
-
-/* The AI's own sentence about its change. */
-.ai-edit__note {
-  /* Secondary text: the AI's own words about its change. */
-  color: var(--text-secondary);
-  /* Small. */
-  font-size: var(--size-sm);
-}
-
-/* The proposals. */
-.ai-edit__list {
-  /* The numbers are noise; each item is boxed instead. */
-  list-style: none;
-  /* No indent. */
-  padding: 0;
-  /* Under the note. */
-  margin-top: var(--gap-2);
-  /* Items stacked. */
-  display: grid;
+/* The composer: input and Send. */
+.ai-chat__composer {
+  /* Side by side. */
+  display: flex;
+  /* Send sits at the bottom of a grown textarea. */
+  align-items: flex-end;
   /* Spaced. */
   gap: var(--gap-2);
+  /* Under the log. */
+  margin-top: var(--gap-2);
 }
 
-/* One proposal as a card. */
-.ai-edit__item {
-  /* Change on the left, button on the right, error underneath. */
-  display: grid;
-  /* The change takes the room. */
-  grid-template-columns: 1fr auto;
-  /* Spaced. */
-  gap: var(--gap-1) var(--gap-3);
-  /* Button level with the first line. */
-  align-items: start;
-  /* Inset. */
-  padding: var(--gap-2) var(--gap-3);
-  /* On the sheet, so each proposal reads as a card on the panel. */
+/* The message box. */
+.ai-chat__input {
+  /* Takes the row. */
+  flex: 1;
+  /* Body type, so what is typed is readable. */
+  font: inherit;
+  /* Same. */
+  font-size: var(--size-base);
+  /* Inset for the text. */
+  padding: var(--gap-2);
+  /* On the sheet colour. */
   background: var(--sheet);
+  /* Text follows the theme. */
+  color: var(--text-primary);
   /* Hairline edge. */
   border: 1px solid var(--rule);
-  /* Matches the panel. */
+  /* Matches the buttons. */
   border-radius: var(--radius-control);
-}
-
-/* An applied edit is done; the traced wash says "this is now on the resume". */
-.ai-edit__item--applied {
-  /* Same green the diff uses for traced lines. */
-  background: var(--traced-wash);
-}
-
-/* A refusal spans both columns under the change. */
-.ai-edit__item > .ai-edit__error {
-  /* Full width. */
-  grid-column: 1 / -1;
-}
-
-/* The before/after block inside a card. */
-.ai-edit__change {
-  /* Body size. */
-  font-size: var(--size-sm);
-  /* Old and new stacked. */
-  display: grid;
-  /* Tight. */
-  gap: var(--gap-1);
-}
-
-/* "Summary" or "Bullet": which part of the resume the edit lands on. */
-.ai-edit__where {
-  /* A small label for which part of the resume. */
-  font-size: var(--size-xs);
-  /* Muted. */
-  color: var(--ink-muted);
-}
-
-/* The text going away. */
-.ai-edit__old {
-  /* Muted: it is going away. */
-  color: var(--ink-muted);
-}
-
-/* The proposed wording. */
-.ai-edit__new {
-  /* No underline: the box already says this is the proposal. */
-  text-decoration: none;
-  /* Full colour. */
-  color: var(--text-primary);
-}
-
-/* What the audit would flag, or a master claim Apply would add: read before the click. */
-.ai-edit__audit {
-  /* The fabrication colour, because an ungrounded number or word is what the audit calls one. */
-  color: var(--fabricated-strong);
-  /* Small. */
-  font-size: var(--size-xs);
-}
-
-/* The audit found nothing to flag. */
-.ai-edit__audit--clean {
-  /* The traced green the diff uses for grounded lines. */
-  color: var(--traced);
-}
-
-/* "Applied" in place of the button. */
-.ai-edit__done {
-  /* The traced green. */
-  color: var(--traced);
-  /* Small. */
-  font-size: var(--size-sm);
+  /* Only taller, never wider. */
+  resize: vertical;
 }

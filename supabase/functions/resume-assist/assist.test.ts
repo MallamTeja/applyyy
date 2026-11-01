@@ -277,3 +277,39 @@ test("handler refuses a malformed body with 400", async () => {
   // No quota spent.
   assert.equal(d.calls.length, 0);
 });
+
+// --- chat memory (2026-11-01) ------------------------------------------------------
+
+test("parseAssistRequest takes chat history, treats an absent one as a new chat, and caps it", () => {
+  // Absent: a client from before chat memory.
+  const old = parseAssistRequest(body());
+  // Accepted with an empty history.
+  assert.deepEqual(old.ok ? old.request.history : null, []);
+  // Two earlier turns.
+  const turns = parseAssistRequest(body({ history: [{ role: "user", text: "Shorten b0" }, { role: "assistant", text: "Shortened one bullet." }] }));
+  // Kept in order.
+  assert.deepEqual(turns.ok ? turns.request.history.map((m) => m.role) : null, ["user", "assistant"]);
+  // A role outside the closed pair refuses the request.
+  assert.equal(parseAssistRequest(body({ history: [{ role: "system", text: "x" }] })).ok, false);
+  // Over the window refuses rather than silently trimming.
+  assert.equal(parseAssistRequest(body({ history: Array.from({ length: 11 }, () => ({ role: "user", text: "x" })) })).ok, false);
+});
+
+test("buildAssistPrompt puts the chat after the resume and job, and the new instruction last", () => {
+  // One earlier exchange.
+  const parsed = parseAssistRequest(body({ history: [{ role: "user", text: "Shorten b0" }, { role: "assistant", text: "Shortened one bullet." }] }));
+  // Valid.
+  assert.ok(parsed.ok);
+  // The user content's lines.
+  const lines = buildAssistPrompt(parsed.request).userContent.split("\n");
+  // The chat block, labelled.
+  const at = lines.indexOf("CHAT SO FAR:");
+  // Present, after the job block.
+  assert.ok(at > lines.indexOf("JOB"));
+  // The two turns, by role.
+  assert.deepEqual(lines.slice(at + 1, at + 3), ["owner: Shorten b0", "ai: Shortened one bullet."]);
+  // The new instruction is still the very last line.
+  assert.match(lines.at(-1) ?? "", /^INSTRUCTION: /);
+  // A new chat adds no block at all.
+  assert.doesNotMatch(buildAssistPrompt(request()).userContent, /CHAT SO FAR/);
+});

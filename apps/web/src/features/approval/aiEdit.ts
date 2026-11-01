@@ -36,6 +36,16 @@ export interface AssistBody {
   readonly skills: string;
   // The master's skill groups.
   readonly categories: readonly string[];
+  // Earlier messages of the active chat, oldest first (chat memory, 2026-11-01).
+  readonly history: readonly ChatTurn[];
+}
+
+/* One earlier message, as the edge function takes it: who said it and what. */
+export interface ChatTurn {
+  // The operator or the AI.
+  readonly role: 'user' | 'assistant';
+  // The instruction, or the AI's note.
+  readonly text: string;
 }
 
 /* One proposed change, as the edge function returns it (a closed union, checked on read). */
@@ -117,7 +127,7 @@ function shortList(items: readonly string[]): string[] {
 }
 
 /* Build the compact projection the AI sees, from what the page already rendered. */
-export function buildAssistDraft(diff: ResumeDiff, categories: readonly string[], instruction: string): AssistDraft {
+export function buildAssistDraft(diff: ResumeDiff, categories: readonly string[], instruction: string, history: readonly ChatTurn[] = []): AssistDraft {
   // Short id -> ref, filled as bullets are numbered.
   const refs = new Map<string, string>();
   // Short id -> text at ask time.
@@ -179,6 +189,8 @@ export function buildAssistDraft(diff: ResumeDiff, categories: readonly string[]
     bullets,
     skills,
     categories: shortList(categories),
+    // The caller (resumeChat.historyFor) already windowed and trimmed it to the function's caps.
+    history,
   };
   // Sent with the maps the answer and the audit advice need.
   return { body, refs, before, masterText, skillTokens, masterSkills };
@@ -206,20 +218,126 @@ export function auditAdvice(op: AssistOp, draft: AssistDraft): AuditAdvice | nul
   return { kind: 'checked', metrics: [...new Set(gaps.metrics)], terms: [...new Set(gaps.terms)] };
 }
 
-/* Turn one op into the page's action, or null when its id is not on this resume. */
-export function toEditAction(op: AssistOp, draft: AssistDraft): EditAction | null {
-  /* A skill always goes through the attest path: it reuses the master's own node when the latest
-     master already has the skill, and otherwise records the operator's vouch as a new master
-     version first. Either way the printed skill traces to the master, which the auditor demands. */
-  if (op.op === 'add_skill') return { kind: 'attest_skill', keyword: op.name, category: op.category };
-  // The summary has its own target; no ref involved (the server never proposes removing it).
-  if (op.id === 'summary') return op.op === 'edit' ? { kind: 'edit', target: { kind: 'summary' }, text: op.text } : null;
+/* A proposed edit as the chat STORES it (2026-11-01): short ids resolved to this resume's real
+   targets at answer time, because "b2" means a different bullet on the next ask. Everything a card
+   needs after a reload is in it; whether it was applied is derived from the resume (isApplied). */
+export type StoredOp =
+  // New text for the summary or one bullet, with the text it replaced and the audit's advice.
+  | {
+      readonly op: 'edit';
+      readonly target: { readonly kind: 'summary' } | { readonly kind: 'bullet'; readonly ref: string };
+      readonly before: string | null;
+      readonly text: string;
+      readonly advice: AuditAdvice | null;
+    }
+  // One bullet dropped, with the text it had.
+  | { readonly op: 'remove'; readonly ref: string; readonly before: string | null }
+  // A skill, and whether the master already had it when proposed.
+  | { readonly op: 'add_skill'; readonly name: string; readonly category: string; readonly inMaster: boolean };
+
+/* Resolve one answer op against the ask it came from; null when its id was never sent. */
+export function toStoredOp(op: AssistOp, draft: AssistDraft): StoredOp | null {
+  // A skill needs no target; the master check is made once, now.
+  if (op.op === 'add_skill') return { op: 'add_skill', name: op.name, category: op.category, inMaster: draft.masterSkills.has(op.name.trim().toLowerCase()) };
+  // The text the id stood for at ask time.
+  const before = draft.before.get(op.id) ?? null;
+  // The summary has its own target; the server never proposes removing it.
+  if (op.id === 'summary') return op.op === 'edit' ? { op: 'edit', target: { kind: 'summary' }, before, text: op.text, advice: auditAdvice(op, draft) } : null;
   // The bullet's ref, from the ask that produced this op.
   const ref = draft.refs.get(op.id);
   // An id we never sent cannot be applied.
   if (ref === undefined) return null;
-  // New text for the bullet, or the bullet dropped.
-  return op.op === 'edit' ? { kind: 'edit', target: { kind: 'bullet', ref }, text: op.text } : { kind: 'remove', target: { kind: 'bullet', ref } };
+  // Resolved, with the audit's advice for an edit.
+  return op.op === 'edit'
+    ? { op: 'edit', target: { kind: 'bullet', ref }, before, text: op.text, advice: auditAdvice(op, draft) }
+    : { op: 'remove', ref, before };
+}
+
+/* The page action a stored op becomes on Apply. */
+export function toEditAction(stored: StoredOp): EditAction {
+  /* A skill always goes through the attest path: it reuses the master's own node when the latest
+     master already has the skill, and otherwise records the operator's vouch as a new master
+     version first. Either way the printed skill traces to the master, which the auditor demands. */
+  if (stored.op === 'add_skill') return { kind: 'attest_skill', keyword: stored.name, category: stored.category };
+  // New text on its resolved target.
+  if (stored.op === 'edit') return { kind: 'edit', target: stored.target, text: stored.text };
+  // The bullet dropped.
+  return { kind: 'remove', target: { kind: 'bullet', ref: stored.ref } };
+}
+
+/* Whether the resume already shows this op's effect. Derived, never stored: the resume is the one
+   record of what was applied, so a chat reopened tomorrow (or after a Reset) tells the truth. */
+export function isApplied(stored: StoredOp, diff: ResumeDiff): boolean {
+  // A skill is applied when it prints.
+  if (stored.op === 'add_skill') {
+    // The skills line, if the diff has one.
+    const skillsLine = diff.lines.find((line) => line.kind === 'skills');
+    // Printed names, compared case-insensitively like every other skill check here.
+    const printed = lineText(skillsLine?.tailoredRuns ?? []).split(',').map((name) => name.trim().toLowerCase());
+    // Present means applied.
+    return printed.includes(stored.name.trim().toLowerCase());
+  }
+  // The targeted bullet's ref, or null for the summary.
+  const ref = stored.op === 'remove' ? stored.ref : stored.target.kind === 'bullet' ? stored.target.ref : null;
+  // The line: the summary, or the bullet with this ref.
+  const line = diff.lines.find((l) => (ref === null ? l.kind === 'summary' : l.editTarget?.kind === 'bullet' && l.editTarget.ref === ref));
+  // A removal is applied when the bullet is gone or marked removed.
+  if (stored.op === 'remove') return line === undefined || line.editState === 'removed';
+  // An edit is applied when the printed text is exactly the proposed text.
+  return line !== undefined && line.editState !== 'removed' && lineText(line.tailoredRuns) === stored.text;
+}
+
+/* A string array, or null. */
+function stringArray(value: unknown): string[] | null {
+  // Every entry must be a string; one that is not makes the whole list unreadable.
+  return Array.isArray(value) && value.every((item) => typeof item === 'string') ? (value as string[]) : null;
+}
+
+/* The audit advice as stored, or undefined when the shape is wrong (null is a valid "no advice"). */
+function readAdvice(value: unknown): AuditAdvice | null | undefined {
+  // No advice is a legitimate stored value.
+  if (value === null) return null;
+  // Anything else must be a record.
+  if (!isRecord(value)) return undefined;
+  // Checked: two string lists.
+  if (value.kind === 'checked') {
+    // Both lists read on their own.
+    const metrics = stringArray(value.metrics);
+    // Same.
+    const terms = stringArray(value.terms);
+    // Either malformed makes the advice unreadable.
+    return metrics !== null && terms !== null ? { kind: 'checked', metrics, terms } : undefined;
+  }
+  // Not checked: a reason.
+  if (value.kind === 'not_checked' && typeof value.why === 'string') return { kind: 'not_checked', why: value.why };
+  // Any other shape.
+  return undefined;
+}
+
+/* A stored op read back from the database, or null when it is not one of the three shapes. Rows
+   are untrusted: an op shown with a guessed target could save the wrong bullet. */
+export function readStoredOp(value: unknown): StoredOp | null {
+  // Must be an object.
+  if (!isRecord(value)) return null;
+  // The text it replaced: a string or null.
+  const before = typeof value.before === 'string' ? value.before : value.before === null ? null : undefined;
+  // A skill: name, group, and the master flag.
+  if (value.op === 'add_skill') {
+    // All three typed exactly.
+    return typeof value.name === 'string' && typeof value.category === 'string' && typeof value.inMaster === 'boolean'
+      ? { op: 'add_skill', name: value.name, category: value.category, inMaster: value.inMaster }
+      : null;
+  }
+  // A removal: a ref and the old text.
+  if (value.op === 'remove') return typeof value.ref === 'string' && before !== undefined ? { op: 'remove', ref: value.ref, before } : null;
+  // Only an edit is left.
+  if (value.op !== 'edit' || typeof value.text !== 'string' || before === undefined || !isRecord(value.target)) return null;
+  // Its target: the summary, or a bullet by ref.
+  const target = value.target.kind === 'summary' ? { kind: 'summary' as const } : value.target.kind === 'bullet' && typeof value.target.ref === 'string' ? { kind: 'bullet' as const, ref: value.target.ref } : null;
+  // The advice, validated like the rest.
+  const advice = readAdvice(value.advice);
+  // Both must be readable.
+  return target !== null && advice !== undefined ? { op: 'edit', target, before, text: value.text, advice } : null;
 }
 
 /* What one ask cost, in one line; unknown counts are left out, never shown as 0. */
@@ -246,6 +364,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function count(value: unknown): number | null {
   // Shape-checked like every other field of the answer.
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+/* Token counts from the wire or from a stored chat row: one reader for both, unknowns as null. */
+export function readUsage(value: unknown): AssistUsage {
+  // Anything but a record reads as four unknowns.
+  const usage = isRecord(value) ? value : {};
+  // Each count checked on its own.
+  return { input: count(usage.input), cached: count(usage.cached), output: count(usage.output), thinking: count(usage.thinking) };
 }
 
 /* One op from the wire, or null when it is not one of the three shapes. */
@@ -310,15 +436,14 @@ export async function requestAssist(client: AssistClient | null, body: AssistBod
     const ops = data.ops.map(readOp);
     // One unreadable op means the contract drifted; say so rather than show a partial list.
     if (ops.some((op) => op === null)) return { kind: 'error', message: 'The AI answer had an unexpected shape.' };
-    // The bill, every count checked.
-    const usage = isRecord(data.usage) ? data.usage : {};
     // The validated answer.
     return {
       kind: 'ok',
       ops: ops.filter((op): op is AssistOp => op !== null),
       dropped: count(data.dropped) ?? 0,
       note: typeof data.note === 'string' ? data.note : '',
-      usage: { input: count(usage.input), cached: count(usage.cached), output: count(usage.output), thinking: count(usage.thinking) },
+      // The bill, every count checked.
+      usage: readUsage(data.usage),
     };
   } catch (cause) {
     // A network drop or a thrown fetch.

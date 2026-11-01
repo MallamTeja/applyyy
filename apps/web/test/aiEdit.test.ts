@@ -65,18 +65,58 @@ describe('buildAssistDraft', () => {
   });
 });
 
-describe('toEditAction', () => {
-  it('maps each op onto the action a click would make', () => {
+describe('toStoredOp + toEditAction', () => {
+  it('resolves each op to a real target at answer time, then to the action a click would make', () => {
     // The draft whose ids the ops use.
     const draft = ai.buildAssistDraft(diff, ['Tools'], 'x');
-    // A bullet edit lands on the bullet's ref.
-    assert.deepEqual(ai.toEditAction({ op: 'edit', id: 'b0', text: 'New.', newNumbers: [] }, draft), { kind: 'edit', target: { kind: 'bullet', ref: 'exp_1_b1' }, text: 'New.' });
+    // A bullet edit: stored against the bullet's ref, with the text it replaces.
+    const edit = ai.toStoredOp({ op: 'edit', id: 'b0', text: 'New.', newNumbers: [] }, draft);
+    // The ref, not the short id, so a reloaded chat still targets the right bullet.
+    assert.deepEqual(edit && edit.op === 'edit' ? [edit.target, edit.before] : null, [{ kind: 'bullet', ref: 'exp_1_b1' }, 'Built a billing API.']);
+    // Applied as a plain edit on that ref.
+    assert.deepEqual(edit && ai.toEditAction(edit), { kind: 'edit', target: { kind: 'bullet', ref: 'exp_1_b1' }, text: 'New.' });
     // The summary has its own target.
-    assert.deepEqual(ai.toEditAction({ op: 'edit', id: 'summary', text: 'S.', newNumbers: [] }, draft), { kind: 'edit', target: { kind: 'summary' }, text: 'S.' });
-    // An id that was never sent maps to nothing.
-    assert.equal(ai.toEditAction({ op: 'remove', id: 'b7' }, draft), null);
-    // A skill always goes through the attest path (master first).
-    assert.deepEqual(ai.toEditAction({ op: 'add_skill', name: 'Kafka', category: 'Tools' }, draft), { kind: 'attest_skill', keyword: 'Kafka', category: 'Tools' });
+    const summary = ai.toStoredOp({ op: 'edit', id: 'summary', text: 'S.', newNumbers: [] }, draft);
+    // Applied on the summary.
+    assert.deepEqual(summary && ai.toEditAction(summary), { kind: 'edit', target: { kind: 'summary' }, text: 'S.' });
+    // An id that was never sent resolves to nothing.
+    assert.equal(ai.toStoredOp({ op: 'remove', id: 'b7' }, draft), null);
+    // A skill records whether the master had it, and applies through the attest path.
+    const skill = ai.toStoredOp({ op: 'add_skill', name: 'Kafka', category: 'Tools' }, draft);
+    // Kafka is in the fixture's master skills.
+    assert.deepEqual(skill, { op: 'add_skill', name: 'Kafka', category: 'Tools', inMaster: true });
+    // Master first, then the resume.
+    assert.deepEqual(skill && ai.toEditAction(skill), { kind: 'attest_skill', keyword: 'Kafka', category: 'Tools' });
+  });
+});
+
+describe('isApplied (derived from the resume, never stored)', () => {
+  it('reads each op against the current diff', () => {
+    // An edit whose text is what the bullet prints now: applied.
+    assert.equal(ai.isApplied({ op: 'edit', target: { kind: 'bullet', ref: 'exp_1_b1' }, before: null, text: 'Built a billing API.', advice: null }, diff), true);
+    // Different text: not yet.
+    assert.equal(ai.isApplied({ op: 'edit', target: { kind: 'bullet', ref: 'exp_1_b1' }, before: null, text: 'Other.', advice: null }, diff), false);
+    // The removed bullet in the fixture reads as removed.
+    assert.equal(ai.isApplied({ op: 'remove', ref: 'exp_1_b2', before: null }, diff), true);
+    // A printed skill reads as added, case-insensitively.
+    assert.equal(ai.isApplied({ op: 'add_skill', name: 'postgres', category: 'Tools', inMaster: true }, diff), true);
+    // One the resume lacks does not.
+    assert.equal(ai.isApplied({ op: 'add_skill', name: 'Kafka', category: 'Tools', inMaster: true }, diff), false);
+  });
+});
+
+describe('readStoredOp (rows are untrusted)', () => {
+  it('reads each stored shape back and refuses a malformed one', () => {
+    // A stored edit round-trips.
+    const edit = { op: 'edit', target: { kind: 'bullet', ref: 'r1' }, before: 'a', text: 'b', advice: { kind: 'checked', metrics: [], terms: ['x'] } };
+    // Read as stored.
+    assert.deepEqual(ai.readStoredOp(edit), edit);
+    // A target without a ref could save the wrong bullet: refused.
+    assert.equal(ai.readStoredOp({ ...edit, target: { kind: 'bullet' } }), null);
+    // Advice with a non-string word: refused, not shown as fewer flags.
+    assert.equal(ai.readStoredOp({ ...edit, advice: { kind: 'checked', metrics: [], terms: [1] } }), null);
+    // A skill without its master flag: refused.
+    assert.equal(ai.readStoredOp({ op: 'add_skill', name: 'Kafka', category: 'Tools' }), null);
   });
 });
 
@@ -84,7 +124,7 @@ describe('requestAssist', () => {
   // A client whose invoke answers `answer`.
   const client = (answer: () => Promise<{ data: unknown; error: unknown }>) => ({ functions: { invoke: answer } });
   // A minimal valid body.
-  const body = { instruction: 'x', job: { title: '', company: '', missing: [] }, summary: null, bullets: [], skills: '', categories: [] };
+  const body = { instruction: 'x', job: { title: '', company: '', missing: [] }, summary: null, bullets: [], skills: '', categories: [], history: [] };
 
   it('reads a valid answer, unknown token counts as null', async () => {
     // The ok shape the function returns.
@@ -129,14 +169,18 @@ describe('formatUsage', () => {
   });
 });
 
-describe('AiEditPanel', () => {
-  it('renders the box with Suggest disabled until something is typed', () => {
-    // Static render; the seams are never called.
+describe('AiEditPanel (chat)', () => {
+  it('renders a new chat: picker, empty-state hint, and Send disabled until something is typed', () => {
+    // Static render with no store: a session-only chat; the seams are never called.
     const html = render(h(panel.AiEditPanel, { diff, onEdit: async () => ({ ok: true }), onAssist: async () => ({ kind: 'error', message: '' }), busy: false, categories: [] }));
     // The heading.
-    assert.match(html, /<h3[^>]*class="ai-edit__title"[^>]*>Ask AI to edit this resume<\/h3>/);
-    // The button exists and is disabled on an empty instruction.
-    assert.match(html, /<button[^>]*disabled=""[^>]*>Suggest edits<\/button>/);
+    assert.match(html, /<h3[^>]*class="ai-chat__title"[^>]*>AI resume chat<\/h3>/);
+    // The past-chats picker, offering the unsaved new chat.
+    assert.match(html, /<select[^>]*class="ai-chat__picker"[^>]*><option[^>]*>New chat<\/option><\/select>/);
+    // The empty chat explains itself.
+    assert.match(html, /<li class="ai-chat__empty">Say what to change/);
+    // Send exists and is disabled on an empty message.
+    assert.match(html, /<button type="submit"[^>]*disabled=""[^>]*>Send<\/button>/);
   });
 });
 

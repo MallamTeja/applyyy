@@ -63,6 +63,8 @@ const USER_SCOPED_TABLES = [
   "answer_bank",
   "email_events",
   "matcher_eval_cases",
+  // The review page's AI chat (20261101120000); live in this sweep from rls-proof's next deploy.
+  "resume_chat_messages",
 ] as const;
 
 // ROWS THIS MANY OR FEWER COUNT AS "EMPTY ENOUGH TO BE SAFE". Zero would be ideal but

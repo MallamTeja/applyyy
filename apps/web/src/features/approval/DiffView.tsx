@@ -54,6 +54,8 @@ import type { DiscoverySource } from '../../data/contract';
 import { AiEditPanel } from './AiEditPanel';
 /* Types only: the ask and answer of the AI box. */
 import type { AssistBody, AssistResult } from './aiEdit';
+/* Type only: the AI chat's store, passed through to the panel. */
+import type { ChatStore } from './resumeChat';
 
 import './DiffView.css';
 
@@ -105,6 +107,8 @@ export interface DiffViewProps {
   /* The AI box's ask (2026-10-31). Absent means no AI box; its proposals apply through onEdit,
      so a screen without a save path never shows it. */
   readonly onAssist?: ((body: AssistBody) => Promise<AssistResult>) | undefined;
+  /* Where the AI chat keeps its chats (2026-11-01). Absent means a session-only chat. */
+  readonly chat?: ChatStore | undefined;
 }
 
 /* --- The job being approved against ------------------------------------- */
@@ -1166,6 +1170,8 @@ export function DiffView({
   attestCategories,
   // The AI box's ask; absent hides the box.
   onAssist,
+  // The AI chat's store; passed straight through.
+  chat,
 }: DiffViewProps): ReactElement {
   // Every claim still in the resume; claims on edited or removed lines are already gone.
   const claims = useMemo(() => collectFlaggedClaims(diff), [diff]);
@@ -1332,7 +1338,7 @@ export function DiffView({
       {/* The AI box, only where an edit could honestly land: a save path, an ask, and editing on.
           Keyed by row so a new row never shows the previous row's proposals. */}
       {runEdit !== null && onAssist !== undefined && !editDisabledReason ? (
-        <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} />
+        <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} />
       ) : null}
 
       {/* View Mode Toolbar */}
