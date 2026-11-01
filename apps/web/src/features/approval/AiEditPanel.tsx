@@ -20,6 +20,12 @@
  * dialog on every click trains a reflex OK; the card is read before the click instead. Each reply
  * counts its flagged edits, so whether the audit should ever BLOCK is decided on measured numbers.
  *
+ * STRUCTURE EDITS (2026-11-01). Given the optional `structure` prop, the AI can also move a bullet or
+ * a section, add a master bullet or entry back, and write a new bullet. Moves and add-backs apply by
+ * themselves (true master text, reordered or restored); a new bullet always waits for a click, since
+ * applying it writes a new claim into the master (aiEdit.shouldAutoApply). Without the prop the chat
+ * behaves exactly as before.
+ *
  * Pure presentation: the ask, the save and the chat store are all injected; no client here. */
 
 // useId ties labels to inputs; useState holds local state; useEffect loads and scrolls; useRef holds the log.
@@ -32,9 +38,9 @@ import type { ResumeDiff } from './diffModel';
 // Type only: the action vocabulary and save result the page already understands.
 import type { EditAction, EditResult } from './DiffView';
 // The pure halves: build the ask, resolve and apply ops, read applied state, format the bill.
-import { buildAssistDraft, formatUsage, isApplied, shouldAutoApply, toEditAction, toStoredOp } from './aiEdit';
+import { buildAssistDraft, formatUsage, isApplied, resolveOps, shouldAutoApply, toEditAction } from './aiEdit';
 // Types for the ask and its parts.
-import type { AssistBody, AssistResult, AuditAdvice, StoredOp } from './aiEdit';
+import type { AssistBody, AssistResult, AssistStructure, AuditAdvice, StoredOp } from './aiEdit';
 // The memory: grouping into chats and the window sent back as context.
 import { groupThreads, historyFor } from './resumeChat';
 // Types for stored messages and the injected store.
@@ -68,6 +74,12 @@ function AdviceLine({ advice }: { readonly advice: AuditAdvice }): ReactElement 
   return <p className="ai-chat__audit">Audit would flag {parts.join('; ')}.</p>;
 }
 
+/* A section key as a heading word ("projects" -> "Projects"); the keys are single lower-case words. */
+function sectionName(section: string): string {
+  // First letter up, rest as is.
+  return section.charAt(0).toUpperCase() + section.slice(1);
+}
+
 /* What one stored op changes, with what the audit would say. Exported for the render test. */
 export function OpBody({
   // The proposal.
@@ -81,10 +93,15 @@ export function OpBody({
   // The card is applied or busy: the picker cannot change what was saved.
   locked = false,
 }: {
+  // One of the stored op kinds; the card shape follows it.
   readonly op: StoredOp;
+  // Optional: only a skill card offers groups.
   readonly categories?: readonly string[];
+  // The operator's pick; undefined means the AI's pick stands.
   readonly group?: string | undefined;
+  // Absent renders the group as plain text (read-only cards, tests).
   readonly onGroup?: ((group: string) => void) | undefined;
+  // Defaults to editable.
   readonly locked?: boolean;
 }): ReactElement {
   // A new skill: name, group, and whether Apply also makes it a master claim.
@@ -95,6 +112,7 @@ export function OpBody({
     const options = categories.includes(chosen) ? categories : [chosen, ...categories];
     // Stacked: the add, then what else Apply does.
     return (
+      // The card root: ai-chat__change stacks the change and its notes.
       <div className="ai-chat__change">
         {/* The name in bold, since that is the claim being made; the group is a picker (2026-11-01)
             because the AI must choose among the master's groups and none may fit (OS under Frameworks). */}
@@ -118,10 +136,75 @@ export function OpBody({
       </div>
     );
   }
+  // A bullet move: which way, and the bullet, so the operator sees what shifts.
+  if (op.op === 'move') {
+    // Stacked like an edit card.
+    return (
+      // The card root: ai-chat__change stacks the change and its notes.
+      <div className="ai-chat__change">
+        {/* The direction is the change. */}
+        <span className="ai-chat__where">Move bullet {op.direction}</span>
+        {/* The bullet's text as it was when asked; unchanged by a move. */}
+        <span>{op.before}</span>
+      </div>
+    );
+  }
+  // A section move: one line says it all.
+  if (op.op === 'move_section') {
+    // The section in bold, since that is what moves in the PDF.
+    return (
+      // The card root: ai-chat__change stacks the change and its notes.
+      <p className="ai-chat__change">
+        Move section <strong>{sectionName(op.section)}</strong> {op.direction}
+      </p>
+    );
+  }
+  // A master bullet back: where it lands, and its master words.
+  if (op.op === 'add_bullet') {
+    // Stacked like an edit card; <ins> carries "added" to screen readers.
+    return (
+      // The card root: ai-chat__change stacks the change and its notes.
+      <div className="ai-chat__change">
+        {/* The entry it goes under. */}
+        <span className="ai-chat__where">Add back under {op.parentLabel}</span>
+        {/* The master's own text: nothing new is claimed. */}
+        <ins className="ai-chat__new">{op.text}</ins>
+      </div>
+    );
+  }
+  // A master entry back: its section and name.
+  if (op.op === 'add_entry') {
+    // Stacked like the others.
+    return (
+      // The card root: ai-chat__change stacks the change and its notes.
+      <div className="ai-chat__change">
+        {/* The section it lands in. */}
+        <span className="ai-chat__where">Add back to {sectionName(op.section)}</span>
+        {/* The entry, with all its master bullets. */}
+        <ins className="ai-chat__new">{op.label}</ins>
+      </div>
+    );
+  }
+  // A new bullet: where, what, and that Apply writes it into the master.
+  if (op.op === 'new_bullet') {
+    // Stacked like an edit card.
+    return (
+      // The card root: ai-chat__change stacks the change and its notes.
+      <div className="ai-chat__change">
+        {/* The entry it goes under. */}
+        <span className="ai-chat__where">New bullet under {op.parentLabel}</span>
+        {/* The proposed wording. */}
+        <ins className="ai-chat__new">{op.text}</ins>
+        {/* Said before the click: this card never applies itself (shouldAutoApply). */}
+        <p className="ai-chat__audit">Not in your master profile yet: Apply saves it there too. Only apply if it is true.</p>
+      </div>
+    );
+  }
   // A removal: the bullet that goes.
   if (op.op === 'remove') {
     // The whole bullet, struck, so the operator sees exactly what leaves the PDF.
     return (
+      // The card root: ai-chat__change stacks the change and its notes.
       <p className="ai-chat__change">
         {/* <del> carries "removed" to screen readers, not only to the eye. */}
         Remove bullet: <del className="ai-chat__old">{op.before}</del>
@@ -158,6 +241,8 @@ export function AiEditPanel({
   categories,
   // Where chats are kept; absent means this session only (tests, a screen without a client).
   chat,
+  // The current resume's structure; absent means no structural ops (the pre-2026-11-01 chat).
+  structure,
 }: {
   // The rendered diff: the AI's context is built from it, so it sees what the operator sees.
   readonly diff: ResumeDiff;
@@ -171,6 +256,9 @@ export function AiEditPanel({
   readonly categories: readonly string[];
   // The chat store; optional so render-only callers need not fake one.
   readonly chat?: ChatStore | undefined;
+  // Section order, entries and master items not on the resume, built by the page from the current
+  // resume (aiEdit.AssistStructure explains how); optional so the page can wire it separately.
+  readonly structure?: AssistStructure | undefined;
 }): ReactElement {
   // Ties labels to controls and the heading to the region.
   const baseId = useId();
@@ -251,8 +339,8 @@ export function AiEditPanel({
     setAsking(true);
     // A new ask clears the old failure.
     setError(null);
-    // Built from the diff as it is NOW (every applied edit included) plus the chat's last turns.
-    const draft = buildAssistDraft(diff, categories, text, historyFor(active));
+    // Built from the diff as it is NOW (every applied edit included), its structure, and the chat's last turns.
+    const draft = buildAssistDraft(diff, categories, text, historyFor(active), structure ?? null);
     // The call; never throws.
     const result = await onAssist(draft.body);
     // A failed ask is said and nothing is stored; the instruction stays for a retry.
@@ -264,8 +352,9 @@ export function AiEditPanel({
       // Nothing else changes.
       return;
     }
-    // Each op resolved to this resume's targets; null for an id the ask never sent.
-    const resolved = result.ops.map((op) => toStoredOp(op, draft));
+    // Each op resolved to this resume's targets, in order (so repeated moves pass different siblings);
+    // null for an id the ask never sent or a move already at the end.
+    const resolved = resolveOps(result.ops, draft);
     // The ones that could be resolved.
     const ops = resolved.filter((op): op is StoredOp => op !== null);
     // Dropped by the server plus unresolved here: said in the stored note, so it survives a reload.
@@ -344,7 +433,10 @@ export function AiEditPanel({
     // One at a time: each save writes the whole resume, so two in flight would race.
     for (const [index, op] of (message.ops ?? []).entries()) {
       // Already on the resume: skipped.
-      if (isApplied(op, diff)) continue;
+      if (isApplied(op, diff, structure ?? null)) continue;
+      /* A new bullet writes a new claim into the MASTER, so it always takes its own click, never a
+         batch (review finding, 2026-11-01): a hostile job text that induces one cannot ride along. */
+      if (op.op === 'new_bullet') continue;
       // A failure usually means the row changed; later saves would fail the same way.
       if (!(await apply(op, opKey(message, index)))) break;
     }
@@ -415,8 +507,8 @@ export function AiEditPanel({
           }
           // The reply's proposals, with their applied state read from the resume.
           const ops = message.ops ?? [];
-          // Ops not yet on the resume, for Apply all.
-          const open = ops.filter((op) => !isApplied(op, diff)).length;
+          // Ops not yet on the resume that Apply all will take (a new bullet always needs its own click).
+          const open = ops.filter((op) => op.op !== 'new_bullet' && !isApplied(op, diff, structure ?? null)).length;
           // Bullet edits the audit rule ran on: the denominator of the flag count.
           const audited = ops.filter((op) => op.op === 'edit' && op.advice?.kind === 'checked');
           // Of those, the ones it would flag: the number that decides whether the audit should ever block.
@@ -436,7 +528,7 @@ export function AiEditPanel({
                     // In flight or refused, if either.
                     const state = opStates.get(key);
                     // On the resume now: read from the diff, never stored.
-                    const applied = isApplied(op, diff);
+                    const applied = isApplied(op, diff, structure ?? null);
                     // One card.
                     return (
                       <li key={key} className={`ai-chat__op${applied ? ' ai-chat__op--applied' : ''}`}>
@@ -488,7 +580,9 @@ export function AiEditPanel({
                 {audited.length > 0 ? <span className="ai-chat__meta">Audit would flag {flagged.length} of {audited.length} bullet edits.</span> : null}
                 {/* What this ask cost; an unsaved reply says so. */}
                 <span className="ai-chat__meta">
+                  {/* The bill, only when Google reported it. */}
                   {message.usage !== null ? formatUsage(message.usage) : ''}
+                  {/* An exchange the save did not land says so, since tomorrow it will be gone. */}
                   {message.id === null ? ' Not saved to history.' : ''}
                 </span>
               </div>
@@ -501,6 +595,7 @@ export function AiEditPanel({
 
       {/* Any failure, polite: news, not an emergency. */}
       <p className="ai-chat__error" role="status" aria-live="polite">
+        {/* Empty when nothing failed; the live region stays for the next announcement. */}
         {error ?? ''}
       </p>
 

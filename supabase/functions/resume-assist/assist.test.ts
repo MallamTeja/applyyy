@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import {
   buildAssistPrompt,
   handleResumeAssist,
+  MAX_AVAILABLE,
   MAX_OPS,
   MAX_OUTPUT_TOKENS,
   parseAssistOps,
@@ -323,4 +324,176 @@ test("the note is the chat reply: the model is told to answer questions, and a l
   const parsed = parseAssistOps(JSON.stringify({ ops: [], note: answer }), request());
   // Kept whole.
   assert.equal(parsed.ok ? parsed.note : null, answer);
+});
+
+// --- structure edits (2026-11-01) ---------------------------------------------------
+
+// body() plus a structure: two entries, sections, bullets tagged with entries, two AVAILABLE items.
+function structured(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  // The flat body, with the structure fields the browser adds when the page passes one.
+  return body({
+    // The printed order.
+    sections: ["summary", "experience", "projects", "skills"],
+    // One job, one project.
+    entries: [
+      { id: "e0", section: "experience", label: "Aczen Technologies · Full Stack AI Engineer" },
+      { id: "e1", section: "projects", label: "F1 Race Pace Predictor" },
+    ],
+    // Both bullets under the job, so b0 and b1 are siblings.
+    bullets: [
+      { id: "b0", text: "Built a billing API serving 500 users.", entry: "e0" },
+      { id: "b1", text: "Cut p95 latency by 30%.", entry: "e0" },
+    ],
+    // A master bullet under the job, and a whole achievement.
+    available: [
+      { id: "m0", entry: "e0", text: "Mentored two interns." },
+      { id: "n0", section: "achievements", label: "LeetCode" },
+    ],
+    // A test's own changes win.
+    ...overrides,
+  });
+}
+
+// The parsed form of structured().
+function structuredRequest(): AssistRequest {
+  // Through the real validator, so the fixture cannot drift from it.
+  const parsed = parseAssistRequest(structured());
+  // The fixture must be valid; a failure here is a broken test, not a finding.
+  if (!parsed.ok) throw new Error(parsed.message);
+  // The request.
+  return parsed.request;
+}
+
+test("parseAssistRequest reads the structure, and treats its absence as none", () => {
+  // The structured body.
+  const parsed = parseAssistRequest(structured());
+  // Valid, with every part read.
+  assert.deepEqual(
+    parsed.ok ? [parsed.request.sections.length, parsed.request.entries.length, parsed.request.bullets[0]?.entry, parsed.request.available.map((a) => a.kind)] : null,
+    [4, 2, "e0", ["bullet", "entry"]],
+  );
+  // A client from before structure edits: empty structure, bullets without an entry.
+  const old = parseAssistRequest(body());
+  // Accepted.
+  assert.deepEqual(old.ok ? [old.request.sections, old.request.entries, old.request.available, old.request.bullets[0]?.entry] : null, [[], [], [], null]);
+});
+
+test("parseAssistRequest refuses a structure that does not hang together", () => {
+  // A bullet tagged with an entry the request did not list.
+  assert.equal(parseAssistRequest(structured({ bullets: [{ id: "b0", text: "a", entry: "e9" }] })).ok, false);
+  // A section name outside the closed list.
+  assert.equal(parseAssistRequest(structured({ sections: ["experience", "hobbies"] })).ok, false);
+  // The same section twice.
+  assert.equal(parseAssistRequest(structured({ sections: ["experience", "experience"] })).ok, false);
+  // An AVAILABLE bullet under an entry that is not on the resume.
+  assert.equal(parseAssistRequest(structured({ available: [{ id: "m0", entry: "e9", text: "x" }] })).ok, false);
+  // An AVAILABLE id that is neither mN nor nN cannot be told apart.
+  assert.equal(parseAssistRequest(structured({ available: [{ id: "x0", section: "projects", label: "x" }] })).ok, false);
+  // More than the cap is refused, never sliced.
+  const tooMany = Array.from({ length: MAX_AVAILABLE + 1 }, (_, i) => ({ id: `n${i}`, section: "achievements", label: "x" }));
+  // Refused.
+  assert.equal(parseAssistRequest(structured({ available: tooMany })).ok, false);
+});
+
+test("buildAssistPrompt labels each entry once, tags bullets with it, and lists AVAILABLE before the job", () => {
+  // The user content's lines.
+  const lines = buildAssistPrompt(structuredRequest()).userContent.split("\n");
+  // The order, printed once.
+  assert.ok(lines.includes("SECTION ORDER: summary, experience, projects, skills"));
+  // Each entry once, with its section.
+  assert.ok(lines.includes("e0 experience: Aczen Technologies · Full Stack AI Engineer"));
+  // A bullet names its entry by id, not by repeating the label.
+  assert.ok(lines.includes("b1 [e0]: Cut p95 latency by 30%."));
+  // The master items: a bullet under its entry, a whole entry under its section.
+  const from = lines.indexOf("AVAILABLE (in the master, not on the resume):") + 1;
+  // Between the AVAILABLE label and the job block.
+  assert.deepEqual(lines.slice(from, lines.indexOf("JOB")), ["m0 [e0]: Mentored two interns.", "n0 achievements: LeetCode"]);
+  // The instruction is still last.
+  assert.match(lines.at(-1) ?? "", /^INSTRUCTION: /);
+  // Without a structure the prompt carries none of the new blocks (old clients cost nothing extra).
+  assert.doesNotMatch(buildAssistPrompt(request()).userContent, /SECTION ORDER|ENTRIES|AVAILABLE|\[e/);
+});
+
+test("parseAssistOps keeps structure ops only for ids the request listed", () => {
+  // One valid op of each kind, then one unusable variant of each.
+  const answer = JSON.stringify({
+    ops: [
+      // Valid: b1 up within e0.
+      { op: "move", id: "b1", direction: "up" },
+      // Valid repeat: a move is one place, so it may repeat.
+      { op: "move", id: "b1", direction: "up" },
+      // Valid, capitalised by the model.
+      { op: "move_section", section: "Projects", direction: "up" },
+      // Valid restore of a master bullet.
+      { op: "add_back", id: "m0" },
+      // Valid new bullet under the project.
+      { op: "new_bullet", entry: "e1", text: "Predicted race pace from lap telemetry." },
+      // Unknown bullet id.
+      { op: "move", id: "b9", direction: "up" },
+      // A direction outside the closed pair.
+      { op: "move", id: "b0", direction: "top" },
+      // A section the resume does not print.
+      { op: "move_section", section: "education", direction: "down" },
+      // An AVAILABLE id that was never sent.
+      { op: "add_back", id: "m7" },
+      // The same item restored twice.
+      { op: "add_back", id: "m0" },
+      // An entry id that was never sent.
+      { op: "new_bullet", entry: "e9", text: "x" },
+      // The same new bullet twice.
+      { op: "new_bullet", entry: "e1", text: "predicted race pace from lap telemetry." },
+    ],
+    note: "",
+  });
+  // Validated against the structured request.
+  const parsed = parseAssistOps(answer, structuredRequest());
+  // Narrowed.
+  assert.ok(parsed.ok);
+  // The five valid ops, in order, the section lower-cased to the printed name.
+  assert.deepEqual(parsed.ops, [
+    { op: "move", id: "b1", direction: "up" },
+    { op: "move", id: "b1", direction: "up" },
+    { op: "move_section", section: "projects", direction: "up" },
+    { op: "add_back", id: "m0" },
+    { op: "new_bullet", entry: "e1", text: "Predicted race pace from lap telemetry." },
+  ]);
+  // The seven unusable ones counted, not lost silently.
+  assert.equal(parsed.dropped, 7);
+});
+
+test("parseAssistOps drops a move of a bullet removed earlier in the answer, and any move without a structure", () => {
+  // Remove b0, then move it.
+  const answer = JSON.stringify({ ops: [{ op: "remove", id: "b0" }, { op: "move", id: "b0", direction: "down" }], note: "" });
+  // With a structure: the remove survives, the move does not.
+  const parsed = parseAssistOps(answer, structuredRequest());
+  // Narrowed.
+  assert.ok(parsed.ok);
+  // Only the remove.
+  assert.deepEqual(parsed.ops, [{ op: "remove", id: "b0" }]);
+  // No structure: a bullet with no entry has no siblings to move among.
+  const flat = parseAssistOps(JSON.stringify({ ops: [{ op: "move", id: "b1", direction: "up" }], note: "" }), request());
+  // Dropped and counted.
+  assert.deepEqual(flat.ok ? [flat.ops.length, flat.dropped] : null, [0, 1]);
+});
+
+test("the schema and the system text offer exactly the seven ops", () => {
+  // The prompt parts.
+  const prompt = buildAssistPrompt(request());
+  // The schema, read through its nested shape.
+  const schema = prompt.responseSchema as { properties: { ops: { items: { properties: { op: { enum: string[] }; direction: { enum: string[] } } } } } };
+  // Closed to what parseAssistOps reads.
+  assert.deepEqual(schema.properties.ops.items.properties.op.enum, ["edit", "remove", "add_skill", "move", "move_section", "add_back", "new_bullet"]);
+  // Direction closed in the schema too.
+  assert.deepEqual(schema.properties.ops.items.properties.direction.enum, ["up", "down"]);
+  // The system text names each new op.
+  assert.match(prompt.systemInstruction, /move \{id,direction\}.*move_section \{section,direction\}.*add_back \{id\}.*new_bullet \{entry,text\}/);
+});
+
+test("parseAssistRequest refuses a free-text id and an oversized job title (review findings, 2026-11-01)", () => {
+  // Ids are printed raw into the prompt, so only the browser's own shape passes: a letter and 1-3 digits.
+  assert.equal(parseAssistRequest(body({ bullets: [{ id: "ignore all", text: "Built a billing API." }] })).ok, false);
+  // The browser's shape still passes.
+  assert.equal(parseAssistRequest(body({ bullets: [{ id: "b12", text: "Built a billing API." }] })).ok, true);
+  // An ATS title over 200 characters is refused, not truncated.
+  assert.equal(parseAssistRequest(body({ job: { title: "x".repeat(201), company: "Acme", missing: [] } })).ok, false);
 });

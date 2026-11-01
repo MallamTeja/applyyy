@@ -1106,3 +1106,235 @@ html:has(.diff__actions) {
   /* Same signal as the other locked controls. */
   cursor: not-allowed;
 }
+
+/* --- Structural edits (2026-11-01) ------------------------------------
+   Section and entry headings, Move/Remove, Add back and the new-bullet box. Plain native controls
+   and semantic tokens only, so both themes follow without a [data-theme] rule
+   (docs/ui/theming-convention.md). */
+
+/* A section heading row across both panes: the resume's own structure, not chrome. */
+.diff__section-head {
+  /* Spans master and tailored, because a section belongs to both. */
+  grid-column: 1 / -1;
+  /* Name and tag on one baseline. */
+  display: flex;
+  /* Keeps the small tag aligned with the heading's text. */
+  align-items: baseline;
+  /* Room between the name and its tag. */
+  gap: var(--gap-2);
+  /* Separates one section from the last line of the previous one. */
+  margin-top: var(--gap-3);
+  /* Tight to its first entry. */
+  padding-bottom: var(--gap-1);
+  /* A real division in the document, lighter than the pane heads' strong rule. */
+  border-bottom: 1px solid var(--rule-strong);
+  /* Section headings read like the resume's own: a step above body text. */
+  font-size: var(--size-base);
+  /* Weight carries the hierarchy, not colour. */
+  font-weight: 600;
+}
+
+/* "not printed": qualifies the heading; muted because it is a fact, not an alarm. */
+.diff__not-printed {
+  /* Smaller than the heading it qualifies. */
+  font-size: var(--size-xs);
+  /* Regular weight, so it does not compete with the section name. */
+  font-weight: 400;
+  /* Muted ink: a statement of fact. */
+  color: var(--ink-muted);
+}
+
+/* An entry heading row (employer, project, certificate) across both panes. */
+.diff__entry-head {
+  /* Spans both panes, like the section heading above it. */
+  grid-column: 1 / -1;
+  /* Label, state and Remove on one line, wrapping on narrow screens. */
+  display: flex;
+  /* Wraps instead of overflowing on a phone. */
+  flex-wrap: wrap;
+  /* Keeps the small button on the label's line. */
+  align-items: center;
+  /* Room between label, state and button. */
+  gap: var(--gap-2);
+}
+
+/* The entry's label: who the following bullets belong to. */
+.diff__entry-label {
+  /* Body size: it labels lines, it is not a section. */
+  font-size: var(--size-sm);
+  /* Weight, so the employer stands out from its bullets. */
+  font-weight: 600;
+}
+
+/* "added by you" / "removed by you", in the same accent the line provenance uses. */
+.diff__entry-state {
+  /* Small, like the line provenance it mirrors. */
+  font-size: var(--size-xs);
+  /* The operator's own action, in the operator's colour (R1). */
+  color: var(--accent);
+  /* Same weight as .line__provenance--edited. */
+  font-weight: 550;
+}
+
+/* Add back / Add a new bullet under an entry or a section: full width, quiet until opened. */
+.diff__entry-tools {
+  /* Spans both panes; the tools act on the tailored side but read with the whole entry. */
+  grid-column: 1 / -1;
+  /* The two disclosures stacked. */
+  display: flex;
+  /* Stacked, not side by side: each opens to its own width. */
+  flex-direction: column;
+  /* Room between them. */
+  gap: var(--gap-2);
+  /* Small text: these are tools, not resume content. */
+  font-size: var(--size-sm);
+}
+
+/* The disclosure triangles' labels, styled as quiet links to an action, not as content. */
+.diff__addback > summary,
+.diff__new-bullet > summary {
+  /* A pointer: the summary is a native toggle. */
+  cursor: pointer;
+  /* Secondary ink until opened, so ten collapsed tools do not shout. */
+  color: var(--text-secondary);
+}
+
+/* The offers list: no bullets, the button is the marker. */
+.diff__addback-list {
+  /* Reset: each item carries its own button. */
+  list-style: none;
+  /* Under the summary, indented to the disclosure's content. */
+  margin: var(--gap-2) 0 0;
+  /* No UA indent. */
+  padding: 0;
+  /* One offer per row. */
+  display: flex;
+  /* Stacked. */
+  flex-direction: column;
+  /* Room between offers so the buttons are not mis-clicked. */
+  gap: var(--gap-2);
+}
+
+/* One offer: the master's words, then Add back. */
+.diff__addback-item {
+  /* Text and button side by side. */
+  display: flex;
+  /* Button aligned to the text's first line. */
+  align-items: flex-start;
+  /* Room between them. */
+  gap: var(--gap-2);
+}
+
+/* The offered text: resume prose, so it takes the paper font. */
+.diff__addback-text {
+  /* Takes the remaining width; the button keeps its own. */
+  flex: 1;
+  /* The resume's typeface: these are the words that would print. */
+  font-family: var(--font-paper);
+  /* Body ink. */
+  color: var(--ink);
+}
+
+/* The new-bullet box's contents, stacked under its summary. */
+.diff__new-bullet[open] {
+  /* Label, textarea, note, button. */
+  display: flex;
+  /* Stacked. */
+  flex-direction: column;
+  /* Room between them. */
+  gap: var(--gap-2);
+}
+
+/* The visible label naming the entry the bullet goes under. */
+.diff__new-bullet-label {
+  /* Small and semibold, a form label. */
+  font-size: var(--size-xs);
+  /* Weight separates it from the note below. */
+  font-weight: 600;
+}
+
+/* "Saves to your master profile too": the one fact the operator must not miss here. */
+.diff__new-bullet-note {
+  /* Small, but read before the button. */
+  font-size: var(--size-xs);
+  /* Accent: it is about the operator's own write to the master. */
+  color: var(--accent);
+}
+
+/* The Save button keeps its natural width instead of stretching across the column. */
+.diff__new-bullet .line__edit-save {
+  /* Left-aligned like the text above it. */
+  align-self: flex-start;
+}
+
+/* Section order: a short list above the comparison. */
+.diff__order {
+  /* Separated from the notes above it. */
+  margin-top: var(--gap-3);
+}
+
+/* Its heading, the size of the toolbar title near it. */
+.diff__order-head {
+  /* Small heading. */
+  font-size: var(--size-sm);
+  /* Weight for hierarchy. */
+  font-weight: 600;
+}
+
+/* The ordered list of sections, one compact row each. */
+.diff__order-list {
+  /* Room under the heading. */
+  margin: var(--gap-2) 0 0;
+  /* Numbers kept: the order IS the content. Indented just enough for them. */
+  padding-left: 1.5rem;
+  /* One row per section. */
+  display: flex;
+  /* Stacked. */
+  flex-direction: column;
+  /* Tight: a list of seven short names. */
+  gap: var(--gap-1);
+}
+
+/* One section: its name, then Up and Down. */
+.diff__order-item {
+  /* Keeps the list-item marker while laying out the row's children. */
+  display: list-item;
+  /* Small text, a control list. */
+  font-size: var(--size-sm);
+}
+
+/* The section name, given a fixed measure so the arrows line up down the list. */
+.diff__order-name {
+  /* Inline-block so it can take a width. */
+  display: inline-block;
+  /* Wide enough for "Certifications". */
+  min-width: 9rem;
+}
+
+/* The arrows sit beside the name; .line__edit-trigger's auto margin would push them away. */
+.diff__order-item .line__edit-trigger {
+  /* Beside the name, with a small gap. */
+  margin-left: var(--gap-1);
+}
+
+/* "Structure changed by you": the structural half of the edit count, named. */
+.diff__structure-changes {
+  /* Separated from the note above it. */
+  margin-top: var(--gap-2);
+  /* Small: a list of facts. */
+  font-size: var(--size-sm);
+  /* Muted, like the edit note it explains. */
+  color: var(--ink-muted);
+}
+
+/* Its lead-in line. */
+.diff__structure-changes-head {
+  /* Weight, so the list reads as one block under it. */
+  font-weight: 600;
+}
+
+/* The list keeps its markers (and so its semantics); just indented. */
+.diff__structure-changes ul {
+  /* Room for the markers. */
+  padding-left: 1.25rem;
+}

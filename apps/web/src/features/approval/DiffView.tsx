@@ -28,12 +28,17 @@
  * path through it that does not involve reading each claim.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+// useId (2026-11-01): ties each new-bullet label to its textarea, unique per entry.
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import type {
   AddedSkill,
+  // One entry's heading, offers and line ids (2026-11-01).
+  DiffEntry,
   DiffLine,
+  // One section's place in the layout (2026-11-01).
+  DiffSection,
   EditTarget,
   FlaggedClaim,
   ResumeDiff,
@@ -44,16 +49,22 @@ import {
   collectFlaggedClaims,
   coveragePercent,
   deriveBucket,
+  // The one section-heading table, shared with the adapter's change sentences.
+  SECTION_TITLE,
 } from './diffModel';
 import { StatusBadge } from '../../app/StatusBadge';
 import { SourceBadge } from '../../app/SourceBadge';
 /* The shared http(s)-only gate for every href built from stored data. */
 import { safeHref } from '../../app/safeHref.ts';
 import type { DiscoverySource } from '../../data/contract';
+/* Types only: the structural-edit vocabulary (contract stubs live beside the pure edits). */
+import type { BulletSection, MoveDirection, SectionKind } from './tailoredEdits';
 /* The AI box: proposes edits that apply through this view's own save path. */
 import { AiEditPanel } from './AiEditPanel';
 /* Types only: the ask and answer of the AI box. */
 import type { AssistBody, AssistResult } from './aiEdit';
+/* The chat's structure, read from this same diff so the AI sees what the operator sees. */
+import { structureFromDiff } from './aiEdit';
 /* Type only: the AI chat's store, passed through to the panel. */
 import type { ChatStore } from './resumeChat';
 
@@ -80,7 +91,21 @@ export type EditAction =
   // The operator vouches for a skill the master LACKS: it goes into a new master version first,
   // then onto this resume (attestSkill.ts). Carries a name, unlike the T3 arms, because there is
   // no master node to point at yet; `category` is one of the master's own groups.
-  | { readonly kind: 'attest_skill'; readonly keyword: string; readonly category: string };
+  | { readonly kind: 'attest_skill'; readonly keyword: string; readonly category: string }
+  // STRUCTURAL EDITS (2026-11-01, docs/ui/2026-11-01-review-structure-edits-contract.md). Every one keeps
+  // each node traced to the master; tracesToMaster checks that at the save boundary.
+  // One bullet one place up or down among its siblings.
+  | { readonly kind: 'move_bullet'; readonly ref: string; readonly direction: MoveDirection }
+  // One section one place up or down in the printed order.
+  | { readonly kind: 'move_section'; readonly section: SectionKind; readonly direction: MoveDirection }
+  // A master bullet the tailor left out, back under its own entry.
+  | { readonly kind: 'add_master_bullet'; readonly ref: string }
+  // A whole master entry (an achievement, a certification, ...) back onto the resume.
+  | { readonly kind: 'add_master_entry'; readonly section: BulletSection; readonly ref: string }
+  // A whole entry off the resume.
+  | { readonly kind: 'remove_entry'; readonly section: BulletSection; readonly ref: string }
+  // Brand-new bullet text: written into the master first (attestBullet), then added by ref.
+  | { readonly kind: 'attest_bullet'; readonly section: BulletSection; readonly parentRef: string; readonly text: string };
 
 /* A save either landed or it did not; the reason is shown to the operator verbatim. An attest
    also hands back the master skill it put on the resume, which is what its Undo removes. */
@@ -775,9 +800,13 @@ function Provenance({ line }: { readonly line: DiffLine }): ReactElement {
 
   return (
     <>
-      {/* Who wrote the line: removed, edited, or the tailor (traced). */}
+      {/* Who wrote the line: removed, added, edited, or the tailor (traced). */}
       {line.editState === 'removed' ? (
         <p className="line__provenance line__provenance--removed">removed by you</p>
+      ) : line.editState === 'edited' && line.kind === 'bullet' && line.originalText === null ? (
+        /* A bullet the tailor never wrote: put back from the master, or new and attested by you.
+           Not "edited": there is no tailor version it was edited from. */
+        <p className="line__provenance line__provenance--edited">added by you</p>
       ) : line.editState === 'edited' ? (
         <p className="line__provenance line__provenance--edited">edited by you</p>
       ) : fabricated.length === 0 ? (
@@ -785,6 +814,10 @@ function Provenance({ line }: { readonly line: DiffLine }): ReactElement {
           traced to <span className="identifier">{line.masterNodeId}</span>
         </p>
       ) : null}
+
+      {/* INDEPENDENT of who wrote it: a moved bullet keeps the tailor's words, so the move is said
+          on its own line (D5a: every structural change is visible where it happened). */}
+      {line.moved === true ? <p className="line__provenance line__provenance--edited">moved by you</p> : null}
 
       {/* INDEPENDENT of the above: an edited line can still carry flagged runs, and "edited by
           you" must never hide that some of its words trace to nothing. */}
@@ -813,6 +846,8 @@ function Line({
   onEdit,
   busy,
   editDisabledReason,
+  // Present only for a bullet drawn under its entry (groupedRows).
+  order,
 }: {
   readonly line: DiffLine;
   // Null when this screen offers no editing.
@@ -821,6 +856,9 @@ function Line({
   readonly busy: boolean;
   // D4: why no line can be edited, so each line's text can answer "why can't I click this?".
   readonly editDisabledReason: string | null;
+  // A bullet drawn under its entry: whether it can move up or down among its printed siblings.
+  // Absent on summary/skills and on a flat (fixture) layout, which then offers no Move or Remove.
+  readonly order?: { readonly up: boolean; readonly down: boolean } | undefined;
 }): ReactElement {
   // Whether the textarea is open.
   const [isEditing, setIsEditing] = useState<boolean>(false);
@@ -878,8 +916,11 @@ function Line({
 
   /* The STORED text: what the saved resume holds, which is what the PDF will print. */
   const storedText = line.tailoredRuns.map((run) => run.text).join('');
-  /* Editing needs both a save path and a line that can be edited (not D4); skills get selection edits only. */
-  const target = onEdit === null ? null : line.editTarget;
+  /* Editing needs a save path, a line that can be edited (not D4), and the page not saying editing is
+     off: when FULL is null the line keeps its editTarget, so the reason must switch the control off
+     here too, or the text stays clickable and every save is refused (review finding, 2026-11-01).
+     Skills get selection edits only. */
+  const target = onEdit === null || editDisabledReason ? null : line.editTarget;
   /* Where TYPED text may land: bullets and the summary only. The skills arm of EditTarget takes
      selection edits, never free text (R0), so a skills line never becomes click-to-type even once
      it carries a target (Reset still uses `target`, which skills may legitimately have). */
@@ -977,8 +1018,46 @@ function Line({
             <span className="line__controls">
               {/* No "Edit text" button: the tailored text below IS the edit trigger, so a second
                   button would be a second tab stop for the same action. */}
-              {/* Reset exists only where there is something of the operator's to undo. */}
-              {line.editState !== 'original' ? (
+              {/* Structural controls (2026-11-01): a printed bullet under its entry moves among its
+                  siblings or leaves the resume. Each name says which bullet, since every bullet has
+                  the same three buttons. */}
+              {order !== undefined && target.kind === 'bullet' && line.editState !== 'removed' ? (
+                <>
+                  {/* Up unless first, down unless last among the printed siblings; one move_bullet. */}
+                  <MoveButtons
+                    // The same words the line's other controls use for it.
+                    name={lineName}
+                    // Worked out by groupedRows from the printed siblings.
+                    up={order.up}
+                    // Same.
+                    down={order.down}
+                    // One write at a time per resume.
+                    busy={busy}
+                    // Through this line's submit, so its error and focus return work as for any edit.
+                    onMove={(direction) => void submit({ kind: 'move_bullet', ref: target.ref, direction })}
+                  />
+                  {/* Remove: the whole bullet off this resume (D2). */}
+                  <button
+                    // Never a form submit.
+                    type="button"
+                    // The shared small control style.
+                    className="line__edit-trigger"
+                    // One write at a time per resume.
+                    disabled={busy}
+                    // Starts with the visible word, so a voice command "Remove" matches (WCAG 2.5.3).
+                    aria-label={`Remove ${lineName}`}
+                    // The same D2 removal the alarm band's "Cut" sends; Reset brings a tailor's bullet back.
+                    onClick={() => void submit({ kind: 'remove', target })}
+                  >
+                    {/* The visible verb the accessible name starts with. */}
+                    Remove
+                  </button>
+                </>
+              ) : null}
+              {/* Reset exists only where there is something of the operator's to undo, and never on a
+                  bullet the tailor did not write: there is no tailor version to go back to, and Remove
+                  is how an added bullet leaves. */}
+              {line.editState !== 'original' && !(line.kind === 'bullet' && line.originalText === null) ? (
                 <button
                   type="button"
                   className="line__edit-trigger"
@@ -1156,6 +1235,501 @@ function Line({
   );
 }
 
+/* --- Structural edits (2026-11-01) --------------------------------------
+ * Grouping by section and entry, moving, removing and adding back. Every control only NAMES an
+ * EditAction; the page builds the new resume and saves it through the same path as a text edit,
+ * where tracesToMaster checks that every node still traces to the pinned master. */
+
+/* The save path every structural control shares: one error and one "saving" flag per control group,
+   so a refusal is shown where the click happened and the button says it is working. */
+function useStructureAction(onEdit: (action: EditAction) => Promise<EditResult>) {
+  // The last refusal's reason, shown under the controls that caused it.
+  const [error, setError] = useState<string | null>(null);
+  // Whether THIS group started the in-flight save, so only its button says "Saving…".
+  const [saving, setSaving] = useState<boolean>(false);
+  /* Clears the old error, sends, and reports success so a form can clear its draft only on a save. */
+  async function run(action: EditAction): Promise<boolean> {
+    // A new attempt answers the old failure.
+    setError(null);
+    // Marks this group as the one saving.
+    setSaving(true);
+    // The page builds and saves the new resume; DiffView's runEdit turns a throw into a reason.
+    const result = await onEdit(action);
+    // Done either way.
+    setSaving(false);
+    // A refusal is named, so the operator knows the resume did not change.
+    if (!result.ok) setError(result.reason);
+    // Lets the caller react to a landed save only.
+    return result.ok;
+  }
+  // The three things a control group needs.
+  return { error, saving, run };
+}
+
+/* A refused structural save, said where the click happened. One component so all four groups word
+   and announce a refusal alike; nothing at all when there is none. */
+function ActionError({ error }: { readonly error: string | null }): ReactElement | null {
+  // No refusal, no paragraph (an empty alert would still be announced by some readers).
+  if (error === null) return null;
+  // role="alert": a refusal must be heard without hunting for it.
+  return (
+    <p className="line__edit-error" role="alert">
+      {error}
+    </p>
+  );
+}
+
+/* Up and Down for one item in an ordered list (a bullet among its siblings, a section in the print
+   order). One component so both lists name, disable and dispatch a move the same way. The arrows
+   carry their name in aria-label because a glyph is not a word a voice user could say. */
+function MoveButtons({
+  name,
+  up,
+  down,
+  busy,
+  onMove,
+}: {
+  // What moves, as a person would say it: "bullet: Built a REST API…", "Experience".
+  readonly name: string;
+  // Whether there is a place above; false on the first item.
+  readonly up: boolean;
+  // Whether there is a place below; false on the last item.
+  readonly down: boolean;
+  // Any save in this diff is in flight.
+  readonly busy: boolean;
+  // The caller turns a direction into its own EditAction (move_bullet or move_section).
+  readonly onMove: (direction: MoveDirection) => void;
+}): ReactElement {
+  // A fragment: the two buttons sit inline wherever the caller puts them.
+  return (
+    <>
+      {/* Up. */}
+      <button
+        // Never a form submit: there is no form, and a stray submit would reload the page.
+        type="button"
+        // The small control style every line control on this screen shares.
+        className="line__edit-trigger"
+        // The first item has nowhere up to go; disabled says so without a click.
+        disabled={busy || !up}
+        // Names the item, since every item in the list has the same arrow.
+        aria-label={`Move up, ${name}`}
+        // The hover hint for a sighted mouse user.
+        title="Move up"
+        // The caller's action, one place up.
+        onClick={() => onMove('up')}
+      >
+        ↑
+      </button>
+      {/* Down. */}
+      <button
+        // Same as above.
+        type="button"
+        // Same style.
+        className="line__edit-trigger"
+        // The last item has nowhere down to go.
+        disabled={busy || !down}
+        // Names the item.
+        aria-label={`Move down, ${name}`}
+        // The hover hint.
+        title="Move down"
+        // The caller's action, one place down.
+        onClick={() => onMove('down')}
+      >
+        ↓
+      </button>
+    </>
+  );
+}
+
+/* A long text trimmed for an accessible name, so a label stays a label (same 40 as Line's). */
+function shortText(text: string): string {
+  // Whole when short, cut with an ellipsis when long.
+  return text.length > 40 ? text.slice(0, 40) + '…' : text;
+}
+
+/* A section's heading row across both panes. A section the PDF does not print says so, because a
+   selected section missing from section_order is reviewed here yet never sent. */
+function SectionHead({ section }: { readonly section: DiffSection }): ReactElement {
+  // A heading, so a screen-reader user can jump section to section.
+  return (
+    <h3 className="diff__section-head">
+      {/* The name the PDF prints. */}
+      {SECTION_TITLE[section.kind]}
+      {/* A tag rather than a sentence: it qualifies the heading, it is not a paragraph of its own. */}
+      {section.printed ? null : <span className="tag-pill diff__not-printed">not printed</span>}
+    </h3>
+  );
+}
+
+/* An entry's heading row: whose bullets follow (the employer, the project, the certificate), whether
+   the operator added or removed it, and the control that takes it off the resume. */
+function EntryHead({
+  entry,
+  onEdit,
+  busy,
+}: {
+  // The entry to head.
+  readonly entry: DiffEntry;
+  // Null when this row cannot be edited (no save path, or D4); then the heading is read-only.
+  readonly onEdit: ((action: EditAction) => Promise<EditResult>) | null;
+  // Any save in this diff is in flight.
+  readonly busy: boolean;
+}): ReactElement {
+  // Hooks run unconditionally; with no save path the button below is simply not rendered.
+  const action = useStructureAction(onEdit ?? (async () => ({ ok: false, reason: 'Editing is off.' })));
+  // One row: label, who changed it, and Remove.
+  return (
+    <div className="diff__entry-head">
+      {/* The label, struck when the entry is no longer on the resume, so it reads as gone. */}
+      <h4 className="diff__entry-label">{entry.state === 'removed' ? <s>{entry.label}</s> : entry.label}</h4>
+      {/* Who changed it, in the same words the bullet provenance uses. */}
+      {entry.state === 'added' ? <span className="diff__entry-state">added by you</span> : null}
+      {/* Same, for a removed entry; "Add back from master" under its section brings it back. */}
+      {entry.state === 'removed' ? <span className="diff__entry-state">removed by you</span> : null}
+      {/* Only an entry that is on the resume can be taken off it. */}
+      {onEdit !== null && entry.state !== 'removed' ? (
+        // Remove entry, beside the label it names.
+        <button
+          // Never a form submit.
+          type="button"
+          // The shared small control style.
+          className="line__edit-trigger"
+          // One write at a time per resume.
+          disabled={busy}
+          // Starts with the visible words and names the entry, since every entry has this button.
+          aria-label={`Remove entry: ${entry.label}`}
+          // The whole entry, bullets and all, comes off; Add back under its section restores it.
+          onClick={() => void action.run({ kind: 'remove_entry', section: entry.section, ref: entry.ref })}
+        >
+          {/* Mid-save the button says so; otherwise the verb. */}
+          {action.saving ? 'Saving…' : 'Remove entry'}
+        </button>
+      ) : null}
+      {/* A refusal stays beside the entry it was about. */}
+      <ActionError error={action.error} />
+    </div>
+  );
+}
+
+/* Under an entry on the resume: the master bullets the tailor left out, and a box for a brand-new
+   bullet. Both collapsed in native <details>, so a 30-line review does not grow a form per entry. */
+function EntryTools({
+  entry,
+  onEdit,
+  busy,
+}: {
+  // The entry the tools act under.
+  readonly entry: DiffEntry;
+  // Always a real save path: this row is rendered only where editing is on.
+  readonly onEdit: (action: EditAction) => Promise<EditResult>;
+  // Any save in this diff is in flight.
+  readonly busy: boolean;
+}): ReactElement {
+  // One error and saving flag for both tools, which share the line of the screen.
+  const action = useStructureAction(onEdit);
+  // The new bullet's unsaved words.
+  const [draft, setDraft] = useState<string>('');
+  // Ties the visible label to the textarea, unique even when two entries share a label.
+  const draftId = useId();
+
+  /* Sends the new bullet. It is written into the master first (attestBullet), so the words stay only
+     in the box until that landed; a refusal keeps them for another try. */
+  async function saveNew(): Promise<void> {
+    // The page refuses empty text too; trimming here keeps a stray space from being a "bullet".
+    const text = draft.trim();
+    // Nothing to send.
+    if (text === '') return;
+    // Cleared only on a landed save, so a refusal never loses the operator's words.
+    if (await action.run({ kind: 'attest_bullet', section: entry.section, parentRef: entry.ref, text })) setDraft('');
+  }
+
+  // Full width under the entry's bullets.
+  return (
+    <div className="diff__entry-tools">
+      {/* Offered only when the master holds something the resume lacks under this entry. */}
+      {entry.addableBullets.length > 0 ? (
+        // Native disclosure: keyboard, state and semantics come from the platform.
+        <details className="diff__addback">
+          {/* The count, so the operator knows whether opening it is worth it. */}
+          <summary>
+            Add back from master ({entry.addableBullets.length})
+            {/* Spoken only: which entry, since every entry can have this list. */}
+            <span className="visually-hidden"> under {entry.label}</span>
+          </summary>
+          {/* `list-style: none` makes Safari drop list semantics; the role keeps the count spoken. */}
+          <ul className="diff__addback-list" role="list">
+            {entry.addableBullets.map((bullet) => (
+              // Keyed by the master ref, stable across saves.
+              <li key={bullet.ref} className="diff__addback-item">
+                {/* The master's own words, exactly what would print: an add-back reuses master text. */}
+                <span className="diff__addback-text">{bullet.text}</span>
+                {/* One button per offer. */}
+                <button
+                  // Never a form submit.
+                  type="button"
+                  // The shared small control style.
+                  className="line__edit-trigger"
+                  // One write at a time per resume.
+                  disabled={busy}
+                  // Names the bullet, since every offer has the same button.
+                  aria-label={`Add back bullet: ${shortText(bullet.text)}`}
+                  // Only the ref crosses to the page, which copies the bullet from FULL itself.
+                  onClick={() => void action.run({ kind: 'add_master_bullet', ref: bullet.ref })}
+                >
+                  Add back
+                </button>
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+
+      {/* Every entry on the resume can take a new bullet, which is written into the master first. */}
+      <details className="diff__new-bullet">
+        {/* The verb, visible; the entry, spoken. */}
+        <summary>
+          Add a new bullet
+          {/* Spoken only: under which entry. */}
+          <span className="visually-hidden"> under {entry.label}</span>
+        </summary>
+        {/* A real label, so the textarea's name says where the bullet goes. */}
+        <label className="diff__new-bullet-label" htmlFor={draftId}>
+          New bullet under {entry.label}
+        </label>
+        {/* The new bullet's words; resizable like the line editor. */}
+        <textarea
+          // Matches the label's htmlFor.
+          id={draftId}
+          // The same paper-on-sheet editor the line edit uses.
+          className="line__edit-textarea"
+          // Controlled, so a refused save keeps the words and a landed one clears them.
+          value={draft}
+          // Locked while saving, so what is sent is what the operator sees.
+          disabled={busy}
+          // Every keystroke into the draft.
+          onChange={(e) => setDraft(e.target.value)}
+        />
+        {/* Said BEFORE the button: this is the one control here that writes the master profile. */}
+        <p className="diff__new-bullet-note">
+          Saves to your master profile too, as a new version, then adds it to this resume.
+        </p>
+        {/* Save: master first, then this resume. */}
+        <button
+          // Never a form submit.
+          type="button"
+          // The primary save style of the line editor.
+          className="line__edit-save"
+          // Empty text cannot be a bullet; one write at a time.
+          disabled={busy || draft.trim() === ''}
+          // Master first, then this resume.
+          onClick={() => void saveNew()}
+        >
+          {/* The verb names both writes, so nobody is surprised by a new master version. */}
+          {action.saving ? 'Saving…' : 'Save to master and resume'}
+        </button>
+      </details>
+
+      {/* A refusal of either tool, under both. */}
+      <ActionError error={action.error} />
+    </div>
+  );
+}
+
+/* Whole master entries a section lacks (the achievement or certification the tailor dropped). */
+function SectionAddBack({
+  section,
+  onEdit,
+  busy,
+}: {
+  // The section whose missing entries are offered.
+  readonly section: DiffSection;
+  // Always a real save path: rendered only where editing is on.
+  readonly onEdit: (action: EditAction) => Promise<EditResult>;
+  // Any save in this diff is in flight.
+  readonly busy: boolean;
+}): ReactElement {
+  // This list's own error and saving flag.
+  const action = useStructureAction(onEdit);
+  // Read once for the summary and the names.
+  const title = SECTION_TITLE[section.kind];
+  // Full width at the end of the section.
+  return (
+    <div className="diff__entry-tools">
+      {/* Native disclosure, collapsed: the offers are there when wanted, quiet otherwise. */}
+      <details className="diff__addback">
+        {/* How many, and of what, so the operator knows what is hidden behind it. */}
+        <summary>
+          Add back from master: {section.addableEntries.length} {title.toLowerCase()} not on this resume
+        </summary>
+        {/* Same list semantics note as the bullet offers. */}
+        <ul className="diff__addback-list" role="list">
+          {section.addableEntries.map((entry) => (
+            // Keyed by the master ref.
+            <li key={entry.ref} className="diff__addback-item">
+              {/* The entry's label, from the same labeller as the headings. */}
+              <span className="diff__addback-text">{entry.label}</span>
+              {/* One button per offer. */}
+              <button
+                // Never a form submit.
+                type="button"
+                // The shared small control style.
+                className="line__edit-trigger"
+                // One write at a time per resume.
+                disabled={busy}
+                // Names the entry and its section, since every offer has the same button.
+                aria-label={`Add back ${entry.label} (${title})`}
+                // Bullet sections only (summary and skills never carry entry offers); the page adds
+                // the entry with all its FULL bullets and appends the section to the order if absent.
+                onClick={() => {
+                  // Narrows the kind to a bullet section for the action's type.
+                  if (section.kind !== 'summary' && section.kind !== 'skills') void action.run({ kind: 'add_master_entry', section: section.kind, ref: entry.ref });
+                }}
+              >
+                Add back
+              </button>
+            </li>
+          ))}
+        </ul>
+      </details>
+      {/* A refusal stays under the list it came from. */}
+      <ActionError error={action.error} />
+    </div>
+  );
+}
+
+/* The printed section order with Up and Down per section: order is a tailoring decision carried in
+   section_order, and this is the one place the operator can change it. */
+function SectionOrder({
+  sections,
+  onEdit,
+  busy,
+}: {
+  // The printed sections, in print order.
+  readonly sections: readonly DiffSection[];
+  // Always a real save path: rendered only where editing is on.
+  readonly onEdit: (action: EditAction) => Promise<EditResult>;
+  // Any save in this diff is in flight.
+  readonly busy: boolean;
+}): ReactElement {
+  // This list's own error and saving flag.
+  const action = useStructureAction(onEdit);
+  // Ties the list to its heading for assistive tech.
+  const headingId = useId();
+  // A landmark with a name, so it can be found from the regions list.
+  return (
+    <section className="diff__order" aria-labelledby={headingId}>
+      {/* The name the region is announced by. */}
+      <h3 id={headingId} className="diff__order-head">
+        Section order
+      </h3>
+      {/* An ordered list, because the order IS the content. */}
+      <ol className="diff__order-list">
+        {sections.map((section, index) => (
+          // Keyed by kind, so a moved section keeps its row (and the focused arrow) across the save.
+          <li key={section.kind} className="diff__order-item">
+            {/* The heading as the PDF prints it. */}
+            <span className="diff__order-name">{SECTION_TITLE[section.kind]}</span>
+            {/* Up unless first, down unless last; the move is one move_section either way. */}
+            <MoveButtons
+              // The heading as printed.
+              name={SECTION_TITLE[section.kind]}
+              // Not the first.
+              up={index > 0}
+              // Not the last.
+              down={index < sections.length - 1}
+              // One write at a time per resume.
+              busy={busy}
+              // Through this list's own error and saving flag.
+              onMove={(direction) => void action.run({ kind: 'move_section', section: section.kind, direction })}
+            />
+          </li>
+        ))}
+      </ol>
+      {/* Said while a move saves, since the arrows carry no words. */}
+      {action.saving ? <p className="diff__edit-note">Saving…</p> : null}
+      {/* A refusal stays under the list. */}
+      <ActionError error={action.error} />
+    </section>
+  );
+}
+
+/* The split view's rows, grouped: section heading, then each entry's heading, its bullet lines and
+ * its tools. ONE flat array of keyed elements rather than nested wrappers, for two reasons: the
+ * panes are a two-column grid whose cells must be direct children, and a moved bullet keeps its
+ * React key in the same array, so its Line keeps its state and focus across the move.
+ * Any line no section claims is appended at the end: nothing on the resume may go unseen (D5a). */
+function groupedRows(
+  // The whole diff, for its lines.
+  diff: ResumeDiff,
+  // Its layout (passed apart so the caller has already proven it present).
+  sections: readonly DiffSection[],
+  // The lines' save path, as the flat layout passes it; each Line hides its own controls under D4.
+  onEdit: ((action: EditAction) => Promise<EditResult>) | null,
+  // The entry and section controls' save path: null unless this row is editable (not D4, not read-only).
+  structureEdit: ((action: EditAction) => Promise<EditResult>) | null,
+  // Any save in this diff is in flight.
+  busy: boolean,
+  // D4's reason, threaded to each Line's title.
+  editDisabledReason: string | null,
+): ReactElement[] {
+  // Lines by id, for the entries' id lists.
+  const byId = new Map(diff.lines.map((line) => [line.id, line]));
+  // Every line drawn so far, so the leftovers can be found.
+  const drawn = new Set<string>();
+  // The flat row list.
+  const rows: ReactElement[] = [];
+  /* One line as a row, with Move/Remove when it sits under an entry. */
+  const drawLine = (line: DiffLine, order?: { readonly up: boolean; readonly down: boolean }): void => {
+    // Remembered, so it is not drawn again as a leftover.
+    drawn.add(line.id);
+    // Keyed by line id, the same key the flat layout uses.
+    rows.push(<Line key={line.id} line={line} onEdit={onEdit} busy={busy} editDisabledReason={editDisabledReason} order={order} />);
+  };
+
+  // Section by section, in the adapter's layout order.
+  for (const section of sections) {
+    // The section heading row.
+    rows.push(<SectionHead key={'section:' + section.kind} section={section} />);
+    // Summary and skills are one line each, found by kind.
+    if (section.kind === 'summary' || section.kind === 'skills') {
+      // The line of that kind, if the resume has one.
+      const line = diff.lines.find((candidate) => candidate.kind === section.kind);
+      // Drawn under its heading.
+      if (line !== undefined) drawLine(line);
+    }
+    // Each entry, in display order.
+    for (const entry of section.entries) {
+      // The entry's heading row.
+      rows.push(<EntryHead key={'entry:' + section.kind + '.' + entry.ref} entry={entry} onEdit={structureEdit} busy={busy} />);
+      // Its lines, in display order.
+      const lines = entry.lineIds.map((id) => byId.get(id)).filter((line): line is DiffLine => line !== undefined);
+      // The printed ones: a removed bullet takes no place in the order Move works on.
+      const printedIds = lines.filter((line) => line.editState !== 'removed').map((line) => line.id);
+      // Every line, removed ones included, so a removal stays visible where it happened.
+      for (const line of lines) {
+        // Its place among the printed siblings; -1 for a removed line, which gets no Move.
+        const at = printedIds.indexOf(line.id);
+        // Up unless first, down unless last.
+        drawLine(line, at === -1 ? undefined : { up: at > 0, down: at < printedIds.length - 1 });
+      }
+      // Add back and Add a bullet, only under an entry that is on the resume, and only where editable.
+      if (structureEdit !== null && entry.state !== 'removed') {
+        // Keyed per entry, so its draft survives a save elsewhere.
+        rows.push(<EntryTools key={'tools:' + section.kind + '.' + entry.ref} entry={entry} onEdit={structureEdit} busy={busy} />);
+      }
+    }
+    // Whole entries to add back, at the end of their section.
+    if (structureEdit !== null && section.addableEntries.length > 0) {
+      // Keyed per section.
+      rows.push(<SectionAddBack key={'addback:' + section.kind} section={section} onEdit={structureEdit} busy={busy} />);
+    }
+  }
+  // Fail loud: any line the layout did not place is still drawn, never dropped.
+  for (const line of diff.lines) if (!drawn.has(line.id)) drawLine(line);
+  // Ready for the grid.
+  return rows;
+}
+
 /* --- The screen -------------------------------------------------------- */
 
 export function DiffView({
@@ -1177,6 +1751,8 @@ export function DiffView({
   const claims = useMemo(() => collectFlaggedClaims(diff), [diff]);
   // A or B, derived; an edited row is always B (R2).
   const bucket = useMemo(() => deriveBucket(diff), [diff]);
+  // The AI chat's structure (2026-11-01): derived from the diff, recomputed only when it changes.
+  const assistStructure = useMemo(() => structureFromDiff(diff), [diff]);
   // Side-by-side or unified; local because no other part of the app cares.
   const [viewMode, setViewMode] = useState<'split' | 'unified'>('split');
 
@@ -1239,6 +1815,15 @@ export function DiffView({
   const canApprove = undecided.length === 0 && !busy;
   // The keys that still exist, for filtering the decisions handed to the page.
   const liveKeys = new Set(claims.map((claim) => claim.key));
+  /* The save path for EVERY control (lines, coverage chips, entries, sections): only where editing is
+     honestly on (a save path, and no editDisabledReason). Lines used to get runEdit and decide from
+     their editTarget, which stays set when FULL is null, so the banner said "off" while text stayed
+     click-to-edit and every save was refused after typing (review finding, 2026-11-01). */
+  const structureEdit = runEdit !== null && !editDisabledReason ? runEdit : null;
+  // The structural sentences behind part of editCount; absent on fixtures that predate them.
+  const structureChanges = diff.structureChanges ?? [];
+  // The sections the PDF prints, in print order: what the Section order list reorders.
+  const printedSections = (diff.sections ?? []).filter((section) => section.printed);
 
   return (
     <article className="diff">
@@ -1297,7 +1882,7 @@ export function DiffView({
 
         {/* T3: given the save path so a missing keyword the master can supply becomes an Add, and
             (with the master's groups) one it lacks becomes a vouch-and-add. */}
-        <CoverageBar diff={diff} onEdit={runEdit} busy={busy} attestCategories={attestCategories} />
+        <CoverageBar diff={diff} onEdit={structureEdit} busy={busy} attestCategories={attestCategories} />
       </header>
 
       {/* The job, before the verdict on the resume. Reading order is the
@@ -1324,11 +1909,29 @@ export function DiffView({
         </p>
       ) : (
         <p className="diff__edit-note">
-          {/* R2: an edited row never rides the batch button, and this says why it left. */}
-          You changed {diff.editCount} {diff.editCount === 1 ? 'line' : 'lines'}, so this
+          {/* R2: an edited row never rides the batch button, and this says why it left. "Changes",
+              not "lines", since 2026-11-01: a moved section or an added certification is counted too. */}
+          You made {diff.editCount} {diff.editCount === 1 ? 'change' : 'changes'}, so this
           application needs your individual approval rather than the batch.
         </p>
       )}
+
+      {/* D5a: the structural half of that count, named, so a reordered resume never looks untouched.
+          Shown in both view modes, because the unified view has no headings to show a move with. */}
+      {structureChanges.length > 0 ? (
+        // One block: the lead-in and its list read together.
+        <div className="diff__structure-changes">
+          {/* The lead-in, in the "by you" words every other operator change on this screen uses. */}
+          <p className="diff__structure-changes-head">Structure changed by you</p>
+          {/* `list-style` is kept here, so the list keeps its semantics without a role. */}
+          <ul>
+            {structureChanges.map((change, index) => (
+              // Index in the key: two entries can share a label, and so a sentence.
+              <li key={index + ':' + change}>{change}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {/* D4: the reason editing is off, once, above the lines it applies to. */}
       {onEdit !== undefined && editDisabledReason ? (
@@ -1338,7 +1941,13 @@ export function DiffView({
       {/* The AI box, only where an edit could honestly land: a save path, an ask, and editing on.
           Keyed by row so a new row never shows the previous row's proposals. */}
       {runEdit !== null && onAssist !== undefined && !editDisabledReason ? (
-        <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} />
+        <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} structure={assistStructure ?? undefined} />
+      ) : null}
+
+      {/* Section order, only where a move could be saved and only with something to reorder. */}
+      {structureEdit !== null && printedSections.length > 1 ? (
+        // Only the printed sections: an unprinted one has no place in the order to move from.
+        <SectionOrder sections={printedSections} onEdit={structureEdit} busy={busy} />
       ) : null}
 
       {/* View Mode Toolbar */}
@@ -1367,16 +1976,26 @@ export function DiffView({
           <h3 className="diff__pane-head">Your master profile</h3>
           <h3 className="diff__pane-head">Tailored for this job</h3>
 
-          {diff.lines.map((line) => (
-            <Line
-              key={line.id}
-              line={line}
-              onEdit={runEdit}
-              busy={busy}
-              // Threaded down so each line's title can say why it is not clickable (D4).
-              editDisabledReason={editDisabledReason ?? null}
-            />
-          ))}
+          {/* Grouped by section and entry when the adapter laid the resume out (every live row);
+              a hand-built diff without a layout keeps the flat list it always had. */}
+          {diff.sections !== undefined
+            ? // Headings, entries and their tools, with the same Line for every bullet.
+              groupedRows(diff, diff.sections, runEdit, structureEdit, busy, editDisabledReason ?? null)
+            : // The pre-2026-11-01 flat list, unchanged.
+              diff.lines.map((line) => (
+                <Line
+                  // Keyed by line id, so a save keeps each line's editor state.
+                  key={line.id}
+                  // The line to draw.
+                  line={line}
+                  // The save path; each line switches its own controls off when it has no target or editing is off.
+                  onEdit={runEdit}
+                  // One write at a time.
+                  busy={busy}
+                  // Threaded down so each line's title can say why it is not clickable (D4).
+                  editDisabledReason={editDisabledReason ?? null}
+                />
+              ))}
         </div>
       ) : (
         <div className="diff__panes--unified">

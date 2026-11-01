@@ -145,6 +145,82 @@ export interface DiffLine {
    * Optional because only the skills line has such a list; absent on every other line, and on
    * hand-built fixtures that predate T3 (absent reads as "none added", the truthful reading). */
   readonly addedSkills?: readonly AddedSkill[];
+  /* Bullet lines only (2026-11-01): the section and entry the bullet prints under, so the screen
+   * can group it under its employer or project and a Move control knows its siblings. Optional
+   * because summary and skills lines have no entry, and hand-built fixtures predate it. */
+  readonly section?: DiffBulletSection;
+  /* The entry's ref within `section`; together they name the bullet's true parent. */
+  readonly entryRef?: string;
+  /* True when the operator moved this bullet: its place among the siblings the tailor ALSO kept
+   * differs from the tailor's. DERIVED like editState, never stored. A move changes no words, so it
+   * is its own flag rather than an editState: Reset restores words, it does not reorder. */
+  readonly moved?: boolean;
+}
+
+/* The five sections whose entries carry bullets, spelled as literals HERE rather than imported from
+ * tailoredEdits.ts: this file is presentation-only and imports nothing (tailoredEdits imports types
+ * from it, so the reverse would be a cycle). Structurally identical to tailoredEdits' BulletSection,
+ * so a value of one is assignable to the other and a drift fails typecheck at the first use. */
+export type DiffBulletSection = 'experience' | 'projects' | 'education' | 'achievements' | 'certifications';
+
+/* Every section key section_order may name, for the same reason spelled here. */
+export type DiffSectionKind = 'summary' | 'skills' | DiffBulletSection;
+
+/* The heading each section prints under on this screen. A literal table, so a new section kind
+ * fails to compile here instead of rendering under its raw key. Shared by the adapter's change
+ * sentences and the view's headings, so the two can never name a section differently. */
+export const SECTION_TITLE: Readonly<Record<DiffSectionKind, string>> = {
+  /* The prose paragraph at the top. */
+  summary: 'Summary',
+  /* The skills list. */
+  skills: 'Skills',
+  /* Employers. */
+  experience: 'Experience',
+  /* Projects. */
+  projects: 'Projects',
+  /* Degrees. */
+  education: 'Education',
+  /* Awards and similar. */
+  achievements: 'Achievements',
+  /* Certificates. */
+  certifications: 'Certifications',
+};
+
+/* One entry (an employer, a project, a degree, an achievement, a certification) as the screen groups
+ * it. Exists because a bullet alone does not say whose it is: "Built a REST API" under the wrong
+ * employer is a different claim, and the operator must see the parent to judge it. */
+export interface DiffEntry {
+  /* The section the entry lives in. */
+  readonly section: DiffBulletSection;
+  /* The master entry's id, which remove_entry names. */
+  readonly ref: string;
+  /* A human label from tailoredEdits' entryLabel, the one labeller the AI box and the add-back
+   * list also use, so all three name an entry the same way. */
+  readonly label: string;
+  /* DERIVED against the tailor's version: on both ('kept'), only on the stored resume ('added'),
+   * or only on the tailor's ('removed'). Without an original every entry reads 'kept' (D4). */
+  readonly state: 'kept' | 'added' | 'removed';
+  /* The ids of this entry's bullet lines in display order: stored order, with removed bullets
+   * shown where the tailor had them. Ids, not lines, so diff.lines stays the one copy. */
+  readonly lineIds: readonly string[];
+  /* Master bullets under this entry that the resume does not carry, offered as "Add back".
+   * Empty without an original or a resolved master: an add could not be saved then. */
+  readonly addableBullets: readonly { readonly ref: string; readonly text: string }[];
+}
+
+/* One section as the screen lays it out: printed ones in section_order's order first, then any
+ * section that has content but is not printed, so nothing on the resume is ever hidden. */
+export interface DiffSection {
+  /* Which section. */
+  readonly kind: DiffSectionKind;
+  /* Named in section_order, which is exactly what the PDF renderer prints. A section that is
+   * selected but not named here is NOT on the PDF, and the screen says so. */
+  readonly printed: boolean;
+  /* The entries in display order; always empty for summary and skills. */
+  readonly entries: readonly DiffEntry[];
+  /* Whole master entries the resume lacks (a dropped achievement or certification), offered as
+   * "Add back". Empty without an original or a resolved master, as above. */
+  readonly addableEntries: readonly { readonly ref: string; readonly label: string }[];
 }
 
 /* Keyword coverage, section 18.7 - "so you can see whether the tailoring
@@ -200,10 +276,19 @@ export interface ResumeDiff {
    * the bucket calculation, and still blocks approval until decided. Fail loud,
    * never fail clean. */
   readonly unlocatedClaims: readonly FlaggedClaim[];
-  /* How many lines differ from the rebuilt original (edited or removed). Counted
-   * once here so the bucket, the Review notice and the approval detail all read
-   * the same number rather than each re-deriving it. */
+  /* How many lines differ from the rebuilt original (edited or removed), PLUS every
+   * structural change (structureChanges). Counted once here so the bucket, the Review
+   * notice and the approval detail all read the same number rather than each re-deriving it. */
   readonly editCount: number;
+  /* The resume laid out by section and entry (2026-11-01). Optional so hand-built fixtures that
+   * predate it still render, as a flat list of lines. */
+  readonly sections?: readonly DiffSection[];
+  /* Every STRUCTURAL change against the tailor's version, one sentence each: a section moved, an
+   * entry added or removed, entries or bullets reordered. D5a: anything the save gate allows must
+   * show here and count in editCount, or a reordered resume would sit in Bucket A looking clean
+   * while it is not what the Auditor read. Added and removed BULLETS are not listed: they are
+   * lines with their own editState, already counted once. Optional for the same reason as above. */
+  readonly structureChanges?: readonly string[];
   readonly discoveredVia?: readonly string[] | null | undefined;
   readonly sourceRefs?: readonly import('../../data/contract').JobSourceRef[] | null | undefined;
   readonly employmentType?: string | null | undefined;

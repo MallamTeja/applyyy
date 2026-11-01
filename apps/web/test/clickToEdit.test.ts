@@ -138,6 +138,15 @@ describe('click-to-edit: non-editable lines say why', () => {
     assert.match(html, new RegExp(`<p class="line__text line__text--bullet" title="${D4_REASON.replace(/[.]/g, '\\.')}">`));
   });
 
+  it('a line that KEEPS its target is still not clickable when the page says editing is off (FULL null, 2026-11-01)', () => {
+    // The FULL-null case: the adapter keeps editTarget, but the page passes a reason.
+    const html = page([line({})], { editDisabledReason: D4_REASON });
+    // Not clickable: a click would only be refused after typing.
+    assert.equal(textButtonTag(html), undefined);
+    // The reason is on the line, as for D4.
+    assert.match(html, new RegExp(`<p class="line__text line__text--bullet" title="${D4_REASON.replace(/[.]/g, '\\.')}">`));
+  });
+
   it('a removed bullet has no text button and the Removed title', () => {
     // Removed by the operator: struck text, Reset brings it back.
     const html = page([line({ tailoredRuns: [], editState: 'removed' })]);

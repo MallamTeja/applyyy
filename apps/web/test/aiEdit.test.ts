@@ -65,24 +65,27 @@ describe('buildAssistDraft', () => {
   });
 });
 
-describe('toStoredOp + toEditAction', () => {
+describe('resolveOps (one op) + toEditAction', () => {
+  // One op resolved on its own, as resolveOps resolves the first op of an answer.
+  const one = (op: Parameters<typeof ai.resolveOps>[0][number], draft: Parameters<typeof ai.resolveOps>[1]) => ai.resolveOps([op], draft)[0] ?? null;
+
   it('resolves each op to a real target at answer time, then to the action a click would make', () => {
     // The draft whose ids the ops use.
     const draft = ai.buildAssistDraft(diff, ['Tools'], 'x');
     // A bullet edit: stored against the bullet's ref, with the text it replaces.
-    const edit = ai.toStoredOp({ op: 'edit', id: 'b0', text: 'New.', newNumbers: [] }, draft);
+    const edit = one({ op: 'edit', id: 'b0', text: 'New.', newNumbers: [] }, draft);
     // The ref, not the short id, so a reloaded chat still targets the right bullet.
     assert.deepEqual(edit && edit.op === 'edit' ? [edit.target, edit.before] : null, [{ kind: 'bullet', ref: 'exp_1_b1' }, 'Built a billing API.']);
     // Applied as a plain edit on that ref.
     assert.deepEqual(edit && ai.toEditAction(edit), { kind: 'edit', target: { kind: 'bullet', ref: 'exp_1_b1' }, text: 'New.' });
     // The summary has its own target.
-    const summary = ai.toStoredOp({ op: 'edit', id: 'summary', text: 'S.', newNumbers: [] }, draft);
+    const summary = one({ op: 'edit', id: 'summary', text: 'S.', newNumbers: [] }, draft);
     // Applied on the summary.
     assert.deepEqual(summary && ai.toEditAction(summary), { kind: 'edit', target: { kind: 'summary' }, text: 'S.' });
     // An id that was never sent resolves to nothing.
-    assert.equal(ai.toStoredOp({ op: 'remove', id: 'b7' }, draft), null);
+    assert.equal(one({ op: 'remove', id: 'b7' }, draft), null);
     // A skill records whether the master had it, and applies through the attest path.
-    const skill = ai.toStoredOp({ op: 'add_skill', name: 'Kafka', category: 'Tools' }, draft);
+    const skill = one({ op: 'add_skill', name: 'Kafka', category: 'Tools' }, draft);
     // Kafka is in the fixture's master skills.
     assert.deepEqual(skill, { op: 'add_skill', name: 'Kafka', category: 'Tools', inMaster: true });
     // Master first, then the resume.
@@ -253,5 +256,259 @@ describe('shouldAutoApply (the AI performs the actions, 2026-11-01)', () => {
     assert.equal(ai.shouldAutoApply(skill('Code review'), 'add the code reviewing skill'), false);
     // Already in the master: printing it claims nothing new.
     assert.equal(ai.shouldAutoApply({ ...skill('Kubernetes'), inMaster: true }, 'anything'), true);
+  });
+});
+
+// --- structure edits (2026-11-01) ---------------------------------------------------
+
+// A bullet line on ref `ref` printing `text`.
+const bulletLine = (ref: string, text: string) => ({ id: ref, kind: 'bullet', masterText: text, tailoredRuns: [run(text)], editTarget: { kind: 'bullet', ref }, editState: 'original' });
+
+// A diff with three job bullets and one project bullet, in print order.
+const sdiff = {
+  applicationId: 'app-2',
+  jobTitle: 'Backend Engineer',
+  companyName: 'Acme',
+  coverage: { jdKeywords: [], honestlyMatched: [], matchedByFabrication: [], matchedByEdit: [] },
+  lines: [bulletLine('x_b1', 'Shipped A.'), bulletLine('x_b2', 'Shipped B.'), bulletLine('x_b3', 'Shipped C.'), bulletLine('p_b1', 'Predicted pace.')],
+} as never;
+
+// The structure the page would build for sdiff: b0..b2 under e0 (the job), b3 under e1 (the project).
+const structure = {
+  sections: ['summary', 'experience', 'projects', 'skills'],
+  entries: [
+    { section: 'experience', ref: 'x', label: 'Aczen Technologies · Full Stack AI Engineer', bulletRefs: ['x_b1', 'x_b2', 'x_b3'] },
+    { section: 'projects', ref: 'p', label: 'F1 Race Pace Predictor', bulletRefs: ['p_b1'] },
+  ],
+  addable: {
+    // One master bullet under the job, and one under an entry that is NOT on the resume.
+    bullets: [
+      { ref: 'x_b4', text: 'Mentored two interns.', section: 'experience', parentRef: 'x', parentLabel: 'Aczen Technologies · Full Stack AI Engineer' },
+      { ref: 'q_b1', text: 'Orphan.', section: 'projects', parentRef: 'q', parentLabel: 'Other' },
+    ],
+    // One whole achievement.
+    entries: [{ ref: 'ach_1', section: 'achievements', label: 'LeetCode' }],
+  },
+} as const;
+
+// The same structure with one entry's bullet order (or the section order) replaced.
+const reordered = (bulletRefs: readonly string[], sections: readonly string[] = structure.sections) =>
+  ({ ...structure, sections, entries: [{ ...structure.entries[0], bulletRefs }, structure.entries[1]] }) as never;
+
+describe('buildAssistDraft with a structure (2026-11-01)', () => {
+  it('tags each bullet with its entry, labels entries once, and lists placeable master items under short ids', () => {
+    // Built with the structure.
+    const draft = ai.buildAssistDraft(sdiff, [], 'x', [], structure as never);
+    // b0..b2 under e0, b3 under e1.
+    assert.deepEqual(draft.body.bullets.map((b) => b.entry), ['e0', 'e0', 'e0', 'e1']);
+    // Each entry once, by section and label.
+    assert.deepEqual(draft.body.entries, [
+      { id: 'e0', section: 'experience', label: 'Aczen Technologies · Full Stack AI Engineer' },
+      { id: 'e1', section: 'projects', label: 'F1 Race Pace Predictor' },
+    ]);
+    // Entries first, then bullets; the orphan (its entry is not on the resume) is left out.
+    assert.deepEqual(draft.body.available, [
+      { id: 'n0', section: 'achievements', label: 'LeetCode' },
+      { id: 'm0', entry: 'e0', text: 'Mentored two interns.' },
+    ]);
+    // The section order travels as section_order spells it.
+    assert.deepEqual(draft.body.sections, structure.sections);
+    // No ref anywhere in what is sent.
+    assert.doesNotMatch(JSON.stringify(draft.body), /x_b|p_b|ach_1|"ref"|parentRef/);
+  });
+
+  it('sends exactly the pre-structure body when the page passes no structure', () => {
+    // No structure.
+    const draft = ai.buildAssistDraft(sdiff, [], 'x');
+    // None of the three keys, and no entry on any bullet: the old edge function sees what it always saw.
+    assert.deepEqual(Object.keys(draft.body).sort(), ['bullets', 'categories', 'history', 'instruction', 'job', 'skills', 'summary']);
+    // Bare bullets.
+    assert.ok(draft.body.bullets.every((b) => !('entry' in b)));
+  });
+
+  it('caps AVAILABLE at 30 items and cuts a long master text', () => {
+    // Forty master bullets under the job, one of them 300 characters long.
+    const many = Array.from({ length: 40 }, (_, i) => ({ ...structure.addable.bullets[0], ref: `x_m${i}`, text: i === 0 ? 'y'.repeat(300) : `T${i}.` }));
+    // Built.
+    const draft = ai.buildAssistDraft(sdiff, [], 'x', [], { ...structure, addable: { entries: structure.addable.entries, bullets: many } } as never);
+    // One entry plus 29 bullets.
+    assert.equal(draft.body.available?.length, 30);
+    // Cut to the function's 200, ending in an ellipsis.
+    const first = draft.body.available?.[1];
+    // A bullet item.
+    assert.equal(first && 'text' in first ? first.text.length : null, 200);
+  });
+});
+
+describe('resolveOps (structure ops, played in order)', () => {
+  // The draft every case resolves against.
+  const draft = () => ai.buildAssistDraft(sdiff, [], 'x', [], structure as never);
+
+  it('gives repeated moves different siblings, and drops a move past the end', () => {
+    // b2 (x_b3) up three times: past x_b2, past x_b1, then it is already first.
+    const ops = ai.resolveOps(Array.from({ length: 3 }, () => ({ op: 'move', id: 'b2', direction: 'up' }) as const), draft());
+    // The pasts, then null.
+    assert.deepEqual(ops.map((op) => (op?.op === 'move' ? op.past : null)), ['x_b2', 'x_b1', null]);
+    // The first bullet cannot go up, and the last of an entry cannot go down.
+    assert.deepEqual(ai.resolveOps([{ op: 'move', id: 'b0', direction: 'up' }, { op: 'move', id: 'b3', direction: 'down' }], draft()), [null, null]);
+    // A removal earlier in the answer shortens the order: b1 becomes first, so it cannot go up.
+    assert.equal(ai.resolveOps([{ op: 'remove', id: 'b0' }, { op: 'move', id: 'b1', direction: 'up' }], draft())[1], null);
+  });
+
+  it('resolves section moves, add-backs and new bullets to real targets, and unknown ids to null', () => {
+    // Projects up passes experience; an unprinted section and unknown ids resolve to nothing.
+    const ops = ai.resolveOps(
+      [
+        { op: 'move_section', section: 'projects', direction: 'up' },
+        { op: 'move_section', section: 'education', direction: 'up' },
+        { op: 'add_back', id: 'm0' },
+        { op: 'add_back', id: 'n0' },
+        { op: 'add_back', id: 'm9' },
+        { op: 'new_bullet', entry: 'e1', text: 'Modelled tyre wear.' },
+        { op: 'new_bullet', entry: 'e7', text: 'x' },
+      ],
+      draft(),
+    );
+    // Each stored shape carries what its card and its Apply need.
+    assert.deepEqual(ops, [
+      { op: 'move_section', section: 'projects', direction: 'up', past: 'experience' },
+      null,
+      { op: 'add_bullet', ref: 'x_b4', text: 'Mentored two interns.', parentLabel: 'Aczen Technologies · Full Stack AI Engineer' },
+      { op: 'add_entry', section: 'achievements', ref: 'ach_1', label: 'LeetCode' },
+      null,
+      { op: 'new_bullet', section: 'projects', parentRef: 'p', parentLabel: 'F1 Race Pace Predictor', text: 'Modelled tyre wear.' },
+      null,
+    ]);
+  });
+
+  it('resolves no structural op without a structure', () => {
+    // The pre-structure draft.
+    const flat = ai.buildAssistDraft(sdiff, [], 'x');
+    // Nothing to move among, nothing available, no entries.
+    assert.deepEqual(ai.resolveOps([{ op: 'move', id: 'b1', direction: 'up' }, { op: 'add_back', id: 'm0' }, { op: 'new_bullet', entry: 'e0', text: 't' }], flat), [null, null, null]);
+  });
+});
+
+describe('structure ops: action, auto-apply, applied state', () => {
+  // One of each stored shape.
+  const move = { op: 'move', ref: 'x_b3', direction: 'up', past: 'x_b2', before: 'Shipped C.' } as const;
+  const section = { op: 'move_section', section: 'projects', direction: 'up', past: 'experience' } as const;
+  const addBullet = { op: 'add_bullet', ref: 'x_b4', text: 'Mentored two interns.', parentLabel: 'Aczen' } as const;
+  const addEntry = { op: 'add_entry', section: 'achievements', ref: 'ach_1', label: 'LeetCode' } as const;
+  const fresh = { op: 'new_bullet', section: 'projects', parentRef: 'p', parentLabel: 'F1', text: 'Predicted pace.' } as const;
+
+  it("maps each onto the page's own structural EditAction", () => {
+    // The five actions DiffView declares.
+    assert.deepEqual([move, section, addBullet, addEntry, fresh].map((op) => ai.toEditAction(op)), [
+      { kind: 'move_bullet', ref: 'x_b3', direction: 'up' },
+      { kind: 'move_section', section: 'projects', direction: 'up' },
+      { kind: 'add_master_bullet', ref: 'x_b4' },
+      { kind: 'add_master_entry', section: 'achievements', ref: 'ach_1' },
+      { kind: 'attest_bullet', section: 'projects', parentRef: 'p', text: 'Predicted pace.' },
+    ]);
+  });
+
+  it('applies moves and add-backs by itself; a new bullet always waits for a click', () => {
+    // Reorder or reuse true master text.
+    assert.deepEqual([move, section, addBullet, addEntry].map((op) => ai.shouldAutoApply(op, 'x')), [true, true, true, true]);
+    // Even when the operator typed the exact words: it is a new master claim.
+    assert.equal(ai.shouldAutoApply(fresh, 'add predicted pace'), false);
+  });
+
+  it('reads applied state from the structure, never from a stored flag', () => {
+    // Not yet: x_b3 is still below x_b2.
+    assert.equal(ai.isApplied(move, sdiff, structure as never), false);
+    // After the swap.
+    assert.equal(ai.isApplied(move, sdiff, reordered(['x_b1', 'x_b3', 'x_b2'])), true);
+    // Projects is still below experience.
+    assert.equal(ai.isApplied(section, sdiff, structure as never), false);
+    // After the swap.
+    assert.equal(ai.isApplied(section, sdiff, reordered(['x_b1', 'x_b2', 'x_b3'], ['summary', 'projects', 'experience', 'skills'])), true);
+    // Not on the resume yet.
+    assert.deepEqual([ai.isApplied(addBullet, sdiff, structure as never), ai.isApplied(addEntry, sdiff, structure as never)], [false, false]);
+    // On the resume.
+    assert.equal(ai.isApplied(addBullet, sdiff, reordered(['x_b1', 'x_b2', 'x_b3', 'x_b4'])), true);
+    // The project already prints "Predicted pace." under p: applied.
+    assert.equal(ai.isApplied(fresh, sdiff, structure as never), true);
+    // Without a structure nothing structural can be confirmed.
+    assert.equal(ai.isApplied(fresh, sdiff), false);
+  });
+
+  it('reads each new stored shape back, and refuses an open direction or a section outside its list', () => {
+    // Round trips.
+    assert.deepEqual([move, section, addBullet, addEntry, fresh].map((op) => ai.readStoredOp(op)), [move, section, addBullet, addEntry, fresh]);
+    // "top" is not a direction.
+    assert.equal(ai.readStoredOp({ ...move, direction: 'top' }), null);
+    // Not a section name.
+    assert.equal(ai.readStoredOp({ ...section, past: 'hobbies' }), null);
+    // A section with no entries cannot hold one.
+    assert.equal(ai.readStoredOp({ ...addEntry, section: 'skills' }), null);
+    // A new bullet with no parent could land anywhere.
+    assert.equal(ai.readStoredOp({ ...fresh, parentRef: undefined }), null);
+  });
+
+  it('renders each card; a new bullet says Apply also writes the master', () => {
+    // Static markup without the <!-- --> React puts between adjacent text nodes.
+    const card = (op: unknown) => render(h(panel.OpBody, { op } as never)).replace(/<!-- -->/g, '');
+    // The new-bullet card.
+    assert.match(card(fresh), /New bullet under F1.*Predicted pace\..*Not in your master profile yet: Apply saves it there too\./);
+    // The section card.
+    assert.match(card(section), /Move section <strong>Projects<\/strong> up/);
+    // The entry card.
+    assert.match(card(addEntry), /Add back to Achievements.*LeetCode/);
+  });
+});
+
+describe('requestAssist reads the structure ops', () => {
+  it('accepts the four new wire shapes and refuses one without its direction', async () => {
+    // Every new shape at once.
+    const ops = [
+      { op: 'move', id: 'b0', direction: 'down' },
+      { op: 'move_section', section: 'projects', direction: 'up' },
+      { op: 'add_back', id: 'n0' },
+      { op: 'new_bullet', entry: 'e0', text: 't' },
+    ];
+    // A client answering them.
+    const answer = (list: unknown[]) => ({ functions: { invoke: async () => ({ data: { status: 'ok', ops: list, note: '' }, error: null }) } });
+    // A minimal body.
+    const body = { instruction: 'x', job: { title: '', company: '', missing: [] }, summary: null, bullets: [], skills: '', categories: [], history: [] };
+    // Read through as-is.
+    const ok = await ai.requestAssist(answer(ops), body);
+    // Every op kept.
+    assert.deepEqual(ok.kind === 'ok' ? ok.ops : null, ops);
+    // A move with no direction is contract drift: an error, not a shorter list.
+    assert.equal((await ai.requestAssist(answer([{ op: 'move', id: 'b0' }]), body)).kind, 'error');
+  });
+});
+
+describe('structureFromDiff (the chat reads the structure the page renders, 2026-11-01)', () => {
+  it('lists printed sections in order, live entries with printed bullets, and the master offers', () => {
+    // One printed experience entry (one bullet kept, one removed, one offer); an unprinted section offering an achievement.
+    const sectioned = {
+      lines: [
+        { id: 'l1', kind: 'bullet', editTarget: { kind: 'bullet', ref: 'b1' }, editState: 'original', tailoredRuns: [] },
+        { id: 'l2', kind: 'bullet', editTarget: { kind: 'bullet', ref: 'b2' }, editState: 'removed', tailoredRuns: [] },
+      ],
+      sections: [
+        { kind: 'summary', printed: true, entries: [], addableEntries: [] },
+        { kind: 'experience', printed: true, entries: [{ section: 'experience', ref: 'exp1', label: 'Aczen', state: 'kept', lineIds: ['l1', 'l2'], addableBullets: [{ ref: 'm1', text: 'Built RAG' }] }], addableEntries: [] },
+        { kind: 'achievements', printed: false, entries: [{ section: 'achievements', ref: 'gone', label: 'Old', state: 'removed', lineIds: [], addableBullets: [] }], addableEntries: [{ ref: 'ach2', label: 'Hackathon' }] },
+      ],
+    } as never;
+    // The adapter under test.
+    const structure = ai.structureFromDiff(sectioned);
+    // Printed sections only, in print order (summary included: section_order names it).
+    assert.deepEqual(structure?.sections, ['summary', 'experience']);
+    // The live entry with only its printed bullet; the removed entry is not targetable.
+    assert.deepEqual(structure?.entries, [{ section: 'experience', ref: 'exp1', label: 'Aczen', bulletRefs: ['b1'] }]);
+    // The bullet offer carries its owner, as AddableBullet names it.
+    assert.deepEqual(structure?.addable.bullets, [{ ref: 'm1', text: 'Built RAG', section: 'experience', parentRef: 'exp1', parentLabel: 'Aczen' }]);
+    // The whole-entry offer from the unprinted section.
+    assert.deepEqual(structure?.addable.entries, [{ ref: 'ach2', section: 'achievements', label: 'Hackathon' }]);
+  });
+
+  it('is null for a diff without sections, so the chat keeps its old behaviour', () => {
+    // A hand-built fixture predating sections.
+    assert.equal(ai.structureFromDiff({ lines: [] } as never), null);
   });
 });

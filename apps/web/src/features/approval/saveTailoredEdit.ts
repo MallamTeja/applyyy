@@ -14,14 +14,41 @@
  * test can drive it with a fake client instead of a browser. */
 
 import type { MasterProfile, ResolvedResume } from '../../data/contract';
-// Builder-1's pure module: one definition of "a resume", and R0 enforced at the write boundary.
-import { deepEqual, isResumeShape, onlyTextChanged } from './tailoredEdits';
+// Builder-1's pure module: one definition of "a resume", and R0' enforced at the write boundary.
+import { deepEqual, isResumeShape, tracesToMaster } from './tailoredEdits';
 
-/* Closed union, so the event log can only ever name one of six operator actions. The skill kinds
+/* Closed union, so the event log can only ever name one of twelve operator actions. The skill kinds
    (T3) record a selection change: the event ref is the MASTER skill's id and before/after carry its
    name, so the log alone says which skill went on or came off. resume_attest_skill is the one that
-   also moved the pin: the operator vouched for a skill the old master lacked (attestSkill.ts). */
-export type EditEventKind = 'resume_edit' | 'resume_remove' | 'resume_reset' | 'resume_add_skill' | 'resume_remove_skill' | 'resume_attest_skill';
+   also moved the pin: the operator vouched for a skill the old master lacked (attestSkill.ts).
+   R0' (2026-11-01) adds the structural kinds, one per pure edit in tailoredEdits.ts, so the log
+   names a reorder, an add-back and an entry removal as what they are rather than as a text edit;
+   resume_attest_bullet, like resume_attest_skill, also moved the pin (attestBullet.ts). */
+export type EditEventKind =
+  // Text: one bullet's or the summary's wording changed.
+  | 'resume_edit'
+  // One bullet taken off.
+  | 'resume_remove'
+  // One line put back to the tailor's version.
+  | 'resume_reset'
+  // T3: a master skill put on.
+  | 'resume_add_skill'
+  // T3: an operator-added skill taken back off.
+  | 'resume_remove_skill'
+  // T3: a skill vouched for, written to the master first, then put on (re-pins).
+  | 'resume_attest_skill'
+  // R0': a bullet moved one place within its entry.
+  | 'resume_move_bullet'
+  // R0': a section moved one place in section_order.
+  | 'resume_move_section'
+  // R0': a master bullet put back under its entry.
+  | 'resume_add_bullet'
+  // R0': a whole master entry put on.
+  | 'resume_add_entry'
+  // R0': a whole entry taken off.
+  | 'resume_remove_entry'
+  // R0': a new bullet vouched for, written to the master first, then put on (re-pins).
+  | 'resume_attest_bullet';
 
 /* What the database holds NOW, read back after an unknown or refused write. */
 export interface StoredRow {
@@ -39,7 +66,9 @@ export type SaveOutcome =
   | { readonly ok: true; readonly eventRecorded: boolean; readonly updatedAt: string }
   | {
       readonly ok: false;
-      readonly reason: 'invalid_resume_shape' | 'not_text_only' | 'changed_elsewhere' | 'unconfirmed' | 'error';
+      /* 'not_traced' (renamed from 'not_text_only' with R0', 2026-11-01, because the gate no longer
+         asks "only text?"): the candidate failed tracesToMaster, or a re-pin's pins disagreed. */
+      readonly reason: 'invalid_resume_shape' | 'not_traced' | 'changed_elsewhere' | 'unconfirmed' | 'error';
       // Said for a person; the page shows it verbatim.
       readonly message: string;
       // Present on 'unconfirmed', and on 'changed_elsewhere' when the re-read works.
@@ -215,14 +244,14 @@ function errorMessage(error: { code?: unknown; message?: unknown }): string {
 type SaveArgs = {
   // The row whose resume is being replaced.
   applicationId: string;
-  // The WHOLE new resume, already produced by applyTextEdit / removeBullet / resetTarget.
+  // The WHOLE new resume, already produced by one of the pure edits in tailoredEdits.ts.
   resume: ResolvedResume;
-  // The resume this edit was computed from, for the R0 boundary check.
+  // The resume this edit was computed from, for the R0' boundary check.
   previous: ResolvedResume;
-  // The tailor's own version, the ground truth for refs and master_text.
+  // The tailor's own version, the base the skills rule measures added skills against.
   original: ResolvedResume;
-  // T3: the PINNED master, the only source an added skill may come from; required so the R0
-  // check below can never run without it.
+  // The PINNED master: R0' resolves FULL (every node a resume may carry) from it, and an added
+  // skill may come only from it; required so the boundary check can never run without it.
   master: MasterProfile;
   // The stamp the page last saw; the write lands only if nobody changed the row since.
   expectedUpdatedAt: string;
@@ -295,8 +324,10 @@ export async function saveTailoredEdit(
   if (!isResumeShape(args.resume)) {
     return { ok: false, reason: 'invalid_resume_shape', message: 'the edited resume was malformed, so nothing was sent.' };
   }
-  /* R0 at the boundary (fix 5): only bullet text, the summary, removed/restored bullets and (T3)
-     master skills added after the tailor's own may differ. A change to master_text would make an edit read as traced, so it never leaves here. */
+  /* R0' at the boundary (fix 5, widened 2026-11-01): every node on the resume must trace to the
+     pinned master under its true parent (tracesToMaster). A change to master_text would make an
+     edit read as traced, an invented or relocated node would print an untraced claim, so neither
+     ever leaves here. */
   /* A re-pin must be internally consistent before anything is sent: the resume and tailor_refs
      both name the target version, so the three pins cannot be written disagreeing. */
   if (args.repin !== undefined) {
@@ -304,14 +335,17 @@ export async function saveTailoredEdit(
     const refsPin = (args.repin.tailorRefs as { master_version?: unknown } | null)?.master_version;
     // Either side naming another version would store a row the page then refuses to rebuild.
     if (args.resume.master_version !== args.repin.version || refsPin !== args.repin.version) {
-      return { ok: false, reason: 'not_text_only', message: 'the new master version did not match on every pin, so nothing was sent.' };
+      // Refused before any network call; the reason is the gate's, since the pin is part of the trace.
+      return { ok: false, reason: 'not_traced', message: 'the new master version did not match on every pin, so nothing was sent.' };
     }
   }
-  /* R0 runs UNCHANGED for a re-pin: the previous resume is relabelled to the new version, so the
-     pin is the only extra difference allowed, and every other key is held to the same rule. */
+  /* R0' runs UNCHANGED for a re-pin: the previous resume is relabelled to the new version, so the
+     pin is the only extra difference allowed, and FULL is resolved from the NEW master. */
   const previousAtPin = args.repin === undefined ? args.previous : { ...args.previous, master_version: args.repin.version };
-  if (!onlyTextChanged(previousAtPin, args.resume, args.original, args.master)) {
-    return { ok: false, reason: 'not_text_only', message: 'the edit changed more than text, so nothing was sent.' };
+  // The gate itself; a refusal is local, so nothing was sent.
+  if (!tracesToMaster(previousAtPin, args.resume, args.original, args.master)) {
+    // Said for the operator: what was wrong, and that the database is untouched.
+    return { ok: false, reason: 'not_traced', message: 'the edit put something on the resume that does not trace to your master profile, so nothing was sent.' };
   }
   /* The columns this save writes: the resume always; on a re-pin, the other two pins with it, in
      the same statement, so no reader can see the row half re-pinned. */

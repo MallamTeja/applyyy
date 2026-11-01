@@ -4,14 +4,17 @@
  * page, the save path and the tests all exercise the same transformations, and a
  * failed save can simply keep the old object because nothing was mutated in place.
  *
- * R0 IS THE POINT OF THIS FILE. An edit writes a bullet's `text` or the top-level
- * `summary` string, or (T3) appends a skill built field for field from a pinned-master
- * node, and nothing else. `master_text` is the Auditor's and the diff's
+ * R0' IS THE POINT OF THIS FILE (2026-11-01; it replaced R0, "only text changed"). Every node
+ * on the resume traces to the pinned master under its true parent. An edit may write a bullet's
+ * `text` or the top-level `summary` string, (T3) append a skill built field for field from a
+ * pinned-master node, reorder bullets and sections, take bullets and entries off, and put master
+ * bullets and entries back on - copied whole from FULL, the entire master as the validator
+ * resolves it - and nothing else. `master_text` is the Auditor's and the diff's
  * ground truth (supabase/functions/_shared/audit/detector.ts:404); writing it would
- * make an operator's wording read back as traced-from-master. Every write below is a
- * spread of the existing node with exactly one field replaced, so there is no code
- * path here that names master_text, ref, identity, master_version or schema_version
- * on the left-hand side of anything.
+ * make an operator's wording read back as traced-from-master. Every write below either
+ * spreads an existing node with exactly one field replaced or copies a validator-built node
+ * whole, so there is no code path here that names master_text, ref, identity, master_version
+ * or schema_version on the left-hand side of anything.
  *
  * "Edited" is never stored. It is derived by comparing the stored resume with the
  * ORIGINAL rebuilt from `tailor_refs` + the pinned master (rebuildOriginal below),
@@ -30,6 +33,10 @@ import { validateTailoredProfile } from '../../../../../supabase/functions/_shar
    chose the JD keywords with this word-bounded matcher, so deciding which master skill supplies a
    keyword with any looser rule ("Go" inside "Google") would offer the wrong skill. Pure, no imports. */
 import { keywordAppearsIn } from '../../../../../supabase/functions/_shared/tailor/jd-keywords.ts';
+/* THE PRODUCER'S list of section kinds (R0' rule 3), by the same relative path: the tailor's JSON
+   schema offers exactly these to the model, with a compile-time check against the contract type, so
+   "a known kind" here can never drift from what a tailoring may name. Type-only imports, no I/O. */
+import { TAILOR_SECTION_KINDS } from '../../../../../supabase/functions/_shared/tailor/prompt.ts';
 
 /* The bullet node, derived from ResolvedResume rather than imported, because the
    contract seam re-exports only ResolvedResume and widening it is not this file's call. */
@@ -42,20 +49,21 @@ export type ResolvedSkill = ResolvedResume['skills'][number];
    reset cannot disagree about where a bullet may live. */
 const BULLET_SECTIONS = ['experience', 'projects', 'education', 'achievements', 'certifications'] as const;
 /* The section names as a type, so a typo in a section key fails typecheck. */
-type BulletSection = (typeof BULLET_SECTIONS)[number];
-/* The sections whose bullet TEXT an operator may change: exactly the ones the diff renders.
-   MUST MATCH `bulletGroups` in diffAdapter.ts - the diff's editCount is what moves an edited
-   row out of Bucket A (R2), so text changed anywhere the diff does not walk would be saved
-   with editCount 0 and batch-approved unseen (D5a). Kept here rather than imported because
-   bulletGroups is not exported; tailoredEdits.test.ts reads diffAdapter's source and fails if
-   the two lists drift. Exported only so that test can compare against it. */
-export const DIFF_BULLET_SECTIONS = ['experience', 'projects', 'education'] as const satisfies readonly BulletSection[];
+export type BulletSection = (typeof BULLET_SECTIONS)[number];
+/* The sections the diff renders, which since R0' (2026-11-01) is all five: the gate lets an operator
+   change every bullet section, and D5a says anything the gate allows must be visible in the diff and
+   count as an edit, or the row would be saved with editCount 0 and batch-approved unseen. So this IS
+   BULLET_SECTIONS, by reference, and the two cannot disagree. It still MUST MATCH `bulletGroups` in
+   diffAdapter.ts (not exported, so not imported); tailoredEdits.test.ts reads diffAdapter's source
+   and fails if the lists drift. Exported only so that test can compare against it. */
+export const DIFF_BULLET_SECTIONS = BULLET_SECTIONS;
 /* The one thing all five entry shapes share, and the only thing this file touches. */
 type BulletEntry = { readonly ref: string; readonly bullets: readonly ResolvedBullet[] };
 
 /* The longest edit accepted. A bullet is a sentence or two; 2000 characters is far past
-   any real one, so hitting it means a paste accident, not a resume line. */
-const MAX_EDIT_LENGTH = 2000;
+   any real one, so hitting it means a paste accident, not a resume line. Exported (2026-11-01)
+   so attestBullet.ts holds a NEW master bullet to the same cap as an edited one. */
+export const MAX_EDIT_LENGTH = 2000;
 
 /* The result of every mutation. A union rather than a throw, so the UI must handle the
    refusal arm to compile - a thrown error is one missing try away from a blank page. */
@@ -220,7 +228,7 @@ export function resetTarget(current: ResolvedResume, original: ResolvedResume, t
 
   /* Removed case: the entry that held it, found by ref in the CURRENT resume. */
   const originalEntry = entriesOf(original, from.section)[from.entryIndex]!;
-  /* Index of that entry now; entries are never removed by this file, but verify rather than assume. */
+  /* Index of that entry now; removeEntry (R0') can take it off, so this lookup can genuinely miss. */
   const entryIndex = entriesOf(current, from.section).findIndex((entry) => entry.ref === originalEntry.ref);
   /* No entry to put it back into means the stored resume diverged in a way no edit here produces. */
   if (entryIndex === -1) return { ok: false, reason: 'The entry that held this bullet is no longer on this resume.' };
@@ -435,132 +443,172 @@ export function masterFromRow(row: unknown): MasterProfile | null {
   return sectionsOk ? (row as unknown as MasterProfile) : null;
 }
 
-/* R0 AT THE WRITE BOUNDARY. True only if `next` differs from `previous` in bullet `text`,
- * the `summary` string, bullets removed or re-inserted by this page, and (T3) master skills
- * added after the tailor's own - nothing else.
+/* R0' AT THE WRITE BOUNDARY (2026-11-01; replaces onlyTextChanged). True only if every node on
+ * `next` traces to the pinned master under its true parent. The rules, numbered as in
+ * docs/ui/2026-11-01-review-structure-edits-contract.md:
+ *   1. every top-level key except summary, skills, section_order and the five bullet sections
+ *      equals `previous` (identity, schema_version and the pin never move here; a re-pin relabels
+ *      `previous` in saveTailoredEdit before this runs);
+ *   2. summary is a string or null; skills are unchanged, or the tailor's plus master skills (T3);
+ *   3. a CHANGED section_order lists unique known kinds, and no section an edit touched is left
+ *      without a slot (see sectionOrderHolds for why unchanged ones are not re-judged);
+ *   4. every entry is FULL's entry in the same section, field for field except `bullets`, once;
+ *   5. every bullet is FULL's bullet under the same section and the same parent entry, field for
+ *      field except `text`, and appears once on the whole resume.
+ * So entries and bullets may be added (from FULL), removed and reordered - the R0' widening - while
+ * an invented node, a relocated claim, a renamed employer or a rewritten master_text still fail.
  *
- * The functions above keep R0 by construction (spread, replace one field). That holds
- * only for callers that use them. The save path calls this just before writing, so a
- * resume built any other way - a future caller, a bug, a hand-crafted object - is refused
- * before it can reach tailored_profile. Two independent controls, answering two different
- * questions: "did we build it right" and "is what we are about to write still R0-clean". */
-export function onlyTextChanged(
+ * The functions in this file keep R0' by construction. That holds only for callers that use them,
+ * so the save path calls this just before writing: a resume built any other way - a future caller,
+ * an AI op, a bug, a hand-crafted object - is refused before it can reach tailored_profile. Two
+ * independent controls answering two questions: "did we build it right" and "does what we are about
+ * to write still trace to the master". */
+export function tracesToMaster(
   /* The resume the edit was computed from (what is stored now). */
   previous: ResolvedResume,
   /* The candidate about to be written. */
   next: ResolvedResume,
-  /* The tailor's version, rebuilt by the validator: ground truth for refs and master_text. */
+  /* The tailor's version, rebuilt by the validator: the base the skills rule measures against. */
   original: ResolvedResume,
-  /* T3: the PINNED master, the only source an added skill may come from. Required, so no caller
-     can forget it and silently fall back to "skills may not change" or, worse, "any skill". */
+  /* The PINNED master: FULL is resolved from it, and an added skill may come only from it.
+     Required, so no caller can forget it and silently fall back to a weaker rule. */
   master: MasterProfile,
 ): boolean {
   /* Read as records so EVERY top-level key is checked, including ones added to the type later. */
   const prev = previous as unknown as Record<string, unknown>;
-  /* Same view of the candidate. */
+  /* Same view of the candidate, which is untrusted at this boundary. */
   const nxt = next as unknown as Record<string, unknown>;
-  /* Keys this page may touch at the top level; every other key must be unchanged. `skills` is
-     here since T3 and checked by its own rule just below, never left unchecked. */
-  const free = new Set<string>(['summary', 'skills', ...BULLET_SECTIONS]);
+  /* Rule 1: the keys an edit may touch. Each one has its own rule below; none is left unchecked. */
+  const free = new Set<string>(['summary', 'skills', 'section_order', ...BULLET_SECTIONS]);
   /* Union of both key sets, so a key ADDED to next is checked as well as a changed one. */
   for (const key of new Set([...Object.keys(prev), ...Object.keys(nxt)])) {
-    /* schema_version, master_version, identity, section_order, and anything else. */
+    /* Own keys only: `prev['__proto__']` would read Object.prototype, which deep-equals `{}`, so a
+       smuggled own "__proto__" key would pass as "unchanged" (review finding, 2026-11-01). */
+    if (!free.has(key) && Object.prototype.hasOwnProperty.call(prev, key) !== Object.prototype.hasOwnProperty.call(nxt, key)) return false;
+    /* schema_version, master_version, identity, and anything else must be untouched. */
     if (!free.has(key) && !deepEqual(prev[key], nxt[key])) return false;
   }
-  /* The summary is free text, but it must still BE text or null - not an object smuggled in. */
+  /* Rule 2: the summary is free text, but it must still BE text or null - not an object smuggled in. */
   if (next.summary !== null && typeof next.summary !== 'string') return false;
-  /* Skills: unchanged from previous is always fine (that is the pre-T3 rule, so an unrelated
-     text edit on a row is never blocked by its skills); a CHANGED list must be the tailor's list
-     plus master skills only. */
+  /* Rule 2: unchanged skills are always fine, so an unrelated edit is never blocked by them; a
+     CHANGED list must be the tailor's list plus master skills only (T3, unchanged by R0'). */
   if (!deepEqual(prev['skills'], nxt['skills']) && !skillsAreOriginalPlusMaster(nxt['skills'], original, master)) return false;
+  /* Rule 3: the order itself, and a slot for every section the edit changed. */
+  if (!sectionOrderHolds(prev, nxt)) return false;
+  /* FULL: every master node as the validator resolves it, at the pin rule 1 just held fixed. */
+  const full = resolveFullMaster(master, next.master_version);
+  /* No FULL means nothing can be traced, so nothing passes: fail closed, as D4 does. */
+  if (full === null) return false;
 
-  /* The validator's bullets by ref, WITH their home: the only bullets this page can emit, and
-     the only place each may sit. The parent is part of the claim - the same bullet under
-     another employer is fabricated history (validator.ts indexBullets keeps parentRef for
-     the same reason) - and the index is what pins relative order (D5b). */
-  const originalBullets = new Map<string, { bullet: ResolvedBullet; section: BulletSection; parentRef: string; index: number }>();
-  /* Each original entry's bullet count, keyed by section + entry ref, so a hidden section can
-     be checked for a removal the diff would never show. */
-  const originalCounts = new Map<string, number>();
-  /* Every bullet-bearing section of the original. */
+  /* FULL's entries keyed by section + ref: an entry is real only in its own section. */
+  const fullEntries = new Map<string, BulletEntry>();
+  /* FULL's bullets by ref, WITH their home. The parent is part of the claim - the same bullet under
+     another employer is fabricated history (validator.ts indexBullets keeps parentRef for the same
+     reason). Ids are globally unique in a master the validator accepted, so set never overwrites. */
+  const fullBullets = new Map<string, { bullet: ResolvedBullet; section: BulletSection; parentRef: string }>();
+  /* Every section of FULL, walked once. */
   for (const section of BULLET_SECTIONS) {
-    /* Each entry's bullets go into the index. */
-    for (const entry of entriesOf(original, section)) {
-      /* Section-qualified, so an experience and a project sharing a ref cannot collide here. */
-      originalCounts.set(section + '/' + entry.ref, entry.bullets.length);
-      /* Refs are unique in a validated resume, so set never overwrites. */
-      entry.bullets.forEach((bullet, index) => originalBullets.set(bullet.ref, { bullet, section, parentRef: entry.ref, index }));
+    /* Each entry, and each bullet beneath it. */
+    for (const entry of entriesOf(full, section)) {
+      /* Section-qualified, so an achievement ref cannot pass as an experience entry. */
+      fullEntries.set(section + '/' + entry.ref, entry);
+      /* Each bullet, remembered with the section and entry it hangs from. */
+      for (const bullet of entry.bullets) fullBullets.set(bullet.ref, { bullet, section, parentRef: entry.ref });
     }
   }
-  /* Refs already seen in next: a re-inserted bullet appearing twice is not a reset. */
+  /* Every entry and bullet ref seen in next. One id space (the validator refuses a master that
+     reuses an id anywhere), so a ref twice anywhere on the resume is a duplicate. */
   const seen = new Set<string>();
 
-  /* Section by section: entries are fixed, only their bullets may differ. */
+  /* Rules 4 and 5, section by section. */
   for (const section of BULLET_SECTIONS) {
-    /* Raw values, not entriesOf: an absent section must stay absent, not read as []. */
-    const before = prev[section];
-    /* The candidate's value for the same section. */
+    /* Raw value, not entriesOf: an absent section must stay absent, not read as []. */
     const after = nxt[section];
-    /* Neither side an array (e.g. a legacy row with no achievements): must be unchanged. */
-    if (!Array.isArray(before) || !Array.isArray(after)) {
-      /* deepEqual decides, so an array appearing or vanishing is a change. */
-      if (!deepEqual(before, after)) return false;
+    /* Not an array (e.g. a legacy row with no achievements key): must be exactly what was stored. */
+    if (!Array.isArray(after)) {
+      /* deepEqual decides, so a section vanishing or turning into garbage is a change. */
+      if (!deepEqual(prev[section], after)) return false;
       /* Nothing to walk. */
       continue;
     }
-    /* Same entries in the same order: this page never adds, drops or reorders an entry. */
-    if (before.length !== after.length) return false;
-    /* Text is free only where the diff shows it; elsewhere a change would carry editCount 0
-       into Bucket A (D5a). Widened to a plain string list so `includes` accepts any section. */
-    const textFree = (DIFF_BULLET_SECTIONS as readonly string[]).includes(section);
-    /* Pairwise by position, since the order is part of what must be unchanged. */
-    for (let i = 0; i < after.length; i++) {
-      /* Every entry field except `bullets` (company, role, dates, ref, links...) must match. */
-      if (!deepEqual(withoutKey(before[i], 'bullets'), withoutKey(after[i], 'bullets'))) return false;
-      /* This entry's ref - equal to before[i]'s by the line above - is the home every bullet
-         under it must already have had in the original. */
-      const parentRef = (after[i] as { ref?: unknown } | null)?.ref;
-      /* The candidate entry's bullets, which must be an array to be walked at all. */
-      const bullets = (after[i] as { bullets?: unknown } | null)?.bullets;
-      /* A non-array here is a malformed entry, never a text edit. */
+    /* Each entry must be proven to be one of FULL's. */
+    for (const entry of after as unknown[]) {
+      /* An entry must be an object before its fields can be read. */
+      if (!isPlainObject(entry)) return false;
+      /* Its ref, read defensively. */
+      const ref = entry['ref'];
+      /* No string ref, or one already seen: not a traced entry. */
+      if (typeof ref !== 'string' || seen.has(ref)) return false;
+      /* Remembered for the duplicate check. */
+      seen.add(ref);
+      /* FULL's entry with the same ref in the SAME section; undefined means invented or relocated. */
+      const home = fullEntries.get(section + '/' + ref);
+      /* Not in FULL there: an invented employer, project, degree, award or credential. */
+      if (home === undefined) return false;
+      /* Every display field (company, role, dates, links, label...) is the master's, verbatim. */
+      if (!deepEqual(withoutKey(entry, 'bullets'), withoutEmptyKeysAbsentFrom(withoutKey(home, 'bullets'), entry))) return false;
+      /* The entry's bullets, which must be an array to be walked at all. */
+      const bullets = entry['bullets'];
+      /* A non-array here is a malformed entry. */
       if (!Array.isArray(bullets)) return false;
-      /* A hidden section must keep every bullet: removeBullet can reach it, but no diff line
-         would record the removal, so it would be as unreviewed as a hidden edit. */
-      if (!textFree && bullets.length !== originalCounts.get(section + '/' + String(parentRef))) return false;
-      /* The previous survivor's position in the original; strictly increasing means the
-         survivors are the original's bullets, removed ones filtered out, in order (D5b). */
-      let lastIndex = -1;
-      /* Each bullet must be one of the validator's, with only its text free. */
+      /* Each bullet must be one of FULL's, under THIS entry, with only its text free. */
       for (const bullet of bullets as unknown[]) {
-        /* The bullet's ref, read defensively because `next` is untrusted at this boundary. */
-        const ref = (bullet as { ref?: unknown } | null)?.ref;
-        /* Where the tailor put it; undefined means the tailor never produced it. */
-        const home = typeof ref === 'string' ? originalBullets.get(ref) : undefined;
-        /* A ref the tailor never produced is an invented bullet. */
-        if (home === undefined) return false;
-        /* Twice on one resume is a duplicate, which the validator itself would refuse. */
-        if (seen.has(home.bullet.ref)) return false;
-        /* Remember it for the duplicate check. */
-        seen.add(home.bullet.ref);
-        /* Under a different entry (or section) is a relocated claim: real words, wrong employer. */
-        if (home.section !== section || home.parentRef !== parentRef) return false;
-        /* At or before the previous survivor's position is a reorder, not a removal. */
-        if (home.index <= lastIndex) return false;
-        /* Advance the floor for the next sibling. */
-        lastIndex = home.index;
-        /* Text is free but must be a string; master_text, ref and any other field must equal
-           the validator's exactly - this is the line that makes R0 checkable. */
-        if (typeof (bullet as { text?: unknown }).text !== 'string') return false;
-        /* Shown sections: everything but `text` equals the original. Hidden sections: the
-           whole bullet does, text included, because nobody reviewed a change there. */
-        const same = textFree ? deepEqual(withoutKey(bullet, 'text'), withoutKey(home.bullet, 'text')) : deepEqual(bullet, home.bullet);
-        /* Any other difference is outside R0. */
-        if (!same) return false;
+        /* A bullet must be an object before its fields can be read. */
+        if (!isPlainObject(bullet)) return false;
+        /* Its ref, read defensively. */
+        const bulletRef = bullet['ref'];
+        /* No string ref, or one already seen anywhere: not a traced bullet. */
+        if (typeof bulletRef !== 'string' || seen.has(bulletRef)) return false;
+        /* Remembered for the duplicate check. */
+        seen.add(bulletRef);
+        /* Where the master holds it. */
+        const at = fullBullets.get(bulletRef);
+        /* Absent from FULL is an invented bullet; another section or entry is a relocated claim. */
+        if (at === undefined || at.section !== section || at.parentRef !== ref) return false;
+        /* Text is free, but it must be a non-blank string within the edit cap. Checked HERE, not
+           only in applyTextEdit, so a hand-built object or a future caller cannot save an empty or
+           runaway bullet past the boundary (review finding, 2026-11-01). */
+        const text = bullet['text'];
+        /* A string, not blank, at most MAX_EDIT_LENGTH: anything else is not a printable bullet. */
+        if (typeof text !== 'string' || text.trim() === '' || text.length > MAX_EDIT_LENGTH) return false;
+        /* master_text, ref and any other field must equal FULL's exactly: the line that makes R0' checkable. */
+        if (!deepEqual(withoutKey(bullet, 'text'), withoutKey(at.bullet, 'text'))) return false;
       }
     }
   }
-  /* Nothing outside bullet text, summary and bullet membership changed. */
+  /* Every node traced to the pinned master under its own parent. */
   return true;
+}
+
+/* R0' rule 3, for tracesToMaster. A CHANGED section_order must be an array of unique kinds the
+ * tailor's schema offers: a duplicate prints a section twice, an unknown kind prints nothing. An
+ * UNCHANGED order is the tailor's own and is not re-judged: the tailor checks only that it is an
+ * array (tailorer.ts parseTailoredProfile), so refusing a stored quirk would lock every edit on that
+ * row while protecting nothing this edit did. Then every non-empty bullet section needs a slot -
+ * unless the edit left it exactly as stored, for the same reason - because a section an edit
+ * changed but the PDF never prints is a change nobody can review. addMasterEntry appends the slot,
+ * so the page's own output always passes. */
+function sectionOrderHolds(prev: Record<string, unknown>, nxt: Record<string, unknown>): boolean {
+  /* The candidate order, untrusted. */
+  const order = nxt['section_order'];
+  /* Only a changed order is held to the shape rule. */
+  if (!deepEqual(prev['section_order'], order)) {
+    /* Not an array: not an order at all. */
+    if (!Array.isArray(order)) return false;
+    /* A kind listed twice would render that section twice. */
+    if (new Set(order).size !== order.length) return false;
+    /* Every kind must be one the producer's schema offers; widened so `includes` accepts unknown. */
+    if (!order.every((kind) => (TAILOR_SECTION_KINDS as readonly unknown[]).includes(kind))) return false;
+  }
+  /* The slots the PDF prints; an unchanged non-array order has none. */
+  const slots = new Set<unknown>(Array.isArray(order) ? order : []);
+  /* Each bullet section must be empty, slotted, or untouched by this edit. */
+  return BULLET_SECTIONS.every((section) => {
+    /* The candidate's entries for this section. */
+    const entries = nxt[section];
+    /* Absent or empty needs no slot; slotted prints; unchanged is the tailor's own choice. */
+    return !Array.isArray(entries) || entries.length === 0 || slots.has(section) || deepEqual(prev[section], entries);
+  });
 }
 
 /* --- internals -------------------------------------------------------------- */
@@ -682,6 +730,29 @@ function withoutKey(value: unknown, key: string): unknown {
   return rest;
 }
 
+/* FULL's entry minus every key that CARRIES NO CONTENT there (null or an empty array) and that the
+   stored entry does not have at all. Added 2026-11-01: the validator began filling `links: []` on
+   achievements and certifications, so a resume stored before that has no `links` key while FULL
+   has `[]`, and a strict compare refused EVERY edit on all 26 live rows (measured). An absent key
+   claims nothing, so it may stay absent when the master has nothing there either. Deliberately
+   narrow: a key PRESENT on the entry is still compared verbatim, and a missing key whose master
+   value has content (a company, a date, a non-empty link list) still fails the compare. */
+function withoutEmptyKeysAbsentFrom(full: unknown, entry: Record<string, unknown>): unknown {
+  /* Only a plain object has keys to drop. */
+  if (!isPlainObject(full)) return full;
+  /* A copy, so FULL itself is never mutated. */
+  const trimmed: Record<string, unknown> = { ...full };
+  /* Each of FULL's keys considered once. */
+  for (const [key, value] of Object.entries(full)) {
+    /* Content-free on the master's side: null, or an empty list. */
+    const empty = value === null || (Array.isArray(value) && value.length === 0);
+    /* Dropped only when the stored entry lacks the key entirely (not when it holds a value). */
+    if (empty && !Object.prototype.hasOwnProperty.call(entry, key)) delete trimmed[key];
+  }
+  /* What the entry is compared against. */
+  return trimmed;
+}
+
 /* Minimal pre-validator shape check on tailor_refs: exactly the top-level fields the
    validator iterates, so it is handed an object it can walk. Deeper malformation is
    left to the validator's own checks plus the catch in rebuildOriginal. */
@@ -766,4 +837,280 @@ function replaceBullets(
   );
   /* The cast restores the section's full entry type, which the spread preserved at runtime. */
   return { ...resume, [section]: entries } as ResolvedResume;
+}
+
+/* --- STRUCTURAL EDITS (R0', 2026-11-01) ------------------------------------------------------
+ * Signatures from docs/ui/2026-11-01-review-structure-edits-contract.md. Each returns a NEW resume
+ * or a named refusal, exactly like the text edits above. Every node they ADD is copied whole from
+ * FULL (resolveFullMaster), never assembled from caller-supplied fields, so a stale UI or an AI op
+ * can only NAME a master node by ref, never supply its words - and tracesToMaster passes their
+ * output by construction. */
+
+/* A section key exactly as section_order spells it. */
+export type SectionKind = ResolvedResume['section_order'][number];
+/* Which way a bullet or section moves by one place. */
+export type MoveDirection = 'up' | 'down';
+/* A master bullet not on the resume, with the entry it belongs under (for "Add back"). */
+export interface AddableBullet { readonly ref: string; readonly text: string; readonly section: BulletSection; readonly parentRef: string; readonly parentLabel: string }
+/* A whole master entry not on the resume (for "Add back"). */
+export interface AddableEntry { readonly ref: string; readonly section: BulletSection; readonly label: string }
+
+/* FULL: the whole master resolved by the validator, the ground truth for every node a resume may carry.
+ *
+ * Selects EVERY master node - each skill, each entry of all five sections with all its bullets, each
+ * bullet in the master's own words - and runs the SAME validator the tailor's output went through, so
+ * FULL holds every entry and bullet exactly as a tailoring would render it (master_text, display
+ * dates, explicit nulls for absent optional fields). One resolver, never a hand-built copy that could
+ * drift from it. The summary is left null: the validator accepts that, and FULL's summary is never
+ * compared with anything. Returns null - never throws - when the master cannot be resolved
+ * (ambiguous ids, no experience/projects/education, a malformed object); editing is then off, as D4
+ * does when rebuildOriginal returns null. */
+export function resolveFullMaster(master: MasterProfile, version: number): ResolvedResume | null {
+  /* A malformed master can throw inside the selection maps or the validator; caught below. */
+  try {
+    /* One section's selection: every entry by id, every bullet by id with its master text verbatim. */
+    const everything = (nodes: readonly { readonly id: string; readonly bullets: readonly { readonly id: string; readonly text: string }[] }[]) =>
+      /* Master order is kept: FULL's order is what "relative position" is measured in. */
+      nodes.map((node) => ({ ref: node.id, bullets: node.bullets.map((bullet) => ({ ref: bullet.id, text: bullet.text })) }));
+    /* The selection a tailoring that picked everything would return. */
+    const selection: TailoredProfile = {
+      /* The only schema. */
+      schema_version: 1,
+      /* The pin the validator checks this against; equal by construction. */
+      master_version: version,
+      /* Every kind in the producer's order, so FULL is a complete resume. */
+      section_order: [...TAILOR_SECTION_KINDS],
+      /* Null passes the summary_without_refs rule, and FULL's summary is never used. */
+      summary: null,
+      /* Every skill, by id. */
+      skills: master.skills.map((skill) => ({ ref: skill.id })),
+      /* Every employer with every bullet. */
+      experience: everything(master.experience),
+      /* Every project. */
+      projects: everything(master.projects),
+      /* Every qualification. */
+      education: everything(master.education),
+      /* Every award. */
+      achievements: everything(master.achievements),
+      /* Every credential. */
+      certifications: everything(master.certifications),
+    };
+    /* The validator is the only producer of a ResolvedResume; reuse it, never re-implement it. */
+    const result = validateTailoredProfile(selection, master, version);
+    /* A refusal means this master cannot vouch for anything: no FULL. */
+    return result.ok ? result.resume : null;
+  } catch {
+    /* Malformed beyond what the types promised: "no FULL" is the honest answer, never a throw. */
+    return null;
+  }
+}
+
+/* One bullet one place up or down among its siblings in the same entry. A move never crosses
+ * entries: that would re-parent a claim, which tracesToMaster rule 5 refuses anyway. */
+export function moveBullet(current: ResolvedResume, ref: string, direction: MoveDirection): EditOutcome {
+  /* Where the bullet sits now. */
+  const at = locateBullet(current, ref);
+  /* An unknown ref means the page and the stored resume disagree: refuse, never guess. */
+  if (at === null) return { ok: false, reason: 'That bullet is no longer on this resume.' };
+  /* Its siblings, in printed order. */
+  const bullets = entriesOf(current, at.section)[at.entryIndex]!.bullets;
+  /* The neighbour it trades places with. */
+  const to = at.bulletIndex + (direction === 'up' ? -1 : 1);
+  /* Already at the edge: a no-op must never be recorded as a move. */
+  if (to < 0 || to >= bullets.length) return { ok: false, reason: `That bullet is already ${direction === 'up' ? 'first' : 'last'} in its entry.` };
+  /* The new order: the two neighbours swapped, every bullet object carried as is. */
+  const moved = swapped(bullets, at.bulletIndex, to);
+  /* Only that entry's bullets array is replaced. */
+  const resume = replaceBullets(current, at.section, at.entryIndex, () => moved);
+  /* before/after are the entry's bullet order by ref, so the event alone can replay the move. */
+  return { ok: true, resume, before: refList(bullets), after: refList(moved) };
+}
+
+/* One section one place up or down in section_order. Only the order changes: no section is added or dropped. */
+export function moveSection(current: ResolvedResume, section: SectionKind, direction: MoveDirection): EditOutcome {
+  /* The printed order now. */
+  const order = current.section_order;
+  /* Where this section sits. */
+  const from = order.indexOf(section);
+  /* Not printed at all: there is nothing to move. */
+  if (from === -1) return { ok: false, reason: 'That section is not on this resume.' };
+  /* The neighbour it trades places with. */
+  const to = from + (direction === 'up' ? -1 : 1);
+  /* At the edge: refuse the no-op. */
+  if (to < 0 || to >= order.length) return { ok: false, reason: `That section is already ${direction === 'up' ? 'first' : 'last'}.` };
+  /* The new order. */
+  const next = swapped(order, from, to);
+  /* Only section_order replaced; before/after are the whole order, readable in the log as is. */
+  return { ok: true, resume: { ...current, section_order: next }, before: order.join(', '), after: next.join(', ') };
+}
+
+/* A master bullet back onto the resume under its own entry, in the master's words (FULL's node,
+ * copied whole). The parent entry must already be printed: the bullet alone would be a claim with
+ * no employer above it. It goes right after the last printed sibling that precedes it in FULL, so
+ * the master's order holds relative to whatever the operator left in place. */
+export function addMasterBullet(current: ResolvedResume, full: ResolvedResume, ref: string): EditOutcome {
+  /* Already printed: a second copy is a duplicate, which rule 5 refuses. */
+  if (locateBullet(current, ref) !== null) return { ok: false, reason: 'That bullet is already on this resume.' };
+  /* Where the master holds it; the caller supplies only the ref, never the words. */
+  const from = locateBullet(full, ref);
+  /* Not a master bullet: adding it would be inventing one. */
+  if (from === null) return { ok: false, reason: 'That bullet is not in your master profile, so it cannot be added.' };
+  /* The master entry it belongs to. */
+  const parent = entriesOf(full, from.section)[from.entryIndex]!;
+  /* The same entry on the resume, by ref, in the same section. */
+  const entryIndex = entriesOf(current, from.section).findIndex((entry) => entry.ref === parent.ref);
+  /* Parent not printed: say what to do first rather than add an orphan. */
+  if (entryIndex === -1) return { ok: false, reason: 'The entry this bullet belongs to is not on this resume. Add the entry first.' };
+  /* FULL's bullet, verbatim: text and master_text are both the master's own words. */
+  const bullet = parent.bullets[from.bulletIndex]!;
+  /* Its place among the bullets the resume prints now. */
+  const insertAt = insertionIndex(entriesOf(current, from.section)[entryIndex]!.bullets, parent.bullets, from.bulletIndex);
+  /* A new bullets array with it spliced in; every other node carried by reference. */
+  const resume = replaceBullets(current, from.section, entryIndex, (bullets) => [...bullets.slice(0, insertAt), bullet, ...bullets.slice(insertAt)]);
+  /* before is null: the bullet was not on the resume. */
+  return { ok: true, resume, before: null, after: bullet.text };
+}
+
+/* A whole master entry onto the resume, with all of FULL's bullets for it, at FULL's relative
+ * position. A section with no slot in section_order gets one appended, or the entry would be saved
+ * but never printed (tracesToMaster rule 3). */
+export function addMasterEntry(current: ResolvedResume, full: ResolvedResume, section: BulletSection, ref: string): EditOutcome {
+  /* The section's entries as printed now. */
+  const present = entriesOf(current, section);
+  /* Already printed: a duplicate, which rule 4 refuses. */
+  if (present.some((entry) => entry.ref === ref)) return { ok: false, reason: 'That entry is already on this resume.' };
+  /* The master's entries for this section, in master order. */
+  const masterEntries = entriesOf(full, section);
+  /* Its position in the master. */
+  const fullIndex = masterEntries.findIndex((entry) => entry.ref === ref);
+  /* Not a master entry of this section: adding it would be inventing one. */
+  if (fullIndex === -1) return { ok: false, reason: 'That entry is not in your master profile, so it cannot be added.' };
+  /* FULL's entry, verbatim: display fields and bullets alike. */
+  const entry = masterEntries[fullIndex]!;
+  /* Its place among the entries the resume prints now. */
+  const insertAt = insertionIndex(present, masterEntries, fullIndex);
+  /* A slot for the section if it had none; otherwise the order is untouched. */
+  const order = current.section_order.includes(section) ? current.section_order : [...current.section_order, section];
+  /* The cast restores the section's entry type, which FULL's node carries at runtime. */
+  const resume = { ...current, [section]: [...present.slice(0, insertAt), entry, ...present.slice(insertAt)], section_order: order } as ResolvedResume;
+  /* before is null; after names the entry the way the operator reads it. */
+  return { ok: true, resume, before: null, after: entryLabel(section, entry) };
+}
+
+/* A whole entry off the resume, its bullets with it. The section keeps its slot in section_order:
+ * the renderer drops a section that renders empty, and the slot keeps its place if it comes back. */
+export function removeEntry(current: ResolvedResume, section: BulletSection, ref: string): EditOutcome {
+  /* The section's entries now. */
+  const present = entriesOf(current, section);
+  /* The entry, for the event's `before`. */
+  const old = present.find((entry) => entry.ref === ref);
+  /* Not printed: "removed" must never be shown for a no-op. */
+  if (old === undefined) return { ok: false, reason: 'That entry is no longer on this resume.' };
+  /* A new array without it; every other entry keeps its place and identity. */
+  const resume = { ...current, [section]: present.filter((entry) => entry.ref !== ref) } as ResolvedResume;
+  /* after is null: the entry is gone. */
+  return { ok: true, resume, before: entryLabel(section, old), after: null };
+}
+
+/* The display fields that name an entry, per section, in heading order. The master node and the
+   resolved entry use the same names, so one table labels both. */
+const LABEL_FIELDS: Readonly<Record<BulletSection, readonly string[]>> = {
+  // "Aczen Technologies · Full Stack AI Engineer".
+  experience: ['company', 'role'],
+  // "F1 Race Pace Predictor".
+  projects: ['name'],
+  // The institution, then the degree.
+  education: ['institution', 'degree'],
+  // "LeetCode".
+  achievements: ['label'],
+  // The credential's own label.
+  certifications: ['label'],
+};
+
+/* A human label for an entry, for the AI chat's view and the "Add back" list. Takes `unknown` because
+ * callers label raw master nodes as well as resolved entries; never throws. Falls back to the node's
+ * ref (resolved) or id (master), then '', so a label is never "undefined". */
+export function entryLabel(section: BulletSection, entry: unknown): string {
+  /* Only a plain object has fields to read. */
+  const fields = isPlainObject(entry) ? entry : {};
+  /* The naming fields that hold real text, in heading order. */
+  const parts = LABEL_FIELDS[section].map((key) => fields[key]).filter((value): value is string => typeof value === 'string' && value.trim() !== '');
+  /* Joined the way the diff heading reads. */
+  if (parts.length > 0) return parts.join(' · ');
+  /* Nothing names it: its identifier is still better than a blank. */
+  const id = fields['ref'] ?? fields['id'];
+  /* A string id, or nothing at all. */
+  return typeof id === 'string' ? id : '';
+}
+
+/* Master items not on the resume, for "Add back": the missing bullets of every entry the resume
+ * prints, and every entry it does not print. A missing entry's bullets are not listed one by one -
+ * they come with the entry. FULL order throughout, so the list reads like the master. */
+export function addableFromMaster(current: ResolvedResume, full: ResolvedResume): { readonly bullets: readonly AddableBullet[]; readonly entries: readonly AddableEntry[] } {
+  /* Every bullet ref printed anywhere, so an offered bullet is never one already there. */
+  const printed = new Set(BULLET_SECTIONS.flatMap((section) => entriesOf(current, section).flatMap((entry) => entry.bullets.map((bullet) => bullet.ref))));
+  /* The addable bullets, filled below. */
+  const bullets: AddableBullet[] = [];
+  /* The addable entries, filled below. */
+  const entries: AddableEntry[] = [];
+  /* Section by section in the fixed order. */
+  for (const section of BULLET_SECTIONS) {
+    /* The entry refs this section prints. */
+    const onResume = new Set(entriesOf(current, section).map((entry) => entry.ref));
+    /* Each master entry, in master order. */
+    for (const entry of entriesOf(full, section)) {
+      /* Its label, computed once for the entry and for each of its bullets. */
+      const label = entryLabel(section, entry);
+      /* Not printed: the whole entry is addable, and its bullets come with it. */
+      if (!onResume.has(entry.ref)) {
+        /* Offered as one item. */
+        entries.push({ ref: entry.ref, section, label });
+        /* Its bullets are not offered separately. */
+        continue;
+      }
+      /* Printed: each master bullet it lacks is addable under it, in the master's words. */
+      for (const bullet of entry.bullets) {
+        /* Skipped when already printed. */
+        if (!printed.has(bullet.ref)) bullets.push({ ref: bullet.ref, text: bullet.text, section, parentRef: entry.ref, parentLabel: label });
+      }
+    }
+  }
+  /* Both lists, in master order. */
+  return { bullets, entries };
+}
+
+/* A copy of `list` with positions i and j traded; the input is never mutated (it is React state). */
+function swapped<T>(list: readonly T[], i: number, j: number): T[] {
+  /* A fresh array, so the caller's stays as it was. */
+  const copy = [...list];
+  /* Destructuring swap; both indices were bounds-checked by the caller. */
+  [copy[i], copy[j]] = [copy[j]!, copy[i]!];
+  /* The reordered copy. */
+  return copy;
+}
+
+/* An entry's bullet order as one string, for a move event's before/after. */
+function refList(bullets: readonly ResolvedBullet[]): string {
+  /* Refs, not text: stable under later edits, so the log can replay the move. */
+  return bullets.map((bullet) => bullet.ref).join(', ');
+}
+
+/* Where a node from FULL goes among the nodes the resume prints now: right after the LAST printed
+ * node that precedes it in FULL's order, or first when none does. A printed node FULL does not know
+ * ranks as "not before", so it never pulls the new one past itself. Shared by addMasterBullet and
+ * addMasterEntry so the two cannot place things by different rules. */
+function insertionIndex(present: readonly { readonly ref: string }[], fullOrder: readonly { readonly ref: string }[], fullIndex: number): number {
+  /* Each FULL ref's position, for constant-time ranking. */
+  const rank = new Map(fullOrder.map((node, index) => [node.ref, index]));
+  /* First, unless a predecessor is found below. */
+  let insertAt = 0;
+  /* Every printed node, in printed order; the last predecessor wins. */
+  present.forEach((node, index) => {
+    /* This node's place in the master, if it has one. */
+    const position = rank.get(node.ref);
+    /* A master predecessor moves the insertion point to just after it. */
+    if (position !== undefined && position < fullIndex) insertAt = index + 1;
+  });
+  /* The index to splice at. */
+  return insertAt;
 }

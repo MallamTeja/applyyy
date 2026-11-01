@@ -4,6 +4,10 @@
  * NOTHING else. `master_text` is the Auditor's and the diff's ground truth; an edit that touched it
  * would make the operator's own words read as traced to the master. So the starred test compares the
  * WHOLE resume after an edit against the whole resume before, with exactly one field changed.
+ * R0' (2026-11-01) widened the save gate (tracesToMaster): entries and bullets may now be added
+ * back from the master, removed and reordered, as long as every node traces to the pinned master
+ * under its true parent. The gate tests below pin both halves: what it now allows, and the honesty
+ * refusals that still hold.
  *
  * Fixture: a MasterProfile + TailoredProfile that validateTailoredProfile accepts (verified with a
  * throwaway node one-liner before these assertions were written: it returned ok:true). Kept small:
@@ -305,163 +309,366 @@ const threeBullets = () => {
   return resume as ReturnType<typeof original>;
 };
 
-describe('onlyTextChanged', () => {
+describe('tracesToMaster', () => {
   it('is true for the outputs of applyTextEdit, removeBullet and resetTarget', () => {
     // The tailor's version doubles as the stored previous.
     const orig = original();
     // A bullet text edit.
     const edited = okResume(edits.applyTextEdit(orig, { kind: 'bullet', ref: 'b-tests' }, 'Wrote integration tests'));
     // Text is free.
-    assert.equal(edits.onlyTextChanged(orig, edited, orig), true);
+    assert.equal(edits.tracesToMaster(orig, edited, orig, MASTER), true);
     // A summary edit.
     const summary = okResume(edits.applyTextEdit(orig, { kind: 'summary' }, 'Engineer who ships Node.js APIs.'));
     // Summary is free.
-    assert.equal(edits.onlyTextChanged(orig, summary, orig), true);
+    assert.equal(edits.tracesToMaster(orig, summary, orig, MASTER), true);
     // A removal.
     const removed = okResume(edits.removeBullet(orig, { kind: 'bullet', ref: 'b-api' }));
-    // Removing a bullet this page owns is allowed.
-    assert.equal(edits.onlyTextChanged(orig, removed, orig), true);
+    // Removing a bullet is allowed.
+    assert.equal(edits.tracesToMaster(orig, removed, orig, MASTER), true);
     // Re-inserting it, measured against the removed state as previous.
     const restored = okResume(edits.resetTarget(removed, orig, { kind: 'bullet', ref: 'b-api' }));
-    // Re-insertion of an original bullet is allowed.
-    assert.equal(edits.onlyTextChanged(removed, restored, orig), true);
+    // Re-insertion of a master bullet is allowed.
+    assert.equal(edits.tracesToMaster(removed, restored, orig, MASTER), true);
   });
 
-  it('is false when master_text, identity, master_version or a non-bullet entry field changes', () => {
+  it('is false when master_text, identity, master_version or an entry field changes', () => {
     // The reference.
     const orig = original();
-    // master_text rewritten to match an edit: the R0 violation that makes edits read as traced.
+    // master_text rewritten to match an edit: the violation that makes edits read as traced.
     const masterText = clone(orig);
     // Both fields moved together, as a careless edit would.
     masterText.experience[0]!.bullets[1] = { ...masterText.experience[0]!.bullets[1]!, text: 'X', master_text: 'X' };
     // Refused.
-    assert.equal(edits.onlyTextChanged(orig, masterText, orig), false);
+    assert.equal(edits.tracesToMaster(orig, masterText, orig, MASTER), false);
     // Identity is the master's, never editable here.
-    assert.equal(edits.onlyTextChanged(orig, { ...orig, identity: { ...orig.identity, full_name: 'Someone Else' } }, orig), false);
-    // The pin must survive.
-    assert.equal(edits.onlyTextChanged(orig, { ...orig, master_version: VERSION + 1 }, orig), false);
+    assert.equal(edits.tracesToMaster(orig, { ...orig, identity: { ...orig.identity, full_name: 'Someone Else' } }, orig, MASTER), false);
+    // The pin must survive (a re-pin relabels previous in saveTailoredEdit first).
+    assert.equal(edits.tracesToMaster(orig, { ...orig, master_version: VERSION + 1 }, orig, MASTER), false);
     // An entry's display field: an employer cannot be renamed from this page.
     const company = clone(orig);
     // Only the company changes; bullets untouched.
     company.experience[0] = { ...company.experience[0]!, company: 'Bigger Corp' };
     // Refused.
-    assert.equal(edits.onlyTextChanged(orig, company, orig), false);
-    // A bullet whose ref the tailor never produced is an invented bullet.
+    assert.equal(edits.tracesToMaster(orig, company, orig, MASTER), false);
+    // A bullet whose ref the master never had is an invented bullet.
     const invented = clone(orig);
-    // Appended with a ref absent from the original.
+    // Appended with a ref absent from the master.
     invented.experience[0]!.bullets.push({ ref: 'b-new', text: 'New', master_text: 'New' });
     // Refused.
-    assert.equal(edits.onlyTextChanged(orig, invented, orig), false);
-    // Positive control: an unchanged resume is text-only by definition.
-    assert.equal(edits.onlyTextChanged(orig, clone(orig), orig), true);
+    assert.equal(edits.tracesToMaster(orig, invented, orig, MASTER), false);
+    // Positive control: an unchanged resume traces by definition.
+    assert.equal(edits.tracesToMaster(orig, clone(orig), orig, MASTER), true);
+  });
+
+  it('fails closed when the master cannot be resolved', () => {
+    // The reference.
+    const orig = original();
+    // No master at all (an old 3-argument caller at runtime): nothing can vouch, so nothing passes.
+    assert.equal((edits.tracesToMaster as (...a: unknown[]) => boolean)(orig, clone(orig), orig), false);
+    // A master whose ids collide: the validator refuses it, so there is no FULL to trace against.
+    const ambiguous = clone(MASTER as object) as { experience: { bullets: { id: string }[] }[] };
+    // The second bullet now shares the first one's id.
+    ambiguous.experience[0]!.bullets[1]!.id = 'b-api';
+    // Refused even for an unchanged resume.
+    assert.equal(edits.tracesToMaster(orig, clone(orig), orig, ambiguous as never), false);
+    // Positive control: the intact master passes the same unchanged resume.
+    assert.equal(edits.tracesToMaster(orig, clone(orig), orig, MASTER), true);
   });
 });
 
-// --- D5: the save boundary must agree with what the diff shows (2026-10-08) ---------------------
+// --- R0' (2026-11-01): every node traces to the pinned master under its true parent -------------
 
-// The original widened to every bullet section plus a second employer, so a relocation has
-// somewhere to go and a hidden-section edit has something to edit. Only the pure functions see it.
-const wideOriginal = () => {
-  // Start from the validator's own resume so every real field is present.
-  const resume = clone(original()) as unknown as Record<string, { ref: string; bullets: { ref: string; text: string; master_text: string }[] }[]>;
-  // A one-bullet helper, so each fixture bullet's text and master_text start equal, as the validator's do.
-  const b = (ref: string, text: string) => ({ ref, text, master_text: text });
-  // A second employer: the destination a relocated claim would be laundered into.
-  resume['experience']!.push({ ...resume['experience']![0]!, ref: 'exp-beta', bullets: [b('b-beta', 'Ran the Beta on-call rota')] });
-  // A project and a degree, so the two other diff-rendered sections are covered by a real edit.
-  resume['projects'] = [{ ref: 'proj-cli', bullets: [b('b-proj', 'Shipped a CLI for log search')] }];
-  // Education is rendered by the diff too, so its text must stay editable.
-  resume['education'] = [{ ref: 'edu-btech', bullets: [b('b-edu', 'Graduated with honours')] }];
-  // Achievements: stored and sent, but never on the diff - the section D5(a) is about.
-  resume['achievements'] = [{ ref: 'ach-hack', bullets: [b('b-ach', 'Won first place at a hackathon')] }];
-  // Certifications: same blind spot as achievements.
-  resume['certifications'] = [{ ref: 'cert-aws', bullets: [b('b-cert', 'Passed the AWS associate exam')] }];
-  // Retyped for the functions under test.
-  return resume as unknown as ReturnType<typeof original>;
+// One master bullet, so each fixture line below is written once.
+const mb = (id: string, text: string) => ({ id, text, tags: [] });
+
+// A master with every bullet section populated, plus nodes the tailor did NOT select (b-beta-2,
+// proj-f1, ach-leet) so add-back has something real to add. Validator-accepted: the tailoring below
+// rewords nothing, so every token is the master's own.
+const WIDE_MASTER = {
+  // The profile's shape marker.
+  schema_version: 1,
+  // Copied verbatim into the resume.
+  identity: { full_name: 'Test Person', headline: 'Backend Engineer', email: 'test@example.com', phone: null, location: 'Hyderabad', links: [] },
+  // A real summary node.
+  summary: { id: 'summary-master', text: 'Backend engineer building REST APIs in Node.js.' },
+  // Two employers, so a relocated claim has somewhere to be laundered into.
+  experience: [
+    // Three bullets, so relative-order inserts have siblings on both sides.
+    { id: 'exp-acme', company: 'Acme', role: 'Backend Intern', location: 'Remote', start_display: 'Jun 2025', end_display: 'Aug 2025', start_date: null, end_date: null,
+      bullets: [mb('b-api', 'Built a REST API with Express and Node.js handling 500 users'), mb('b-tests', 'Wrote unit tests for the billing service'), mb('b-docs', 'Wrote docs for the billing service')] },
+    // b-beta-2 is never selected by the tailor: the add-back bullet.
+    { id: 'exp-beta', company: 'Beta Labs', role: 'Platform Intern', location: null, start_display: 'Jan 2025', end_display: 'May 2025', start_date: null, end_date: null,
+      bullets: [mb('b-beta', 'Ran the Beta on-call rota'), mb('b-beta-2', 'Cut Beta deploy time in half')] },
+  ],
+  // proj-f1 is never selected: the add-back entry, placed AFTER proj-cli in master order.
+  projects: [
+    { id: 'proj-cli', name: 'Log Search CLI', links: [], start_display: '2024', end_display: '2024', start_date: null, end_date: null, bullets: [mb('b-proj', 'Shipped a CLI for log search')] },
+    { id: 'proj-f1', name: 'F1 Race Pace Predictor', links: [], start_display: '2025', end_display: '2025', start_date: null, end_date: null, bullets: [mb('b-f1', 'Predicted race pace from lap data')] },
+  ],
+  // One degree.
+  education: [{ id: 'edu-btech', institution: 'JNTU', degree: 'B.Tech', field: 'Computer Science', start_display: '2021', end_display: '2025', start_date: null, end_date: null, grade_display: '8.4 CGPA', bullets: [mb('b-edu', 'Graduated with honours')] }],
+  // ach-leet is never selected.
+  achievements: [
+    { id: 'ach-hack', label: 'Hackathon Winner', description: null, bullets: [mb('b-ach', 'Won first place at a hackathon')] },
+    { id: 'ach-leet', label: 'LeetCode', description: null, bullets: [mb('b-leet', 'Solved 500 problems')] },
+  ],
+  // One credential.
+  certifications: [{ id: 'cert-aws', label: 'AWS Solutions Architect', description: null, bullets: [mb('b-cert', 'Passed the AWS associate exam')] }],
+  // One skill.
+  skills: [{ id: 'skill-node', name: 'Node.js', category: 'Frameworks' }],
+  // Profile-level links.
+  links: [],
+} as never;
+
+// One tailored entry, verbatim from the master: what the tailor would select.
+const pick = (ref: string, ...bullets: [string, string][]) => ({ ref, bullets: bullets.map(([b, text]) => ({ ref: b, text })) });
+
+// The tailoring over WIDE_MASTER: every section non-empty and slotted, three master nodes left out.
+const WIDE_REFS = {
+  // The contract's shape marker.
+  schema_version: 1,
+  // Same pin as the narrow fixture.
+  master_version: VERSION,
+  // Every kind, so no section is slotless unless a test makes it so.
+  section_order: ['summary', 'experience', 'projects', 'education', 'achievements', 'certifications', 'skills'],
+  // Cites the master summary.
+  summary: { text: 'Backend engineer shipping REST APIs in Node.js.', refs: ['summary-master'] },
+  // The one skill.
+  skills: [{ ref: 'skill-node' }],
+  // Acme whole; Beta without b-beta-2.
+  experience: [
+    pick('exp-acme', ['b-api', 'Built a REST API with Express and Node.js handling 500 users'], ['b-tests', 'Wrote unit tests for the billing service'], ['b-docs', 'Wrote docs for the billing service']),
+    pick('exp-beta', ['b-beta', 'Ran the Beta on-call rota']),
+  ],
+  // The CLI only; proj-f1 left out.
+  projects: [pick('proj-cli', ['b-proj', 'Shipped a CLI for log search'])],
+  // The degree.
+  education: [pick('edu-btech', ['b-edu', 'Graduated with honours'])],
+  // The hackathon only; ach-leet left out.
+  achievements: [pick('ach-hack', ['b-ach', 'Won first place at a hackathon'])],
+  // The credential.
+  certifications: [pick('cert-aws', ['b-cert', 'Passed the AWS associate exam'])],
 };
 
+// The wide original, rebuilt by the real validator, so every field is what a live row would hold.
+const wideOriginal = () => {
+  // The function under test produces it; a null is a fixture bug.
+  const resume = edits.rebuildOriginal(WIDE_REFS, WIDE_MASTER, VERSION);
+  // Named, so a broken fixture does not read as a gate failure.
+  assert.notEqual(resume, null, 'wide fixture must rebuild to a ResolvedResume');
+  // Narrowed for the callers.
+  return resume!;
+};
+// FULL for the wide master, as the page and the gate compute it.
+const wideFull = () => {
+  // The function under test.
+  const full = edits.resolveFullMaster(WIDE_MASTER, VERSION);
+  // Named precondition.
+  assert.notEqual(full, null, 'the wide master must resolve to FULL');
+  // Narrowed.
+  return full!;
+};
+// The gate over the wide fixture; previous defaults to the tailor's version.
+const traces = (next: unknown, previous: unknown = wideOriginal()) =>
+  // original is always the tailor's, master always the pinned wide master.
+  edits.tracesToMaster(previous as never, next as never, wideOriginal(), WIDE_MASTER);
+
 // Mutable view of a cloned resume's bullet sections, so the hand-built violations stay readable.
-type Sections = Record<string, { ref: string; bullets: { ref: string; text: string }[] }[]>;
+type Sections = Record<string, { ref: string; bullets: { ref: string; text: string; master_text: string }[]; [field: string]: unknown }[]> & { section_order: string[] };
 
-describe('onlyTextChanged, D5 save-boundary cases', () => {
-  it('refuses a text change in an achievements or certifications bullet (the diff never shows it)', () => {
-    // The reference, with both hidden sections populated.
-    const orig = wideOriginal();
-    // An achievement reworded: editCount would stay 0 and the row would batch-approve unseen.
-    const ach = clone(orig) as unknown as Sections;
-    // Only `text` changes - exactly what R0 allows in a SHOWN section.
-    ach['achievements']![0]!.bullets[0]!.text = 'Won the national hackathon';
-    // Refused: text is free only where the operator's diff can see it.
-    assert.equal(edits.onlyTextChanged(orig, ach as never, orig), false);
-    // A certification reworded, same blind spot.
-    const cert = clone(orig) as unknown as Sections;
-    // Only `text` changes.
-    cert['certifications']![0]!.bullets[0]!.text = 'Passed the AWS professional exam';
-    // Refused.
-    assert.equal(edits.onlyTextChanged(orig, cert as never, orig), false);
-    // Positive control: the unchanged wide resume is clean, so the refusals above are about the edit.
-    assert.equal(edits.onlyTextChanged(orig, clone(orig), orig), true);
-  });
-
-  it('refuses removing a bullet from a section the diff does not show', () => {
+describe("tracesToMaster (R0'): what the gate now allows", () => {
+  it('accepts a text edit and a removal in achievements and certifications (the diff shows them now)', () => {
     // The reference.
     const orig = wideOriginal();
-    // removeBullet locates in every section, so it CAN produce this; no diff line would record it.
-    const gone = okResume(edits.removeBullet(orig, { kind: 'bullet', ref: 'b-ach' }));
-    // Refused: an invisible removal is as unreviewed as an invisible edit.
-    assert.equal(edits.onlyTextChanged(orig, gone, orig), false);
+    // An achievement reworded: free text, like any other section since R0'.
+    assert.equal(traces(okResume(edits.applyTextEdit(orig, { kind: 'bullet', ref: 'b-ach' }, 'Won a hackathon'))), true);
+    // A certification reworded.
+    assert.equal(traces(okResume(edits.applyTextEdit(orig, { kind: 'bullet', ref: 'b-cert' }, 'Passed AWS'))), true);
+    // An achievement bullet removed.
+    assert.equal(traces(okResume(edits.removeBullet(orig, { kind: 'bullet', ref: 'b-ach' }))), true);
   });
 
-  it('refuses a bullet moved under another entry', () => {
-    // The reference: two employers.
+  it('accepts a swapped bullet order (hand-built and moveBullet)', () => {
+    // The reference: Acme holds [b-api, b-tests, b-docs].
     const orig = wideOriginal();
-    // The candidate, hand-built because no page function relocates.
-    const moved = clone(orig) as unknown as Sections;
+    // Reversed in place: every bullet still under its own parent, order changed.
+    const swapped = clone(orig) as unknown as Sections;
+    // The whole entry reversed.
+    swapped['experience']![0]!.bullets.reverse();
+    // Order is the operator's to change now.
+    assert.equal(traces(swapped), true);
+    // The page's own move.
+    assert.equal(traces(okResume(edits.moveBullet(orig, 'b-tests', 'up'))), true);
+  });
+
+  it('accepts a moved section', () => {
+    // achievements moved above education.
+    assert.equal(traces(okResume(edits.moveSection(wideOriginal(), 'achievements', 'up'))), true);
+  });
+
+  it('accepts an added-back master bullet and an added master entry', () => {
+    // The reference and FULL.
+    const orig = wideOriginal();
+    // Beta's left-out bullet put back under Beta.
+    assert.equal(traces(okResume(edits.addMasterBullet(orig, wideFull(), 'b-beta-2'))), true);
+    // The left-out project put on, with its bullet.
+    assert.equal(traces(okResume(edits.addMasterEntry(orig, wideFull(), 'projects', 'proj-f1'))), true);
+    // The left-out achievement too.
+    assert.equal(traces(okResume(edits.addMasterEntry(orig, wideFull(), 'achievements', 'ach-leet'))), true);
+  });
+
+  it('accepts a removed achievement entry', () => {
+    // The only achievement taken off, bullets and all.
+    assert.equal(traces(okResume(edits.removeEntry(wideOriginal(), 'achievements', 'ach-hack'))), true);
+  });
+});
+
+describe("tracesToMaster (R0'): the honesty refusals that still hold", () => {
+  it('refuses a bullet moved under another entry', () => {
+    // The candidate: two employers.
+    const moved = clone(wideOriginal()) as unknown as Sections;
     // Take Acme's second bullet out...
     const [claim] = moved['experience']![0]!.bullets.splice(1, 1);
     // ...and file it under Beta: same ref, same text, a different employer's history.
     moved['experience']![1]!.bullets.push(claim!);
     // Refused: the parent entry is part of the claim.
-    assert.equal(edits.onlyTextChanged(orig, moved as never, orig), false);
+    assert.equal(traces(moved), false);
   });
 
-  it('refuses two bullets swapped within an entry', () => {
-    // The reference: Acme holds [b-api, b-tests].
-    const orig = wideOriginal();
-    // The candidate.
-    const swapped = clone(orig) as unknown as Sections;
-    // Reversed in place: every bullet still under its own parent, order changed.
-    swapped['experience']![0]!.bullets.reverse();
-    // Precondition: the swap really happened, so the refusal is about order.
-    assert.deepEqual(swapped['experience']![0]!.bullets.map((x) => x.ref), ['b-tests', 'b-api']);
-    // Refused: order is the tailor's decision, not this page's.
-    assert.equal(edits.onlyTextChanged(orig, swapped as never, orig), false);
+  it('refuses a bullet ref or an entry ref that is not in the master, or an entry in the wrong section', () => {
+    // An invented bullet under Acme.
+    const bullet = clone(wideOriginal()) as unknown as Sections;
+    // A ref the master never had.
+    bullet['experience']![0]!.bullets.push({ ref: 'b-invented', text: 'Led a team of five', master_text: 'Led a team of five' });
+    // Refused.
+    assert.equal(traces(bullet), false);
+    // An invented project entry, wearing a real entry's fields.
+    const entry = clone(wideOriginal()) as unknown as Sections;
+    // A copy of the CLI under a new ref.
+    entry['projects']!.push({ ...entry['projects']![0]!, ref: 'proj-invented', bullets: [] });
+    // Refused.
+    assert.equal(traces(entry), false);
+    // A real achievement filed as a certification: real ref, wrong section.
+    const relocated = clone(wideOriginal()) as unknown as Sections;
+    // Moved across sections whole.
+    relocated['certifications']!.push(relocated['achievements']!.pop()!);
+    // Refused: an award is not a credential.
+    assert.equal(traces(relocated), false);
   });
 
-  it('still accepts every page operation in the sections the diff shows', () => {
-    // The reference.
-    const orig = wideOriginal();
-    // A text edit in each diff-rendered section.
-    for (const ref of ['b-tests', 'b-proj', 'b-edu']) {
-      // Each must stay legal, named on failure.
-      assert.equal(edits.onlyTextChanged(orig, okResume(edits.applyTextEdit(orig, { kind: 'bullet', ref }, 'Reworded by the operator')), orig), true, ref);
+  it('refuses an edited entry field (company, dates)', () => {
+    // An employer renamed.
+    const company = clone(wideOriginal()) as unknown as Sections;
+    // Only the company changes.
+    company['experience']![0]!['company'] = 'Bigger Corp';
+    // Refused.
+    assert.equal(traces(company), false);
+    // Dates stretched.
+    const dates = clone(wideOriginal()) as unknown as Sections;
+    // A longer tenure than the master records.
+    dates['experience']![1]!['start_display'] = 'Jan 2023';
+    // Refused.
+    assert.equal(traces(dates), false);
+  });
+
+  it('lets a stored entry lack a key the master leaves empty, and nothing more (2026-11-01)', () => {
+    // The live case: a resume stored before the validator began filling an empty field (links: [])
+    // has no such key, and a strict compare refused EVERY edit on all 26 live rows. description is
+    // null on the wide master's achievement, so the same branch is exercised without that change.
+    const lacking = clone(wideOriginal()) as unknown as Sections;
+    // The key removed entirely from the stored achievement.
+    delete lacking['achievements']![0]!['description'];
+    // Absent claims nothing: allowed, both as the edit and as the stored previous.
+    assert.equal(traces(lacking, lacking), true);
+    // But a PRESENT value the master does not have is a claim, and is refused.
+    const claimed = clone(wideOriginal()) as unknown as Sections;
+    // Text where the master has null.
+    claimed['achievements']![0]!['description'] = 'Won first prize';
+    // Refused.
+    assert.equal(traces(claimed), false);
+    // And a missing key whose master value HAS content is still refused (the employer, here).
+    const noCompany = clone(wideOriginal()) as unknown as Sections;
+    // The company dropped.
+    delete noCompany['experience']![0]!['company'];
+    // Refused.
+    assert.equal(traces(noCompany), false);
+  });
+
+  it('refuses an own __proto__ key and a blank or runaway bullet text (review findings, 2026-11-01)', () => {
+    // An own "__proto__" key, as JSON.parse creates it: prev['__proto__'] reads the prototype, so a
+    // value-only compare called it unchanged.
+    const smuggled = JSON.parse(JSON.stringify(wideOriginal()).replace(/^{/, '{"__proto__":{},'));
+    // Refused: a key the stored resume does not own.
+    assert.equal(traces(smuggled), false);
+    // A bullet emptied by a hand-built object, bypassing applyTextEdit.
+    const blank = clone(wideOriginal()) as unknown as Sections;
+    // Whitespace only.
+    blank['experience']![0]!.bullets[0]!.text = '   ';
+    // Refused at the boundary.
+    assert.equal(traces(blank), false);
+    // A runaway paste, one past the cap.
+    const runaway = clone(wideOriginal()) as unknown as Sections;
+    // MAX_EDIT_LENGTH + 1 characters.
+    runaway['experience']![0]!.bullets[0]!.text = 'x'.repeat(edits.MAX_EDIT_LENGTH + 1);
+    // Refused.
+    assert.equal(traces(runaway), false);
+  });
+
+  it('refuses a duplicate bullet ref or a duplicate entry ref', () => {
+    // A bullet printed twice in its own entry.
+    const bullet = clone(wideOriginal()) as unknown as Sections;
+    // Same node appended again.
+    bullet['experience']![0]!.bullets.push(bullet['experience']![0]!.bullets[0]!);
+    // Refused.
+    assert.equal(traces(bullet), false);
+    // An entry printed twice.
+    const entry = clone(wideOriginal()) as unknown as Sections;
+    // Same project appended again.
+    entry['projects']!.push(entry['projects']![0]!);
+    // Refused.
+    assert.equal(traces(entry), false);
+  });
+
+  it('refuses master_text altered, in any section', () => {
+    // Each section's first bullet, master_text rewritten to match a new text.
+    for (const section of ['experience', 'achievements', 'certifications']) {
+      // A fresh candidate per section.
+      const tampered = clone(wideOriginal()) as unknown as Sections;
+      // Both fields moved together, as a careless edit would.
+      Object.assign(tampered[section]![0]!.bullets[0]!, { text: 'Rewritten', master_text: 'Rewritten' });
+      // Refused, named by section on failure.
+      assert.equal(traces(tampered), false, section);
     }
-    // The summary is editable and outside the bullet walk.
-    assert.equal(edits.onlyTextChanged(orig, okResume(edits.applyTextEdit(orig, { kind: 'summary' }, 'Engineer who ships Node.js APIs.')), orig), true);
-    // Removing a whole shown bullet is legal (removeBullet).
-    const removed = okResume(edits.removeBullet(orig, { kind: 'bullet', ref: 'b-api' }));
-    // Accepted: the survivors keep their parent and relative order.
-    assert.equal(edits.onlyTextChanged(orig, removed, orig), true);
-    // Re-inserting it at its original place is legal (resetTarget).
-    assert.equal(edits.onlyTextChanged(removed, okResume(edits.resetTarget(removed, orig, { kind: 'bullet', ref: 'b-api' })), orig), true);
-    // The 3-bullet middle removal and reset, the case the relative-order logic exists for.
-    const three = threeBullets();
-    // Remove the middle one.
-    const middle = okResume(edits.removeBullet(three, { kind: 'bullet', ref: 'b-tests' }));
-    // Survivors [b-api, b-docs] keep relative order: legal.
-    assert.equal(edits.onlyTextChanged(three, middle, three), true);
-    // Reset puts it back between them: legal.
-    assert.equal(edits.onlyTextChanged(middle, okResume(edits.resetTarget(middle, three, { kind: 'bullet', ref: 'b-tests' })), three), true);
+  });
+
+  it('refuses a section_order with an unknown kind or a duplicate kind', () => {
+    // An unknown kind the renderer has no instruction for.
+    const unknown = clone(wideOriginal()) as unknown as Sections;
+    // Appended.
+    unknown.section_order.push('hobbies');
+    // Refused.
+    assert.equal(traces(unknown), false);
+    // A kind twice would print that section twice.
+    const duplicate = clone(wideOriginal()) as unknown as Sections;
+    // experience listed again.
+    duplicate.section_order.push('experience');
+    // Refused.
+    assert.equal(traces(duplicate), false);
+    // Not an array at all.
+    assert.equal(traces({ ...wideOriginal(), section_order: 'experience' }), false);
+  });
+
+  it('refuses a changed section with no slot; an untouched slotless section blocks nothing', () => {
+    // A stored row whose tailor left achievements out of section_order (the tailor only checks Array.isArray).
+    const stored = clone(wideOriginal()) as unknown as Sections;
+    // The slot removed, entries kept.
+    stored.section_order = stored.section_order.filter((kind) => kind !== 'achievements');
+    // An edit elsewhere is not blocked by the tailor's quirk.
+    assert.equal(traces(okResume(edits.applyTextEdit(stored as never, { kind: 'bullet', ref: 'b-api' }, 'Built an API')), stored), true);
+    // A text edit INSIDE the slotless section would be saved but never printed: refused.
+    assert.equal(traces(okResume(edits.applyTextEdit(stored as never, { kind: 'bullet', ref: 'b-ach' }, 'Won a hackathon')), stored), false);
+    // addMasterEntry appends the slot, so its own output passes.
+    assert.equal(traces(okResume(edits.addMasterEntry(stored as never, wideFull(), 'achievements', 'ach-leet')), stored), true);
   });
 
   it('DIFF_BULLET_SECTIONS is exactly the section list diffAdapter bulletGroups walks', () => {
@@ -475,8 +682,190 @@ describe('onlyTextChanged, D5 save-boundary cases', () => {
     const walked = [...body.matchAll(/\{\s*section:\s*'(\w+)'\s*,\s*entries:\s*resume\.\1\s*\}/g)].map((m) => m[1]);
     // Non-empty, so the equality below cannot pass vacuously.
     assert.ok(walked.length > 0, 'no section entries parsed from bulletGroups');
-    // The save boundary frees text in exactly the sections the operator sees, in the same order.
+    // D5a: the gate frees every bullet section, so the diff must show (and count) every one, in order.
     assert.deepEqual([...edits.DIFF_BULLET_SECTIONS], walked);
+  });
+});
+
+describe('resolveFullMaster', () => {
+  it('resolves every master node exactly as the validator would', () => {
+    // FULL for the wide master.
+    const full = wideFull();
+    // Every entry of every section, in master order.
+    assert.deepEqual(full.projects.map((p) => p.ref), ['proj-cli', 'proj-f1']);
+    // Including the bullets the tailor left out.
+    assert.deepEqual(full.experience[1]!.bullets.map((b) => b.ref), ['b-beta', 'b-beta-2']);
+    // The award sections too.
+    assert.deepEqual(full.achievements.map((a) => a.ref), ['ach-hack', 'ach-leet']);
+    // Each bullet in the master's words, text and master_text alike.
+    assert.deepEqual(full.experience[1]!.bullets[1], { ref: 'b-beta-2', text: 'Cut Beta deploy time in half', master_text: 'Cut Beta deploy time in half' });
+    // The tailor's entries are field-for-field FULL's (the property rule 4 relies on).
+    assert.deepEqual(wideOriginal().experience[0], full.experience[0]);
+  });
+
+  it('returns null, never throws, for a master the validator refuses or garbage', () => {
+    // Ids that collide make every lookup ambiguous.
+    const ambiguous = clone(WIDE_MASTER as object) as { projects: { id: string }[] };
+    // proj-f1 now shares proj-cli's id.
+    ambiguous.projects[1]!.id = 'proj-cli';
+    // No FULL.
+    assert.equal(edits.resolveFullMaster(ambiguous as never, VERSION), null);
+    // Not a master at all.
+    assert.equal(edits.resolveFullMaster(null as never, VERSION), null);
+    // Positive control.
+    assert.notEqual(edits.resolveFullMaster(WIDE_MASTER, VERSION), null);
+  });
+});
+
+describe('moveBullet and moveSection', () => {
+  it('moveBullet swaps one bullet with its neighbour and records the order before and after', () => {
+    // The reference, captured to prove no mutation.
+    const orig = wideOriginal();
+    // A JSON snapshot of the input.
+    const beforeJson = snapshot(orig);
+    // b-docs up one place.
+    const out = edits.moveBullet(orig, 'b-docs', 'up');
+    // Unwrapped.
+    const resume = okResume(out);
+    // The new order.
+    assert.deepEqual(resume.experience[0]!.bullets.map((b) => b.ref), ['b-api', 'b-docs', 'b-tests']);
+    // The event replays the move.
+    assert.deepEqual(out.ok && [out.before, out.after], ['b-api, b-tests, b-docs', 'b-api, b-docs, b-tests']);
+    // Input untouched.
+    assert.equal(snapshot(orig), beforeJson);
+    // Down is the mirror.
+    assert.deepEqual(okResume(edits.moveBullet(orig, 'b-api', 'down')).experience[0]!.bullets.map((b) => b.ref), ['b-tests', 'b-api', 'b-docs']);
+  });
+
+  it('moveBullet refuses the edges and an unknown ref', () => {
+    // First cannot go up.
+    assert.equal(edits.moveBullet(wideOriginal(), 'b-api', 'up').ok, false);
+    // Last cannot go down.
+    assert.equal(edits.moveBullet(wideOriginal(), 'b-docs', 'down').ok, false);
+    // A lone bullet can go nowhere.
+    assert.equal(edits.moveBullet(wideOriginal(), 'b-beta', 'down').ok, false);
+    // Not on the resume.
+    assert.equal(edits.moveBullet(wideOriginal(), 'b-beta-2', 'up').ok, false);
+  });
+
+  it('moveSection swaps one section with its neighbour; refuses the edges and an absent section', () => {
+    // The tailor's order starts with summary.
+    const orig = wideOriginal();
+    // experience above summary.
+    const out = edits.moveSection(orig, 'experience', 'up');
+    // The new order's head.
+    assert.deepEqual(okResume(out).section_order.slice(0, 2), ['experience', 'summary']);
+    // Only the order changed.
+    assert.deepEqual({ ...okResume(out), section_order: orig.section_order }, orig);
+    // First cannot go up.
+    assert.equal(edits.moveSection(orig, 'summary', 'up').ok, false);
+    // Last cannot go down.
+    assert.equal(edits.moveSection(orig, 'skills', 'down').ok, false);
+    // The narrow fixture has no projects slot.
+    assert.equal(edits.moveSection(original(), 'projects', 'up').ok, false);
+  });
+});
+
+describe('addMasterBullet, addMasterEntry and removeEntry', () => {
+  it("addMasterBullet inserts FULL's bullet after its last printed predecessor", () => {
+    // Beta's missing bullet goes after b-beta.
+    const out = edits.addMasterBullet(wideOriginal(), wideFull(), 'b-beta-2');
+    // Unwrapped.
+    const resume = okResume(out);
+    // In master order, verbatim from FULL.
+    assert.deepEqual(resume.experience[1]!.bullets, wideFull().experience[1]!.bullets);
+    // The event names the master's words.
+    assert.equal(out.ok && out.after, 'Cut Beta deploy time in half');
+    // With the operator's reordering: Acme as [b-docs, b-api], then b-tests added back.
+    const reordered = okResume(edits.moveBullet(okResume(edits.removeBullet(wideOriginal(), { kind: 'bullet', ref: 'b-tests' })), 'b-docs', 'up'));
+    // Precondition.
+    assert.deepEqual(reordered.experience[0]!.bullets.map((b) => b.ref), ['b-docs', 'b-api']);
+    // b-tests follows b-api, its master predecessor, wherever b-api now sits.
+    assert.deepEqual(okResume(edits.addMasterBullet(reordered, wideFull(), 'b-tests')).experience[0]!.bullets.map((b) => b.ref), ['b-docs', 'b-api', 'b-tests']);
+  });
+
+  it('addMasterBullet refuses a printed bullet, a non-master ref, and a bullet whose entry is not printed', () => {
+    // Already on the resume.
+    assert.equal(edits.addMasterBullet(wideOriginal(), wideFull(), 'b-api').ok, false);
+    // Not in the master.
+    assert.equal(edits.addMasterBullet(wideOriginal(), wideFull(), 'b-invented').ok, false);
+    // proj-f1 is not printed, so its bullet would be an orphan.
+    assert.equal(edits.addMasterBullet(wideOriginal(), wideFull(), 'b-f1').ok, false);
+  });
+
+  it("addMasterEntry inserts FULL's entry at its master position, bullets and all", () => {
+    // proj-f1 follows proj-cli in the master.
+    const out = edits.addMasterEntry(wideOriginal(), wideFull(), 'projects', 'proj-f1');
+    // Unwrapped.
+    const resume = okResume(out);
+    // Order and content are FULL's.
+    assert.deepEqual(resume.projects, wideFull().projects);
+    // The event names it the way the operator reads it.
+    assert.equal(out.ok && out.after, 'F1 Race Pace Predictor');
+    // ach-leet goes AFTER ach-hack; with ach-hack removed it is first.
+    const removed = okResume(edits.removeEntry(wideOriginal(), 'achievements', 'ach-hack'));
+    // Alone in its section.
+    assert.deepEqual(okResume(edits.addMasterEntry(removed, wideFull(), 'achievements', 'ach-leet')).achievements.map((a) => a.ref), ['ach-leet']);
+  });
+
+  it('addMasterEntry appends a missing slot to section_order, and refuses a printed or non-master entry', () => {
+    // The narrow fixture has no achievements slot; FULL of the wide master supplies the entry.
+    const narrow = original();
+    // Precondition: no slot.
+    assert.equal(narrow.section_order.includes('achievements'), false);
+    // The slot is appended, after everything already ordered.
+    assert.deepEqual(okResume(edits.addMasterEntry(narrow, wideFull(), 'achievements', 'ach-leet')).section_order, [...narrow.section_order, 'achievements']);
+    // Already printed.
+    assert.equal(edits.addMasterEntry(wideOriginal(), wideFull(), 'projects', 'proj-cli').ok, false);
+    // Not in the master.
+    assert.equal(edits.addMasterEntry(wideOriginal(), wideFull(), 'projects', 'proj-invented').ok, false);
+    // A real ref in the wrong section.
+    assert.equal(edits.addMasterEntry(wideOriginal(), wideFull(), 'certifications', 'ach-leet').ok, false);
+  });
+
+  it('removeEntry takes one entry off and keeps the slot; refuses an absent entry', () => {
+    // The only achievement.
+    const out = edits.removeEntry(wideOriginal(), 'achievements', 'ach-hack');
+    // Unwrapped.
+    const resume = okResume(out);
+    // Gone, bullets and all.
+    assert.deepEqual(resume.achievements, []);
+    // The slot stays; the renderer drops an empty section.
+    assert.ok(resume.section_order.includes('achievements'));
+    // The event names what went.
+    assert.equal(out.ok && out.before, 'Hackathon Winner');
+    // Not on the resume.
+    assert.equal(edits.removeEntry(wideOriginal(), 'achievements', 'ach-leet').ok, false);
+  });
+});
+
+describe('entryLabel and addableFromMaster', () => {
+  it('labels each section the way its heading reads, and never returns undefined', () => {
+    // Company · role.
+    assert.equal(edits.entryLabel('experience', { company: 'Aczen Technologies', role: 'Full Stack AI Engineer' }), 'Aczen Technologies · Full Stack AI Engineer');
+    // A project by name.
+    assert.equal(edits.entryLabel('projects', { name: 'F1 Race Pace Predictor' }), 'F1 Race Pace Predictor');
+    // An award by label.
+    assert.equal(edits.entryLabel('achievements', { label: 'LeetCode' }), 'LeetCode');
+    // Institution · degree.
+    assert.equal(edits.entryLabel('education', wideOriginal().education[0]), 'JNTU · B.Tech');
+    // No naming field: the ref, then the master id, then ''.
+    assert.equal(edits.entryLabel('projects', { ref: 'proj-x' }), 'proj-x');
+    // A master node carries `id`.
+    assert.equal(edits.entryLabel('projects', { id: 'proj-y' }), 'proj-y');
+    // Garbage.
+    assert.equal(edits.entryLabel('projects', null), '');
+  });
+
+  it('lists the missing bullets of printed entries and the missing entries, in master order', () => {
+    // What the wide original leaves out.
+    const addable = edits.addableFromMaster(wideOriginal(), wideFull());
+    // One bullet, under the entry that prints.
+    assert.deepEqual(addable.bullets, [{ ref: 'b-beta-2', text: 'Cut Beta deploy time in half', section: 'experience', parentRef: 'exp-beta', parentLabel: 'Beta Labs · Platform Intern' }]);
+    // Two whole entries; b-f1 and b-leet come with them, not separately.
+    assert.deepEqual(addable.entries, [{ ref: 'proj-f1', section: 'projects', label: 'F1 Race Pace Predictor' }, { ref: 'ach-leet', section: 'achievements', label: 'LeetCode' }]);
+    // FULL against itself offers nothing.
+    assert.deepEqual(edits.addableFromMaster(wideFull(), wideFull()), { bullets: [], entries: [] });
   });
 });
 

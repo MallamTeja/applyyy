@@ -39,11 +39,17 @@ import type {
 
 import type {
   AddedSkill,
+  DiffBulletSection,
+  DiffEntry,
   DiffLine,
+  DiffSection,
+  DiffSectionKind,
   FlaggedClaim,
   ResumeDiff,
   TailoredRun,
 } from './diffModel';
+/* The one heading table, shared with the view so a change sentence and a heading name a section alike. */
+import { SECTION_TITLE } from './diffModel';
 
 /* THE PRODUCER'S matching rule, reached by relative path into the Deno tree (precedent:
    master-robots reaching the shared Retry-After parser). The same function chose these
@@ -55,6 +61,9 @@ import { keywordAppearsIn } from '../../../../../supabase/functions/_shared/tail
    adapter's "skills changed" and the boundary's cannot disagree. tailoredEdits imports only types
    from diffModel, so this adds no import cycle. */
 import { addableSkillFor, deepEqual } from './tailoredEdits.ts';
+/* 2026-11-01: the ONE entry labeller and the ONE "what is in the master but not on the resume" rule,
+   shared with the AI box, so the headings, the add-back offers and the AI's view cannot disagree. */
+import { addableFromMaster, entryLabel } from './tailoredEdits.ts';
 
 /* Everything the adapter needs. Passed as one object rather than five
  * positional parameters, because five positional strings and objects at a call
@@ -93,6 +102,10 @@ export interface DiffAdapterInput {
    * comparing `resolved` with this, never stored. Null when it cannot be rebuilt, which
    * disables editing on every line (D4) and otherwise leaves the diff exactly as before. */
   readonly original: ResolvedResume | null;
+  /* FULL (2026-11-01): the whole pinned master resolved by the validator (tailoredEdits'
+   * resolveFullMaster), the only source of "Add back" offers. Optional and nullable so callers that
+   * predate it, and a master that cannot be resolved, simply get no offers, never a guess. */
+  readonly full?: ResolvedResume | null;
 }
 
 /* --- Locating a finding inside a line -------------------------------- */
@@ -225,30 +238,106 @@ const NOT_EDITABLE = {
  * re-export it, and widening that seam is not this change's call. */
 type ResolvedBullet = ResolvedResume['experience'][number]['bullets'][number];
 
-/* Experience, projects and education all hold bullets with identical shape, so one
- * list of the three collections avoids three near-copies that would drift the moment
- * one of them needed a fix. Achievements and certifications are NOT here: the diff has
- * never shown them, and adding them would change every row's lines and coverage, which
- * is a separate decision from editing. A function so the current and the original
- * resume are walked by the same definition. */
+/* All five bullet-holding sections, in print-default order. Experience, projects and education
+ * have shown here since task 8; achievements and certifications joined on 2026-11-01, when the
+ * review page started editing them (docs/ui/2026-11-01-review-structure-edits-contract.md): text
+ * changed in a section this walk skips would be saved with editCount 0 and batch-approved unseen
+ * (D5a). tailoredEdits.test.ts parses this body and requires it to equal DIFF_BULLET_SECTIONS, so
+ * keep each entry in the `{ section: '<name>', entries: resume.<name> }` shape. A function so the
+ * current and the original resume are walked by the same definition. */
 function bulletGroups(resume: ResolvedResume) {
   /* `as const` keeps each section name a literal for the line id. */
   return [
     { section: 'experience', entries: resume.experience },
     { section: 'projects', entries: resume.projects },
     { section: 'education', entries: resume.education },
+    { section: 'achievements', entries: resume.achievements },
+    { section: 'certifications', entries: resume.certifications },
   ] as const;
 }
 
-/* Every bullet, in document order, with the master text beside it.
+/* The one thing all five entry shapes share, and all the walk reads besides the label. */
+type WalkEntry = { readonly ref: string; readonly bullets: readonly ResolvedBullet[] };
+
+/* A section's entries, or none. isResumeShape requires only experience, projects, education and
+   skills to be arrays, so an older stored resume may carry no achievements at all; that must read
+   as "no entries", never throw inside buildResumeDiff and blank the review screen. */
+function entriesOf(entries: unknown): readonly WalkEntry[] {
+  /* The array as typed; anything else is an absent section. */
+  return Array.isArray(entries) ? (entries as readonly WalkEntry[]) : [];
+}
+
+/* Display order for one list of refs: the STORED order (what prints), with every ref only the
+ * tailor had re-inserted right after its nearest preceding tailor sibling, so a removed bullet or
+ * entry shows where it used to be. Pure, and O(n^2) on lists of a handful of refs. */
+function mergeOrder(now: readonly string[], was: readonly string[]): string[] {
+  /* Starts as exactly what prints. */
+  const out = [...now];
+  /* Refs already placed, so a kept ref is never inserted twice. */
+  const placed = new Set(now);
+  /* The tailor's refs in the tailor's order, so each removed one finds its predecessor. */
+  was.forEach((ref, index) => {
+    /* Kept refs are already in place. */
+    if (placed.has(ref)) return;
+    /* After the closest earlier tailor ref that is on screen; the top when there is none. */
+    let at = 0;
+    /* Walk backwards through the tailor's earlier refs. */
+    for (let back = index - 1; back >= 0; back -= 1) {
+      /* Where that earlier ref sits in the output, if it does. */
+      const found = out.indexOf(was[back] as string);
+      /* The first one found is the nearest. */
+      if (found !== -1) {
+        /* Right after it. */
+        at = found + 1;
+        /* Nearest found; stop looking. */
+        break;
+      }
+    }
+    /* Inserted, and remembered so a later removed sibling can anchor on it. */
+    out.splice(at, 0, ref);
+    /* Placed now. */
+    placed.add(ref);
+  });
+  /* Stored order with the removed refs threaded back in. */
+  return out;
+}
+
+/* The refs whose place among the KEPT refs (on both sides) differs from the tailor's: the moved
+ * ones. Added and removed refs are not moves; they are counted as additions and removals. */
+function movedRefs(now: readonly string[], was: readonly string[]): ReadonlySet<string> {
+  /* Membership on each side. */
+  const onWas = new Set(was);
+  /* Same, for the stored side. */
+  const onNow = new Set(now);
+  /* The refs both sides kept, in stored order. */
+  const keptNow = now.filter((ref) => onWas.has(ref));
+  /* The same refs, in the tailor's order. */
+  const keptWas = was.filter((ref) => onNow.has(ref));
+  /* A ref whose position differs between the two orders has moved. */
+  return new Set(keptNow.filter((ref, index) => keptWas[index] !== ref));
+}
+
+/* What the bullet walk hands back: the lines, the entries that group them, and the structural
+ * changes it found. One walk produces all three so they cannot describe different resumes. */
+interface BulletWalk {
+  /* Every bullet line, in display order, section by section. */
+  readonly lines: DiffLine[];
+  /* Each bullet section's entries, in display order. */
+  readonly entries: ReadonlyMap<DiffBulletSection, readonly DiffEntry[]>;
+  /* One sentence per entry added, removed or reordered, and per entry whose bullets were reordered. */
+  readonly changes: string[];
+}
+
+/* Every bullet, grouped by section and entry, with the master text beside it.
  *
  * `ResolvedBullet` carries `master_text` specifically so this screen needs no
  * second lookup - the contract's author put it there for the diff view.
  *
- * With an original (task 8) the ORIGINAL is walked as the skeleton. An edit changes
- * text and a removal deletes a bullet, but neither moves anything, so walking the
- * tailor's version keeps a removed bullet in its own place and turns every comparison
- * into "same ref - what does it say now". */
+ * With an original (task 8) each entry's bullets are compared ref by ref with the tailor's
+ * version of the SAME entry. Until 2026-11-01 the original was walked as the skeleton, which was
+ * right while no edit could move anything; now bullets and entries can be moved, added and
+ * removed, so the display follows the STORED order (what prints) and threads each removed item
+ * back in where the tailor had it. An untouched resume walks exactly as before. */
 function bulletLines(
   resolved: ResolvedResume,
   original: ResolvedResume | null,
@@ -257,74 +346,149 @@ function bulletLines(
   /* Out-parameter, like matchedClaims: findings accounted for as superseded, so the
      caller's fail-loud step does not ALSO report them as unlocated. */
   supersededKeys: Set<string>,
-): DiffLine[] {
-  /* Accumulated in skeleton order, so the screen reads in the tailor's document order. */
+  /* Master bullets the resume lacks, keyed `section.parentRef`; empty when no add could be saved. */
+  addableByParent: ReadonlyMap<string, readonly { readonly ref: string; readonly text: string }[]>,
+): BulletWalk {
+  /* Accumulated in display order, so the screen reads in print order. */
   const lines: DiffLine[] = [];
+  /* Each section's entries, filled as the walk goes. */
+  const entries = new Map<DiffBulletSection, DiffEntry[]>();
+  /* Structural changes, in display order. */
+  const changes: string[] = [];
+  /* The tailor's sections, looked up by name below; null means D4 (nothing compared). */
+  const tailorGroups = original === null ? null : bulletGroups(original);
 
-  /* Current bullets by ref, so each original bullet finds its stored text in one lookup.
-     Refs are unique across the resume (the validator refuses duplicates). */
-  const currentByRef = new Map<string, ResolvedBullet>();
-  /* The same three sections the skeleton walk covers, so the lookup and the walk agree. */
+  /* Section by section, in the one list the parity test pins. */
   for (const group of bulletGroups(resolved)) {
-    /* Every entry in that section. */
-    for (const entry of group.entries) {
-      /* Index every stored bullet; the walk below consumes them by ref. */
-      for (const bullet of entry.bullets) currentByRef.set(bullet.ref, bullet);
-    }
-  }
+    /* What prints now. */
+    const nowEntries = entriesOf(group.entries);
+    /* What the tailor wrote; without an original (D4) the stored resume stands in, so nothing differs. */
+    const wasEntries = tailorGroups === null ? nowEntries : entriesOf(tailorGroups.find((g) => g.section === group.section)?.entries);
+    /* Both sides by ref, for one lookup per entry. */
+    const nowByRef = new Map(nowEntries.map((entry) => [entry.ref, entry]));
+    /* Same, for the tailor's side. */
+    const wasByRef = new Map(wasEntries.map((entry) => [entry.ref, entry]));
+    /* The section's heading, for its change sentences. */
+    const title = SECTION_TITLE[group.section];
+    /* Entries reordered among themselves: one change for the section. */
+    if (movedRefs(nowEntries.map((e) => e.ref), wasEntries.map((e) => e.ref)).size > 0) changes.push(`Reordered ${title}`);
+    /* This section's grouped entries. */
+    const sectionEntries: DiffEntry[] = [];
 
-  /* No original: walk the stored resume, exactly as before task 8. */
-  const skeleton = original ?? resolved;
+    /* Every entry on either side, stored order first, removed ones where they were. */
+    for (const entryRef of mergeOrder(nowEntries.map((e) => e.ref), wasEntries.map((e) => e.ref))) {
+      /* The stored entry, if it is still on the resume. */
+      const now = nowByRef.get(entryRef);
+      /* The tailor's entry, if the tailor chose it. */
+      const was = wasByRef.get(entryRef);
+      /* Both sides, or one: added (stored only) or removed (tailor only). */
+      const state: DiffEntry['state'] = now !== undefined && was !== undefined ? 'kept' : now !== undefined ? 'added' : 'removed';
+      /* The shared labeller reads whichever side exists; one of the two always does here. */
+      const label = entryLabel(group.section, now ?? was);
+      /* A whole entry added or dropped is a structural change in its own right (D5a): a certification
+         carries no bullets, so no line would ever count it otherwise. */
+      if (state === 'added') changes.push(`Added ${label} (${title})`);
+      /* Same, for a dropped entry. */
+      if (state === 'removed') changes.push(`Removed ${label} (${title})`);
+      /* The stored bullets in print order. */
+      const nowBullets = now?.bullets ?? [];
+      /* The tailor's bullets for the same entry; D4 compares the stored resume with itself. */
+      const wasBullets = original === null ? nowBullets : (was?.bullets ?? []);
+      /* Bullets the operator moved among the ones both sides kept. */
+      const moved = movedRefs(nowBullets.map((b) => b.ref), wasBullets.map((b) => b.ref));
+      /* One change per entry, however many bullets moved: the operator reordered one list. */
+      if (moved.size > 0) changes.push(`Reordered bullets under ${label}`);
+      /* The line ids this entry groups. */
+      const lineIds: string[] = [];
 
-  for (const group of bulletGroups(skeleton)) {
-    for (const entry of group.entries) {
-      for (const bullet of entry.bullets) {
+      /* Every bullet on either side, in display order. */
+      for (const bulletRef of mergeOrder(nowBullets.map((b) => b.ref), wasBullets.map((b) => b.ref))) {
         /* The path the Auditor would have used to name this bullet. Findings
          * are looked up by it, and anything that does not match falls through
          * to the unlocated list rather than being quietly ignored. */
-        const path = group.section + '.' + entry.ref + '.' + bullet.ref;
+        const path = group.section + '.' + entryRef + '.' + bulletRef;
+        /* Grouped under its entry. */
+        lineIds.push(path);
+        /* The stored bullet, if it prints. */
+        const stored = nowBullets.find((b) => b.ref === bulletRef);
+        /* The tailor's bullet, if the tailor wrote it. */
+        const tailor = wasBullets.find((b) => b.ref === bulletRef);
+        /* Where every line in this entry belongs, for grouping and for Move. */
+        const place = { section: group.section, entryRef, moved: moved.has(bulletRef) };
+        /* This bullet's findings, by path. */
         const findings = findingsByPath.get(path) ?? [];
+        /* Just the quoted claims. */
         const claims = findings.map((finding) => finding.claim);
 
         /* D4: without an original no edit can be recognised, so the line is built as it
-           always was and offers no control. */
+           always was and offers no control. Here `stored` exists: both lists are the stored one. */
         if (original === null) {
-          const { runs, matched } = splitIntoRuns(bullet.text, claims, bullet.ref);
+          const { runs, matched } = splitIntoRuns((stored as ResolvedBullet).text, claims, bulletRef);
           /* Record what landed so the caller can compute the difference. */
           for (const claim of matched) matchedClaims.add(path + '::' + claim);
           lines.push({
             id: path,
             kind: 'bullet',
-            masterText: bullet.master_text,
-            masterNodeId: bullet.ref,
+            masterText: (stored as ResolvedBullet).master_text,
+            masterNodeId: bulletRef,
             tailoredRuns: runs,
             /* Nothing editable, nothing edited. */
             ...NOT_EDITABLE,
+            /* Grouped like any other bullet; a D4 line never reads as moved. */
+            ...place,
           });
           /* Done with this bullet. */
           continue;
         }
 
-        /* Here `bullet` is the TAILOR's version; `now` is what is stored for that ref. */
-        const now = currentByRef.get(bullet.ref);
-        /* Consumed, so anything left afterwards is a bullet the original never had. */
-        currentByRef.delete(bullet.ref);
         /* Edit controls address the bullet by ref, whatever its state. */
-        const editTarget = { kind: 'bullet', ref: bullet.ref } as const;
+        const editTarget = { kind: 'bullet', ref: bulletRef } as const;
+
+        /* Stored but never the tailor's: added by the operator from the master (add_master_bullet,
+           add_master_entry, attest_bullet), or divergence no page edit produces. Shown as EDITED -
+           unaudited, forcing Bucket B - never traced: the Auditor never read a resume carrying it. */
+        if (tailor === undefined) {
+          /* `stored` exists: mergeOrder only yields refs from one side or the other. */
+          const added = stored as ResolvedBullet;
+          lines.push({
+            /* Its path in the stored resume. */
+            id: path,
+            /* Still a bullet, so it renders and edits like one. */
+            kind: 'bullet',
+            /* Only the stored copy exists here; it is shown, never written (R0). */
+            masterText: added.master_text,
+            /* The ref the operator can look up on the Master Profile page. */
+            masterNodeId: bulletRef,
+            /* The operator-side verdict: unaudited text. */
+            tailoredRuns: [{ text: added.text, verdict: 'edited', tracesTo: null }],
+            /* Editable and removable, so the operator can act on it. */
+            editTarget,
+            /* Counted in editCount, which is what keeps the row out of Bucket A. */
+            editState: 'edited',
+            /* No tailor version exists to show or reset to; the view reads this null as "added". */
+            originalText: null,
+            /* The Auditor never read it, so it has no findings to supersede. */
+            supersededClaims: [],
+            /* Grouped under its entry. */
+            ...place,
+          });
+          /* Done with this bullet. */
+          continue;
+        }
 
         /* Unchanged: the Auditor read exactly this text, so its findings still apply. */
-        if (now !== undefined && now.text === bullet.text) {
-          const { runs, matched } = splitIntoRuns(now.text, claims, bullet.ref);
-          /* Same bookkeeping as the no-original path. */
+        if (stored !== undefined && stored.text === tailor.text) {
+          const { runs, matched } = splitIntoRuns(stored.text, claims, bulletRef);
+          /* Same bookkeeping as the D4 path. */
           for (const claim of matched) matchedClaims.add(path + '::' + claim);
           lines.push({
             id: path,
             kind: 'bullet',
             /* The ORIGINAL's master_text - the validator's - never the stored copy: the
                ground-truth pane must come from the source R0 protects. */
-            masterText: bullet.master_text,
+            masterText: tailor.master_text,
             /* Same ref either side; the original's is the one the Auditor named. */
-            masterNodeId: bullet.ref,
+            masterNodeId: bulletRef,
             /* The Auditor's findings, carved out exactly as before task 8. */
             tailoredRuns: runs,
             /* Editable: an original exists to compare a future edit against. */
@@ -332,9 +496,11 @@ function bulletLines(
             /* Unchanged from what the tailor wrote and the Auditor read. */
             editState: 'original',
             /* The tailor's text, for the edit box and Reset. */
-            originalText: bullet.text,
+            originalText: tailor.text,
             /* Nothing replaced, so nothing superseded; its findings are live runs above. */
             supersededClaims: [],
+            /* Grouped, and flagged if the operator moved it. */
+            ...place,
           });
           /* Done with this bullet. */
           continue;
@@ -343,9 +509,9 @@ function bulletLines(
         /* Removed: every claim's words are gone, so all are superseded. Edited: only the
            claims the new text no longer contains; kept claims stay flagged runs. */
         const edited =
-          now === undefined
+          stored === undefined
             ? { runs: [], matched: [], superseded: claims }
-            : splitEdited(now.text, claims, bullet.ref);
+            : splitEdited(stored.text, claims, bulletRef);
         /* Kept claims that landed: located, so not unlocated, and they gate as fabricated. */
         for (const claim of edited.matched) matchedClaims.add(path + '::' + claim);
         /* Gone claims: shown on the line, never blocking, never unlocated. */
@@ -355,62 +521,43 @@ function bulletLines(
           id: path,
           kind: 'bullet',
           /* From the original, as above. */
-          masterText: bullet.master_text,
+          masterText: tailor.master_text,
           /* The ref the edit and Reset address. */
-          masterNodeId: bullet.ref,
+          masterNodeId: bulletRef,
           /* Edited: the operator's words as 'edited' runs, never traced (R1), with any
              kept claim carved out as fabricated. Removed: no runs - nothing is sent. */
           tailoredRuns: edited.runs,
           /* Kept on a removed line too: Reset needs somewhere to point. */
           editTarget,
           /* Absent from the stored resume means removed; present with other text means edited. */
-          editState: now === undefined ? 'removed' : 'edited',
+          editState: stored === undefined ? 'removed' : 'edited',
           /* The tailor's text, for comparison and Reset. */
-          originalText: bullet.text,
+          originalText: tailor.text,
           /* Only the findings whose words the edit or removal actually took off the resume. */
           supersededClaims: edited.superseded,
+          /* Grouped, and flagged if moved. */
+          ...place,
         });
       }
+
+      /* The entry itself, with the master bullets that could go back under it. A removed entry
+         offers none: addMasterBullet needs the parent on the resume, so that offer could only fail;
+         the whole entry is offered at section level instead. */
+      sectionEntries.push({
+        section: group.section,
+        ref: entryRef,
+        label,
+        state,
+        lineIds,
+        addableBullets: state === 'removed' ? [] : (addableByParent.get(group.section + '.' + entryRef) ?? []),
+      });
     }
+    /* Published for the section layout. */
+    entries.set(group.section, sectionEntries);
   }
 
-  /* Bullets stored now that the original never had. No edit on this page produces one, so
-     this is divergence; it is shown as EDITED (unaudited, forces Bucket B) rather than as
-     traced, because nothing proves the tailor wrote it. Fail closed, never clean. */
-  if (original !== null) {
-    /* Walk the STORED resume this time: the leftovers exist only there. */
-    for (const group of bulletGroups(resolved)) {
-      /* Entry by entry, so the leftovers keep their stored order. */
-      for (const entry of group.entries) {
-        /* Each stored bullet; the consumed ones are skipped just below. */
-        for (const bullet of entry.bullets) {
-          /* Only the leftovers the walk above did not consume. */
-          if (!currentByRef.has(bullet.ref)) continue;
-          lines.push({
-            /* Its own path in the stored resume: the original has none to lend it. */
-            id: group.section + '.' + entry.ref + '.' + bullet.ref,
-            /* Still a bullet, so it renders and edits like one. */
-            kind: 'bullet',
-            /* Only the stored copy exists here; it is shown, never written (R0). */
-            masterText: bullet.master_text,
-            /* The ref the operator can look up on the Master Profile page. */
-            masterNodeId: bullet.ref,
-            /* The operator-side verdict: unaudited text. */
-            tailoredRuns: [{ text: bullet.text, verdict: 'edited', tracesTo: null }],
-            /* Editable and removable, so the operator can act on the divergence. */
-            editTarget: { kind: 'bullet', ref: bullet.ref },
-            /* Counted in editCount, which is what keeps the row out of Bucket A. */
-            editState: 'edited',
-            /* No tailor version exists to show or reset to. */
-            originalText: null,
-            supersededClaims: [],
-          });
-        }
-      }
-    }
-  }
-
-  return lines;
+  /* All three products of the one walk. */
+  return { lines, entries, changes };
 }
 
 /* The skills line.
@@ -594,6 +741,19 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
   /* `?? null` because node-run tests and older callers may omit the field entirely; an
      absent original must mean D4 (nothing editable), never a crash or a guess. */
   const original = input.original ?? null;
+  /* Same tolerance for FULL; an add is offered only with an original to measure it against too. */
+  const full = original === null ? null : (input.full ?? null);
+  /* What the master holds that the resume lacks; nothing when an add could not be saved. */
+  const addable = full === null ? { bullets: [], entries: [] } : addableFromMaster(resolved, full);
+  /* Bullet offers keyed by their true parent, so each entry finds its own in one lookup. */
+  const addableByParent = new Map<string, { readonly ref: string; readonly text: string }[]>();
+  /* Grouped once; order kept, so offers list in master order. */
+  for (const bullet of addable.bullets) {
+    /* Section plus parent ref: an entry ref is unique only within its section. */
+    const key = bullet.section + '.' + bullet.parentRef;
+    /* Only ref and text cross to the UI; the page re-reads FULL on Add, never trusting these. */
+    addableByParent.set(key, [...(addableByParent.get(key) ?? []), { ref: bullet.ref, text: bullet.text }]);
+  }
 
   /* Group findings by path once, so each line does a map lookup instead of a
    * scan of every finding. At 35 rows a day this is not a performance
@@ -621,9 +781,51 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
   const lines: DiffLine[] = [];
   const summary = summaryLine(resolved, original, findingsByPath, matchedClaims, supersededKeys);
   if (summary !== null) lines.push(summary);
-  lines.push(...bulletLines(resolved, original, findingsByPath, matchedClaims, supersededKeys));
+  /* One walk yields the bullet lines, their entries and the structural changes, so the three agree. */
+  const walk = bulletLines(resolved, original, findingsByPath, matchedClaims, supersededKeys, addableByParent);
+  lines.push(...walk.lines);
   /* The original is passed so added skills (T3) can be told apart from the tailor's. */
   lines.push(skillsLine(resolved, master, original));
+
+  /* What prints, in order: section_order exactly as the renderer reads it, known kinds only, once
+     each. Not an array (a legacy row) means the renderer would refuse it, so nothing is printed. */
+  const printedOrder = Array.isArray(resolved.section_order)
+    ? /* Own keys only: `in` would also accept an inherited name like "constructor" from stored junk. */
+      [...new Set(resolved.section_order)].filter((kind): kind is DiffSectionKind => Object.hasOwn(SECTION_TITLE, kind))
+    : [];
+  /* For the "is it printed" test below. */
+  const printed = new Set<DiffSectionKind>(printedOrder);
+  /* The section order the operator changed is one structural change (D5a), however far it moved. */
+  const changes = original !== null && !deepEqual(resolved.section_order, original.section_order) ? ['Changed the section order'] : [];
+  /* Whole-entry offers by section. */
+  const entryOffers = (kind: DiffSectionKind) => addable.entries.filter((entry) => entry.section === kind).map((entry) => ({ ref: entry.ref, label: entry.label }));
+  /* Every section with something to show: the printed ones in print order, then the unprinted ones
+     that hold a line, an entry or an offer, so nothing selected is ever hidden from review. */
+  const sections: DiffSection[] = [...printedOrder, ...(Object.keys(SECTION_TITLE) as DiffSectionKind[]).filter((kind) => !printed.has(kind))]
+    .map((kind) => ({
+      kind,
+      printed: printed.has(kind),
+      /* Summary and skills have no entries. */
+      entries: kind === 'summary' || kind === 'skills' ? [] : (walk.entries.get(kind) ?? []),
+      /* Same: offers exist only for bullet sections. */
+      addableEntries: kind === 'summary' || kind === 'skills' ? [] : entryOffers(kind),
+    }))
+    .filter(
+      (section) =>
+        /* Printed sections always show, even empty, so the section-order list matches the PDF's. */
+        section.printed ||
+        /* An unprinted summary or skills line still exists and must be seen. */
+        lines.some((line) => line.kind === section.kind) ||
+        /* An unprinted bullet section with entries, or with something to add back. */
+        section.entries.length > 0 ||
+        section.addableEntries.length > 0,
+    );
+  /* Section order first, then the walk's per-section changes, in display order. */
+  const structureChanges = [...changes, ...walk.changes];
+  /* Coverage reads only lines that PRINT: a bullet in a section section_order does not name is not
+     on the PDF, so crediting it would inflate the figure the operator trusts (same rule as the
+     credentials check below). A legacy non-array order keeps the pre-2026-11-01 reading. */
+  const counted = Array.isArray(resolved.section_order) ? lines.filter((line) => line.section === undefined || printed.has(line.section)) : lines;
 
   /* THE FAIL-LOUD STEP. Any finding whose claim text was not located inside a
    * rendered line becomes an unlocated claim rather than disappearing.
@@ -668,34 +870,40 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
        * in a traced run is honestly matched. */
       honestlyMatched: application.selected_jd_keywords.filter((keyword) =>
         /* QA item 3 (2026-10-08): a printed certification/achievement title is honest too. */
-        keywordAppearsInTracedText(keyword, lines) || keywordAppearsInPrintedCredentials(keyword, resolved, master),
+        keywordAppearsInTracedText(keyword, counted) || keywordAppearsInPrintedCredentials(keyword, resolved, master),
       ),
       /* Keywords that appear ONLY inside a flagged claim. This is the number
        * that stops the coverage figure rewarding fabrication. */
       matchedByFabrication: application.selected_jd_keywords.filter(
         (keyword) =>
-          !keywordAppearsInTracedText(keyword, lines) &&
+          !keywordAppearsInTracedText(keyword, counted) &&
           /* Already honest via a credential: never double-counted as purchased. */
           !keywordAppearsInPrintedCredentials(keyword, resolved, master) &&
-          keywordAppearsInFlaggedText(keyword, lines),
+          keywordAppearsInFlaggedText(keyword, counted),
       ),
       /* Keywords that appear ONLY in the operator's edited text: not master-backed, not
          flagged, and kept apart from both so neither figure is credited with them. */
       matchedByEdit: application.selected_jd_keywords.filter(
         (keyword) =>
-          !keywordAppearsInTracedText(keyword, lines) &&
+          !keywordAppearsInTracedText(keyword, counted) &&
           /* Honest via a credential wins over "from your edits", same as traced text does. */
           !keywordAppearsInPrintedCredentials(keyword, resolved, master) &&
-          !keywordAppearsInFlaggedText(keyword, lines) &&
-          keywordAppearsInEditedText(keyword, lines),
+          !keywordAppearsInFlaggedText(keyword, counted) &&
+          keywordAppearsInEditedText(keyword, counted),
       ),
       /* T3: what the operator could add for each keyword missing from the resume entirely. */
-      addable: addableByKeyword(application.selected_jd_keywords, lines, resolved, master, original),
+      addable: addableByKeyword(application.selected_jd_keywords, counted, resolved, master, original),
     },
     lines,
     unlocatedClaims,
-    /* Derived from the lines, never passed in, so it cannot disagree with them (R2). */
-    editCount: lines.filter((line) => line.editState !== 'original').length,
+    /* Derived from the lines AND the structural changes, never passed in, so it cannot disagree with
+       them (R2). The structural half is D5a: a moved or added-back item changes no line's words, and
+       without it a reordered resume would count 0 and ride the batch button into Bucket A. */
+    editCount: lines.filter((line) => line.editState !== 'original').length + structureChanges.length,
+    /* The grouped layout the view draws. */
+    sections,
+    /* The sentences behind the structural half of editCount, so the count is never unexplained. */
+    structureChanges,
     discoveredVia: job.discovered_via,
     sourceRefs: job.source_refs,
     employmentType: job.employment_type,
@@ -784,11 +992,12 @@ export function keywordAppearsInTracedText(
  *
  * Counted as honest (master-traced) because nothing in it can be the operator's or the tailor's
  * words: only `label` and `description` are read, which the validator copies verbatim from the
- * master, which the edit boundary freezes (tailoredEdits' hidden-section rule refuses any change
- * to an achievement/certification entry), and which are compared here against the PINNED master
+ * master, which the edit boundary keeps equal to the master (tracesToMaster: an entry must
+ * deep-equal FULL's except its bullets), and which are compared here against the PINNED master
  * node by ref - a stored string that differs from the master earns nothing. Bullets are left out:
- * they are bullet text the Auditor can flag, and the diff does not walk these sections, so a
- * flagged one would be credited honest. "Printed" means the section is named in section_order,
+ * they are bullet text the Auditor can flag, and since 2026-11-01 they are diff LINES (bulletGroups
+ * walks all five sections), so they earn coverage there by their own verdict, traced or not.
+ * "Printed" means the section is named in section_order,
  * exactly as render-resume-html.ts decides; a selected-but-unprinted section (the live row's
  * achievements) is not on the resume and earns nothing. Exported for test/printedCredentialsCoverage.test.ts. */
 export function keywordAppearsInPrintedCredentials(

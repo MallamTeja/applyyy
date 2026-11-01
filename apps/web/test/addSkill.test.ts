@@ -4,7 +4,7 @@
  * the pinned master, inserted as exactly { ref: id, name, category } copied from it. Never a
  * synthetic skill, never a renamed or re-categorised one. An added skill is the operator's choice,
  * so it reads as 'edited' (never 'traced'), counts in coverage.matchedByEdit, and takes the row out
- * of Bucket A. R0 still holds: nothing but resume.skills may change.
+ * of Bucket A. R0' still holds: nothing that does not trace to the master may change.
  *
  * Import shape: only modules that ALREADY exist are imported in before(), and every new export is
  * read inside its own test. A missing export then fails that one test with "is not a function"
@@ -287,9 +287,9 @@ describe("resetTarget({ kind: 'skills' })", () => {
   });
 });
 
-describe('onlyTextChanged with a master (R0 for skills)', () => {
+describe("tracesToMaster with a master (R0' rule 2, skills)", () => {
   // The 4-arg contract call; previous defaults to the tailor's version.
-  const check = (next: Resume, previous: Resume = original()): boolean => (edits.onlyTextChanged as unknown as AnyFn)(previous, next, original(), MASTER);
+  const check = (next: Resume, previous: Resume = original()): boolean => (edits.tracesToMaster as unknown as AnyFn)(previous, next, original(), MASTER);
 
   it('accepts the outputs of addSkill, removeAddedSkill and reset', () => {
     // One add.
@@ -351,7 +351,7 @@ describe('onlyTextChanged with a master (R0 for skills)', () => {
     const tampered = clone(added(original(), 'skill-docker')) as unknown as { experience: { bullets: { master_text: string }[] }[] };
     // ...smuggling a master_text rewrite alongside it.
     tampered.experience[0]!.bullets[1]!.master_text = 'Wrote integration tests for the billing service';
-    // Refused: R0 holds whatever else the edit did.
+    // Refused: R0' holds whatever else the edit did.
     assert.equal(check(tampered as unknown as Resume), false);
     // An add plus a changed identity.
     const renamed = clone(added(original(), 'skill-docker')) as unknown as { identity: { full_name: string } };
@@ -432,15 +432,15 @@ describe('saveTailoredEdit: a synthetic skill never reaches the database', () =>
     return { done, calls: fake.calls };
   };
 
-  it("refuses with 'not_text_only' and sends no update", async () => {
+  it("refuses with 'not_traced' and sends no update", async () => {
     // A hand-built resume with a skill the master never had.
     const { done, calls } = run(withSkills({ ref: 'user:caching', name: 'Caching', category: 'X' }), 'resume_add_skill');
     // Awaited.
     const result = await done;
     // Refused.
     assert.equal(result.ok, false);
-    // With the R0 reason.
-    if (!result.ok) assert.equal(result.reason, 'not_text_only');
+    // With the R0' reason.
+    if (!result.ok) assert.equal(result.reason, 'not_traced');
     // No UPDATE reached the client.
     assert.equal(calls.filter((c) => c.method === 'update').length, 0);
   });

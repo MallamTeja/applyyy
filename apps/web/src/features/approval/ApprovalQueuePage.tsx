@@ -68,7 +68,17 @@ import {
   removeAddedSkill,
   removeBullet,
   resetTarget,
+  // Structural edits (2026-11-01): each returns a new resume or a refusal, like the text edits.
+  moveBullet,
+  moveSection,
+  addMasterBullet,
+  addMasterEntry,
+  removeEntry,
+  // FULL: the whole pinned master resolved once per row, the only source an add-back may copy from.
+  resolveFullMaster,
 } from './tailoredEdits';
+// Types only: the pure edits' result, named by the dispatcher below, and the section a new bullet goes in.
+import type { BulletSection, EditOutcome } from './tailoredEdits';
 // The one write path for an edit: resume first, history note second.
 // confirmFresh: the per-row cross-tab check every approval crosses right before its RPC.
 // isNoAnswer + confirmSettle: a lost RPC response is re-read, never reported as failed (item 6);
@@ -77,6 +87,8 @@ import { buildSettleArgs, confirmFresh, confirmSettle, isNoAnswer, saveTailoredE
 import type { EditEventKind, StoredRow } from './saveTailoredEdit';
 // Vouching for a skill the master lacks: master version first, then the re-pinned resume.
 import { attestSkill } from './attestSkill';
+// The same two-step write for a brand-new bullet under one entry (2026-11-01).
+import { attestBullet } from './attestBullet';
 // The submitted resume and its master side by side, rendered by the worker's own renderer,
 // so every row can be SEEN before it is approved. Shared with the pipeline history page.
 import { ResumePreview } from '../resume-preview/ResumePreview';
@@ -138,6 +150,22 @@ interface RowSource {
   readonly hasCoverLetter: boolean;
   // applications.tailor_refs as loaded (untyped JSON): an attested skill re-pins it with the resume.
   readonly tailorRefs: unknown;
+  // FULL: every master node resolved at the pin (resolveFullMaster). Add-backs copy from it and the
+  // diff offers from it; null means the master cannot be resolved, so editing is off like D4.
+  readonly full: ResolvedResume | null;
+}
+
+/* Why the edit controls are off for a row, or null when they are on. One place, so the banner the
+   operator reads and the guard editRow enforces cannot disagree. */
+function editOffReason(source: RowSource | undefined): string | null {
+  // A row never loaded offers nothing; the guard in editRow says so if it is ever reached.
+  if (source === undefined) return null;
+  // D4: no original, so an edit could not be told apart from the tailor's text.
+  if (source.original === null) return EDIT_DISABLED_REASON;
+  // No FULL: nothing could be checked against the master, so every save would be refused.
+  if (source.full === null) return FULL_UNRESOLVED_REASON;
+  // Editable.
+  return null;
 }
 
 /* The pinned master's skill groups, in master order, offered when vouching for a missing skill.
@@ -169,15 +197,65 @@ const EVENT_KIND: Readonly<Record<PageEditAction['kind'], EditEventKind>> = {
   remove_skill: 'resume_remove_skill',
   // A skill the operator vouched for: new master version, then this resume, re-pinned.
   attest_skill: 'resume_attest_skill',
+  // Structural edits (2026-11-01), one event kind each, as the contract names them.
+  // One bullet one place up or down.
+  move_bullet: 'resume_move_bullet',
+  // One section one place up or down.
+  move_section: 'resume_move_section',
+  // A master bullet the tailor left out, put back.
+  add_master_bullet: 'resume_add_bullet',
+  // A whole master entry put back.
+  add_master_entry: 'resume_add_entry',
+  // A whole entry taken off.
+  remove_entry: 'resume_remove_entry',
+  // A brand-new bullet: master version first, then this resume (attestBullet.ts writes the event).
+  attest_bullet: 'resume_attest_bullet',
 };
 
-/* The event's ref: the line key for text actions, the MASTER skill id for skill actions, so the
-   log names exactly which skill went on or came off (its name rides in before/after). */
+/* The event's ref: the line key for text actions, the MASTER node id for every other action, so the
+   log names exactly which skill, bullet, entry or section went on, off or moved. A switch with a
+   `never` default, so a new action fails to compile here instead of logging an empty ref. */
 function eventRef(action: PageEditAction): string {
-  // An attest has no master id until it lands; attestSkill.ts writes its own event with the real one.
-  if (action.kind === 'attest_skill') return action.keyword;
-  // Skill actions carry the master ref directly; there is no line target to key.
-  return action.kind === 'add_skill' || action.kind === 'remove_skill' ? action.ref : editKey(action.target);
+  // One arm per action kind; the compiler checks the list is complete (see default).
+  switch (action.kind) {
+    // An attest has no master id until it lands; attestSkill.ts writes its own event with the real one.
+    case 'attest_skill':
+      return action.keyword;
+    // Same for a new bullet: its parent is the only master node known before it lands.
+    case 'attest_bullet':
+      return action.parentRef;
+    // A section has no node id; its key is the name section_order stores.
+    case 'move_section':
+      return action.section;
+    // These all carry the master ref directly; there is no line target to key.
+    // T3: the master skill put on.
+    case 'add_skill':
+    // T3: the master skill taken off.
+    case 'remove_skill':
+    // The bullet that moved.
+    case 'move_bullet':
+    // The master bullet put back.
+    case 'add_master_bullet':
+    // The master entry put back.
+    case 'add_master_entry':
+    // The entry taken off.
+    case 'remove_entry':
+      // The node the log names.
+      return action.ref;
+    // Text actions name their line.
+    case 'edit':
+    case 'remove':
+    case 'reset':
+      // The same line key p_detail.edited_refs uses.
+      return editKey(action.target);
+    // Only for the never check: every kind is listed above.
+    default: {
+      // Unreachable while every arm is listed; a new arm turns this into a compile error.
+      const unhandled: never = action;
+      // Returned only so the function still has a string at runtime.
+      return String(unhandled);
+    }
+  }
 }
 
 /* What the page-level live region says after a save landed. It lives on the PAGE, not in DiffView,
@@ -196,10 +274,34 @@ function announcementFor(
 ): string {
   // One sentence per action; a literal table could not carry the skill name, so a ternary over the closed union.
   const what =
-    // The attest arm first: it is the only action that also wrote the master, and must say so.
+    // The attest arms first: they are the only actions that also wrote the master, and must say so.
     kind === 'attest_skill'
       ? // Both places it went, so the master write is never silent.
         `Added ${outcome.after ?? 'the skill'} to your master profile and this resume.`
+      : // A new bullet also wrote the master.
+        kind === 'attest_bullet'
+      ? // Same for a new bullet; its text is not read back, it is on screen under its entry.
+        'Added your new bullet to your master profile and this resume.'
+      : // The structural arms (2026-11-01), one sentence each.
+        kind === 'move_bullet'
+      ? // Where it went is on screen; the sentence confirms the save.
+        'Moved the bullet.'
+      : // A section moved.
+        kind === 'move_section'
+      ? // Same, for a whole section.
+        'Moved the section.'
+      : // A master bullet put back.
+        kind === 'add_master_bullet'
+      ? // Says where the words came from: the master, not the operator.
+        'Added the bullet back from your master profile.'
+      : // A master entry put back.
+        kind === 'add_master_entry'
+      ? // Same, for a whole entry and its bullets.
+        'Added the entry back from your master profile.'
+      : // An entry taken off.
+        kind === 'remove_entry'
+      ? // A whole entry taken off.
+        'Removed the entry.'
       : kind === 'add_skill'
       ? // An add carries the new skill's name in `after`.
         `Added ${outcome.after ?? 'the skill'} to this resume.`
@@ -256,6 +358,11 @@ const GONE_MESSAGE = 'This application is no longer available to you. Reload the
 const EDIT_DISABLED_REASON =
   'Editing is off for this application: the tailor’s original version could not be rebuilt from its saved references, so your edits could not be told apart from its text.';
 
+/* The other way editing is off (2026-11-01): the pinned master could not be resolved whole, so no
+   edit could be checked against it and an add-back would have nothing to copy from. */
+const FULL_UNRESOLVED_REASON =
+  'Editing is off for this application: its pinned master profile version could not be resolved, so no change could be checked against it.';
+
 /* Fix 3: WHICH lines carry the operator's wording, for p_detail.edited_refs. A count says that
    something changed; the refs say what, so the record can be checked against the event log. */
 function editedRefs(diff: ResumeDiff | undefined): string[] {
@@ -265,6 +372,63 @@ function editedRefs(diff: ResumeDiff | undefined): string[] {
   return diff.lines.flatMap((line) =>
     line.editState !== 'original' && line.editTarget !== null ? [editKey(line.editTarget)] : [],
   );
+}
+
+/* Every action that is a pure edit of this resume alone (the two attest arms also write the master
+   and take their own paths). A switch with a `never` default, so a new action fails to compile here
+   instead of falling through to whatever the last branch did. Pure: no state, no network. */
+function pureEdit(
+  // The action, minus the two that write the master.
+  action: Exclude<PageEditAction, { readonly kind: 'attest_skill' } | { readonly kind: 'attest_bullet' }>,
+  // The latest saved resume, the only thing an edit may build on.
+  current: ResolvedResume,
+  // The tailor's version, for Reset and for telling an added skill from a chosen one.
+  original: ResolvedResume,
+  // The pinned master, the only source a skill may come from.
+  master: MasterProfile,
+  // FULL at the pin, the only source a put-back bullet or entry may come from.
+  full: ResolvedResume,
+): EditOutcome {
+  // One arm per action kind; the compiler checks the list is complete (see default).
+  switch (action.kind) {
+    // One bullet's text, or the summary.
+    case 'edit':
+      return applyTextEdit(current, action.target, action.text);
+    // One whole bullet off (D2).
+    case 'remove':
+      return removeBullet(current, action.target);
+    // T3: only the ref crosses from the UI; the skill is built from the PINNED master.
+    case 'add_skill':
+      return addSkill(current, master, action.ref);
+    // T3: only skills the operator added; the tailor's are refused by name.
+    case 'remove_skill':
+      return removeAddedSkill(current, original, action.ref);
+    // Back to the tailor's text, or a removed bullet back in place.
+    case 'reset':
+      return resetTarget(current, original, action.target);
+    // One bullet one place among its siblings.
+    case 'move_bullet':
+      return moveBullet(current, action.ref, action.direction);
+    // One section one place in section_order.
+    case 'move_section':
+      return moveSection(current, action.section, action.direction);
+    // Only the ref crosses from the UI; the bullet is copied from FULL under its own parent.
+    case 'add_master_bullet':
+      return addMasterBullet(current, full, action.ref);
+    // Same for a whole entry, with all its FULL bullets.
+    case 'add_master_entry':
+      return addMasterEntry(current, full, action.section, action.ref);
+    // A whole entry off.
+    case 'remove_entry':
+      return removeEntry(current, action.section, action.ref);
+    // Only for the never check: every kind is listed above.
+    default: {
+      // Unreachable while every arm is listed; a new arm turns this into a compile error.
+      const unhandled: never = action;
+      // A refusal, never a throw, if it is ever reached at runtime.
+      return { ok: false, reason: `Unknown edit ${String((unhandled as { kind?: unknown }).kind)}.` };
+    }
+  }
 }
 
 /* A save that definitely did not happen. The prefix lives HERE, not in DiffView, because only the
@@ -323,6 +487,11 @@ export function ApprovalQueuePage(): ReactElement {
      compute an edit from an older resume and write it over a newer one, or approve a row on
      a bucket it has since left. Refs are updated synchronously on load and on every save. */
   const latestResumes = useRef<Map<string, ResolvedResume>>(new Map());
+  /* Each row's source (master, original, tailor_refs, FULL) as last published. Added 2026-11-01
+     (review finding): an attest RE-PINS the row, and the next op of the same Apply all ran with the
+     render closure's OLD source, so it was refused as "master version changed". Read here, never
+     from `sources`, anywhere an async edit needs the row's current pin. */
+  const latestSources = useRef<Map<string, RowSource>>(new Map());
   // The latest diff per row, for the bucket re-check and edited_lines at settle time.
   const latestDiffs = useRef<Map<string, ResumeDiff>>(new Map());
   /* Fix 2a: each row's updated_at as last seen. An edit is written only if the row still carries
@@ -571,7 +740,11 @@ export function ApprovalQueuePage(): ReactElement {
           // The row as loaded, with the keyword list made safe for the adapter; master_version left as stored.
           const application = { ...app, selected_jd_keywords: app.selected_jd_keywords || [] } as ApplicationRow;
 
-          const diff = buildResumeDiff({ application, job, resolved, master, original });
+          // FULL at the same pin: every master node as a tailoring would render it, for add-backs. Null = edits off.
+          const full = resolveFullMaster(master, version);
+
+          // The diff, with FULL so the add-back offers come from the same pin as everything else.
+          const diff = buildResumeDiff({ application, job, resolved, master, original, full });
 
           diffs.push(diff);
           // Same row, same snapshot: the preview can never show a different resume than the diff.
@@ -590,6 +763,8 @@ export function ApprovalQueuePage(): ReactElement {
             hasCoverLetter: app.cover_letter !== null && app.cover_letter !== undefined,
             // The tailor's record, needed again only if the operator vouches for a skill.
             tailorRefs: app.tailor_refs,
+            // The whole master at the pin, so a save never re-resolves it against another version.
+            full,
           });
         }
 
@@ -598,6 +773,8 @@ export function ApprovalQueuePage(): ReactElement {
         setResumes(snapshots);
         // Same pass, so every rendered row can be rebuilt after a save.
         setSources(rowSources);
+        // The ref starts from the same load, like latestResumes below.
+        latestSources.current = new Map(rowSources);
         // The refs start from the same load, so the first edit and approval read what is on screen.
         latestResumes.current = new Map(snapshots);
         // Same, for the diffs the bucket re-check reads.
@@ -962,7 +1139,7 @@ export function ApprovalQueuePage(): ReactElement {
     // The stamp that resume was stored at; the next edit must present it.
     updatedAt: string,
     // An attest re-pins the row, so it hands in the NEW source; the render closure still holds the old one.
-    source: RowSource | undefined = sources.get(applicationId),
+    source: RowSource | undefined = latestSources.current.get(applicationId),
     // No return value: the refs and the rendered state ARE the result.
   ): void {
     // A row this page never loaded has nothing to rebuild.
@@ -974,6 +1151,8 @@ export function ApprovalQueuePage(): ReactElement {
       resolved: resume,
       master: source.master,
       original: source.original,
+      // The same FULL as the load (or the re-pin), so the add-back offers match what an add would copy.
+      full: source.full,
     });
     // The refs move first and synchronously, so the very next edit or approval reads this.
     latestResumes.current.set(applicationId, resume);
@@ -1000,7 +1179,7 @@ export function ApprovalQueuePage(): ReactElement {
     // A stored value that is not a resume cannot be reviewed; refuse it by name, never render it.
     if (!isResumeShape(stored.resume)) {
       // The job's names, for the refused list.
-      const job = sources.get(applicationId)?.job;
+      const job = latestSources.current.get(applicationId)?.job;
       // Out of the buckets...
       setQueue((previous) => previous.filter((diff) => diff.applicationId !== applicationId));
       // ...and into the refused list, where it can be rejected.
@@ -1086,9 +1265,12 @@ export function ApprovalQueuePage(): ReactElement {
       return notSaved(attested.masterInserted ? `${attested.message} ${action.keyword} was added to your master profile; this resume was not changed.` : attested.message);
     }
     // The row now traces to the new version: its master, original and tailor_refs move with it.
-    const nextSource: RowSource = { ...source, master: attested.master, original: attested.original, tailorRefs: attested.tailorRefs };
+    // FULL is re-resolved at the NEW pin: the old one lacks the attested skill's master version.
+    const nextSource: RowSource = { ...source, master: attested.master, original: attested.original, tailorRefs: attested.tailorRefs, full: resolveFullMaster(attested.master, attested.resume.master_version) };
     // Published for later renders and edits.
     setSources((previous) => new Map(previous).set(applicationId, nextSource));
+    // Synchronously, so the very next op of the same batch reads the new pin.
+    latestSources.current.set(applicationId, nextSource);
     // Redrawn against the NEW source now; the closure would still hold the old pin's master.
     adoptRow(applicationId, attested.resume, attested.updatedAt, nextSource);
     // Bucket before and after, derived the same way the render partitions the queue.
@@ -1107,6 +1289,99 @@ export function ApprovalQueuePage(): ReactElement {
     return { ok: true, skillRef: attested.skillRef };
   }
 
+  /* A BRAND-NEW BULLET (2026-11-01). Modelled on attestRow: the words never enter the resume directly.
+     attestBullet writes them into the master as a new immutable version under their parent entry,
+     re-pins the row, then adds the bullet by ref, so FULL contains it and the auditor can trace it.
+     Called only from editRow, after its guards (not mid-approval, one save at a time, loaded, pin
+     unchanged since load, FULL resolved). */
+  async function attestBulletRow(
+    // The row being reviewed.
+    applicationId: string,
+    // Where the bullet goes and what it says.
+    action: { readonly section: BulletSection; readonly parentRef: string; readonly text: string },
+    // The row's load inputs, which the re-pin replaces.
+    source: RowSource,
+    // The tailor's version at the current pin; editRow has proven it non-null.
+    original: ResolvedResume,
+    // The latest saved resume.
+    current: ResolvedResume,
+    // The stamp it was read or saved at.
+    stamp: string,
+    // The connected client; editRow refused a null one.
+    client: NonNullable<typeof supabase>,
+    // The same result shape as any edit, so DiffView locks and reports it the same way.
+  ): Promise<EditResult> {
+    // Emptied first, so the same sentence twice is still re-announced.
+    setAnnouncement('');
+    // The bucket before, to tell whether the save moved the row.
+    const previousDiff = latestDiffs.current.get(applicationId);
+    // Marked before the await, so a batch approval skips this row while it saves.
+    editing.current.add(applicationId);
+    // Declared outside the try so the result survives the finally.
+    let attested: Awaited<ReturnType<typeof attestBullet>>;
+    // try/finally, so the per-row lock is released even if attestBullet throws.
+    try {
+      // Master version first, then the re-pinned resume; it never throws by design.
+      attested = await attestBullet(client, {
+        // The row being written.
+        applicationId,
+        // The section and entry the bullet belongs under: its true parent in the master.
+        section: action.section,
+        parentRef: action.parentRef,
+        // The operator's words, which become the master bullet's text.
+        text: action.text,
+        // The latest saved resume, so the add never builds on an older one.
+        current,
+        // The tailor's version at the current pin, for the rebuild proof.
+        original,
+        // The tailor's record, re-pinned in the same write as the resume.
+        tailorRefs: source.tailorRefs,
+        // Optimistic concurrency, same as every other edit.
+        expectedUpdatedAt: stamp,
+        // A fresh master node id; NodeIds must be unique across the whole master.
+        newBulletId: `bullet_${crypto.randomUUID()}`,
+      });
+    // Runs on success, refusal and throw alike.
+    } finally {
+      // Released whatever happened.
+      editing.current.delete(applicationId);
+    }
+    // Not saved, or not known to be saved.
+    if (!attested.ok) {
+      // A refused or unknown row write: show what IS stored, as every other edit does.
+      if (attested.stored !== undefined) {
+        // Redrawn from the database, never from the operator's attempt.
+        adoptStored(applicationId, attested.stored);
+        // Page-level, because the whole row may have changed.
+        toast.error(attested.message);
+      }
+      // The master write is never silent: if a version was made, the operator is told it exists.
+      return notSaved(attested.masterInserted ? `${attested.message} The bullet was added to your master profile; this resume was not changed.` : attested.message);
+    }
+    // The row now traces to the new version: master, original, tailor_refs and FULL all move with it.
+    const nextSource: RowSource = { ...source, master: attested.master, original: attested.original, tailorRefs: attested.tailorRefs, full: resolveFullMaster(attested.master, attested.resume.master_version) };
+    // Published for later renders and edits.
+    setSources((previous) => new Map(previous).set(applicationId, nextSource));
+    // Synchronously, so the very next op of the same batch reads the new pin.
+    latestSources.current.set(applicationId, nextSource);
+    // Redrawn against the NEW source now; the closure would still hold the old pin's master.
+    adoptRow(applicationId, attested.resume, attested.updatedAt, nextSource);
+    // Bucket before and after, derived the same way the render partitions the queue.
+    const from = previousDiff === undefined ? undefined : deriveBucket(previousDiff);
+    // adoptRow just put the rebuilt diff in the ref synchronously.
+    const nextDiff = latestDiffs.current.get(applicationId);
+    // Bucket after; undefined only for a row never loaded, which editRow's guards refused.
+    const to = nextDiff === undefined ? undefined : deriveBucket(nextDiff);
+    // Always announced: unlike a skill attest, no other live region speaks a landed bullet.
+    setAnnouncement(announcementFor('attest_bullet', { before: null, after: action.text }, from, to));
+    // A move needs the page to place focus.
+    if (from !== undefined && to !== undefined && from !== to) setPendingFocusId(applicationId);
+    // Saved; only the history note is missing.
+    if (!attested.eventRecorded) toast.error('The bullet was saved, but it could not be added to the application history.');
+    // Saved.
+    return { ok: true };
+  }
+
   /* THE EDIT PATH: click -> pure edit -> saveTailoredEdit -> state replaced with the SAVED
      resume (or, if the save is refused or unconfirmed, with what IS stored). Nothing is shown as
      changed until the database has accepted it, so the preview, the Download and the score can
@@ -1114,8 +1389,8 @@ export function ApprovalQueuePage(): ReactElement {
   async function editRow(applicationId: string, action: PageEditAction): Promise<EditResult> {
     // Editing IS reviewing the latest version, which is what the stale notice asked for, so it retires.
     clearStale(applicationId);
-    // What this row's diff was built from.
-    const source = sources.get(applicationId);
+    // What this row's diff was built from, as last published (never the render closure's copy).
+    const source = latestSources.current.get(applicationId);
     // An approval or rejection is in flight; an edit now could land mid-approval.
     if (settlingRef.current.has(applicationId)) return notSaved('this application is being approved or rejected.');
     // One save at a time per row, or the second would start from the pre-save resume.
@@ -1138,23 +1413,17 @@ export function ApprovalQueuePage(): ReactElement {
     // No client, no write; say so instead of pretending.
     if (supabase === null) return notSaved('not connected to the database.');
 
+    // No FULL: nothing could be checked against the master, so refuse before any write (same rule as the banner).
+    if (source.full === null) return notSaved(FULL_UNRESOLVED_REASON);
+
     // Vouching for a missing skill also writes the master, so it has its own path (attestRow above).
     if (action.kind === 'attest_skill') return attestRow(applicationId, action, source, source.original, current, stamp, supabase);
+    // A brand-new bullet writes the master too, so it has the same kind of path (attestBulletRow above).
+    if (action.kind === 'attest_bullet') return attestBulletRow(applicationId, action, source, source.original, current, stamp, supabase);
 
-    /* The pure operation. Each returns a NEW resume, touching only one bullet's text or the
-       summary (R0), and refuses empty, oversized or unknown-ref edits before any write. */
-    const outcome =
-      action.kind === 'edit'
-        ? applyTextEdit(current, action.target, action.text)
-        : action.kind === 'remove'
-          ? removeBullet(current, action.target)
-          : action.kind === 'add_skill'
-            ? // T3: only the ref crosses from the UI; the skill is built from the PINNED master.
-              addSkill(current, source.master, action.ref)
-            : action.kind === 'remove_skill'
-              ? // T3: only skills the operator added; the tailor's are refused by name.
-                removeAddedSkill(current, source.original, action.ref)
-              : resetTarget(current, source.original, action.target);
+    /* The pure operation. Each returns a NEW resume, or a refusal before any write; tracesToMaster
+       then checks at the save boundary that every node still traces to the pinned master. */
+    const outcome = pureEdit(action, current, source.original, source.master, source.full);
     // A refused edit never reaches the network.
     if (!outcome.ok) return notSaved(outcome.reason);
 
@@ -1418,7 +1687,7 @@ export function ApprovalQueuePage(): ReactElement {
                     /* Saves for real; see editRow. */
                     onEdit={(action) => editRow(diff.applicationId, action)}
                     /* D4: only when the tailor's original could not be rebuilt. */
-                    editDisabledReason={sources.get(diff.applicationId)?.original === null ? EDIT_DISABLED_REASON : null}
+                    editDisabledReason={editOffReason(sources.get(diff.applicationId))}
                     /* So the diff can say the letter predates the edits. */
                     hasCoverLetter={sources.get(diff.applicationId)?.hasCoverLetter === true}
                     /* Locks edits and Approve while this row's approve/reject is in flight. */
@@ -1566,7 +1835,7 @@ export function ApprovalQueuePage(): ReactElement {
                         /* Same save path as Bucket B; an edit moves the row there (R2). */
                         onEdit={(action) => editRow(diff.applicationId, action)}
                         /* D4, as in Bucket B. */
-                        editDisabledReason={sources.get(diff.applicationId)?.original === null ? EDIT_DISABLED_REASON : null}
+                        editDisabledReason={editOffReason(sources.get(diff.applicationId))}
                         /* Cover-letter note, as in Bucket B. */
                         hasCoverLetter={sources.get(diff.applicationId)?.hasCoverLetter === true}
                         /* Same lock as Bucket B, including during the batch. */

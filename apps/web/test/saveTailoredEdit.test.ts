@@ -5,8 +5,8 @@
  *     filtered on status AND on the updated_at the page loaded (optimistic concurrency), and only
  *     "exactly one row came back" counts as saved. Never a read-then-write: a read can be stale by
  *     the time the write lands.
- *   - R0 at the write boundary: a resume whose change is not text-only (e.g. master_text moved) is
- *     refused before any network call.
+ *   - R0' at the write boundary (2026-11-01): a resume carrying a node that does not trace to the
+ *     pinned master (e.g. master_text moved, an invented bullet) is refused before any network call.
  *   - A thrown UPDATE means the outcome is UNKNOWN, so the code re-reads instead of guessing.
  *
  * The client is a hand-built fake recording every call in order; no network. Every builder step is
@@ -50,7 +50,36 @@ const resume = (text: string, masterText = 'Old text') => ({
   projects: [], education: [], achievements: [], certifications: [],
 });
 
-// The tailor's version, rebuilt from tailor_refs: the reference for master_text.
+// The pinned master the fixture traces to (R0'): Acme with the bullet every edit targets, plus one
+// bullet the resume does not print, so a structural add-back can be saved too. Same display fields
+// as resume() above, because the gate compares every entry field with FULL's.
+const MASTER = {
+  // The profile's shape marker.
+  schema_version: 1,
+  // Not compared by the gate (identity is held to previous), but a master needs one.
+  identity: { full_name: 'Test Person', headline: null, email: 'test@example.com', phone: null, location: null, links: [] },
+  // No summary node.
+  summary: null,
+  // The one employer; b-docs is the add-back bullet.
+  experience: [{
+    id: 'exp-acme', company: 'Acme', role: 'Backend Intern', location: 'Remote', start_display: 'Jun 2025', end_display: 'Aug 2025', start_date: null, end_date: null,
+    bullets: [{ id: 'b-tests', text: 'Old text', tags: [] }, { id: 'b-docs', text: 'Wrote docs for the billing service', tags: [] }],
+  }],
+  // The remaining required arrays.
+  projects: [], education: [], achievements: [], certifications: [], skills: [], links: [],
+};
+
+// PREVIOUS with the master's second bullet added back, built the way FULL holds it.
+const withDocs = () => {
+  // A fresh resume per call, so no test mutates another's.
+  const r = resume('Old text');
+  // FULL's node: text and master_text both the master's words.
+  r.experience[0]!.bullets.push({ ref: 'b-docs', text: 'Wrote docs for the billing service', master_text: 'Wrote docs for the billing service' });
+  // The candidate.
+  return r;
+};
+
+// The tailor's version, rebuilt from tailor_refs: the base the skills rule measures against.
 const ORIGINAL = resume('Old text');
 // What tailored_profile held when the page loaded.
 const PREVIOUS = resume('Old text');
@@ -133,7 +162,7 @@ function fakeClient(answers: { update?: Answer; reselect?: Answer; insert?: Answ
 }
 
 // Shorthand: run one save with these answers, defaulting to a legal edit.
-const run = (answers: Parameters<typeof fakeClient>[0], next: unknown = NEXT) => {
+const run = (answers: Parameters<typeof fakeClient>[0], next: unknown = NEXT, event: unknown = EVENT) => {
   // A fresh fake per run, so call logs never leak between tests.
   const fake = fakeClient(answers);
   // The call under test, with the v2 arguments.
@@ -142,14 +171,16 @@ const run = (answers: Parameters<typeof fakeClient>[0], next: unknown = NEXT) =>
     applicationId: 'app-1',
     // What to write.
     resume: next as never,
-    // What the page believed was stored, for the text-only check.
+    // What the page believed was stored, for the R0' check.
     previous: PREVIOUS as never,
-    // The tailor's version, for master_text and ref integrity.
+    // The tailor's version, for the skills rule.
     original: ORIGINAL as never,
+    // The pinned master: FULL, the ground truth for every entry and bullet, is resolved from it.
+    master: MASTER as never,
     // The optimistic-concurrency token.
     expectedUpdatedAt: LOADED_STAMP,
     // The audit note.
-    event: EVENT,
+    event: event as never,
   });
   // Both returned so the test can await the result and inspect the log.
   return { done, calls: fake.calls };
@@ -187,7 +218,7 @@ describe('saveTailoredEdit: the write boundary', () => {
     // Refused with the contract's reason.
     assert.equal(result.ok, false);
     // Named so the page can say why.
-    if (!result.ok) assert.equal(result.reason, 'not_text_only');
+    if (!result.ok) assert.equal(result.reason, 'not_traced');
     // Before touching the network at all.
     assert.equal(calls.length, 0);
     // Positive control: the same save with master_text untouched reaches the client and succeeds.
@@ -198,6 +229,29 @@ describe('saveTailoredEdit: the write boundary', () => {
     assert.ok(control.calls.length > 0);
   });
 
+  it("R0': a master bullet added back saves, and the note names the structural kind", async () => {
+    // The add-back candidate, with one of the new event kinds.
+    const { done, calls } = run({}, withDocs(), { kind: 'resume_add_bullet', ref: 'b-docs', before: null, after: 'Wrote docs for the billing service' });
+    // Saved: the bullet traces to the master under its own entry.
+    assert.equal((await done).ok, true);
+    // The note carries the structural kind, so the log says what kind of change this was.
+    assert.equal((inserts(calls)[0]!.args[0] as { detail: { kind: string } }).detail.kind, 'resume_add_bullet');
+    // The same bullet under a ref the master never had: an invented line.
+    const invented = withDocs();
+    // Only the ref differs.
+    invented.experience[0]!.bullets[1]!.ref = 'b-invented';
+    // Saved through the same path.
+    const refused = run({}, invented);
+    // Awaited.
+    const result = await refused.done;
+    // Refused with the gate's reason.
+    assert.equal(result.ok, false);
+    // Named.
+    if (!result.ok) assert.equal(result.reason, 'not_traced');
+    // Before any network call.
+    assert.equal(refused.calls.length, 0);
+  });
+
   it('an invalid resume shape is refused with zero client calls', async () => {
     // Not a resume: schema 2 is not this code's to write.
     const { done, calls } = run({}, { ...NEXT, schema_version: 2 });
@@ -205,7 +259,7 @@ describe('saveTailoredEdit: the write boundary', () => {
     const result = await done;
     // Refused.
     assert.equal(result.ok, false);
-    // With the shape reason, not the text-only one.
+    // With the shape reason, not the R0' one.
     if (!result.ok) assert.equal(result.reason, 'invalid_resume_shape');
     // No network.
     assert.equal(calls.length, 0);

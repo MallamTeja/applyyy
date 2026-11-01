@@ -64,6 +64,21 @@ describe('createChatStore', () => {
     assert.deepEqual(result.messages.map((m) => [m.role, m.ops?.length ?? null, m.usage?.input ?? null]), [['user', null, null], ['assistant', 1, 900]]);
   });
 
+  it('loads a reply whose ops are structure edits (2026-11-01), through the same shared reader', async () => {
+    // A move, an add-back and a new bullet, as the panel stores them.
+    const ops = [
+      { op: 'move', ref: 'x_b3', direction: 'up', past: 'x_b2', before: 'Shipped C.' },
+      { op: 'add_entry', section: 'achievements', ref: 'ach_1', label: 'LeetCode' },
+      { op: 'new_bullet', section: 'projects', parentRef: 'p', parentLabel: 'F1', text: 'Predicted pace.' },
+    ];
+    // One assistant row carrying them.
+    const { client } = fakeClient({ data: [{ ...row(5, 'c1', 'assistant', 'Done.', 't'), ops }], error: null });
+    // The read.
+    const result = await chat.createChatStore(client).load('a');
+    // Read whole, each op as stored.
+    assert.deepEqual(result.kind === 'ok' ? result.messages[0]?.ops : null, ops);
+  });
+
   it('refuses the whole read when one row is malformed, and passes a database error through', async () => {
     // An assistant row without ops breaks the role/ops rule.
     const bad = { ...row(2, 'c1', 'assistant', 'Done.', 't'), ops: null };

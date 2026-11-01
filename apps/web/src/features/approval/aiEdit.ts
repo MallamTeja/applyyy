@@ -3,7 +3,7 @@
  * of the page's own EditActions.
  *
  * WHY THE AI ANSWERS IN EditActions AND NEVER IN RESUMES. Every edit on this page already
- * crosses one guarded write (saveTailoredEdit: shape check, R0 text-only check, status and
+ * crosses one guarded write (saveTailoredEdit: shape check, R0' tracesToMaster check, status and
  * stamp guards, an append-only event). Mapping the AI's ops onto the SAME actions a click makes
  * means the AI gets no new write path at all: it can only suggest what the operator could have
  * typed, and only the operator's Apply click sends it.
@@ -12,15 +12,29 @@
  * browser. Refs are long and cost tokens on every call, and a model that never sees a ref cannot
  * invent one: an id it was not given is simply not in the map.
  *
+ * STRUCTURE EDITS (2026-11-01, docs/ui/2026-11-01-review-structure-edits-contract.md). When the page
+ * passes an AssistStructure, the AI also sees the section order, each entry labelled once ("e0"),
+ * which entry every bullet sits under, and a capped list of master items NOT on the resume ("m0"
+ * bullets, "n0" entries). It can then move a bullet or a section one place, add a master item back,
+ * or write a new bullet. Each maps onto the page's own structural EditAction, so again no new write
+ * path: tracesToMaster checks every one at the save boundary. Without a structure the body is
+ * exactly what it was before, so the page can ship this before it computes one.
+ *
  * Pure apart from the injected client, so node --test drives it with a fake. */
 
 // Types only: the diff the page renders, and the action vocabulary the save path understands.
 import type { ResumeDiff } from './diffModel';
 // Type-only import from the view: the action union is declared there, beside the controls.
 import type { EditAction } from './DiffView';
+/* Types only from the core edits: section names, directions, and the shape of a master item not on
+   the resume. Type-only so this file never runs W1's code, only compiles against its names. */
+import type { AddableBullet, AddableEntry, BulletSection, MoveDirection, SectionKind } from './tailoredEdits';
 /* The auditor's own rule 5 and tokenizer, imported by relative path (as diffAdapter.ts imports
    jd-keywords) so the advice shown before Apply is the audit's definition, never a copy. */
 import { bulletGroundingGaps, tokenizeText } from '../../../../../supabase/functions/_shared/audit/detector.ts';
+/* The closed list of section names, shared with the tailor's schema and the edge function, so a
+   stored op naming a section is checked against the same seven words everywhere. */
+import { TAILOR_SECTION_KINDS } from '../../../../../supabase/functions/_shared/tailor/prompt.ts';
 
 /* The body the edge function validates (resume-assist/assist.ts parseAssistRequest). */
 export interface AssistBody {
@@ -30,14 +44,47 @@ export interface AssistBody {
   readonly job: { readonly title: string; readonly company: string; readonly missing: readonly string[] };
   // The current summary, or null.
   readonly summary: string | null;
-  // Current bullet text under short ids.
-  readonly bullets: readonly { readonly id: string; readonly text: string }[];
+  // Current bullet text under short ids, with the short id of its entry when a structure was given.
+  readonly bullets: readonly { readonly id: string; readonly text: string; readonly entry?: string }[];
   // The printed skills line.
   readonly skills: string;
   // The master's skill groups.
   readonly categories: readonly string[];
   // Earlier messages of the active chat, oldest first (chat memory, 2026-11-01).
   readonly history: readonly ChatTurn[];
+  // STRUCTURE (2026-11-01); the three fields below are sent only when the page passed a structure.
+  // The printed section order.
+  readonly sections?: readonly SectionKind[];
+  // The entries on the resume, each labelled once.
+  readonly entries?: readonly { readonly id: string; readonly section: BulletSection; readonly label: string }[];
+  // Master items not on the resume: a bullet under an entry above, or a whole entry.
+  readonly available?: readonly ({ readonly id: string; readonly entry: string; readonly text: string } | { readonly id: string; readonly section: BulletSection; readonly label: string })[];
+}
+
+/* One entry on the current resume, as the page describes it (see AssistStructure). */
+export interface AssistEntry {
+  // Which section it is in.
+  readonly section: BulletSection;
+  // Its master node ref.
+  readonly ref: string;
+  // tailoredEdits.entryLabel(section, entry), e.g. "Aczen Technologies · Full Stack AI Engineer".
+  readonly label: string;
+  // Its bullets' refs in printed order: the siblings a move swaps among.
+  readonly bulletRefs: readonly string[];
+}
+
+/* What the page passes so the AI can make structural edits. Built from the CURRENT resume on every
+   render, so it is also the record isApplied reads a structural op against:
+     sections: current.section_order
+     entries:  every entry of every bullet section, in printed order, as an AssistEntry
+     addable:  tailoredEdits.addableFromMaster(current, full), as returned */
+export interface AssistStructure {
+  // The printed section order.
+  readonly sections: readonly SectionKind[];
+  // Every entry on the resume.
+  readonly entries: readonly AssistEntry[];
+  // Master items not on the resume.
+  readonly addable: { readonly bullets: readonly AddableBullet[]; readonly entries: readonly AddableEntry[] };
 }
 
 /* One earlier message, as the edge function takes it: who said it and what. */
@@ -55,7 +102,15 @@ export type AssistOp =
   // Drop a bullet.
   | { readonly op: 'remove'; readonly id: string }
   // Add a skill under one of the master's groups.
-  | { readonly op: 'add_skill'; readonly name: string; readonly category: string };
+  | { readonly op: 'add_skill'; readonly name: string; readonly category: string }
+  // A bullet one place up or down within its entry.
+  | { readonly op: 'move'; readonly id: string; readonly direction: MoveDirection }
+  // A section one place up or down; a name from the sent order, checked again on resolve.
+  | { readonly op: 'move_section'; readonly section: string; readonly direction: MoveDirection }
+  // A master item back onto the resume, by its "mN" or "nN" id.
+  | { readonly op: 'add_back'; readonly id: string }
+  // New bullet text under an entry, by its "eN" id.
+  | { readonly op: 'new_bullet'; readonly entry: string; readonly text: string };
 
 /* Billed token counts for one ask; null where Google did not report a number. */
 export interface AssistUsage {
@@ -90,6 +145,14 @@ export interface AssistDraft {
   readonly skillTokens: ReadonlySet<string>;
   // Every master skill name, lower-cased, so a card can say whether Apply also adds it to the master.
   readonly masterSkills: ReadonlySet<string>;
+  // Short entry id -> the entry on the resume; new_bullet's parent. Empty without a structure.
+  readonly entries: ReadonlyMap<string, AssistEntry>;
+  // "mN" -> the master bullet it stands for. Empty without a structure.
+  readonly availableBullets: ReadonlyMap<string, AddableBullet>;
+  // "nN" -> the master entry it stands for. Empty without a structure.
+  readonly availableEntries: ReadonlyMap<string, AddableEntry>;
+  // The structure the ask was built from: the orders a move is resolved against. Null without one.
+  readonly structure: AssistStructure | null;
 }
 
 /* What the audit would say about one AI edit, shown BEFORE Apply. Advice only (2026-10-31):
@@ -113,6 +176,27 @@ export interface AssistClient {
 const MAX_LIST = 40;
 // Same: the longest keyword or group name the function accepts.
 const MAX_ITEM = 80;
+// The edge function's bullet cap (resume-assist MAX_BULLETS); mirrored so a long resume is trimmed here.
+const MAX_BULLETS = 80;
+// Same: the most entries the function accepts (resume-assist MAX_ENTRIES).
+const MAX_ENTRIES = 40;
+// Same: the most master items not on the resume (MAX_AVAILABLE). Token cost: no full master dump.
+const MAX_AVAILABLE = 30;
+// Same: the longest entry label (MAX_LABEL).
+const MAX_LABEL = 120;
+// Same: the longest AVAILABLE bullet text (MAX_AVAILABLE_TEXT). Only the model's choice reads it.
+const MAX_AVAILABLE_TEXT = 200;
+
+/* A display string cut to `max` characters, never blank. The function refuses a blank or oversized
+   label outright, which would refuse the whole ask over one odd master node. */
+function clip(text: string, max: number, fallback: string): string {
+  // One line, as the prompt prints it.
+  const flat = text.replace(/\s+/g, ' ').trim();
+  // Blank becomes the stated fallback, never an empty label.
+  if (flat === '') return fallback;
+  // Cut with an ellipsis so the model knows the text goes on.
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
 
 /* A line's printed text: its runs joined, exactly as the diff renders them. */
 function lineText(runs: readonly { readonly text: string }[]): string {
@@ -126,8 +210,75 @@ function shortList(items: readonly string[]): string[] {
   return items.map((item) => item.trim()).filter((item) => item !== '' && item.length <= MAX_ITEM).slice(0, MAX_LIST);
 }
 
-/* Build the compact projection the AI sees, from what the page already rendered. */
-export function buildAssistDraft(diff: ResumeDiff, categories: readonly string[], instruction: string, history: readonly ChatTurn[] = []): AssistDraft {
+/* Build the compact projection the AI sees, from what the page already rendered. `structure` is
+   optional: without it the body is exactly the pre-structure one, and no structural op can resolve. */
+/* The structure prop, read from the diff the page already rendered (2026-11-01 integration). The
+   diff's sections are the CURRENT resume's, printed ones first in print order (diffAdapter), so the
+   chat sees exactly what the operator sees, from one derivation, never a second one from the
+   resume that could drift. Null when the diff carries no sections (a hand-built fixture). */
+export function structureFromDiff(diff: ResumeDiff): AssistStructure | null {
+  // No sections: the chat keeps its pre-structure behaviour.
+  if (diff.sections === undefined) return null;
+  // Lines by id, so an entry's line ids resolve to its bullets.
+  const lineById = new Map(diff.lines.map((line) => [line.id, line]));
+  // Every entry still on the resume, with its printed bullet refs in order.
+  const entries: AssistEntry[] = [];
+  // Bullets offered back, each under the entry that owns it.
+  const bullets: AddableBullet[] = [];
+  // Whole entries offered back.
+  const offeredEntries: AddableEntry[] = [];
+  // Section by section, in the diff's order.
+  for (const section of diff.sections) {
+    // Summary and skills hold no entries; only the five bullet sections do.
+    if (section.kind === 'summary' || section.kind === 'skills') continue;
+    // Narrowed for the typed records below.
+    const kind: BulletSection = section.kind;
+    // Each entry the diff shows.
+    for (const entry of section.entries) {
+      // A removed entry is not on the resume, so the AI cannot target it.
+      if (entry.state === 'removed') continue;
+      // Its printed bullets: lines still on the resume, in the order the diff walks them.
+      const bulletRefs = entry.lineIds
+        // Each line id resolved.
+        .map((id) => lineById.get(id))
+        // Only bullet lines that are still printed.
+        .filter((line) => line !== undefined && line.editState !== 'removed' && line.editTarget?.kind === 'bullet')
+        // Their refs.
+        .map((line) => (line!.editTarget as { readonly ref: string }).ref);
+      // The entry as the AI sees it.
+      entries.push({ section: kind, ref: entry.ref, label: entry.label, bulletRefs });
+      // Its offered master bullets, with the owner the contract's AddableBullet names.
+      for (const offer of entry.addableBullets) bullets.push({ ref: offer.ref, text: offer.text, section: kind, parentRef: entry.ref, parentLabel: entry.label });
+    }
+    // Whole entries this section can take back.
+    for (const offer of section.addableEntries) offeredEntries.push({ ref: offer.ref, section: kind, label: offer.label });
+  }
+  // The printed order, as section_order spells it.
+  const sections = diff.sections.filter((section) => section.printed).map((section) => section.kind as SectionKind);
+  // Assembled.
+  return { sections, entries, addable: { bullets, entries: offeredEntries } };
+}
+
+export function buildAssistDraft(
+  diff: ResumeDiff,
+  categories: readonly string[],
+  instruction: string,
+  history: readonly ChatTurn[] = [],
+  structure: AssistStructure | null = null,
+): AssistDraft {
+  // Short entry id -> entry, numbered in the page's order and capped like the function.
+  const entries = new Map<string, AssistEntry>((structure?.entries ?? []).slice(0, MAX_ENTRIES).map((entry, index) => [`e${index}`, entry]));
+  // Bullet ref -> its entry's short id, so each bullet can be tagged as it is numbered.
+  const entryOfBullet = new Map<string, string>();
+  // Entry ref (scoped by section, since refs are only unique per section) -> short id, for AVAILABLE bullets.
+  const entryIdOf = new Map<string, string>();
+  // Both filled from the same walk.
+  for (const [id, entry] of entries) {
+    // The entry itself.
+    entryIdOf.set(`${entry.section}:${entry.ref}`, id);
+    // Each of its bullets.
+    for (const ref of entry.bulletRefs) entryOfBullet.set(ref, id);
+  }
   // Short id -> ref, filled as bullets are numbered.
   const refs = new Map<string, string>();
   // Short id -> text at ask time.
@@ -139,7 +290,7 @@ export function buildAssistDraft(diff: ResumeDiff, categories: readonly string[]
   // Master skill names; empty until the skills line is read.
   let masterSkills = new Set<string>();
   // The bullets sent.
-  const bullets: { id: string; text: string }[] = [];
+  const bullets: { id: string; text: string; entry?: string }[] = [];
   // The summary, null until a summary line is found.
   let summary: string | null = null;
   // The skills line, empty until found.
@@ -148,6 +299,9 @@ export function buildAssistDraft(diff: ResumeDiff, categories: readonly string[]
   for (const line of diff.lines) {
     // A bullet that is still printed and can be edited: the only ones an op could target.
     if (line.kind === 'bullet' && line.editTarget?.kind === 'bullet' && line.editState !== 'removed') {
+      /* The edge function refuses more than MAX_BULLETS (assist.ts): past that the AI sees no more
+         bullets, rather than the whole ask failing on a long resume (review finding, 2026-11-01). */
+      if (bullets.length >= MAX_BULLETS) continue;
       // Numbered in print order.
       const id = `b${bullets.length}`;
       // Its current text.
@@ -160,8 +314,10 @@ export function buildAssistDraft(diff: ResumeDiff, categories: readonly string[]
       before.set(id, text);
       // The master bullet this one rewords (diffAdapter sets it from bullet.master_text).
       masterText.set(id, line.masterText);
-      // Sent.
-      bullets.push({ id, text });
+      // Its entry's short id, when the page passed a structure that lists it.
+      const entry = entryOfBullet.get(line.editTarget.ref);
+      // Sent; the key is left out rather than set to undefined (exactOptionalPropertyTypes, and a smaller body).
+      bullets.push(entry === undefined ? { id, text } : { id, text, entry });
     } else if (line.kind === 'summary') {
       // The one summary line.
       summary = lineText(line.tailoredRuns);
@@ -181,6 +337,20 @@ export function buildAssistDraft(diff: ResumeDiff, categories: readonly string[]
   const matched = new Set([...diff.coverage.honestlyMatched, ...diff.coverage.matchedByFabrication, ...diff.coverage.matchedByEdit]);
   // The keywords still missing: the useful hint, and far cheaper than the whole posting.
   const missing = shortList(diff.coverage.jdKeywords.filter((keyword) => !matched.has(keyword)));
+  // "nN" -> master entry, whole entries first: "add my LeetCode achievement back" is the common ask.
+  const availableEntries = new Map<string, AddableEntry>((structure?.addable.entries ?? []).slice(0, MAX_AVAILABLE).map((entry, index) => [`n${index}`, entry]));
+  // Each master bullet with its entry's short id; one whose entry is not on the resume (or past the
+  // entry cap) is left out, since addMasterBullet needs the parent there.
+  const placeable = (structure?.addable.bullets ?? []).flatMap((bullet) => {
+    // The parent's short id, if listed.
+    const entry = entryIdOf.get(`${bullet.section}:${bullet.parentRef}`);
+    // Kept as a pair, so the body never has to look the id up again.
+    return entry === undefined ? [] : [{ bullet, entry }];
+  });
+  // In the room the entries left under the cap.
+  const shownBullets = placeable.slice(0, MAX_AVAILABLE - availableEntries.size);
+  // "mN" -> master bullet.
+  const availableBullets = new Map<string, AddableBullet>(shownBullets.map(({ bullet }, index) => [`m${index}`, bullet]));
   // The body, every list capped.
   const body: AssistBody = {
     instruction: instruction.trim(),
@@ -191,9 +361,25 @@ export function buildAssistDraft(diff: ResumeDiff, categories: readonly string[]
     categories: shortList(categories),
     // The caller (resumeChat.historyFor) already windowed and trimmed it to the function's caps.
     history,
+    // The structure, only when the page passed one, so an old body stays byte-identical.
+    ...(structure === null
+      ? {}
+      : {
+          // The printed order, as section_order spells it.
+          sections: structure.sections,
+          // Each entry once, its label cut to the function's cap.
+          entries: [...entries].map(([id, entry]) => ({ id, section: entry.section, label: clip(entry.label, MAX_LABEL, entry.section) })),
+          // Entries first, then bullets; each bullet names its entry by short id, never by ref.
+          available: [
+            // A whole entry: section and label.
+            ...[...availableEntries].map(([id, entry]) => ({ id, section: entry.section, label: clip(entry.label, MAX_LABEL, entry.section) })),
+            // A bullet: its entry's id and its text, cut; numbered exactly as availableBullets.
+            ...shownBullets.map(({ bullet, entry }, index) => ({ id: `m${index}`, entry, text: clip(bullet.text, MAX_AVAILABLE_TEXT, '(no text)') })),
+          ],
+        }),
   };
   // Sent with the maps the answer and the audit advice need.
-  return { body, refs, before, masterText, skillTokens, masterSkills };
+  return { body, refs, before, masterText, skillTokens, masterSkills, entries, availableBullets, availableEntries, structure };
 }
 
 /* The audit's verdict on one AI op, or null for an op that changes no wording. */
@@ -233,20 +419,102 @@ export type StoredOp =
   // One bullet dropped, with the text it had.
   | { readonly op: 'remove'; readonly ref: string; readonly before: string | null }
   // A skill, and whether the master already had it when proposed.
-  | { readonly op: 'add_skill'; readonly name: string; readonly category: string; readonly inMaster: boolean };
+  | { readonly op: 'add_skill'; readonly name: string; readonly category: string; readonly inMaster: boolean }
+  /* A bullet one place up or down. `past` is the sibling it moves past: what makes the op's effect
+     checkable later ("ref now sits above past"), since "up" alone means nothing once it is applied. */
+  | { readonly op: 'move'; readonly ref: string; readonly direction: MoveDirection; readonly past: string; readonly before: string | null }
+  // A section one place up or down, past the neighbouring section, for the same reason.
+  | { readonly op: 'move_section'; readonly section: SectionKind; readonly direction: MoveDirection; readonly past: SectionKind }
+  // A master bullet back under its entry, with its master text and the entry's label for the card.
+  | { readonly op: 'add_bullet'; readonly ref: string; readonly text: string; readonly parentLabel: string }
+  // A whole master entry back onto the resume.
+  | { readonly op: 'add_entry'; readonly section: BulletSection; readonly ref: string; readonly label: string }
+  // New bullet text under an entry; Apply writes it into the master first (attestBullet).
+  | { readonly op: 'new_bullet'; readonly section: BulletSection; readonly parentRef: string; readonly parentLabel: string; readonly text: string };
 
-/* Resolve one answer op against the ask it came from; null when its id was never sent. */
-export function toStoredOp(op: AssistOp, draft: AssistDraft): StoredOp | null {
+/* Resolve an answer's ops against the ask they came from, in order; null for each one that cannot
+   apply to this resume (an id never sent, a move already at the end). Replaced the one-op
+   toStoredOp on 2026-11-01, because a move can only be resolved knowing the moves before it. The orders
+   are copied and each move (and removal) is played on the copy, because the saves land in order:
+   "move b3 up" twice must pass two different siblings, and a bullet already first cannot go up. */
+export function resolveOps(ops: readonly AssistOp[], draft: AssistDraft): (StoredOp | null)[] {
+  // Each entry's bullet refs, copied so the ask's structure is never changed.
+  const lists = (draft.structure?.entries ?? []).map((entry) => [...entry.bulletRefs]);
+  // The section order, copied the same way.
+  const sections = [...(draft.structure?.sections ?? [])];
+  // One op at a time, against the orders as the earlier ops left them.
+  return ops.map((op) => resolveOne(op, draft, lists, sections));
+}
+
+/* Swap list[at] with its neighbour one place `direction`; answers the neighbour, or undefined at
+   either end (and for an item that is not in the list). Mutates: callers pass resolveOps' copies. */
+function swapPast<T>(list: T[], item: T, direction: MoveDirection): T | undefined {
+  // Where it sits now.
+  const at = list.indexOf(item);
+  // One place up is one index lower.
+  const to = direction === 'up' ? at - 1 : at + 1;
+  // The neighbour; undefined past either end.
+  const past = at < 0 ? undefined : list[to];
+  // Nothing to move past: the caller drops the op.
+  if (past === undefined) return undefined;
+  // The swap the save will make.
+  list[to] = item;
+  // The neighbour takes the old place.
+  list[at] = past;
+  // Recorded on the stored op.
+  return past;
+}
+
+/* One op against the orders as played so far (see resolveOps). */
+function resolveOne(op: AssistOp, draft: AssistDraft, lists: string[][], sections: SectionKind[]): StoredOp | null {
   // A skill needs no target; the master check is made once, now.
   if (op.op === 'add_skill') return { op: 'add_skill', name: op.name, category: op.category, inMaster: draft.masterSkills.has(op.name.trim().toLowerCase()) };
+  // A section: it must be in the order, with a neighbour on that side.
+  if (op.op === 'move_section') {
+    // The sent name, matched to its typed form (the wire carries a plain string).
+    const section = sections.find((name) => name === op.section);
+    // The neighbour it passes, played on the copy.
+    const past = section === undefined ? undefined : swapPast(sections, section, op.direction);
+    // Unknown or already at that end: cannot apply.
+    return section === undefined || past === undefined ? null : { op: 'move_section', section, direction: op.direction, past };
+  }
+  // A master item back: an "mN" bullet or an "nN" entry.
+  if (op.op === 'add_back') {
+    // A bullet first.
+    const bullet = draft.availableBullets.get(op.id);
+    // Its master text and entry label travel with it, for the card.
+    if (bullet !== undefined) return { op: 'add_bullet', ref: bullet.ref, text: bullet.text, parentLabel: bullet.parentLabel };
+    // Otherwise a whole entry.
+    const entry = draft.availableEntries.get(op.id);
+    // An id never sent cannot be applied.
+    return entry === undefined ? null : { op: 'add_entry', section: entry.section, ref: entry.ref, label: entry.label };
+  }
+  // A new bullet: under an entry that was sent.
+  if (op.op === 'new_bullet') {
+    // The entry, by short id.
+    const entry = draft.entries.get(op.entry);
+    // Its section and ref are what attestBullet files the new master bullet under.
+    return entry === undefined ? null : { op: 'new_bullet', section: entry.section, parentRef: entry.ref, parentLabel: entry.label, text: op.text };
+  }
   // The text the id stood for at ask time.
   const before = draft.before.get(op.id) ?? null;
-  // The summary has its own target; the server never proposes removing it.
+  // The summary has its own target; the server never proposes removing or moving it.
   if (op.id === 'summary') return op.op === 'edit' ? { op: 'edit', target: { kind: 'summary' }, before, text: op.text, advice: auditAdvice(op, draft) } : null;
   // The bullet's ref, from the ask that produced this op.
   const ref = draft.refs.get(op.id);
   // An id we never sent cannot be applied.
   if (ref === undefined) return null;
+  // The sibling list holding this bullet, if a structure was sent.
+  const list = lists.find((refs) => refs.includes(ref));
+  // A move needs that list and a neighbour on that side.
+  if (op.op === 'move') {
+    // Played on the copy.
+    const past = list === undefined ? undefined : swapPast(list, ref, op.direction);
+    // No structure, or already at that end: cannot apply.
+    return past === undefined ? null : { op: 'move', ref, direction: op.direction, past, before };
+  }
+  // A removal shortens the copy too, so a later move in this answer sees the right neighbour.
+  if (op.op === 'remove') list?.splice(list.indexOf(ref), 1);
   // Resolved, with the audit's advice for an edit.
   return op.op === 'edit'
     ? { op: 'edit', target: { kind: 'bullet', ref }, before, text: op.text, advice: auditAdvice(op, draft) }
@@ -259,9 +527,14 @@ export function toStoredOp(op: AssistOp, draft: AssistDraft): StoredOp | null {
    master already has it, or the operator NAMED it in this message. Otherwise applying writes a new
    claim into the master profile, which every future resume inherits, and the AI must not invent
    one; that card waits for a click. Matched by whole tokens, so "os" in "add os" counts but "os"
-   inside "cost" does not. */
+   inside "cost" does not.
+   STRUCTURE (2026-11-01): moves and add-backs apply by themselves, since they only reorder or reuse
+   true master text. A new bullet never does: applying it writes a new claim into the master, the
+   same reason as an unnamed skill, so its card always waits for a click. */
 export function shouldAutoApply(op: StoredOp, instruction: string): boolean {
-  // Edits and removals are resume-only and reversible.
+  // A new claim in the master is the operator's call, every time.
+  if (op.op === 'new_bullet') return false;
+  // Edits, removals, moves and add-backs are resume-only and reversible.
   if (op.op !== 'add_skill') return true;
   // Already a master claim: printing it claims nothing new.
   if (op.inMaster) return true;
@@ -273,21 +546,50 @@ export function shouldAutoApply(op: StoredOp, instruction: string): boolean {
   return name.length > 0 && name.every((token) => said.has(token));
 }
 
-/* The page action a stored op becomes on Apply. */
+/* The page action a stored op becomes on Apply. A switch over the closed union: a new StoredOp arm
+   without an action here fails typecheck (the function would not return on every path). */
 export function toEditAction(stored: StoredOp): EditAction {
-  /* A skill always goes through the attest path: it reuses the master's own node when the latest
-     master already has the skill, and otherwise records the operator's vouch as a new master
-     version first. Either way the printed skill traces to the master, which the auditor demands. */
-  if (stored.op === 'add_skill') return { kind: 'attest_skill', keyword: stored.name, category: stored.category };
-  // New text on its resolved target.
-  if (stored.op === 'edit') return { kind: 'edit', target: stored.target, text: stored.text };
-  // The bullet dropped.
-  return { kind: 'remove', target: { kind: 'bullet', ref: stored.ref } };
+  // One case per stored shape.
+  switch (stored.op) {
+    /* A skill always goes through the attest path: it reuses the master's own node when the latest
+       master already has the skill, and otherwise records the operator's vouch as a new master
+       version first. Either way the printed skill traces to the master, which the auditor demands. */
+    case 'add_skill':
+      return { kind: 'attest_skill', keyword: stored.name, category: stored.category };
+    // New text on its resolved target.
+    case 'edit':
+      return { kind: 'edit', target: stored.target, text: stored.text };
+    // The bullet dropped.
+    case 'remove':
+      return { kind: 'remove', target: { kind: 'bullet', ref: stored.ref } };
+    // One place among its siblings; the save re-reads the order, so this is "one place from now".
+    case 'move':
+      return { kind: 'move_bullet', ref: stored.ref, direction: stored.direction };
+    // One place in section_order.
+    case 'move_section':
+      return { kind: 'move_section', section: stored.section, direction: stored.direction };
+    // A master bullet back, by ref; the save puts it under its own entry.
+    case 'add_bullet':
+      return { kind: 'add_master_bullet', ref: stored.ref };
+    // A master entry back, with all its bullets.
+    case 'add_entry':
+      return { kind: 'add_master_entry', section: stored.section, ref: stored.ref };
+    // New text: into the master first, then onto the resume by its new ref.
+    case 'new_bullet':
+      return { kind: 'attest_bullet', section: stored.section, parentRef: stored.parentRef, text: stored.text };
+  }
 }
 
 /* Whether the resume already shows this op's effect. Derived, never stored: the resume is the one
-   record of what was applied, so a chat reopened tomorrow (or after a Reset) tells the truth. */
-export function isApplied(stored: StoredOp, diff: ResumeDiff): boolean {
+   record of what was applied, so a chat reopened tomorrow (or after a Reset) tells the truth.
+   Structural ops are read from `structure` (the current resume's, from the page); without one they
+   read as not applied, since nothing could confirm them. */
+export function isApplied(stored: StoredOp, diff: ResumeDiff, structure: AssistStructure | null = null): boolean {
+  // The five structural shapes have their own reader.
+  if (stored.op === 'move' || stored.op === 'move_section' || stored.op === 'add_bullet' || stored.op === 'add_entry' || stored.op === 'new_bullet') {
+    // Nothing to read them against.
+    return structure !== null && structureApplied(stored, diff, structure);
+  }
   // A skill is applied when it prints.
   if (stored.op === 'add_skill') {
     // The skills line, if the diff has one.
@@ -305,6 +607,48 @@ export function isApplied(stored: StoredOp, diff: ResumeDiff): boolean {
   if (stored.op === 'remove') return line === undefined || line.editState === 'removed';
   // An edit is applied when the printed text is exactly the proposed text.
   return line !== undefined && line.editState !== 'removed' && lineText(line.tailoredRuns) === stored.text;
+}
+
+/* "a sits above b" in one list; false when either is missing, so a stale op never reads as done. */
+function above<T>(list: readonly T[], a: T, b: T): boolean {
+  // Both positions.
+  const [i, j] = [list.indexOf(a), list.indexOf(b)];
+  // Both present and in that order.
+  return i >= 0 && j >= 0 && i < j;
+}
+
+/* isApplied for the structural shapes, against the current resume's structure. */
+function structureApplied(
+  stored: Extract<StoredOp, { op: 'move' | 'move_section' | 'add_bullet' | 'add_entry' | 'new_bullet' }>,
+  diff: ResumeDiff,
+  structure: AssistStructure,
+): boolean {
+  // One case per shape.
+  switch (stored.op) {
+    // Moved up: the bullet now sits above the sibling it passed; down: below it. Same entry only.
+    case 'move': {
+      // The entry holding both, if any.
+      const list = structure.entries.find((entry) => entry.bulletRefs.includes(stored.ref))?.bulletRefs ?? [];
+      // Order read in the direction of the move.
+      return stored.direction === 'up' ? above(list, stored.ref, stored.past) : above(list, stored.past, stored.ref);
+    }
+    // The same reading on section_order.
+    case 'move_section':
+      return stored.direction === 'up' ? above(structure.sections, stored.section, stored.past) : above(structure.sections, stored.past, stored.section);
+    // Back on the resume under some entry.
+    case 'add_bullet':
+      return structure.entries.some((entry) => entry.bulletRefs.includes(stored.ref));
+    // The entry is on the resume in its section.
+    case 'add_entry':
+      return structure.entries.some((entry) => entry.section === stored.section && entry.ref === stored.ref);
+    // A bullet under its entry now prints exactly this text (its ref is new, so the text is the key).
+    case 'new_bullet': {
+      // The parent entry's bullets.
+      const refs = structure.entries.find((entry) => entry.section === stored.section && entry.ref === stored.parentRef)?.bulletRefs ?? [];
+      // Any of them printing the proposed text.
+      return diff.lines.some((line) => line.editTarget?.kind === 'bullet' && refs.includes(line.editTarget.ref) && line.editState !== 'removed' && lineText(line.tailoredRuns) === stored.text);
+    }
+  }
 }
 
 /* A string array, or null. */
@@ -334,13 +678,77 @@ function readAdvice(value: unknown): AuditAdvice | null | undefined {
   return undefined;
 }
 
-/* A stored op read back from the database, or null when it is not one of the three shapes. Rows
+/* A direction, or null for anything outside the closed pair. */
+function moveDirection(value: unknown): MoveDirection | null {
+  // Exactly one of two words, never coerced.
+  return value === 'up' || value === 'down' ? value : null;
+}
+
+/* A section name from the closed list, typed, or null. find() returns the list's own typed value,
+   so no cast is needed. */
+function sectionKind(value: unknown): SectionKind | null {
+  // Membership in the shared seven.
+  return TAILOR_SECTION_KINDS.find((kind) => kind === value) ?? null;
+}
+
+/* A section that holds entries with bullets (every kind but summary and skills), or null. */
+function bulletSection(value: unknown): BulletSection | null {
+  // A real section name first.
+  const kind = sectionKind(value);
+  // The two that hold no entries are excluded; the rest narrow to BulletSection.
+  return kind === null || kind === 'summary' || kind === 'skills' ? null : kind;
+}
+
+/* True when every listed field of the record is a string. */
+function allStrings(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  // One wrong-typed field makes the row unreadable.
+  return keys.every((key) => typeof value[key] === 'string');
+}
+
+/* A stored op read back from the database, or null when it is not one of the stored shapes. Rows
    are untrusted: an op shown with a guessed target could save the wrong bullet. */
 export function readStoredOp(value: unknown): StoredOp | null {
   // Must be an object.
   if (!isRecord(value)) return null;
   // The text it replaced: a string or null.
   const before = typeof value.before === 'string' ? value.before : value.before === null ? null : undefined;
+  // A bullet move: refs, a closed direction, and the old text.
+  if (value.op === 'move') {
+    // Closed.
+    const direction = moveDirection(value.direction);
+    // Every field typed exactly.
+    return allStrings(value, ['ref', 'past']) && direction !== null && before !== undefined
+      ? { op: 'move', ref: value.ref as string, direction, past: value.past as string, before }
+      : null;
+  }
+  // A section move: two section names from the closed list and a direction.
+  if (value.op === 'move_section') {
+    // Each read on its own.
+    const [section, past, direction] = [sectionKind(value.section), sectionKind(value.past), moveDirection(value.direction)];
+    // All three readable.
+    return section !== null && past !== null && direction !== null ? { op: 'move_section', section, direction, past } : null;
+  }
+  // A master bullet back: ref, text and its entry's label.
+  if (value.op === 'add_bullet') {
+    // Strings only.
+    return allStrings(value, ['ref', 'text', 'parentLabel']) ? { op: 'add_bullet', ref: value.ref as string, text: value.text as string, parentLabel: value.parentLabel as string } : null;
+  }
+  // A master entry back: a bullet section, a ref and a label.
+  if (value.op === 'add_entry') {
+    // Closed.
+    const section = bulletSection(value.section);
+    // Typed exactly.
+    return section !== null && allStrings(value, ['ref', 'label']) ? { op: 'add_entry', section, ref: value.ref as string, label: value.label as string } : null;
+  }
+  // A new bullet: a bullet section, its parent, the parent's label and the text.
+  if (value.op === 'new_bullet') {
+    // Closed.
+    const section = bulletSection(value.section);
+    // Typed exactly.
+    return section !== null && allStrings(value, ['parentRef', 'parentLabel', 'text'])
+      ? { op: 'new_bullet', section, parentRef: value.parentRef as string, parentLabel: value.parentLabel as string, text: value.text as string }
+      : null;
+  }
   // A skill: name, group, and the master flag.
   if (value.op === 'add_skill') {
     // All three typed exactly.
@@ -394,10 +802,20 @@ export function readUsage(value: unknown): AssistUsage {
   return { input: count(usage.input), cached: count(usage.cached), output: count(usage.output), thinking: count(usage.thinking) };
 }
 
-/* One op from the wire, or null when it is not one of the three shapes. */
+/* One op from the wire, or null when it is not one of the seven shapes. */
 function readOp(value: unknown): AssistOp | null {
   // Must be an object.
   if (!isRecord(value)) return null;
+  // A direction, for the two moves.
+  const direction = moveDirection(value.direction);
+  // A bullet move: an id and a direction.
+  if (value.op === 'move' && typeof value.id === 'string' && direction !== null) return { op: 'move', id: value.id, direction };
+  // A section move: a name (checked against the order on resolve) and a direction.
+  if (value.op === 'move_section' && typeof value.section === 'string' && direction !== null) return { op: 'move_section', section: value.section, direction };
+  // A master item back: an id.
+  if (value.op === 'add_back' && typeof value.id === 'string') return { op: 'add_back', id: value.id };
+  // A new bullet: an entry id and text.
+  if (value.op === 'new_bullet' && typeof value.entry === 'string' && typeof value.text === 'string') return { op: 'new_bullet', entry: value.entry, text: value.text };
   // An edit carries an id, text and a list of new numbers.
   if (value.op === 'edit' && typeof value.id === 'string' && typeof value.text === 'string' && Array.isArray(value.newNumbers)) {
     // Every flagged number must be a string, or the warning shown would be wrong.
