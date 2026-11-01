@@ -1,6 +1,6 @@
 # Drains the post-screen queues on demand: pages the whole `passed_filters` queue through the
-# matcher (?limit=10), then the whole `scored` queue through the tailor (?limit=10), then the
-# whole `tailored` queue through the auditor (?limit=10). The sibling of prescreen-drain.yml,
+# matcher (?limit=10), then the whole `scored` queue through the tailor (?limit=3), then the
+# whole `tailored` queue through the auditor (?limit=5), pausing between pages for Gemini's RPM. The sibling of prescreen-drain.yml,
 # which drains the two stages BEFORE this one (normalizer, screener).
 # Exists because nothing calls these three agents on a schedule: only run-one.yml (one row
 # per dispatch, ~1 billed Actions minute each), job-link-intake (one pasted link) and the web
@@ -49,11 +49,10 @@ jobs:
     # Same runner image as the other workflows. Its preinstalled Node (>= 20) has
     # global fetch, which is all this job needs: no checkout, no install, no third-party action.
     runs-on: ubuntu-latest
-    # Every page makes Gemini calls; measured 2026-11-01, a matcher page takes ~1 min. About
-    # 45 pages of 10 across the three stages (~200 rows to score, fewer to tailor and audit)
-    # is ~45-90 min; this cap leaves room for slow pages and stops a hung run from burning
-    # the monthly Actions minutes.
-    timeout-minutes: 150
+    # Paced for the Gemini ~15 RPM free tier: each page is followed by a 45 s pause. ~17
+    # matcher + ~34 tailor + ~20 auditor pages at ~1-1.5 min each is ~75-110 min; this cap
+    # leaves room for 429 backoffs and stops a hung run from burning the monthly Actions minutes.
+    timeout-minutes: 180
     # Steps run top to bottom; a non-zero exit stops the job.
     steps:
       # The whole drain in one step, so the secrets exist ONLY here. No `uses:` step runs
@@ -66,22 +65,35 @@ jobs:
           set -euo pipefail
           # Node reads the module from stdin; --input-type=module enables top-level await.
           node --input-type=module <<'JS'
+          // Promise-based sleep for the pacing gaps; stdlib, nothing to hand-roll (same as ingest-links.yml).
+          import { setTimeout as sleep } from 'node:timers/promises';
+
           // The three stages, declared up front so the plan log and the loop read ONE source.
-          // limit: every agent runs at its DEFAULT 10 (matcher/index.ts:90), the size the web
-          // runner has always used. NOT the matcher's MAX_BATCH_SIZE 25: the first live run
-          // (41305052697, 2026-11-01) read 25 on page 1, then page 2 died with HTTP 546
-          // WORKER_RESOURCE_LIMIT (the edge worker ran out of compute mid-batch). The tailor
-          // and auditor stay at 10 because each row is one or more Gemini calls.
-          // pageCap: hard ceiling well above the live backlog (~200 passed_filters / 10 = 20
-          // pages; a deadline-cut page reads fewer) so a queue that never shrinks stops red.
+          // limit: the matcher runs at its DEFAULT 10 (matcher/index.ts:90), the size the web
+          // runner has always used. NOT its MAX_BATCH_SIZE 25: the first live run (41305052697,
+          // 2026-11-01) read 25 on page 1, then page 2 died with HTTP 546 WORKER_RESOURCE_LIMIT.
+          // The tailor runs 3 rows a page because one tailored row can cost several Gemini calls
+          // (candidates plus retries); the auditor 5. Each page stays near 10 Gemini calls.
+          // pageCap: hard ceiling well above the live backlog (~170 passed_filters / 10 = 17
+          // pages; ~100 to tailor / 3 = 34 pages) so a queue that never shrinks stops red.
           const STAGES = [
             // Stage 1: passed_filters -> scored | dropped_filter | failed.
             { name: 'matcher', limit: 10, pageCap: 40 },
             // Stage 2: scored -> tailored | failed.
-            { name: 'tailor', limit: 10, pageCap: 40 },
+            { name: 'tailor', limit: 3, pageCap: 90 },
             // Stage 3: tailored -> audit_clean | audit_flagged -> awaiting_approval.
-            { name: 'auditor', limit: 10, pageCap: 40 },
+            { name: 'auditor', limit: 5, pageCap: 60 },
           ];
+          // Pause after every page that read rows. The second live run (41305575499) sent ~10
+          // calls every ~20 s, and by page 5 every key answered 429 RESOURCE_EXHAUSTED. A single
+          // row run 3 minutes later succeeded, so it was the ~15 RPM free-tier window
+          // (gemini/client.ts:22), not the daily quota. 45 s is the gap ingest-links.yml uses for
+          // the same budget.
+          const GAP_MS = 45_000;
+          // After a page with errors, wait long enough for a per-minute window to roll over
+          // before the next page, so one burst does not count toward the stall cap
+          // (ingest-links.yml's 429 retry wait).
+          const QUOTA_BACKOFF_MS = 90_000;
           // Consecutive pages that read rows but advance none before the run stops red. A
           // Gemini outage (every key cooling, or 503 "high demand") leaves each row in
           // `failures` at its input status, and oldest-first the same rows refill every
@@ -121,6 +133,8 @@ jobs:
           }
           // The stop rules, verbatim, so a reader of the log can check the run against them.
           console.log(`plan: a stage ends when a page reads 0 rows; ${STALL_CAP} consecutive pages that read rows but advance none abort the run`);
+          // The pacing, likewise, so the run's length in the log is explained by its rules.
+          console.log(`plan: ${GAP_MS / 1000}s pause after each page, ${QUOTA_BACKOFF_MS / 1000}s after a page with errors (Gemini ~15 RPM free tier)`);
           // The abort rules, likewise.
           console.log('plan: abort on non-2xx, non-JSON, missing/ill-typed fields, or a kill-switch halt (skipped_disabled)');
           // The rehearsal ends here, before sign-in.
@@ -297,6 +311,8 @@ jobs:
                 // Any progress resets the window: only CONSECUTIVE stalls count.
                 stalled = 0;
               }
+              // Pace the next page: errors usually mean the per-minute window is full, so wait it out.
+              await sleep(page.errored > 0 ? QUOTA_BACKOFF_MS : GAP_MS);
             }
             // Stage boundary line, so the log shows where each stage ended.
             console.log(`${stage.name}: queue drained in ${pages} page(s)`);
