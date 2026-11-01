@@ -91,7 +91,8 @@ that one function's deploys and says nothing about age.
   `env -u SUPABASE_ACCESS_TOKEN supabase db query --linked "<select>"` (Bash). With it set
   it returns 403: that token belongs to the WRONG account (same trap as §3). This was the
   "403 since ~2026-10-04" (re-verified 2026-11-01). Routes change, so re-enumerate them
-  before declaring anything unreachable.
+  before declaring anything unreachable. SQL that starts with a `--` comment must go via
+  `-f <file>`: passed as an argument, the CLI parses it as a flag and errors.
 - **Status counts:** `select status, count(*) from applications group by 1`. Never quote an old count.
 - **Migrations applied:** the MCP `list_migrations` vs `ls supabase/migrations`.
 - **Is prod web current?** `curl` the `/assets/index-*.js` from https://applyyy.vercel.app/
