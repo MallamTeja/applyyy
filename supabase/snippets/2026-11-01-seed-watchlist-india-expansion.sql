@@ -1,5 +1,6 @@
 -- =============================================================================
--- Watchlist India expansion: +10 NEW verified-pollable boards (2026-11-01).
+-- Watchlist India expansion: +11 NEW verified-pollable boards (2026-11-01;
+-- 10 seeded ~11:50 IST, Arcesium added ~12:20 IST).
 --
 -- WHY THIS EXISTS: Teja asked (2026-11-01 ~11:39 IST) to add 99 India companies
 -- (service, GCC, MNC, product, startups) to the watchlist. Only boards that a
@@ -77,7 +78,11 @@ begin
     -- First page 12 India (Hyderabad); company "Wise".
     ('smartrecruiters', 'wise', 'Wise'),
     -- First page 3 India (Pune/Mumbai studios); company "Ubisoft".
-    ('smartrecruiters', 'Ubisoft2', 'Ubisoft')
+    ('smartrecruiters', 'Ubisoft2', 'Ubisoft'),
+    -- Added 12:20 IST after Teja ruled "keep all, add verified" for the second 50.
+    -- Token found by peer ce (the legal-entity slug a name guess misses), re-probed
+    -- by the orchestrator: 44 postings, board name "Arcesium LLC", 17 India.
+    ('greenhouse', 'arcesiumllc', 'Arcesium')
   ) as b(provider, board_token, company_name)
   -- Re-running updates the name and re-enables instead of erroring, on the live
   -- unique key company_watchlist_user_board_key (user_id, ats_provider, board_token).
@@ -89,6 +94,6 @@ begin
   get diagnostics v_written = row_count;
 
   -- Matched vs written, reported (repo DB rule: counts, not silence).
-  raise notice 'Watchlist India expansion: wrote % row(s) (expected 10).', v_written;
+  raise notice 'Watchlist India expansion: wrote % row(s) (expected 11).', v_written;
 end
 $$;
