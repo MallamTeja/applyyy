@@ -25,7 +25,9 @@ tailored (tailor) → audit_clean|audit_flagged (auditor) → awaiting_approval 
 (human) → applying → blocked_needs_human → applied|failed (human)`.
 Every agent above exists as an edge function. Read the edges, never assume them:
 `select * from application_status_transitions where from_status = '<s>'`.
-There is **no** `discovered → passed_filters` edge.
+`discovered → passed_filters` exists for `human` only (the pasted-link path, migration
+`20261031200000`); no agent may take it. Scouts *insert* at `passed_filters|dropped_filter`
+directly (screened on insert); only the fallback/scout-web path inserts at `discovered`.
 
 **Submission is automatic after human approval** (since c557533, 2026-10-09).
 `SUBMISSION_IMPLEMENTED=true` (`worker/src/playwright-page.ts:21`). Teja hand-picks and
