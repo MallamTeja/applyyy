@@ -171,14 +171,12 @@ export function laneCountsFrom(kind: string, counts: Readonly<Partial<Record<str
   return { discovered: counts['discovered'] ?? 0, ready: counts['passed_filters'] ?? 0, filteredOut: counts['dropped_filter'] ?? 0 };
 }
 
-/* Which lane the page opens on (2026-10-24, Teja: "get me rid of this"). After the prescreen drain
- * `discovered` held 0 and 2,511 rows waited at passed_filters, and the page opened on the empty lane.
- * It opens on "Ready to tailor" only when Discovered is provably empty AND Ready has work; otherwise
- * on Discovered as it always did, including when the counts are unknown (no evidence, no switch). */
-export function initialLane(counts: LaneCounts | null): Lane {
-  // The one case where the default lane is certainly empty and the other certainly is not.
-  return counts !== null && counts.discovered === 0 && counts.ready > 0 ? 'ready' : 'discovered';
-}
+/* The lane the page opens on, every time (2026-11-01, Teja: "whenever I open discovered jobs from the
+ * nav bar it needs to show and stay in Ready to tailor"). Since the prescreen drain and the scout's
+ * own screening path (both 2026-10-24) `discovered` sits near empty, so Ready is where the work is.
+ * The 2026-10-24 version picked the lane from the status counts once, and could settle on Discovered
+ * if the counts landed while a scout run had rows still waiting there. A constant cannot race. */
+export const OPENING_LANE: Lane = 'ready';
 
 /* The sentence for an empty list, chosen from the EXACT lane count (2026-10-24).
  * An empty grid has two different causes: the lane itself holds no rows, or it has rows and the

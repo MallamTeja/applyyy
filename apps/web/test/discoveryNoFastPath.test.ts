@@ -154,6 +154,13 @@ describe('lane queries and paging', () => {
     assert.equal(source.includes(".eq('status', 'discovered')"), false, 'a hard-coded discovered filter would ignore the lane switch');
   });
 
+  it('opens on OPENING_LANE, and only an operator click changes the lane', () => {
+    // State and ref start on the same constant, so the first load and the stale-lane guard agree.
+    assert.ok(source.includes('useState<Lane>(OPENING_LANE)') && source.includes('useRef<Lane>(OPENING_LANE)'), 'lane state and laneRef must both start on OPENING_LANE');
+    // Exactly one setLane call, inside switchLane: no effect can move the page off the lane it opened on.
+    assert.equal(source.match(/setLane\(/g)?.length, 1, 'only switchLane may set the lane');
+  });
+
   it('pages by keyset on (created_at desc, id asc), not by offset', () => {
     // The order keysetFilter mirrors: newest first, then id ascending as the unique tie-break.
     assert.match(source, /\.order\('created_at', \{ ascending: false \}\)\s*(\/\/[^\n]*\s*)*\.order\('id', \{ ascending: true \}\)/, 'the list must order by created_at desc then id asc');

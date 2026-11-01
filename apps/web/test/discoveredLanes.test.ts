@@ -24,7 +24,7 @@ import {
   postedDate,
   sortItems,
   emptyListMessage,
-  initialLane,
+  OPENING_LANE,
   laneCountsFrom,
 } from '../src/features/discovery/discoveredList.ts';
 // The engine's real step lists, so the mapping is compared against the source of truth, not a copy.
@@ -277,32 +277,19 @@ describe('empty list message', () => {
   });
 });
 
-/* Opening lane and the screened counts (2026-10-24, Teja: "get me rid of this"). With discovered=0
- * and 2,511 at passed_filters, the page opened on an empty Discovered lane. It must open where the
- * work is, and only from a status read that actually answered. */
+/* Opening lane (2026-11-01, Teja: "whenever I open discovered jobs from the nav bar it needs to show
+ * and stay in Ready to tailor"). Since the 2026-10-24 prescreen drain `discovered` sits near empty.
+ * The 2026-10-24 rule (open on Ready only once the counts prove Discovered = 0) could settle on the
+ * empty lane if the counts landed while a scout run had rows still waiting there. The opening lane
+ * is now a constant that no read can change. */
 describe('opening lane', () => {
-  // One fixture for every case below, so each case differs from the live shape in one field only.
   // The live shape after the prescreen drain: nothing to screen, 2,511 ready, 19,047 dropped.
+  // Kept for the laneCountsFrom case below, which pins the status-to-lane mapping against it.
   const DRAINED = { discovered: 0, ready: 2511, filteredOut: 19047 };
 
-  it('discovered=0 and passed_filters>0 opens on Ready to tailor', () => {
-    // The case Teja hit.
-    assert.equal(initialLane(DRAINED), 'ready');
-  });
-
-  it('TWIN: rows still waiting at discovered keep the page on Discovered', () => {
-    // The ordinary day: new postings to screen, so the page opens where it always did.
-    assert.equal(initialLane({ ...DRAINED, discovered: 12 }), 'discovered');
-  });
-
-  it('both lanes empty stays on Discovered, the page the operator expects', () => {
-    // Switching to an equally empty lane would only move the empty state somewhere less familiar.
-    assert.equal(initialLane({ discovered: 0, ready: 0, filteredOut: 5 }), 'discovered');
-  });
-
-  it('an unanswered status read never moves the page', () => {
-    // null = loading, failed, signed out or unconfigured: no evidence, so no switch.
-    assert.equal(initialLane(null), 'discovered');
+  it('the page opens on Ready to tailor, whatever the counts say', () => {
+    // A constant, so no count, race or failed read can pick another lane.
+    assert.equal(OPENING_LANE, 'ready');
   });
 
   // The mapping is where "absent means zero" is decided, so it is pinned by value.
