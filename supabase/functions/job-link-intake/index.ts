@@ -15,10 +15,8 @@ import { createAppUserClient } from "../_shared/db/client.ts";
 import { withErrorBoundary } from "../_shared/cors.ts";
 // The shared Gemini client: key pool, pacing, failover.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
-// The robots-gated transport and its typed pre-contact refusal.
-import { DEFAULT_USER_AGENT, httpFetch, RobotsDisallowedError } from "../_shared/http/index.ts";
-// The robots gate itself, run here with a redirect-refusing fetcher.
-import { checkRobots, tokenFromUserAgentHeader, type RobotsCache } from "../../../packages/master-robots/src/index.ts";
+// The shared transport (timeouts, bot-wall detection), used with its robots gate OFF for the pasted page.
+import { httpFetch } from "../_shared/http/index.ts";
 // The SSRF-safe page fetch: every redirect hop re-checked before it is requested.
 import { fetchPublicPage } from "./fetch-page.ts";
 // scout-web's robots-gated board fetch, reused for the ATS path.
@@ -85,12 +83,8 @@ function startServerPipeline(db: SupabaseClient, applicationId: string): void {
   }
 }
 
-// One robots cache per isolate, as scout-web does.
+// One robots cache per isolate, as scout-web does. The ATS board path stays robots-gated.
 const fetchBoard = makeFetchBoard();
-// The page path's own robots cache (its checks bypass the transport's gate; see fetchPage).
-const robotsCache: RobotsCache = new Map();
-// The same product token the transport's gate derives, so sites see one consistent bot name.
-const ROBOTS_TOKEN = tokenFromUserAgentHeader(DEFAULT_USER_AGENT);
 
 // "No records of this type" is an empty answer; every other resolver failure must refuse the fetch.
 function noRecords(err: unknown): string[] {
@@ -175,24 +169,23 @@ Deno.serve(withErrorBoundary("job-link-intake", (req) =>
     now: () => new Date(),
     // Robots-gated board fetch.
     fetchBoard,
-    // Robots-gated page fetch with every redirect hop DNS- and address-checked (fetch-page.ts).
+    // The pasted page (and the LinkedIn/X public endpoints) with every redirect hop DNS- and
+    // address-checked (fetch-page.ts). Robots NOT checked; see fetchHop.
     async fetchPage(url) {
       // Typed failures become a reason string; this seam never throws.
       try {
-        // Hops are robots-checked GETs that hand redirects back; 'null' turns a 404 into null.
+        // Hops are plain GETs that hand redirects back; 'null' turns a 404 into null.
         return await fetchPublicPage(url, {
-          // Robots asked HERE, not by the transport: the transport's robots fetch follows redirects,
-          // so a robots.txt 302 could walk into a private host (security review, 2026-10-31).
-          fetchHop: async (hop) => {
-            // A null token fails closed, as in the transport: guessing one would match the "*" group.
-            if (ROBOTS_TOKEN === null) throw new Error("no robots product token; refusing to fetch");
-            // Same host as the hop, already DNS-checked; a redirecting robots.txt is "indeterminate" and refused.
-            const verdict = await checkRobots(hop, ROBOTS_TOKEN, { cache: robotsCache, fetcher: (u, init) => fetch(u, { ...init, redirect: "manual" }) });
-            // Only an explicit allow fetches the page (fail closed, like the transport's gate).
-            if (verdict.kind !== "allow") throw new Error("the site does not allow automated reading");
-            // No retries: each retry re-resolves DNS, widening the rebinding window the check cannot close.
-            return await httpFetch(hop, { robots: false, redirect: "manual", notFound: "null", retry: { maxRetries: 0 } });
-          },
+          // ROBOTS IS DELIBERATELY NOT CHECKED HERE. Teja's ruling, 2026-11-01 ~17:19 IST: a link
+          // the human pastes is a USER-TRIGGERED fetch (one page, read once, because a person asked),
+          // not crawling, so robots.txt does not apply to it or its redirect hops. Do not "restore"
+          // the check: it made Tower Research and Databricks links unreadable (CI ingest run
+          // 41294502085). Scouts, scout-web, the ATS board path (fetchBoard above) and the worker
+          // stay robots-strict. The SSRF guard is untouched: fetchPublicPage still shape-, DNS- and
+          // address-checks every hop, caps redirects and bytes. `robots: false` also means the
+          // transport never fetches a robots.txt, whose own redirects could reach a private host.
+          // No retries: each retry re-resolves DNS, widening the rebinding window the check cannot close.
+          fetchHop: (hop) => httpFetch(hop, { robots: false, redirect: "manual", notFound: "null", retry: { maxRetries: 0 } }),
           // A and AAAA looked up separately: a host with only one family answers NotFound for the other.
           // Any OTHER resolver error throws, so the fetch is refused rather than checked on half the answer.
           resolve: async (host) => [
@@ -203,12 +196,12 @@ Deno.serve(withErrorBoundary("job-link-intake", (req) =>
           ],
         });
       } catch (err) {
-        // The expected case for LinkedIn and most social sites.
-        if (err instanceof RobotsDisallowedError) return { ok: false, reason: "the site does not allow automated reading" };
-        // Bot walls, timeouts, network: named.
+        // Bot walls, HTTP errors, timeouts, network: named, and the ladder moves to the browser.
         return { ok: false, reason: err instanceof Error ? err.message : String(err) };
       }
     },
+    // The browser render service's POST; page-readers.ts builds the request and shape-checks the answer.
+    renderFetch: fetch,
     // One JSON-mode call; a short budget, since a human is waiting on the response.
     extract: (db, prompt) => generateGeminiContent(db as SupabaseClient, { prompt, timeoutMs: 20_000, maxRetries: 2 }),
     // Lazy sign-in per request.

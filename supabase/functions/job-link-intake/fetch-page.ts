@@ -81,7 +81,8 @@ export function isPublicAddress(ip: string): boolean {
 
 // The two effects, injected.
 export interface PageFetchDeps {
-  // One robots-gated GET with redirect: "manual": a 3xx comes back as a Response; null on 404.
+  // One GET with redirect: "manual": a 3xx comes back as a Response; null on 404. Not robots-gated
+  // since 2026-11-01 (a pasted link is a user-triggered fetch; index.ts carries the ruling).
   fetchHop(url: string): Promise<Response | null>;
   // Every A and AAAA address of a host; empty when it has none or cannot be resolved.
   resolve(hostname: string): Promise<string[]>;
@@ -116,7 +117,7 @@ async function readCapped(res: Response, max: number): Promise<string> {
 }
 
 // Fetch a pasted page, re-checking every redirect hop. Never fetches a refused hop. May throw
-// whatever fetchHop throws (robots refusal, bot wall, network); the caller maps those.
+// whatever fetchHop throws (bot wall, HTTP error, network); the caller maps those.
 export async function fetchPublicPage(start: string, deps: PageFetchDeps): Promise<{ ok: true; html: string } | { ok: false; reason: string }> {
   // The URL about to be requested.
   let current = start;
@@ -142,7 +143,7 @@ export async function fetchPublicPage(start: string, deps: PageFetchDeps): Promi
     if (addresses.length === 0) return { ok: false, reason: "the site's address could not be looked up" };
     // One private address is enough to refuse: the connection may pick any of them.
     if (!addresses.every(isPublicAddress)) return { ok: false, reason: "the site points at a private network address" };
-    // The request itself, robots-gated, redirects NOT followed.
+    // The request itself, redirects NOT followed.
     const res = await deps.fetchHop(url.toString());
     // A 404 is a dead link.
     if (res === null) return { ok: false, reason: "page not found" };

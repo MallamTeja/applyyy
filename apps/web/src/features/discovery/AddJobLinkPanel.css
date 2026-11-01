@@ -1,0 +1,29 @@
+/* AddJobLinkPanel's modal (2026-11-01). The <dialog> itself is the card: .web-scout (WebScoutPanel.css)
+ * gives it the sheet surface, edge, radius and padding, so this file only places it, dims the page
+ * behind it, and lays out its header row. Tokens only, no hex fallbacks, like the sibling files. */
+
+/* dialog.x outranks .web-scout (element + class), whichever of the two files loads last. */
+dialog.add-job-link {
+  /* The UA centres a modal dialog with margin:auto; .web-scout's margin-bottom would pull it off centre. */
+  margin: auto;
+  /* Readable width on desktop; a 1rem (16px) gutter each side on a phone. */
+  width: min(36rem, 100% - 2rem);
+}
+
+/* Dims the page so the modal reads as the one thing to act on. */
+dialog.add-job-link::backdrop {
+  /* Same scrim as PipelineRunModal.css; black only darkens, so it works in both themes. */
+  background: rgba(0, 0, 0, 0.6);
+}
+
+/* Heading and Close share one row, so the way out sits beside the title. */
+.add-job-link__header {
+  /* Row layout. */
+  display: flex;
+  /* Heading left, Close right. */
+  justify-content: space-between;
+  /* Close lines up with the heading's text, not its bottom margin. */
+  align-items: baseline;
+  /* They never touch at narrow widths. */
+  gap: var(--gap-2);
+}

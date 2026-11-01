@@ -1,0 +1,21 @@
+{
+  // Typecheck-only config for the Vercel function in api/ and its tests in api/_render/.
+  // Run: worker/node_modules/.bin/tsc -p api/tsconfig.json
+  // The repo-wide strictness comes from the base, like every package here.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // Vercel compiles api/*.ts itself and forces this option on; matching it here means a `.ts`
+    // import that typechecks here is one Vercel can rewrite to `.js` there.
+    "rewriteRelativeImportExtensions": true,
+    // The base allows `.ts` imports only for no-emit packages; Vercel emits, so this config must
+    // not ask for it (rewriteRelativeImportExtensions above already permits the `.ts` spelling).
+    "allowImportingTsExtensions": false,
+    // Node's globals (process, Buffer, fetch, Response) and node:* modules.
+    "types": ["node"],
+    // The repo root lists no @types/node (no new dependency for a typecheck); the worker's copy is
+    // the same major (24) as the runtime, so it is borrowed from there.
+    "typeRoots": ["../worker/node_modules/@types"]
+  },
+  // The function and its tests.
+  "include": ["**/*.ts"]
+}

@@ -33,6 +33,8 @@ import { companyFor, slugFromToken, type FetchBoardFn, type WatchlistName } from
 import { checkPublicUrl } from "./fetch-page.ts";
 // Page-to-text, the prompt, and the shape check on the model's answer.
 import { buildExtractPrompt, MAX_SOURCE_CHARS, MIN_JOB_TEXT_CHARS, pageText, parseExtraction } from "./extract.ts";
+// The readers past a plain fetch: LinkedIn's and X's public endpoints, and the browser render.
+import { readSite, renderPage, type RenderFetch } from "./page-readers.ts";
 // The web engine's step tables (an import-free module), so "does this row need the chain" is the
 // same rule the browser's Send button uses; a local copy would drift from it.
 import { PASSED_FILTERS_STEPS, STEP_INPUT_STATUS } from "../../../apps/web/src/features/pipeline/rowPipeline.ts";
@@ -118,8 +120,12 @@ export interface IntakeDeps {
   connect(): Promise<Connection>;
   // Robots-gated whole-board fetch (scout-web's), for the ATS path.
   readonly fetchBoard: FetchBoardFn;
-  // Robots-gated page fetch for every other link. Never throws.
+  // SSRF-guarded page fetch for the pasted link, its redirect hops and the site adapters' public
+  // endpoints. Robots NOT checked: a pasted link is a user-triggered fetch (Teja, 2026-11-01;
+  // index.ts carries the ruling where the check used to be). Never throws.
   fetchPage(url: string): Promise<{ ok: true; html: string } | { ok: false; reason: string }>;
+  // The POST to the browser render service (page-readers.ts renderPage builds and checks it).
+  readonly renderFetch: RenderFetch;
   // One JSON-mode Gemini call with the prompt from buildExtractPrompt.
   extract(db: unknown, prompt: ReturnType<typeof buildExtractPrompt>): Promise<GeminiCallOutcome<GeminiResponseBody>>;
   // The clock, injected so timestamps are testable.
@@ -199,19 +205,31 @@ type Built = { readonly row: JobInsert; readonly source: "ats_board" | "page" | 
 
 // The ATS path: find the posting on the live board and build the row from the board's data.
 // `pastedText` (W3): the human's text, used only when the board itself has no description.
-async function buildFromBoard(target: ParsedJobUrl, deps: IntakeDeps, store: IntakeStore, now: Date, pastedText: string | null): Promise<Built | Refusal> {
+// Null when the board itself could not be read or parsed: the caller then reads the pasted link
+// through the page ladder instead (Teja, 2026-11-01), so a board outage no longer ends the request.
+async function buildFromBoard(target: ParsedJobUrl, deps: IntakeDeps, store: IntakeStore, now: Date, pastedText: string | null): Promise<Built | Refusal | null> {
   // The adapter owns the board URL and parser.
   const adapter = getAdapter(target.provider);
   // Unreachable unless the registry and urls.ts disagree; refuse rather than guess.
   if (adapter === null) return { httpStatus: 500, body: { status: "error", message: `no adapter for ${target.provider}` } };
-  // Robots-gated, never throws.
+  // Robots-gated (the board API stays strict: the ruling covers only the pasted page), never throws.
   const fetched = await deps.fetchBoard(target.provider, target.token);
-  // Robots refusal, dead board or network: say which.
-  if (!fetched.ok) return { httpStatus: 502, body: { status: "error", message: `Could not read the ${target.provider} board "${target.token}": ${fetched.reason}` } };
+  // Robots refusal, dead board or network: logged for the operator, then the page ladder tries.
+  if (!fetched.ok) {
+    // The reason survives in the function logs; the human sees the page ladder's outcome.
+    console.warn(`[job-link-intake] board_unreadable ${target.provider}/${target.token}: ${fetched.reason}`);
+    // Fall through to the page path.
+    return null;
+  }
   // The adapter's own parser.
   const parsed = adapter.parse(fetched.payload);
-  // A board we cannot parse cannot vouch for the posting.
-  if (!parsed.ok) return { httpStatus: 502, body: { status: "error", message: `The ${target.provider} board could not be parsed: ${parsed.reason}` } };
+  // A board we cannot parse cannot vouch for the posting, but the page itself may still say it.
+  if (!parsed.ok) {
+    // Same as above: logged, then the page ladder.
+    console.warn(`[job-link-intake] board_unparseable ${target.provider}/${target.token}: ${parsed.reason}`);
+    // Fall through to the page path.
+    return null;
+  }
   // Exact id match; UUID case carries no meaning.
   const posting = parsed.postings.find((p) => p.atsJobId !== null && p.atsJobId.toLowerCase() === target.jobId.toLowerCase());
   // The board no longer lists it: closed or never real. Nothing to apply to.
@@ -234,29 +252,88 @@ async function buildFromBoard(target: ParsedJobUrl, deps: IntakeDeps, store: Int
   return { row: { ...row, discovered_via: ["manual"], ...(pastedDescription !== null ? { description_raw: pastedDescription } : {}) }, source: "ats_board" };
 }
 
-// The page path: pasted text when given, else the fetched page; then Gemini, then the shape check.
-async function buildFromPage(req: IntakeRequest, deps: IntakeDeps, db: unknown, now: Date): Promise<Built | Refusal> {
-  // Pasted text long enough to be a description is used as-is: no fetch needed.
+// How a link's text was read: the site's public endpoint, a plain fetch, or the browser. Kept in
+// source_refs metadata. The response's `source` stays 'page' for all three: its closed union is a
+// contract the web panel (parseIntakeOk) and ingest-links.yml both parse.
+type ReadVia = "site" | "plain" | "render";
+
+// The reading ladder (Teja, 2026-11-01: a link is read from the link alone, no pasted text): the
+// site's public endpoint, then ONE plain fetch, then ONE browser render. Each rung's failure is
+// kept, so the final refusal says what every rung hit.
+async function readLink(url: URL, deps: IntakeDeps, authorization: string): Promise<{ ok: true; text: string; via: ReadVia } | { ok: false; reason: string }> {
+  // Why each rung fell short, in order.
+  const reasons: string[] = [];
+  // b. A LinkedIn job or an X post through its public endpoint; null for every other site.
+  const site = await readSite(url, deps.fetchPage);
+  // Enough text from the adapter is the answer.
+  if (site !== null && site.ok && site.text.length >= MIN_JOB_TEXT_CHARS) return { ok: true, text: site.text, via: "site" };
+  // Recorded only when an adapter claimed the link.
+  if (site !== null) reasons.push(site.ok ? "the site's public page had almost no text" : site.reason);
+  // c. One plain fetch, robots not checked (see IntakeDeps.fetchPage).
+  const page = await deps.fetchPage(url.toString());
+  // Markup to readable text; a failed fetch has none.
+  const plain = page.ok ? pageText(page.html) : null;
+  // Enough text: the common case for an ordinary careers page.
+  if (plain !== null && plain.length >= MIN_JOB_TEXT_CHARS) return { ok: true, text: plain, via: "plain" };
+  // A login wall or a JS shell reads as almost nothing.
+  reasons.push(page.ok ? "almost no readable text (it may need a login or JavaScript)" : page.reason);
+  // d. The browser, once: it runs the page's scripts that a plain fetch cannot.
+  const shown = await renderPage(url.toString(), authorization, deps.renderFetch);
+  // Enough visible text once the scripts ran.
+  if (shown.ok && shown.text.length >= MIN_JOB_TEXT_CHARS) return { ok: true, text: shown.text, via: "render" };
+  // The browser's own shortfall.
+  reasons.push(shown.ok ? "the browser saw almost no text either" : shown.reason);
+  // f. Every rung fell short.
+  return { ok: false, reason: reasons.join("; ") };
+}
+
+// True when the model read the text and said it is not one job posting.
+function saysNotAJob(outcome: GeminiCallOutcome<GeminiResponseBody>): boolean {
+  // A failed call said nothing about the page.
+  if (!outcome.ok) return false;
+  // The same shape check the row is built from, so "not a job" means exactly one thing.
+  const verdict = parseExtraction(outcome.data.candidates?.[0]?.content?.parts?.[0]?.text);
+  // Only the model's own refusal counts; a malformed answer is a defect, not a verdict.
+  return !verdict.ok && verdict.reason === "not_a_job_posting";
+}
+
+// The page path: pasted text when given, else the reading ladder; then Gemini, then the shape check.
+// Caps per request: at most ONE render and TWO Gemini calls.
+// ponytail: no wall-clock guard. Worst case (plain fetch, a slow "not a job" extract, a 60 s
+// render, a second extract) can approach the 150 s kill; add a deadline check before step e if
+// function logs ever show this request timing out.
+async function buildFromPage(req: IntakeRequest, deps: IntakeDeps, db: unknown, now: Date, authorization: string): Promise<Built | Refusal> {
+  // a. Pasted text long enough to be a description is used as-is: no fetch needed (ingest-links.yml
+  // still sends text for its listed links).
   const pasted = req.text !== null && req.text.length >= MIN_JOB_TEXT_CHARS ? req.text.slice(0, MAX_SOURCE_CHARS) : null;
   // Where the text came from, for the response.
-  let source: Built["source"] = "pasted_text";
+  const source: Built["source"] = pasted !== null ? "pasted_text" : "page";
+  // b-d. No usable paste: read the link.
+  const read = pasted !== null ? { ok: true as const, text: pasted, via: null } : await readLink(req.url, deps, authorization);
+  // f. Every rung failed. The UI has no paste box any more, so the message never asks for one.
+  if (!read.ok) return { httpStatus: 422, body: { status: "needs_text", message: `Could not read that page, even with a browser (${read.reason}).` } };
   // The description the matcher and tailor will read.
-  let text = pasted;
-  // No usable paste: read the page.
-  if (text === null) {
-    // Robots-gated; LinkedIn and most social sites refuse, which is the expected case for them.
-    const page = await deps.fetchPage(req.url.toString());
-    // The remedy is the same for every fetch failure: paste the text.
-    if (!page.ok) return { httpStatus: 422, body: { status: "needs_text", message: `Could not read that page (${page.reason}). Paste the job description or post text and try again.` } };
-    // Markup to readable text.
-    text = pageText(page.html);
-    // Marked as fetched.
-    source = "page";
-  }
-  // A login wall or JS shell yields almost nothing readable.
-  if (text === null || text.length < MIN_JOB_TEXT_CHARS) return { httpStatus: 422, body: { status: "needs_text", message: "That page has almost no readable text (it may need a login or JavaScript). Paste the job description or post text and try again." } };
+  let text = read.text;
+  // How it was read (null for pasted text), recorded on the row.
+  let via: ReadVia | null = read.via;
   // One Gemini call, JSON mode.
-  const outcome = await deps.extract(db, buildExtractPrompt(text, req.url.toString()));
+  let outcome = await deps.extract(db, buildExtractPrompt(text, req.url.toString()));
+  // e. A plain-fetched page the model calls "not a job" may be a JS shell around the posting (3 of
+  // 21 links in CI ingest run 41294502085): render it ONCE and ask ONCE more. Only plain-fetched
+  // text qualifies: rendered text already had its browser, and pasted or adapter text is not a shell.
+  if (via === "plain" && saysNotAJob(outcome)) {
+    // The only render on this branch: readLink returns "plain" only when it did not render.
+    const shown = await renderPage(req.url.toString(), authorization, deps.renderFetch);
+    // A failed or empty render leaves the first verdict standing.
+    if (shown.ok && shown.text.length >= MIN_JOB_TEXT_CHARS) {
+      // The rendered text replaces the shell's.
+      text = shown.text;
+      // Recorded honestly.
+      via = "render";
+      // The second and last Gemini call.
+      outcome = await deps.extract(db, buildExtractPrompt(text, req.url.toString()));
+    }
+  }
   // Budget spent or every key cooling: normal quota behaviour, not a failure.
   if (!outcome.ok && outcome.reason === "all_keys_cooling") return { httpStatus: 429, body: { status: "quota", message: "Daily Gemini budget used up; try again later." } };
   // Gemini overloaded: heals on its own.
@@ -265,8 +342,8 @@ async function buildFromPage(req: IntakeRequest, deps: IntakeDeps, db: unknown, 
   if (!outcome.ok) return { httpStatus: 502, body: { status: "error", message: `Reading the job failed: ${outcome.reason}` } };
   // The shape check decides; the model's words never reach the row unchecked.
   const verdict = parseExtraction(outcome.data.candidates?.[0]?.content?.parts?.[0]?.text);
-  // The model says this is not one job.
-  if (!verdict.ok && verdict.reason === "not_a_job_posting") return { httpStatus: 422, body: { status: "not_a_job", message: "That does not look like a single job posting. Paste the job's own link or its description." } };
+  // The model says this is not one job. No paste box exists any more, so the remedy is a better link.
+  if (!verdict.ok && verdict.reason === "not_a_job_posting") return { httpStatus: 422, body: { status: "not_a_job", message: "That does not look like a single job posting. Try the link to the job's own page instead." } };
   // Malformed answer: a defect, reported.
   if (!verdict.ok) return { httpStatus: 502, body: { status: "error", message: `Reading the job failed: ${verdict.reason}` } };
   // The validated fields.
@@ -306,8 +383,8 @@ async function buildFromPage(req: IntakeRequest, deps: IntakeDeps, db: unknown, 
     ats_job_id: null,
     // The tag the matcher's bypass reads.
     discovered_via: ["manual"],
-    // The sighting, so the row says where it came from.
-    source_refs: [{ provider: "manual", url: req.url.toString(), ats_job_id: null, first_seen_at: at, last_seen_at: at, metadata: { type: source, apply_url_reason: apply.reason } }],
+    // The sighting, so the row says where it came from; read_via says which ladder rung read it.
+    source_refs: [{ provider: "manual", url: req.url.toString(), ats_job_id: null, first_seen_at: at, last_seen_at: at, metadata: { type: source, read_via: via, apply_url_reason: apply.reason } }],
     // No posting date on an arbitrary page: today, marked as derived.
     posted_at: at,
     // `derived` = fell back to first sighting (never `unknown`, which means cold-start only).
@@ -382,6 +459,10 @@ export async function handleJobLinkIntake(req: Request, deps: IntakeDeps): Promi
   const caller = await authorizeCaller(req, conn.db, conn.userId);
   // 401 and 403 stay distinct.
   if (!caller.ok) return json(caller.status, { status: "unauthorized", message: caller.error });
+  // The verified "Bearer <jwt>" header, forwarded to the render service so it acts as the caller.
+  const authorization = req.headers.get("authorization");
+  // Unreachable after gate 1 (it parsed this header), but never defaulted to "" (§6).
+  if (authorization === null) return json(401, { status: "unauthorized", message: "missing_bearer_token" });
   // Body parsed only after auth, so anonymous callers cannot probe the validator.
   let raw: unknown;
   // Malformed JSON is the caller's error.
@@ -404,9 +485,11 @@ export async function handleJobLinkIntake(req: Request, deps: IntakeDeps): Promi
   const now = deps.now();
   // The board posting this points at, if any.
   const target = atsTarget(parsed.value.url, parsed.value.text);
-  // Board data when there is a board; otherwise the page or the pasted text.
-  // The pasted text goes to the board path too, for a board with no description (W3).
-  const built = target !== null ? await buildFromBoard(target, deps, conn.store, now, parsed.value.text) : await buildFromPage(parsed.value, deps, conn.db, now);
+  // Board data when there is a board. The pasted text goes to the board path too, for a board
+  // with no description (W3). Null: no board, or one that could not be read or parsed.
+  const fromBoard = target !== null ? await buildFromBoard(target, deps, conn.store, now, parsed.value.text) : null;
+  // Otherwise the page ladder: the pasted text, the site's public endpoint, the page, the browser.
+  const built = fromBoard ?? (await buildFromPage(parsed.value, deps, conn.db, now, authorization));
   // Refusals carry their own status.
   if ("httpStatus" in built) return json(built.httpStatus, built.body);
   // Write it.

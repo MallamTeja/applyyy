@@ -1,7 +1,8 @@
 /* AddJobLinkPanel (2026-10-31): paste one job link, the job skips every filter and runs to the
- * Approval queue. These tests pin the response shape check, the refusal mapping (needs_text asks
- * for pasted text; quota/closed posting are notices, not errors), and that the agent run is
- * rendered only for a row that still needs agents.
+ * Approval queue. These tests pin the response shape check, the refusal mapping (needs_text,
+ * quota and a closed posting are notices, not errors), that the agent run is rendered only for a
+ * row that still needs agents, and (2026-11-01) that the panel is one button opening a modal whose
+ * only field is the link box: no job text is ever asked for or sent.
  *
  * Rendered with react-dom/server through the shared .tsx hook; assertions match markup SHAPE
  * (ids, roles, attributes), never prose from comments. The auto-start itself is an effect, which
@@ -57,7 +58,7 @@ function clientAnswering(status: number, body: unknown, sent: unknown[] = []) {
 
 // The view with every handler stubbed.
 const view = (state: unknown) =>
-  render(h(panel.AddJobLinkView, { state: state as never, url: '', text: '', onUrlChange: () => {}, onTextChange: () => {}, onSubmit: () => {}, pipelineDeps: null }));
+  render(h(panel.AddJobLinkView, { state: state as never, url: '', onUrlChange: () => {}, onSubmit: () => {}, onClose: () => {}, pipelineDeps: null }));
 
 describe('parseIntakeOk', () => {
   it('accepts the documented body', () => {
@@ -106,46 +107,71 @@ describe('describeServerRun', () => {
 });
 
 describe('runJobLinkIntake', () => {
-  it('sends only the url when the text box is blank, and the text when it is not', async () => {
+  it('sends exactly { url }, trimmed, and nothing else (no job text since 2026-11-01)', async () => {
     const sent: unknown[] = [];
-    await panel.runJobLinkIntake(clientAnswering(200, okBody(), sent), ' https://x.example/j ', '   ');
-    await panel.runJobLinkIntake(clientAnswering(200, okBody(), sent), 'https://x.example/j', ' the post ');
-    assert.deepEqual(sent, [
-      { name: 'job-link-intake', body: { url: 'https://x.example/j' } },
-      { name: 'job-link-intake', body: { url: 'https://x.example/j', text: 'the post' } },
-    ]);
+    await panel.runJobLinkIntake(clientAnswering(200, okBody(), sent), ' https://x.example/j ');
+    // deepEqual on the whole body: a stray `text` key (even empty) fails it.
+    assert.deepEqual(sent, [{ name: 'job-link-intake', body: { url: 'https://x.example/j' } }]);
   });
 
-  it('maps needs_text, the notices, and errors', async () => {
-    assert.equal((await panel.runJobLinkIntake(clientAnswering(422, { status: 'needs_text', message: 'paste it' }), 'https://x.example/j', '')).kind, 'needs_text');
+  it('maps needs_text and the other notices to a notice with the server message verbatim, and errors to errors', async () => {
+    // needs_text has no remedy box any more: it is a plain notice, the server's words unchanged.
+    assert.deepEqual(await panel.runJobLinkIntake(clientAnswering(422, { status: 'needs_text', message: 'This page needs a login.' }), 'https://x.example/j'), { kind: 'notice', message: 'This page needs a login.' });
     for (const status of ['quota', 'posting_closed', 'not_a_job', 'disabled', 'upstream_unavailable']) {
-      assert.equal((await panel.runJobLinkIntake(clientAnswering(422, { status, message: 'm' }), 'https://x.example/j', '')).kind, 'notice', status);
+      assert.equal((await panel.runJobLinkIntake(clientAnswering(422, { status, message: 'm' }), 'https://x.example/j')).kind, 'notice', status);
     }
-    assert.equal((await panel.runJobLinkIntake(clientAnswering(503, { status: 'error', message: 'db down' }), 'https://x.example/j', '')).kind, 'error');
-    assert.equal((await panel.runJobLinkIntake(clientAnswering(200, { status: 'ok' }), 'https://x.example/j', '')).kind, 'error');
+    assert.equal((await panel.runJobLinkIntake(clientAnswering(503, { status: 'error', message: 'db down' }), 'https://x.example/j')).kind, 'error');
+    assert.equal((await panel.runJobLinkIntake(clientAnswering(200, { status: 'ok' }), 'https://x.example/j')).kind, 'error');
   });
 
   it('refuses a blank link without calling the function', async () => {
     const sent: unknown[] = [];
-    assert.equal((await panel.runJobLinkIntake(clientAnswering(200, okBody(), sent), '  ', 'text')).kind, 'error');
+    assert.equal((await panel.runJobLinkIntake(clientAnswering(200, okBody(), sent), '  ')).kind, 'error');
     assert.equal(sent.length, 0);
   });
 });
 
+describe('AddJobLinkPanel', () => {
+  it('is one chip-btn trigger plus a closed dialog named by its heading', () => {
+    // The stateful wrapper as the page mounts it; static rendering runs no click, so the dialog stays closed.
+    const html = render(h(panel.AddJobLinkPanel, { client: clientAnswering(200, okBody()) as never, pipelineDeps: null }));
+    // The trigger keeps the words humanLanes.ts points people at.
+    assert.match(html, /<button type="button" class="chip-btn" aria-haspopup="dialog">Add a job by link<\/button>/);
+    // A native dialog, rendered without `open`: nothing shows until the button is pressed.
+    assert.match(html, /<dialog class="web-scout add-job-link" aria-labelledby="add-job-link-heading">/);
+    // The heading the dialog is labelled by exists inside it.
+    assert.match(html, /<h2 id="add-job-link-heading"/);
+  });
+});
+
 describe('AddJobLinkView', () => {
-  it('labels both fields and ties the needs_text notice to the text box', () => {
-    const html = view({ kind: 'needs_text', message: 'Paste the job text.' });
+  it('the modal holds exactly one field: the labelled link box (Teja, 2026-11-01: no job text)', () => {
+    const html = view({ kind: 'idle' });
+    // Every form control the markup has; the positive shape is "exactly one, and it is the url box".
+    const fields = html.match(/<(input|textarea|select)\b[^>]*>/g) ?? [];
+    // One field only: a job-text box (or anything else) makes this two.
+    assert.equal(fields.length, 1, `fields were ${fields.join(' ')}`);
+    // And that one is the url input the label names.
+    assert.match(fields[0] ?? '', /id="add-job-link-url"[^>]*type="url"/);
+    // Labelled, so a screen reader names it.
     assert.match(html, /<label[^>]*for="add-job-link-url"/);
-    assert.match(html, /<label[^>]*for="add-job-link-text"/);
-    assert.match(html, /<textarea[^>]*aria-describedby="add-job-link-needs-text"/);
-    assert.match(html, /<p id="add-job-link-needs-text"/);
+    // A visible Close button, beside the submit.
+    assert.match(html, /<button type="button"[^>]*>Close<\/button>/);
+  });
+
+  it('a needs_text notice is a plain notice: the message verbatim, polite, never an alert', () => {
+    const html = view({ kind: 'notice', message: 'This page needs a login.' });
+    // Inside the polite status region, in the notice box.
+    assert.match(html, /role="status"[^>]*>[^]*<p class="web-scout__notice">This page needs a login\.<\/p>/);
+    // Not an interruption.
+    assert.doesNotMatch(html, /role="alert"/);
   });
 
   it('a server-started run shows its progress and NO button to press (Teja, 2026-11-01)', () => {
     const result = panel.parseIntakeOk(okBody());
     // A working status reader: with none, the watch is (correctly) stalled from the start.
     const deps = { invoke: () => Promise.resolve({ ok: true, httpStatus: 200, body: {} }), readStatus: () => Promise.resolve('passed_filters') };
-    const html = render(h(panel.AddJobLinkView, { state: { kind: 'ok', result } as never, url: '', text: '', onUrlChange: () => {}, onTextChange: () => {}, onSubmit: () => {}, pipelineDeps: deps }));
+    const html = render(h(panel.AddJobLinkView, { state: { kind: 'ok', result } as never, url: '', onUrlChange: () => {}, onSubmit: () => {}, onClose: () => {}, pipelineDeps: deps }));
     assert.match(html, /Scoring the fit \(matcher\)…/);
     assert.doesNotMatch(html, /drawer__send-button/);
     assert.match(html, /href="https:\/\/www\.linkedin\.com\/posts\/x"/);

@@ -638,6 +638,23 @@ export function DiscoveredJobsPage(): ReactElement {
             ⚙️ Rules
           </Link>
 
+          {/* One button, first of the discovery sources: a link the human already chose outranks
+              anything the scouts propose. It opens a modal holding only the link box (Teja,
+              2026-11-01). Mounted only with a client, like the web-search panel: nothing to call without one. */}
+          {supabase !== null && (
+            <AddJobLinkPanel
+              // The real functions client.
+              client={supabase}
+              // The same deps the Discovered cards run agents with.
+              pipelineDeps={liveRowPipelineDeps}
+              // Reload so the added (or revived) row shows in the lists.
+              onAdded={() => {
+                // Same reload the scout panels use.
+                void loadData();
+              }}
+            />
+          )}
+
           <button
             type="button"
             className="chip-btn"
@@ -672,22 +689,6 @@ export function DiscoveredJobsPage(): ReactElement {
           </button>
         </div>
       </section>
-
-      {/* Above web search: a link the human already chose outranks anything the scouts propose.
-          Same mount rule as the panel below: nothing to call without a client. */}
-      {supabase !== null && (
-        <AddJobLinkPanel
-          // The real functions client.
-          client={supabase}
-          // The same deps the Discovered cards run agents with.
-          pipelineDeps={liveRowPipelineDeps}
-          // Reload so the added (or revived) row shows in the lists.
-          onAdded={() => {
-            // Same reload the scout panels use.
-            void loadData();
-          }}
-        />
-      )}
 
       {/* Beside the header's scout/run buttons because it is another discovery source.
           Only mounted with a real client: the panel cannot do anything without one.

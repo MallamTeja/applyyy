@@ -6,6 +6,8 @@ import { atsTarget, handleJobLinkIntake, needsChain, parseIntakeBody, persistMan
 import type { JobInsert } from "../_shared/contracts/shared-types.ts";
 // Moved to fetch-page.ts (2026-10-31) so redirect hops share it; still pinned here for the pasted link.
 import { isBlockedHost } from "./fetch-page.ts";
+// The readers past a plain fetch (2026-11-01): pinned here through the handler and directly.
+import { linkedInGuestUrl, parseOembed, RENDER_URL, xOembedUrl } from "./page-readers.ts";
 
 // One live Greenhouse posting, the shape the greenhouse adapter parses.
 const GH_BOARD = {
@@ -73,11 +75,23 @@ function fakeStore(spy: Spy, opts: { existing?: { discoveredVia: string[]; disap
   };
 }
 
+// One fetchPage answer, as the real seam returns it.
+type PageAnswer = { ok: true; html: string } | { ok: false; reason: string };
+
 // Deps with every seam faked; options flip the branch under test.
-function makeDeps(opts: { killOn?: boolean; pageFails?: boolean; html?: string; extract?: unknown; store?: Parameters<typeof fakeStore>[1]; board?: unknown } = {}): { deps: IntakeDeps; spy: Spy; runs: string[] } {
+// `pages` answers specific URLs (adapter endpoints, outbound links); every other URL gets the
+// default page. `render` answers the browser service; by default it fails, so the ladder's
+// earlier rungs decide. `extractSeq` answers the 1st, 2nd... Gemini call in turn.
+function makeDeps(opts: { killOn?: boolean; pageFails?: boolean; html?: string; extract?: unknown; extractSeq?: unknown[]; store?: Parameters<typeof fakeStore>[1]; board?: unknown; boardFails?: boolean; pages?: Record<string, PageAnswer>; render?: { status: number; body: unknown } } = {}): { deps: IntakeDeps; spy: Spy; runs: string[]; fetched: string[]; renders: { url: string; init: RequestInit }[]; prompts: string[] } {
   const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
   // Every server pipeline run the handler started, in order (kept off Spy so its literals stay valid).
   const runs: string[] = [];
+  // Every URL fetchPage was asked for, in order: proves which rung read what.
+  const fetched: string[] = [];
+  // Every call to the render service, with the request it would have sent.
+  const renders: { url: string; init: RequestInit }[] = [];
+  // The untrusted text each Gemini call was given, so a retry can be shown to read the render.
+  const prompts: string[] = [];
   const deps: IntakeDeps = {
     connect: () =>
       Promise.resolve({
@@ -98,22 +112,40 @@ function makeDeps(opts: { killOn?: boolean; pageFails?: boolean; html?: string; 
     fetchBoard: () => {
       // Counted so the page path can prove it never touched a board.
       spy.boardFetches += 1;
+      // A dead board, when a test needs the fall-through to the page ladder.
+      if (opts.boardFails) return Promise.resolve({ ok: false as const, reason: "HTTP 503" });
       // The default board, unless a test serves one with a different posting.
       return Promise.resolve({ ok: true as const, payload: opts.board ?? GH_BOARD });
     },
-    fetchPage: () => {
+    fetchPage: (url) => {
       // Counted so the pasted-text path can prove it never fetched.
       spy.pageFetches += 1;
-      return Promise.resolve(opts.pageFails ? { ok: false as const, reason: "the site does not allow automated reading" } : { ok: true as const, html: opts.html ?? `<html><body><p>${POST_TEXT}</p></body></html>` });
+      // Recorded in order.
+      fetched.push(url);
+      // A URL the test answers itself.
+      const listed = opts.pages?.[url];
+      if (listed !== undefined) return Promise.resolve(listed);
+      return Promise.resolve(opts.pageFails ? { ok: false as const, reason: "HTTP 403 Forbidden" } : { ok: true as const, html: opts.html ?? `<html><body><p>${POST_TEXT}</p></body></html>` });
     },
-    extract: () => {
+    renderFetch: (url, init) => {
+      // Recorded so a test can read the request the handler built.
+      renders.push({ url, init });
+      // The test's answer, else a renderer that could not help.
+      const answer = opts.render ?? { status: 502, body: { status: "error", message: "no browser in tests" } };
+      return Promise.resolve(new Response(JSON.stringify(answer.body), { status: answer.status, headers: { "content-type": "application/json" } }));
+    },
+    extract: (_db, prompt) => {
       // Counted so the ATS path can prove it spent no Gemini call.
       spy.extracts += 1;
-      return Promise.resolve((opts.extract ?? geminiAnswer(GOOD_FIELDS)) as Awaited<ReturnType<IntakeDeps["extract"]>>);
+      // The fenced text the model was shown.
+      prompts.push(prompt.userContent);
+      // A sequence answers call by call; otherwise one answer for every call.
+      const answer = opts.extractSeq !== undefined ? opts.extractSeq[spy.extracts - 1] : opts.extract;
+      return Promise.resolve((answer ?? geminiAnswer(GOOD_FIELDS)) as Awaited<ReturnType<IntakeDeps["extract"]>>);
     },
     now: () => new Date("2026-10-31T10:00:00Z"),
   };
-  return { deps, spy, runs };
+  return { deps, spy, runs, fetched, renders, prompts };
 }
 
 // A POST with the app user's token.
@@ -388,4 +420,196 @@ test("job-link-intake wiring: the store reads description_raw back and writes it
   assert.match(source, /\.select\("id, discovered_via, disappeared_at, description_raw"\)/);
   // The tag write sets description_raw only for a non-null fill; otherwise the column is not named.
   assert.match(source, /\.\.\.\(descriptionRaw !== null \? \{ description_raw: descriptionRaw \} : \{\}\)/);
+});
+
+// --- Read from the link alone (Teja, 2026-11-01): no robots on the pasted page, LinkedIn/X
+// public endpoints, the browser render, and the not_a_job re-read ---
+
+// What the browser service sees once a page's scripts ran; distinct from POST_TEXT on purpose.
+const RENDERED_TEXT = "Rendered: Platform Engineer at Initech in Pune. ".repeat(6);
+// A JS shell: a plain fetch reads a few words, short of MIN_JOB_TEXT_CHARS but not nothing, so the
+// tests pin "too short" and not merely "empty".
+const SHELL = "<html><body><div id=root>Loading jobs…</div><script>var x = 1;</script></body></html>";
+// The renderer's success answer, per the agreed contract.
+const RENDER_OK = { status: 200, body: { status: "ok", text: RENDERED_TEXT, final_url: "https://careers.example.com/job/1" } };
+// The model's "this is not one job" answer.
+const NOT_A_JOB = geminiAnswer({ ...GOOD_FIELDS, is_job_posting: false });
+
+test("robots: the pasted page's hops are plain httpFetch calls with robots off, and the ruling is cited", async () => {
+  // index.ts runs Deno.serve on import, so its wiring is read as source (POSITIVE shape, §6).
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  // fetchHop IS one robots-off httpFetch, so no robots check can sit in front of it.
+  assert.match(source, /fetchHop: \(hop\) => httpFetch\(hop, \{ robots: false, redirect: "manual", notFound: "null", retry: \{ maxRetries: 0 \} \}\),/);
+  // The comment that stops someone restoring the check names the ruling and its date.
+  assert.match(source, /Teja's ruling, 2026-11-01/);
+  // The ATS board path keeps scout-web's robots-gated fetcher.
+  assert.match(source, /const fetchBoard = makeFetchBoard\(\);/);
+});
+
+test("LinkedIn job link: read through the public guest endpoint by its id, no plain fetch, no render", async () => {
+  const guest = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/4012345678";
+  // The plain page would fail; only the guest endpoint answers.
+  const { deps, fetched, renders } = makeDeps({ pageFails: true, pages: { [guest]: { ok: true, html: `<section><h2>Backend Engineer</h2><div>${POST_TEXT}</div></section>` } } });
+  // The slug form search engines show, with tracking junk.
+  const res = await handleJobLinkIntake(post({ url: "https://in.linkedin.com/jobs/view/backend-engineer-at-globex-4012345678/?refId=abc" }), deps);
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  // The response contract's closed union is unchanged.
+  assert.equal(body.source, "page");
+  // The adapter's endpoint was the first and only fetch.
+  assert.deepEqual(fetched, [guest]);
+  assert.equal(renders.length, 0);
+});
+
+test("linkedInGuestUrl: /jobs/view ids and currentJobId, digits only, LinkedIn hosts only", () => {
+  assert.equal(linkedInGuestUrl(new URL("https://www.linkedin.com/jobs/view/4012345678/")), "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/4012345678");
+  assert.equal(linkedInGuestUrl(new URL("https://www.linkedin.com/jobs/collections/recommended/?currentJobId=4099")), "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/4099");
+  // Non-digit ids, non-job pages and lookalike hosts are refused, never encoded into a URL.
+  for (const bad of ["https://www.linkedin.com/jobs/search/?currentJobId=12a", "https://www.linkedin.com/jobs/search/?currentJobId=..%2F1", "https://www.linkedin.com/posts/globex-hiring", "https://evillinkedin.com/jobs/view/123", "https://linkedin.com.evil.io/jobs/view/123"]) {
+    assert.equal(linkedInGuestUrl(new URL(bad)), null, bad);
+  }
+});
+
+test("X post link: the oEmbed post text is read, and a short post follows its first outbound link once", async () => {
+  const oembed = "https://publish.x.com/oembed?url=https%3A%2F%2Fx.com%2Fglobex%2Fstatus%2F1850000000000000000&omit_script=true&dnt=true";
+  // The live oEmbed shape (curl, 2026-11-01): a hashtag link, a t.co link, then the permalink.
+  const html = `<blockquote class="twitter-tweet"><p>We're hiring a Backend Engineer! <a href="https://twitter.com/hashtag/hiring">#hiring</a> <a href="https://t.co/AbC123">t.co/AbC123</a></p>&mdash; Globex (@globex) <a href="https://x.com/globex/status/1850000000000000000?ref_src=twsrc%5Etfw">November 1, 2026</a></blockquote>`;
+  const { deps, fetched, renders, spy } = makeDeps({ pageFails: true, pages: { [oembed]: { ok: true, html: JSON.stringify({ html, author_name: "Globex" }) }, "https://t.co/AbC123": { ok: true, html: `<main>${POST_TEXT}</main>` } } });
+  // The old host and a share-tracking query string.
+  const res = await handleJobLinkIntake(post({ url: "https://twitter.com/globex/status/1850000000000000000?s=20" }), deps);
+  assert.equal(res.status, 200);
+  // oEmbed, then the first link leaving X (not the hashtag, not the permalink), and nothing else.
+  assert.deepEqual(fetched, [oembed, "https://t.co/AbC123"]);
+  assert.equal(renders.length, 0);
+  // Post text first, then the linked page's.
+  assert.match(String(spy.jobs[0]?.description_raw), /^We're hiring a Backend Engineer![\s\S]*Globex in Hyderabad/);
+});
+
+test("parseOembed: positive shape only; xOembedUrl: posts only, query string dropped", () => {
+  // Not JSON, no html string, not an object: each a failure, never an empty post.
+  assert.equal(parseOembed("<html>rate limited</html>").ok, false);
+  assert.equal(parseOembed(JSON.stringify({ html: null })).ok, false);
+  assert.equal(parseOembed(JSON.stringify([])).ok, false);
+  // A post whose only link is its own permalink has no outbound link.
+  const own = parseOembed(JSON.stringify({ html: '<p>Hello world</p><a href="https://x.com/a/status/1">d</a>' }));
+  assert.ok(own.ok);
+  assert.equal(own.link, null);
+  assert.match(own.text, /Hello world/);
+  // Rebuilt from handle + id.
+  assert.equal(xOembedUrl(new URL("https://x.com/globex/status/123?s=20")), "https://publish.x.com/oembed?url=https%3A%2F%2Fx.com%2Fglobex%2Fstatus%2F123&omit_script=true&dnt=true");
+  // A profile and a lookalike host are not posts.
+  assert.equal(xOembedUrl(new URL("https://x.com/globex")), null);
+  assert.equal(xOembedUrl(new URL("https://notx.com/globex/status/123")), null);
+});
+
+test("render: a page the plain fetch cannot read is opened by the browser service, as the caller", async () => {
+  const { deps, renders, spy } = makeDeps({ pageFails: true, render: RENDER_OK });
+  const res = await handleJobLinkIntake(post({ url: "https://careers.example.com/job/1" }), deps);
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  assert.equal(body.source, "page");
+  // Exactly one call, to the agreed endpoint.
+  assert.equal(renders.length, 1);
+  assert.equal(renders[0]?.url, RENDER_URL);
+  // The caller's own token, so the renderer can check who is asking.
+  assert.equal((renders[0]?.init.headers as Record<string, string>)["authorization"], "Bearer good");
+  assert.deepEqual(JSON.parse(String(renders[0]?.init.body)), { url: "https://careers.example.com/job/1" });
+  // A timeout signal rides along: the renderer can never hold the request past its budget.
+  assert.ok(renders[0]?.init.signal instanceof AbortSignal);
+  // The request carries the JWT, so a redirect must fail rather than re-send it (security review 2026-11-01).
+  assert.equal(renders[0]?.init.redirect, "error");
+  // The rendered text is what the matcher and tailor read, and the row says how it was read.
+  assert.equal(spy.jobs[0]?.description_raw, RENDERED_TEXT.trim());
+  assert.equal(spy.jobs[0]?.source_refs?.[0]?.metadata?.["read_via"], "render");
+});
+
+test("render: a plain fetch that returns a JS shell is re-read by the browser", async () => {
+  const { deps, renders, fetched, spy } = makeDeps({ html: SHELL, render: RENDER_OK });
+  const res = await handleJobLinkIntake(post({ url: "https://careers.example.com/job/1" }), deps);
+  assert.equal(res.status, 200);
+  // One plain fetch, one render, no more.
+  assert.equal(fetched.length, 1);
+  assert.equal(renders.length, 1);
+  assert.equal(spy.jobs[0]?.description_raw, RENDERED_TEXT.trim());
+});
+
+test("render: an answer that is not 200 + {status:'ok', text:string} is a failure (needs_text), never ok", async () => {
+  // Wrong status word, missing text, non-string text, and a success body on an error status.
+  const bad = [
+    { status: 200, body: { status: "refused", text: RENDERED_TEXT } },
+    { status: 200, body: { status: "ok", final_url: "https://careers.example.com/job/1" } },
+    { status: 200, body: { status: "ok", text: 42 } },
+    { status: 500, body: { status: "ok", text: RENDERED_TEXT } },
+  ];
+  for (const render of bad) {
+    const { deps, spy } = makeDeps({ pageFails: true, render });
+    const res = await handleJobLinkIntake(post({ url: "https://careers.example.com/job/1" }), deps);
+    assert.equal(res.status, 422, JSON.stringify(render));
+    assert.equal((await res.json()).status, "needs_text", JSON.stringify(render));
+    // Nothing reached Gemini or the table.
+    assert.equal(spy.extracts + spy.jobs.length, 0, JSON.stringify(render));
+  }
+});
+
+test("not_a_job on plain-fetched text: the browser renders it once and Gemini reads it once more", async () => {
+  // First read says "not a job" (a JS shell around the posting); the rendered read finds the job.
+  const { deps, spy, renders, prompts } = makeDeps({ extractSeq: [NOT_A_JOB, geminiAnswer(GOOD_FIELDS)], render: RENDER_OK });
+  const res = await handleJobLinkIntake(post({ url: "https://careers.example.com/job/1" }), deps);
+  assert.equal(res.status, 200);
+  assert.equal(renders.length, 1);
+  assert.equal(spy.extracts, 2);
+  // The second read is of the rendered page, and so is the stored description.
+  assert.match(prompts[1] ?? "", /Initech/);
+  assert.equal(spy.jobs[0]?.description_raw, RENDERED_TEXT.trim());
+});
+
+test("caps: still 'not a job' after its render is refused after one render and two extracts", async () => {
+  const { deps, spy, renders } = makeDeps({ extract: NOT_A_JOB, render: RENDER_OK });
+  const res = await handleJobLinkIntake(post({ url: "https://careers.example.com/job/1" }), deps);
+  assert.equal(res.status, 422);
+  assert.equal((await res.json()).status, "not_a_job");
+  assert.equal(renders.length, 1);
+  assert.equal(spy.extracts, 2);
+  assert.equal(spy.jobs.length, 0);
+});
+
+test("caps: rendered or pasted text the model calls 'not a job' is never rendered again", async () => {
+  // Already rendered (the plain fetch failed): no second render, no second extract.
+  const rendered = makeDeps({ pageFails: true, extract: NOT_A_JOB, render: RENDER_OK });
+  assert.equal((await handleJobLinkIntake(post({ url: "https://careers.example.com/job/1" }), rendered.deps)).status, 422);
+  assert.equal(rendered.renders.length, 1);
+  assert.equal(rendered.spy.extracts, 1);
+  // The human's own text: no render at all.
+  const pasted = makeDeps({ extract: NOT_A_JOB, render: RENDER_OK });
+  assert.equal((await handleJobLinkIntake(post({ url: "https://careers.example.com/job/1", text: POST_TEXT }), pasted.deps)).status, 422);
+  assert.equal(pasted.renders.length, 0);
+  assert.equal(pasted.spy.extracts, 1);
+});
+
+test("refusal wording: needs_text and not_a_job say what failed and never ask for pasted text", async () => {
+  // Unreadable page, JS shell (both with the default failing renderer), and a pasted non-job.
+  const unreadable = await (await handleJobLinkIntake(post({ url: "https://careers.example.com/job/1" }), makeDeps({ pageFails: true }).deps)).json();
+  const shell = await (await handleJobLinkIntake(post({ url: "https://careers.example.com/job/1" }), makeDeps({ html: SHELL }).deps)).json();
+  const notJob = await (await handleJobLinkIntake(post({ url: "https://careers.example.com/jobs", text: POST_TEXT }), makeDeps({ extract: NOT_A_JOB }).deps)).json();
+  // POSITIVE shape (§6): the new wording, with every rung's reason.
+  assert.equal(unreadable.message, "Could not read that page, even with a browser (HTTP 403 Forbidden; the browser could not open it: no browser in tests).");
+  assert.equal(shell.message, "Could not read that page, even with a browser (almost no readable text (it may need a login or JavaScript); the browser could not open it: no browser in tests).");
+  assert.equal(notJob.message, "That does not look like a single job posting. Try the link to the job's own page instead.");
+  // Status codes and field names unchanged: the web panel and ingest-links.yml parse them.
+  assert.deepEqual([unreadable.status, shell.status, notJob.status], ["needs_text", "needs_text", "not_a_job"]);
+  // And the UI has no paste box any more, so none of them asks for one.
+  for (const m of [unreadable.message, shell.message, notJob.message]) assert.doesNotMatch(m, /paste/i);
+});
+
+test("ATS link whose board cannot be read: falls through to the page ladder instead of a 502", async () => {
+  const { deps, spy, fetched } = makeDeps({ boardFails: true });
+  const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111" }), deps);
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  // Read as a page, so no board data and no adapter claimed.
+  assert.equal(body.source, "page");
+  assert.equal(spy.boardFetches, 1);
+  assert.deepEqual(fetched, ["https://job-boards.greenhouse.io/acme/jobs/111"]);
+  assert.equal(spy.jobs[0]?.ats_provider, "unknown");
 });

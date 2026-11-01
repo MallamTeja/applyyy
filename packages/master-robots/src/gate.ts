@@ -46,8 +46,10 @@ export type RobotsCache = Map<string, CacheEntry>;
 // WHICH READING OF A 401 ROBOTS.TXT APPLIES. A closed union, not a boolean, so a third
 // purpose has to be named and decided here rather than smuggled in as `true`.
 //   'strict'   — 401 and 403 both refuse (the deviation explained above). The DEFAULT,
-//                so every caller that says nothing (the applier, job-link-intake) keeps
-//                exactly the rule it had.
+//                so every caller that says nothing (the applier) keeps exactly the rule
+//                it had. job-link-intake no longer calls this gate for the pasted page:
+//                Teja ruled 2026-11-01 (~17:19 IST) that a link the human pastes is a
+//                user-triggered fetch, so robots.txt is not consulted for it.
 //   'scouting' — board-list reads only. A 401 counts as "no robots file", RFC 9309's own
 //                reading of a 4xx. Teja ruled this 2026-11-01 after api.ashbyhq.com's
 //                robots.txt was measured answering 401 while its public board API

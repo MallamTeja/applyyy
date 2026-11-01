@@ -294,6 +294,26 @@ jobs:
           echo "web tests: $total"
           # A zero total means the filter or glob matched nothing.
           [ "$total" -gt 0 ] || { echo "no web tests ran"; exit 1; }
+      # The Vercel render function (api/render-job-page.ts, 2026-11-01) runs a headless
+      # browser on URLs from strangers' posts; its SSRF and auth guards live in these tests.
+      # In THIS job because they import playwright-core and @sparticuz/chromium, which only
+      # the install above provides; Vercel deploys api/ on the same push as the web build.
+      - name: render function (tsc, tests), and assert tests ran
+        run: |
+          # The web package's tsc binary over the function's own typecheck-only tsconfig.
+          apps/web/node_modules/.bin/tsc -p api/tsconfig.json
+          # Root-relative glob; pipefail makes a failing test fail this line despite tee.
+          node --test "api/_render/*.test.ts" 2>&1 | tee api-tests.log
+          # Only the anchored summary line, never a test title containing the words.
+          total=$(grep -E 'ℹ tests [0-9]+$' api-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
+          # A before() hook that cannot import CANCELS tests: neither passed nor failed (CLAUDE.md §5).
+          cancelled=$(grep -E 'ℹ cancelled [0-9]+$' api-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
+          # Printed so both counts are visible in the job log.
+          echo "render function tests: $total, cancelled: $cancelled"
+          # `fail 0` beside `tests 0` is a glob that matched nothing, not a pass.
+          [ "$total" -gt 0 ] || { echo "no render function tests ran"; exit 1; }
+          # A cancelled test proved nothing.
+          [ "$cancelled" -eq 0 ] || { echo "$cancelled render function tests were cancelled"; exit 1; }
 
   # ---------------------------------------------------------------------------
   # (d) Worker: typecheck and vitest. This is the component that types into real

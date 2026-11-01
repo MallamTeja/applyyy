@@ -4,10 +4,15 @@
  * auditor on it server-side (Teja, 2026-11-01: "no need of me pressing that button"), so the run
  * survives a closed tab. This panel only watches the row's status; it offers the shared
  * SendThroughPipeline button only when the server run stalls or was never started.
+ * Since 2026-11-01 it is ONE header button that opens a modal holding only the link box (Teja: "if i
+ * press that button it will open and i will just paste the link there no jd will be pasted by me"),
+ * so the optional job-text box is gone and the request carries the url alone.
  * The client and the pipeline deps are injected, so tests need no network. */
 
-// One request, one result; the effect and refs drive the status watch.
+// One request, one result; the effect and refs drive the status watch and the dialog.
 import { useEffect, useRef, useState } from 'react';
+// Type only: the view takes the input's ref so the wrapper can focus it when the modal opens.
+import type { RefObject } from 'react';
 // The fallback button (shared with the drawer and the Discovered cards) and the queue-link sentence.
 import { OutcomeNote, SendThroughPipeline } from '../pipeline/DrawerAppCard.tsx';
 // The agents a passed_filters row needs, their input statuses, and the uuid shape check.
@@ -20,6 +25,8 @@ import { safeHref } from '../../app/safeHref.ts';
 import { isRecord, readErrorBody, type WebScoutClient } from './WebScoutPanel.tsx';
 // Shared look with the sibling panel.
 import './WebScoutPanel.css';
+// Only the modal's placement, scrim and header row; the card look stays WebScoutPanel.css's.
+import './AddJobLinkPanel.css';
 
 // Where the job's fields came from, as the function reports it.
 export type IntakeSource = 'ats_board' | 'page' | 'pasted_text';
@@ -56,15 +63,15 @@ export type IntakeState =
   | { readonly kind: 'running' }
   // Added: the agents start next.
   | { readonly kind: 'ok'; readonly result: IntakeOk }
-  // The page could not be read: the remedy is pasting the job text, so the text box is called out.
-  | { readonly kind: 'needs_text'; readonly message: string }
-  // Nothing broken (kill switch, quota, Gemini busy, closed posting, not a job): a polite notice.
+  // Nothing broken (kill switch, quota, Gemini busy, closed posting, not a job, unreadable page): a polite notice.
   | { readonly kind: 'notice'; readonly message: string }
   // Something failed; the message says what.
   | { readonly kind: 'error'; readonly message: string };
 
-// Body statuses that are not failures, only "not now" or "not this link".
-const NOTICE_STATUSES = new Set(['disabled', 'quota', 'upstream_unavailable', 'posting_closed', 'not_a_job']);
+// Body statuses that are not failures, only "not now" or "not this link". needs_text (the page
+// could not be read) is one since 2026-11-01: with no text box left there is no remedy to point at,
+// so it shows the server's own message verbatim, like any other notice.
+const NOTICE_STATUSES = new Set(['disabled', 'quota', 'upstream_unavailable', 'posting_closed', 'not_a_job', 'needs_text']);
 
 // Validate the 200 body's SHAPE; null on anything unexpected, so a bad body is an error, never "added".
 export function parseIntakeOk(body: unknown): IntakeOk | null {
@@ -112,16 +119,14 @@ export function parseIntakeOk(body: unknown): IntakeOk | null {
   };
 }
 
-// Send one link (and optional text) and map every outcome to a state. Never throws.
-export async function runJobLinkIntake(client: WebScoutClient, url: string, text: string): Promise<IntakeState> {
+// Send one link and map every outcome to a state. Never throws.
+export async function runJobLinkIntake(client: WebScoutClient, url: string): Promise<IntakeState> {
   // Trimmed so stray spaces are not part of the link.
   const trimmedUrl = url.trim();
-  // Blank text is omitted, so the function fetches the page instead.
-  const trimmedText = text.trim();
   // Refused here so an empty box costs no request.
   if (trimmedUrl === '') return { kind: 'error', message: 'Paste a job link first.' };
-  // Body carries only what the contract names.
-  const body: Record<string, unknown> = trimmedText === '' ? { url: trimmedUrl } : { url: trimmedUrl, text: trimmedText };
+  // The url alone: the function always reads the page itself, so no job text is ever sent.
+  const body: Record<string, unknown> = { url: trimmedUrl };
   // A rejected promise (network down) becomes an error state.
   try {
     // Contract: invoke('job-link-intake', { body }).
@@ -132,9 +137,7 @@ export async function runJobLinkIntake(client: WebScoutClient, url: string, text
       const errBody = (await readErrorBody(error)) ?? data;
       // Only a well-formed envelope is trusted.
       if (isRecord(errBody) && typeof errBody.message === 'string') {
-        // The page needs a login or JS: ask for the text.
-        if (errBody.status === 'needs_text') return { kind: 'needs_text', message: errBody.message };
-        // Not a failure, just not now / not this link.
+        // Not a failure, just not now / not this link (needs_text included).
         if (typeof errBody.status === 'string' && NOTICE_STATUSES.has(errBody.status)) return { kind: 'notice', message: errBody.message };
         // Everything else, verbatim.
         return { kind: 'error', message: errBody.message };
@@ -310,28 +313,33 @@ export function AddJobLinkView(props: {
   state: IntakeState;
   // The link box, controlled by the wrapper.
   url: string;
-  // The optional text box, controlled by the wrapper.
-  text: string;
   // Lifts link edits to the wrapper.
   onUrlChange: (value: string) => void;
-  // Lifts text edits to the wrapper.
-  onTextChange: (value: string) => void;
   // Starts one intake; the view never calls the network itself.
   onSubmit: () => void;
+  // The visible Close button's action; the wrapper closes the dialog (Esc closes it natively).
+  onClose: () => void;
+  // The link box's ref, so the wrapper can move focus into it on open; optional for tests.
+  inputRef?: RefObject<HTMLInputElement> | undefined;
   // The status reader for the watch, and the fallback button's deps; null renders the button disabled with a reason.
   pipelineDeps: RowPipelineDeps | null;
   // Called when the server run settles, so the page can reload its lists; optional for tests.
   onRunSettled?: (() => void) | undefined;
 }) {
   // Destructured once for readability.
-  const { state, url, text, onUrlChange, onTextChange, onSubmit, pipelineDeps, onRunSettled } = props;
+  const { state, url, onUrlChange, onSubmit, onClose, inputRef, pipelineDeps, onRunSettled } = props;
   // Disables the button so a double click cannot add twice.
   const running = state.kind === 'running';
-  // One landmark, labelled by its heading.
+  // A fragment: the wrapper's <dialog> is the container and is labelled by the heading below.
   return (
-    <section className="web-scout" aria-labelledby="add-job-link-heading">
-      {/* Names the panel for the landmark above. */}
-      <h2 id="add-job-link-heading" className="web-scout__title">Add a job by link</h2>
+    <>
+      {/* Heading and Close on one row, so the way out is visible next to the title. */}
+      <div className="add-job-link__header">
+        {/* Names the dialog through its aria-labelledby. */}
+        <h2 id="add-job-link-heading" className="web-scout__title">Add a job by link</h2>
+        {/* type=button: inside no form, but stated so it can never submit one. Never disabled: closing mid-request is safe, the wrapper keeps the run. */}
+        <button type="button" className="button button--ghost" onClick={onClose}>Close</button>
+      </div>
       {/* A form so Enter submits; preventDefault stops a reload. */}
       <form
         // Same wrapping row layout as the web-search form beside it.
@@ -350,6 +358,8 @@ export function AddJobLinkView(props: {
         <input
           // Matches the label's htmlFor.
           id="add-job-link-url"
+          // The wrapper focuses it on open; React's autoFocus fires only at mount, while the dialog is closed.
+          ref={inputRef}
           // Shared input styling.
           className="web-scout__input"
           // URL keyboard and basic browser validation.
@@ -366,29 +376,12 @@ export function AddJobLinkView(props: {
           {/* Text changes so the busy state does not rely on colour. */}
           {running ? 'Adding…' : 'Add job'}
         </button>
-        {/* Its own label: the text box is optional and says when it is needed. */}
-        <label className="web-scout__label" htmlFor="add-job-link-text">Job text (optional; paste the post or description when the link needs a login)</label>
-        {/* Full-row box for a pasted post. */}
-        <textarea
-          // Matches the label's htmlFor.
-          id="add-job-link-text"
-          // Input look, full row.
-          className="web-scout__input web-scout__input--block"
-          // Controlled.
-          value={text}
-          // Points at the needs_text notice when the page could not be read.
-          aria-describedby={state.kind === 'needs_text' ? 'add-job-link-needs-text' : undefined}
-          // Lifts the raw string.
-          onChange={(event) => onTextChange(event.target.value)}
-        />
       </form>
       {/* Polite live region, always mounted so changes are announced. */}
       <div className="web-scout__status" role="status" aria-live="polite">
         {/* Its own text, announced while waiting. */}
         {running ? 'Reading the job. This can take up to a minute.' : ''}
-        {/* "Paste the text" request, tied to the text box above. */}
-        {state.kind === 'needs_text' && <p id="add-job-link-needs-text" className="web-scout__notice">{state.message}</p>}
-        {/* Not-now notices: polite, never alerts. */}
+        {/* Not-now notices (an unreadable page too), the server's words verbatim: polite, never alerts. */}
         {state.kind === 'notice' && <p className="web-scout__notice">{state.message}</p>}
       </div>
       {/* Failures interrupt. */}
@@ -442,11 +435,11 @@ export function AddJobLinkView(props: {
           )}
         </div>
       )}
-    </section>
+    </>
   );
 }
 
-// Stateful wrapper the Discovered page mounts.
+// Stateful wrapper the Discovered page mounts in its header row: the trigger button plus the modal.
 export function AddJobLinkPanel(props: {
   // The functions client; the page passes the real one, tests a fake.
   client: WebScoutClient;
@@ -457,39 +450,79 @@ export function AddJobLinkPanel(props: {
 }) {
   // The pasted link.
   const [url, setUrl] = useState<string>('');
-  // The optional pasted text.
-  const [text, setText] = useState<string>('');
   // Idle until the human acts.
   const [state, setState] = useState<IntakeState>({ kind: 'idle' });
-  // The view does all drawing; this wrapper only owns state.
+  // The trigger, so focus can return to it when the modal closes (Safari never focuses a clicked button).
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  // The native dialog: showModal() brings the focus trap, Esc-to-close and the inert page for free.
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  // The link box, focused on open so the human can paste at once.
+  const inputRef = useRef<HTMLInputElement>(null);
+  // The dialog stays mounted while closed, so a request (and its run watch) outlives a close.
   return (
-    <AddJobLinkView
-      // Passed down so tests can render any state.
-      state={state}
-      // Controlled values.
-      url={url}
-      // Same.
-      text={text}
-      // Stable setters.
-      onUrlChange={setUrl}
-      // Same.
-      onTextChange={setText}
-      // Injected so the view never imports a client.
-      pipelineDeps={props.pipelineDeps}
-      // The row has moved on: the page reloads, so it leaves the Ready to tailor list.
-      onRunSettled={props.onAdded}
-      // Closes over the current inputs.
-      onSubmit={() => {
-        // Synchronous flip so the button disables before the await.
-        setState({ kind: 'running' });
-        // runJobLinkIntake never throws.
-        void runJobLinkIntake(props.client, url, text).then((next) => {
-          // Commit the outcome (an ok mounts the watch on the server's run).
-          setState(next);
-          // A new or revived row: the page reloads its lists.
-          if (next.kind === 'ok') props.onAdded?.();
-        });
-      }}
-    />
+    <>
+      {/* chip-btn, like the scout and run buttons beside it in the header row. */}
+      <button
+        // Not a submit: the page has no form.
+        type="button"
+        // The header row's small-button look.
+        className="chip-btn"
+        // Read by the dialog's close handler.
+        ref={triggerRef}
+        // Tells assistive tech the button opens a dialog.
+        aria-haspopup="dialog"
+        // Open as a modal, then move focus into the link box rather than wherever the browser picks.
+        onClick={() => {
+          // Modal, not show(): only the modal form makes the rest of the page inert.
+          dialogRef.current?.showModal();
+          // Explicit: the browser's own initial-focus choice varies, and the Close button comes first.
+          inputRef.current?.focus();
+        }}
+      >
+        {/* The words humanLanes.ts sends people to ("Discovery, Add a job by link"); keep them in step. */}
+        Add a job by link
+      </button>
+      {/* .web-scout makes the dialog itself the card; AddJobLinkPanel.css only centres it and dims the page. */}
+      <dialog
+        // Read by the open and close handlers.
+        ref={dialogRef}
+        // Card look plus this panel's placement rules.
+        className="web-scout add-job-link"
+        // Named by the view's heading.
+        aria-labelledby="add-job-link-heading"
+        // Fires on Esc and on the Close button alike, so both paths hand focus back to the trigger.
+        onClose={() => triggerRef.current?.focus()}
+      >
+        {/* Everything inside is the pure view, so tests render each state without a DOM or a click. */}
+        <AddJobLinkView
+          // Passed down so tests can render any state.
+          state={state}
+          // Controlled value.
+          url={url}
+          // Stable setter.
+          onUrlChange={setUrl}
+          // close() fires the dialog's close event, which restores focus above.
+          onClose={() => dialogRef.current?.close()}
+          // Focused by the trigger's click handler.
+          inputRef={inputRef}
+          // Injected so the view never imports a client.
+          pipelineDeps={props.pipelineDeps}
+          // The row has moved on: the page reloads, so it leaves the Ready to tailor list.
+          onRunSettled={props.onAdded}
+          // Closes over the current input.
+          onSubmit={() => {
+            // Synchronous flip so the button disables before the await.
+            setState({ kind: 'running' });
+            // runJobLinkIntake never throws.
+            void runJobLinkIntake(props.client, url).then((next) => {
+              // Commit the outcome (an ok mounts the watch on the server's run).
+              setState(next);
+              // A new or revived row: the page reloads its lists.
+              if (next.kind === 'ok') props.onAdded?.();
+            });
+          }}
+        />
+      </dialog>
+    </>
   );
 }

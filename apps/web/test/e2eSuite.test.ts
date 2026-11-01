@@ -908,4 +908,45 @@ describe('Playwright E2E Operator Console Suite', () => {
       await page.unroute('**/rest/v1/agent_runs**');
     }
   });
+
+  // 2026-11-01 (Teja: "if i press that button it will open and i will just paste the link there no jd
+  // will be pasted by me"). Add-a-job-by-link was an always-open section with a job-text box; it is
+  // now one header button opening a native <dialog> whose only field is the link. Static rendering
+  // cannot run showModal(), focus or Esc, so this drives them in Chromium.
+  it('14. "Add a job by link" is one header button; its modal holds only the link box, takes focus, and Esc closes it back to the button', async () => {
+    // A fresh load, so the dialog starts closed.
+    await page.goto(`${serverUrl}/discovered`, { waitUntil: 'domcontentloaded' });
+    // The trigger, by the words humanLanes.ts sends people to.
+    const trigger = page.getByRole('button', { name: 'Add a job by link' });
+    // Rendered once the page has its client; waiting proves the mount condition held.
+    await trigger.waitFor();
+    // Closed by default: the link box exists in the DOM but is not shown until asked.
+    assert.equal(await page.locator('#add-job-link-url').isVisible(), false, 'the link box must be hidden until the button is pressed');
+    // Open it as the operator does.
+    await trigger.click();
+    // The dialog, found by the name its heading gives it.
+    const dialog = page.getByRole('dialog', { name: 'Add a job by link' });
+    // Visible once showModal() ran.
+    await dialog.waitFor();
+    // Exactly one field, and it is the url box: no job-text box came back.
+    assert.equal(await dialog.locator('input, textarea, select').count(), 1, 'the modal must hold exactly one field');
+    // That one field is the link box.
+    assert.equal(await dialog.locator('input[type="url"]#add-job-link-url').count(), 1, 'the one field must be the url input');
+    // Focus moved into the link box, so a paste lands without a click.
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'add-job-link-url', 'opening must focus the link box');
+    // The native cancel path.
+    await page.keyboard.press('Escape');
+    // Hidden again.
+    await dialog.waitFor({ state: 'hidden' });
+    // Focus returned to the trigger, so keyboard users are not dropped at the top of the page.
+    assert.equal(await page.evaluate(() => document.activeElement?.textContent), 'Add a job by link', 'closing must return focus to the trigger');
+    // The visible Close button is the other way out: reopen, then press it.
+    await trigger.click();
+    // Open again.
+    await dialog.waitFor();
+    // By its visible name, scoped to the dialog so no other Close on the page can match.
+    await dialog.getByRole('button', { name: 'Close' }).click();
+    // Closed by the button too.
+    await dialog.waitFor({ state: 'hidden' });
+  });
 });

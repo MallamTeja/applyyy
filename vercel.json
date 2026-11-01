@@ -1,7 +1,13 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "outputDirectory": "apps/web/dist",
-  "ignoreCommand": "[ -n \"$VERCEL_GIT_PREVIOUS_SHA\" ] && git diff --quiet \"$VERCEL_GIT_PREVIOUS_SHA\" HEAD -- apps/web packages supabase/functions/_shared package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json .npmrc vercel.json",
+  "ignoreCommand": "[ -n \"$VERCEL_GIT_PREVIOUS_SHA\" ] && git diff --quiet \"$VERCEL_GIT_PREVIOUS_SHA\" HEAD -- apps/web packages supabase/functions/_shared package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json .npmrc vercel.json api",
+  "functions": {
+    "api/render-job-page.ts": {
+      "maxDuration": 60,
+      "includeFiles": "node_modules/.pnpm/@sparticuz+chromium@140.0.0*/node_modules/@sparticuz/chromium/bin/**"
+    }
+  },
   "rewrites": [
     {
       "source": "/(.*)",
