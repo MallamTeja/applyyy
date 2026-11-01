@@ -253,6 +253,26 @@ export function toStoredOp(op: AssistOp, draft: AssistDraft): StoredOp | null {
     : { op: 'remove', ref, before };
 }
 
+/* Whether the chat applies this op by itself, right after the answer (Teja, 2026-11-01: "my ai
+   need to perform the actions"). Edits and removals: yes; they change only this resume, the row
+   still needs Approve, and every edited line keeps its Reset in the diff. A skill: only when the
+   master already has it, or the operator NAMED it in this message. Otherwise applying writes a new
+   claim into the master profile, which every future resume inherits, and the AI must not invent
+   one; that card waits for a click. Matched by whole tokens, so "os" in "add os" counts but "os"
+   inside "cost" does not. */
+export function shouldAutoApply(op: StoredOp, instruction: string): boolean {
+  // Edits and removals are resume-only and reversible.
+  if (op.op !== 'add_skill') return true;
+  // Already a master claim: printing it claims nothing new.
+  if (op.inMaster) return true;
+  // The operator's words, as the auditor tokenises text.
+  const said = new Set(tokenizeText(instruction));
+  // Every word of the skill's name must have been typed ("CN" needs "cn"; "Code review" needs both).
+  const name = tokenizeText(op.name);
+  // An empty name never auto-applies.
+  return name.length > 0 && name.every((token) => said.has(token));
+}
+
 /* The page action a stored op becomes on Apply. */
 export function toEditAction(stored: StoredOp): EditAction {
   /* A skill always goes through the attest path: it reuses the master's own node when the latest

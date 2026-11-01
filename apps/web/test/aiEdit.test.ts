@@ -213,3 +213,45 @@ describe('auditAdvice (the audit as advice, 2026-11-01)', () => {
     assert.deepEqual([...ai.buildAssistDraft(diff, [], 'x').masterSkills], ['typescript', 'postgres', 'kafka']);
   });
 });
+
+describe('skill card group picker (2026-11-01)', () => {
+  it("offers every master group, preselecting the AI's pick, so a misfiled skill is fixed before Apply", () => {
+    // OS filed under Frameworks by the AI, the failure seen on 2026-11-01.
+    const op = { op: 'add_skill', name: 'OS', category: 'Frameworks', inMaster: false } as const;
+    // With a change handler: the picker renders.
+    const html = render(h(panel.OpBody, { op, categories: ['Languages', 'Frameworks', 'Databases'], onGroup: () => {} }));
+    // A labelled select.
+    assert.match(html, /<select class="ai-chat__group" aria-label="Skill group for OS"/);
+    // All three groups, Frameworks selected.
+    assert.match(html, /<option value="Languages">Languages<\/option><option value="Frameworks" selected="">Frameworks<\/option><option value="Databases">Databases<\/option>/);
+    // An operator pick overrides the AI's.
+    assert.match(render(h(panel.OpBody, { op, categories: ['Languages', 'Frameworks'], group: 'Languages', onGroup: () => {} })), /<option value="Languages" selected="">/);
+  });
+});
+
+describe('shouldAutoApply (the AI performs the actions, 2026-11-01)', () => {
+  // A skill the master lacks.
+  const skill = (name: string) => ({ op: 'add_skill', name, category: 'Tools', inMaster: false }) as const;
+
+  it('applies edits and removals by itself', () => {
+    // A bullet edit.
+    assert.equal(ai.shouldAutoApply({ op: 'edit', target: { kind: 'bullet', ref: 'r' }, before: null, text: 't', advice: null }, 'x'), true);
+    // A removal.
+    assert.equal(ai.shouldAutoApply({ op: 'remove', ref: 'r', before: null }, 'x'), true);
+  });
+
+  it('adds a master-less skill only when the operator named it, by whole words', () => {
+    // The 2026-11-01 message: each named skill auto-applies.
+    const said = 'hey i wanan add dbms , os , cn , oops skills to';
+    // Named, so applied.
+    assert.deepEqual(['DBMS', 'OS', 'CN', 'OOPS'].map((n) => ai.shouldAutoApply(skill(n), said)), [true, true, true, true]);
+    // "os" inside "cost" is not naming OS.
+    assert.equal(ai.shouldAutoApply(skill('OS'), 'cut the cost line'), false);
+    // A skill the AI chose on its own waits for a click.
+    assert.equal(ai.shouldAutoApply(skill('Kubernetes'), said), false);
+    // Every word of a multi-word name must be typed: "reviewing" is not "review".
+    assert.equal(ai.shouldAutoApply(skill('Code review'), 'add the code reviewing skill'), false);
+    // Already in the master: printing it claims nothing new.
+    assert.equal(ai.shouldAutoApply({ ...skill('Kubernetes'), inMaster: true }, 'anything'), true);
+  });
+});

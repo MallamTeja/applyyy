@@ -57,6 +57,22 @@
   border-radius: var(--radius-control);
 }
 
+/* The skill-group picker inside a skill card's sentence. */
+.ai-chat__group {
+  /* Reads as part of the sentence. */
+  font: inherit;
+  /* Tight inset, so the line does not jump in height. */
+  padding: 0 var(--gap-1);
+  /* On the sheet colour, like the other inputs. */
+  background: var(--sheet);
+  /* Text follows the theme. */
+  color: var(--text-primary);
+  /* Hairline edge. */
+  border: 1px solid var(--rule);
+  /* Matches the controls. */
+  border-radius: var(--radius-control);
+}
+
 /* The conversation. */
 .ai-chat__log {
   /* No list markers: bubbles carry the structure. */

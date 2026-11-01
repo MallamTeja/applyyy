@@ -1,9 +1,12 @@
 /* THE AI CHAT on the review page (2026-10-31; a chat with memory since 2026-11-01).
  *
- * The operator types what to change; the AI answers with a short note and a list of proposed
- * edits; each edit is applied only by the operator's click, through the same save path as a hand
- * edit (aiEdit.ts explains why). Nothing here writes the resume on its own, and the preview /
- * "Download PDF" follow every applied edit because the page re-renders the saved resume.
+ * The operator types what to change; the AI replies (answering any question) and makes the edits.
+ * Since 2026-11-01 THE AI PERFORMS THE ACTIONS: each edit is applied right after the answer, through
+ * the same guarded save path as a hand edit (aiEdit.ts explains why that path). The one exception is
+ * shouldAutoApply's: a skill the master lacks and the operator did not name waits for a click, so
+ * the AI cannot write a claim into the master on its own. The row still needs Approve before anything
+ * is submitted, every edited line keeps its Reset in the diff, and the preview / "Download PDF"
+ * follow every applied edit because the page re-renders the saved resume.
  *
  * CHATS AND MEMORY. Every exchange is stored (resumeChat.ts, table resume_chat_messages), several
  * chats per resume, picked from a native <select>. The next ask carries the active chat's last
@@ -29,7 +32,7 @@ import type { ResumeDiff } from './diffModel';
 // Type only: the action vocabulary and save result the page already understands.
 import type { EditAction, EditResult } from './DiffView';
 // The pure halves: build the ask, resolve and apply ops, read applied state, format the bill.
-import { buildAssistDraft, formatUsage, isApplied, toEditAction, toStoredOp } from './aiEdit';
+import { buildAssistDraft, formatUsage, isApplied, shouldAutoApply, toEditAction, toStoredOp } from './aiEdit';
 // Types for the ask and its parts.
 import type { AssistBody, AssistResult, AuditAdvice, StoredOp } from './aiEdit';
 // The memory: grouping into chats and the window sent back as context.
@@ -65,16 +68,50 @@ function AdviceLine({ advice }: { readonly advice: AuditAdvice }): ReactElement 
   return <p className="ai-chat__audit">Audit would flag {parts.join('; ')}.</p>;
 }
 
-/* What one stored op changes, with what the audit would say. */
-function OpBody({ op }: { readonly op: StoredOp }): ReactElement {
+/* What one stored op changes, with what the audit would say. Exported for the render test. */
+export function OpBody({
+  // The proposal.
+  op,
+  // The master's skill groups, offered on a skill card.
+  categories = [],
+  // The group chosen on this card; the AI's pick until changed.
+  group,
+  // Called when the operator picks another group; absent renders the group as text.
+  onGroup,
+  // The card is applied or busy: the picker cannot change what was saved.
+  locked = false,
+}: {
+  readonly op: StoredOp;
+  readonly categories?: readonly string[];
+  readonly group?: string | undefined;
+  readonly onGroup?: ((group: string) => void) | undefined;
+  readonly locked?: boolean;
+}): ReactElement {
   // A new skill: name, group, and whether Apply also makes it a master claim.
   if (op.op === 'add_skill') {
+    // The group shown: the operator's pick, else the AI's.
+    const chosen = group ?? op.category;
+    // Every master group, plus the AI's pick if the list somehow lacks it, so the select can show it.
+    const options = categories.includes(chosen) ? categories : [chosen, ...categories];
     // Stacked: the add, then what else Apply does.
     return (
       <div className="ai-chat__change">
-        {/* The name in bold, since that is the claim being made. */}
+        {/* The name in bold, since that is the claim being made; the group is a picker (2026-11-01)
+            because the AI must choose among the master's groups and none may fit (OS under Frameworks). */}
         <span>
-          Add skill <strong>{op.name}</strong> under {op.category}
+          Add skill <strong>{op.name}</strong> under{' '}
+          {onGroup === undefined ? (
+            chosen
+          ) : (
+            <select className="ai-chat__group" aria-label={`Skill group for ${op.name}`} value={chosen} onChange={(event) => onGroup(event.target.value)} disabled={locked}>
+              {/* One option per master group. */}
+              {options.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          )}
         </span>
         {/* Said before the click, where the popup used to ask it. */}
         {op.inMaster ? null : <p className="ai-chat__audit">Not in your master profile yet: Apply saves it there too. Only apply if you have it.</p>}
@@ -153,6 +190,8 @@ export function AiEditPanel({
   const [opStates, setOpStates] = useState<ReadonlyMap<string, OpState>>(new Map());
   // An Apply-all run is in progress, so its buttons wait.
   const [applyingAll, setApplyingAll] = useState<boolean>(false);
+  // Skill groups the operator picked on a card, by op key; absent means the AI's pick stands.
+  const [groups, setGroups] = useState<ReadonlyMap<string, string>>(new Map());
   // The scrolling log, kept at its newest message.
   const logRef = useRef<HTMLOListElement | null>(null);
 
@@ -244,19 +283,27 @@ export function AiEditPanel({
     ];
     // Stored when there is a store; the rows come back with ids and times.
     const saved = chat === undefined ? null : await chat.save(diff.applicationId, exchange);
+    // The stored rows, or local copies (ids null: not in the database, so not in tomorrow's history).
+    const shown: ChatMessage[] =
+      saved !== null && saved.kind === 'ok' ? saved.messages : exchange.map((m) => ({ ...m, id: null, createdAt: new Date().toISOString() }));
     // Shown either way: a failed save keeps the answer usable, marked as unsaved.
-    if (saved !== null && saved.kind === 'ok') setMessages((current) => [...current, ...saved.messages]);
-    // Not stored (no store, or the save failed).
-    else {
-      // Local copies, so the cards still work this session.
-      const now = new Date().toISOString();
-      // Ids null: not in the database, so not in tomorrow's history.
-      setMessages((current) => [...current, ...exchange.map((m) => ({ ...m, id: null, createdAt: now }))]);
-      // Said, so the operator knows this exchange will not be remembered.
-      if (saved !== null && saved.kind === 'error') setError(saved.message);
-    }
+    setMessages((current) => [...current, ...shown]);
+    // Said, so the operator knows this exchange will not be remembered.
+    if (saved !== null && saved.kind === 'error') setError(saved.message);
     // The composer empties for the next message.
     setInstruction('');
+    // The reply whose ops are applied now.
+    const reply = shown.find((m) => m.role === 'assistant');
+    /* THE AI PERFORMS THE ACTIONS (2026-11-01): each op that shouldAutoApply allows is applied in
+       order through the page's guarded save, exactly as a click would; the composer stays locked
+       until they land. A skill the operator did not name stays a card. First failure stops the run,
+       since the row probably changed and later saves would fail the same way. */
+    for (const [index, op] of (reply?.ops ?? []).entries()) {
+      // Left as a card for a click.
+      if (!shouldAutoApply(op, text)) continue;
+      // Applied; a refusal shows on its card with Retry.
+      if (reply !== undefined && !(await apply(op, opKey(reply, index)))) break;
+    }
     // Unlocks.
     setAsking(false);
   }
@@ -281,7 +328,7 @@ export function AiEditPanel({
     // Shown as in progress. No popup: the card already showed every flag before this click.
     setOpState(key, { status: 'applying' });
     // The page's save; a refusal comes back as a reason.
-    const result = await onEdit(toEditAction(op));
+    const result = await onEdit(toEditAction(op.op === 'add_skill' ? { ...op, category: groups.get(key) ?? op.category } : op));
     // Landed: the diff re-renders and isApplied turns the card to "Applied".
     if (result.ok) setOpState(key, undefined);
     // Refused or unknown, in the save path's words.
@@ -352,7 +399,7 @@ export function AiEditPanel({
         {/* An empty chat explains itself instead of showing blank space. */}
         {active.length === 0 ? (
           <li className="ai-chat__empty">
-            {loading ? 'Loading chats…' : 'Say what to change, e.g. "Add Kafka to skills and make the first bullet about latency". The AI proposes; nothing changes until you apply.'}
+            {loading ? 'Loading chats…' : 'Say what to change, e.g. "Add Kafka to skills and make the first bullet about latency". The AI makes the edits; Reset in the comparison below undoes any of them.'}
           </li>
         ) : null}
         {/* Each message in order. */}
@@ -393,7 +440,17 @@ export function AiEditPanel({
                     // One card.
                     return (
                       <li key={key} className={`ai-chat__op${applied ? ' ai-chat__op--applied' : ''}`}>
-                        <OpBody op={op} />
+                        <OpBody
+                          op={op}
+                          /* The master's groups, the only ones a skill may print under. */
+                          categories={categories}
+                          /* The operator's pick for this card, if any. */
+                          group={groups.get(key)}
+                          /* Remembered per card; Apply reads it. */
+                          onGroup={(name) => setGroups((current) => new Map(current).set(key, name))}
+                          /* Applied or in flight: the group is settled. */
+                          locked={applied || locked || state?.status === 'applying'}
+                        />
                         {/* Applied items say so instead of offering the button again. */}
                         {applied ? (
                           <span className="ai-chat__done">Applied</span>

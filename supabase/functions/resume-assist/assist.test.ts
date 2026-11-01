@@ -313,3 +313,14 @@ test("buildAssistPrompt puts the chat after the resume and job, and the new inst
   // A new chat adds no block at all.
   assert.doesNotMatch(buildAssistPrompt(request()).userContent, /CHAT SO FAR/);
 });
+
+test("the note is the chat reply: the model is told to answer questions, and a long answer survives", () => {
+  // The instruction that turns note into a reply (a question used to get a description of an answer).
+  assert.match(buildAssistPrompt(request()).systemInstruction, /note is your reply to the owner.*answer any question they asked directly/);
+  // A 500-character answer, longer than the old 300 cap.
+  const answer = "Code review fits Tools. ".repeat(21).trim();
+  // Parsed with no ops: a question needs none.
+  const parsed = parseAssistOps(JSON.stringify({ ops: [], note: answer }), request());
+  // Kept whole.
+  assert.equal(parsed.ok ? parsed.note : null, answer);
+});
