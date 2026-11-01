@@ -1,5 +1,5 @@
 # Drains the post-screen queues on demand: pages the whole `passed_filters` queue through the
-# matcher (?limit=25), then the whole `scored` queue through the tailor (?limit=10), then the
+# matcher (?limit=10), then the whole `scored` queue through the tailor (?limit=10), then the
 # whole `tailored` queue through the auditor (?limit=10). The sibling of prescreen-drain.yml,
 # which drains the two stages BEFORE this one (normalizer, screener).
 # Exists because nothing calls these three agents on a schedule: only run-one.yml (one row
@@ -49,9 +49,10 @@ jobs:
     # Same runner image as the other workflows. Its preinstalled Node (>= 20) has
     # global fetch, which is all this job needs: no checkout, no install, no third-party action.
     runs-on: ubuntu-latest
-    # Every page makes Gemini calls, so pages run near the functions' ~150 s wall clock. About
-    # 25 pages across the three stages at that pace is ~60 min; this cap leaves room for slow
-    # pages and stops a hung run from burning the monthly Actions minutes.
+    # Every page makes Gemini calls; measured 2026-11-01, a matcher page takes ~1 min. About
+    # 45 pages of 10 across the three stages (~200 rows to score, fewer to tailor and audit)
+    # is ~45-90 min; this cap leaves room for slow pages and stops a hung run from burning
+    # the monthly Actions minutes.
     timeout-minutes: 150
     # Steps run top to bottom; a non-zero exit stops the job.
     steps:
@@ -66,14 +67,16 @@ jobs:
           # Node reads the module from stdin; --input-type=module enables top-level await.
           node --input-type=module <<'JS'
           // The three stages, declared up front so the plan log and the loop read ONE source.
-          // limit: the matcher's MAX_BATCH_SIZE (matcher/index.ts:93); the tailor and auditor run
-          // at their default 10 because each row is one or more Gemini calls and a page must
-          // finish inside the function's wall clock. A larger ask is clamped, never an error.
-          // pageCap: hard ceiling well above the live backlog (~230 passed_filters / 25 = 10
+          // limit: every agent runs at its DEFAULT 10 (matcher/index.ts:90), the size the web
+          // runner has always used. NOT the matcher's MAX_BATCH_SIZE 25: the first live run
+          // (41305052697, 2026-11-01) read 25 on page 1, then page 2 died with HTTP 546
+          // WORKER_RESOURCE_LIMIT (the edge worker ran out of compute mid-batch). The tailor
+          // and auditor stay at 10 because each row is one or more Gemini calls.
+          // pageCap: hard ceiling well above the live backlog (~200 passed_filters / 10 = 20
           // pages; a deadline-cut page reads fewer) so a queue that never shrinks stops red.
           const STAGES = [
             // Stage 1: passed_filters -> scored | dropped_filter | failed.
-            { name: 'matcher', limit: 25, pageCap: 40 },
+            { name: 'matcher', limit: 10, pageCap: 40 },
             // Stage 2: scored -> tailored | failed.
             { name: 'tailor', limit: 10, pageCap: 40 },
             // Stage 3: tailored -> audit_clean | audit_flagged -> awaiting_approval.
