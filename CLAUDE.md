@@ -87,8 +87,11 @@ that one function's deploys and says nothing about age.
 ## 4. Reaching live systems (read-only unless told otherwise)
 
 - **DB:** the supabase MCP `execute_sql`, project `xynqxekcqizwhtskzqrq`.
-  `supabase db query --linked` returns 403 (since ~2026-10-04). Routes change, so
-  re-enumerate them before declaring anything unreachable.
+  `supabase db query --linked` works **with the user env var unset**:
+  `env -u SUPABASE_ACCESS_TOKEN supabase db query --linked "<select>"` (Bash). With it set
+  it returns 403: that token belongs to the WRONG account (same trap as §3). This was the
+  "403 since ~2026-10-04" (re-verified 2026-11-01). Routes change, so re-enumerate them
+  before declaring anything unreachable.
 - **Status counts:** `select status, count(*) from applications group by 1`. Never quote an old count.
 - **Migrations applied:** the MCP `list_migrations` vs `ls supabase/migrations`.
 - **Is prod web current?** `curl` the `/assets/index-*.js` from https://applyyy.vercel.app/
