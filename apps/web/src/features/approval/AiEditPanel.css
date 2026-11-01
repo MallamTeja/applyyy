@@ -135,10 +135,13 @@
   background: var(--sheet);
 }
 
-/* The AI's one-line note. */
+/* The AI's reply: the answer itself, so it reads as the AI talking, not as metadata. Was muted
+   secondary text until 2026-11-01, when Teja could not find replies that carried no edit card. */
 .ai-chat__note {
-  /* Secondary text: the AI's own words. */
-  color: var(--text-secondary);
+  /* Full colour, like the operator's own bubble. */
+  color: var(--text-primary);
+  /* Body size, not the small meta size. */
+  font-size: var(--size-base);
 }
 
 /* The proposals inside a reply. */
