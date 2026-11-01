@@ -11,7 +11,9 @@ import { classifyEmail } from "../_shared/email/classifier.ts";
 // Schema-owned enum types, so a typo here is a compile error, not a 22P02 at runtime.
 // `isTerminal` and `canTransition` are the runtime mirror of the status graph; read them, never a hand-kept list.
 // EmailEventInsert types the stored-row builder below against the schema owner's shape.
-import { canTransition, isTerminal, type ApplicationStatus, type EmailClassification, type EmailEventInsert } from "../_shared/contracts/shared-types.ts";
+// EMAIL_CLASSIFICATIONS (the vocabulary as a runtime list) lets the replay's set be DERIVED
+// from the status mapping below rather than hand-kept beside it (W6, 2026-11-01).
+import { canTransition, EMAIL_CLASSIFICATIONS, isTerminal, type ApplicationStatus, type EmailClassification, type EmailEventInsert } from "../_shared/contracts/shared-types.ts";
 
 // The wire fields the stored email_events row copies. Narrower than `IntakeMessage` for
 // the same reason DecidableMessage is: tests build one without the whole wire contract.
@@ -292,7 +294,8 @@ function slugNamedIn(message: DecidableMessage, slug: string): boolean {
 // The single application a message belongs to, or null. Null when NOTHING matches and
 // also when MORE THAN ONE does: the old first-match-wins loop picked whichever row the
 // database returned first, so an email from a company with two open applications moved
-// an arbitrary one. Domain evidence outranks text evidence.
+// an arbitrary one. Domain evidence outranks text evidence. Since 2026-11-01 (W7) a
+// same-company tie is broken by the job title named in the email, and by nothing else.
 export function matchApplication(
   // The message being matched.
   message: DecidableMessage,
@@ -317,8 +320,15 @@ export function matchApplication(
   const pool = byDomain.length > 0
     ? byDomain
     : candidates.filter((app) => slugNamedIn(message, app.jobs!.company_slug.toLowerCase()));
+  // Exactly one company candidate: the answer, with no title needed.
+  if (pool.length === 1) return pool[0]!.id;
+  // W7 (2026-11-01): two applications at one company used to make EVERY email from it
+  // unmatched. The job title now breaks the tie, by the same whole-phrase rule the receipt
+  // confirmation uses (titleNamedIn). Exactly one titled candidate wins; none or several is
+  // still null, so a tie is never resolved by a guess. An empty pool also lands here as null.
+  const titled = pool.filter((app) => titleNamedIn(message, app.jobs?.title));
   // Exactly one, or nothing.
-  return pool.length === 1 ? pool[0]!.id : null;
+  return titled.length === 1 ? titled[0]!.id : null;
 }
 
 // ---- Receipt confirmation: a verified ATS receipt marks a submitted row `applied` ----------
@@ -342,13 +352,21 @@ export const CONFIRMING_VENDOR_DOMAINS: readonly string[] = ["greenhouse.io", "g
 // `needs_verification` either — that lane is human-only (multi-tenant signer, see above).
 export const CONFIRMABLE_STATUSES: readonly ApplicationStatus[] = ["applying"];
 
-// Statuses whose rows a receipt must still SEE as match candidates: both submit-uncertain
-// lanes, not just the confirmable one. A needs_verification row hidden from the matcher
-// would stop making a same-company receipt ambiguous, and its late receipt could then
-// confirm the WRONG row (found by security review, 2026-10-23). Loaded for ambiguity
-// detection only: CONFIRMABLE_STATUSES and the status graph still refuse every tracker
-// move out of needs_verification.
-export const SUBMIT_PENDING_STATUSES: readonly ApplicationStatus[] = ["applying", "needs_verification"];
+// Every status whose rows are MATCH CANDIDATES, for every classification; index.ts loads
+// exactly these rows, and the replay sweep reads the same list.
+// Both submit-uncertain lanes (applying, needs_verification) are in it, not just the
+// confirmable one. A needs_verification row hidden from the matcher would stop making a
+// same-company receipt ambiguous, and its late receipt could then confirm the WRONG row
+// (found by security review, 2026-10-23). CONFIRMABLE_STATUSES and the status graph still
+// refuse every tracker move out of needs_verification.
+// W6 (2026-11-01): outcome emails now see these lanes too. Before, `matchPoolFor` hid them
+// from every non-receipt, so a rejection that arrived while the row waited for a human
+// check was stored UNMATCHED and lost for good. Now it is stored matched, its move is
+// refused by the graph for now, and the replay sweep applies it once a human sets the row
+// to applied. The cost: an outcome email that names no job title, from a company that also
+// has a row mid-submit, is now ambiguous (null) instead of matched to the post-submit row.
+// That is a refusal, never a wrong move; the W7 title tiebreak resolves the titled ones.
+export const TRACKED_STATUSES: readonly ApplicationStatus[] = ["applying", "needs_verification", "applied", "employer_screening", "oa_pending", "interview"];
 
 /**
  * Whether the tracker may ADVANCE any status this run, given the kill switch
@@ -403,18 +421,141 @@ export function emailEventRowOf(
   };
 }
 
+// ---- Replay: re-drive stored outcome emails whose move never happened (W6, 2026-11-01) ----
+//
+// The tracker used to try each move ONCE, in the call that first stored the email. A move
+// skipped by the kill switch, refused by the database, or deferred because the row sat in
+// needs_verification was lost for good, and the run still closed green. Pending work is
+// now DERIVED FROM DATA every run (a reconcile sweep, the outbox pattern without an outbox
+// table): an email is done when the tracker's own note for its move names its message id.
+// advance_application_status writes that note (p_detail) in the SAME transaction as the
+// move, so "a note exists" and "the move committed" can never disagree.
+
+/** The classifications whose verdict can move a status: derived, so it can't drift from the mapping. */
+export const REPLAYABLE_CLASSIFICATIONS: readonly EmailClassification[] = EMAIL_CLASSIFICATIONS.filter(
+  // A classification is replay work exactly when targetStatusFor maps it somewhere.
+  (classification) => targetStatusFor(classification) !== null,
+);
+
+// The non-terminal statuses an employer email moves a row INTO. A move into one of these by
+// anyone OTHER than the tracker (Teja recording an interview by hand) supersedes every email
+// received before it. Moves into applying, needs_verification or applied are submit
+// bookkeeping, not employer news, so they supersede nothing: a rejection that arrived while
+// the row waited for a human check must still apply after the human sets it to applied.
+export const EMPLOYER_STAGES: readonly ApplicationStatus[] = ["employer_screening", "oa_pending", "interview"];
+
+/** One stored email the replay may act on, after its row passed the shape checks. */
+export interface ReplayEmail {
+  // email_events.id, for the move's evidence trail.
+  readonly eventId: string;
+  // provider_message_id: the key the move's note records.
+  readonly messageId: string;
+  // matched_application_id.
+  readonly applicationId: string;
+  // The stored verdict; statusMoveFor reads it exactly as on the first try.
+  readonly classification: EmailClassification;
+  // The stored confidence; the same confidence gate applies.
+  readonly confidence: number;
+  // When Gmail received it, as stored.
+  readonly receivedAt: string;
+}
+
+/** An ISO-8601 instant as epoch ms, or null. Shape first: Date.parse("-5") is year -5 (CLAUDE.md §6). */
+function instantOf(value: unknown): number | null {
+  // Only a string that starts like a date-time is a candidate.
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value)) return null;
+  // Then it must actually parse.
+  const ms = Date.parse(value);
+  // NaN is not a time.
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/** A non-empty string, or null: every id the replay keys on must be one. */
+function idOf(value: unknown): string | null {
+  // An empty or non-string id could never be matched to anything.
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** Raises the newest-known instant for an application; an unreadable one becomes +Infinity. */
+function raise(newest: Map<string, number>, applicationId: string, at: number | null): void {
+  // Unreadable time: it could be newer than anything, so it supersedes everything (fail closed).
+  const ms = at ?? Number.POSITIVE_INFINITY;
+  // Keep the maximum.
+  newest.set(applicationId, Math.max(newest.get(applicationId) ?? Number.NEGATIVE_INFINITY, ms));
+}
+
 /**
- * The match-candidate pool for one classification. Pure and exported so the pool rule is
- * node-testable — the 2026-10-23 regression lived in an inline filter no test could reach.
+ * The stored emails whose move is still owed, oldest first. Pure: the I/O lives in replay.ts.
+ * Rows arrive untyped from three reads and are shape-checked here, where a test can see it.
+ * An email is owed when ALL hold: it carries a replayable verdict; the tracker has no note
+ * for its message id; it is strictly newer than every email the tracker already moved its
+ * row on (the 2026-10-04 bug: a week-old OA invite walking interview -> oa_pending); and it
+ * is strictly newer than every non-tracker move of its row into an employer stage.
+ * Whether it moves, and where, is still statusMoveFor's call at the row's current status.
  */
-export function matchPoolFor(classification: EmailClassification, apps: readonly ActiveApplication[]): readonly ActiveApplication[] {
-  // A receipt sees EVERY loaded row: a submit-uncertain sibling (applying or
-  // needs_verification) must be able to force the two-candidate ambiguity refusal, or its
-  // late receipt could match — and confirm — the wrong row.
-  if (classification === "application_received") return apps;
-  // Every other email sees only post-submit rows, exactly as before receipts could
-  // confirm, so an interview email isn't made ambiguous by an unrelated submitting row.
-  return apps.filter((app) => !SUBMIT_PENDING_STATUSES.includes(app.status));
+export function replayQueue(input: {
+  // email_events rows: id, provider_message_id, matched_application_id, classification,
+  // classification_confidence, received_at. Moved and pending alike.
+  readonly emails: readonly Record<string, unknown>[];
+  // The tracker's note rows, projected to { provider_message_id }.
+  readonly trackerNotes: readonly Record<string, unknown>[];
+  // status_change rows into EMPLOYER_STAGES: application_id, agent, to_status, created_at.
+  readonly stageMoves: readonly Record<string, unknown>[];
+}): ReplayEmail[] {
+  // Message ids the tracker has already moved a row on.
+  const moved = new Set(input.trackerNotes.map((note) => idOf(note.provider_message_id)).filter((id): id is string => id !== null));
+  // Per application: the newest instant that makes older emails stale.
+  const newestSettled = new Map<string, number>();
+  // Pending candidates, before the staleness filter.
+  const pending: ReplayEmail[] = [];
+  // One pass over the stored emails.
+  for (const row of input.emails) {
+    // Both keys are required; without them the row can't be tied to anything.
+    const messageId = idOf(row.provider_message_id);
+    const applicationId = idOf(row.matched_application_id);
+    // Untieable: skipped, never moved.
+    if (messageId === null || applicationId === null) continue;
+    // Already moved on: it supersedes older emails, by the time the EMPLOYER sent it. Move
+    // time would be wrong here: a replay that moves an email late would make every older
+    // pending email stale, even ones the employer sent after it.
+    if (moved.has(messageId)) {
+      // Newest settled email for this row.
+      raise(newestSettled, applicationId, instantOf(row.received_at));
+      // Done; never a candidate.
+      continue;
+    }
+    // The rest of the shape, checked before anything is trusted.
+    const eventId = idOf(row.id);
+    const classification = row.classification as EmailClassification;
+    const confidence = row.classification_confidence;
+    // A non-replayable or unknown verdict, a non-number confidence, or no event id: skipped.
+    if (eventId === null || !REPLAYABLE_CLASSIFICATIONS.includes(classification) || typeof confidence !== "number") continue;
+    // An unreadable receipt time can't be ordered: skipped.
+    if (instantOf(row.received_at) === null) continue;
+    // A candidate; received_at is a string (instantOf checked it).
+    pending.push({ eventId, messageId, applicationId, classification, confidence, receivedAt: row.received_at as string });
+  }
+  // Non-tracker moves into an employer stage supersede older emails, by MOVE time: the
+  // human acted on the state as it stood then. A null agent (a row the database wrote
+  // before an actor was known) is treated as non-tracker, which supersedes: fail closed.
+  for (const row of input.stageMoves) {
+    // Tracker moves are judged by email time above, never here.
+    if (row.agent === "tracker") continue;
+    // Only employer stages; the read filters on this too, and the planner doesn't trust it.
+    if (!EMPLOYER_STAGES.includes(row.to_status as ApplicationStatus)) continue;
+    // The row it moved; untieable moves are skipped (application_id is NOT NULL anyway).
+    const applicationId = idOf(row.application_id);
+    if (applicationId === null) continue;
+    // Raised to this move's time; unreadable = +Infinity = supersedes all.
+    raise(newestSettled, applicationId, instantOf(row.created_at));
+  }
+  // Owed = strictly newer than everything that settled its row; then oldest first, the
+  // order the employer sent them, with the message id as a stable tiebreak.
+  return pending
+    // Strictly newer: an email at the same instant as a settled one is not news.
+    .filter((email) => instantOf(email.receivedAt)! > (newestSettled.get(email.applicationId) ?? Number.NEGATIVE_INFINITY))
+    // Oldest first.
+    .sort((a, b) => instantOf(a.receivedAt)! - instantOf(b.receivedAt)! || a.messageId.localeCompare(b.messageId));
 }
 
 // The one authserv-id whose verdict is trusted. Gmail PREPENDS its own

@@ -29,6 +29,14 @@
 // (it does, after any 5xx or timeout) replayed old emails against current statuses — an
 // OA invite from last week could walk `interview -> oa_pending`, a legal machine edge.
 // Classification, matching and the status mapping live in `./decide.ts` so they are tested.
+//
+// CHANGED 2026-11-01 (W6): the transition step above now makes receipt confirmations only.
+// Every outcome-email move then goes through the REPLAY SWEEP (`./replay.ts`), on every
+// run including the empty-batch heartbeat: stored, matched emails with no tracker note for
+// their message id are owed, and are re-driven oldest first. The 2026-10-04 guarantee is
+// kept by `replayQueue`: an email older than one the tracker already moved its row on, or
+// older than a human's stage move, is stale and never replayed. Refused moves are counted
+// on the run row (error_count), so Health stops showing green; the batch still gets 202.
 
 // RLS-bound client factory for user-authenticated database access.
 // Import function to construct client bound by user credentials.
@@ -48,17 +56,19 @@ import {
   CONFIRMABLE_STATUSES,
   addressedTo,
   emailEventRowOf,
-  matchPoolFor,
   mayAdvanceStatus,
   classifyMessage,
   matchApplication,
   receiptConfirmsApplied,
-  statusMoveFor,
   titleNamedIn,
+  TRACKED_STATUSES,
   verifyReceiptSender,
   type ActiveApplication,
   type MessageDecision,
 } from "./decide.ts";
+// The replay sweep (W6, 2026-11-01): every outcome-email move, fresh or owed, goes through it.
+// Its own module so node --test can drive it; this file calls Deno.serve on import.
+import { replayStoredMoves } from "./replay.ts";
 
 // Central helper function to emit standard JSON responses with explicit headers.
 //
@@ -202,7 +212,10 @@ Deno.serve(async (request: Request): Promise<Response> => {
   // Null when the open failed; every close below then no-ops.
   const runId: string | null = runRow?.id ?? null;
   // Close the run row. Called before every exit after this point; never throws.
-  const closeRun = async (status: "succeeded" | "failed", rowsOut: number, errorDetail: string | null): Promise<void> => {
+  // errorCount (W6, 2026-11-01): a succeeded batch can still carry refused or skipped moves;
+  // Health renders status succeeded + error_count > 0 as "succeeded with N errors".
+  // Defaults to the old rule (1 for a failed run, none otherwise) so every older call is unchanged.
+  const closeRun = async (status: "succeeded" | "failed", rowsOut: number, errorDetail: string | null, errorCount = status === "failed" ? 1 : 0): Promise<void> => {
     // No row to close (open failed): nothing to do.
     if (runId === null) return;
     // One update carries the verdict; error_count 1 on failure feeds the health page.
@@ -212,7 +225,8 @@ Deno.serve(async (request: Request): Promise<Response> => {
         status,
         finished_at: new Date().toISOString(),
         rows_out: rowsOut,
-        ...(status === "failed" ? { error_count: 1 } : {}),
+        // Written only when there is something to count; the column defaults to 0.
+        ...(errorCount > 0 ? { error_count: errorCount } : {}),
         ...(errorDetail === null ? {} : { error_detail: errorDetail }),
       })
       .eq("id", runId);
@@ -220,12 +234,39 @@ Deno.serve(async (request: Request): Promise<Response> => {
     if (error !== null) console.error(`[email-tracker-intake] agent_runs close failed: ${error.message}`);
   };
 
+  // KILL SWITCH (2026-10-23): this function stores intel unconditionally (the events are
+  // append-only), but a status MOVE needs the switch readable and on — the tracker was the
+  // one status-writing agent that never consulted it. A closure since W6 (2026-11-01): the
+  // heartbeat and the batch path both read it, because both now run the replay sweep.
+  // Returns true/false from a real row, or null (fail closed) on any error or no row.
+  const readSystemEnabled = async (): Promise<boolean | null> => {
+    // Exceptions are treated like an error result: null, which fails closed.
+    try {
+      // The same single-row settings read scout-ats makes.
+      const { data: settingsRow, error: settingsError } = await client.db
+        .from("system_settings")
+        .select("system_enabled")
+        .limit(1)
+        .single();
+      // An error (including no row) stays null; only a real row can say true.
+      return settingsError !== null ? null : (settingsRow as { system_enabled?: unknown } | null)?.system_enabled === true;
+    } catch (err) {
+      // Same fail-closed handling as an error result; detail to the log.
+      console.error(`[email-tracker-intake] kill switch read exception: ${String(err)}`);
+      return null;
+    }
+  };
+
   // Check if message batch is empty: the heartbeat case, common by design (the trigger
   // fires every 15 minutes whether or not mail arrived; since 2026-10-23 the script
   // POSTs the empty batch instead of skipping, so this run row IS the liveness signal).
   if (batch.messages.length === 0) {
-    // A recorded heartbeat is a succeeded run that moved nothing.
-    await closeRun("succeeded", 0, null);
+    // W6 (2026-11-01): the heartbeat also re-drives owed moves. Without this, a move paused
+    // by the kill switch would wait for the next email to arrive, which may never come.
+    const replay = await replayStoredMoves(client.db, await readSystemEnabled(), new Map());
+    // A recorded heartbeat is a succeeded run that stored nothing; replay errors are counted
+    // on it (the first five in the detail), so a refused move can't hide behind a heartbeat.
+    await closeRun("succeeded", 0, replay.errors.length > 0 ? replay.errors.slice(0, 5).join("; ") : null, replay.errors.length);
     // 202 as before; Apps Script treats anything else as transient failure.
     return json(202, { accepted: 0, duplicates: 0, rejected: rejected.length, batch_id: batch.batch_id });
   }
@@ -244,11 +285,12 @@ Deno.serve(async (request: Request): Promise<Response> => {
     // hidden from the matcher, its row would stop making a same-company receipt ambiguous,
     // and its late receipt could then confirm the WRONG applying row (security review,
     // 2026-10-23). The move itself stays refused by CONFIRMABLE_STATUSES and the graph.
+    // The list is decide.ts's TRACKED_STATUSES (2026-11-01), shared with the replay sweep.
     const { data: appsData, error: appsError } = await client.db
       .from("applications")
-      // `title` is read only by the receipt confirmation (titleNamedIn).
+      // `title` is read by the receipt confirmation and, since W7, by the matcher's tiebreak (titleNamedIn).
       .select("id, status, job_id, updated_at, jobs(company_name, company_slug, title)")
-      .in("status", ["applying", "needs_verification", "applied", "employer_screening", "oa_pending", "interview"]);
+      .in("status", [...TRACKED_STATUSES]);
     // An error result is a failed batch.
     if (appsError !== null) {
       // The detail goes to the log, not to the caller.
@@ -281,12 +323,14 @@ Deno.serve(async (request: Request): Promise<Response> => {
   const decided: DecidedMessage[] = batch.messages.map((message) => {
     // Outcome first, out-of-office never advances, receipt only as a fallback.
     const decision = classifyMessage(message);
-    // The pool rule lives in decide.ts (matchPoolFor) so it is node-tested: receipts see
-    // every row (a needs_verification sibling can force ambiguity), everything else sees
-    // only post-submit rows. The 2026-10-23 wrong-row regression was an inline filter here.
-    const pool = matchPoolFor(decision.classification, activeApplications);
+    // The pool rule used to live in decide.ts (matchPoolFor) so it was node-tested: receipts
+    // saw every row (a needs_verification sibling can force ambiguity), everything else only
+    // post-submit rows. The 2026-10-23 wrong-row regression was an inline filter here.
+    // Since W6 (2026-11-01) EVERY email sees every loaded row (TRACKED_STATUSES, tested), so
+    // an outcome email for a row awaiting a human check is stored matched and the replay
+    // applies it later; see the TRACKED_STATUSES comment for the trade-off.
     // Exactly one application, or null for none/ambiguous.
-    const matchedApplicationId = matchApplication(message, decision.senderDomain, pool);
+    const matchedApplicationId = matchApplication(message, decision.senderDomain, activeApplications);
     // Kept together until the upsert result is known.
     return { message, decision, matchedApplicationId };
   });
@@ -396,25 +440,9 @@ Deno.serve(async (request: Request): Promise<Response> => {
   // KILL SWITCH (2026-10-23): this function stores intel unconditionally (the events are
   // append-only and already written above), but a status MOVE needs the switch readable
   // and on — the tracker was the one status-writing agent that never consulted it.
-  let systemEnabled: boolean | null = null;
-  // Skip the round trip when this batch moves nothing anyway.
-  if (toTransition.length > 0) {
-    // Exceptions are treated like an error result: null, which fails closed below.
-    try {
-      // The same single-row settings read scout-ats makes.
-      const { data: settingsRow, error: settingsError } = await client.db
-        .from("system_settings")
-        .select("system_enabled")
-        .limit(1)
-        .single();
-      // An error (including no row) stays null; only a real row can say true.
-      systemEnabled = settingsError !== null ? null : (settingsRow as { system_enabled?: unknown } | null)?.system_enabled === true;
-    } catch (err) {
-      // Same fail-closed handling as an error result; detail to the log.
-      console.error(`[email-tracker-intake] kill switch read exception: ${String(err)}`);
-      systemEnabled = null;
-    }
-  }
+  // Read on EVERY batch since W6 (2026-11-01), not only when this batch has new matches:
+  // the replay sweep below may owe moves from earlier calls. See readSystemEnabled.
+  const systemEnabled = await readSystemEnabled();
   // The verdict, pure and node-tested (decide.ts). Off or unreadable: skip every move,
   // still 202 — the emails ARE stored, and Apps Script must not redeliver the batch.
   const advancesPermitted = mayAdvanceStatus(systemEnabled);
@@ -422,7 +450,16 @@ Deno.serve(async (request: Request): Promise<Response> => {
   // from a halted one in the function logs.
   if (!advancesPermitted && toTransition.length > 0) console.warn(`[email-tracker-intake] kill switch off or unreadable: ${toTransition.length} candidate transition(s) skipped`);
 
+  // Every refused move this call, for the run row (W6): a refusal used to be a log line only,
+  // and the run still closed green.
+  const moveErrors: string[] = [];
+
   // Transitions, one per qualifying message — none while the kill switch refuses.
+  // Since W6 (2026-11-01) this loop makes RECEIPT CONFIRMATIONS only (applying -> applied).
+  // Outcome-email moves all go through the replay sweep below, fresh or owed alike: one path,
+  // one staleness rule, and no second attempt in the same call when the first is refused.
+  // Receipts stay here because they need wire-only fields (authentication_results, To) that
+  // email_events does not store, so they cannot be replayed.
   for (const { message, decision, matchedApplicationId } of advancesPermitted ? toTransition : []) {
     // Narrowed by the filter above.
     const applicationId = matchedApplicationId!;
@@ -433,39 +470,40 @@ Deno.serve(async (request: Request): Promise<Response> => {
     // A row the worker tried to submit can ONLY be confirmed by a verified receipt; no other
     // email moves it (the graph has no other tracker edge out of these statuses anyway).
     const confirming = CONFIRMABLE_STATUSES.includes(currentStatus);
+    // Every other row's move is the replay sweep's (W6); an outcome email on an applying row
+    // is stored matched and waits there until the row leaves the submit lane.
+    if (!confirming) continue;
     // Gmail's verdict on the sender, computed only where it matters.
-    const verification = confirming ? verifyReceiptSender(message.from, message.authentication_results) : null;
-    // The receipt path decides `applied` or nothing; every other row uses the usual mapping.
-    const targetStatus = confirming
-      ? (receiptConfirmsApplied({
-          // What the email is.
-          decision,
-          // Where the row is.
-          current: currentStatus,
-          // When Gmail received it.
-          receivedAt: message.received_at,
-          // When the row last entered applying (null: never, so refused).
-          enteredApplyingAt: enteredApplyingAt.get(applicationId) ?? null,
-          // Gmail's verdict.
-          verification,
-          // The email names THIS job's title, not just the company.
-          titleMatches: titleNamedIn(message, activeApplications.find((app) => app.id === applicationId)?.jobs?.title),
-          // The signed To names Teja (not a replay of someone else's receipt). The owner
-          // is the app user the function signs in as; unset means nothing is confirmed.
-          addressedToOwner: addressedTo(message.to, Deno.env.get(APP_USER_EMAIL_ENV_VAR)),
-        })
-          ? "applied"
-          : null)
-      // Target status after the graph check AND the confidence gate (see `statusMoveFor`);
-      // a low-confidence verdict such as the 0.5-0.8 moderate-rejection band is stored
-      // above but returns null here, so it moves nothing.
-      : statusMoveFor(decision, currentStatus);
+    const verification = verifyReceiptSender(message.from, message.authentication_results);
+    // The receipt path decides `applied` or nothing.
+    const targetStatus = receiptConfirmsApplied({
+      // What the email is.
+      decision,
+      // Where the row is.
+      current: currentStatus,
+      // When Gmail received it.
+      receivedAt: message.received_at,
+      // When the row last entered applying (null: never, so refused).
+      enteredApplyingAt: enteredApplyingAt.get(applicationId) ?? null,
+      // Gmail's verdict.
+      verification,
+      // The email names THIS job's title, not just the company.
+      titleMatches: titleNamedIn(message, activeApplications.find((app) => app.id === applicationId)?.jobs?.title),
+      // The signed To names Teja (not a replay of someone else's receipt). The owner
+      // is the app user the function signs in as; unset means nothing is confirmed.
+      addressedToOwner: addressedTo(message.to, Deno.env.get(APP_USER_EMAIL_ENV_VAR)),
+    })
+      ? "applied"
+      : null;
+    // (The non-receipt branch that stood here — statusMoveFor, with its graph check and
+    // confidence gate that keep the 0.5-0.8 moderate-rejection band from moving anything —
+    // now runs in replay.ts, unchanged.)
     // Nothing to do.
     if (targetStatus === null) continue;
     // A confirmation must not land on a row that changed since it was read (e.g. the worker
     // just wrote applied or failed): without a stamp it is refused rather than sent blind.
-    const expectedUpdatedAt = confirming ? updatedAtById.get(applicationId) ?? null : null;
-    if (confirming && expectedUpdatedAt === null) continue;
+    const expectedUpdatedAt = updatedAtById.get(applicationId) ?? null;
+    if (expectedUpdatedAt === null) continue;
     // The only correct way to change status.
     const { error: transitionError } = await client.db.rpc("advance_application_status", {
       // Application UUID.
@@ -488,23 +526,25 @@ Deno.serve(async (request: Request): Promise<Response> => {
         reasoning: decision.reasoning,
         // For a confirmation, the audit trail a human can check and reverse: the stored
         // email row, Gmail's verdict, and the two instants that were compared.
-        ...(confirming
-          ? {
-              email_event_id: eventIdByMessage.get(message.message_id) ?? null,
-              authentication: verification,
-              received_at: message.received_at,
-              entered_applying_at: enteredApplyingAt.get(applicationId) ?? null,
-            }
-          : {}),
+        // (Every move here is a confirmation since W6, so the old `confirming ?` guard went.)
+        email_event_id: eventIdByMessage.get(message.message_id) ?? null,
+        // Gmail's verdict.
+        authentication: verification,
+        // When Gmail received the receipt.
+        received_at: message.received_at,
+        // When the row last entered applying.
+        entered_applying_at: enteredApplyingAt.get(applicationId) ?? null,
       },
-      // Optimistic concurrency for confirmations only (PT409 if the row moved meanwhile);
-      // omitted for the other moves, exactly as before this change.
-      ...(confirming ? { p_expected_updated_at: expectedUpdatedAt } : {}),
+      // Optimistic concurrency for confirmations (PT409 if the row moved meanwhile).
+      p_expected_updated_at: expectedUpdatedAt,
     });
-    // A refused edge is logged; the email is already stored and matched.
+    // A refused edge is logged AND counted on the run (W6); the email is already stored
+    // and matched. Receipts are not replayed (wire-only fields), so this is its record.
     if (transitionError !== null) {
       // Detail to the log.
       console.error(`[email-tracker-intake] advance status failed for app ${applicationId}: ${transitionError.message}`);
+      // And to the run row, so Health shows "succeeded with N errors".
+      moveErrors.push(`confirm ${applicationId} ${currentStatus}->applied failed: ${transitionError.message}`);
     } else {
       // Later emails in this batch see the new status.
       statusById.set(applicationId, targetStatus);
@@ -518,8 +558,24 @@ Deno.serve(async (request: Request): Promise<Response> => {
   // Everything else in the batch was already stored.
   const duplicateCount = batch.messages.length - acceptedCount;
 
+  // THE REPLAY SWEEP (W6, 2026-11-01): every owed outcome-email move, this batch's new ones
+  // included, oldest first, after the receipts above so a row just confirmed to applied is
+  // seen there. Off or unreadable switch: no moves (unreadable is counted as an error).
+  // This call's verdicts ride along so fresh moves keep their classifier signals and reasoning.
+  const liveDecisions = new Map(
+    // Only rows this call stored; a duplicate's verdict was already recorded the first time.
+    decided.filter((d) => newlyInserted.has(d.message.message_id)).map((d) => [d.message.message_id, d.decision] as const),
+  );
+  // Never throws; returns its own errors.
+  const replay = await replayStoredMoves(client.db, systemEnabled, liveDecisions);
+  // Receipt refusals first, then the sweep's.
+  const runErrors = [...moveErrors, ...replay.errors];
+
   // The batch landed: rows_out = newly stored events (duplicates moved nothing new).
-  await closeRun("succeeded", acceptedCount, null);
+  // Still 202 below even with errors: the emails ARE stored, and an owed move is retried by
+  // the next run's sweep, so Apps Script must not redeliver the batch. The first five errors
+  // go in the detail; the count is exact.
+  await closeRun("succeeded", acceptedCount, runErrors.length > 0 ? runErrors.slice(0, 5).join("; ") : null, runErrors.length);
 
   // 202 = processed; Apps Script marks the threads done.
   return json(202, {

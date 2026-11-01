@@ -66,6 +66,42 @@ test("two applications to the same company match neither", () => {
   assert.equal(matchApplication({ from: "x@acme.com", subject: "Update", snippet: "" }, "acme.com", [app("a1", "acme"), app("a2", "acme")]), null);
 });
 
+// ---- 2026-11-01 W7: the job title breaks a same-company tie ----------------------------
+
+// Builds an application whose job carries a title, which the tiebreak reads.
+function appTitled(id: string, slug: string, title: string): ActiveApplication {
+  // Same shape as `app`, plus the title.
+  return { ...app(id, slug), jobs: { company_name: slug, company_slug: slug, title } };
+}
+
+// Two live applications at one company: 1 of 8 in-flight companies had this on 2026-11-01.
+const TWO_AT_ACME = [appTitled("a1", "acme", "Backend Engineer"), appTitled("a2", "acme", "Data Analyst")];
+
+test("W7: two applications at one company, the email names one title: it matches that one", () => {
+  // Before the tiebreak the second candidate made EVERY Acme email unmatched.
+  const invite = { from: "x@acme.com", subject: "Interview invitation: Data Analyst", snippet: "We'd like to schedule an interview." };
+  // Domain pool of two, one title named: the named one wins.
+  assert.equal(matchApplication(invite, "acme.com", TWO_AT_ACME), "a2");
+  // The same tiebreak serves the text-fallback pool (an ATS sender, no employer domain).
+  const atsMail = { from: "Acme <no-reply@greenhouse.io>", subject: "Acme: your Backend Engineer application", snippet: "" };
+  // Slug named in the display name and subject; title names a1 only.
+  assert.equal(matchApplication(atsMail, null, TWO_AT_ACME), "a1");
+});
+
+test("W7: the email names neither title: still unmatched", () => {
+  // No title evidence: two candidates stay a refusal, never a guess.
+  const update = { from: "x@acme.com", subject: "Update on your application", snippet: "Unfortunately we will not be moving forward." };
+  // Null, exactly as before the tiebreak.
+  assert.equal(matchApplication(update, "acme.com", TWO_AT_ACME), null);
+});
+
+test("W7: the email names both titles: still unmatched", () => {
+  // A "first title wins" tiebreak would pick a1 here; exactly-one is the rule.
+  const both = { from: "x@acme.com", subject: "Backend Engineer and Data Analyst openings", snippet: "" };
+  // Two title matches is still ambiguity.
+  assert.equal(matchApplication(both, "acme.com", TWO_AT_ACME), null);
+});
+
 // ---- 2026-10-05: false-rejection and loose-domain fixes -------------------------------
 
 // Builds an application at a chosen status, for the full verdict -> move pipeline.
@@ -304,10 +340,11 @@ test("CONFIRMING_VENDOR_DOMAINS and CONFIRMABLE_STATUSES are exactly the ruled s
   assert.deepEqual([...receipt.CONFIRMABLE_STATUSES], ["applying"]);
   // Both submit-uncertain lanes stay match candidates: hiding needs_verification from the
   // matcher would let its late receipt confirm the wrong applying row (review, 2026-10-23).
-  assert.deepEqual([...receipt.SUBMIT_PENDING_STATUSES], ["applying", "needs_verification"]);
-  // Confirmable is a strict subset of submit-pending: visible to the matcher is a weaker
+  // Since W6 (2026-11-01) the one candidate list is TRACKED_STATUSES, for every classification.
+  assert.ok(receipt.TRACKED_STATUSES.includes("applying") && receipt.TRACKED_STATUSES.includes("needs_verification"));
+  // Confirmable is a strict subset of the candidates: visible to the matcher is a weaker
   // privilege than movable, and the two drifting apart silently is this line's job to stop.
-  assert.ok(receipt.CONFIRMABLE_STATUSES.every((s) => receipt.SUBMIT_PENDING_STATUSES.includes(s)));
+  assert.ok(receipt.CONFIRMABLE_STATUSES.every((s) => receipt.TRACKED_STATUSES.includes(s)));
 });
 
 test("verifyReceiptSender: a passing dkim for a vendor subdomain verifies", () => {
@@ -409,14 +446,99 @@ test("a needs_verification sibling still trips the ambiguity refusal", () => {
   const rows = [appAt("a1", "acme", "applying"), appAt("a2", "acme", "needs_verification")];
   // Parser domain exactly as index.ts passes it.
   const domain = classifyMessage(GREENHOUSE_RECEIPT).senderDomain;
-  // The LIVE pool rule (index.ts calls this same function): a receipt sees both rows.
-  const pool = receipt.matchPoolFor("application_received", rows);
+  // The LIVE pool rule: index.ts loads exactly TRACKED_STATUSES and matches every email
+  // against all of them (matchPoolFor, which hid these lanes from non-receipts, is gone).
+  const pool = rows.filter((row) => receipt.TRACKED_STATUSES.includes(row.status));
   // Both rows visible — hiding the needs_verification sibling was the 2026-10-23 regression.
   assert.equal(pool.length, 2);
   // Two candidates: refuse, so the wrong row can never be confirmed by the sibling's receipt.
-  assert.equal(matchApplication(GREENHOUSE_RECEIPT, domain, [...pool]), null);
-  // A non-receipt email sees neither submit-uncertain row (pre-feature matching semantics).
-  assert.equal(receipt.matchPoolFor("interview_invite", rows).length, 0);
+  assert.equal(matchApplication(GREENHOUSE_RECEIPT, domain, pool), null);
+});
+
+test("W6: an outcome email for a needs_verification row is matched to it, and its move waits", () => {
+  // The row parked for a human check; before W6 a non-receipt never saw it, so the
+  // rejection below was stored unmatched and lost for good.
+  const rows = [appAt("a2", "acme", "needs_verification")];
+  // The ATS rejection fixture from the top of this file (subject names Acme).
+  const decision = classifyMessage(REJECTION);
+  // The match is KEPT, so the replay sweep can apply it once a human resolves the row.
+  assert.equal(matchApplication(REJECTION, decision.senderDomain, rows), "a2");
+  // Deferred, not applied: the graph gives the tracker no edge out of needs_verification.
+  assert.equal(statusMoveFor(decision, "needs_verification"), null);
+  // Once a human sets the row to applied, the same stored verdict moves it.
+  assert.equal(statusMoveFor(decision, "applied"), "rejected");
+});
+
+// ---- 2026-11-01 W6: the replay sweep's pure planner ---------------------------------------
+
+// A stored email_events row as the replay reads it; each test overrides what it is about.
+function stored(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  // A confident rejection matched to a1, received at 10:00, never moved.
+  return { id: "e1", provider_message_id: "m1", matched_application_id: "a1", classification: "rejection", classification_confidence: 0.95, received_at: "2026-11-01T10:00:00+00:00", ...overrides };
+}
+
+test("W6 replayQueue: an email the tracker already moved on is done; the rest come oldest first", () => {
+  // m1 moved (its note exists); m2 and m3 pending, deliberately listed newest first (the read order).
+  const queue = receipt.replayQueue({
+    // The read returns newest first.
+    emails: [stored({ id: "e3", provider_message_id: "m3", received_at: "2026-11-01T12:00:00+00:00", matched_application_id: "a2" }), stored({ id: "e2", provider_message_id: "m2", received_at: "2026-11-01T11:00:00+00:00", matched_application_id: "a2" }), stored()],
+    // The tracker's note for m1's move: written in the same transaction as the move.
+    trackerNotes: [{ provider_message_id: "m1" }],
+    // No other moves.
+    stageMoves: [],
+  });
+  // m1 is done; m2 before m3, the order the employer sent them.
+  assert.deepEqual(queue.map((email) => email.messageId), ["m2", "m3"]);
+  // The typed shape the replay loop reads.
+  assert.deepEqual(queue[0], { eventId: "e2", messageId: "m2", applicationId: "a2", classification: "rejection", confidence: 0.95, receivedAt: "2026-11-01T11:00:00+00:00" });
+});
+
+test("W6 replayQueue: an email older than one the tracker already moved on is stale (the 2026-10-04 OA replay)", () => {
+  // The interview invite of 11:00 moved a1; an OA invite of 10:00 whose move failed must
+  // not walk interview -> oa_pending (a legal edge) a day later.
+  const moved = stored({ id: "e2", provider_message_id: "m2", classification: "interview_invite", received_at: "2026-11-01T11:00:00+00:00" });
+  // The older, never-moved OA invite.
+  const olderOa = stored({ classification: "oa_invite" });
+  // A NEWER OA invite (12:00) is real news and stays eligible.
+  const newerOa = stored({ id: "e3", provider_message_id: "m3", classification: "oa_invite", received_at: "2026-11-01T12:00:00+00:00" });
+  // Only the newer one survives.
+  const queue = receipt.replayQueue({ emails: [newerOa, moved, olderOa], trackerNotes: [{ provider_message_id: "m2" }], stageMoves: [] });
+  // m1 superseded, m3 kept.
+  assert.deepEqual(queue.map((email) => email.messageId), ["m3"]);
+});
+
+test("W6 replayQueue: a human stage move after the email supersedes it; a move into a submit lane does not", () => {
+  // Teja recorded the interview by hand at 11:00, after the 10:00 email arrived: stale.
+  const humanStage = { application_id: "a1", agent: "human", to_status: "interview", created_at: "2026-11-01T11:00:00+00:00" };
+  // Superseded.
+  assert.deepEqual(receipt.replayQueue({ emails: [stored()], trackerNotes: [], stageMoves: [humanStage] }), []);
+  // A tracker stage move is judged by EMAIL time (via its note), never by move time: a
+  // move made late by a replay must not make every older pending email stale.
+  assert.equal(receipt.replayQueue({ emails: [stored()], trackerNotes: [], stageMoves: [{ ...humanStage, agent: "tracker" }] }).length, 1);
+  // A human resolving needs_verification -> applied is not an employer stage: the email waits for exactly this.
+  assert.equal(receipt.replayQueue({ emails: [stored()], trackerNotes: [], stageMoves: [{ ...humanStage, to_status: "applied" }] }).length, 1);
+  // A database-written move with no recorded agent counts as non-tracker: it supersedes.
+  assert.deepEqual(receipt.replayQueue({ emails: [stored()], trackerNotes: [], stageMoves: [{ ...humanStage, agent: null }] }), []);
+});
+
+test("W6 replayQueue: malformed rows never become a move", () => {
+  // An unparseable received_at is not a time (Date.parse("-5") is year -5): skipped.
+  assert.deepEqual(receipt.replayQueue({ emails: [stored({ received_at: "-5" })], trackerNotes: [], stageMoves: [] }), []);
+  // A confidence that is not a number (a string from a changed column type) is skipped.
+  assert.deepEqual(receipt.replayQueue({ emails: [stored({ classification_confidence: "0.95" })], trackerNotes: [], stageMoves: [] }), []);
+  // A classification that maps to no move is not replay work.
+  assert.deepEqual(receipt.replayQueue({ emails: [stored({ classification: "application_received" })], trackerNotes: [], stageMoves: [] }), []);
+  // A stage move with an unreadable time could be newer than anything: it supersedes all (fail closed).
+  assert.deepEqual(receipt.replayQueue({ emails: [stored()], trackerNotes: [], stageMoves: [{ application_id: "a1", agent: "human", to_status: "interview", created_at: null }] }), []);
+  // A moved email with an unreadable time poisons its application the same way.
+  const movedBad = stored({ id: "e0", provider_message_id: "m0", received_at: "garbage" });
+  // m1 would otherwise be eligible.
+  assert.deepEqual(receipt.replayQueue({ emails: [stored(), movedBad], trackerNotes: [{ provider_message_id: "m0" }], stageMoves: [] }), []);
+});
+
+test("W6: the replayable classifications are derived from the status mapping", () => {
+  // Exactly the classifications targetStatusFor maps to a status; a receipt is not one.
+  assert.deepEqual([...receipt.REPLAYABLE_CLASSIFICATIONS].sort(), ["interview_invite", "oa_invite", "offer", "recruiter_outreach", "rejection"]);
 });
 
 test("received-before-applying: a receipt older than the latest entry into applying is refused", () => {
