@@ -46,6 +46,9 @@ import { classifyRead } from './readState.ts';
 import type { ReadState } from './readState.ts';
 import { summarizeAgentRuns } from './agentFreshness.ts';
 import type { AgentFreshness, AgentRunFacts } from './agentFreshness.ts';
+/* The roster, so the per-agent lookups (W9) check every agent the table shows. */
+import { AGENT_NAMES } from './contract.ts';
+import type { AgentName } from './contract.ts';
 /* Picks which run's error_detail answers "which rules were skipped". */
 import { pickRuleWarningRun } from './ruleWarnings.ts';
 
@@ -59,9 +62,14 @@ import { pickRuleWarningRun } from './ruleWarnings.ts';
  *
  * WHY NOT `.limit(1)` PER AGENT: that is twelve round trips on a free tier to
  * answer one question. And why not a `DISTINCT ON` view: that is the schema
- * stream's file to write, not this one's. 200 comfortably covers the newest run
- * of every agent even when the busiest one has run many times today, and the
- * page is honest about the window in the note it renders. */
+ * stream's file to write, not this one's.
+ *
+ * CORRECTED 2026-11-01 (wiring audit W9). This comment used to say 200 always
+ * covers the newest run of every agent and that the page renders a note about
+ * the window. Neither was true: live, tracker (170 rows) and scout_ats (177)
+ * filled the window, the screener's newest run sat at rank 253, and no window
+ * note was ever rendered. So the window still answers the busy agents in one
+ * trip, and `readNewestBeyondWindow` below looks up only the agents it missed. */
 export const RUN_WINDOW = 200;
 
 /* SEVEN COLUMNS, which is every column this page reads and no more.
@@ -93,6 +101,67 @@ export interface AgentRunRow extends AgentRunFacts {
   /* Rows the run took in; `not null default 0` in the schema, optional here
      for fixtures. Validated at use, never trusted. */
   readonly rows_in?: number | null;
+}
+
+/* The newest run of each roster agent the window MISSED, one agent at a time.
+ *
+ * WHY (2026-11-01, wiring audit W9). The window is the newest RUN_WINDOW rows
+ * across ALL agents, so busy agents push quiet ones out of it, and an agent
+ * outside it used to be summarised from zero rows as "has never run". Here each
+ * missing agent gets its own `.limit(1)` read, all in parallel. Only an agent
+ * whose lookup answers with zero rows has truly never run.
+ *
+ * Every missing agent is looked up, even when the window came back short of
+ * the cap. A short window should mean "that is every row", but a server-side
+ * row cap would make it look the same, and trusting that would be the fail-open
+ * this fix removes. The cost is a few empty reads on a young table.
+ *
+ * A lookup that returns an error or throws puts the agent in `failed`, never in
+ * "no rows": a failed read is not evidence of absence (CLAUDE.md section 6). */
+async function readNewestBeyondWindow(
+  /* The configured client; the caller has already ruled out null. */
+  client: NonNullable<typeof supabase>,
+  /* The window's rows, to know which agents it already covers. */
+  windowRows: readonly AgentRunRow[],
+): Promise<{ rows: AgentRunRow[]; failed: Set<AgentName> }> {
+  // Runs found beyond the window, at most one per agent.
+  const rows: AgentRunRow[] = [];
+  // Agents whose lookup could not answer.
+  const failed = new Set<AgentName>();
+  // The agents the window already covers need no second read.
+  const seen = new Set(windowRows.map((row) => row.agent));
+  // Every roster agent the window did not reach, all at once.
+  await Promise.all(
+    // The roster drives this, like the table: an agent never listed is never checked.
+    AGENT_NAMES.filter((agent) => !seen.has(agent)).map(async (agent) => {
+      try {
+        // Same columns and order as the window, for one agent only.
+        const { data, error } = await client
+          .from('agent_runs')
+          .select(AGENT_RUN_COLUMNS)
+          // This agent's rows only.
+          .eq('agent', agent)
+          // Newest first, for the same crashed-run reason as the window.
+          .order('started_at', { ascending: false })
+          // The newest run is all the freshness table needs.
+          .limit(1);
+        // supabase-js reports failures as { error }; an array is the only answer shape.
+        if (error !== null || !Array.isArray(data)) {
+          // Unknown, not absent.
+          failed.add(agent);
+          // Nothing to add for this agent.
+          return;
+        }
+        // Zero rows is a real answer (never ran); one row is its newest run.
+        if (data.length > 0) rows.push(data[0] as AgentRunRow);
+      } catch {
+        // A thrown network failure is unknown, the same as a returned error.
+        failed.add(agent);
+      }
+    }),
+  );
+  // Both halves together, so the caller sets them from one result.
+  return { rows, failed };
 }
 
 export interface AgentRunsRead {
@@ -138,6 +207,9 @@ export function useAgentRuns(): AgentRunsRead {
      would make an age creep upward while the page sits open, which looks like
      live data and is not - the underlying read is minutes old. */
   const [measuredAt, setMeasuredAt] = useState<number | null>(null);
+  /* Agents whose own newest-run lookup failed (W9). Empty until the lookups
+     settle; summarised as `lookup_failed`, never as "never run". */
+  const [lookupFailed, setLookupFailed] = useState<ReadonlySet<AgentName>>(new Set());
 
   useEffect(() => {
     /* No client at all: the console is unconfigured, which the classifier
@@ -198,7 +270,17 @@ export function useAgentRuns(): AgentRunsRead {
            manufacture a positive "nothing has ever run" answer out of a state
            we do not understand - so it stays null and classifies as still
            loading rather than as a conclusive empty. */
-        setRows(data as readonly AgentRunRow[] | null);
+        const windowRows = data as readonly AgentRunRow[] | null;
+        /* W9: the agents the window missed, each read on its own. Skipped for
+           a null window, which stays "still loading" as explained above. */
+        const beyond =
+          windowRows === null ? null : await readNewestBeyondWindow(supabase, windowRows);
+        // The lookups were awaited; the component may have unmounted meanwhile.
+        if (!live) return;
+        // Window rows plus the newest run of each agent it missed.
+        setRows(beyond === null ? windowRows : [...(windowRows ?? []), ...beyond.rows]);
+        // Set with the rows, so no render pairs new rows with old failures.
+        setLookupFailed(beyond === null ? new Set() : beyond.failed);
         /* Stamped at the same moment as the rows, so the ages on screen and the
            "as of" label can never disagree. */
         setMeasuredAt(Date.now());
@@ -244,6 +326,8 @@ export function useAgentRuns(): AgentRunsRead {
       ? summarizeAgentRuns(
           state.kind === 'rows' ? state.rows : [],
           measuredAt,
+          /* W9: a failed lookup must read as unknown, never as "never run". */
+          lookupFailed,
         )
       : [];
 

@@ -471,9 +471,40 @@ test('needsAttention flags exactly the four verdicts that require action', () =>
   assert.equal(needsAttention('silent'), true);
   assert.equal(needsAttention('running_dry'), true);
   assert.equal(needsAttention('clock_skew'), true);
+  /* Added 2026-11-01 (W9): an agent the page could not look up is unknown,
+     and an unknown agent is as much the operator's problem as a silent one. */
+  assert.equal(needsAttention('lookup_failed'), true);
   /* And the two that do not - the non-vacuity side of the predicate. */
   assert.equal(needsAttention('succeeding'), false);
   assert.equal(needsAttention('age_only'), false);
+});
+
+/* W9 (2026-11-01 wiring audit): the page looks up, one by one, each agent the
+   200-row window missed. A lookup that FAILED proves nothing about whether the
+   agent ran, so it must never come out as "has never run" (CLAUDE.md section 6:
+   missing data must not become an answer). */
+test('an agent whose own lookup failed is lookup_failed, never never_run', () => {
+  /* No rows anywhere, and the normalizer's lookup failed. */
+  const summary = summarizeAgentRuns([], NOW, new Set<AgentName>(['normalizer']));
+  /* The agent under test. */
+  const normalizer = summary.find((entry) => entry.agent === 'normalizer');
+  /* Present: the roster still drives the table. */
+  assert.ok(normalizer !== undefined, 'the roster must still include the agent');
+  /* The verdict that says "unknown", not the one that says "absent". */
+  assert.equal(normalizer.verdict, 'lookup_failed');
+  /* The sentence must not claim it never ran. */
+  assert.doesNotMatch(describeVerdict(normalizer), /never/);
+  /* An agent nobody can see is an agent that needs attention. */
+  assert.equal(needsAttention(normalizer.verdict), true);
+  /* Non-vacuity: an agent whose lookup answered with zero rows is still never_run. */
+  assert.equal(summary.find((entry) => entry.agent === 'screener')?.verdict, 'never_run');
+});
+
+test('a run in hand outranks a failed lookup for the same agent', () => {
+  /* A row proves the agent ran, so a lookup failure cannot erase it. */
+  const summary = summarizeAgentRuns([run({ agent: 'normalizer' })], NOW, new Set<AgentName>(['normalizer']));
+  /* The fresh success is judged as usual. */
+  assert.equal(summary.find((entry) => entry.agent === 'normalizer')?.verdict, 'succeeding');
 });
 
 test('every verdict has a description, and none of them is a bare status word', () => {

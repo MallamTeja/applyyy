@@ -72,10 +72,12 @@ import {
   needsAttention,
   newestHeartbeat,
 } from '../../data/agentFreshness';
-/* The read itself. `RUN_WINDOW` is imported rather than restated so the note
-   the panel renders about its own window cannot drift from the query's LIMIT -
-   a page that misdescribes its own bounds is worse than one that says nothing,
-   because the operator would trust it. */
+/* The read itself. Corrected 2026-11-01 (wiring audit W9): this comment used
+   to say the panel renders a note about its RUN_WINDOW. It never did, and the
+   window is no longer the read's bound: `useAgentRuns` looks up, one by one,
+   every agent the window missed, so no note about it is needed. A page that
+   misdescribes its own bounds is worse than one that says nothing, because the
+   operator would trust it - which is why this comment is now corrected. */
 import { useAgentRuns } from '../../data/useAgentRuns';
 import type { AgentRunRow, AgentRunsRead } from '../../data/useAgentRuns';
 /* The shared vocabulary for every state that is not an answer. Imported so
@@ -282,6 +284,10 @@ function AgentFreshnessPanel({
                       /* The read's own phrase, so an unknown age can never be
                          mistaken for a measured one. */
                       <span className="unknown">{unreadable}</span>
+                    ) : entry.verdict === 'lookup_failed' ? (
+                      /* W9: this agent's own lookup failed. Its age is
+                         unknown, which is not the same as "never run". */
+                      <span className="unknown">lookup failed</span>
                     ) : entry.heartbeatAgeMs === null ? (
                       /* THE LOUDEST CASE. Not a dash, not a blank, not a zero:
                          an agent with no runs at all has never run once, and
@@ -298,6 +304,9 @@ function AgentFreshnessPanel({
                   <td>
                     {entry === undefined ? (
                       <span className="unknown">{unreadable}</span>
+                    ) : entry.verdict === 'lookup_failed' ? (
+                      /* Same W9 case: no success is known because nothing is. */
+                      <span className="unknown">lookup failed</span>
                     ) : entry.successAgeMs === null ? (
                       /* Has run, has never succeeded - a real state, and a
                          different one from never having run. */
@@ -543,6 +552,9 @@ function KeepalivePanel({
           </span>
           {unreadable !== null ? (
             <span className="unknown">{unreadable}</span>
+          ) : keepalive?.verdict === 'lookup_failed' ? (
+            /* W9: the keepalive's own lookup failed, so "Never run" would be a guess. */
+            <span className="unknown">lookup failed</span>
           ) : keepalive === undefined ||
             keepalive.heartbeatAgeMs === null ? (
             <span className="table__never">Never run</span>

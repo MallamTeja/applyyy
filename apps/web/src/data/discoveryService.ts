@@ -1,7 +1,14 @@
 /* Browser Discovery Service: the Watchlist ATS scan, triggered from the Application UI.
  *
- * Runs the scout-ats Edge Function (falling back to direct Ashby reads) against the
- * Company Watchlist, deduplicates by SHA-256 fingerprint and queues applications.
+ * Asks the scout-ats Edge Function to scan the Company Watchlist and reports what it said.
+ * The function deduplicates, screens and queues; the browser reads nothing and writes nothing.
+ *
+ * THE BROWSER FALLBACK IS GONE (2026-11-01, wiring audit W8). On any scout-ats failure except
+ * 401/403 this file used to scan Ashby boards itself. That path upserted `jobs` with ON CONFLICT
+ * DO UPDATE and `posted_at = now`, `posted_at_source = 'unknown'`, so it overwrote real scout rows
+ * (every live Ashby job had an 'exact' date) and made stale jobs look fresh. It also polled
+ * disabled boards, never read the kill switch, and reported a failed watchlist read as "add
+ * companies first". A failure now says what failed, and the server-side scan stays the only writer.
  *
  * REMOTE FEEDS ARE NOT HERE ANY MORE (retired 2026-10-24). The browser used to fetch
  * RemoteOK, Jobicy and Arbeitnow itself and insert every posting UNSCREENED at
@@ -12,8 +19,6 @@
  */
 
 import { supabase } from './supabase';
-// The one contract type the watchlist scan still builds rows with.
-import type { EmploymentType } from './contract';
 
 /* What every remote-feed button shows instead of a scan. One sentence, so the modal and the
    tests agree on it; the time matches the cron in .github/workflows/scout-remote.yml. */
@@ -27,80 +32,6 @@ export interface WatchlistScanResult {
   readonly jobsInserted: number;
   readonly appsCreated: number;
   readonly error?: string;
-}
-
-const COMPANY_LEGAL_SUFFIXES: ReadonlySet<string> = new Set([
-  'pvt', 'private', 'ltd', 'limited', 'llp',
-  'inc', 'incorporated', 'corp', 'corporation', 'co', 'llc', 'plc', 'gmbh', 'bv', 'ag',
-]);
-
-const CITY_ALIASES: ReadonlyMap<string, string> = new Map([
-  ['bengaluru', 'bangalore'],
-  ['gurugram', 'gurgaon'],
-  ['bombay', 'mumbai'],
-  ['calcutta', 'kolkata'],
-  ['madras', 'chennai'],
-]);
-
-const TRAILING_COUNTRY_TOKENS: ReadonlySet<string> = new Set(['india', 'bharat']);
-
-function foldText(value: string): string {
-  return value
-    .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function normalizeCompany(company: string): string {
-  const tokens = foldText(company).split(' ');
-  while (tokens.length > 1 && COMPANY_LEGAL_SUFFIXES.has(tokens[tokens.length - 1] as string)) {
-    tokens.pop();
-  }
-  return tokens.join(' ');
-}
-
-function normalizeTitle(title: string): string {
-  const withoutBrackets = title.replace(/[([{][^)\]}]*[)\]}]/g, ' ');
-  return foldText(withoutBrackets);
-}
-
-function normalizeLocation(location: string | undefined): string {
-  if (location === undefined) return '';
-  const tokens = foldText(location).split(' ').filter((token) => token.length > 0);
-  const aliased = tokens.map((token) => CITY_ALIASES.get(token) ?? token);
-  while (aliased.length > 1 && TRAILING_COUNTRY_TOKENS.has(aliased[aliased.length - 1] as string)) {
-    aliased.pop();
-  }
-  return aliased.join(' ');
-}
-
-function canonicalJobKey(company: string, title: string, location?: string): string {
-  return [
-    normalizeCompany(company),
-    normalizeTitle(title),
-    normalizeLocation(location),
-  ].join('|');
-}
-
-async function computeJobFingerprint(company: string, title: string, location?: string): Promise<string> {
-  const key = canonicalJobKey(company, title, location);
-  const bytes = new TextEncoder().encode(key);
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-function detectEmploymentType(text: string): EmploymentType {
-  const lower = text.toLowerCase();
-  if (lower.includes('intern') || lower.includes('co-op') || lower.includes('trainee')) return 'internship';
-  if (lower.includes('contract') || lower.includes('freelance')) return 'contract';
-  if (lower.includes('part-time') || lower.includes('part time')) return 'part_time';
-  if (lower.includes('full-time') || lower.includes('full time') || lower.includes('permanent')) return 'full_time';
-  return 'unknown';
 }
 
 /* HTTP status of a functions.invoke error, or null. FunctionsHttpError carries the
@@ -188,8 +119,28 @@ export function parseScoutAtsResponse(body: unknown): WatchlistScanResult | null
   };
 }
 
+/* The first 200 characters of a failed response's body, or '' when there is none to read.
+ * FunctionsHttpError carries the raw Response as `context`; scout-ats puts its reason there
+ * (e.g. `{"error":"kill_switch_read_failed"}`), which is the sentence the operator needs. */
+async function responseTextOf(error: unknown): Promise<string> {
+  // Only an object can carry a context.
+  if (typeof error !== 'object' || error === null) return '';
+  // The Response, when present.
+  const context = (error as { context?: unknown }).context;
+  // A fetch or relay error carries no readable body.
+  if (!(context instanceof Response)) return '';
+  try {
+    // Trimmed so a large HTML error page cannot flood the modal.
+    return (await context.text()).trim().slice(0, 200);
+  } catch {
+    // An already-read or broken body: fall back to the error's own message.
+    return '';
+  }
+}
+
 /**
- * Scans Watchlist ATS Boards (Greenhouse, Lever, Ashby) via Edge Function or direct API.
+ * Asks the scout-ats Edge Function to scan the Watchlist ATS boards (Greenhouse, Lever,
+ * Ashby, SmartRecruiters) and reports what it said. Never scans or writes from the browser.
  */
 export async function runWatchlistScan(
   onProgress?: (status: string) => void,
@@ -207,152 +158,97 @@ export async function runWatchlistScan(
 
   onProgress?.('Contacting Scout-ATS Edge Function...');
 
-  try {
-    // Attempt invoking the Edge Function first. invoke() attaches the session JWT,
-    // which scout-ats now requires.
-    const { data, error } = await supabase.functions.invoke('scout-ats', {
-      body: {},
-    });
+  // invoke() attaches the session JWT, which scout-ats requires. It never throws: HTTP,
+  // relay and network failures all come back as `error` (functions-js FunctionsClient).
+  const { data, error } = await supabase.functions.invoke('scout-ats', {
+    body: {},
+  });
 
-    // Non-2xx responses arrive as an error carrying the raw Response in `context`.
-    if (error) {
-      // Read the HTTP status defensively; not every invoke error carries a Response.
-      const status = httpStatusOf(error);
-      // Auth failures are not "busy": the browser fallback would hit the same wall,
-      // and the fix is the user's (sign in again), so say so instead of falling back.
-      if (status === 401 || status === 403) {
-        return {
-          // A refused call scanned nothing.
-          ok: false,
-          // 401 = no/expired session; 403 = authenticated but not allowed.
-          message:
-            status === 401
-              ? 'Scout-ATS refused the request: your session is missing or expired. Sign in again and retry.'
-              : 'Scout-ATS refused the request (403): this account is not allowed to run it.',
-          // Nothing ran, so every count is zero by fact, not by default.
-          boardsScanned: 0,
-          // Same: nothing was inserted.
-          jobsInserted: 0,
-          // Same: nothing was created.
-          appsCreated: 0,
-          // Machine-readable reason.
-          error: status === 401 ? 'unauthenticated' : 'forbidden',
-        };
-      }
-      // Any other failure falls through to the direct-scan fallback below, as before.
-    } else {
-      // A 2xx body is validated, never defaulted: the old code read fields scout-ats
-      // never sends (summaries / total_*), defaulted them to 0, and reported a
-      // successful "0 new applications" for every run.
-      const parsed = parseScoutAtsResponse(data);
-      // An unrecognised body is a failure to report, not zeros to display.
-      if (parsed === null) {
-        return {
-          // We cannot say what happened, so it did not demonstrably succeed.
-          ok: false,
-          // Include the body so the mismatch is diagnosable.
-          message: `Scout-ATS returned an unrecognised response: ${JSON.stringify(data).slice(0, 200)}`,
-          // Unknown, reported as zero alongside ok:false so nothing reads it as success.
-          boardsScanned: 0,
-          // Same.
-          jobsInserted: 0,
-          // Same.
-          appsCreated: 0,
-          // Machine-readable reason.
-          error: 'unrecognised_response',
-        };
-      }
-      // Recognised: report it in the modal's progress line too.
-      onProgress?.(parsed.message);
-      // The validated result, success or a stated halt.
-      return parsed;
+  // Non-2xx responses arrive as an error carrying the raw Response in `context`.
+  if (error) {
+    // Read the HTTP status defensively; not every invoke error carries a Response.
+    const status = httpStatusOf(error);
+    // Auth failures are the user's to fix (sign in again), so say exactly that.
+    if (status === 401 || status === 403) {
+      return {
+        // A refused call scanned nothing.
+        ok: false,
+        // 401 = no/expired session; 403 = authenticated but not allowed.
+        message:
+          status === 401
+            ? 'Scout-ATS refused the request: your session is missing or expired. Sign in again and retry.'
+            : 'Scout-ATS refused the request (403): this account is not allowed to run it.',
+        // Nothing ran, so every count is zero by fact, not by default.
+        boardsScanned: 0,
+        // Same: nothing was inserted.
+        jobsInserted: 0,
+        // Same: nothing was created.
+        appsCreated: 0,
+        // Machine-readable reason.
+        error: status === 401 ? 'unauthenticated' : 'forbidden',
+      };
     }
-  } catch {
-    // Fall back to scanning public Ashby boards directly from browser
-  }
-
-  onProgress?.('Edge function busy; scanning active watchlist Ashby/Public boards directly...');
-
-  // Fallback: Query active watchlist boards directly
-  const { data: boards } = await supabase
-    .from('company_watchlist')
-    .select('*')
-    .order('last_polled_at', { ascending: true, nullsFirst: true })
-    .limit(10);
-
-  if (!boards || boards.length === 0) {
+    // 504 = the gateway stopped waiting; 546 = the function hit a resource limit. Either way the
+    // server got the request and may have saved boards before the answer was lost, so "nothing
+    // happened" would be wrong. The scan writes per board, so finished boards are already in.
+    if (status === 504 || status === 546) {
+      return {
+        // Not a confirmed success: the outcome is unknown to the browser.
+        ok: false,
+        // Where to look, instead of a retry that would start a second scan on top of the first.
+        message: `Scout-ATS did not answer in time (HTTP ${status}). The scan may still be running on the server, and boards it finished are already saved: check the Discovered page in a few minutes before scanning again.`,
+        // Unknown, reported as zero alongside ok:false so nothing reads it as success.
+        boardsScanned: 0,
+        // Same.
+        jobsInserted: 0,
+        // Same.
+        appsCreated: 0,
+        // Machine-readable reason.
+        error: 'server_timeout',
+      };
+    }
+    // Every other failure is reported as it is: the function's own body when it sent one,
+    // otherwise the client's message (a network failure has no status and no body).
+    const detail = (await responseTextOf(error)) || (error instanceof Error ? error.message : String(error));
     return {
-      ok: true,
-      message: 'No company boards in your watchlist. Add companies in the Watchlist page first.',
+      // The scan failed; the browser does not try to do the server's job (W8).
+      ok: false,
+      // Status first, so 500 and a network drop read differently.
+      message: `Scout-ATS failed${status === null ? '' : ` (HTTP ${status})`}: ${detail}`,
+      // Nothing confirmed, so zero alongside ok:false.
       boardsScanned: 0,
+      // Same.
       jobsInserted: 0,
+      // Same.
       appsCreated: 0,
+      // Machine-readable reason.
+      error: 'scout_ats_failed',
     };
   }
 
-  let totalJobs = 0;
-  let totalApps = 0;
-
-  for (const board of boards) {
-    onProgress?.(`Scanning ${board.company_name} (${board.ats_provider})...`);
-
-    // For Ashby boards, browser has direct CORS access
-    if (board.ats_provider === 'ashby') {
-      try {
-        const res = await fetch(`https://api.ashbyhq.com/posting-api/job-board/${board.board_token}`);
-        if (res.ok) {
-          const body = (await res.json()) as { jobs?: Array<{ title: string; location?: string; jobUrl: string; isRemote?: boolean }> };
-          const jobs = body.jobs ?? [];
-
-          const inserts = [];
-          for (const j of jobs) {
-            const fingerprint = await computeJobFingerprint(board.company_name, j.title, j.location);
-            inserts.push({
-              fingerprint,
-              title: j.title,
-              company_name: board.company_name,
-              company_slug: board.company_slug,
-              location_raw: j.location ?? 'Unknown',
-              locations: j.isRemote ? ['Remote'] : [j.location ?? 'Onsite'],
-              work_arrangement: j.isRemote ? 'remote' : 'onsite',
-              employment_type: detectEmploymentType(j.title),
-              apply_url: j.jobUrl,
-              ats_provider: 'ashby',
-              discovered_via: ['ashby'],
-              posted_at: new Date().toISOString(),
-              posted_at_source: 'unknown',
-            });
-          }
-
-          if (inserts.length > 0) {
-            const { data: upserted } = await supabase
-              .from('jobs')
-              .upsert(inserts, { onConflict: 'user_id,fingerprint' })
-              .select('id');
-
-            if (upserted && upserted.length > 0) {
-              const appInserts = upserted.map((u) => ({ job_id: u.id, status: 'discovered' }));
-              const { data: created } = await supabase
-                .from('applications')
-                .upsert(appInserts, { onConflict: 'user_id,job_id', ignoreDuplicates: true })
-                .select('id');
-
-              totalJobs += upserted.length;
-              totalApps += created?.length ?? 0;
-            }
-          }
-        }
-      } catch {
-        // next board
-      }
-    }
+  // A 2xx body is validated, never defaulted: the old code read fields scout-ats
+  // never sends (summaries / total_*), defaulted them to 0, and reported a
+  // successful "0 new applications" for every run.
+  const parsed = parseScoutAtsResponse(data);
+  // An unrecognised body is a failure to report, not zeros to display.
+  if (parsed === null) {
+    return {
+      // We cannot say what happened, so it did not demonstrably succeed.
+      ok: false,
+      // Include the body so the mismatch is diagnosable.
+      message: `Scout-ATS returned an unrecognised response: ${JSON.stringify(data).slice(0, 200)}`,
+      // Unknown, reported as zero alongside ok:false so nothing reads it as success.
+      boardsScanned: 0,
+      // Same.
+      jobsInserted: 0,
+      // Same.
+      appsCreated: 0,
+      // Machine-readable reason.
+      error: 'unrecognised_response',
+    };
   }
-
-  return {
-    ok: true,
-    message: `Scanned ${boards.length} watchlist boards. ${totalApps} new applications created.`,
-    boardsScanned: boards.length,
-    jobsInserted: totalJobs,
-    appsCreated: totalApps,
-  };
+  // Recognised: report it in the modal's progress line too.
+  onProgress?.(parsed.message);
+  // The validated result, success or a stated halt.
+  return parsed;
 }

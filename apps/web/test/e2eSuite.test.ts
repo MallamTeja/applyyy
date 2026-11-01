@@ -26,7 +26,8 @@ import { extname, join } from 'node:path';
 // beforeEach carries the dist guard's error into each test so it counts as a failure.
 import { describe, it, before, beforeEach, after } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+// Request: test 12 records the browser's own requests to prove which writes it made.
+import { chromium, type Browser, type BrowserContext, type Page, type Request } from 'playwright';
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -747,6 +748,164 @@ describe('Playwright E2E Operator Console Suite', () => {
       await page.unroute('**/rest/v1/rpc/application_status_counts');
       // Leave the palette closed for whatever runs next.
       await page.keyboard.press('Escape');
+    }
+  });
+
+  // W8 (2026-11-01 wiring audit). On ANY scout-ats failure except 401/403 the browser used to scan
+  // Ashby itself and upsert `jobs` with ON CONFLICT DO UPDATE, stamping posted_at = now over real
+  // scout rows, polling disabled boards, and skipping the kill switch. The mocks below give that
+  // deleted path everything it needs (an enabled Ashby board, a live board answer), so restoring it
+  // makes this test record a browser write and fail by name.
+  it('12. a failed Scout-ATS scan (500 and 504) says why and writes no jobs or applications from the browser', async () => {
+    // Every request this test cares about, as "METHOD host/path"; the query string is dropped on purpose.
+    const seen: string[] = [];
+    // Network-level, so a write is caught whichever code path makes it.
+    const record = (request: Request): void => {
+      // Parsed so select= / on_conflict= params cannot vary an entry.
+      const url = new URL(request.url());
+      // The edge call itself (the one expected entry), any direct Ashby read, and any write to the two tables.
+      const relevant =
+        url.pathname.startsWith('/functions/v1/') ||
+        url.hostname === 'api.ashbyhq.com' ||
+        (/^\/rest\/v1\/(jobs|applications)$/.test(url.pathname) && !['GET', 'HEAD', 'OPTIONS'].includes(request.method()));
+      // Only those enter the closed set below.
+      if (relevant) seen.push(`${request.method()} ${url.hostname}${url.pathname}`);
+    };
+    // The status the scout-ats mock answers with; set per round.
+    let scoutStatus = 500;
+    // Page-level routes win over the context catch-all for these URLs only.
+    await page.route('**/functions/v1/scout-ats', async (route) => {
+      // 500 carries the body scout-ats sends when it cannot read the kill switch; 504 a gateway's.
+      const body = scoutStatus === 500 ? { error: 'kill_switch_read_failed' } : { message: 'upstream request timeout' };
+      // JSON, as both the function and the gateway send it.
+      await route.fulfill({ status: scoutStatus, contentType: 'application/json', body: JSON.stringify(body) });
+    });
+    // An ENABLED Ashby board: the only provider the deleted fallback scanned.
+    await page.route('**/rest/v1/company_watchlist**', async (route) => {
+      // Same shape the context mock uses, switched to Ashby.
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([{ id: 'b24bbfcc-0a12-4266-a09e-2ed7fa18ed25', ats_provider: 'ashby', board_token: 'acme', company_name: 'Acme', company_slug: 'acme', enabled: true }]),
+      });
+    });
+    // A one-job board answer, so a restored fallback would have a row to upsert.
+    await page.route('https://api.ashbyhq.com/**', async (route) => {
+      // The posting-api shape the fallback read.
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ jobs: [{ title: 'Engineer', location: 'Remote', jobUrl: 'https://jobs.ashbyhq.com/acme/1', isRemote: true }] }) });
+    });
+    // Listening from here on; removed in finally.
+    page.on('request', record);
+    try {
+      // One round per failure the audit named: a server error and a gateway timeout.
+      for (const [status, expected] of [
+        // The function's own error body must reach the operator.
+        [500, /HTTP 500.*kill_switch_read_failed/],
+        // A timeout must point at the Discovered page instead of claiming nothing happened.
+        [504, /HTTP 504.*Discovered page/],
+      ] as const) {
+        // The mock answers this round's status.
+        scoutStatus = status;
+        // A fresh page load per round, so the modal opens in its start state.
+        await page.goto(`${serverUrl}/discovered`, { waitUntil: 'domcontentloaded' });
+        // The page's own watchlist button opens the modal in watchlist mode.
+        await page.getByRole('button', { name: /Scout Watchlist/ }).click();
+        // Only requests from the scan onward count; the page load's reads are not under test.
+        seen.length = 0;
+        // Start the scan as the operator does.
+        await page.getByRole('button', { name: 'Start Watchlist Scan' }).click();
+        // Rendered only once the scan has settled with a result, whichever path produced it.
+        await page.getByRole('button', { name: 'Scan Again' }).waitFor();
+        // The step box shows the result's own sentence.
+        assert.match((await page.locator('.discovery-step__text').textContent()) ?? '', expected, `HTTP ${status}: the modal must say why the scan failed`);
+        // The "New positions have been queued" summary is a success claim; a failure must not show it.
+        assert.equal(await page.locator('.discovery-results').count(), 0, `HTTP ${status}: no scan summary on a failed scan`);
+        // The closed set: one edge call, no Ashby read, no jobs/applications write from the browser.
+        assert.deepEqual(seen, ['POST xynqxekcqizwhtskzqrq.supabase.co/functions/v1/scout-ats'], `HTTP ${status}: the browser made requests beyond the scout-ats call`);
+      }
+    } finally {
+      // Later tests must not be recorded.
+      page.off('request', record);
+      // Later tests get the context's catch-all answers again.
+      await page.unroute('**/functions/v1/scout-ats');
+      // Same.
+      await page.unroute('**/rest/v1/company_watchlist**');
+      // Same.
+      await page.unroute('https://api.ashbyhq.com/**');
+    }
+  });
+
+  // W9 (2026-11-01 wiring audit). Health reads the newest 200 agent_runs rows across ALL agents.
+  // Live, tracker and scout_ats fill that window, so screener (newest run at rank 253) and
+  // normalizer were reported "never run" while they had last run 8 days earlier. This serves a
+  // FULL window of tracker rows and answers the per-agent lookups itself.
+  it('13. System Health finds a quiet agent\'s newest run beyond the 200-row window, and a failed lookup is never "never run"', async () => {
+    // One instant for every fixture timestamp, so the ages below are exact.
+    const now = Date.now();
+    // An ISO timestamp msAgo before now.
+    const ago = (msAgo: number): string => new Date(now - msAgo).toISOString();
+    // A full window (exactly 200 rows, all tracker): the page cannot know what lies beyond it.
+    const windowRows = Array.from({ length: 200 }, (_, i) => ({
+      // The agent that crowds the window live.
+      agent: 'tracker',
+      // A plain success; its outcome is not under test.
+      status: 'succeeded',
+      // One per minute, newest first.
+      started_at: ago((i + 1) * 60_000),
+      // Closed 30 s later.
+      finished_at: ago((i + 1) * 60_000 - 30_000),
+      // The remaining selected columns, at their clean values.
+      error_count: 0,
+      // Same.
+      error_detail: null,
+      // Same.
+      rows_in: 0,
+    }));
+    // The screener's newest run, 8 days old: the audit's live case.
+    const screenerRun = { ...windowRows[0], agent: 'screener', started_at: ago(8 * 86_400_000 + 60_000), finished_at: ago(8 * 86_400_000) };
+    // Every per-agent filter the page sent, e.g. "eq.screener".
+    const lookups: string[] = [];
+    // Page-level, so it wins over the context's catch-all [] for this table only.
+    await page.route('**/rest/v1/agent_runs**', async (route) => {
+      // PostgREST encodes `.eq('agent', x)` as agent=eq.x; the window read has no agent filter.
+      const agent = new URL(route.request().url()).searchParams.get('agent');
+      // The window read.
+      if (agent === null) return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(windowRows) });
+      // Recorded so the test can prove which agents were looked up.
+      lookups.push(agent);
+      // The screener's run lies beyond the window.
+      if (agent === 'eq.screener') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([screenerRun]) });
+      // The normalizer's lookup fails: supabase-js returns this as { error }, it does not throw.
+      if (agent === 'eq.normalizer') return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ message: 'lookup failed in test' }) });
+      // Every other agent truly has no rows.
+      return route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
+    });
+    try {
+      // A full load, so the hook's effect runs against the routes above.
+      await page.goto(`${serverUrl}/health`, { waitUntil: 'domcontentloaded' });
+      // The freshness panel only, so a same-named row in another table cannot match.
+      const panel = page.locator('section.panel', { has: page.locator('h2', { hasText: 'Agent freshness' }) });
+      // One agent's row by its exact row header.
+      const row = (agent: string) => panel.locator('tr', { has: page.locator('th[scope="row"]', { hasText: new RegExp(`^${agent}$`) }) });
+      // The "Silent for" cell (td 0 is the expected cadence).
+      const silentFor = async (agent: string): Promise<string> => ((await row(agent).locator('td').nth(1).textContent()) ?? '').trim();
+      // The tracker's "Silent for" age appears once the read has rendered (its Last success cell has a second one).
+      await row('tracker').locator('td').nth(1).locator('.table__age').waitFor();
+      // The screener's age arrives with the lookups; wait for it rather than read once.
+      await row('screener').locator('td').nth(1).locator('.table__age').waitFor({ timeout: 10_000 }).catch(() => {});
+      // The fix: an 8-day-old run beyond the window is an age, not "never run".
+      assert.equal(await silentFor('screener'), '8 days', 'screener ran 8 days ago, beyond the window; it must not read "never run"');
+      // A failed lookup is unknown, never an absence (CLAUDE.md section 6).
+      assert.equal(await silentFor('normalizer'), 'lookup failed', 'a failed lookup must say so, not "never run"');
+      // The same row's verdict sentence must not claim it never ran either.
+      assert.doesNotMatch((await row('normalizer').textContent()) ?? '', /never run/i, 'a failed lookup must not render "never run" anywhere in its row');
+      // Non-vacuity: an agent whose lookup answered [] still says never run.
+      assert.equal(await silentFor('matcher'), 'never run', 'an agent with zero runs ever must still read "never run"');
+      // Only agents absent from the window are looked up: tracker filled it, so it must not be.
+      assert.ok(lookups.includes('eq.screener') && lookups.includes('eq.normalizer') && !lookups.includes('eq.tracker'), `lookups were ${lookups.join(',')}`);
+    } finally {
+      // Later tests get the context's catch-all [] again.
+      await page.unroute('**/rest/v1/agent_runs**');
     }
   });
 });

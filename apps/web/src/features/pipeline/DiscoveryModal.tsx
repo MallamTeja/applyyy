@@ -44,6 +44,9 @@ export function DiscoveryModal({
       const res = await runWatchlistScan((currentStep) => {
         setStep(currentStep);
       });
+      // The result's own sentence, success or failure. Before W8 (2026-11-01) only progress lines
+      // reached this box, so a refused or failed scan left "Contacting Scout-ATS..." on screen.
+      setStep(res.message);
       // The summary for the results grid.
       setWatchlistResult(res);
       // The page behind the modal reloads, so the new rows appear.
@@ -106,7 +109,9 @@ export function DiscoveryModal({
           </div>
 
           {/* Results Summary */}
-          {hasResult && (
+          {/* Only for a scan that worked: its note says positions were queued, which a failed
+              or timed-out scan cannot claim. The step box above carries the failure's sentence. */}
+          {watchlistResult?.ok === true && (
             <div className="discovery-results">
               <h3 className="discovery-results__heading">Scan Summary</h3>
               <div className="discovery-results__grid">

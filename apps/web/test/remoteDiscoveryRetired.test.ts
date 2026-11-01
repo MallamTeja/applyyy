@@ -24,6 +24,21 @@ describe('browser remote discovery is retired', () => {
     assert.deepEqual(exports, ['REMOTE_FEEDS_SCHEDULE_NOTE', 'parseScoutAtsResponse', 'runWatchlistScan']);
   });
 
+  // W8 (2026-11-01 wiring audit): the browser "Scout Watchlist" fallback read company_watchlist and
+  // upserted jobs/applications itself. The scan is now the scout-ats call and nothing else.
+  it('the watchlist scan touches no table and no ATS host from the browser', () => {
+    // The service source, read once for both checks.
+    const source = read('../src/data/discoveryService.ts');
+    // Every table access as code, `.from(` with its open paren; prose cannot match it.
+    const tables = [...source.matchAll(/\.from\(\s*'(\w+)'/g)].map((m) => m[1]);
+    // The closed set is empty: a restored fallback names company_watchlist, jobs and applications here.
+    assert.deepEqual(tables, [], 'discoveryService must not read or write tables; scout-ats does the scan');
+    // Every outbound host the service builds a URL for; the only call left goes through supabase.functions.
+    const hosts = [...source.matchAll(/fetch\(\s*`https:\/\/([^/`]+)/g)].map((m) => m[1]);
+    // Same closed, empty set: the fallback fetched api.ashbyhq.com directly.
+    assert.deepEqual(hosts, [], 'discoveryService must not fetch an ATS host itself');
+  });
+
   it('the modal imports only the watchlist scan and the schedule note from the service', () => {
     // The modal's one runtime import from discoveryService.
     const match = /^import \{ ([^}]+) \} from '\.\.\/\.\.\/data\/discoveryService';$/m.exec(read('../src/features/pipeline/DiscoveryModal.tsx'));
@@ -34,9 +49,10 @@ describe('browser remote discovery is retired', () => {
   });
 
   it('the CSP connects only to the hosts the app still fetches (the three feed hosts are gone)', () => {
-    // The exact connect-src host list the app needs: Supabase (https + realtime), the watchlist
-    // scan's Ashby fallback, and the email tracker's Apps Script.
-    const expected = ['https://api.ashbyhq.com', 'https://script.google.com', 'https://script.googleusercontent.com', 'https://xynqxekcqizwhtskzqrq.supabase.co', "'self'", 'wss://xynqxekcqizwhtskzqrq.supabase.co'].sort();
+    // The exact connect-src host list the app needs: Supabase (https + realtime) and the email
+    // tracker's Apps Script. api.ashbyhq.com left with the watchlist scan's browser fallback (W8,
+    // 2026-11-01): nothing in the browser fetches it, so the CSP no longer allows it.
+    const expected = ['https://script.google.com', 'https://script.googleusercontent.com', 'https://xynqxekcqizwhtskzqrq.supabase.co', "'self'", 'wss://xynqxekcqizwhtskzqrq.supabase.co'].sort();
     // The root config is the only one: Vercel builds from the repo root, and the inert
     // apps/web/vercel.json duplicate was deleted 2026-10-24 so a CSP edit can't land in a dead file.
     const path = '../../../vercel.json';

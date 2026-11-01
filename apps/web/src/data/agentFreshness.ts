@@ -223,6 +223,11 @@ export type FreshnessVerdict =
      not run once, which a table built from query rows would render by simply
      omitting the agent - the exact silence this page exists to break. */
   | 'never_run'
+  /* Added 2026-11-01 (wiring audit W9). The agent had no row in the 200-row
+     window, and its own newest-run lookup FAILED. That proves nothing either
+     way, so it must not fall through to `never_run`: a failed read reported as
+     "has never run" is missing data turned into a confident answer. */
+  | 'lookup_failed'
   /* A timestamp lies in the future. Refuse to judge rather than judge wrongly:
      a skewed clock makes a dead agent look alive, and a page that can be fooled
      by a clock is a page that cannot be trusted about anything. */
@@ -348,10 +353,17 @@ function verdictFor(
  *
  * `now` is a parameter rather than a `Date.now()` call so that a nine-day
  * silence, a clock skew and a run in the future are each one line of test
- * setup instead of being untestable. */
+ * setup instead of being untestable.
+ *
+ * `lookupFailed` names the agents whose own newest-run lookup failed
+ * (`useAgentRuns.ts`, W9). With no run in hand, such an agent is
+ * `lookup_failed`, never `never_run`. A run in hand still wins: a row is proof
+ * the agent ran, whatever a later lookup did. Empty by default, so callers
+ * that read every row (and the tests) need not pass it. */
 export function summarizeAgentRuns(
   runs: readonly AgentRunFacts[],
   now: number,
+  lookupFailed: ReadonlySet<AgentName> = new Set(),
 ): readonly AgentFreshness[] {
   return AGENT_NAMES.map((agent) => {
     /* This agent's runs only. A linear filter per agent is O(agents × runs),
@@ -411,7 +423,12 @@ export function summarizeAgentRuns(
       lastSuccess,
       successAgeMs,
       stuckRun,
-      verdict: verdictFor(cadence, heartbeatAgeMs, successAgeMs),
+      /* Unknown beats "never": with no run in hand and a failed lookup, the
+         only true statement is that the page could not see this agent. */
+      verdict:
+        lastRun === null && lookupFailed.has(agent)
+          ? 'lookup_failed'
+          : verdictFor(cadence, heartbeatAgeMs, successAgeMs),
     };
   });
 }
@@ -449,6 +466,9 @@ export function describeVerdict(freshness: AgentFreshness): string {
     case 'never_run':
       /* Stated as an absolute, because it is one. There is no age to report. */
       return 'has never run';
+    case 'lookup_failed':
+      /* No claim about running at all: the page simply could not look. */
+      return 'its newest-run lookup failed, so whether it ran is unknown — reload to retry';
     case 'clock_skew':
       return 'reported a run in the future — clock skew, so no age can be trusted';
     case 'age_only':
@@ -518,6 +538,8 @@ export function newestHeartbeat(
 export function needsAttention(verdict: FreshnessVerdict): boolean {
   return (
     verdict === 'never_run' ||
+    /* An agent the page could not see is not an agent known to be fine. */
+    verdict === 'lookup_failed' ||
     verdict === 'silent' ||
     verdict === 'running_dry' ||
     /* Skew counts: a page that cannot be trusted about ages is itself the
