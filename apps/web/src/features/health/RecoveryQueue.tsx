@@ -6,9 +6,11 @@
  * advanceRecovery (the only write path; see that file for the PT409 stamp and the lost-answer rules).
  *
  * RULES THIS COMPONENT OWNS (the engine owns the rest):
- *  - window.confirm names the row and the move before anything is written.
- *  - A row is locked from the click until its outcome is known, so a double click cannot send two
- *    moves. After an UNKNOWN outcome it stays locked until reload: retrying could double-apply.
+ *  - An inline confirm (app/InlineConfirm.tsx, 2026-11-01; it replaced the browser popup) names the row
+ *    and the move before anything is written. A move button only opens it; only its Confirm calls
+ *    move(), at most once. Cancel and Escape write nothing. One confirm is open at a time on the page.
+ *  - A row is locked from the Confirm click until its outcome is known, so a double click cannot send
+ *    two moves. After an UNKNOWN outcome it stays locked until reload: retrying could double-apply.
  *  - After every move the queue is re-read, so what is on screen is what is stored.
  *  - A held edge (humanLanes.ts HELD_HUMAN_EDGES) renders disabled WITH its reason, never hidden:
  *    a missing button reads as "not possible", a disabled one with a reason reads as "deliberately off".
@@ -43,6 +45,8 @@ import { advanceRecovery, confirmText, describeRecovery } from './advanceRecover
 import type { RecoveryClient, RecoveryOutcome } from './advanceRecovery';
 // The one gate between untrusted board URLs and an href: only http(s) passes, everything else is undefined.
 import { safeHref } from '../../app/safeHref';
+// The in-place confirm in front of every move: these moves have no human undo edge.
+import { InlineConfirm, armConfirm } from '../../app/InlineConfirm';
 
 /* How many rows one queue shows. One more is fetched, so "there are more" is a fact, not a guess. */
 const QUEUE_LIMIT = 50;
@@ -97,7 +101,7 @@ interface OutcomeNote {
 }
 
 /* The JD join can come back as an object, an array (a to-many shape) or null; this reads all three.
-   Exported so the Manual apply page names a row exactly as this queue and its confirm dialog do. */
+   Exported so the Manual apply page names a row exactly as this queue and its inline confirm do. */
 export function rowLabel(id: string, jobs: unknown): string {
   // A to-many join shape still carries one job here; take the first.
   const job = (Array.isArray(jobs) ? jobs[0] : jobs) as { title?: unknown; company_name?: unknown } | null | undefined;
@@ -365,13 +369,12 @@ export function RecoveryQueue(props: {
     void load();
   }, [load]);
 
-  // One click on one move: confirm, lock, write, record, unlock, re-read.
+  // One CONFIRMED move: lock, write, record, unlock, re-read. The confirm already ran in RecoveryRowView
+  // (its InlineConfirm calls onMove only from Confirm), so nothing here asks again.
   async function move(row: QueueRow, to: ApplicationStatus): Promise<void> {
     // A second click while the first is in flight, or after an unknown outcome, does nothing.
     if (inflight.current.has(row.id) || frozenRef.current.has(row.id)) return;
-    // Named row, named move, and the consequence, before anything is written.
-    if (!window.confirm(confirmText(row.label, { from: status, to }))) return;
-    // Claimed synchronously, after the (blocking) confirm and before the first await.
+    // Claimed synchronously, before the first await, so a second Confirm in the same tick sees it.
     inflight.current.add(row.id);
     // Mirrored into state so the buttons render disabled.
     setBusy((prev) => new Set(prev).add(row.id));
@@ -479,7 +482,7 @@ export function RecoveryQueue(props: {
                     frozen={frozen.has(row.id)}
                     /* A live worker lease blocks every move on an applying row. */
                     lease={leaseBlock(status, row, now)}
-                    /* The write, through the confirm and the locks in move(). */
+                    /* The write, after the row's inline confirm, through the locks in move(). */
                     onMove={(to) => void move(row, to)}
                   />
                 ))}
@@ -511,17 +514,19 @@ export function RecoveryRowView(props: {
   readonly frozen: boolean;
   // The live-lease sentence, or null.
   readonly lease: string | null;
-  // Called with the target status when a move's button is clicked.
+  // Called with the target status when a move is CONFIRMED; the button itself only opens the confirm.
   readonly onMove: (to: ApplicationStatus) => void;
 }): ReactElement {
   // Destructured once for readability below.
   const { status, row, moves, verb, meaning, locked, frozen, lease, onMove } = props;
+  // This row's confirm slot. The status is in it because HealthPage and ManualApplyPage each draw queues.
+  const confirmId = `recovery:${status}:${row.id}`;
   return (
     /* One table row per application. */
     <tr>
       {/* The row in words; the id stays available in the title for anyone who copies it. */}
       <th scope="row" className="table__id recovery__label" title={row.id}>
-        {/* The same label the confirm dialog and the outcome note use, so all three match. */}
+        {/* The same label the inline confirm and the outcome note use, so all three match. */}
         {row.label}
         {/* Why it is waiting, before anything else, so the operator knows what to check. */}
         <span className="recovery__reason">{row.reason}</span>
@@ -549,52 +554,67 @@ export function RecoveryRowView(props: {
       </th>
       {/* The moves cell: one line per human edge out of this status. */}
       <td>
-        {/* Stacked so a held move's reason sits under its own button. */}
-        <div className="recovery__moves">
-          {/* Built from the graph, so a new human edge appears here with no edit. */}
-          {moves.map((to) => {
-            // Deliberately off edges show their reason instead of firing.
-            const held = heldReason(status, to);
-            // The optional meaning line for this move.
-            const why = meaning?.(to) ?? null;
-            // One id per row and move, so the button can point at its own explanation.
-            const noteId = `recovery-${row.id}-${to}`;
-            // Whichever explanation applies, held first (it is permanent), then the lease.
-            const blocker = held ?? lease;
-            return (
-              /* Keyed by target: a status has at most one edge to each target. */
-              <div key={to} className="recovery__move">
-                <button
-                  /* type=button: never a form submit, whatever this is nested in later. */
-                  type="button"
-                  /* The page's existing recovery-button look, so the four queues match. */
-                  className="health-recovery-button"
-                  /* Off when held, while a lease is live, or while the row is locked. */
-                  disabled={blocker !== null || locked}
-                  /* A specific accessible name: every row has the same verbs, so the row is named too. */
-                  aria-label={`${verb(to)}: ${row.label}`}
-                  /* Ties the reason to the button, for screen readers that reach a disabled control. */
-                  aria-describedby={blocker !== null || why !== null ? noteId : undefined}
-                  /* The write, through the queue's confirm and locks. */
-                  onClick={() => onMove(to)}
-                >
-                  {/* The visible verb; the row name is in aria-label, where the eye does not need it. */}
-                  {verb(to)}
-                </button>
-                {/* Why it is off (HELD_HUMAN_EDGES' own words, or the lease), else what it means. */}
-                {blocker !== null ? (
-                  /* The reason the button is off; its id is what aria-describedby points at. */
-                  <span id={noteId} className="recovery__held">{blocker}</span>
-                ) : why !== null ? (
-                  /* Otherwise the move's meaning, under the same id for the same reason. */
-                  <span id={noteId} className="recovery__why">{why}</span>
-                ) : null}
-              </div>
-            );
-          })}
-          {/* Said once per frozen row, so its disabled buttons are explained. */}
-          {frozen ? <span className="recovery__held">Outcome unknown: reload before moving this row again.</span> : null}
-        </div>
+        {/* The confirm opens in place of the moves, in this same cell, so the row keeps its height. */}
+        <InlineConfirm id={confirmId}>
+          {/* Stacked so a held move's reason sits under its own button. */}
+          <div className="recovery__moves">
+            {/* Built from the graph, so a new human edge appears here with no edit. */}
+            {moves.map((to) => {
+              // Deliberately off edges show their reason instead of firing.
+              const held = heldReason(status, to);
+              // The optional meaning line for this move.
+              const why = meaning?.(to) ?? null;
+              // One id per row and move, so the button can point at its own explanation.
+              const noteId = `recovery-${row.id}-${to}`;
+              // Whichever explanation applies, held first (it is permanent), then the lease.
+              const blocker = held ?? lease;
+              // The move and its row in words: the button's name, and the confirm's button names.
+              const action = `${verb(to)}: ${row.label}`;
+              return (
+                /* Keyed by target: a status has at most one edge to each target. */
+                <div key={to} className="recovery__move">
+                  <button
+                    /* type=button: never a form submit, whatever this is nested in later. */
+                    type="button"
+                    /* The page's existing recovery-button look, so the four queues match. */
+                    className="health-recovery-button"
+                    /* Off when held, while a lease is live, or while the row is locked. */
+                    disabled={blocker !== null || locked}
+                    /* A specific accessible name: every row has the same verbs, so the row is named too. */
+                    aria-label={action}
+                    /* Ties the reason to the button, for screen readers that reach a disabled control. */
+                    aria-describedby={blocker !== null || why !== null ? noteId : undefined}
+                    /* Opens the inline confirm; nothing is written until its Confirm. The button is
+                       passed from the click event so Cancel can refocus it (Safari skips focus on click). */
+                    onClick={(e) => armConfirm(confirmId, {
+                      // Named row, named move, and the consequence: the sentence the old popup showed.
+                      message: confirmText(row.label, { from: status, to }),
+                      // For the Confirm and Cancel names.
+                      action,
+                      // The write, through the queue's locks in move().
+                      onConfirm: () => onMove(to),
+                      // Where focus goes back on Cancel or Escape.
+                      trigger: e.currentTarget,
+                    })}
+                  >
+                    {/* The visible verb; the row name is in aria-label, where the eye does not need it. */}
+                    {verb(to)}
+                  </button>
+                  {/* Why it is off (HELD_HUMAN_EDGES' own words, or the lease), else what it means. */}
+                  {blocker !== null ? (
+                    /* The reason the button is off; its id is what aria-describedby points at. */
+                    <span id={noteId} className="recovery__held">{blocker}</span>
+                  ) : why !== null ? (
+                    /* Otherwise the move's meaning, under the same id for the same reason. */
+                    <span id={noteId} className="recovery__why">{why}</span>
+                  ) : null}
+                </div>
+              );
+            })}
+            {/* Said once per frozen row, so its disabled buttons are explained. */}
+            {frozen ? <span className="recovery__held">Outcome unknown: reload before moving this row again.</span> : null}
+          </div>
+        </InlineConfirm>
       </td>
     </tr>
   );

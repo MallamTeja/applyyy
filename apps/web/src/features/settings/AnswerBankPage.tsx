@@ -33,6 +33,8 @@ import {
 import type { BankQuestion, QuestionCategory } from './answerBankStore';
 // Which rows the table leaves out (EEO keys and the legacy gender/disability seeds), and why, in one tested place.
 import { isTableHiddenKey } from './answerBankView';
+// The in-place confirm in front of Delete (2026-11-01, replacing the browser popup): a delete has no undo.
+import { InlineConfirm, armConfirm } from '../../app/InlineConfirm';
 
 import './settings.css';
 
@@ -168,18 +170,16 @@ export function AnswerBankPage(): ReactElement {
     }
   };
 
+  // Runs only from the row's inline confirm (AnswerBankRowActions), so it asks nothing itself.
   const handleDeleteCustom = async (question: BankQuestion) => {
-    if (!window.confirm(`Are you sure you want to delete "${question.asks}" from the Answer Bank?`)) {
-      return;
-    }
     try {
       const res = await deleteCustomBankQuestion(question.key);
       if (res.ok) {
         toast.success(`Deleted question "${question.asks}"`);
         setQuestions((prev) => prev.filter((item) => item.key !== question.key));
-        if (editingKey === question.key) {
-          cancelEditing();
-        }
+        // Functional update: this runs from the confirm's stored callback, so a plain `editingKey` read
+        // here could be from the render that opened the confirm, not the current one.
+        setEditingKey((current) => (current === question.key ? null : current));
       } else {
         toast.error(res.error || 'Failed to delete question');
       }
@@ -588,33 +588,22 @@ export function AnswerBankPage(): ReactElement {
                       </td>
 
                       <td>
-                        <div className="answer-bank__row-actions">
-                          <button
-                            type="button"
-                            className="copy-btn answer-bank__action-btn"
-                            onClick={() =>
-                              void handleCopy(
-                                typeof question.value === 'object'
-                                  ? JSON.stringify(question.value)
-                                  : String(question.value),
-                                question.asks,
-                              )
-                            }
-                            title="Copy answer value to clipboard"
-                          >
-                            📋 Copy
-                          </button>
-                          {question.isCustom && (
-                            <button
-                              type="button"
-                              className="answer-bank__action-btn answer-bank__action-btn--delete"
-                              onClick={() => void handleDeleteCustom(question)}
-                              title="Delete custom question"
-                            >
-                              🗑️
-                            </button>
-                          )}
-                        </div>
+                        {/* Own component, so a test can click its Delete and Confirm without a DOM. */}
+                        <AnswerBankRowActions
+                          /* The row: names the delete and keys its confirm. */
+                          question={question}
+                          /* Copy is unchanged: objects as JSON, everything else as text. */
+                          onCopy={() =>
+                            void handleCopy(
+                              typeof question.value === 'object'
+                                ? JSON.stringify(question.value)
+                                : String(question.value),
+                              question.asks,
+                            )
+                          }
+                          /* The write, called only by the inline confirm's Confirm. */
+                          onDelete={() => void handleDeleteCustom(question)}
+                        />
                       </td>
                     </tr>
                   );
@@ -650,5 +639,74 @@ export function AnswerBankPage(): ReactElement {
         onAdd={handleAddQuestion}
       />
     </div>
+  );
+}
+
+/* One row's Actions cell: Copy, and Delete behind an inline confirm (custom questions only). Hook-free
+   and exported, so test/answerBankDeleteConfirm.test.ts calls the real Delete click handler by value;
+   the page owns the state and the write. */
+export function AnswerBankRowActions(props: {
+  // The row; its key also keys the confirm slot.
+  readonly question: BankQuestion;
+  // Copies the answer value.
+  readonly onCopy: () => void;
+  // Deletes the question; reached only through the confirm's Confirm.
+  readonly onDelete: () => void;
+}): ReactElement {
+  // Destructured once for the markup below.
+  const { question, onCopy, onDelete } = props;
+  // This row's confirm slot: question keys are unique in the bank, so no two rows share one.
+  const confirmId = `answer-bank:${question.key}`;
+  // The delete in words, for the trash button's name and the confirm's button names.
+  const action = `Delete "${question.asks}"`;
+  return (
+    /* While asking, the question shows in place of both buttons, in this same cell. */
+    <InlineConfirm id={confirmId}>
+      {/* The existing two-button strip. */}
+      <div className="answer-bank__row-actions">
+        <button
+          /* type=button: never a form submit. */
+          type="button"
+          /* Unchanged look. */
+          className="copy-btn answer-bank__action-btn"
+          /* No write, so no confirm. */
+          onClick={onCopy}
+          /* Unchanged hover hint. */
+          title="Copy answer value to clipboard"
+        >
+          {/* Unchanged label. */}
+          📋 Copy
+        </button>
+        {/* Only custom questions can be deleted; the seeded ones are the worker's fixed set. */}
+        {question.isCustom && (
+          <button
+            /* type=button: never a form submit. */
+            type="button"
+            /* Unchanged danger look. */
+            className="answer-bank__action-btn answer-bank__action-btn--delete"
+            /* The emoji alone names nothing useful ("wastebasket"), and every row has one, so the
+               question is in the name. */
+            aria-label={action}
+            /* Opens the inline confirm; nothing is deleted until its Confirm. The button comes from the
+               click event so Cancel can refocus it (Safari skips focus on click). */
+            onClick={(e) => armConfirm(confirmId, {
+              // The same sentence the old popup asked.
+              message: `Are you sure you want to delete "${question.asks}" from the Answer Bank?`,
+              // For the Confirm and Cancel names.
+              action,
+              // The page's delete, run at most once.
+              onConfirm: onDelete,
+              // Where focus goes back on Cancel or Escape.
+              trigger: e.currentTarget,
+            })}
+            /* Unchanged hover hint. */
+            title="Delete custom question"
+          >
+            {/* Unchanged icon. */}
+            🗑️
+          </button>
+        )}
+      </div>
+    </InlineConfirm>
   );
 }

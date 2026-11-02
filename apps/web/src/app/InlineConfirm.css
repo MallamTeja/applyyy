@@ -1,0 +1,59 @@
+/* InlineConfirm (app/InlineConfirm.tsx): the confirm opens IN PLACE of the controls it guards.
+   Semantic tokens only, so both themes follow light-dark() (docs/ui/theming-convention.md). */
+
+/* One grid cell holds both layers, so the cell is as tall as the taller of the two and the next row
+   does not move when the confirm opens. A popover was rejected: .table-wrap scrolls sideways
+   (overflow-x), which clips anything positioned outside the last row. */
+.inline-confirm {
+  /* Grid, because only grid lets two in-flow children share one cell. */
+  display: grid;
+}
+
+/* Both layers in the same cell, stacked; the panel comes later in the DOM, so it paints on top. */
+.inline-confirm > * {
+  /* Row 1, column 1 for both. */
+  grid-area: 1 / 1;
+}
+
+/* While asking: the controls keep their box (so the height holds) but cannot be seen, clicked,
+   tabbed to, or read by a screen reader. */
+.inline-confirm__controls--hidden {
+  /* visibility, not display:none: display would collapse the box and shift the row. */
+  visibility: hidden;
+}
+
+/* The question layer: at the top of the cell, at its own height. */
+.inline-confirm__panel {
+  /* Without this the always-mounted, empty layer stretches over the controls and swallows their clicks. */
+  align-self: start;
+  /* Sentence above, buttons below. */
+  display: flex;
+  /* One column, so the buttons sit under the question they answer. */
+  flex-direction: column;
+  /* The cell's own rhythm (.recovery__moves uses the same gap). */
+  gap: var(--gap-1);
+}
+
+/* The question itself. */
+.inline-confirm__sentence {
+  /* No browser paragraph margin: an empty sentence must take no height while closed. */
+  margin: 0;
+  /* Keeps confirmText's blank line between the question and its warning, as the old popup showed it. */
+  white-space: pre-line;
+  /* A long job title wraps instead of widening the table past a phone screen. */
+  overflow-wrap: anywhere;
+  /* The size of the cell's other explanatory lines, so the question fits the space the moves held. */
+  font-size: var(--size-xs);
+  /* Full-strength ink: this is the line the operator must read before choosing. */
+  color: var(--text-primary);
+}
+
+/* Confirm and Cancel side by side. */
+.inline-confirm__actions {
+  /* One line when there is room. */
+  display: flex;
+  /* Two lines in a narrow cell rather than overflowing it. */
+  flex-wrap: wrap;
+  /* The app's control spacing. */
+  gap: var(--gap-2);
+}

@@ -430,16 +430,56 @@ describe('Playwright E2E Operator Console Suite', () => {
     assert.equal(isModalClosedAfterEsc, false, 'Command palette must close on Escape key');
   });
 
+  // CI 85ef531 (2026-11-01, red twice): nothing here waited for the bank read, so on a fast runner
+  // every step ran against the "Loading standing answers..." placeholder. That row is one <tr>, so
+  // "at least one compensation row" and "exactly one search hit" both PASSED on it, and only the
+  // /relocate/ text check failed. The read is now held at a gate, so the test sees the loading
+  // state on every run, proves its row locator does not match it, then waits for the loaded table.
   it('3. verifies Answer Bank search, category chips, and 1-click clipboard copy with toast', async () => {
+    // Real question rows only: each puts its question in a <th scope="row">, while the loading
+    // placeholder and the no-match row are one <td colSpan={5}>. Counting every tbody <tr> let
+    // the placeholder answer "one row".
+    const questionRows = page.locator('.settings-table tbody tr:has(th[scope="row"])');
+    // The row AnswerBankPage renders while loadAnswerBank() is in flight.
+    const placeholder = page.locator('.settings-table tbody tr', { hasText: 'Loading standing answers...' });
+    // Set by the gate below; the route handler waits on it, so the test decides when the bank lands.
+    let releaseBank: () => void = () => {};
+    // One promise, resolved once by releaseBank().
+    const bankGate = new Promise<void>((resolve) => {
+      // Captured so releaseBank() can open the gate from outside the handler.
+      releaseBank = resolve;
+    });
     // Fake timers BEFORE navigation, so the page's setTimeout (Toast.tsx's 3200ms auto-dismiss)
     // runs on a clock we control. Without this the close click raced the auto-dismiss and flaked.
+    // install() leaves time flowing (Playwright resumes the clock on inject), so the bank read
+    // needs no runFor(); only pauseAt() below stops time.
     await page.clock.install();
     // try/finally: the clock is context-wide, so later tests must get flowing time back even on failure.
     try {
+      // Page-level route: Playwright gives it precedence over the context's catch-all for this table.
+      await page.route('**/rest/v1/answer_bank**', async (route) => {
+        // Hold the read until the loading state has been checked.
+        await bankGate;
+        // Hand on to the catch-all, whose [] leaves the seed questions (one asks about relocating).
+        await route.fallback();
+      });
       // Navigate after install() so the app's timers are created on the fake clock.
       await page.goto(`${serverUrl}/answer-bank`, { waitUntil: 'domcontentloaded' });
       // The toolbar is the first thing the page renders once the shell is signed in.
       await page.waitForSelector('.answer-bank__toolbar');
+
+      // The read is held, so the table must be showing its loading row now, on every run.
+      await placeholder.waitFor();
+      // Non-vacuity of the row locator: the placeholder must count as zero question rows.
+      assert.equal(await questionRows.count(), 0, 'The loading placeholder must not count as a question row');
+      // Let the bank read answer.
+      releaseBank();
+      // The LOADED table, part one: the loading row is gone.
+      await placeholder.waitFor({ state: 'detached' });
+      // Part two: a real question row is present, so an outage or empty bank can't stand in for data.
+      await questionRows.first().waitFor();
+      // The whole loaded bank, to compare the category filter against below.
+      const allRows = await questionRows.count();
 
       // Category chips: one locator reused for the count and the clicks below.
       const chipBtns = page.locator('.chip-btn');
@@ -450,10 +490,14 @@ describe('Playwright E2E Operator Console Suite', () => {
 
       // A category chip must narrow the table, not just toggle its own style.
       await page.locator('.chip-btn:has-text("Compensation & Notice")').click();
-      // Rows after filtering; zero would mean the filter emptied the bank.
-      const compensationRows = await page.locator('.settings-table tbody tr').count();
+      // The active chip is set in the same render that filters the rows, so this waits for that render.
+      await page.locator('.chip-btn--active', { hasText: 'Compensation & Notice' }).waitFor();
+      // Question rows after filtering; the placeholder can no longer count.
+      const compensationRows = await questionRows.count();
       // At least one compensation question proves the filter matched something real.
       assert.ok(compensationRows >= 1, 'Must show compensation questions');
+      // Fewer than the whole bank proves the chip filtered; equal would mean it only changed style.
+      assert.ok(compensationRows < allRows, `Compensation chip must narrow the bank (${compensationRows} of ${allRows})`);
 
       // Reset to All so the search below runs over the whole bank, not one category.
       await page.locator('.chip-btn:has-text("All Questions")').click();
@@ -463,15 +507,15 @@ describe('Playwright E2E Operator Console Suite', () => {
       // "relocate" matches exactly one seeded question, so the count is a precise check.
       await searchInput.fill('relocate');
       // The search filters on a re-render, and count() is a one-shot read: wait until a second
-      // row is gone (at most one left) so the exact-count assertion reads the settled table.
-      await page.locator('.settings-table tbody tr').nth(1).waitFor({ state: 'detached' }).catch(() => {});
-      // Rows left after the instant search.
-      const filteredRows = await page.locator('.settings-table tbody tr').count();
+      // question row is gone (at most one left) so the exact-count assertion reads the settled table.
+      await questionRows.nth(1).waitFor({ state: 'detached' }).catch(() => {});
+      // Question rows left after the instant search.
+      const filteredRows = await questionRows.count();
       // Exactly one: more means the search didn't filter, zero means it over-filtered.
       assert.equal(filteredRows, 1, 'Only relocation question should match');
 
       // The surviving row's text, to prove it is the RIGHT row and not just one row.
-      const rowText = await page.locator('.settings-table tbody tr').first().innerText();
+      const rowText = await questionRows.first().innerText();
       // Case-insensitive because the question text capitalises freely.
       assert.match(rowText, /relocate/i);
 
@@ -500,6 +544,10 @@ describe('Playwright E2E Operator Console Suite', () => {
     } finally {
       // Hand real-paced time back to the shared context for tests 4-10.
       await page.clock.resume();
+      // Open the gate in case an early step failed, so the held handler can finish.
+      releaseBank();
+      // Later tests get the context's catch-all answer for this table again.
+      await page.unroute('**/rest/v1/answer_bank**');
     }
   });
 
@@ -948,5 +996,242 @@ describe('Playwright E2E Operator Console Suite', () => {
     await dialog.getByRole('button', { name: 'Close' }).click();
     // Closed by the button too.
     await dialog.waitFor({ state: 'hidden' });
+  });
+
+  // 2026-11-01 (Teja, 14:04 IST): no browser popups. A recovery move asked with window.confirm; it now
+  // asks inline (app/InlineConfirm.tsx). The unit test (inlineConfirm.test.ts) calls the handlers by
+  // value; only a real browser can show that no dialog opens, that focus really moves, that exactly one
+  // write leaves the page, and that the row does not change height while asking.
+  it('15. a recovery move asks inline, never in a browser dialog: one write on Confirm, none on Cancel or Esc, focus and row height kept', async () => {
+    // One needs_verification row; the label below is what rowLabel() makes of its job join.
+    const row = {
+      // Any uuid; the move sends it as p_application_id.
+      id: '6f1e2d3c-4b5a-4c6d-8e7f-90a1b2c3d4e5',
+      // The stale-stamp guard's value.
+      updated_at: '2026-11-01T08:00:00.000000+00:00',
+      // Swept rows carry no lease.
+      claim_expires_at: null,
+      // No block reason at this status.
+      block_reason: null,
+      // Nor a failure reason.
+      failure_reason: null,
+      // The embedded job, as PostgREST nests it.
+      jobs: { title: 'E2E Backend Engineer', company_name: 'Acme', apply_url: 'https://example.com/jobs/1' },
+      // No matched receipt.
+      email_events: [],
+    };
+    // The move under test, by the accessible name RecoveryRowView gives it (`${verb}: ${label}`).
+    const moveName = 'I applied (mark applied): E2E Backend Engineer at Acme';
+    // Requests to the one write path; the first click, Cancel and Esc must leave this at 0.
+    let rpcCalls = 0;
+    // Browser dialogs (confirm/alert/prompt) the page opened; must stay 0.
+    let dialogs = 0;
+    // Counts AND dismisses, so a restored window.confirm fails this test by name instead of hanging it.
+    const onDialog = (d: import('playwright').Dialog): void => {
+      // Counted first, so the assertion sees it even if dismiss() rejects.
+      dialogs += 1;
+      // Dismissed: confirm() then returns false, as a Cancel would.
+      void d.dismiss().catch(() => {});
+    };
+    // Bottom edge of the row's table in document coordinates (scroll-independent): with one row, the
+    // table's bottom is where the next content starts, so a taller row moves it.
+    const tableBottom = (): Promise<number> =>
+      // The queue table holding this row, found by its row header's title (the id). Not by the move
+      // button: while asking, that button is visibility:hidden and out of the accessibility tree.
+      page.locator('table.recovery__table', { has: page.locator(`th[title="${row.id}"]`) })
+        // Read in the page, so the scroll offset and the rect come from the same instant.
+        .evaluate((el) => el.getBoundingClientRect().bottom + window.scrollY);
+    // The name of whatever has focus, the way the operator's screen reader would get it.
+    const focusedName = (): Promise<string | null> => page.evaluate(() => document.activeElement?.getAttribute('aria-label') ?? null);
+    // Page-level: wins over the context's catch-all [] for this table only.
+    await page.route('**/rest/v1/applications**', async (route) => {
+      // The needs_verification queue's read is a GET filtered status=eq.needs_verification.
+      const status = new URL(route.request().url()).searchParams.get('status');
+      // Only that read gets the row; every other read keeps the catch-all's [].
+      if (route.request().method() === 'GET' && status === 'eq.needs_verification') {
+        // One row, so the queue renders exactly one move strip.
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([row]) });
+      }
+      // Everything else as before.
+      return route.fallback();
+    });
+    // The single write path: counted, and answered as an accepted move (no error, real status).
+    await page.route('**/rest/v1/rpc/advance_application_status', async (route) => {
+      // One per request that left the page.
+      rpcCalls += 1;
+      // 200 + null: advanceRecovery reads "no error and a real response" as moved.
+      await route.fulfill({ status: 200, contentType: 'application/json', body: 'null' });
+    });
+    // Attached before the first click, so no dialog can open unseen.
+    page.on('dialog', onDialog);
+    // Table-bottom deltas per viewport width, reported together at the end.
+    const shifts: string[] = [];
+    try {
+      // Phone and desktop: the cell is a stacked block at 390 px and a table column at 1280 px.
+      for (const width of [390, 1280]) {
+        // Height is generous so the queue fits without the row being cut by the fold.
+        await page.setViewportSize({ width, height: 900 });
+        // A fresh load per width, so the queue reads (and lays out) at this size from the start.
+        await page.goto(`${serverUrl}/health`, { waitUntil: 'domcontentloaded' });
+        // The move button, once the queue's read has rendered the row.
+        const moveBtn = page.getByRole('button', { name: moveName, exact: true });
+        // Waiting proves the route above fed the queue.
+        await moveBtn.waitFor();
+        // Where the next content starts before asking.
+        const before = await tableBottom();
+        // Arm: the first click must only ask.
+        await moveBtn.click();
+        // The confirm's Cancel, named for the move and the row.
+        const cancelBtn = page.getByRole('button', { name: `Cancel: ${moveName}`, exact: true });
+        // Rendered on arming.
+        await cancelBtn.waitFor();
+        // The sentence the popup used to show, in the polite live region.
+        assert.match((await page.locator('p.inline-confirm__sentence[aria-live="polite"]', { hasText: 'Move "E2E Backend Engineer at Acme"' }).textContent()) ?? '', /from needs_verification to applied\?/, `${width}px: the confirm must ask the confirmText sentence`);
+        // (a) Arming wrote nothing.
+        assert.equal(rpcCalls, 0, `${width}px: the first click must not write`);
+        // (c) Cancel is the focused default.
+        assert.equal(await focusedName(), `Cancel: ${moveName}`, `${width}px: Cancel must have focus when the confirm opens`);
+        // (d) Where the next content starts while asking; the moves keep their box (visibility:hidden).
+        const after = await tableBottom();
+        // Recorded with its width; asserted after both widths ran, so both numbers are reported.
+        shifts.push(`${width}px: ${(after - before).toFixed(1)}px`);
+        // Cancel with the mouse.
+        await cancelBtn.click();
+        // The confirm closed.
+        await cancelBtn.waitFor({ state: 'detached' });
+        // (a) Cancel wrote nothing.
+        assert.equal(rpcCalls, 0, `${width}px: Cancel must not write`);
+        // (c) Focus went back to the move button.
+        assert.equal(await focusedName(), moveName, `${width}px: Cancel must return focus to the move button`);
+      }
+      // Esc: arm again (at 1280 px, the last width).
+      await page.getByRole('button', { name: moveName, exact: true }).click();
+      // Open again.
+      await page.getByRole('button', { name: `Cancel: ${moveName}`, exact: true }).waitFor();
+      // The keyboard cancel.
+      await page.keyboard.press('Escape');
+      // Closed by Esc.
+      await page.getByRole('button', { name: `Cancel: ${moveName}`, exact: true }).waitFor({ state: 'detached' });
+      // (a) Esc wrote nothing.
+      assert.equal(rpcCalls, 0, 'Esc must not write');
+      // (c) Focus back on the move button.
+      assert.equal(await focusedName(), moveName, 'Esc must return focus to the move button');
+      // Confirm: arm once more.
+      await page.getByRole('button', { name: moveName, exact: true }).click();
+      // The armed request that leaves the page on Confirm; a restored popup would block it (timeout -> null).
+      const write = page.waitForRequest('**/rest/v1/rpc/advance_application_status', { timeout: 5_000 }).catch(() => null);
+      // Confirm, by its row-specific name.
+      await page.getByRole('button', { name: `Confirm: ${moveName}`, exact: true }).click();
+      // Settled: the write was ANSWERED (the request event fires before the route handler counts it;
+      // its response exists only after that handler's fulfill), or 5 s passed without it.
+      await (await write)?.response();
+      // (b) No browser dialog at any step, Confirm included (checked before the write count, so a
+      // restored window.confirm fails HERE, by this name).
+      assert.equal(dialogs, 0, 'a browser dialog opened: the recovery move must ask inline, never with window.confirm');
+      // (a) Exactly one write for one Confirm.
+      assert.equal(rpcCalls, 1, 'Confirm must send exactly one advance_application_status');
+      // The outcome strip says it moved (the mocked answer), so the write ran through advanceRecovery.
+      await page.locator('.recovery__note--ok').first().waitFor();
+      // (d) Both widths: the row's table ends where it did before asking.
+      assert.deepEqual(shifts, ['390px: 0.0px', '1280px: 0.0px'], `arming the confirm moved the content below the row: ${shifts.join(', ')}`);
+    } finally {
+      // Later tests must not be counted or have their dialogs dismissed.
+      page.off('dialog', onDialog);
+      // Later tests get the catch-all [] again.
+      await page.unroute('**/rest/v1/applications**');
+      // Same for the write path.
+      await page.unroute('**/rest/v1/rpc/advance_application_status');
+      // Playwright's default viewport, which every other test was written against.
+      await page.setViewportSize({ width: 1280, height: 720 });
+    }
+  });
+
+  // 2026-11-01: the Answer Bank's Delete asked with window.confirm; it now asks inline. Same proof as
+  // test 15, on the other call site: no dialog, no DELETE until Confirm, exactly one DELETE after it.
+  it('16. deleting a custom Answer Bank question asks inline: no DELETE on Cancel, exactly one on Confirm, no browser dialog', async () => {
+    // The custom question's key; the DELETE must filter on exactly this.
+    const key = 'e2e_portfolio_url';
+    // Its prompt; Delete, Confirm and Cancel are named with it.
+    const asks = 'Portfolio URL (e2e)';
+    // Every DELETE that left the page, by URL.
+    const deletes: string[] = [];
+    // Browser dialogs the page opened; must stay 0.
+    let dialogs = 0;
+    // Counts and dismisses, so a restored popup fails by name instead of hanging the suite.
+    const onDialog = (d: import('playwright').Dialog): void => {
+      // Counted first.
+      dialogs += 1;
+      // Dismissed, as a Cancel would.
+      void d.dismiss().catch(() => {});
+    };
+    // Page-level and registered per test, so test 3's own answer_bank gate (unrouted in its finally) is untouched.
+    await page.route('**/rest/v1/answer_bank**', async (route) => {
+      // The delete under test.
+      if (route.request().method() === 'DELETE') {
+        // Recorded with its filter.
+        deletes.push(route.request().url());
+        // PostgREST's empty success for a delete.
+        return route.fulfill({ status: 204, body: '' });
+      }
+      // The bank read: one remote row with no seed behind it, which loadAnswerBank marks custom.
+      if (route.request().method() === 'GET') {
+        // The remote table's columns, as loadAnswerBank reads them.
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{ question_key: key, question_text: asks, answer_type: 'text', answer_value: 'https://example.test', needs_human: false, times_used: 0, last_used_at: null }]) });
+      }
+      // Anything else as before.
+      return route.fallback();
+    });
+    // Attached before the first click.
+    page.on('dialog', onDialog);
+    try {
+      // A fresh load, so the bank is read through the route above.
+      await page.goto(`${serverUrl}/answer-bank`, { waitUntil: 'domcontentloaded' });
+      // The custom row's Delete, by the name AnswerBankRowActions gives it.
+      const deleteBtn = page.getByRole('button', { name: `Delete "${asks}"`, exact: true });
+      // Rendered once the read landed; proves the row is custom (only custom rows get Delete).
+      await deleteBtn.waitFor();
+      // Arm.
+      await deleteBtn.click();
+      // The confirm's Cancel.
+      const cancelBtn = page.getByRole('button', { name: `Cancel: Delete "${asks}"`, exact: true });
+      // Rendered on arming.
+      await cancelBtn.waitFor();
+      // The popup's old sentence, now inline.
+      assert.equal(((await page.locator('p.inline-confirm__sentence', { hasText: asks }).textContent()) ?? '').trim(), `Are you sure you want to delete "${asks}" from the Answer Bank?`);
+      // Arming deleted nothing.
+      assert.deepEqual(deletes, [], 'clicking Delete must only ask');
+      // Cancel is the focused default.
+      assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label') ?? null), `Cancel: Delete "${asks}"`);
+      // Cancel.
+      await cancelBtn.click();
+      // Closed.
+      await cancelBtn.waitFor({ state: 'detached' });
+      // Cancel deleted nothing.
+      assert.deepEqual(deletes, [], 'Cancel must not send a DELETE');
+      // Focus back on Delete. Red before InlineConfirm finished visibility transitions: this button's
+      // `transition: all` kept it hidden at focus() time, so focus fell to <body> (2 runs in 3).
+      assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label') ?? null), `Delete "${asks}"`, 'Cancel must return focus to Delete');
+      // Arm again.
+      await deleteBtn.click();
+      // The DELETE that Confirm sends; a restored popup would block it (timeout -> null).
+      const sent = page.waitForRequest((r) => r.method() === 'DELETE' && r.url().includes('/rest/v1/answer_bank'), { timeout: 5_000 }).catch(() => null);
+      // Confirm.
+      await page.getByRole('button', { name: `Confirm: Delete "${asks}"`, exact: true }).click();
+      // Settled: answered (so the route handler has recorded it), or 5 s passed without it.
+      await (await sent)?.response();
+      // No browser dialog at any step; checked before the DELETE count so a restored popup fails here.
+      assert.equal(dialogs, 0, 'a browser dialog opened: Delete must ask inline, never with window.confirm');
+      // Exactly one DELETE...
+      assert.equal(deletes.length, 1, `Confirm must send exactly one DELETE (sent ${deletes.length})`);
+      // ...filtered on this question's key.
+      assert.equal(new URL(deletes[0] ?? 'http://x').searchParams.get('question_key'), `eq.${key}`);
+      // The row leaves the table on the successful delete.
+      await deleteBtn.waitFor({ state: 'detached' });
+    } finally {
+      // Later tests must not be counted.
+      page.off('dialog', onDialog);
+      // Later tests get the catch-all [] again.
+      await page.unroute('**/rest/v1/answer_bank**');
+    }
   });
 });
