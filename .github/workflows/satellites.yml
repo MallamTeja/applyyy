@@ -74,7 +74,7 @@ jobs:
             { name: 'cover-letter', query: '?limit=5' },
             // ?limit honoured (default 5, max 10); stated explicitly so a code default change cannot raise spend.
             { name: 'interview-prep', query: '?limit=5' },
-            // ?limit honoured (default 10, max 25); passed_filters is a large backlog, so 5 a day.
+            // ?limit honoured (default 10, max 25); drafts only awaiting_approval/approved rows (2026-11-02), 5 a day.
             { name: 'referral', query: '?limit=5' },
           ];
           // A deliberate halt is reported this way by the five (skill-gap since 2026-11-01).

@@ -268,9 +268,10 @@ export function ReferralOutreachPage(): ReactElement {
         </div>
       ) : items.length === 0 ? (
         <div className="referral-page__empty">
-          {/* Names the real trigger (W22, 2026-11-01): passing screening drafts nothing by itself;
-              the satellites workflow calls referral once a day for rows at passed_filters or scored. */}
-          <p>No drafted referral requests found. The daily satellites workflow drafts up to 5 per run, for applications that passed screening or were scored.</p>
+          {/* Names the real trigger (W22, 2026-11-01): reaching a status drafts nothing by itself;
+              the satellites workflow calls referral once a day, and since Teja's 2026-11-02 ruling
+              only rows at awaiting_approval or approved are drafted (referral/eligible-queue.ts). */}
+          <p>No drafted referral requests found. The daily satellites workflow drafts up to 5 per run, only for applications awaiting your approval or already approved.</p>
         </div>
       ) : (
         <div className="referral-page__grid">

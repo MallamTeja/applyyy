@@ -4,7 +4,8 @@
 // Build Referral Edge Function runner to automate cold outreach draft generation for candidate referrals.
 //
 // WHAT THIS EDGE FUNCTION DOES:
-// 1. Queries applications queue sitting at status `passed_filters` or `scored`.
+// 1. Queries applications sitting at status `awaiting_approval` or `approved` (Teja's
+//    ruling 2026-11-02; see eligible-queue.ts for why earlier statuses are excluded).
 // 2. Checks and validates company name presence for each candidate application row.
 // 3. Loads candidate master profile context from `master_profiles` table.
 // 4. Generates a personalized referral outreach message draft (subject + body + networking strategy notes)
@@ -35,6 +36,8 @@ import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 import type { MasterProfile } from "../_shared/contracts/shared-types.ts";
 // Strict reply-shape check; null means "store nothing, retry next run".
 import { parseReferralReply } from "./parse-reply.ts";
+// The queue query and its eligible-status list, tested apart from this Deno.serve entrypoint.
+import { REFERRAL_ELIGIBLE_STATUSES, selectReferralQueue } from "./eligible-queue.ts";
 
 // Define the default batch processing size constant for queue lookups.
 // Limits the number of candidate application rows fetched per single Edge Function execution.
@@ -263,22 +266,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // Distinct ids; one application may carry old duplicate drafts.
   const draftedIds = [...new Set((draftedRows ?? []).map((r: { application_id: string }) => r.application_id))];
 
-  // Query applications table for applications sitting at status 'passed_filters' or 'scored'.
-  // Fetches eligible candidate applications ready for referral outreach drafting.
-  const { data: apps, error: appsError } = await db
-    // Target applications queue table.
-    .from("applications")
-    // Select application ID, status, match score, match reasoning, and joined job record details.
-    .select("id, job_id, user_id, status, match_score, match_reasoning, jobs ( id, title, company_name, company_slug, location_raw, locations, employment_type, description_raw )")
-    // Filter applications where status is either 'passed_filters' or 'scored'.
-    .in("status", ["passed_filters", "scored"])
-    // Skip applications that already have a draft. ponytail: the id list travels in the
-    // URL, so this ceiling is a few thousand drafts; a `not exists` RPC removes it.
-    .not("id", "in", `(${draftedIds.length > 0 ? draftedIds.join(",") : "00000000-0000-0000-0000-000000000000"})`)
-    // Order applications by creation timestamp ascending for FIFO queue processing order.
-    .order("created_at", { ascending: true })
-    // Limit returned application rows to resolved batch size ceiling.
-    .limit(batchSize);
+  // The oldest undrafted applications at awaiting_approval or approved, capped at batchSize.
+  // The query lives in eligible-queue.ts so a test can pin the status filter it sends.
+  const { data: apps, error: appsError } = await selectReferralQueue(db, draftedIds, batchSize);
 
   // Handle database query error if application queue lookup failed.
   // Evaluates applications query error result object.
@@ -304,7 +294,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Return HTTP 200 response indicating no eligible applications were queued.
     return jsonResponse(200, {
       status: "no_eligible_applications",
-      message: "No applications found at status 'passed_filters' or 'scored'.",
+      // Built from the same list the query used, so the message cannot drift from it.
+      message: `No undrafted applications found at status ${REFERRAL_ELIGIBLE_STATUSES.join(" or ")}.`,
       processed: 0,
       generated: 0,
     });
