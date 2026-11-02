@@ -149,10 +149,20 @@ jobs:
           # Only the summary line ("ℹ tests 606", ending the line), so a test TITLE
           # containing "tests 3" can never be read as the total.
           total=$(grep -E 'ℹ tests [0-9]+$' edge-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
-          # Printed so the count is visible in the job log.
-          echo "edge tests: $total"
+          # A before() hook that cannot import CANCELS tests: neither passed nor failed (CLAUDE.md §5).
+          cancelled=$(grep -E 'ℹ cancelled [0-9]+$' edge-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
+          # Audit W35: a describe() body that throws before its first it() drops its tests
+          # with fail 0, cancelled 0 AND exit 0 (measured on Node 24.14). Its only trace is
+          # a line starting with ✖, which node prints for every failed test or suite.
+          failed=$(grep -cE '^[[:space:]]*✖' edge-tests.log || true)
+          # Printed so all three counts are visible in the job log.
+          echo "edge tests: $total, cancelled: $cancelled, ✖ lines: $failed"
           # `fail 0` beside `tests 0` is a glob that matched nothing, not a pass.
           [ "$total" -gt 0 ] || { echo "no edge tests ran"; exit 1; }
+          # A cancelled test proved nothing.
+          [ "$cancelled" -eq 0 ] || { echo "$cancelled edge tests were cancelled"; exit 1; }
+          # Red even when node exited 0: a failure marker is a failure.
+          [ "$failed" -eq 0 ] || { echo "$failed ✖ lines: a test or suite failed (W35)"; exit 1; }
 
   # ---------------------------------------------------------------------------
   # (b2) packages/shared-types tests (added 2026-11-01). They hold the contract's
@@ -191,12 +201,98 @@ jobs:
           total=$(grep -E 'ℹ tests [0-9]+$' shared-types-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
           # A before() hook that cannot import CANCELS tests: neither passed nor failed (CLAUDE.md §5).
           cancelled=$(grep -E 'ℹ cancelled [0-9]+$' shared-types-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
-          # Printed so both counts are visible in the job log.
-          echo "shared-types tests: $total, cancelled: $cancelled"
+          # Audit W35: a describe() body that throws first leaves fail 0, cancelled 0, exit 0;
+          # only a line starting with ✖ shows it (see the edge-tests job).
+          failed=$(grep -cE '^[[:space:]]*✖' shared-types-tests.log || true)
+          # Printed so all three counts are visible in the job log.
+          echo "shared-types tests: $total, cancelled: $cancelled, ✖ lines: $failed"
           # `fail 0` beside `tests 0` is a glob that matched nothing, not a pass.
           [ "$total" -gt 0 ] || { echo "no shared-types tests ran"; exit 1; }
           # A cancelled test proved nothing.
           [ "$cancelled" -eq 0 ] || { echo "$cancelled shared-types tests were cancelled"; exit 1; }
+          # Red even when node exited 0: a failure marker is a failure.
+          [ "$failed" -eq 0 ] || { echo "$failed ✖ lines: a test or suite failed (W35)"; exit 1; }
+
+  # ---------------------------------------------------------------------------
+  # (b3) The other workspace packages' tests (added 2026-11-02, audit W13). No job
+  # ran them, including master-robots: the robots.txt gate that scout-ats, scout-web,
+  # job-link-intake, _shared/http/transport.ts and worker/src/apply-one.ts import.
+  # A gate regression would have landed on a green main. Unlike (b2), three of the
+  # four import @applyy/shared-types by its bare name, which resolves only through
+  # pnpm's workspace links, so this job installs (frozen) like the web and worker
+  # jobs. No browser: none of these suites launches Chromium.
+  # ---------------------------------------------------------------------------
+  package-tests:
+    # A readable name in the PR checks list.
+    name: node --test (packages)
+    # Linux runner, as above.
+    runs-on: ubuntu-latest
+    # Install dominates; the suites themselves run in seconds.
+    timeout-minutes: 15
+    steps:
+      # The source to test.
+      - name: Checkout
+        # Same pin as every other job.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # pnpm before setup-node, for the same cache reason as the web job.
+      - name: Install pnpm
+        # Same action and pin as the web job.
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        # The pinned pnpm version.
+        with:
+          # Matches "packageManager": "pnpm@11.25.0".
+          version: 11.25.0
+      # Node plus the pnpm store cache.
+      - name: Install Node
+        # Same pin as the web job.
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        # Runtime and cache settings.
+        with:
+          # Node 24 strips TypeScript natively, which is how these suites run.
+          node-version: '24'
+          # Restores the pnpm store between runs.
+          cache: 'pnpm'
+      # Exactly the locked dependency set; it also creates the workspace links.
+      - name: pnpm install --frozen-lockfile
+        # Frozen, for the same reason as the web job.
+        run: pnpm install --frozen-lockfile
+      # One suite per package, each held to the same three guards as (b2).
+      - name: node --test per package, and assert each ran
+        run: |
+          # An unmatched glob expands to nothing rather than to its own literal text.
+          shopt -s nullglob
+          # Counts the packages actually tested, so an empty loop cannot pass.
+          ran=0
+          # Every package with a test dir, so a package added later is covered
+          # without editing this file.
+          for dir in packages/*/test; do
+            # The package folder name, e.g. master-robots.
+            pkg=$(basename "$(dirname "$dir")")
+            # (b2) already runs shared-types, without an install.
+            if [ "$pkg" = shared-types ]; then continue; fi
+            # Root-relative glob; pipefail makes a failing test fail this line despite tee.
+            node --test "packages/$pkg/test/**/*.test.ts" 2>&1 | tee "$pkg-tests.log"
+            # Only the anchored summary line, never a test title containing the words.
+            total=$(grep -E 'ℹ tests [0-9]+$' "$pkg-tests.log" | tail -1 | grep -oE '[0-9]+$' || echo 0)
+            # A before() hook that cannot import CANCELS tests (CLAUDE.md §5).
+            cancelled=$(grep -E 'ℹ cancelled [0-9]+$' "$pkg-tests.log" | tail -1 | grep -oE '[0-9]+$' || echo 0)
+            # Audit W35: a describe() body that throws first shows only as a ✖ line.
+            failed=$(grep -cE '^[[:space:]]*✖' "$pkg-tests.log" || true)
+            # Printed so every package's counts are visible in the job log.
+            echo "$pkg tests: $total, cancelled: $cancelled, ✖ lines: $failed"
+            # `fail 0` beside `tests 0` is a glob that matched nothing, not a pass.
+            [ "$total" -gt 0 ] || { echo "no $pkg tests ran"; exit 1; }
+            # A cancelled test proved nothing.
+            [ "$cancelled" -eq 0 ] || { echo "$cancelled $pkg tests were cancelled"; exit 1; }
+            # Red even when node exited 0: a failure marker is a failure.
+            [ "$failed" -eq 0 ] || { echo "$failed ✖ lines in $pkg: a test or suite failed (W35)"; exit 1; }
+            # Plain assignment: ((ran++)) returns 1 when ran is 0, which -e treats as a failure.
+            ran=$((ran + 1))
+          done
+          # Printed so the number of packages covered is visible in the job log.
+          echo "packages tested: $ran"
+          # No package matched at all: the loop above never ran a single check.
+          [ "$ran" -gt 0 ] || { echo "no package test dirs matched"; exit 1; }
 
   # ---------------------------------------------------------------------------
   # (c) Web app: typecheck, production build, tests. The build matters on its own:
@@ -290,10 +386,19 @@ jobs:
           pnpm --filter @applyy/web test 2>&1 | tee web-tests.log
           # Same anchored summary-line match as edge-tests, for the same reason.
           total=$(grep -E 'ℹ tests [0-9]+$' web-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
-          # Printed so the count is visible in the job log.
-          echo "web tests: $total"
+          # A before() hook that cannot import CANCELS tests: neither passed nor failed (CLAUDE.md §5).
+          cancelled=$(grep -E 'ℹ cancelled [0-9]+$' web-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
+          # Audit W35: a describe() body that throws first leaves fail 0, cancelled 0, exit 0;
+          # only a line starting with ✖ shows it (see the edge-tests job).
+          failed=$(grep -cE '^[[:space:]]*✖' web-tests.log || true)
+          # Printed so all three counts are visible in the job log.
+          echo "web tests: $total, cancelled: $cancelled, ✖ lines: $failed"
           # A zero total means the filter or glob matched nothing.
           [ "$total" -gt 0 ] || { echo "no web tests ran"; exit 1; }
+          # A cancelled test proved nothing.
+          [ "$cancelled" -eq 0 ] || { echo "$cancelled web tests were cancelled"; exit 1; }
+          # Red even when node exited 0: a failure marker is a failure.
+          [ "$failed" -eq 0 ] || { echo "$failed ✖ lines: a test or suite failed (W35)"; exit 1; }
       # The Vercel render function (api/render-job-page.ts, 2026-11-01) runs a headless
       # browser on URLs from strangers' posts; its SSRF and auth guards live in these tests.
       # In THIS job because they import playwright-core and @sparticuz/chromium, which only
@@ -308,12 +413,17 @@ jobs:
           total=$(grep -E 'ℹ tests [0-9]+$' api-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
           # A before() hook that cannot import CANCELS tests: neither passed nor failed (CLAUDE.md §5).
           cancelled=$(grep -E 'ℹ cancelled [0-9]+$' api-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
-          # Printed so both counts are visible in the job log.
-          echo "render function tests: $total, cancelled: $cancelled"
+          # Audit W35: a describe() body that throws first leaves fail 0, cancelled 0, exit 0;
+          # only a line starting with ✖ shows it (see the edge-tests job).
+          failed=$(grep -cE '^[[:space:]]*✖' api-tests.log || true)
+          # Printed so all three counts are visible in the job log.
+          echo "render function tests: $total, cancelled: $cancelled, ✖ lines: $failed"
           # `fail 0` beside `tests 0` is a glob that matched nothing, not a pass.
           [ "$total" -gt 0 ] || { echo "no render function tests ran"; exit 1; }
           # A cancelled test proved nothing.
           [ "$cancelled" -eq 0 ] || { echo "$cancelled render function tests were cancelled"; exit 1; }
+          # Red even when node exited 0: a failure marker is a failure.
+          [ "$failed" -eq 0 ] || { echo "$failed ✖ lines: a test or suite failed (W35)"; exit 1; }
 
   # ---------------------------------------------------------------------------
   # (d) Worker: typecheck and vitest. This is the component that types into real
