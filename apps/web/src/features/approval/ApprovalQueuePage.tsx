@@ -14,8 +14,10 @@
  *   is what then carries them through Bucket B.
  *
  *   BUCKET B - any untraceable claim. Presented as full diff views, expanded,
- *   one after another, each with its own gate. Never collapsed into a list,
- *   never batched, never given a count.
+ *   one after another, each with its own gate. Never batched, never given a
+ *   count, and OPEN BY DEFAULT. Since 2026-11-02 the operator may fold one away
+ *   ("Hide review", Teja asked); folding only hides it, it never approves, and
+ *   the diff stays mounted so the AI chat and unsaved edits survive.
  *
  * Bucket B comes FIRST on the page. A list of clean rows above the dangerous
  * ones would mean the operator scrolls past thirty green rows to reach the one
@@ -510,6 +512,10 @@ export function ApprovalQueuePage(): ReactElement {
   const [reviewing, setReviewing] = useState<ReadonlySet<string>>(() => new Set());
   // Rows whose rendered resume is showing; separate because a preview is tall.
   const [previewing, setPreviewing] = useState<ReadonlySet<string>>(() => new Set());
+  /* Bucket B rows the operator FOLDED away (2026-11-02). Inverted on purpose: Bucket A tracks
+     what is open, Bucket B tracks what is closed, so an empty set means every Bucket B row is
+     open, which keeps the "a flagged row is read by default" rule. */
+  const [foldedB, setFoldedB] = useState<ReadonlySet<string>>(() => new Set());
   /* The page-level polite announcement. Page state, not DiffView state, so it survives the
      DiffView remount a cross-bucket save causes. */
   const [announcement, setAnnouncement] = useState<string>('');
@@ -1493,7 +1499,7 @@ export function ApprovalQueuePage(): ReactElement {
     return { ok: true };
   }
 
-  // Flip one id in a set-valued state; used by both Bucket A disclosures.
+  // Flip one id in a set-valued state; used by every disclosure on the page (both buckets).
   function toggle(setter: typeof setReviewing, id: string): void {
     // A new Set each time, so React sees the change.
     setter((previous) => {
@@ -1645,10 +1651,14 @@ export function ApprovalQueuePage(): ReactElement {
             Flagged modifications or untraced claims requiring manual verification.
           </p>
 
-          {/* Expanded, one after another. Never a collapsed list: a row that
-              must be read cannot be behind a disclosure triangle. */}
+          {/* Expanded, one after another, open by default: a row that must be read
+              starts in front of the operator. Each can be folded by hand (2026-11-02). */}
           <ul className="queue__list">
             {bucketB.map((diff) => {
+              // Whether the operator folded this row's review away; false until they click.
+              const isFolded = foldedB.has(diff.applicationId);
+              // Region id for the review disclosure, same builder shape as Bucket A's.
+              const reviewId = `review-${diff.applicationId}`;
               // The snapshot behind this diff, for the rendered preview.
               const resume = resumes.get(diff.applicationId);
               // Whether this row's rendered resume is open.
@@ -1677,6 +1687,27 @@ export function ApprovalQueuePage(): ReactElement {
                       {staleNotices.get(diff.applicationId)}
                     </p>
                   ) : null}
+                  {/* The fold control, Bucket A's line shape. The job's name shows only while
+                      folded: open, DiffView's own heading already says it. */}
+                  <div className="queue__clean-line">
+                    {/* Empty while open, so the button keeps its place on the right. */}
+                    <span className="queue__clean-job">{isFolded ? `${diff.jobTitle} at ${diff.companyName}` : null}</span>
+                    <button
+                      type="button"
+                      className="button button--secondary button--small"
+                      /* Disclosure semantics, as in Bucket A: true while the review shows. */
+                      aria-expanded={!isFolded}
+                      aria-controls={reviewId}
+                      onClick={() => toggle(setFoldedB, diff.applicationId)}
+                    >
+                      {/* Same words as Bucket A, so the action reads the same everywhere. */}
+                      {isFolded ? 'Review' : 'Hide review'}
+                    </button>
+                  </div>
+                  {/* `hidden`, NOT a conditional mount: unmounting would drop the AI chat, a
+                      half-typed edit and the row's attestations. Bucket A can unmount because
+                      its rows open fresh; a Bucket B row may be mid-review when folded. */}
+                  <div id={reviewId} hidden={isFolded}>
                   <DiffView
                     diff={diff}
                     /* The shared approval path; see approveReviewed for why the
@@ -1699,8 +1730,9 @@ export function ApprovalQueuePage(): ReactElement {
                     /* Where the chat keeps its chats; undefined when not connected. */
                     chat={chatStore}
                   />
-                  {/* The diff stays expanded (Bucket B is never collapsed); the
-                      rendered document is an extra, opened on demand because it is tall. */}
+                  </div>
+                  {/* The diff is open unless folded; the rendered document is an extra,
+                      opened on demand because it is tall. */}
                   <button
                     type="button"
                     className="button button--secondary button--small queue__preview-toggle"
