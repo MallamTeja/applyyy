@@ -27,6 +27,18 @@ on:
         type: boolean
         # Default is the real drain: the dispatcher opts INTO the rehearsal, not out of the run.
         default: false
+      # Which stage to start from; every later stage still runs. Exists for re-runs: on
+      # 2026-11-02 the rows Teja wanted back sat at scored/tailored behind 514 fresh
+      # passed_filters rows, and a matcher-first drain would have made them wait an hour.
+      from_stage:
+        # Shown in the Actions UI beside the dropdown.
+        description: 'First stage to drain (later stages always follow)'
+        # A choice renders as a dropdown, so no free text reaches the script.
+        type: choice
+        # The three stage names, in pipeline order; the script re-checks the value.
+        options: [matcher, tailor, auditor]
+        # Default is the full drain.
+        default: matcher
 
 # Read-only token. The job never checks out code or writes to the repo; it only talks
 # to Supabase with its own credentials.
@@ -125,9 +137,17 @@ jobs:
           // Origin only, trailing slash removed, so the URLs below never get a double slash.
           // Not required() in dry mode: the plan must print even before secrets exist.
           const base = (process.env.SUPABASE_URL ?? '').replace(/\/+$/, '');
+          // The chosen first stage. Empty (a run with no input) means the full drain.
+          const fromStage = process.env.FROM_STAGE || 'matcher';
+          // Its position in pipeline order; -1 means a value the dropdown never offers.
+          const fromIndex = STAGES.findIndex((stage) => stage.name === fromStage);
+          // Refuse an unknown stage rather than silently draining everything (CLAUDE.md §6).
+          if (fromIndex < 0) abort(`from_stage "${fromStage}" is not one of ${STAGES.map((s) => s.name).join(', ')}`);
+          // The stages this run drains: the chosen one and every later one.
+          const RUN_STAGES = STAGES.slice(fromIndex);
 
           // The plan, printed on every run so the log always states the rules it ran under.
-          for (const stage of STAGES) {
+          for (const stage of RUN_STAGES) {
             // One line per stage: URL shape, page size and cap.
             console.log(`plan: POST ${base || '<SUPABASE_URL>'}/functions/v1/${stage.name}?limit=${stage.limit}, page cap ${stage.pageCap}`);
           }
@@ -162,31 +182,56 @@ jobs:
           const REQUEST_TIMEOUT_MS = 180_000;
 
           // Sign in over the Auth REST endpoint: the same session prescreen-drain.yml gets,
-          // without installing supabase-js.
-          const authRes = await fetch(`${base}/auth/v1/token?grant_type=password`, {
-            // GoTrue's password grant is a POST.
-            method: 'POST',
-            // The gateway wants the anon key; the body is JSON.
-            headers: { apikey: anonKey, 'content-type': 'application/json' },
-            // JSON.stringify escapes the values, so no credential can break the body.
-            body: JSON.stringify({ email, password }),
-            // A hung sign-in rejects instead of holding the job to timeout-minutes.
-            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-          });
-          // Read as text first: an error page must not crash the parse and hide the status.
-          const authText = await authRes.text();
-          // Only the status is logged; the body may echo the email.
-          if (!authRes.ok) abort(`sign-in failed: HTTP ${authRes.status}`);
-          // Parsed inside try: a soft-200 HTML page is a failure, not a session.
-          let session;
-          // JSON or abort.
-          try { session = JSON.parse(authText); } catch { abort('sign-in returned non-JSON'); }
-          // The token must be a non-empty string; anything else is not a session.
-          const token = typeof session?.access_token === 'string' ? session.access_token : '';
-          // Never continue unauthenticated.
-          if (token === '') abort('sign-in returned no access_token');
-          // Mask the JWT before anything could print it.
-          console.log(`::add-mask::${token}`);
+          // without installing supabase-js. A function, because a paced drain outlives one
+          // access token (see TOKEN_REFRESH_MS) and must sign in again mid-run.
+          async function signIn() {
+            // The password grant; the response carries a fresh access token.
+            const authRes = await fetch(`${base}/auth/v1/token?grant_type=password`, {
+              // GoTrue's password grant is a POST.
+              method: 'POST',
+              // The gateway wants the anon key; the body is JSON.
+              headers: { apikey: anonKey, 'content-type': 'application/json' },
+              // JSON.stringify escapes the values, so no credential can break the body.
+              body: JSON.stringify({ email, password }),
+              // A hung sign-in rejects instead of holding the job to timeout-minutes.
+              signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+            });
+            // Read as text first: an error page must not crash the parse and hide the status.
+            const authText = await authRes.text();
+            // Only the status is logged; the body may echo the email.
+            if (!authRes.ok) abort(`sign-in failed: HTTP ${authRes.status}`);
+            // Parsed inside try: a soft-200 HTML page is a failure, not a session.
+            let session;
+            // JSON or abort.
+            try { session = JSON.parse(authText); } catch { abort('sign-in returned non-JSON'); }
+            // The token must be a non-empty string; anything else is not a session.
+            const fresh = typeof session?.access_token === 'string' ? session.access_token : '';
+            // Never continue unauthenticated.
+            if (fresh === '') abort('sign-in returned no access_token');
+            // Mask the JWT before anything could print it.
+            console.log(`::add-mask::${fresh}`);
+            // Proven non-empty and masked.
+            return fresh;
+          }
+          // Re-sign-in this long after the last sign-in. Supabase access tokens live 1 hour:
+          // run 41306282331 (2026-11-01) got HTTP 401 UNAUTHORIZED_ASYMMETRIC_JWT on tailor
+          // page 20, ~63 min in. 45 min leaves room for one slow page (<= 3 min) plus pacing.
+          const TOKEN_REFRESH_MS = 45 * 60_000;
+          // The current access token; replaced by refreshTokenIfOld().
+          let token = await signIn();
+          // When it was issued, by this runner's clock.
+          let signedInAt = Date.now();
+          // Called before every page so no request carries a token near its expiry.
+          async function refreshTokenIfOld() {
+            // Young enough: keep it.
+            if (Date.now() - signedInAt < TOKEN_REFRESH_MS) return;
+            // Old: sign in again; a failure aborts inside signIn(), fail closed.
+            token = await signIn();
+            // Restart the clock from the new token.
+            signedInAt = Date.now();
+            // One line, so the log shows the run crossed a token boundary on purpose.
+            console.log('auth: signed in again before the access token expired');
+          }
 
           // Requires a field to be a non-negative integer, named in the abort so the
           // operator sees WHICH field broke the shape (CLAUDE.md §6: validate the shape,
@@ -265,7 +310,7 @@ jobs:
           let totalProcessed = 0;
 
           // Stages run strictly in order: each stage's output IS the next stage's input.
-          for (const stage of STAGES) {
+          for (const stage of RUN_STAGES) {
             // Pages spent in this stage; the stage's own cap bounds them.
             let pages = 0;
             // Consecutive stalled pages (processed > 0, advanced 0); reset by any progress.
@@ -278,6 +323,8 @@ jobs:
               if (pages >= stage.pageCap) abort(`${stage.name}: page cap ${stage.pageCap} reached before the queue emptied`);
               // Counted before the request so a failing request still counts.
               pages += 1;
+              // Never send a token within reach of its 1-hour expiry.
+              await refreshTokenIfOld();
               // The page request: empty POST, app-user JWT plus anon key, limit in the query
               // string because none of the three functions reads a body for a batch run.
               const res = await fetch(`${base}/functions/v1/${stage.name}?limit=${stage.limit}`, {
@@ -319,7 +366,7 @@ jobs:
           }
 
           // The summary line the orchestrator reads.
-          console.log(`CLEAN: all three queues drained; processed=${totalProcessed} advanced=${totalAdvanced}`);
+          console.log(`CLEAN: ${RUN_STAGES.map((s) => s.name).join(' -> ')} queues drained; processed=${totalProcessed} advanced=${totalAdvanced}`);
           // Green.
           process.exit(0);
           JS
@@ -327,6 +374,8 @@ jobs:
         env:
           # The rehearsal flag, passed through env, never interpolated into the script.
           DRY_COUNT_ONLY: ${{ inputs.dry_count_only }}
+          # The first stage, passed through env like every input; the script re-validates it.
+          FROM_STAGE: ${{ inputs.from_stage }}
           # Public project URL, stored as a secret for parity with apply.yml.
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           # The ANON key: authority comes from the app user's JWT.
