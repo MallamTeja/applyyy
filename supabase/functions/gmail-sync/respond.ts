@@ -28,6 +28,35 @@ export interface SyncVerdict {
   readonly body: SyncBody;
 }
 
+// This function's OWN secret (W16, 2026-11-02). Until then it sent EMAIL_INTAKE_SHARED_SECRET,
+// the intake's, so one leak opened three entry points. The Apps Script side reads the same value
+// from its APPLYY_SYNC_SECRET property. Unset means the config gate below answers 503.
+export const GMAIL_SYNC_SECRET_ENV_VAR = "APPLYY_GMAIL_SYNC_SECRET";
+
+/**
+ * The upstream request (W16): the secret in a JSON POST body, the URL untouched. Until then it
+ * was `GET <url>?secret=...`, which lands the secret in Google-side request logs. POST is the
+ * only method whose body Apps Script hands to the script (as doPost's `e.postData.contents`);
+ * a Web App cannot read custom request headers, so a header was not an option.
+ */
+export function upstreamRequest(url: string, secret: string): { readonly url: string; readonly init: RequestInit } {
+  // The URL exactly as configured: no query string at all.
+  return {
+    url,
+    init: {
+      // doPost, not doGet (doGet now refuses).
+      method: "POST",
+      // The script parses JSON.
+      headers: { "content-type": "application/json" },
+      // The only place the secret travels.
+      body: JSON.stringify({ secret }),
+      // Apps Script answers a POST with a 302 to script.googleusercontent.com; following it
+      // (as a GET, per the fetch spec) is how the script's reply is read.
+      redirect: "follow",
+    },
+  };
+}
+
 /**
  * The config gate. Null/empty env vars mean "not configured" — a plain 503 the
  * dashboard can show verbatim, never a crash. The sync URL will not exist until Teja

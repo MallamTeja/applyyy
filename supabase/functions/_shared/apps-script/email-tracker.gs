@@ -25,15 +25,20 @@
  *
  *  1. Sign in to the tracker mailbox and open https://script.google.com → New project.
  *  2. Paste this entire file over the default `Code.gs`.
- *  3. Project Settings → Script Properties → add two properties:
+ *  3. Project Settings → Script Properties → add three properties:
  *
  *       APPLYY_INTAKE_URL      https://<project-ref>.supabase.co/functions/v1/email-tracker-intake
  *       APPLYY_INTAKE_SECRET   <the same random string set as EMAIL_INTAKE_SHARED_SECRET
  *                               in the Supabase function's environment>
  *
- *     Generate the secret with something like `openssl rand -base64 32`. It goes in
+ *       APPLYY_SYNC_SECRET     <a DIFFERENT random string, the same as APPLYY_GMAIL_SYNC_SECRET
+ *                               in the gmail-sync function's environment (W16, 2026-11-02);
+ *                               it guards only the on-demand sync (doPost)>
+ *
+ *     Generate each secret with something like `openssl rand -base64 32`. Each goes in
  *     exactly two places — here and Supabase — and NOWHERE ELSE. Never in this file,
- *     never in the repo (constraint #11).
+ *     never in the repo (constraint #11). After pasting a new version of this file, deploy
+ *     it as a NEW VERSION of the existing Web App deployment so the /exec URL stays the same.
  *
  *  4. Run `applyyTestConnection` once from the editor. Google will ask for Gmail and
  *     external-request permission; grant it. The execution log tells you whether the
@@ -64,6 +69,65 @@ var APPLYY_LABEL = 'applyy-ingested';
  */
 var APPLYY_SEARCH_WINDOW = 'newer_than:2d';
 
+/**
+ * ATS senders, searched by sender (W33, 2026-11-02). The same list as ATS_VENDOR_DOMAINS in
+ * `_shared/email/parser.ts`; `email-tracker.test.ts` fails if this one misses any of those.
+ * WHY BY SENDER: an ATS email's subject is often bare ("Thank you from Acme"), so only its
+ * sender says it is job mail.
+ */
+var APPLYY_ATS_SENDERS = [
+  // Greenhouse, both its app domain and its notification domain.
+  'greenhouse.io', 'greenhouse-mail.io',
+  // Lever, Ashby.
+  'lever.co', 'ashbyhq.com',
+  // Workday's two domains.
+  'myworkday.com', 'workday.com',
+  // The rest of the classifier's vendor vocabulary.
+  'smartrecruiters.com', 'bamboohr.com', 'jobvite.com', 'recruitee.com', 'breezy.hr', 'rippling.com', 'icims.com'
+];
+
+/**
+ * Job-lifecycle phrases for employer-direct mail (W33). Each is wording one of the classifier's
+ * outcomes keys on: receipts and rejections ("your application", "thank you for applying",
+ * "other candidates"), interviews, screening ("assessment", "coding challenge"), offers.
+ * Gmail matches a quoted phrase against subject and body alike.
+ */
+var APPLYY_JOB_PHRASES = [
+  // Receipts and rejections.
+  '"your application"', '"thank you for applying"', '"your candidacy"', '"other candidates"', '"regret to inform"', '"thank you for interviewing"',
+  // Interviews.
+  '"interview"',
+  // Screening.
+  '"assessment"', '"coding challenge"', '"phone screen"',
+  // Offers.
+  '"offer letter"', '"offer of employment"', '"job offer"'
+];
+
+/**
+ * The Gmail query every run uses (W33, 2026-11-02). Until then it was the window plus the
+ * label, i.e. THE WHOLE INBOX: live on 2026-11-01, 97/97 stored emails were unclassified and
+ * none matched, Google security mail included. Now: the window, minus already-sent mail, minus
+ * the Social and Forums tabs (never job mail), AND an ATS sender OR a job phrase.
+ * WHY NOT `category:primary`: Gmail files ATS mail under Updates (and sometimes Promotions),
+ * so a Primary-only search would silently drop real rejections. Recall beats precision here,
+ * because the intake stores an unmatched, unclassified email without its text anyway.
+ */
+function applyySearchQuery_() {
+  // `from:x` per vendor; Gmail matches subdomains such as hire.lever.co.
+  var senders = APPLYY_ATS_SENDERS.map(function (domain) { return 'from:' + domain; });
+  // Gmail's `{a b c}` is OR; the outer terms are ANDed with it.
+  return [
+    // Bounded in time.
+    APPLYY_SEARCH_WINDOW,
+    // Not already handed over.
+    '-label:' + APPLYY_LABEL,
+    // Never job mail.
+    '-category:social', '-category:forums',
+    // Either arm qualifies.
+    '{' + senders.concat(APPLYY_JOB_PHRASES).join(' ') + '}'
+  ].join(' ');
+}
+
 /** Messages per POST. Mirrors MAX_MESSAGES_PER_BATCH in `_shared/intake/email-contract.ts`. */
 var APPLYY_BATCH_SIZE = 50;
 
@@ -77,8 +141,8 @@ var APPLYY_SNIPPET_LIMIT = 4096;
 var APPLYY_MAX_THREADS = 200;
 
 /**
- * THE ENTRY POINT. Called either directly on-demand via Web App HTTP trigger (doGet/doPost)
- * or manually from the Apps Script editor.
+ * THE ENTRY POINT. Called by the hourly trigger, on demand via the Web App (doPost only since
+ * W16, 2026-11-02; doGet refuses), or manually from the Apps Script editor.
  */
 function applyyIngest() {
   // Serialise runs against each other.
@@ -96,8 +160,8 @@ function applyyIngest() {
     }
     // Find or create the label. Doing it once per run keeps the per-thread work cheap.
     var label = applyyEnsureLabel_();
-    // Everything recent that this script has not already handed over.
-    var threads = GmailApp.search(APPLYY_SEARCH_WINDOW + ' -label:' + APPLYY_LABEL, 0, APPLYY_MAX_THREADS);
+    // Recent job mail this script has not already handed over (W33: no longer the whole inbox).
+    var threads = GmailApp.search(applyySearchQuery_(), 0, APPLYY_MAX_THREADS);
     // Nothing to do is the common case — but a silent return here is indistinguishable
     // from a dead trigger on the Supabase side, which is how the tracker once sat dark
     // for a month (0 emails since 2026-09-11, noticed 2026-10-09). So the quiet path
@@ -531,40 +595,81 @@ function applyyRemoveTriggers() {
 }
 
 /**
- * Web App HTTP GET handler for on-demand sync.
- * Invoked when the web dashboard is opened or when the operator clicks "Refresh Interviews".
+ * Web App HTTP GET handler: REFUSES (W16, 2026-11-02). GET can carry a secret only in the URL
+ * query, and a URL lands in Google-side request logs. gmail-sync POSTs instead.
  */
 function doGet(e) {
-  return handleOnDemandSync_(e);
+  // Same JSON shape as every refusal, so gmail-sync maps it to its fixed 502.
+  return applyyJsonReply_({ ok: false, error: 'Use POST: the sync secret is accepted only in the request body.' });
 }
 
 /**
- * Web App HTTP POST handler for on-demand sync.
+ * Web App HTTP POST handler for on-demand sync (gmail-sync's "sync now").
  */
 function doPost(e) {
+  // One handler; the body carries the secret.
   return handleOnDemandSync_(e);
 }
 
+/** JSON reply helper: Apps Script cannot set an HTTP status, so `ok` carries the verdict. */
+function applyyJsonReply_(body) {
+  // ContentService is the only way a Web App returns a body.
+  return ContentService.createTextOutput(JSON.stringify(body)).setMimeType(ContentService.MimeType.JSON);
+}
+
 /**
- * Internal handler for Web App HTTP requests.
- * Authenticates against APPLYY_INTAKE_SECRET passed via query parameter ?secret=... or ?key=...
+ * Constant-time string comparison. WHY: `!==` stops at the first differing character, so the
+ * time to refuse leaks how much of a guess was right; the Web App URL is callable by anyone.
+ */
+function applyyTimingSafeEqual_(presented, expected) {
+  // Length is observable anyway; folding it in keeps the loop's length fixed to `expected`.
+  var difference = presented.length ^ expected.length;
+  // Walk the whole expected secret every time.
+  for (var i = 0; i < expected.length; i += 1) {
+    // Out-of-range reads give NaN, which `| 0` turns into 0; the length XOR already differs then.
+    difference |= (presented.charCodeAt(i) | 0) ^ expected.charCodeAt(i);
+  }
+  // Zero only when every character and the length matched.
+  return difference === 0;
+}
+
+/**
+ * Internal handler for the on-demand sync. Authenticates against APPLYY_SYNC_SECRET, sent in
+ * the JSON body as {"secret": "..."} (W16, 2026-11-02). Until then it compared
+ * APPLYY_INTAKE_SECRET from `?secret=` / `?key=`: ONE secret guarded three entry points and
+ * travelled in a URL. The query is now ignored, and the intake secret no longer opens this.
  */
 function handleOnDemandSync_(e) {
+  // The ingest run below still needs the intake URL and secret.
   var config = applyyReadConfig_();
+  // Unusable configuration: say which properties, run nothing.
   if (config === null) {
-    return ContentService.createTextOutput(JSON.stringify({
-      ok: false,
-      error: 'APPLYY_INTAKE_URL or APPLYY_INTAKE_SECRET not configured in Script Properties.'
-    })).setMimeType(ContentService.MimeType.JSON);
+    // Fixed message; no secret material.
+    return applyyJsonReply_({ ok: false, error: 'APPLYY_INTAKE_URL or APPLYY_INTAKE_SECRET not configured in Script Properties.' });
   }
-
-  // Verify authorization secret token
-  var secretParam = (e && e.parameter && (e.parameter.secret || e.parameter.key)) || '';
-  if (secretParam !== config.secret) {
-    return ContentService.createTextOutput(JSON.stringify({
-      ok: false,
-      error: 'Unauthorized: invalid or missing secret parameter.'
-    })).setMimeType(ContentService.MimeType.JSON);
+  // This entry point's own secret.
+  var syncSecret = PropertiesService.getScriptProperties().getProperty('APPLYY_SYNC_SECRET');
+  // FAIL CLOSED while it is unset: no fallback to the intake secret, ever.
+  if (!syncSecret) {
+    // Named so the fix needs no source reading.
+    return applyyJsonReply_({ ok: false, error: 'APPLYY_SYNC_SECRET not configured in Script Properties.' });
+  }
+  // The secret from the JSON body; anything unparsable or non-string is "no secret".
+  var presented = '';
+  // A missing body (GET-shaped call, form post) leaves it empty.
+  try {
+    // doPost hands the raw body over as postData.contents.
+    var parsed = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    // Only a string counts; a number or object is refused, not coerced.
+    if (parsed && typeof parsed.secret === 'string') presented = parsed.secret;
+  } catch (parseError) {
+    // Not JSON: stays empty, refused below.
+    presented = '';
+  }
+  // Empty or wrong: the same refusal, so a caller learns nothing about which.
+  if (presented.length === 0 || !applyyTimingSafeEqual_(presented, syncSecret)) {
+    // Fixed message.
+    return applyyJsonReply_({ ok: false, error: 'Unauthorized: invalid or missing secret.' });
   }
 
   // SERVER-SIDE COOLDOWN (Teja, 2026-10-23): on-demand sync at most once a minute. The

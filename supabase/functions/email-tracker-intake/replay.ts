@@ -37,9 +37,70 @@ import type { ApplicationStatus } from "../_shared/contracts/shared-types.ts";
 // ponytail: one fixed page; a full page is reported as a run error, paginate if that ever fires.
 export const REPLAY_WINDOW = 200;
 
-// PostgREST's default max-rows. A history read that returns this many rows may have been
-// cut short, and a missing note would make a moved email look owed: refuse instead.
-export const HISTORY_LIMIT = 1000;
+// Ids per `.in()` filter (Review #3, 2026-11-02). Every read used to send ONE filter over
+// every tracked row, and applied rows only pile up, so the request URL grew without bound.
+// 100 UUIDs is about 3.7 KB of filter, well under the ~8 KB request-line limits common in
+// front of PostgREST.
+export const ID_CHUNK_SIZE = 100;
+
+// Rows asked for per page of a history read: PostgREST's max_rows (supabase/config.toml).
+// Until Review #3 a read that returned this many refused EVERY move, as possibly truncated.
+export const HISTORY_PAGE_SIZE = 1000;
+
+// Pages per paged read before the sweep refuses (50 000 rows per id chunk). A ceiling on
+// work, so a runaway history fails closed with an error instead of reading forever.
+export const MAX_HISTORY_PAGES = 50;
+
+// One awaited page: supabase-js resolves `{ data, error }` and never throws (CLAUDE.md §5).
+type Page = PromiseLike<{ data: unknown; error: { message: string } | null }>;
+
+/**
+ * Every row of one filtered read, paged until an EMPTY page. WHY NOT "until a short page":
+ * a server cap below HISTORY_PAGE_SIZE would make page 1 look short, and the read would stop
+ * early, the truncated-history case this sweep refuses to act on. Each page starts where the
+ * rows actually received end, so a lower cap only costs requests, never rows. Offset paging is
+ * safe on application_events because it is append-only (no row can shift out of a page) and
+ * the caller orders by its monotonic id, so new rows land after the last page. Returns the
+ * rows, or the error string that refuses the sweep.
+ */
+async function readAllPages(page: (from: number, to: number) => Page): Promise<Record<string, unknown>[] | string> {
+  // Accumulated across pages.
+  const rows: Record<string, unknown>[] = [];
+  // One request per page, bounded.
+  for (let pages = 0; ; pages += 1) {
+    // Past the ceiling: refuse, named so the operator knows which bound fired.
+    if (pages >= MAX_HISTORY_PAGES) return `read exceeded ${MAX_HISTORY_PAGES} pages of ${HISTORY_PAGE_SIZE} rows`;
+    // The next page, starting after the rows already received.
+    const { data, error } = await page(rows.length, rows.length + HISTORY_PAGE_SIZE - 1);
+    // An unreadable page is an unreadable history.
+    if (error !== null) return error.message;
+    // §6: a non-array is not "no rows", it is a broken answer.
+    if (!Array.isArray(data)) return "page was not an array";
+    // The empty page is the only proof the read is complete.
+    if (data.length === 0) return rows;
+    // Collected.
+    rows.push(...(data as Record<string, unknown>[]));
+  }
+}
+
+/** The same paged read once per id chunk, concatenated; the first error refuses the whole read. */
+async function readChunked(ids: readonly string[], page: (chunk: string[], from: number, to: number) => Page): Promise<Record<string, unknown>[] | string> {
+  // Every chunk's rows.
+  const rows: Record<string, unknown>[] = [];
+  // Bounded filters, in order.
+  for (let start = 0; start < ids.length; start += ID_CHUNK_SIZE) {
+    // This chunk's ids.
+    const chunk = ids.slice(start, start + ID_CHUNK_SIZE);
+    // Every page of it.
+    const got = await readAllPages((from, to) => page(chunk, from, to));
+    // One failed chunk means the history is incomplete: refuse it all.
+    if (typeof got === "string") return got;
+    // Collected.
+    rows.push(...got);
+  }
+  // Complete.
+  return rows;
+}
 
 /** What one sweep did: moves made, and every error, each of which the run row counts. */
 export interface ReplayResult {
@@ -74,13 +135,15 @@ export async function replayStoredMoves(
   try {
     // Fresh statuses, read AFTER this call's receipt confirmations, so a row the receipt
     // just moved to applied is seen at applied.
-    const { data: apps, error: appsError } = await db.from("applications").select("id, status").in("status", [...TRACKED_STATUSES]);
+    // Paged (Review #3): applied rows pile up past PostgREST's 1000-row cap, and a cut-short
+    // read would silently leave rows out of the sweep. Ordered by id so the pages are stable.
+    const apps = await readAllPages((from, to) => db.from("applications").select("id, status").in("status", [...TRACKED_STATUSES]).order("id").range(from, to));
     // No statuses, no decisions.
-    if (appsError !== null) return { moved, errors: [...errors, `replay: applications read failed: ${appsError.message}`] };
+    if (typeof apps === "string") return { moved, errors: [...errors, `replay: applications read failed: ${apps}`] };
     // Shape-checked: only a string id with a tracked status becomes a candidate row.
     const statusById = new Map<string, ApplicationStatus>();
     // One entry per tracked row.
-    for (const row of (apps ?? []) as { id?: unknown; status?: unknown }[]) {
+    for (const row of apps as { id?: unknown; status?: unknown }[]) {
       // Anything else is skipped; skipped rows can't be moved.
       if (typeof row.id === "string" && TRACKED_STATUSES.includes(row.status as ApplicationStatus)) statusById.set(row.id, row.status as ApplicationStatus);
     }
@@ -91,63 +154,81 @@ export async function replayStoredMoves(
 
     // Stored, matched, move-capable emails of tracked rows, moved and pending alike (the
     // moved ones tell replayQueue what is already settled). Newest first; see REPLAY_WINDOW.
-    const { data: emails, error: emailsError } = await db
-      // RLS scopes it to Teja's rows.
-      .from("email_events")
-      // Exactly the fields replayQueue shape-checks; no untrusted subject or body text.
-      .select("id, provider_message_id, matched_application_id, classification, classification_confidence, received_at")
-      // Only rows matched to an application the tracker still follows.
-      .in("matched_application_id", ids)
-      // Only verdicts that can move a status (receipts, other, unclassified never replay).
-      .in("classification", [...REPLAYABLE_CLASSIFICATIONS])
-      // Newest first, so a cap never starves fresh mail.
-      .order("received_at", { ascending: false })
-      // The per-run bound.
-      .limit(REPLAY_WINDOW);
-    // Without the emails there is nothing to plan from.
-    if (emailsError !== null) return { moved, errors: [...errors, `replay: email_events read failed: ${emailsError.message}`] };
+    // One query per id chunk (Review #3), each bounded by the window; merged below.
+    const emailChunks: Record<string, unknown>[] = [];
+    // Bounded filters, in order.
+    for (let start = 0; start < ids.length; start += ID_CHUNK_SIZE) {
+      // This chunk's newest emails.
+      const { data: chunkEmails, error: emailsError } = await db
+        // RLS scopes it to Teja's rows.
+        .from("email_events")
+        // Exactly the fields replayQueue shape-checks; no untrusted subject or body text.
+        .select("id, provider_message_id, matched_application_id, classification, classification_confidence, received_at")
+        // Only rows matched to an application the tracker still follows, one chunk at a time.
+        .in("matched_application_id", ids.slice(start, start + ID_CHUNK_SIZE))
+        // Only verdicts that can move a status (receipts, other, unclassified never replay).
+        .in("classification", [...REPLAYABLE_CLASSIFICATIONS])
+        // Newest first, so a cap never starves fresh mail.
+        .order("received_at", { ascending: false })
+        // The per-run bound; no chunk needs more than the whole window.
+        .limit(REPLAY_WINDOW);
+      // Without the emails there is nothing to plan from.
+      if (emailsError !== null) return { moved, errors: [...errors, `replay: email_events read failed: ${emailsError.message}`] };
+      // Collected; replayQueue shape-checks every row.
+      emailChunks.push(...((chunkEmails ?? []) as Record<string, unknown>[]));
+    }
+    // The window stays GLOBAL across chunks: newest first by the ISO text PostgREST returns
+    // (one fixed format, so text order is time order), then cut to REPLAY_WINDOW.
+    const byNewest = emailChunks.sort((a, b) => (String(a.received_at) < String(b.received_at) ? 1 : String(a.received_at) > String(b.received_at) ? -1 : 0));
+    // The emails this run plans from.
+    const emails = byNewest.slice(0, REPLAY_WINDOW);
 
     // The tracker's own notes: the done-marker. Projected to the one field the planner reads.
-    const { data: notes, error: notesError } = await db
-      // The append-only event log; read only, never written here.
-      .from("application_events")
-      // PostgREST's JSON path projection: the id alone, not the whole detail blob.
-      .select("provider_message_id:detail->>provider_message_id")
-      // advance_application_status writes p_detail as a 'note', beside the trigger's status_change.
-      .eq("event_type", "note")
-      // Only the tracker's notes carry an email's message id.
-      .eq("agent", "tracker")
-      // Scoped to the rows this sweep could move.
-      .in("application_id", ids)
-      // Bounded; a full page is treated as truncated below.
-      .limit(HISTORY_LIMIT);
+    // Chunked and paged (Review #3): a done-marker past row 1000 used to refuse every move.
+    const notes = await readChunked(ids, (chunk, from, to) =>
+      db
+        // The append-only event log; read only, never written here.
+        .from("application_events")
+        // PostgREST's JSON path projection: the id alone, not the whole detail blob.
+        .select("provider_message_id:detail->>provider_message_id")
+        // advance_application_status writes p_detail as a 'note', beside the trigger's status_change.
+        .eq("event_type", "note")
+        // Only the tracker's notes carry an email's message id.
+        .eq("agent", "tracker")
+        // Scoped to the rows this sweep could move, one chunk at a time.
+        .in("application_id", chunk)
+        // The monotonic bigint key: stable pages on an append-only table.
+        .order("id")
+        // One page.
+        .range(from, to)
+    );
+    // Unreadable history: every email would look owed. Refuse every move (fail closed, §6).
+    if (typeof notes === "string") return { moved, errors: [...errors, `replay: application_events read failed: ${notes}`] };
     // Moves by anyone into an employer stage; the planner keeps the non-tracker ones.
-    const { data: stageMoves, error: stageError } = await db
-      // Same log.
-      .from("application_events")
-      // The fields the staleness rule reads; agent is null-able, and the planner handles null.
-      .select("application_id, agent, to_status, created_at")
-      // Written by the log_status_change trigger, one per move, with the acting agent.
-      .eq("event_type", "status_change")
-      // Only employer stages supersede; submit bookkeeping moves never do.
-      .in("to_status", [...EMPLOYER_STAGES])
-      // Scoped to the rows this sweep could move.
-      .in("application_id", ids)
-      // Bounded; a full page is treated as truncated below.
-      .limit(HISTORY_LIMIT);
-    // Unreadable history: every email would look owed or fresh. Refuse every move.
-    const historyError = notesError ?? stageError;
-    if (historyError !== null) return { moved, errors: [...errors, `replay: application_events read failed: ${historyError.message}`] };
-    // A page at the cap may be truncated: same refusal, same reason.
-    if ((notes ?? []).length >= HISTORY_LIMIT || (stageMoves ?? []).length >= HISTORY_LIMIT) {
-      // Named so the operator knows which bound to raise.
-      return { moved, errors: [...errors, `replay: application_events read hit ${HISTORY_LIMIT} rows; refusing moves on possibly truncated history`] };
-    }
+    const stageMoves = await readChunked(ids, (chunk, from, to) =>
+      db
+        // Same log.
+        .from("application_events")
+        // The fields the staleness rule reads; agent is null-able, and the planner handles null.
+        .select("application_id, agent, to_status, created_at")
+        // Written by the log_status_change trigger, one per move, with the acting agent.
+        .eq("event_type", "status_change")
+        // Only employer stages supersede; submit bookkeeping moves never do.
+        .in("to_status", [...EMPLOYER_STAGES])
+        // Scoped to the rows this sweep could move, one chunk at a time.
+        .in("application_id", chunk)
+        // Stable pages, as above.
+        .order("id")
+        // One page.
+        .range(from, to)
+    );
+    // Unreadable history: a human move could make an email stale. Refuse every move.
+    if (typeof stageMoves === "string") return { moved, errors: [...errors, `replay: application_events read failed: ${stageMoves}`] };
     // A full window is not a refusal (the newest emails are all in it), but it is reported.
-    if ((emails ?? []).length >= REPLAY_WINDOW) errors.push(`replay: window full (${REPLAY_WINDOW} newest stored outcome emails); older ones were not considered`);
+    if (emailChunks.length >= REPLAY_WINDOW) errors.push(`replay: window full (${REPLAY_WINDOW} newest stored outcome emails); older ones were not considered`);
 
     // The owed emails, oldest first.
-    const queue = replayQueue({ emails: emails ?? [], trackerNotes: notes ?? [], stageMoves: stageMoves ?? [] });
+    const queue = replayQueue({ emails, trackerNotes: notes, stageMoves });
     // One move attempt per owed email.
     for (const email of queue) {
       // Where the row is now, as far as this sweep knows.

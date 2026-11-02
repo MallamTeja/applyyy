@@ -22,6 +22,9 @@
 // ------------------------------------------------------------------------------
 // THIS FUNCTION WRITES ROWS INTO THE LIVE DATABASE. Two safeguards, both structural:
 //
+//   0. It REFUSES TO RUN on the production project, and on any project not explicitly marked
+//      as a throwaway (guard.ts, W34 2026-11-02). Safeguard 1 alone passed on prod: it counts
+//      under RLS as a test user who owns nothing, so a full database reads as empty.
 //   1. It REFUSES TO RUN against a populated database. That constraint could have
 //      been a comment saying "never re-run this once real data exists" — but a
 //      comment is not a safeguard, it is a hope about who reads it. The emptiness
@@ -33,6 +36,8 @@
 
 // The official client, pinned exactly as elsewhere in this stream.
 import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2.58.0";
+// The entry gate (W16 + W34): its own secret, and never the production project. Pure, node-tested.
+import { RLS_PROOF_SECRET_ENV_VAR, RLS_PROOF_SECRET_HEADER, RLS_PROOF_TARGET_REF_ENV_VAR, runGate } from "./guard.ts";
 
 // The two test identities. SEPARATE from the app user on purpose: this test must
 // prove that two DIFFERENT authenticated users cannot see each other, which is
@@ -41,9 +46,8 @@ const TEST_A_EMAIL = "APPLYY_RLS_TEST_A_EMAIL";
 const TEST_A_PASSWORD = "APPLYY_RLS_TEST_A_PASSWORD";
 const TEST_B_EMAIL = "APPLYY_RLS_TEST_B_EMAIL";
 const TEST_B_PASSWORD = "APPLYY_RLS_TEST_B_PASSWORD";
-// Reuses the intake's shared secret so this diagnostic is not callable by anyone who
-// finds the URL. It runs with `verify_jwt = true` as well, so this is a second lock.
-const RUN_SECRET = "EMAIL_INTAKE_SHARED_SECRET";
+// The run secret is this function's OWN (guard.ts, W16 2026-11-02); it reused the intake's
+// until then. It runs with `verify_jwt = true` as well, so the secret is a second lock.
 
 // Every user-scoped table. `application_status_transitions` is deliberately absent:
 // it holds RULES rather than user data and is readable by everyone by design, so
@@ -130,16 +134,22 @@ Deno.serve(async (request: Request): Promise<Response> => {
   const json = (status: number, body: Record<string, unknown>): Response =>
     new Response(JSON.stringify(body, null, 2), { status, headers: { "content-type": "application/json; charset=utf-8" } });
 
-  // POST only. A diagnostic that writes rows must not be triggerable by a link.
-  if (request.method !== "POST") return json(405, { error: "method not allowed" });
-
-  // The shared secret, so this is not runnable by anyone who learns the URL.
-  const configuredSecret = readEnv(RUN_SECRET);
-  // Fail closed on missing configuration, exactly as the intake endpoint does.
-  if (configuredSecret === undefined) return json(500, { error: `${RUN_SECRET} is not set` });
-  // Compare. Not constant-time here because this endpoint is also JWT-gated and is a
-  // one-shot diagnostic — stated rather than left as an oversight for a reader to spot.
-  if (request.headers.get("X-Applyy-Intake-Secret") !== configuredSecret) return json(401, { error: "unauthorized" });
+  // SAFEGUARD 0, before any sign-in or write: POST only, this function's own secret
+  // (constant-time), and a project that is neither production nor unmarked (guard.ts).
+  const gate = runGate({
+    // A link click is a GET and is refused.
+    method: request.method,
+    // Its own header name, not the intake's.
+    presentedSecret: request.headers.get(RLS_PROOF_SECRET_HEADER),
+    // Unset fails closed with 500.
+    configuredSecret: readEnv(RLS_PROOF_SECRET_ENV_VAR),
+    // Platform-injected; names the project ref.
+    supabaseUrl: readEnv("SUPABASE_URL"),
+    // The operator's throwaway marker.
+    targetRef: readEnv(RLS_PROOF_TARGET_REF_ENV_VAR),
+  });
+  // Refused: the status and fixed message the gate chose.
+  if (!gate.ok) return json(gate.status, { error: gate.error });
 
   // Platform-injected connection details.
   const url = readEnv("SUPABASE_URL");
@@ -178,6 +188,9 @@ Deno.serve(async (request: Request): Promise<Response> => {
   // being true the moment one real application exists. A comment saying "do not
   // re-run this" is a hope about who reads it; this makes the dangerous case
   // unreachable. Counted as A, so it also exercises the read path before relying on it.
+  // W34 (2026-11-02): counted UNDER RLS, so it only sees A's own rows and can never see
+  // someone else's data; it is a second layer now, and SAFEGUARD 0 is the one that keeps
+  // this function off the production project.
   const jobsCount = await countVisible(clientA, "jobs");
   const applicationsCount = await countVisible(clientA, "applications");
   // A count that errored means we cannot establish emptiness, so we must not proceed.

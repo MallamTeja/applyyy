@@ -209,8 +209,8 @@ test("classifyRawEmail handles prompt injection attempts safely and classifies b
   assert.equal(result.outcome, "rejected");
 });
 
-// Test that EMAIL_OUTCOMES tuple contains all 4 expected outcome values.
+// Test that EMAIL_OUTCOMES tuple contains all 5 expected outcome values (offer added by W32, 2026-11-02).
 test("EMAIL_OUTCOMES contains exact required outcome set", () => {
   // Check exact enum member set.
-  assert.deepEqual([...EMAIL_OUTCOMES], ["interviewing", "rejected", "employer_screening", "unknown"]);
+  assert.deepEqual([...EMAIL_OUTCOMES], ["interviewing", "rejected", "employer_screening", "offer", "unknown"]);
 });

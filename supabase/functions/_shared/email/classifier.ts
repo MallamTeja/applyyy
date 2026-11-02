@@ -1,8 +1,8 @@
 // Outcome classifier for email messages received from hiring teams and recruiters.
 //
 // WHY THIS IS A DEDICATED OUTCOME CLASSIFIER MODULE: When an email is received from a hiring team,
-// the system must classify the job application lifecycle outcome into one of four deterministic states:
-// 'interviewing', 'employer_screening', 'rejected', or 'unknown'.
+// the system must classify the job application lifecycle outcome into one of five deterministic states:
+// 'interviewing', 'employer_screening', 'rejected', 'offer' (since W32, 2026-11-02), or 'unknown'.
 //
 // WHY DECISION PRECEDENCE MATTERS: A candidate email may mention multiple terms (e.g. referencing
 // a past "interview" in a rejection message, or starting with polite thanks). The classification logic
@@ -21,14 +21,16 @@ import { parseEmail, type ParseEmailInput, type ParsedEmail } from "./parser.ts"
 // - 'interviewing': Candidate has received an interview invitation or scheduling link.
 // - 'employer_screening': Candidate has received a technical test (OA), take-home assessment, or phone screen request.
 // - 'rejected': Candidate application has been declined or role has been filled.
+// - 'offer': The employer has extended a job offer (W32, 2026-11-02). Terminal downstream, so it
+//   needs a positive decision phrase; offer-letter and subject wording only corroborate.
 // - 'unknown': Email is an application receipt, auto-reply, or generic text without status decision.
-export type EmailOutcome = "interviewing" | "rejected" | "employer_screening" | "unknown";
+export type EmailOutcome = "interviewing" | "rejected" | "employer_screening" | "offer" | "unknown";
 
 // Array tuple of allowed email outcome strings for runtime validation.
 //
 // WHY AN EXPLICIT CONST TUPLE IS EXPOSED: Allows runtime iteration, validation, and schema definitions
 // without duplicating the literal outcome string array across packages.
-export const EMAIL_OUTCOMES = ["interviewing", "rejected", "employer_screening", "unknown"] as const;
+export const EMAIL_OUTCOMES = ["interviewing", "rejected", "employer_screening", "offer", "unknown"] as const;
 
 // Detailed result structure returned by the classifier.
 //
@@ -303,6 +305,58 @@ const SCREENING_SIGNALS: readonly SignalRule[] = [
   },
 ];
 
+// Lowest offer score classified as `offer`: the tracker's terminal gate (decide.ts, 0.8), so an
+// offer verdict always clears it and the corroborate-only sum (0.6) never reaches it.
+export const OFFER_MIN = 0.8;
+
+// Job-offer phrases (W32, 2026-11-02). Exported for the weight-sum guard in decide.test.ts.
+//
+// WHY SO NARROW: `offer` is terminal, and the word is everywhere in recruiter and retail mail
+// ("offer letter templates", "job offers for you", "an offer of 30% off"). Only an employer
+// stating that it IS offering Teja a job counts: a positive verb ("pleased/delighted/... to")
+// bound to a job object ("the position", "an offer of employment"). A negation ("will not be
+// extending an offer") has no positive verb, so it never matches here; with "unfortunately,
+// we" it is a rejection, which classifyEmail checks first.
+export const OFFER_SIGNALS: readonly SignalRule[] = [
+  // The decision phrase.
+  {
+    tag: "offer_extended",
+    pattern: new RegExp(
+      // The positive opener: an emotion verb or "would like to"/"'d like to".
+      `\\b(?:(?:pleased|delighted|happy|excited|thrilled|glad)\\s+to|(?:would|${APOS}d)\\s+like\\s+to)\\s+(?:formally\\s+)?` +
+        // Either "offer you the position/role/job" ("the opportunity" is not a job: excluded)...
+        `(?:offer\\s+you\\s+the\\s+(?:position|role|job)\\b` +
+        // ...or "extend (you) an offer" whose object is employment, never a discount.
+        `|extend\\s+(?:to\\s+you\\s+|you\\s+)?(?:an?\\s+|our\\s+)?(?:formal\\s+|verbal\\s+|written\\s+)?(?:job\\s+offer\\b|offer\\s+of\\s+employment\\b|offer\\s+to\\s+join\\b|offer\\s+for\\s+the\\s+(?:position|role)\\b))`,
+      // Case-insensitive, as every rule here.
+      "i",
+    ),
+    weight: 0.9,
+    target: "both",
+  },
+  // The offer letter itself, attached or to be signed.
+  {
+    tag: "offer_letter_attached",
+    // "Your offer letter is attached" / "attached is your offer letter" / "sign and return the
+    // offer letter". The lookahead drops "offer letter template(s)", the spam form.
+    pattern: /\b(?:(?:your|the)\s+offer\s+letter(?!\s+templates?)\s+(?:is\s+)?attached|attached\s+(?:is\s+)?(?:your|the)\s+offer\s+letter(?!\s+templates?)|sign\s+(?:and\s+return\s+)?(?:your|the)\s+offer\s+letter(?!\s+templates?))\b/i,
+    // Corroborates only: a forwarded or templated letter mentions this without a decision.
+    weight: 0.3,
+    target: "body",
+    corroborateOnly: true,
+  },
+  // Subject naming an offer ("Your offer from Stripe", "Offer of employment").
+  {
+    tag: "offer_subject",
+    // `job offer\b` refuses "job offers" (a listing digest); the lookahead refuses "offer letter templates".
+    pattern: /\b(?:job\s+offer\b|offer\s+of\s+employment\b|offer\s+letter\b(?!\s+templates?)|your\s+offer\b)/i,
+    // Subjects are short and spammy: corroborates only.
+    weight: 0.3,
+    target: "subject",
+    corroborateOnly: true,
+  },
+];
+
 // Evaluate a set of signal rules against parsed email content.
 //
 // WHY THIS HELPER IS GENERALIZED: Evaluates rules against subject and body uniformly,
@@ -372,6 +426,11 @@ export function classifyEmail(parsed: ParsedEmail): OutcomeClassification {
   // WHY EVALUATE SCREENING SIGNALS: Calculates keyword match score for online assessments and pre-screens.
   const screening = evaluateSignals(SCREENING_SIGNALS, parsed);
 
+  // Step 3b: Evaluate the offer signal set (W32).
+  //
+  // WHY BEFORE THE PRECEDENCE RULES: rule 1b reads it, ahead of interviewing.
+  const offer = evaluateSignals(OFFER_SIGNALS, parsed);
+
   // Collect structural signal boosters detected during parsing phase.
   //
   // WHY STRUCTURAL BOOSTERS ARE TRACKED: URLs and platform names detected by parser provide non-textual evidence.
@@ -414,6 +473,27 @@ export function classifyEmail(parsed: ParsedEmail): OutcomeClassification {
       matchedSignals: [...rejection.matches, ...structuralMatches],
       // Human-readable summary explanation detailing why rejection was chosen.
       reasoning: "Email contains strong explicit rejection phrases indicating candidate non-selection.",
+    };
+  }
+
+  // DECISION PRECEDENCE RULE 1b: An explicit offer (W32, 2026-11-02).
+  //
+  // WHY AFTER REJECTION AND BEFORE INTERVIEWING: an offer email routinely mentions the interview
+  // it follows ("after your onsite interview, we are pleased to offer you..."), so the later
+  // stage must win; a strong rejection still wins over both. WHY THE REJECTION CEILING: any
+  // moderate rejection wording beside an offer phrase makes the email ambiguous, and `offer` is
+  // terminal, so ambiguity falls through to the safer verdicts below.
+  if (offer.score >= OFFER_MIN && rejection.score < MODERATE_REJECTION_MIN) {
+    // Construct and return the offer outcome result object.
+    return {
+      // Primary outcome classification string verdict.
+      outcome: "offer",
+      // Numerical confidence score calculated from offer signals.
+      confidence: offer.score,
+      // Matched offer and structural signal tags.
+      matchedSignals: [...offer.matches, ...structuralMatches],
+      // Human-readable summary explanation detailing why offer was chosen.
+      reasoning: "Email states that the employer is extending a job offer.",
     };
   }
 
@@ -495,7 +575,7 @@ export function classifyEmail(parsed: ParsedEmail): OutcomeClassification {
     // Low fallback confidence score representing uncertainty.
     confidence: 0.3,
     // Consolidated array of all matched signals evaluated across categories.
-    matchedSignals: [...rejection.matches, ...interviewing.matches, ...screening.matches, ...structuralMatches],
+    matchedSignals: [...rejection.matches, ...interviewing.matches, ...screening.matches, ...offer.matches, ...structuralMatches],
     // Human-readable summary explanation detailing why fallback unknown was chosen.
     reasoning: "Email content did not match interviewing, screening, or rejection criteria with high confidence.",
   };

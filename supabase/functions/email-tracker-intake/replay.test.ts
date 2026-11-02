@@ -4,20 +4,25 @@ import { test } from "node:test";
 // Strict equality so null and undefined stay distinct.
 import assert from "node:assert/strict";
 // Unit under test, plus its two bounds so the tests read them instead of copying numbers.
-import { HISTORY_LIMIT, REPLAY_WINDOW, replayStoredMoves } from "./replay.ts";
+import { HISTORY_PAGE_SIZE, ID_CHUNK_SIZE, MAX_HISTORY_PAGES, REPLAY_WINDOW, replayStoredMoves } from "./replay.ts";
 // The decision shape a fresh email carries, for the evidence-enrichment case.
 import type { MessageDecision } from "./decide.ts";
 
 // What supabase-js resolves a query to: data or error, never a throw (CLAUDE.md §5).
 type Result = { data: unknown; error: { message: string } | null };
 
+// A canned answer: one Result, or one per query, decided from that query's recorded filters
+// (Review #3: a paged read must be able to fail on its SECOND page).
+type Canned = Result | ((filters: Record<string, unknown>) => Result);
+
 // A supabase-js double. Every chain method returns the builder; awaiting it resolves the
 // canned Result for that table. application_events is read twice, told apart by event_type.
+// `.range(from, to)` slices an array answer the way PostgREST pages one (Review #3).
 function fakeDb(canned: {
-  apps?: Result;
-  emails?: Result;
-  notes?: Result;
-  stageMoves?: Result;
+  apps?: Canned;
+  emails?: Canned;
+  notes?: Canned;
+  stageMoves?: Canned;
   rpcError?: { message: string } | null;
 }) {
   // Every RPC call's arguments, and every query's recorded filters, for the assertions.
@@ -30,8 +35,8 @@ function fakeDb(canned: {
     const filters: Record<string, unknown> = {};
     // Recorded once, when the query is built.
     calls.queries.push({ table, filters });
-    // Which canned result this query resolves to.
-    const pick = (): Result => {
+    // The canned answer for this table, before paging.
+    const answer = (): Canned => {
       // The tracked-applications read.
       if (table === "applications") return canned.apps ?? ok([]);
       // The stored-emails read.
@@ -40,6 +45,19 @@ function fakeDb(canned: {
       if (filters["eq:event_type"] === "note") return canned.notes ?? ok([]);
       // Everything else on application_events is the stage-move read.
       return canned.stageMoves ?? ok([]);
+    };
+    // Which canned result this query resolves to, paged when the query asked for a range.
+    const pick = (): Result => {
+      // A per-query answer sees the filters, range included.
+      const raw = answer();
+      // Resolved to one Result.
+      const result = typeof raw === "function" ? raw(filters) : raw;
+      // The rows PostgREST would return for [from, to], inclusive, when a range was asked for.
+      const range = filters.range as [number, number] | undefined;
+      // Unpaged queries, errors and non-array data come back as canned.
+      if (range === undefined || !Array.isArray(result.data)) return result;
+      // One page.
+      return { data: result.data.slice(range[0], range[1] + 1), error: result.error };
     };
     // A thenable builder, the shape supabase-js's PostgrestFilterBuilder has.
     const builder = {
@@ -53,6 +71,8 @@ function fakeDb(canned: {
       order: (column: string, options: unknown) => ((filters[`order:${column}`] = options), builder),
       // The bound, recorded.
       limit: (n: number) => ((filters.limit = n), builder),
+      // A page, recorded and applied by pick().
+      range: (from: number, to: number) => ((filters.range = [from, to]), builder),
       // Awaiting the builder runs the "query": resolve, never reject.
       then: (resolve: (value: Result) => unknown) => Promise.resolve(pick()).then(resolve),
     };
@@ -167,13 +187,15 @@ test("W6: unreadable or truncated move history never becomes 'move anyway'", asy
   const b = await replayStoredMoves(stagesDown.db, true, NO_LIVE);
   // No RPC, one error.
   assert.deepEqual([b.moved, b.errors.length, stagesDown.calls.rpc.length], [0, 1, 0]);
-  // A notes read at the row cap may be cut short by PostgREST: same refusal.
-  const full = Array.from({ length: HISTORY_LIMIT }, () => ({ provider_message_id: "other" }));
-  // Same rows plus a full page of notes.
-  const truncated = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: [STORED_REJECTION], error: null }, notes: { data: full, error: null } });
+  // Review #3: a history read that fails on a LATER page is the same refusal, not "page 1 was enough".
+  const full = Array.from({ length: HISTORY_PAGE_SIZE }, () => ({ provider_message_id: "other" }));
+  // Page 1 succeeds in full; page 2 errors.
+  const secondPageDown = (filters: Record<string, unknown>): Result => ((filters.range as number[] | undefined)?.[0] ?? 0) === 0 ? { data: full, error: null } : { data: null, error: { message: "boom on page 2" } };
+  // Same rows plus that notes read.
+  const truncated = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: [STORED_REJECTION], error: null }, notes: secondPageDown });
   // Refused, with an error.
   const c = await replayStoredMoves(truncated.db, true, NO_LIVE);
-  // No RPC, one error.
+  // No RPC, one error naming the read.
   assert.deepEqual([c.moved, c.errors.length, truncated.calls.rpc.length], [0, 1, 0]);
 });
 
@@ -201,4 +223,74 @@ test("W6: a full replay window is reported, so a backlog is never silent", async
   assert.deepEqual([result.moved, result.errors.length, calls.rpc.length], [0, 1, 0]);
   // The message says what happened.
   assert.match(result.errors[0]!, /window/);
+});
+
+// ---- Review #3 (2026-11-02): reads scale with tracked rows instead of refusing ----
+//
+// The sweep scoped every read with ONE `.in(column, ids)` over every tracked row (applied rows
+// only pile up), so the URL grew without bound, and a history read that hit 1000 rows refused
+// every move. Now ids go in bounded chunks and history is paged until an empty page.
+
+// N tracked applied rows, ids a0..a{N-1}.
+const tracked = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `a${i}`, status: "applied" }));
+
+test("Review #3: tracked ids are sent in bounded chunks that together cover every row", async () => {
+  // Two and a half chunks' worth of tracked rows.
+  const rows = tracked(ID_CHUNK_SIZE * 2 + ID_CHUNK_SIZE / 2);
+  // Nothing stored: only the reads matter here.
+  const { db, calls } = fakeDb({ apps: { data: rows, error: null } });
+  // Switch on.
+  const result = await replayStoredMoves(db, true, NO_LIVE);
+  // Nothing to move, nothing wrong.
+  assert.deepEqual(result, { moved: 0, errors: [] });
+  // Every id-scoped filter the sweep sent, per read.
+  for (const [table, column] of [["email_events", "in:matched_application_id"], ["application_events", "in:application_id"]] as const) {
+    // The id lists of this read's queries.
+    const lists = calls.queries.filter((query) => query.table === table && query.filters[column] !== undefined).map((query) => query.filters[column] as string[]);
+    // No single filter is longer than the chunk bound.
+    assert.ok(lists.every((list) => list.length <= ID_CHUNK_SIZE), `${table}: a filter exceeded ${ID_CHUNK_SIZE} ids`);
+    // Together they name every tracked row (the notes and stage reads each cover them all).
+    assert.deepEqual([...new Set(lists.flat())].sort(), rows.map((row) => row.id).sort(), table);
+  }
+});
+
+test("Review #3: a done-marker on the second history page is honoured, not refused", async () => {
+  // A full first page of unrelated notes, then the note that marks m1 as already moved.
+  const notes = [...Array.from({ length: HISTORY_PAGE_SIZE }, () => ({ provider_message_id: "other" })), { provider_message_id: "m1" }];
+  // The stored rejection whose move already committed.
+  const { db, calls } = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: [STORED_REJECTION], error: null }, notes: { data: notes, error: null } });
+  // Switch on.
+  const result = await replayStoredMoves(db, true, NO_LIVE);
+  // Not refused (the old cap), and not moved again (page 2 was read).
+  assert.deepEqual([result, calls.rpc.length], [{ moved: 0, errors: [] }, 0]);
+});
+
+test("Review #3: a history longer than the page cap is refused, never read forever", async () => {
+  // One row more than MAX_HISTORY_PAGES full pages.
+  const huge = Array.from({ length: HISTORY_PAGE_SIZE * MAX_HISTORY_PAGES + 1 }, () => ({ provider_message_id: "other" }));
+  // A pending email beside it.
+  const { db, calls } = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: [STORED_REJECTION], error: null }, notes: { data: huge, error: null } });
+  // Switch on.
+  const result = await replayStoredMoves(db, true, NO_LIVE);
+  // Fail closed: no move, one error.
+  assert.deepEqual([result.moved, result.errors.length, calls.rpc.length], [0, 1, 0]);
+});
+
+test("Review #3: an email outside the first id chunk is still replayed, oldest first", async () => {
+  // Two chunks of tracked rows.
+  const rows = tracked(ID_CHUNK_SIZE * 2);
+  // A pending rejection for a row in the FIRST chunk; the older email.
+  const older = { ...STORED_REJECTION, id: "e-old", provider_message_id: "m-old", matched_application_id: "a0", received_at: "2026-11-01T09:00:00+00:00" };
+  // The newer one, for a row in the SECOND chunk.
+  const newer = { ...STORED_REJECTION, id: "e-new", provider_message_id: "m-new", matched_application_id: `a${ID_CHUNK_SIZE}`, received_at: "2026-11-01T11:00:00+00:00" };
+  // Each email query answers only the rows its chunk asked for, as PostgREST would.
+  const emails = (filters: Record<string, unknown>): Result => ({ data: [older, newer].filter((row) => (filters["in:matched_application_id"] as string[]).includes(row.matched_application_id)), error: null });
+  // Both stored.
+  const { db, calls } = fakeDb({ apps: { data: rows, error: null }, emails });
+  // Switch on.
+  const result = await replayStoredMoves(db, true, NO_LIVE);
+  // Both moved: an email outside the first chunk is not lost.
+  assert.deepEqual(result, { moved: 2, errors: [] });
+  // Oldest first, the order the employer sent them.
+  assert.deepEqual(calls.rpc.map((call) => call.p_application_id), ["a0", `a${ID_CHUNK_SIZE}`]);
 });

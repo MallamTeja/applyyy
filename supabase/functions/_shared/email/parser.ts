@@ -63,7 +63,8 @@ const PUBLIC_EMAIL_DOMAINS: ReadonlySet<string> = new Set([
 //
 // WHY WE FILTER THESE: An email from "no-reply@greenhouse.io" belongs to an ATS vendor,
 // not the employer hiring the candidate. Filtering vendor domains isolates the real target domain when available.
-const ATS_VENDOR_DOMAINS: ReadonlySet<string> = new Set([
+// Exported (W33, 2026-11-02) only so the Apps Script test can hold the Gmail query to this list.
+export const ATS_VENDOR_DOMAINS: ReadonlySet<string> = new Set([
   "greenhouse.io",
   "lever.co",
   "ashbyhq.com",

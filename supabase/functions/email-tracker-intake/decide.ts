@@ -114,6 +114,9 @@ export function classifyMessage(message: DecidableMessage): MessageDecision {
   if (result.outcome === "interviewing") return { classification: "interview_invite", ...base };
   // Rejection, including ones that open with "thank you for applying".
   if (result.outcome === "rejected") return { classification: "rejection", ...base };
+  // Offer (W32, 2026-11-02): before this the classifier had no offer outcome, so the
+  // `case "offer"` mapping below was dead and interview -> offer was never taken.
+  if (result.outcome === "offer") return { classification: "offer", ...base };
   // Screening splits into an assessment invite or plain recruiter contact.
   if (result.outcome === "employer_screening") {
     // Assessment signals, by the classifier's tags and the platform detector's prefix.
@@ -393,21 +396,31 @@ export function emailEventRowOf(
   matchedApplicationId: string | null,
   processedAt: string,
 ): EmailEventInsert & Record<string, unknown> {
+  // W33 (2026-11-02): an email the classifier read nothing in AND that matched no application
+  // carries no tracker value, so its words are not kept. Live on 2026-11-01, 97/97 rows were
+  // exactly this, including Google security mail (OAuth grants). WHY A MINIMAL ROW, NOT NO ROW:
+  // the row still holds the dedup key (a redelivered batch stays a no-op), and its sender, time
+  // and labels are what tells a human whether the Gmail query or the classifier is missing real
+  // employer mail. Dropping it would make that miss invisible: Apps Script labels the thread
+  // after the 202, so the mail is never re-sent. The cost: such an email's text is not
+  // re-readable here if the classifier improves; it is still in Gmail.
+  const redact = decision.classification === "unclassified" && matchedApplicationId === null;
   return {
     // Deduplication key, half of `(user_id, provider_message_id)`.
     provider_message_id: message.message_id,
     // Gmail's thread id; null stays null (column is nullable, older scripts sent none).
     thread_id: message.thread_id,
     // The To header; same bug class as thread_id — validated, column existed, never mapped.
-    recipient_to: message.to,
+    // Nulled on a redacted row: an address list is content, not a tuning signal.
+    recipient_to: redact ? null : message.to,
     // Label names; copied so the readonly contract array never aliases the insert payload.
     label_ids: [...message.label_ids],
-    // Sender header.
+    // Sender header. Kept even when redacted: it is the signal for tuning the Gmail query.
     from_address: message.from,
-    // Subject line.
-    subject: message.subject,
-    // Body excerpt.
-    snippet: message.snippet,
+    // Subject line; emptied (the column is NOT NULL) on a redacted row.
+    subject: redact ? "" : message.subject,
+    // Body excerpt; emptied (NOT NULL) on a redacted row.
+    snippet: redact ? "" : message.snippet,
     // When Gmail received it.
     received_at: message.received_at,
     // Verdict.

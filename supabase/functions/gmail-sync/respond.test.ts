@@ -57,3 +57,32 @@ test("the secret never reaches the browser, even inside passed-through details",
   const clean = upstreamVerdict(200, JSON.stringify({ ok: true, details: { echo: "GET /exec" } }), SECRET);
   assert.equal(clean.status, 200);
 });
+
+// ---- W16 (2026-11-02): the sync secret is its own, and never rides in a URL ----
+//
+// Namespace import: a missing export fails only these tests, not the four above.
+import * as respond from "./respond.ts";
+// The intake's secret name, to prove the sync reads a DIFFERENT one.
+import { INTAKE_SECRET_ENV_VAR } from "../_shared/intake/auth.ts";
+
+test("W16: gmail-sync reads its own secret, not the intake's", () => {
+  // Named, so the orchestrator's `supabase secrets set` and the code cannot drift.
+  assert.equal(respond.GMAIL_SYNC_SECRET_ENV_VAR, "APPLYY_GMAIL_SYNC_SECRET");
+  // One secret per entry point: the intake's leak no longer opens the sync, nor the reverse.
+  assert.notEqual(respond.GMAIL_SYNC_SECRET_ENV_VAR, INTAKE_SECRET_ENV_VAR);
+});
+
+test("W16: the sync secret travels in a POST body, never in the URL", () => {
+  // The /exec URL as configured.
+  const url = "https://script.google.com/macros/s/x/exec";
+  // The request gmail-sync sends.
+  const request = respond.upstreamRequest(url, SECRET);
+  // The URL is sent exactly as configured: no query string, so no secret in Google's logs.
+  assert.equal(request.url, url);
+  // POST, the one method whose body Apps Script hands to doPost.
+  assert.equal(request.init.method, "POST");
+  // The secret is in the JSON body.
+  assert.deepEqual(JSON.parse(String(request.init.body)), { secret: SECRET });
+  // Redirects to script.googleusercontent.com are how Apps Script returns the reply.
+  assert.equal(request.init.redirect, "follow");
+});

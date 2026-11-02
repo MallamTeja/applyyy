@@ -13,7 +13,8 @@ import { createAppUserClient } from "../_shared/db/client.ts";
 // Gate 1: only the app user's own session may trigger a sync (the anon key is public).
 import { authorizeCaller } from "../_shared/db/gates.ts";
 // Pure response shaping, node-tested in respond.test.ts.
-import { configVerdict, upstreamVerdict } from "./respond.ts";
+// GMAIL_SYNC_SECRET_ENV_VAR and upstreamRequest (W16): its own secret, sent in a POST body.
+import { configVerdict, GMAIL_SYNC_SECRET_ENV_VAR, upstreamRequest, upstreamVerdict } from "./respond.ts";
 
 // Browser-invoked, so the standard CORS trio (same values as the other functions).
 const corsHeaders = {
@@ -54,7 +55,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // Config gate: a plain 503 until Teja deploys the Web App and sets the URL secret.
   const config = configVerdict(
     Deno.env.get("APPLYY_GMAIL_SYNC_URL") ?? null,
-    Deno.env.get("EMAIL_INTAKE_SHARED_SECRET") ?? null,
+    // Its own secret (W16): unset means 503, never a fallback to the intake secret.
+    Deno.env.get(GMAIL_SYNC_SECRET_ENV_VAR) ?? null,
   );
   // Not configured yet: the dashboard shows this verbatim; nothing crashed.
   if (!config.ok) return json(config.verdict.status, { ...config.verdict.body });
@@ -66,10 +68,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let upstreamStatus: number;
   let upstreamText: string;
   try {
-    const response = await fetch(`${config.url}?secret=${encodeURIComponent(config.secret)}`, {
-      // The Web App answers GET; redirects to script.googleusercontent.com are normal.
-      method: "GET",
-      redirect: "follow",
+    // The secret rides in the POST body, never the URL (W16); built by the node-tested helper.
+    const request = upstreamRequest(config.url, config.secret);
+    // Sent as built.
+    const response = await fetch(request.url, {
+      // Method, JSON body and redirect policy, unchanged.
+      ...request.init,
       // A hung script must not hold the Edge Function's wall clock past 30s.
       signal: AbortSignal.timeout(30_000),
     });
@@ -77,9 +81,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
     upstreamStatus = response.status;
     upstreamText = await response.text();
   } catch (cause) {
-    // The thrown error can quote the request URL with the secret in it — and in its
-    // URL-ENCODED form, which a raw-string scrub misses (security review, 2026-10-23).
-    // So the cause is never logged: only its name, which is enough to tell a timeout
+    // The thrown error could quote the request URL, which carried the secret (URL-ENCODED,
+    // which a raw-string scrub misses; security review, 2026-10-23) until W16 moved it into
+    // the body. Kept anyway, since the cause is never needed: it is never logged, only its name, which is enough to tell a timeout
     // (TimeoutError) from DNS/TLS trouble, and nothing is forwarded to the browser.
     const causeName = cause instanceof Error ? cause.name : typeof cause;
     console.error(`[gmail-sync] upstream fetch failed (${causeName})`);

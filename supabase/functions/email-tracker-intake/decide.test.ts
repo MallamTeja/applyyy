@@ -656,3 +656,121 @@ test("injection: a quoted mailfrom echoed into the header cannot forge a dkim=pa
   // The real Gmail shape — balanced comment, no quotes — still verifies after stripping.
   assert.deepEqual(receipt.verifyReceiptSender("no-reply@us.greenhouse-mail.io", GREENHOUSE_AUTH), { method: "dkim", domain: "us.greenhouse-mail.io" });
 });
+
+// ---- W32 (2026-11-02): the tracker can classify an offer, conservatively ----
+//
+// Before this, classifier.ts had no offer outcome, so targetStatusFor's `case "offer"` was
+// dead and interview -> offer (tracker, 0.8 bar) was never taken. `offer` is TERMINAL, so a
+// false positive is a wrong irreversible move: the spam cases below matter as much as the hit.
+
+// Namespace import: a missing OFFER_SIGNALS export fails only the guard that reads it.
+import * as classifier from "../_shared/email/classifier.ts";
+
+// A real offer, employer-direct: the decision phrase plus the offer-letter corroboration.
+const OFFER = {
+  // Employer domain sender, so the domain matcher can pin the row.
+  from: "Stripe Recruiting <recruiting@stripe.com>",
+  // The subject names the offer, which only corroborates.
+  subject: "Your offer from Stripe",
+  // The decision phrase ("delighted to extend you an offer of employment") is the strong signal.
+  snippet: "Hi Teja, following your onsite interview we are delighted to extend you an offer of employment for the Software Engineer role. Your offer letter is attached; please sign and return it by Friday.",
+};
+
+test("W32: a real offer email is an offer and moves interview to offer", () => {
+  // The classification the tracker stores.
+  const decision = classifyMessage(OFFER);
+  // An offer, not the interview the snippet also mentions: the later stage wins.
+  assert.equal(decision.classification, "offer");
+  // Clears the terminal gate on its own decision phrase.
+  assert.ok(decision.confidence >= TERMINAL_MIN_CONFIDENCE, `confidence ${decision.confidence}`);
+  // The one edge the graph gives the tracker into offer.
+  assert.equal(moveFor(OFFER, "interview"), "offer");
+  // From applied the graph has no offer edge, so the same email moves nothing.
+  assert.equal(moveFor(OFFER, "applied"), null);
+});
+
+test("W32: 'pleased to offer you the position' is an offer", () => {
+  // The other common phrasing, from an ATS sender this time.
+  const message = { from: "Acme <no-reply@greenhouse.io>", subject: "Next steps", snippet: "We are pleased to offer you the position of Backend Engineer at Acme." };
+  // An offer.
+  assert.equal(classifyMessage(message).classification, "offer");
+});
+
+test("W32: recruiter spam about offer letter templates is never an offer", () => {
+  // Marketing mail that says "offer letter" and "job offer" without anyone offering a job.
+  const spam = [
+    // The HR-tooling newsletter the audit named.
+    { from: "HR Weekly <news@hrtools.example>", subject: "10 offer letter templates every recruiter needs", snippet: "Download our free offer letter template pack and create a job offer letter in minutes. Exclusive offer: 20% off this week." },
+    // A discount that borrows the decision verbs.
+    { from: "Deals <deals@shop.example>", subject: "A special offer for you", snippet: "We are pleased to extend an offer of 30% off to our best customers. We're excited to offer you free shipping." },
+    // A job board pushing listings: "job offers" in the plural is not an offer to Teja.
+    { from: "Jobs <alerts@board.example>", subject: "New job offers matching your profile", snippet: "Here are 25 job offers you may like. Apply today." },
+  ];
+  // Every one of them.
+  for (const message of spam) {
+    // Not an offer.
+    assert.notEqual(classifyMessage(message).classification, "offer", message.subject);
+    // And moves nothing from interview, the only stage an offer could leave.
+    assert.equal(moveFor(message, "interview"), null, message.subject);
+  }
+});
+
+test("W32: a refused offer is never an offer", () => {
+  // Negations of the decision verbs, with and without the rejection opener.
+  const refusals = [
+    // No "unfortunately": no rejection rule fires, so only the offer rule's own wording protects it.
+    "We will not be extending an offer for the Software Engineer role at this time.",
+    // With the opener: a rejection, which must win.
+    "Unfortunately, we are unable to offer you the position.",
+  ];
+  // Each one.
+  for (const snippet of refusals) {
+    // Same sender and subject as the real offer, so only the body differs.
+    const decision = classifyMessage({ ...OFFER, snippet });
+    // Not an offer.
+    assert.notEqual(decision.classification, "offer", snippet);
+  }
+});
+
+test("W32: offer corroborate-only rules, all firing at once, never reach an offer", () => {
+  // The flagged offer rules; read live from the classifier, never copied.
+  const weak = classifier.OFFER_SIGNALS.filter((rule) => rule.corroborateOnly === true);
+  // Guard against a vacuous pass.
+  assert.ok(weak.length >= 2, `only ${weak.length} flagged offer rules`);
+  // Additive worst case.
+  const sum = weak.reduce((total, rule) => total + rule.weight, 0);
+  // Under the terminal gate, so subject + attachment wording alone never moves a row.
+  assert.ok(sum < TERMINAL_MIN_CONFIDENCE, `offer corroborate-only sum ${sum}`);
+  // And the live message built from those signals alone is not an offer.
+  const weakOnly = { from: "recruiting@stripe.com", subject: "Your offer letter", snippet: "Your offer letter is attached." };
+  // Not an offer.
+  assert.notEqual(classifyMessage(weakOnly).classification, "offer");
+});
+
+// ---- W33 (2026-11-02): an email with no signal and no match is stored without its text ----
+//
+// Live 2026-11-01: 97/97 email_events were `unclassified` and none matched, including Google
+// security mail (OAuth grants). Storing their subject and body text bought nothing.
+
+// One wire message, every field filled so a dropped field is visible.
+const STORABLE = { message_id: "m-9", thread_id: "t-9", to: "teja@x.com", label_ids: ["INBOX"], from: "Google <no-reply@accounts.google.com>", subject: "Security alert", snippet: "A new app was granted access to your Google Account", received_at: "2026-11-01T05:00:00.000Z" };
+
+test("W33: an unclassified, unmatched email is stored without its subject, body or To", () => {
+  // Built exactly as index.ts builds it.
+  const row = receipt.emailEventRowOf(STORABLE, { classification: "unclassified", confidence: 0.3 }, null, "2026-11-01T05:01:00.000Z");
+  // The text columns are NOT NULL, so they are emptied, not nulled.
+  assert.deepEqual([row.subject, row.snippet, row.recipient_to], ["", "", null]);
+  // The dedup key, sender, time and labels stay: they are what tunes the Gmail query.
+  assert.deepEqual([row.provider_message_id, row.from_address, row.received_at, row.label_ids], ["m-9", STORABLE.from, STORABLE.received_at, ["INBOX"]]);
+});
+
+test("W33: a matched or classified email keeps its text", () => {
+  // Unclassified but matched to an application: the human may need the words.
+  const matched = receipt.emailEventRowOf(STORABLE, { classification: "unclassified", confidence: 0.3 }, "a1", "x");
+  // Kept whole.
+  assert.deepEqual([matched.subject, matched.snippet, matched.recipient_to], [STORABLE.subject, STORABLE.snippet, STORABLE.to]);
+  // Classified but unmatched: the words show why matching missed.
+  const classified = receipt.emailEventRowOf(STORABLE, { classification: "rejection", confidence: 0.95 }, null, "x");
+  // Kept whole.
+  assert.deepEqual([classified.subject, classified.snippet], [STORABLE.subject, STORABLE.snippet]);
+});
