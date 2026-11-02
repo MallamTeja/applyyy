@@ -197,6 +197,20 @@ describe('runApplierBatch', () => {
     expect(summary.stoppedReason).toMatch(/kill switch/i);
   });
 
+  it('W31: sweeps stale claims even while the kill switch is off', async () => {
+    // Nothing else sweeps on a schedule: if an off switch also skipped the sweep, a row a
+    // killed run stranded at `applying` would stay there for as long as the system is off.
+    const { gateway, calls, closed } = fakeGateway({ isSystemEnabled: async () => false });
+
+    await runApplierBatch({ gateway, openPage: async () => stubPage(), renderResume, env: {}, clock: frozenClock });
+
+    // The sweep ran: cleanup is not new work, so the switch does not stop it.
+    expect(calls).toContain('sweep');
+    // The switch still stopped the work itself, and the run still says so.
+    expect(calls).not.toContain('claim');
+    expect(closed[0]?.status).toBe('skipped_disabled');
+  });
+
   it('re-authenticates before an application when the token is near expiry', async () => {
     // The refresh must land BEFORE `approved -> applying`, never inside the
     // applying window: that is the one non-idempotent leg, and a token dying

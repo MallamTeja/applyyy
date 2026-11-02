@@ -7,6 +7,8 @@
 //
 // The sweep is how kits are made normally: .github/workflows/apply-kit.yml runs it after
 // every applier run and daily, so nobody dispatches a kit by hand (Teja, 2026-10-24).
+// The sweep honours the kill switch (W28): off, it opens no page. A single `--id` run does
+// not read it: it only starts from a human's dispatch naming one row, and it never submits.
 //
 // Opens the application's live form, plans every field from our data, renders a fresh
 // resume with the latest master's identity, and appends ONE application_events note.
@@ -162,6 +164,8 @@ async function main(): Promise<void> {
     } else {
       // THE SWEEP: every due row, capped, one failure never stopping the rest.
       const summary = await runKitSweep({
+        // W28: the kill switch, read through the applier's gateway method before any row or page.
+        isSystemEnabled: gateway.isSystemEnabled,
         // The two reads, over the same signed-in client (RLS applies).
         ...createSweepReader(client),
         // Each kit's counts reach the log; its values never do.
@@ -169,6 +173,8 @@ async function main(): Promise<void> {
         cap: sweepCap,
         log: (line) => console.log(line),
       });
+      // An off switch is the switch working: the sweep already logged it, and the run stays green.
+      if (summary === 'skipped_disabled') return;
       // The totals as one line, so the run page shows the outcome at a glance.
       console.log(`[apply-kit sweep] done: eligible ${summary.eligible}, attempted ${summary.attempted}, built ${summary.built}, failed ${summary.failed.length}`);
       // A failed row turns the run red so it is seen, after every other row has had its turn.

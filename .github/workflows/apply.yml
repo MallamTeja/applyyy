@@ -128,12 +128,19 @@ jobs:
       - name: Install Chromium system dependencies
         run: pnpm --filter '@applyy/worker' exec playwright install-deps chromium
 
-      # The run itself. The worker checks the `system_enabled` kill switch FIRST
-      # (§18.1) and exits immediately if it is off, so stopping everything never
+      # The run itself. The worker first sweeps stale claims (cleanup, so it runs even
+      # while the system is off: W31), then checks the `system_enabled` kill switch
+      # (§18.1) and claims nothing if it is off, so stopping everything never
       # requires deleting this cron or revoking a key at 2am.
       - name: Run the applier
-        # Two guards before the worker starts, both in shell because a workflow
-        # `env:` key cannot be conditionally omitted:
+        # The run mode, then two guards, all in shell before the worker starts.
+        # THE MODE (W30, wiring audit 2026-11-01) is decided here, not in a `${{ }}`
+        # expression: GitHub's expression `==` ignores case, so `dry_run=FALSE` ran
+        # live and `APPLYY_CRON_LIVE=TRUE` made cron live. Shell `[ = ]` is exact.
+        # The raw input and variable arrive through env, never pasted into the
+        # script text, so no input value can be run as shell code.
+        # The guards are in shell because a workflow `env:` key cannot be
+        # conditionally omitted:
         # 1. A LIVE MANUAL run must name one application. Without this, dry_run
         #    "false" would submit every approved row in one go. Scheduled runs are
         #    exempt: a live cron run (APPLYY_CRON_LIVE) is bounded instead by
@@ -143,6 +150,18 @@ jobs:
         #    run), and scheduled runs supply no inputs at all, so passing the input
         #    straight through would make every cron run fail.
         run: |
+          # THE SAFETY DEFAULT: dry, unless one of exactly two opt-ins holds below.
+          DRY_RUN=true
+          # Opt-in 1: a manual run whose dry_run input is the exact string "false".
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN_INPUT" = "false" ]; then DRY_RUN=false; fi
+          # Opt-in 2: a scheduled run while APPLYY_CRON_LIVE is the exact string "true".
+          # Unset, "TRUE" or a typo compares unequal, so cron stays dry; a manual run never reads it.
+          if [ "$EVENT_NAME" = "schedule" ] && [ "$CRON_LIVE" = "true" ]; then DRY_RUN=false; fi
+          # Exported for the worker's gate, which also refuses anything but the exact "false"
+          # (worker/src/submission-mode.ts), so the two checks fail closed independently.
+          export DRY_RUN
+          # Named in the log, so the run page says which mode ran and why.
+          echo "DRY_RUN=$DRY_RUN (event $EVENT_NAME)"
           # Guard 1: refuse a whole-queue live MANUAL submit, before anything is claimed.
           if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ] && [ -z "$ONLY_ID" ]; then
             # Annotated as an error so the reason shows on the run page, not only in the log.
@@ -157,17 +176,13 @@ jobs:
         # Step-scoped: the ONLY step that reads any of these (apply.ts:77-81,
         # submission-mode.ts:56), so no action or install script can see them.
         env:
-          # THE SAFETY DEFAULT: 'true' unless one of exactly two opt-ins holds.
-          # 1. A manual run whose dry_run input is the exact string "false".
-          # 2. A SCHEDULED run while the repository variable APPLYY_CRON_LIVE is the
-          #    exact string 'true'. An unset or misspelt variable compares unequal,
-          #    so cron stays dry; a manual run never reads the variable at all.
-          # The worker's gate additionally refuses anything that is not the exact
-          # string "false", so a typo here fails closed rather than submitting (see
-          # worker/src/submission-mode.ts).
-          DRY_RUN: ${{ (inputs.dry_run == 'false' || (github.event_name == 'schedule' && vars.APPLYY_CRON_LIVE == 'true')) && 'false' || 'true' }}
-          # Which trigger started this run; read only by Guard 1, which applies to
-          # manual runs alone.
+          # NO DRY_RUN here (W30): the script above computes it from the two raw
+          # values below. A `${{ == }}` here would bring back the case-insensitive match.
+          # The raw dry_run input, as typed; only its exact "false" opts a manual run in.
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          # The raw repository variable; only its exact "true" opts a scheduled run in.
+          CRON_LIVE: ${{ vars.APPLYY_CRON_LIVE }}
+          # Which trigger started this run; read by both opt-ins and by Guard 1.
           EVENT_NAME: ${{ github.event_name }}
           # The per-run cap on real submit attempts (submitted + outcome unknown),
           # parsed strictly by the worker (claim-loop.ts parseMaxSubmits). It bounds

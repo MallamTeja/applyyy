@@ -414,6 +414,17 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
   }
 
   try {
+    // Sweep FIRST, before the kill switch and before claiming (W31, wiring audit
+    // 2026-11-01). Cheap, and it turns a crashed previous run into a self-healing
+    // one; sweeping after claiming would leave last night's stranded rows
+    // invisible for another whole day. It is also what routes a row stuck at
+    // `applying` to `needs_verification` rather than back into this queue.
+    // Before the kill switch because nothing else sweeps on a schedule: behind the
+    // switch's early return, a row a killed run stranded at `applying` stayed there
+    // for as long as the system was off. A sweep is cleanup, not new work, so an
+    // off switch has no reason to stop it.
+    await gateway.sweepStaleClaims();
+
     // THE KILL SWITCH (§18.1), read here for OBSERVABILITY rather than safety.
     // `claim_applications` already returns zero rows when `system_enabled` is
     // false — safety that depends on nine callers remembering is not safety —
@@ -433,12 +444,6 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
     // the run-level catch: the run closes `failed` naming the cause and claims nothing. That
     // is the fail-closed direction; falling back to "no cap" is the fail-open one.
     if (live) daily = await gateway.fetchDailyCap(new Date((clock() - 24 * 60 * 60) * 1000).toISOString());
-
-    // Sweep BEFORE claiming. Cheap, and it turns a crashed previous run into a
-    // self-healing one; sweeping afterwards would leave last night's stranded
-    // rows invisible for another whole day. It is also what routes a row stuck
-    // at `applying` to `needs_verification` rather than back into this queue.
-    await gateway.sweepStaleClaims();
 
     // Fetched once per run rather than per application: the bank changes only
     // when a human edits it, and 35 refetches would be 35 needless round trips.

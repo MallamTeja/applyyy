@@ -306,10 +306,14 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
  * production gateway, so storage paths and the note insert match a bot run exactly; the
  * one new read is the row by id, which the production gateway only offers through a claim.
  */
-export function createKitGateway(client: SupabaseLike, config: GatewayConfig): KitGateway {
+// The kill-switch read rides BESIDE KitGateway, not in it, as supabase-assist-gateway does:
+// buildApplyKit never reads it, so its test doubles need not grow a method it does not call.
+export function createKitGateway(client: SupabaseLike, config: GatewayConfig): KitGateway & { isSystemEnabled(): Promise<boolean> } {
   // The production gateway; only the methods below are exposed, never its status writes.
   const production = createSupabaseGateway(client, config);
   return {
+    // W28: the applier's own kill-switch read, reused: missing row reads false, a refused read throws.
+    isSystemEnabled: () => production.isSystemEnabled(),
     async fetchApplication(applicationId) {
       // The row. Errors surface as {error}, so they are checked, not assumed away.
       const app = await client.from('applications').select('id, status, tailored_profile, job_id').eq('id', applicationId).maybeSingle();

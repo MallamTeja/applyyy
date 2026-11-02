@@ -16,7 +16,9 @@
 // needs_verification for a human to check by hand. Deciding early is what keeps
 // the dangerous window free of decisions.
 import { describe, expect, it } from 'vitest';
-import { canStartAnotherApplication } from '../src/run-window.ts';
+// Read once, to hold the budget against the job timeout it must fit inside (W31).
+import { readFileSync } from 'node:fs';
+import { canStartAnotherApplication, DEFAULT_RUN_WINDOW_LIMITS } from '../src/run-window.ts';
 
 // A baseline that every case below perturbs one axis of, so each assertion
 // attributes its outcome to exactly one variable.
@@ -92,5 +94,28 @@ describe('canStartAnotherApplication', () => {
     ]) {
       expect(decision.reason.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('DEFAULT_RUN_WINDOW_LIMITS against apply.yml (W31)', () => {
+  it('W31: budget + setup + one in-flight application + teardown fits inside timeout-minutes', () => {
+    // The workflow the applier runs in; the test fails if its timeout and the budget drift apart.
+    const workflow = readFileSync(new URL('../../.github/workflows/apply.yml', import.meta.url), 'utf8');
+    // Every timeout-minutes line: the shape is asserted, so a renamed key cannot pass vacuously (§6).
+    const timeouts = [...workflow.matchAll(/^\s+timeout-minutes:\s*(\d+)\s*$/gm)].map((match) => Number(match[1]));
+    // Exactly one job, exactly one timeout.
+    expect(timeouts).toHaveLength(1);
+    // The hard kill, in seconds. A killed run strands its row at `applying`.
+    const killAtSeconds = timeouts[0]! * 60;
+    // Setup before the worker starts: 45 s measured on a cache hit (2026-11-02); a cache miss
+    // also downloads Chromium (~130 MB) with its apt deps, so 180 s is the bound used.
+    const setupSeconds = 180;
+    // The budget is checked only BEFORE an application, so one may still be in flight when it
+    // runs out. Bounded by the refresh margin, which run-window.ts sizes to exceed one application.
+    const inFlightSeconds = DEFAULT_RUN_WINDOW_LIMITS.refreshMarginSeconds;
+    // Releasing held rows, closing the run row and the post-job steps.
+    const teardownSeconds = 30;
+    // The worst case must end before the kill.
+    expect(DEFAULT_RUN_WINDOW_LIMITS.runBudgetSeconds + setupSeconds + inFlightSeconds + teardownSeconds).toBeLessThanOrEqual(killAtSeconds);
   });
 });

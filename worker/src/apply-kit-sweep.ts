@@ -7,7 +7,19 @@
 // few per run (one browser, rows in turn), and never lets one failure stop the others.
 // It runs after every applier run (workflow_run) plus a daily backstop, so a parked row
 // gets its kit minutes later without anyone dispatching anything.
-import type { ApplicationStatus } from '@applyy/shared-types';
+//
+// Two rules on top (wiring audit 2026-11-01):
+// - W28: the kill switch. With system_settings.system_enabled off, the sweep reads no row
+//   and opens no employer page; an unreadable switch throws (fail closed).
+// - W29: a row parked because its form cannot be opened (robots_refused, no_apply_url) is
+//   never due. The kit hits the same robots gate or the same missing URL, so it threw on
+//   every run, stayed un-stamped, was retried oldest-first and kept the workflow red.
+//   SKIPPED rather than stamped with a failure note: skipping writes nothing and leaves the
+//   v1 note contract alone, while a failure stamp would also silence TRANSIENT failures
+//   (robots "wait", a timeout) until the next status change. Teja still sees the row in
+//   the human queue with its reason, and `--id` still builds its kit on demand.
+// BlockReason types the park fact, so a typo in the skip list fails to compile.
+import type { ApplicationStatus, BlockReason } from '@applyy/shared-types';
 // The statuses that wait on Teja: the same list buildApplyKit re-checks per row.
 import { KIT_STATUSES } from './apply-kit.ts';
 // The client shape the production gateway accepts, so the reader runs on the same client.
@@ -42,6 +54,12 @@ export interface SweepRow {
   readonly status: ApplicationStatus;
   // applications.status_changed_at: set by the transition trigger whenever the status moves.
   readonly statusChangedAt: string;
+  // applications.block_reason. KEPT after a row leaves blocked_needs_human (20261004220000),
+  // so it describes the row now only together with that status (W29).
+  readonly blockReason: BlockReason | null;
+  // applications.block_detail->>unusable: the applier's W4 cause ('no_apply_url' |
+  // 'posting_disappeared'), or null. Typed as text: it is read from jsonb, not an enum.
+  readonly blockUnusable: string | null;
 }
 
 /** One existing kit note: whose, and when it was written. */
@@ -66,6 +84,9 @@ export interface SweepSummary {
 
 /** The sweep's inputs, injected so the selection and the loop are testable without a browser. */
 export interface RunKitSweepInput {
+  // system_settings.system_enabled (W28). REQUIRED, so a sweep that ignores the kill switch
+  // does not compile. A missing row reads false; a refused read throws (supabase-gateway).
+  readonly isSystemEnabled: () => Promise<boolean>;
   // Every row that could be waiting on Teja.
   readonly listRows: () => Promise<readonly SweepRow[]>;
   // The kit notes for exactly these ids.
@@ -81,6 +102,19 @@ export interface RunKitSweepInput {
 // An ISO-ish timestamp: the shape PostgREST returns for timestamptz. Checked BEFORE
 // Date.parse, which reads "-5" as the year -5 (CLAUDE.md §6).
 const TIMESTAMP_SHAPE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
+
+// W29: the park causes under which a kit cannot open the form, so building one fails every run.
+const UNOPENABLE_REASONS: readonly BlockReason[] = ['robots_refused'];
+// The applier's W4 cause for a job with no form URL (claim-loop.ts UnusableClaim).
+const UNOPENABLE_UNUSABLE: readonly string[] = ['no_apply_url'];
+
+/** True for a row parked RIGHT NOW for a cause no kit can get past (W29). */
+function cannotOpenForm(row: SweepRow): boolean {
+  // Only while parked: a re-approved row keeps its old block facts as history.
+  if (row.status !== 'blocked_needs_human') return false;
+  // Either cause is enough.
+  return (row.blockReason !== null && UNOPENABLE_REASONS.includes(row.blockReason)) || (row.blockUnusable !== null && UNOPENABLE_UNUSABLE.includes(row.blockUnusable));
+}
 
 /** Milliseconds for a well-shaped timestamp, or null for anything else. */
 function readTime(value: string): number | null {
@@ -118,6 +152,8 @@ export function selectKitCandidates(rows: readonly SweepRow[], kits: readonly Ki
   for (const row of rows) {
     // Only rows waiting on Teja; the query is not trusted to have filtered.
     if (!KIT_STATUSES.includes(row.status)) continue;
+    // W29: a form no kit can open is never due, so it cannot keep the run red.
+    if (cannotOpenForm(row)) continue;
     // When the current situation began.
     const changed = readTime(row.statusChangedAt);
     // Its newest kit, if any.
@@ -135,8 +171,19 @@ export function selectKitCandidates(rows: readonly SweepRow[], kits: readonly Ki
   return { eligible, selected: eligible.slice(0, Math.max(0, cap)) };
 }
 
-/** One sweep: read, select, build each selected row in turn, and report every outcome. */
-export async function runKitSweep(input: RunKitSweepInput): Promise<SweepSummary> {
+/**
+ * One sweep: check the kill switch, read, select, build each selected row in turn, and
+ * report every outcome. 'skipped_disabled' is its own closed outcome, never a zero summary,
+ * so the caller cannot report an off switch as "nothing was due".
+ */
+export async function runKitSweep(input: RunKitSweepInput): Promise<SweepSummary | 'skipped_disabled'> {
+  // W28: THE KILL SWITCH, before any read or page. A throw here (unreadable) ends the run red.
+  if (!(await input.isSystemEnabled())) {
+    // The agent_runs word, so a log search for a skipped run finds this one too.
+    input.log('[apply-kit sweep] skipped_disabled: system_settings.system_enabled is false; no row read, no page opened');
+    // Nothing was read, so there is nothing to count.
+    return 'skipped_disabled';
+  }
   // Every row that might wait on Teja.
   const rows = await input.listRows();
   // Kits are read only for the candidates, so the read stays small as history grows.
@@ -148,7 +195,7 @@ export async function runKitSweep(input: RunKitSweepInput): Promise<SweepSummary
   // An empty sweep says so; a silent pass would look like a broken one.
   if (eligible.length === 0) {
     // The exact phrase a log search for "0 eligible" finds.
-    input.log('[apply-kit sweep] 0 eligible: every row waiting on Teja already has a current kit');
+    input.log('[apply-kit sweep] 0 eligible: every row waiting on Teja has a current kit or a form no kit can open (robots_refused, no_apply_url)');
     // Nothing tried, nothing failed.
     return { eligible: 0, attempted: 0, built: 0, failed: [] };
   }
@@ -187,12 +234,21 @@ export function createSweepReader(client: SupabaseLike): Pick<RunKitSweepInput, 
   return {
     // Every row in a lane that waits on Teja.
     async listRows() {
-      // The candidate lanes, with the stamp the transition trigger keeps (status_transition_guard).
-      const result = await client.from('applications').select('id, status, status_changed_at').in('status', [...KIT_STATUSES]);
+      // The candidate lanes, with the stamp the transition trigger keeps (status_transition_guard),
+      // and the two park facts W29 skips on: the enum column and the W4 cause inside block_detail.
+      const result = await client.from('applications').select('id, status, status_changed_at, block_reason, unusable:block_detail->>unusable').in('status', [...KIT_STATUSES]);
       // A refused read must not look like "nothing to do".
       if (result.error) throw new Error(`apply kit sweep: read applications failed: ${result.error.message}`);
       // Narrowed to the sweep's shape.
-      return (result.data ?? []).map((r: { id: string; status: ApplicationStatus; status_changed_at: string }) => ({ id: r.id, status: r.status, statusChangedAt: r.status_changed_at }));
+      return (result.data ?? []).map((r: { id: string; status: ApplicationStatus; status_changed_at: string; block_reason: BlockReason | null; unusable: string | null }) => ({
+        // The row's id and lane, as before.
+        id: r.id,
+        status: r.status,
+        statusChangedAt: r.status_changed_at,
+        // Absent reads as null: "not parked for that cause", so the row is kitted as before W29.
+        blockReason: r.block_reason ?? null,
+        blockUnusable: r.unusable ?? null,
+      }));
     },
     // The kit notes of exactly these rows.
     async listKits(applicationIds) {

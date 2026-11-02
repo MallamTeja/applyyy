@@ -69,13 +69,19 @@ export const DEFAULT_RUN_WINDOW_LIMITS: RunWindowLimits = {
   // between two checks, so generous costs nothing but makes the gate immune to
   // the real-site latency the fixture measurement could not capture.
   refreshMarginSeconds: 300,
-  // 55 minutes. Sits between the ~53 min a full 35-application queue needs (so
-  // a normal day is not truncated) and the 66 min/day average allowance (so a
-  // slow day cannot overrun the monthly budget). Overflow is not lost: rows
-  // stay claimable and the next cron tick takes them, which is the same
-  // bounded-batch-and-re-fire principle the Edge Functions use for their 2s CPU
-  // limit, applied to wall clock instead.
-  runBudgetSeconds: 3300,
+  // 50 minutes (W31, wiring audit 2026-11-01; was 55). The budget must END
+  // before apply.yml's `timeout-minutes: 60` kills the job, because a killed
+  // run strands its row at `applying`. Worst case, in seconds:
+  //   3000 budget + 180 setup (45 measured on a cache hit 2026-11-02; a miss
+  //   also downloads Chromium) + 300 one application still in flight when the
+  //   budget runs out (it is checked only BEFORE an application; bounded by the
+  //   refresh margin above) + 30 teardown = 3510 <= 3600.
+  // The old 3300 came to 3810: past the kill. test/run-window.test.ts holds this
+  // sum against the workflow's timeout, so the two cannot drift apart again.
+  // Overflow is not lost: rows stay claimable and the next cron tick takes
+  // them, which is the same bounded-batch-and-re-fire principle the Edge
+  // Functions use for their 2s CPU limit, applied to wall clock instead.
+  runBudgetSeconds: 3000,
 };
 
 export function canStartAnotherApplication(
