@@ -9,8 +9,8 @@
 // Processes queue items sitting at status 'deduped' (the legal source state for the
 // screener according to status_transition_guard.sql).
 
-// Database client creation helper. Signs in under RLS policy.
-import { createAppUserClient } from "../_shared/db/client.ts";
+// Database client creation helper. Checks the caller first, then signs in under RLS policy (W15).
+import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 // Batch evaluation planner and row adapter.
 import { planScreenedApplications } from "../_shared/screen/screen-batch.ts";
 // Screener context loader (rules, blocklist, application history, preferences).
@@ -22,8 +22,8 @@ import type { JobRow } from "../_shared/contracts/shared-types.ts";
 // The guarded status write. A bare `.update({ status })` is refused by the transition
 // guard with 42501, which is why no row used to leave `deduped`.
 import { persistScreenVerdict } from "../_shared/screen/persist-verdict.ts";
-// Caller auth and the fail-closed kill switch, shared by every pipeline agent.
-import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
+// The fail-closed kill switch, shared by every pipeline agent (caller auth is in the client now).
+import { readKillSwitch } from "../_shared/db/gates.ts";
 // Shared CORS headers, plus the boundary that keeps them on an uncaught 500.
 import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 // Persists the cascade's "rule skipped" warnings into the run row (B1, 2026-10-08).
@@ -58,18 +58,23 @@ Deno.serve(withErrorBoundary("screener", async (req: Request): Promise<Response>
   // Handle OPTIONS preflight request.
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
-  // Initialize DB client.
-  const connection = await createAppUserClient();
+  // Verify the caller FIRST, then sign in (W15): this function is verify_jwt=false, so a
+  // tokenless request reaches here and must not cost a password grant.
+  const connection = await createAuthorizedAppUserClient(req);
+  // Refused before any write, including the telemetry row: 401 or 403, same bodies as before.
+  if (!connection.ok && connection.kind === "refused") {
+    // The verdict carries which status.
+    return jsonResponse(connection.status, { success: false, error: connection.error });
+  }
+  // Our failure (env or sign-in), not the caller's.
   if (!connection.ok) {
+    // The reason can name env vars, so it goes to the log only.
     console.error("[screener] DB client connection failed:", connection.reason);
+    // Sanitized body, unchanged.
     return jsonResponse(503, { success: false, error: "database_unavailable" });
   }
+  // The signed-in, RLS-bound client.
   const db = connection.db;
-
-  // Refuse anyone but the app user BEFORE any write, including the telemetry row: the
-  // sign-in above never looked at the caller, and the anon key alone used to suffice.
-  const caller = await authorizeCaller(req, db, connection.userId);
-  if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });
 
   // Parsed once here: the application_id check below and the batch `limit` further down both read it.
   const url = new URL(req.url);

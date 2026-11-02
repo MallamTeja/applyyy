@@ -9,6 +9,8 @@
 // public anon key (it ships in the browser bundle) could drive the pipeline: the
 // platform's `verify_jwt` accepts the anon key because it is itself a valid JWT. The
 // gate demands a real user session and that it be the one app user's session.
+// Two variants: `authorizeCaller` runs after the sign-in (it compares ids), and
+// `authorizeBeforeSignIn` runs before it (W15: a refused caller costs no password grant).
 //
 // GATE 2 — THE KILL SWITCH. Each agent used to read `system_settings` its own way: the
 // screener halted on a missing row, the normalizer ran on one and ignored read errors,
@@ -20,7 +22,9 @@ export interface CallerAuthClient {
     // `getUser(jwt)` asks the auth server, so an expired, forged or anon token fails here
     // — a local decode would happily accept a token signed for a different project.
     getUser(jwt: string): PromiseLike<{
-      readonly data: { readonly user: { readonly id: string } | null };
+      // `email` is optional because supabase-js types it so (phone and anonymous users have
+      // none); authorizeBeforeSignIn compares it, authorizeCaller ignores it.
+      readonly data: { readonly user: { readonly id: string; readonly email?: string } | null };
       readonly error: { readonly message: string } | null;
     }>;
   };
@@ -41,21 +45,26 @@ export type CallerVerdict =
 // that only fails one network round trip later.
 const BEARER_SHAPE = /^Bearer\s+(\S+)\s*$/i;
 
+// The bearer token, or null when the header is absent or malformed. Shared by both gate-1
+// variants so they cannot disagree about what counts as "a token".
+function readBearer(req: Request): string | null {
+  // Absent header and malformed header are the same failure to the caller.
+  const match = BEARER_SHAPE.exec(req.headers.get("authorization") ?? "");
+  // The captured group; `?? null` covers the undefined the type system allows and the
+  // shape above rules out.
+  return match?.[1] ?? null;
+}
+
 // Gate 1. Run before any read or write on the app user's data.
 export async function authorizeCaller(
   req: Request,
   client: CallerAuthClient,
   appUserId: string,
 ): Promise<CallerVerdict> {
-  // Absent header and malformed header are the same failure to the caller.
-  const match = BEARER_SHAPE.exec(req.headers.get("authorization") ?? "");
+  // The token, validated by shape.
+  const token = readBearer(req);
   // No token at all: refuse without spending a call on the auth server.
-  if (!match) return { ok: false, status: 401, error: "missing_bearer_token" };
-  // The captured token. Indexed access is checked because the regex group is optional
-  // only in the type system's eyes; the shape above guarantees it.
-  const token = match[1];
-  // Unreachable by the regex, but the type says it could be undefined.
-  if (token === undefined) return { ok: false, status: 401, error: "missing_bearer_token" };
+  if (token === null) return { ok: false, status: 401, error: "missing_bearer_token" };
 
   // Ask the auth server. The anon key has no `sub` claim and is refused here, which is
   // precisely the caller this gate exists to stop.
@@ -70,6 +79,73 @@ export async function authorizeCaller(
 
   // The app user, verified by the auth server.
   return { ok: true, userId: data.user.id };
+}
+
+// What a password sign-in yields: the same union `client.ts#DbClientResult` is, generic
+// over the client so a test can sign in with a string instead of a real SupabaseClient.
+export type SignInResult<Db> =
+  // Signed in; `userId` is the id the sign-in returned.
+  | { readonly ok: true; readonly db: Db; readonly userId: string }
+  // Could not sign in; `reason` is for the server log only.
+  | { readonly ok: false; readonly reason: string };
+
+// The verdict of gate 1 run BEFORE the sign-in. Two failure kinds, because the entry
+// points answer them differently: `refused` is the caller's fault (401/403, the same
+// bodies authorizeCaller produces), `unavailable` is ours (503, reason only in the log).
+export type AuthorizedSignIn<Db> =
+  // An authorized caller, and a client signed in as the app user.
+  | { readonly ok: true; readonly db: Db; readonly userId: string }
+  // The caller was refused. No password grant was spent on them.
+  | { readonly ok: false; readonly kind: "refused"; readonly status: 401 | 403; readonly error: Extract<CallerVerdict, { ok: false }>["error"] }
+  // The caller was fine, but the sign-in failed.
+  | { readonly ok: false; readonly kind: "unavailable"; readonly reason: string };
+
+// W15 (wiring audit 2026-11-01). Gate 1, run BEFORE the password sign-in.
+//
+// WHY THE ORDER MATTERS: the sign-in is a GoTrue password grant, rate-limited per IP.
+// authorizeCaller needs the app user's id, which only the sign-in returned, so every
+// caller ran the grant first: a loop of tokenless requests against a verify_jwt=false
+// function spent one grant each and could rate-limit the pipeline's own sign-ins (503).
+// Here the caller is checked against the app user's EMAIL instead (already a secret,
+// APPLYY_APP_USER_EMAIL), so no new secret is needed and a refused caller costs no grant.
+export async function authorizeBeforeSignIn<Db>(
+  req: Request,
+  // Any client that can ask the auth server about a token; an anon-key client suffices.
+  verifier: CallerAuthClient,
+  // The app user's email, from the secret.
+  appUserEmail: string,
+  // The password sign-in, called only once the caller has passed.
+  signIn: () => Promise<SignInResult<Db>>,
+): Promise<AuthorizedSignIn<Db>> {
+  // The token, validated by shape.
+  const token = readBearer(req);
+  // No token: refused locally, no auth-server call and no grant.
+  if (token === null) return { ok: false, kind: "refused", status: 401, error: "missing_bearer_token" };
+
+  // /auth/v1/user verifies the token's signature and expiry server-side; it is a token
+  // check, not a password grant, so it is not the rate limit W15 is about.
+  const { data, error } = await verifier.auth.getUser(token);
+  // An error or a null user is "not a session we can trust", checked together as above.
+  if (error !== null || data.user === null) return { ok: false, kind: "refused", status: 401, error: "invalid_session" };
+
+  // GoTrue stores emails lowercased; the secret may carry case or padding. A user with no
+  // email (phone, anonymous) has nothing to match and is refused, never waved through.
+  const callerEmail = typeof data.user.email === "string" ? data.user.email.trim().toLowerCase() : null;
+  // A real session for someone else: 403, as authorizeCaller says it.
+  if (callerEmail === null || callerEmail !== appUserEmail.trim().toLowerCase()) {
+    return { ok: false, kind: "refused", status: 403, error: "caller_is_not_app_user" };
+  }
+
+  // The caller is the app user: only now spend the password grant.
+  const connection = await signIn();
+  // Our failure, not the caller's; the reason stays for the server log.
+  if (!connection.ok) return { ok: false, kind: "unavailable", reason: connection.reason };
+  // The id check authorizeCaller made, kept: an email is reusable after a user is deleted
+  // and re-created, an id is not. Costs no network call; the sign-in already returned it.
+  if (data.user.id !== connection.userId) return { ok: false, kind: "refused", status: 403, error: "caller_is_not_app_user" };
+
+  // Authorized, and signed in.
+  return { ok: true, db: connection.db, userId: connection.userId };
 }
 
 // The slice of postgrest gate 2 needs — the same shape as `screen/supabase-queries.ts`.

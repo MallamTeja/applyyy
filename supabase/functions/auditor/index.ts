@@ -20,8 +20,8 @@
 // written. Without this, a stranded row never reached the human queue at all.
 // ============================================================================
 
-// Import database client factory helper for authenticated Supabase connection
-import { createAppUserClient } from "../_shared/db/client.ts";
+// Import database client factory: verifies the caller first, then signs in (W15)
+import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 
 // Import anti-fabrication auditor orchestrator function
 import { auditApplication } from "../_shared/audit/audit.ts";
@@ -32,8 +32,8 @@ import { collectPins, resolvePinnedMaster } from "../_shared/audit/pinned-master
 // Import shared contract interfaces for MasterProfile, ResolvedResume, and TailoredProfile
 import type { MasterProfile, ResolvedResume, TailoredProfile } from "../_shared/contracts/shared-types.ts";
 
-// Caller auth and the fail-closed kill switch, shared by every pipeline agent
-import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
+// The fail-closed kill switch, shared by every pipeline agent (caller auth is in the client now)
+import { readKillSwitch } from "../_shared/db/gates.ts";
 
 // Shared CORS headers, plus the boundary that keeps them on an uncaught 500
 import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
@@ -104,8 +104,16 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
     return new Response("ok", { headers: corsHeaders });
   }
 
-  // Establish database client connection under authenticated user RLS session
-  const connection = await createAppUserClient();
+  // Verify the caller FIRST, then sign in under the app user's RLS session (W15): this
+  // function is verify_jwt=false, so a tokenless request reaches here and must not cost a
+  // password grant
+  const connection = await createAuthorizedAppUserClient(req);
+
+  // 401 for no/invalid session, 403 for someone else's: refused before any write, same bodies
+  if (!connection.ok && connection.kind === "refused") {
+    // The verdict carries which status
+    return jsonResponse(connection.status, { success: false, error: connection.error });
+  }
 
   // Return service unavailable response if database connection failed
   if (!connection.ok) {
@@ -118,13 +126,6 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
 
   // Unpack connected database client
   const db = connection.db;
-
-  // Refuse anyone but the app user BEFORE any write: the sign-in above never looks at
-  // the caller, so the public anon key alone used to be enough to advance rows
-  const caller = await authorizeCaller(req, db, connection.userId);
-
-  // 401 for no/invalid session, 403 for someone else's — the verdict carries which
-  if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });
 
   // Optional single-row target. Read from the URL so the CLI can push ONE application through
   // without waiting for it to reach the head of an oldest-first queue.

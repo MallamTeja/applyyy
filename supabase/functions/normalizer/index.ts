@@ -4,10 +4,11 @@
 // for their associated `jobs`, detects duplicate postings against existing database records or
 // within the current batch, and updates application status to `deduped` or `dropped_duplicate`.
 //
-// Signs in as the ordinary app user via createAppUserClient, so every query runs under RLS.
+// Verifies the caller, then signs in as the ordinary app user via createAuthorizedAppUserClient,
+// so every query runs under RLS.
 
-// Client factory for authenticating as the ordinary app user under RLS policies.
-import { createAppUserClient } from "../_shared/db/client.ts";
+// Client factory: checks the caller first, then authenticates as the app user under RLS (W15).
+import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 // Pure normalization planner and input types for fingerprinting and duplicate detection.
 import {
   // Pure batch calculation planner function.
@@ -15,8 +16,8 @@ import {
   // Input item type contract representing discovered application data.
   type DiscoveredApplicationItem,
 } from "../_shared/normalize/normalize-batch.ts";
-// Caller auth and the fail-closed kill switch, shared by every pipeline agent.
-import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
+// The fail-closed kill switch, shared by every pipeline agent (caller auth is in the client now).
+import { readKillSwitch } from "../_shared/db/gates.ts";
 // Shared CORS headers, plus the boundary that keeps them on an uncaught 500.
 import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 // The shared `?application_id=` parser, so all five pipeline agents refuse a bad id identically.
@@ -76,8 +77,14 @@ Deno.serve(withErrorBoundary("applyy-normalizer", async (req: Request): Promise<
   // Return HTTP 200 ok for CORS OPTIONS preflight requests.
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
-  // Authenticate database client with app user credentials.
-  const connection = await createAppUserClient();
+  // Verify the caller FIRST, then sign in as the app user (W15): this function is
+  // verify_jwt=false, so a tokenless request reaches here and must not cost a password grant.
+  const connection = await createAuthorizedAppUserClient(req);
+  // 401 for no/invalid session, 403 for someone else's: the same bodies as before.
+  if (!connection.ok && connection.kind === "refused") {
+    // Refused before any read or write, and before any sign-in.
+    return jsonResponse(connection.status, { success: false, error: connection.error });
+  }
   // Return HTTP 503 error if database authentication fails.
   if (!connection.ok) {
     // Log detailed failure reason on the server side.
@@ -88,11 +95,6 @@ Deno.serve(withErrorBoundary("applyy-normalizer", async (req: Request): Promise<
 
   // Extract authenticated Supabase DB client instance.
   const db = connection.db;
-  // Refuse anyone but the app user BEFORE any write: the sign-in above never looks at
-  // the caller, so without this the public anon key alone could drive the pipeline.
-  const caller = await authorizeCaller(req, db, connection.userId);
-  // 401 for no/invalid session, 403 for someone else's — the verdict carries which.
-  if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });
   // Extract URL parameters from incoming request.
   const reqUrl = new URL(req.url);
   // Resolve batch size limit from query parameter.

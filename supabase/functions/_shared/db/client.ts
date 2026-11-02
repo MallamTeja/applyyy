@@ -32,6 +32,8 @@
 import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2.58.0";
 // The machine-agent proof header, shared with the worker so the name cannot drift.
 import { AGENT_KEY_ENV_VAR, agentKeyHeaders } from "./agent-key.ts";
+// W15: the caller check that runs before the sign-in. Pure, so its tests run under node.
+import { authorizeBeforeSignIn, type AuthorizedSignIn } from "./gates.ts";
 
 // Supabase injects these two into every function's environment automatically, so they
 // are the one pair Teja never has to set by hand.
@@ -142,4 +144,29 @@ export async function createAppUserClient(): Promise<DbClientResult> {
   }
   // Authenticated and RLS-bound, with the id the caller gate compares against.
   return { ok: true, db, userId: data.user.id };
+}
+
+// W15 (wiring audit 2026-11-01): the caller check FIRST, the password sign-in only for an
+// authorized caller. createAppUserClient above signs in before anyone looks at the
+// request, so on a verify_jwt=false function every tokenless request cost one GoTrue
+// password grant, and enough of them rate-limit the pipeline's own sign-ins.
+export async function createAuthorizedAppUserClient(req: Request): Promise<AuthorizedSignIn<SupabaseClient>> {
+  // The project URL, injected by the platform.
+  const url = readEnv(SUPABASE_URL_ENV_VAR);
+  // The public key, also injected.
+  const anonKey = readEnv(SUPABASE_ANON_KEY_ENV_VAR);
+  // The address the caller's session must belong to; the same secret the sign-in uses.
+  const email = readEnv(APP_USER_EMAIL_ENV_VAR);
+  // Without these nobody can be verified, so it is our failure (503), not the caller's.
+  if (url === undefined || anonKey === undefined || email === undefined) {
+    return { ok: false, kind: "unavailable", reason: `${SUPABASE_URL_ENV_VAR}, ${SUPABASE_ANON_KEY_ENV_VAR} or ${APP_USER_EMAIL_ENV_VAR} is not set` };
+  }
+  // An anon-key client that only asks the auth server about the caller's token. It holds
+  // no session of its own and sends no agent key: it never queries a table.
+  const verifier = createClient(url, anonKey, {
+    // Same three settings as above, for the same stateless-isolate reasons.
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+  });
+  // Verify, then sign in. The order is the whole fix.
+  return await authorizeBeforeSignIn(req, verifier, email, createAppUserClient);
 }

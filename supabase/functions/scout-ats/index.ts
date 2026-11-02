@@ -5,11 +5,11 @@
 // Deduplicates postings by canonical fingerprint into `public.jobs`, creates initial
 // `public.applications` records at status `discovered`, and updates polling telemetry.
 
-import { createAppUserClient } from "../_shared/db/client.ts";
-// Caller authentication shared with the pipeline agents; this function is browser-invoked.
-import { authorizeCaller } from "../_shared/db/gates.ts";
-// The kill-switch verdict, pure so node --test can pin "force never bypasses the halt".
-import { haltedByKillSwitch } from "./gate.ts";
+// Caller authentication FIRST, then the app-user sign-in (W15); this function is browser-invoked.
+import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
+// The kill-switch verdict, pure so node --test can pin "force never bypasses the halt",
+// and the run close (W12), pure so its screener_not_run flag is pinned the same way.
+import { haltedByKillSwitch, planScoutRunClose } from "./gate.ts";
 // The board fetch, through the robots-gated shared transport (111791c closed every
 // httpFetch path; this import closes the one bare `fetch(` that remained here).
 import { fetchBoard } from "./poll-fetch.ts";
@@ -134,21 +134,26 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const limitBoards = resolveBoardLimit(url.searchParams.get("limit"));
   const specificBoard = url.searchParams.get("board");
 
-  const clientResult = await createAppUserClient();
+  // GATE 1 — WHO IS CALLING, checked BEFORE the sign-in (W15). The browser invokes this
+  // function (discoveryService.ts), and the platform's verify_jwt accepts the public anon
+  // key, so without this anyone holding the bundle's key could trigger polls; and since it
+  // is verify_jwt=false, a tokenless request must not cost a password grant either.
+  const clientResult = await createAuthorizedAppUserClient(req);
+  // 401 for no/invalid session, 403 for someone else's; the verdict carries which.
+  if (!clientResult.ok && clientResult.kind === "refused") {
+    // Same body shape as before: this function's responses carry no `success` on errors.
+    return jsonResponse(clientResult.status, { error: clientResult.error });
+  }
+  // Our failure (env or sign-in), not the caller's.
   if (!clientResult.ok) {
     // The reason can name env vars; it belongs in the log, not the response.
     console.error("[scout-ats] database connection failed:", clientResult.reason);
+    // Unchanged status and body.
     return jsonResponse(500, { error: "db_client_failed" });
   }
 
+  // The signed-in, RLS-bound client.
   const { db } = clientResult;
-
-  // GATE 1 — WHO IS CALLING. The browser invokes this function (discoveryService.ts), and
-  // the platform's verify_jwt accepts the public anon key, so without this anyone holding
-  // the bundle's key could trigger polls.
-  const caller = await authorizeCaller(req, db, clientResult.userId);
-  // 401 for no/invalid session, 403 for someone else's; the verdict carries which.
-  if (!caller.ok) return jsonResponse(caller.status, { error: caller.error });
 
   // 1. Record run start in agent_runs
   const { data: runRow } = await db
@@ -290,7 +295,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // screen at all: rows are created at 'discovered', exactly as before this change, which
   // is a TRUE statement about them (they have not been screened) and leaves them
   // findable by a later backfill. Recording them as 'passed_filters' would be a lie.
+  // The log line stays, but it is no longer the only trace (W12): planScoutRunClose below
+  // records screener_not_run on the run row and answers non-2xx.
   if (!screenContext.ok) {
+    // Warn, not error: the run continues and keeps its rows.
     console.warn(`[scout-ats] screener context unavailable, inserting unscreened: ${screenContext.reason}`);
   }
 
@@ -713,32 +721,37 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // run in which every attempted board failed is `failed` — "succeeded, 0 errors" over a
   // run that wrote nothing was the old reading whenever every jobs upsert errored.
   const failedBoards = summaries.filter((s) => s.status === "failed");
-  // Boards actually attempted; skipped ones (no adapter) are neither success nor failure.
-  const attemptedBoards = summaries.filter((s) => s.status !== "skipped").length;
-  // All attempted boards failed: the run did not do its job.
-  const runFailed = attemptedBoards > 0 && failedBoards.length === attemptedBoards;
   // Liveness refusals, recorded on the run but NOT counted as errors: the boards polled fine.
   const livenessRefusals = summaries
     .filter((s) => s.liveness?.disappearance_refused_reason)
     .map((s) => `${s.provider}/${s.board}: ${s.liveness?.disappearance_refused_reason}`);
   // Run-level total for the response.
   const totalDisappearedMarked = summaries.reduce((n, s) => n + (s.liveness?.disappeared_marked ?? 0), 0);
+  // How the run closes and how the caller is answered, decided in one pure place (gate.ts)
+  // so the W12 screener_not_run flag has a named test.
+  const close = planScoutRunClose({
+    // Boards actually attempted; skipped ones (no adapter) are neither success nor failure.
+    attemptedBoards: summaries.filter((s) => s.status !== "skipped").length,
+    // One "provider/board: reason" per failed board.
+    failedBoardDetails: failedBoards.map((s) => `${s.provider}/${s.board}: ${s.error ?? "unknown"}`),
+    // Kept apart from failures; the plan labels them.
+    livenessRefusals,
+    // W12: whether the screener ran at all.
+    screenContext,
+  });
   if (runId) {
     await db
       .from("agent_runs")
       .update({
-        status: runFailed ? "failed" : "succeeded",
-        // How many boards failed, so a partial failure is visible on the health page.
-        error_count: failedBoards.length,
-        // The first few reasons; enough to diagnose without unbounded text.
-        // Board failures first, then liveness refusals in their own labelled segment, so a
-        // refusal can never be mistaken for one of the error_count failures.
+        // `failed` only when every attempted board failed.
+        status: close.status,
+        // Board failures plus a screener that never ran, so either is visible on the health page.
+        error_count: close.errorCount,
+        // The first few reasons; enough to diagnose without unbounded text: screener_not_run
+        // first, then board failures, then liveness refusals in their own labelled segment.
         // Then the cascade's rule warnings, labelled the same way (B1, 2026-10-08): this scout
         // screens most rows, and its warnings were only in the HTTP response.
-        error_detail: withRuleWarnings([
-          ...failedBoards.slice(0, 5).map((s) => `${s.provider}/${s.board}: ${s.error ?? "unknown"}`),
-          ...(livenessRefusals.length > 0 ? [`liveness_refused: ${livenessRefusals.slice(0, 5).join(", ")}`] : []),
-        ].join("; ") || null, screenWarnings),
+        error_detail: withRuleWarnings(close.errorDetail, screenWarnings),
         finished_at: new Date().toISOString(),
         // rows_in is what we looked at, rows_out is what we created. Kept as two
         // numbers because "polled 40 boards, created 0 applications" is the early
@@ -749,9 +762,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .eq("id", runId);
   }
 
-  return jsonResponse(200, {
-    success: true,
+  // The run's report, sent on both outcomes: a screener_not_run answer still says what was
+  // polled and inserted, because those rows are kept.
+  const report = {
+    // Boards in this run, including skipped ones.
     boards_polled: summaries.length,
+    // Postings upserted across all boards.
     jobs_discovered: totalJobsDiscovered,
     applications_created: totalApplicationsCreated,
     // THE SCREENER'S OWN COUNTERS, reported separately from the discovery counters
@@ -775,6 +791,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
     identity_mismatch: totalIdentityMismatch,
     // Boards whose marking was refused, with why. Empty means every ok board was evaluated.
     disappearance_refused_reason: livenessRefusals,
+    // Per-board detail.
     results: summaries,
-  });
+  };
+  // W12: the screener never ran, so the caller gets a non-2xx naming it. `error` and
+  // `detail` lead the body because the browser shows its first 200 characters.
+  if (close.httpError !== null) {
+    // Rows are kept; the answer says why they sit unscreened at 'discovered'.
+    return jsonResponse(close.httpError.status, { success: false, error: close.httpError.error, detail: close.httpError.detail, ...report });
+  }
+  // The ordinary answer, unchanged in shape: success:true plus the report.
+  return jsonResponse(200, { success: true, ...report });
 });
