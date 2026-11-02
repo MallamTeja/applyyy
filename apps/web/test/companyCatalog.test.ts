@@ -18,13 +18,33 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
+// The registry parity test below reads the Deno registry as TEXT: importing it would pull
+// Deno-only adapter modules into node.
+import { readFileSync } from 'node:fs';
+
 import {
   AVAILABLE_LOCATIONS,
   CURATED_COMPANIES,
+  SELECTABLE_ATS_PROVIDERS,
   filterCompanies,
   getRefreshedCompaniesBatch,
   searchOrDiscoverCompany,
 } from '../src/features/settings/companyCatalog.ts';
+
+test('selectable ATS providers equal the providers registered in the scout ATS registry', () => {
+  // W24 (2026-11-02): the Watchlist offered `workable`, but scout-ats selects rows with
+  // `.in("ats_provider", supportedProviders())`, the ADAPTERS keys — so a Workable row
+  // was never polled and never reported. The dropdown must offer exactly those keys.
+  const registry = readFileSync(new URL('../../../supabase/functions/_shared/ats/registry.ts', import.meta.url), 'utf8');
+  // The ADAPTERS map literal, from its declaration to the closing `]);`.
+  const map = /const ADAPTERS[^=]*=\s*new Map\(\[([\s\S]*?)\]\);/.exec(registry);
+  assert.ok(map !== null, 'ADAPTERS map not found in registry.ts — has its declaration changed?');
+  // Each entry starts `["<provider>" as AtsProvider,`; comments in between cannot match it.
+  const registered = [...map[1]!.matchAll(/\[\s*"(\w+)"\s+as\s+AtsProvider\s*,/g)].map((m) => m[1]!);
+  // Non-vacuity: an empty parse would make "equal" mean nothing.
+  assert.ok(registered.length > 0, 'parsed zero registered adapters from registry.ts');
+  assert.deepEqual([...SELECTABLE_ATS_PROVIDERS].sort(), registered.sort());
+});
 
 test('curated companies catalog has all expected baseline employers across 4 categories', () => {
   assert.ok(CURATED_COMPANIES.length >= 30, 'Should have at least 30 curated companies');
@@ -65,13 +85,8 @@ test('every curated company satisfies the schema contract, location, and ATS slu
     'Startup / Unicorn',
     'Service-Based',
   ]);
-  const validAts = new Set([
-    'greenhouse',
-    'lever',
-    'ashby',
-    'smartrecruiters',
-    'workable',
-  ]);
+  // Only providers the Scout polls (W24): a curated row on any other board is a dead add.
+  const validAts = new Set<string>(SELECTABLE_ATS_PROVIDERS);
 
   for (const c of CURATED_COMPANIES) {
     assert.ok(c.name.trim().length > 0, `Name must not be empty for ${c.name}`);

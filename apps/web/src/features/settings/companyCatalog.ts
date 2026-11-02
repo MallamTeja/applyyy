@@ -3,7 +3,8 @@
  * WHAT THIS FILE CONTROLS. The Scout only polls boards that have been registered
  * on the Watchlist page. Deciding which companies to add is a high-stakes
  * friction point for the operator: each board must be mapped to its exact ATS
- * provider (greenhouse, lever, ashby, workable, smartrecruiters) and its careers token.
+ * provider (one of SELECTABLE_ATS_PROVIDERS below — the ones the Scout polls) and its
+ * careers token.
  *
  * WHY THE `verification` FIELD EXISTS — READ THIS BEFORE ADDING A ROW.
  *   Until 2026-09-17 every `atsIdentifier` here was the lowercase company name
@@ -52,15 +53,24 @@ export type CompanyCategory =
   | 'Startup / Unicorn'
   | 'Service-Based';
 
-export type SupportedAtsProvider =
-  | 'greenhouse'
-  | 'lever'
-  | 'ashby'
-  | 'workable'
-  | 'smartrecruiters'
-  // Workday boards are pollable since 2026-11-01 (scout adapter workday.ts), so a
-  // catalog row may name one; kept in step with the shared ATS_PROVIDERS tuple.
-  | 'workday';
+/* The providers the Scout can actually POLL — the keys of the `ADAPTERS` map in
+ * supabase/functions/_shared/ats/registry.ts, which scout-ats passes to
+ * `.in("ats_provider", supportedProviders())`. A row naming any other provider is never
+ * selected, so it polls nothing, forever, and nothing reports it (W24, 2026-11-02).
+ * `workable` is REMOVED for that reason: its adapter is written but not registered.
+ * Re-add it here in the same change that registers it; companyCatalog.test.ts compares
+ * this list to the registry and goes red when the two disagree. */
+export const SELECTABLE_ATS_PROVIDERS = [
+  'greenhouse',
+  'lever',
+  'ashby',
+  'smartrecruiters',
+  // Workday boards are pollable since 2026-11-01 (scout adapter workday.ts).
+  'workday',
+] as const satisfies readonly AtsProvider[];
+
+/* Derived from the list, so the type and the dropdown cannot drift apart. */
+export type SupportedAtsProvider = (typeof SELECTABLE_ATS_PROVIDERS)[number];
 
 /* One date for the whole sweep, so a reader can tell at a glance that every
  * `probedOn` below came from the SAME run rather than from rows aged
@@ -192,7 +202,8 @@ export interface SuggestedCompany {
   readonly category: CompanyCategory;
   readonly domain: string;
   readonly location: string;
-  readonly atsProvider: AtsProvider;
+  /* Pollable providers only: a one-click add of an unpollable board writes a dead row. */
+  readonly atsProvider: SupportedAtsProvider;
   readonly atsIdentifier: string; // The board slug
   readonly cooldown: CompanyCooldown;
   /* REQUIRED, deliberately. Every consumer that reads `atsIdentifier` is reading

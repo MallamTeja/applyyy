@@ -34,21 +34,12 @@ import type { AtsProvider, CompanyWatchlistRow } from '../../data/contract';
 import { supabase } from '../../data/supabase';
 
 import { CompanySuggestionsModal } from './CompanySuggestionsModal';
-import type { SuggestedCompany } from './companyCatalog';
+/* The dropdown offers only providers the Scout polls; the list and its registry parity
+   test live in companyCatalog.ts, because node --test cannot import this .tsx (W24). */
+import { SELECTABLE_ATS_PROVIDERS, type SuggestedCompany } from './companyCatalog';
 import { DiscoveryModal } from '../pipeline/DiscoveryModal';
 
 import './settings.css';
-
-/* Supported direct-poll ATS providers */
-const SELECTABLE_ATS_PROVIDERS: readonly AtsProvider[] = [
-  'greenhouse',
-  'lever',
-  'ashby',
-  'workable',
-  'smartrecruiters',
-  // Selectable since the scout's Workday adapter landed (2026-11-01).
-  'workday',
-];
 
 /* --- What a board token looks like per provider ----------------------- */
 
@@ -70,10 +61,8 @@ const PROVIDER_HINTS: Readonly<Partial<Record<AtsProvider, ProviderHint>>> = {
     where: 'The board name in the Ashby hosted jobs URL.',
     example: 'jobs.ashbyhq.com/EXAMPLECO -> token is EXAMPLECO',
   },
-  workable: {
-    where: 'The company subdomain of the Workable-hosted careers site.',
-    example: 'apply.workable.com/EXAMPLECO -> token is EXAMPLECO',
-  },
+  // No `workable` hint: Workable is not selectable until its scout adapter is registered
+  // (companyCatalog.ts SELECTABLE_ATS_PROVIDERS). Restore the hint when it is.
   smartrecruiters: {
     where: 'The company identifier in the SmartRecruiters careers URL.',
     example: 'careers.smartrecruiters.com/ExampleCo -> token is ExampleCo',

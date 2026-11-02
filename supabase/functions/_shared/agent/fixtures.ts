@@ -70,6 +70,8 @@ export function makeApplicationRow(overrides: Partial<ApplicationRow> = {}): App
     // No letter yet: the CHECK keeps these two null together, and null is the queue predicate.
     cover_letter: null,
     cover_letter_generated_at: null,
+    // W20: ApplicationRow now carries the live resume_sha256 column; null = no resume rendered yet.
+    resume_sha256: null,
     created_at: FIXTURE_NOW,
     updated_at: FIXTURE_NOW,
     // The caller's overrides win, so a test changes exactly the field it is about.

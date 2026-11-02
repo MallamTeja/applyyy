@@ -486,3 +486,207 @@ test('status graph parity — the TS mirror matches the transitions seeded into 
     );
   });
 });
+
+// ── COLUMN PARITY (added 2026-11-02, W20) ─────────────────────────────────────────
+// The table-parity test above only asks "does a Row type EXIST". That let four live
+// columns go missing from tables.ts for weeks (applications.resume_sha256,
+// answer_bank.attested_by_human, search_preferences.work_authorized_countries,
+// gemini_key_state.used_in_cycle) while the header still claimed "ZERO missing
+// columns" — every consumer hand-cast around the gap. This half compares column NAMES,
+// both directions, against the same migration replay the enum tests use.
+// Nullability and types are NOT compared here: a nullable column needs table-level
+// PRIMARY KEY parsing and multi-line TS unions to read reliably, and a parity test that
+// cries wolf is worse than none. `supabase gen types` against the live DB is the check
+// for those (see the tables.ts header).
+
+/**
+ * Statement-level verbs this parser does not model. Each one changes which columns a
+ * table has, so meeting one must fail loudly instead of leaving a stale column set that
+ * makes the comparison below quietly wrong.
+ */
+const UNMODELLED_COLUMN_CHANGES = /\bdrop\s+column\b|\brename\b|\bdrop\s+table\b/i;
+
+/**
+ * The first word of a CREATE TABLE element that marks a table CONSTRAINT, not a column.
+ * Closed list on purpose: a new element kind is read as a column and shows up as an
+ * "has no column" failure that names it, rather than being silently skipped.
+ */
+const TABLE_CONSTRAINT_WORDS = new Set(['constraint', 'primary', 'unique', 'check', 'foreign', 'exclude', 'like']);
+
+/** The table-parity test's key: separators and case stripped, one trailing `s` dropped. */
+function tableKey(name: string): string {
+  // Shared by both sides so a table and its Row type always pair the same way.
+  return name.replace(/_/g, '').toLowerCase().replace(/s$/, '');
+}
+
+/**
+ * Split on commas that sit at paren depth 0 and outside a '...' literal.
+ * Quote-aware because array defaults like `'{onsite,hybrid,remote}'` contain commas, and
+ * paren-aware because `numeric(14, 2)` and `check (a, b)` do too.
+ */
+function splitTopLevel(body: string): string[] {
+  // Collected elements, and the start offset of the one being scanned.
+  const parts: string[] = [];
+  let start = 0;
+  // Paren depth and literal state, tracked together so a ')' inside a quote is ignored.
+  let depth = 0;
+  let inQuote = false;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    // A quote toggles literal state; '' (escaped quote) toggles twice, so it self-cancels.
+    if (c === "'") inQuote = !inQuote;
+    // Parens and commas only count outside a literal.
+    else if (!inQuote && c === '(') depth++;
+    else if (!inQuote && c === ')') depth--;
+    else if (!inQuote && depth === 0 && c === ',') {
+      // A top-level comma ends one element.
+      parts.push(body.slice(start, i));
+      start = i + 1;
+    }
+  }
+  // The tail after the last comma is the final element.
+  parts.push(body.slice(start));
+  // Trimmed and non-empty, so a trailing comma cannot invent a blank column.
+  return parts.map((p) => p.trim()).filter((p) => p.length > 0);
+}
+
+/**
+ * The body between the `(` at `open` and its matching `)`, skipping literals.
+ * Returns null when the parens never balance, which the caller turns into a failure.
+ */
+function balancedBody(sql: string, open: number): string | null {
+  // Same depth/quote tracking as splitTopLevel, so both agree on what a paren is.
+  let depth = 0;
+  let inQuote = false;
+  for (let i = open; i < sql.length; i++) {
+    const c = sql[i];
+    // Literal state first: a paren inside a string is data, not structure.
+    if (c === "'") inQuote = !inQuote;
+    else if (!inQuote && c === '(') depth++;
+    else if (!inQuote && c === ')' && --depth === 0) return sql.slice(open + 1, i);
+  }
+  // Unbalanced: the regex matched something that is not a real CREATE TABLE.
+  return null;
+}
+
+/**
+ * Replay every `create table public.X (...)` and `alter table public.X add column ...`
+ * into one column-name set per table.
+ */
+function parseSqlColumns(sql: string): Map<string, Set<string>> {
+  // table name -> column names, filled in migration (filename) order.
+  const tables = new Map<string, Set<string>>();
+  for (const match of sql.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?public\.(\w+)\s*\(/gi)) {
+    // The match ends on the `(`, so its last character is where the body opens.
+    const body = balancedBody(sql, match.index! + match[0].length - 1);
+    assert.ok(body !== null, `create table public.${match[1]} has unbalanced parentheses — the column parser cannot read it`);
+    // Each top-level element is a column or a table constraint; the first word decides.
+    const columns = new Set<string>();
+    for (const element of splitTopLevel(body)) {
+      // The leading identifier, unquoted. A word match, not a whitespace split, because
+      // `UNIQUE(user_id, ...)` has no space before its paren (skill_gap_reports).
+      const first = /^"?(\w+)/.exec(element)?.[1] ?? element;
+      if (!TABLE_CONSTRAINT_WORDS.has(first.toLowerCase())) columns.add(first);
+    }
+    tables.set(match[1]!, columns);
+  }
+  for (const match of sql.matchAll(/alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?public\.(\w+)\s+([^;]*);/gi)) {
+    const [, table, body] = match;
+    // A verb this replay ignores would leave a stale column set; refuse to guess.
+    assert.ok(
+      !UNMODELLED_COLUMN_CHANGES.test(body!),
+      `alter table public.${table} uses drop/rename, which the column parser does not model. Teach it before trusting column parity.`,
+    );
+    // `add column` clauses can be several per statement, comma-separated.
+    for (const clause of splitTopLevel(body!)) {
+      const add = /^add\s+column\s+(?:if\s+not\s+exists\s+)?"?(\w+)"?/i.exec(clause);
+      // Non-column clauses (add constraint, enable rls, ...) change no column set.
+      if (add === null) continue;
+      // Adding to a table no migration creates means the replay is out of order or wrong.
+      const columns = tables.get(table!);
+      assert.ok(columns !== undefined, `alter table public.${table} adds column ${add[1]} to a table never created`);
+      columns.add(add[1]!);
+    }
+  }
+  return tables;
+}
+
+/**
+ * Top-level field names of every `export interface XRow { ... }` in tables.ts, keyed by
+ * tableKey. Depth-tracked so the fields of an inline object type are not read as
+ * columns; the field regex needs `name:` at line start, so JSDoc lines never match.
+ */
+function parseRowFields(source: string): Map<string, { name: string; fields: Set<string> }> {
+  // tableKey -> interface name and its field names.
+  const rows = new Map<string, { name: string; fields: Set<string> }>();
+  // CRLF working copies: strip \r so the `\n}` terminator matches on Windows checkouts.
+  const text = source.replace(/\r/g, '');
+  for (const match of text.matchAll(/export interface (\w+)Row(?: extends [^{]+)? \{\n([\s\S]*?)\n\}/g)) {
+    const fields = new Set<string>();
+    // Brace depth inside the interface body; only depth-0 lines declare columns.
+    let depth = 0;
+    for (const line of match[2]!.split('\n')) {
+      const trimmed = line.trim();
+      // A field line is `name:` or `name?:`, never a comment continuation.
+      const field = /^(?:readonly\s+)?(\w+)\??:/.exec(trimmed);
+      if (depth === 0 && field !== null) fields.add(field[1]!);
+      // Count braces outside `//` comments so prose braces cannot shift the depth.
+      for (const c of trimmed.replace(/\/\/.*$/, '')) depth += c === '{' ? 1 : c === '}' ? -1 : 0;
+    }
+    rows.set(tableKey(match[1]!), { name: `${match[1]}Row`, fields });
+  }
+  return rows;
+}
+
+/**
+ * Every column-name disagreement between the SQL replay and the Row types, as readable
+ * lines. Tables without a Row type are skipped here — the table-parity test owns that.
+ */
+function columnDrift(
+  sqlTables: Map<string, Set<string>>,
+  rows: Map<string, { name: string; fields: Set<string> }>,
+): string[] {
+  // One line per disagreement, so a failure lists all of them at once.
+  const drift: string[] = [];
+  for (const [table, columns] of sqlTables) {
+    const row = rows.get(tableKey(table));
+    // No Row type: reported by the table-parity test, not double-reported here.
+    if (row === undefined) continue;
+    // In SQL but not in TS: a consumer cannot read it without a cast (the W20 failure).
+    for (const c of columns) if (!row.fields.has(c)) drift.push(`${row.name} lacks ${table}.${c}`);
+    // In TS but not in SQL: a SELECT returns undefined where the type promises a value.
+    for (const f of row.fields) if (!columns.has(f)) drift.push(`${row.name}.${f} has no column in ${table}`);
+  }
+  return drift;
+}
+
+test('column parity — every Row type has exactly the columns its table has in the migrations', () => {
+  const sqlTables = parseSqlColumns(MIGRATION_SQL);
+  const rows = parseRowFields(readFileSync(join(SRC_DIR, 'tables.ts'), 'utf8'));
+  // Non-vacuity: zero tables or zero Row types would make an empty drift list meaningless.
+  assert.ok(sqlTables.size > 0, 'parsed zero tables from the migrations');
+  assert.ok(rows.size > 0, 'parsed zero Row interfaces from src/tables.ts');
+  // At least one table must actually be compared, or every pairing silently missed.
+  assert.ok([...sqlTables.keys()].some((t) => rows.has(tableKey(t))), 'no migration table paired with a Row type');
+  assert.deepEqual(
+    columnDrift(sqlTables, rows),
+    [],
+    'tables.ts Row types disagree with supabase/migrations. Add or remove the field in tables.ts ' +
+      '(the live-DB re-diff command is in the tables.ts header).',
+  );
+});
+
+test('column parity — NON-VACUITY CONTROL: the parser and comparison catch a missing and an extra column', () => {
+  // A miniature schema with every parsing hazard: a constraint element, a quoted comma
+  // inside a default, a paren pair inside a type, and a multi-clause alter.
+  const sql =
+    "create table public.widgets (id uuid primary key, tags text[] not null default '{a,b}', " +
+    'price numeric(14, 2), constraint widgets_ok check (price > 0), UNIQUE(id, price));\n' +
+    'alter table public.widgets add column if not exists colour text, add constraint c unique (id);';
+  const sqlTables = parseSqlColumns(sql);
+  // The replay must see exactly the three declared columns plus the added one.
+  assert.deepEqual([...sqlTables.get('widgets')!].sort(), ['colour', 'id', 'price', 'tags']);
+  // A Row type missing `colour` and inventing `weight` must produce both drift lines.
+  const rows = parseRowFields('export interface WidgetsRow {\n  id: string;\n  tags: string[];\n  price: number | null;\n  weight: number;\n}');
+  assert.deepEqual(columnDrift(sqlTables, rows).sort(), ['WidgetsRow lacks widgets.colour', 'WidgetsRow.weight has no column in widgets']);
+});

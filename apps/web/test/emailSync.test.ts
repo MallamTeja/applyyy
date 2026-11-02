@@ -162,7 +162,9 @@ describe('emailSync helpers', () => {
 
     it('accepts explicit classification matches', () => {
       assert.equal(isInterviewEmail({ ...baseRow, classification: 'interview_invite' }), true);
-      assert.equal(isInterviewEmail({ ...baseRow, classification: 'interview' }), true);
+      // No `classification: 'interview'` case (W21, 2026-11-02): that value is not in
+      // EMAIL_CLASSIFICATIONS, so the old assertion pinned a dead branch. It passed only
+      // because the subject says "Interview". tsc now rejects the literal in src.
     });
 
     it('rejects automated system and social notification senders', () => {

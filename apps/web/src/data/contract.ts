@@ -170,3 +170,8 @@ export type {
   GeminiKeyStateRow,
   ApplicationEventRow,
 } from '@applyy/shared-types';
+
+/* Email Monitoring rows. Re-exported 2026-11-02 (W21): emailSync.ts kept its own copy
+ * with `classification: string`, so a comparison against a value the enum never holds
+ * (`'interview'`) compiled and was dead code. The closed union makes that a tsc error. */
+export type { EmailEventRow, EmailClassification } from '@applyy/shared-types';

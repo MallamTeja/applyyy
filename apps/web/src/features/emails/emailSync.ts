@@ -24,21 +24,13 @@ export const GMAIL_SYNC_LAST_MS_KEY = 'applyy_gmail_sync_last_ms';
    ADVISORY ONLY — the gmail-sync function's own cooldown is the authoritative gate. */
 export const GMAIL_SYNC_DEBOUNCE_MS = 60_000;
 
-/* Data model matching the public.email_events schema */
-export interface EmailEventRow {
-  readonly id: string;
-  readonly user_id: string;
-  readonly provider_message_id: string;
-  readonly from_address: string;
-  readonly subject: string;
-  readonly snippet: string;
-  readonly received_at: string;
-  readonly classification: string;
-  readonly classification_confidence: number | null;
-  readonly matched_application_id: string | null;
-  readonly processed_at: string | null;
-  readonly created_at: string;
-}
+/* The email_events row comes from the schema seam, never a local copy (W21, 2026-11-02).
+   The copy that lived here typed `classification` as `string`, so isInterviewEmail could
+   compare it to 'interview' — a value the enum does not have — and tsc said nothing.
+   Imported for this file's own use, and re-exported so EmailMonitoringPage's existing
+   `import { type EmailEventRow } from './emailSync.ts'` keeps resolving to the shared one. */
+import type { EmailEventRow } from '../../data/contract.ts';
+export type { EmailEventRow };
 
 /* The sync outcomes the page renders — a closed union, not a boolean pair, so the
    "skipped because it just ran" case can never be conflated with success or failure. */
@@ -158,8 +150,10 @@ export function formatSyncTime(timestamp: number | null): string {
  * Rejects newsletters, security alerts, and social digests outright.
  */
 export function isInterviewEmail(ev: EmailEventRow): boolean {
-  /* 1. Explicit classifier positive match */
-  if (ev.classification === 'interview_invite' || ev.classification === 'interview') {
+  /* 1. Explicit classifier positive match. `interview_invite` is the ONLY interview value
+     in the enum; the former `|| === 'interview'` branch could never match, and with the
+     shared closed union it no longer compiles (TS2367). */
+  if (ev.classification === 'interview_invite') {
     return true;
   }
 

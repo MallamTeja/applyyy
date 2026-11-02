@@ -1,35 +1,31 @@
 /**
  * applyy — row shapes for every table, plus the signatures of the SQL functions.
  *
- * Hand-written, and now CHECKED against generated types rather than merely trusted.
+ * Hand-written, and CHECKED rather than merely trusted. This header states the commands
+ * that regenerate each fact, never a count: the counts it used to quote ("ZERO missing
+ * columns", "44-edge graph") went stale while still reading as current (W20, 2026-11-01).
  *
- * DIFFED AGAINST THE LIVE REMOTE SCHEMA, 2026-09-10 ~19:00 IST, via
- * `supabase gen types typescript --project-id <ref>` (Management API, read-only, no
- * write and no DB password needed). The authority at that moment was the SEVEN applied
- * migrations `20260909234500`–`20260909235100`. applyyy-8c has since written two
- * local-only migrations (`20260910185900`, `20260910190000`) which were NOT yet pushed,
- * so they are absent from that diff — re-run it after they land. Timestamping this
- * matters: "the migration files" and "the live database" are two different authorities
- * and they currently disagree.
- *
- * WHAT THE DIFF FOUND — the exercise paid for itself:
- *   - ZERO missing or extra columns across all 15 tables. The hand-written shapes are
- *     structurally complete.
- *   - TEN columns mistyped `string` where the database returns a number. Fixed; see the
- *     `numeric` convention below for why the original rule was half-right.
- *   - ONE nullability disagreement, `company_watchlist.first_seen_at_is_trustworthy`,
- *     left deliberately as-is — see that column's own comment.
- *   - Every RPC return shape CONFIRMED, including the two that were corrected earlier
- *     the same day: `claim_gemini_key` is `Returns: number` (a scalar, not an object)
- *     and `sweep_stale_claims` is `Returns: {...}[]` (an array, not a bare object).
+ * WHAT IS CHECKED, AND BY WHAT:
+ *   - Column NAMES of every `<Table>Row`, both directions, against the migration files:
+ *     `test/enum-parity.test.ts` "column parity" (the package.json `test` script, run
+ *     from packages/shared-types; CI skips this suite, so run it by hand after any
+ *     migration). Same file: enum values and ORDER, table presence, the status graph.
+ *   - Column TYPES and NULLABILITY are NOT checked by any test — an `interface` is erased
+ *     at runtime and the suite reads this file as text. Re-diff against the LIVE DB:
+ *       env -u SUPABASE_ACCESS_TOKEN supabase db query --linked "select table_name,
+ *         column_name, udt_name, is_nullable, column_default from information_schema.columns
+ *         where table_schema='public' order by 1, ordinal_position"
+ *     (parse its JSON with node, never grep it), or `supabase gen types typescript
+ *     --project-id <ref>` for the generated shapes. Live edge count of the status graph:
+ *       select count(*) from public.application_status_transitions
+ *   - Known, deliberate disagreement: `company_watchlist.first_seen_at_is_trustworthy` is
+ *     nullable live and non-null here — see that column's own comment.
+ *   - RPC return shapes were confirmed against generated types on 2026-09-10:
+ *     `claim_gemini_key` is `Returns: number` (a scalar, not an object) and
+ *     `sweep_stale_claims` is `Returns: {...}[]` (an array, not a bare object).
  *
  * This file stays hand-written because it carries the comments and the reasoning; the
- * generated output carries column-level proof that no hand-written shape can give.
- * `test/enum-parity.test.ts` covers enum values, enum ORDER, table presence and the
- * whole 44-edge status graph — what it structurally CANNOT cover is per-column types
- * and nullability, because an `interface` is erased at runtime and that half of the
- * suite reads this file as text. Re-running the generated diff is the only mechanism
- * that closes that gap, so re-run it after any migration.
+ * generated output carries column-level type proof that no hand-written shape can give.
  *
  * Conventions used throughout, so you can predict a shape you have not read yet:
  *   - `<Table>Row`    — exactly what a SELECT returns.
@@ -581,6 +577,13 @@ export interface ApplicationRow {
   cover_letter: string | null;
   /** When `cover_letter` was written. A CHECK keeps it null exactly when the letter is. */
   cover_letter_generated_at: string | null;
+  /**
+   * sha256 of the resume PDF bytes the Applier uploaded (migration 20260911114300).
+   * NULL means no resume was sent — deliberately no default, since '' would pass a later
+   * NOT NULL. A CHECK enforces lowercase 64-hex shape only; it cannot prove the digest is
+   * of the right bytes. Added here 2026-11-02 (W20): the column was live, the type was not.
+   */
+  resume_sha256: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -631,6 +634,9 @@ export type ApplicationUpdate = Partial<
     // the database CHECK refuses one without the other.
     | 'cover_letter'
     | 'cover_letter_generated_at'
+    // The Applier's gateway writes it beside the resume path (worker/src/supabase-gateway.ts),
+    // so the type must permit that write rather than force a cast around it.
+    | 'resume_sha256'
   >
 >;
 
@@ -815,6 +821,12 @@ export interface GeminiKeyStateRow {
   enabled: boolean;
   /** Last error text, for the observability panel. */
   last_error: string | null;
+  /**
+   * The shuffle-without-replacement marker (migration 20260912001500): true once this key
+   * was handed out in the current epoch. `claim_gemini_key()` resets every key to false
+   * when all enabled keys are used. NOT NULL DEFAULT false. Added here 2026-11-02 (W20).
+   */
+  used_in_cycle: boolean;
 }
 /** Insert shape — one row per key you actually hold. */
 export type GeminiKeyStateInsert = { user_id?: string; key_index: number; enabled?: boolean };
@@ -846,6 +858,13 @@ export interface SearchPreferencesRow {
   salary_currency: string;
   /** Allowed compensation models: 'paid', 'unpaid', 'stipend'. */
   compensation_types: string[];
+  /**
+   * Countries the user may work in without a visa (migration 20261024190000); read by the
+   * screener's work-auth gate. NULL (and an empty array) means NEVER SET: the gate passes
+   * everything and warns, because a missing answer must not become "authorised nowhere"
+   * (CLAUDE.md §6). Nullable with no default on purpose. Added here 2026-11-02 (W20).
+   */
+  work_authorized_countries: string[] | null;
   created_at: string;
   updated_at: string;
 }
@@ -987,6 +1006,14 @@ export interface AnswerBankRow {
   needs_human: boolean;
   times_used: number;
   last_used_at: string | null;
+  /**
+   * True when a signed-in browser session (no agent key) saved this answer (migration
+   * 20261009160000). Stamped by a BEFORE INSERT OR UPDATE trigger that OVERWRITES whatever
+   * the client sends, so it is absent from the Insert and Update shapes: a caller cannot
+   * claim it. The worker fills eligibility questions only from rows where this is true.
+   * NOT NULL DEFAULT false. Added here 2026-11-02 (W20).
+   */
+  attested_by_human: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -1053,6 +1080,15 @@ export type EmailEventInsert = {
   thread_id?: string | null;
   recipient_to?: Untrusted | null;
   label_ids?: string[] | null;
+  // The tracker's verdict, written in the SAME insert since the classifier runs before the
+  // row is stored (email-tracker-intake decide.ts `emailEventRowOf`). Optional because each
+  // column has a default or is nullable. Added 2026-11-02 (W20): before this the intake
+  // typed its row as `EmailEventInsert & Record<string, unknown>` to smuggle them in.
+  /** Defaults to 'unclassified' when omitted. */
+  classification?: EmailClassification;
+  classification_confidence?: number | null;
+  matched_application_id?: string | null;
+  processed_at?: string | null;
 };
 /** Update shape — only the Tracker's verdict is writable after ingest. */
 export type EmailEventUpdate = Partial<
