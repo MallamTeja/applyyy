@@ -6,10 +6,11 @@
 # public.applications row is born at 'passed_filters' or 'dropped_filter' ('discovered'
 # only when the screener cannot load). Corrected 2026-11-01: this said 'discovered'.
 #
-# Lightweight: requires NO Playwright or Chromium download. Not fast any more: each run
-# reads every enabled board, measured 9-12 minutes (2026-10-29..11-01, 16,772 postings),
-# where this once said ~10-15 seconds. The 15-minute job timeout below is the ceiling to
-# watch as the watchlist grows.
+# Lightweight: requires NO Playwright or Chromium download. Not fast any more: a full pass
+# over 262 enabled boards needs ~16 min (917 s for 246 boards, measured 2026-11-02), so the
+# scout now stops STARTING boards after a 12-minute budget (SCOUT_BUDGET_MS in
+# worker/src/scout/run-outcome.ts), closes its run `succeeded` with a `deadline:` note, and
+# the unstarted boards go first next run (oldest last_polled_at first). See timeout-minutes.
 name: applyy scout (ats discovery)
 
 on:
@@ -43,7 +44,13 @@ concurrency:
 jobs:
   scout:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 25, raised from 15 on 2026-11-02 (W40): at 15 both scheduled runs (41334080711,
+    # 41399027003) were killed mid-scan, leaving agent_runs `running` for ~6 h. The scout's
+    # own 12-minute budget now ends a normal run at ~12.5 min (setup measured 14 s), so this
+    # is only a backstop: 13 min of headroom covers the board in flight, even a page that
+    # hangs for undici's 300 s default (board-pages sets no fetch timeout). It costs minutes
+    # only when something hangs. Change it together with SCOUT_BUDGET_MS.
+    timeout-minutes: 25
 
     # NO job-level env (moved 2026-10-05): job env reaches every action and every
     # dependency install script. Only "Run Scout ATS Discovery" reads these

@@ -12,8 +12,6 @@ import { getAdapter, supportedProviders, toJobInsert, type JobInsertContext } fr
 // THE ONE ON CRON (.github/workflows/scout.yml:61 -> package.json:13), so this import is
 // what actually puts the cascade in front of Teja's queue.
 import { planScreenedApplications } from '../../../supabase/functions/_shared/screen/screen-batch.ts';
-// Same formatter as the edge functions, so every screening run writes warnings one way.
-import { withRuleWarnings } from '../../../supabase/functions/_shared/screen/run-summary.ts';
 // The Screener's database context, and the adapter that fetches it.
 import { loadScreenContext } from '../../../supabase/functions/_shared/screen/context.ts';
 import { supabaseScreenQueries } from '../../../supabase/functions/_shared/screen/supabase-queries.ts';
@@ -28,6 +26,11 @@ import { evaluateBoardIdentity } from '../../../supabase/functions/_shared/ats/i
 import { boardRefusal, failureMark } from '../../../supabase/functions/_shared/ats/registry.ts';
 // Every page of a board through plain HTTP, kept in its own module so it can be tested.
 import { readBoardPages } from '../scout/board-pages.ts';
+// The shared countdown, so this run's budget is measured the way the matcher's is.
+import { createDeadline } from '../../../supabase/functions/_shared/agent/deadline.ts';
+// How this run ends (W40 budget gate, W12 loud screener fallback), kept pure and tested
+// in worker/test/scout-run-outcome.test.ts because this file cannot be imported by a test.
+import { SCOUT_BUDGET_MS, boardsWithinBudget, scoutRunClose } from '../scout/run-outcome.ts';
 import type { AtsProvider, JobInsert } from '../../../packages/shared-types/src/tables.ts';
 
 function required(name: string): string {
@@ -57,6 +60,9 @@ const BATCH_SIZE = 50;
 
 async function main(): Promise<void> {
   console.log('[applyy-scout] starting ATS job board discovery scan...');
+  // THE RUN BUDGET (W40), started first so sign-in and the context load count against it:
+  // the job timeout in scout.yml counts them too.
+  const deadline = createDeadline({ budgetMs: SCOUT_BUDGET_MS });
 
   const supabaseUrl = required('SUPABASE_URL');
   const anonKey = required('SUPABASE_ANON_KEY');
@@ -229,8 +235,11 @@ async function main(): Promise<void> {
   // created at 'discovered', exactly as before this change, which is a TRUE statement
   // about them and leaves them findable by a later backfill. Marking them
   // 'passed_filters' would be a lie that the Matcher would then act on.
+  // LOUD, NOT SILENT (W12, 2026-11-02): the rows are still inserted, but the close below
+  // counts this as `screener_not_run: <reason>`, closes the run `failed` and exits 1, so
+  // the Health page and the Actions tick both go red instead of green over an unscreened queue.
   if (!screenContext.ok) {
-    console.warn(`[applyy-scout] ⚠️ screener context unavailable, inserting unscreened: ${screenContext.reason}`);
+    console.error(`[applyy-scout] ⚠️ screener context unavailable, inserting unscreened (run will close failed): ${screenContext.reason}`);
   } else {
     console.log('[applyy-scout] screener active: deterministic cascade will run before any job is queued.');
   }
@@ -243,7 +252,12 @@ async function main(): Promise<void> {
   let totalPassed = 0;
   let totalDropped = 0;
 
-  for (const board of boards as WatchlistRow[]) {
+  // THE BUDGET GATE (W40). Boards still unstarted when the budget runs out are left
+  // untouched, so their older last_polled_at sorts them first next run (the order above);
+  // every board this run does start gets last_polled_at = now from watchlistPollUpdate or
+  // failureMark. The board in flight is always finished: the check is between boards.
+  const budget = boardsWithinBudget(boards as WatchlistRow[], deadline);
+  for (const board of budget.boards) {
     const adapter = getAdapter(board.ats_provider);
     if (!adapter) {
       console.log(`[applyy-scout] skipping ${board.company_name} (${board.board_token}): no adapter for ${board.ats_provider}`);
@@ -451,7 +465,14 @@ async function main(): Promise<void> {
     // and nothing matched; a list means the filters are not actually protecting anything.
     for (const warning of screenWarnings) console.log(`[applyy-scout] ⚠️ screener warning: ${warning}`);
   } else {
-    console.log('[applyy-scout] screener: NOT RUN — rows were created unscreened at status discovered.');
+    // console.error, not log: since W12 this run closes `failed` and exits 1 for it.
+    console.error('[applyy-scout] screener: NOT RUN — rows were created unscreened at status discovered; the run is closed failed (screener_not_run).');
+  }
+  // Read once: how far the board loop got before the budget.
+  const budgetOutcome = budget.outcome();
+  // A budget stop is said in the log as well as on the run row, with the counts.
+  if (budgetOutcome.stoppedEarly) {
+    console.log(`[applyy-scout] ⏱️ run budget (${SCOUT_BUDGET_MS / 60_000} min) reached after ${budgetOutcome.processed} of ${boards.length} boards; the other ${budgetOutcome.skippedForDeadline} go first next run.`);
   }
   console.log('====================================================');
 
@@ -463,21 +484,31 @@ async function main(): Promise<void> {
   // Board HTTP/parse failures are NOT counted here — a 404 board token is the
   // board's state, already tracked in `consecutive_failures`, and counting it
   // would mark nearly every run failed and teach everyone to ignore the colour.
-  await closeRun({
-    status: dbErrors.length > 0 ? 'failed' : 'succeeded',
-    finished_at: new Date().toISOString(),
-    rows_in: totalDiscovered,
-    rows_out: totalApplications,
-    error_count: dbErrors.length,
-    // Capped so one bad night cannot write an unbounded text blob into the row. The rule
-    // warnings ride along, labelled, so they reach the run row and not only this console
-    // (B1, 2026-10-08). error_count above is unchanged: a warning is not an error.
-    error_detail: withRuleWarnings(dbErrors.length > 0 ? dbErrors.slice(0, 20).join('\n') : null, screenWarnings),
+  // The decision itself lives in scoutRunClose (pure, tested): db errors and, since W12,
+  // the screener fallback make it `failed`; a budget stop alone stays `succeeded` with a
+  // `deadline:` note. Capped and labelled as before: the db list keeps its 20-line cap
+  // and the rule warnings ride along (B1, 2026-10-08); a warning is not an error.
+  const close = scoutRunClose({
+    // Every failed write, counted above.
+    dbErrors,
+    // The fallback's reason, so it reaches the row as `screener_not_run: <reason>`.
+    screenerNotRun: screenContext.ok ? null : screenContext.reason,
+    // The W40 tally, for the `deadline:` note.
+    budget: budgetOutcome,
+    // Rule warnings, de-duplicated across boards.
+    screenWarnings,
+    // Same counters as before.
+    rowsIn: totalDiscovered,
+    rowsOut: totalApplications,
+    // The close's own clock, not the run's `now`, so duration_ms is real.
+    finishedAt: new Date(),
   });
+  // Checked close, as every other close in this file.
+  await closeRun(close.update);
 
   // Non-zero exit too, so the Actions tick is red — the run row alone is only
   // seen by someone who already suspects a problem.
-  if (dbErrors.length > 0) process.exitCode = 1;
+  process.exitCode = close.exitCode;
 }
 
 // Deliberately NOT async. An earlier edit marked this handler `async` without adding

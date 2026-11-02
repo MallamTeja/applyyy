@@ -203,6 +203,12 @@ export async function runRemoteScout(deps: RemoteRunDeps): Promise<RemoteRunResu
     return { ...result, status: 'dry_run' };
   }
 
+  // LOUD FALLBACK (W12, 2026-11-02): an unscreened real run is a counted error named
+  // `screener_not_run`, so it closes `failed` and the CLI exits 1, where it used to close
+  // `succeeded` over rows nothing screens on a schedule. Same label as scout.ts's close
+  // (worker/src/scout/run-outcome.ts). The rows are still written below: discovery is kept.
+  if (!screen.ok) noteError('screener_not_run', { message: screen.reason });
+
   // REAL RUN: write in batches, each through the shared persist path and the screener.
   for (let i = 0; i < kept.length; i += BATCH_SIZE) {
     // One batch of prepared postings.

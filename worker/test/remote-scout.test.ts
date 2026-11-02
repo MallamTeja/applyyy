@@ -88,7 +88,9 @@ describe('posted date (shared extractPostedAt, remote_feed variant)', () => {
 // A recording fake of the supabase-js client. Like the real one it never throws: every
 // awaited builder resolves to { data, error }. Every insert/upsert/update/delete is
 // recorded by table, which is what the dry-run test counts.
-function recordingClient(tables: Record<string, unknown>) {
+// `failing` names tables whose reads resolve to { data: null, error } (W12: a screener
+// context that cannot load), the way supabase-js reports a refused read: as a value.
+function recordingClient(tables: Record<string, unknown>, failing: readonly string[] = []) {
   // "table.method" for every write attempted.
   const writes: string[] = [];
   // A chainable, awaitable builder for one table; `single` switches the resolved shape.
@@ -96,12 +98,17 @@ function recordingClient(tables: Record<string, unknown>) {
     get(_target, prop) {
       // Awaiting the builder: rows for a list read, one object (or null) for single reads.
       if (prop === 'then') {
+        // A failing table answers with an error value, never a throw, like the real client.
+        if (failing.includes(table)) return (resolve: (v: unknown) => unknown) => resolve({ data: null, error: { message: `${table} unavailable` } });
         // The stored fixture for this table.
         const stored = tables[table];
         // Shaped like PostgREST: an array for lists, an object or null for single.
         const data = single ? (Array.isArray(stored) ? stored[0] ?? null : stored ?? null) : (Array.isArray(stored) ? stored : stored === undefined ? [] : [stored]);
         // A real thenable, so `await` works.
-        return (resolve: (v: unknown) => unknown) => resolve({ data, error: null });
+        // `count` too, as PostgREST reports it for a { count: "exact" } read: the screener's
+        // history query refuses a page it cannot prove complete. Without it the screener
+        // never loaded in this suite, so every real-run test above ran the unscreened path.
+        return (resolve: (v: unknown) => unknown) => resolve({ data, error: null, count: Array.isArray(data) ? data.length : null });
       }
       // The four writes are recorded, then keep chaining (.select(), .eq(), ...).
       if (prop === 'insert' || prop === 'upsert' || prop === 'update' || prop === 'delete') {
@@ -171,5 +178,28 @@ describe('remote run', () => {
     // Red, with every feed named.
     expect(result.status).toBe('failed');
     expect(result.failedFeeds).toEqual(['remoteok', 'jobicy', 'arbeitnow']);
+  });
+
+  it('screener context unavailable fails the real run with screener_not_run instead of a quiet success (W12)', async () => {
+    // filter_rules refuses the read, so loadScreenContext returns ok:false.
+    const { client, writes } = recordingClient(DB, ['filter_rules']);
+    // The live path; the fallback still writes rows at 'discovered'.
+    const result = await runRemoteScout({ client, fetchJson: fakeFetch, now: new Date('2026-10-24T08:00:00Z'), dryRun: false, force: false, log: () => {} });
+    // Discovery is kept: jobs were still written.
+    expect(writes).toContain('jobs.upsert');
+    // Red, so the CLI exits 1 (scout-remote.ts sets exitCode on 'failed').
+    expect(result.status).toBe('failed');
+    // Named first, with the loader's reason, so the run row says why.
+    expect(result.errors[0]).toMatch(/^screener_not_run: filter_rules query failed/);
+  });
+
+  it('TWIN: the same run with the screener loading closes succeeded, so the failure above is the screener', async () => {
+    // Nothing failing.
+    const { client } = recordingClient(DB);
+    // Same live path.
+    const result = await runRemoteScout({ client, fetchJson: fakeFetch, now: new Date('2026-10-24T08:00:00Z'), dryRun: false, force: false, log: () => {} });
+    // Green, with no errors at all.
+    expect(result.errors).toEqual([]);
+    expect(result.status).toBe('succeeded');
   });
 });
