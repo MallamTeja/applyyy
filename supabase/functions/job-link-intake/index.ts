@@ -4,7 +4,8 @@
 // Contract: POST { url: string, text?: string } with the app user's JWT.
 // 200 { status:'ok', application_id, pipeline_started, application_status, created, revived_from, source, job }
 // 4xx/5xx { status, message } where status is one of needs_text | not_a_job | posting_closed |
-// quota | upstream_unavailable | disabled | unauthorized | error. After a 200 with
+// quota | upstream_unavailable | disabled | unauthorized | cannot_restart (409: a failed row the
+// database will not move back, e.g. it failed after approval) | error. After a 200 with
 // pipeline_started, THIS function runs matcher -> tailor -> auditor on application_id in the
 // background (EdgeRuntime.waitUntil), so the run survives the tab closing (Teja, 2026-11-01:
 // "no need of me pressing that button"). The browser only watches the row's status.
@@ -15,10 +16,11 @@ import { createAppUserClient } from "../_shared/db/client.ts";
 import { withErrorBoundary } from "../_shared/cors.ts";
 // The shared Gemini client: key pool, pacing, failover.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
-// The shared transport (timeouts, bot-wall detection), used with its robots gate OFF for the pasted page.
-import { httpFetch } from "../_shared/http/index.ts";
 // The SSRF-safe page fetch: every redirect hop re-checked before it is requested.
 import { fetchPublicPage } from "./fetch-page.ts";
+// The hop that connects to the checked IP instead of re-resolving the name (audit W17). It replaced
+// httpFetch here, keeping that call's deadline, User-Agent and status mapping.
+import { fetchPinnedHop } from "./pinned-get.ts";
 // scout-web's robots-gated board fetch, reused for the ATS path.
 import { makeFetchBoard } from "../scout-web/fetch-board.ts";
 // The decisions and the seam types.
@@ -27,7 +29,8 @@ import { handleJobLinkIntake, type IntakeStore } from "./handler.ts";
 import type { ApplicationStatus } from "../_shared/contracts/shared-types.ts";
 // The engine behind the web's "Send through pipeline", reused so the server run and a manual
 // click share every stop rule (skip, halt, no progress). It imports nothing, so Deno loads it as is.
-import { PASSED_FILTERS_STEPS, runRowPipeline, type RowPipelineDeps } from "../../../apps/web/src/features/pipeline/rowPipeline.ts";
+// From _shared, never apps/web: the web auto-deploys and this function does not (audit W26).
+import { PASSED_FILTERS_STEPS, runRowPipeline, type RowPipelineDeps } from "../_shared/pipeline/row-pipeline.ts";
 // The client type the Gemini helper takes (scout-web reads it the same way; client.ts does not export it).
 type SupabaseClient = Parameters<typeof generateGeminiContent>[0];
 // Supabase's background-task hook. Deno's own types do not declare it.
@@ -184,8 +187,14 @@ Deno.serve(withErrorBoundary("job-link-intake", (req) =>
           // stay robots-strict. The SSRF guard is untouched: fetchPublicPage still shape-, DNS- and
           // address-checks every hop, caps redirects and bytes. `robots: false` also means the
           // transport never fetches a robots.txt, whose own redirects could reach a private host.
-          // No retries: each retry re-resolves DNS, widening the rebinding window the check cannot close.
-          fetchHop: (hop) => httpFetch(hop, { robots: false, redirect: "manual", notFound: "null", retry: { maxRetries: 0 } }),
+          // DNS REBINDING CLOSED (audit W17, 2026-11-02): the hop connects to the address the guard
+          // just checked, by IP literal, and runs TLS with the real name for SNI and the certificate
+          // check. fetch() would resolve the name again, which a zero-TTL answer can point at
+          // 10.x, 127.x or 169.254.169.254. One attempt, no retries, as before (pinned-get.ts).
+          fetchHop: (hop, address) => fetchPinnedHop(hop, address, {
+            // TCP to the checked IP; TLS verifies the certificate against serverName, not the IP.
+            openTls: async (address, serverName) => await Deno.startTls(await Deno.connect({ hostname: address, port: 443 }), { hostname: serverName }),
+          }),
           // A and AAAA looked up separately: a host with only one family answers NotFound for the other.
           // Any OTHER resolver error throws, so the fetch is refused rather than checked on half the answer.
           resolve: async (host) => [

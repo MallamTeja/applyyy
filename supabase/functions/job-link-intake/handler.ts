@@ -35,9 +35,10 @@ import { checkPublicUrl } from "./fetch-page.ts";
 import { buildExtractPrompt, MAX_SOURCE_CHARS, MIN_JOB_TEXT_CHARS, pageText, parseExtraction } from "./extract.ts";
 // The readers past a plain fetch: LinkedIn's and X's public endpoints, and the browser render.
 import { readSite, renderPage, type RenderFetch } from "./page-readers.ts";
-// The web engine's step tables (an import-free module), so "does this row need the chain" is the
-// same rule the browser's Send button uses; a local copy would drift from it.
-import { PASSED_FILTERS_STEPS, STEP_INPUT_STATUS } from "../../../apps/web/src/features/pipeline/rowPipeline.ts";
+// The pipeline engine's step tables (an import-free module), so "does this row need the chain" is
+// the same rule the browser's Send button uses; a local copy would drift from it. Imported from
+// _shared, never from apps/web (audit W26: import-graph.test.ts pins it).
+import { PASSED_FILTERS_STEPS, STEP_INPUT_STATUS } from "../_shared/pipeline/row-pipeline.ts";
 
 // Longest URL accepted: far above any real job link, low enough that the body stays tiny.
 const MAX_URL_CHARS = 2_000;
@@ -45,9 +46,26 @@ const MAX_URL_CHARS = 2_000;
 const MAX_TEXT_CHARS = 100_000;
 
 // Statuses a pasted link pulls back into the pipeline, as the human (migration 20261031200000
-// adds these three human edges into passed_filters). Every other status is left alone: rows
+// adds the first three human edges into passed_filters). Every other status is left alone: rows
 // already moving forward need nothing, and rows at awaiting_approval or later must not be reset.
-export const REVIVE_FROM: readonly ApplicationStatus[] = ["discovered", "deduped", "dropped_filter"];
+// 'failed' since 2026-11-02 (Teja: a pasted link must RESTART a failed job). Its edge comes from
+// migration 20261102203000, whose trigger guard_failed_rerun refuses a row that failed at or after
+// approval (it may already have been submitted). That refusal is answered as cannot_restart, never
+// as a 500 (restartRefusal below). Until that migration is live the graph guard refuses the edge
+// itself, and that takes the same path.
+export const REVIVE_FROM: readonly ApplicationStatus[] = ["discovered", "deduped", "dropped_filter", "failed"];
+
+// The phrase guard_failed_rerun's exception carries (migration 20261102203000). Matched positively, so
+// a refusal that does NOT say it is never worded as "failed after approval" (§6: no claimed cause).
+const FAILED_AFTER_APPROVAL = /failed at or after approval/;
+
+// The message the human sees when a paste cannot restart a failed row. Takes the database's refusal.
+function restartRefusal(moveError: string): string {
+  // The trigger's own reason: the row may already have been submitted, so it is checked by hand.
+  if (FAILED_AFTER_APPROVAL.test(moveError)) return "This job failed after approval, so a pasted link cannot restart it: it may already have been submitted. Check it by hand.";
+  // Any other refusal (e.g. the restart edge is not live yet): said as it is, with the reason.
+  return `This failed job could not be restarted from a pasted link: ${moveError}`;
+}
 
 // True when matcher, tailor or auditor still has work on a row in this status. awaiting_approval
 // and later match no step, so a re-pasted link never re-runs agents on a finished row.
@@ -408,6 +426,9 @@ function richerDescription(stored: string | null, pasted: string | null): string
 export async function persistManualJob(store: IntakeStore, row: JobInsert, pastedUrl: string): Promise<
   | { ok: true; application: StoredApplication; revivedFrom: ApplicationStatus | null }
   | { ok: false; reason: string }
+  // A failed row the database would not move: a refusal to report as such, not a failed write.
+  // The job row (and any description it gained) is already saved by then.
+  | { ok: false; reason: string; restartRefused: true }
 > {
   // Insert-if-absent, then read back.
   const job = await store.upsertJob(row);
@@ -434,6 +455,9 @@ export async function persistManualJob(store: IntakeStore, row: JobInsert, paste
   if (!REVIVE_FROM.includes(app.application.status)) return { ok: true, application: app.application, revivedFrom: null };
   // Upstream or dropped: the human pulls it into passed_filters through the guarded RPC.
   const moveError = await store.moveToPassedFilters(app.application.id, { reason: "pasted_link", url: pastedUrl, from: app.application.status });
+  // A failed row the database refused (failed after approval, or the edge not live yet): reported
+  // as a refusal the human can read. The tag and description write above already happened.
+  if (moveError !== null && app.application.status === "failed") return { ok: false, reason: restartRefusal(moveError), restartRefused: true };
   // The guard refused (e.g. the migration is not applied): say so, never pretend it moved.
   if (moveError !== null) return { ok: false, reason: `advance_to_passed_filters: ${moveError}` };
   // Moved; the handler then starts matcher -> tailor -> auditor on it, server-side.
@@ -494,6 +518,8 @@ export async function handleJobLinkIntake(req: Request, deps: IntakeDeps): Promi
   if ("httpStatus" in built) return json(built.httpStatus, built.body);
   // Write it.
   const saved = await persistManualJob(conn.store, built.row, parsed.value.url.toString());
+  // A failed job the paste may not restart: 409, the refusal in words, no pipeline run.
+  if (!saved.ok && "restartRefused" in saved) return json(409, { status: "cannot_restart", message: saved.reason });
   // A failed write is reported, never a quiet success.
   if (!saved.ok) return json(503, { status: "error", message: `Saving the job failed: ${saved.reason}` });
   // Only a row the agents can still move gets a run; the decision is reported, never guessed by the browser.

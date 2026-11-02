@@ -294,8 +294,84 @@ test("needsChain: the matcher/tailor/auditor inputs need the chain; the queue an
   for (const s of ["awaiting_approval", "approved", "applied", "dropped_filter", "failed", "discovered"]) assert.equal(needsChain(s), false, s);
 });
 
-test("REVIVE_FROM is exactly the three statuses the migration gives a human edge into passed_filters", () => {
-  assert.deepEqual([...REVIVE_FROM].sort(), ["deduped", "discovered", "dropped_filter"]);
+test("REVIVE_FROM is exactly the four statuses the migrations give a human edge into passed_filters", () => {
+  // 20261031200000 adds the first three; 20261102203000 adds failed (Teja, 2026-11-02).
+  assert.deepEqual([...REVIVE_FROM].sort(), ["deduped", "discovered", "dropped_filter", "failed"]);
+});
+
+// --- A pasted link restarts a failed job (Teja, 2026-11-02); the trigger may refuse it ---
+
+// guard_failed_rerun's exception text (migration 20261102203000), as supabase-js hands it back.
+const TRIGGER_REFUSAL = "application 33333333-3333-4333-8333-333333333333 failed at or after approval (previous_status approved); it may not re-enter the pipeline";
+
+test("persistManualJob: a row that failed before approval is moved back to passed_filters as the human", async () => {
+  // The spy records the guarded move.
+  const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
+  // A failed row; the fake advance succeeds, as the database does for a pre-approval failure.
+  const store = fakeStore(spy, { existing: { discoveredVia: ["manual"] }, application: { id: "app-9", status: "failed", created: false } });
+  // The paste.
+  const saved = await persistManualJob(store, pastedRow(null), "https://x.example/j");
+  // Revived, from failed.
+  assert.ok(saved.ok);
+  // Named, so the browser can say "restarted".
+  assert.equal(saved.revivedFrom, "failed");
+  // Where the server pipeline picks it up.
+  assert.equal(saved.application.status, "passed_filters");
+  // Through the guarded RPC, saying where it came from.
+  assert.equal(spy.moves[0]?.detail["from"], "failed");
+});
+
+test("handler: a failed pre-approval row is restarted: 200, revived_from failed, and the server pipeline runs", async () => {
+  // The scouted row failed before approval; the fake advance succeeds.
+  const { deps, runs } = makeDeps({ store: { existing: { discoveredVia: ["greenhouse"] }, application: { id: "33333333-3333-4333-8333-333333333333", status: "failed", created: false } } });
+  // The paste.
+  const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111" }), deps);
+  // The envelope.
+  const body = await res.json();
+  // Accepted.
+  assert.equal(res.status, 200);
+  // Restarted from failed.
+  assert.equal(body.revived_from, "failed");
+  // The chain runs on it, server-side.
+  assert.deepEqual(runs, ["33333333-3333-4333-8333-333333333333"]);
+});
+
+test("handler: a failed row the trigger refuses answers 409 cannot_restart, names 'failed after approval', keeps the description, runs nothing", async () => {
+  // A scouted row with no description that failed AFTER approval; the trigger refuses the move.
+  const { deps, runs, spy } = makeDeps({ store: { existing: { discoveredVia: ["greenhouse"], descriptionRaw: null }, application: { id: "33333333-3333-4333-8333-333333333333", status: "failed", created: false }, moveError: TRIGGER_REFUSAL } });
+  // The paste.
+  const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111" }), deps);
+  // The envelope.
+  const body = await res.json();
+  // A refusal, not a server error.
+  assert.equal(res.status, 409);
+  // Its own status, so the browser shows the message rather than "saving failed".
+  assert.equal(body.status, "cannot_restart");
+  // The cause in words.
+  assert.match(body.message, /failed after approval/);
+  // Nothing re-runs a row that may already have been submitted.
+  assert.deepEqual(runs, []);
+  // The board's description was still written to the job row before the move was refused.
+  assert.ok(typeof spy.fills?.[0] === "string" && spy.fills[0].length > 0, "the description fill was not written");
+});
+
+test("handler: a failed row refused for another reason (restart edge not live yet) is still cannot_restart, and never claims 'after approval'", async () => {
+  // The graph guard's refusal before migration 20261102203000 is applied.
+  const { deps, runs } = makeDeps({ store: { existing: { discoveredVia: ["manual"] }, application: { id: "33333333-3333-4333-8333-333333333333", status: "failed", created: false }, moveError: "illegal status transition failed -> passed_filters (application x). No such edge in application_status_transitions." } });
+  // The paste.
+  const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111" }), deps);
+  // The envelope.
+  const body = await res.json();
+  // The same graceful path.
+  assert.equal(res.status, 409);
+  // Same status.
+  assert.equal(body.status, "cannot_restart");
+  // The database's own reason, not an invented one.
+  assert.match(body.message, /No such edge/);
+  // A cause the database did not state is never claimed.
+  assert.doesNotMatch(body.message, /after approval/);
+  // Nothing runs.
+  assert.deepEqual(runs, []);
 });
 
 test("persistManualJob: a scouted row a filter dropped is tagged manual, then moved back as the human", async () => {
@@ -435,12 +511,20 @@ const RENDER_OK = { status: 200, body: { status: "ok", text: RENDERED_TEXT, fina
 // The model's "this is not one job" answer.
 const NOT_A_JOB = geminiAnswer({ ...GOOD_FIELDS, is_job_posting: false });
 
-test("robots: the pasted page's hops are plain httpFetch calls with robots off, and the ruling is cited", async () => {
+test("robots: the pasted page's hops are pinned-IP GETs with no robots gate, and the ruling is cited", async () => {
   // index.ts runs Deno.serve on import, so its wiring is read as source (POSITIVE shape, §6).
   const { readFileSync } = await import("node:fs");
   const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
-  // fetchHop IS one robots-off httpFetch, so no robots check can sit in front of it.
-  assert.match(source, /fetchHop: \(hop\) => httpFetch\(hop, \{ robots: false, redirect: "manual", notFound: "null", retry: \{ maxRetries: 0 \} \}\),/);
+  // fetchHop IS the pinned hop, called directly, so no robots check can sit in front of it.
+  // (Since 2026-11-02, audit W17: it replaced a robots-off httpFetch to close DNS rebinding.)
+  assert.match(source, /fetchHop: \(hop, address\) => fetchPinnedHop\(hop, address, \{/);
+  // The pinned hop imports only error classes and two constants: no robots gate, no httpFetch.
+  const hop = readFileSync(new URL("./pinned-get.ts", import.meta.url), "utf8");
+  // Every import line of pinned-get.ts, exactly.
+  assert.deepEqual(hop.match(/^import .*$/gm), [
+    'import { HttpError, NetworkError } from "../_shared/http/errors.ts";',
+    'import { DEFAULT_TIMEOUT_MS, DEFAULT_USER_AGENT } from "../_shared/http/index.ts";',
+  ]);
   // The comment that stops someone restoring the check names the ruling and its date.
   assert.match(source, /Teja's ruling, 2026-11-01/);
   // The ATS board path keeps scout-web's robots-gated fetcher.

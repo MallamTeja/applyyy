@@ -5,9 +5,9 @@
 // name can resolve to 127.0.0.1 (e.g. 127.0.0.1.nip.io), `localhost.` slips past a suffix
 // match, and an allowed host can 302 to an internal one. So redirects are followed BY HAND and
 // every hop is shape-checked, DNS-resolved and address-checked before it is requested.
-// ponytail: fetch re-resolves the name after our check, so a DNS-rebinding window remains;
-// closing it means pinning the checked IP in a custom connector. Add that if this runtime ever
-// sits on a private network worth reaching.
+// DNS REBINDING (audit W17, closed 2026-11-02): fetch() used to resolve the name AGAIN after this
+// check, so a zero-TTL answer could swap a private address in between. fetchHop now receives the
+// address that was checked and connects to that IP (pinned-get.ts); nothing looks the name up twice.
 //
 // Pure module behind two seams (fetchHop, resolve), so `node --test` covers every branch.
 
@@ -83,7 +83,9 @@ export function isPublicAddress(ip: string): boolean {
 export interface PageFetchDeps {
   // One GET with redirect: "manual": a 3xx comes back as a Response; null on 404. Not robots-gated
   // since 2026-11-01 (a pasted link is a user-triggered fetch; index.ts carries the ruling).
-  fetchHop(url: string): Promise<Response | null>;
+  // `address` is the IP the guard just checked; the hop must connect to IT, never re-resolve the
+  // name (audit W17). A required parameter, so a hop cannot silently ignore it by omission.
+  fetchHop(url: string, address: string): Promise<Response | null>;
   // Every A and AAAA address of a host; empty when it has none or cannot be resolved.
   resolve(hostname: string): Promise<string[]>;
 }
@@ -139,12 +141,15 @@ export async function fetchPublicPage(start: string, deps: PageFetchDeps): Promi
     if (refused !== null) return { ok: false, reason: `a redirect was refused: ${refused}` };
     // Where this name really points, root dot stripped like isBlockedHost does.
     const addresses = await deps.resolve(url.hostname.replace(/\.+$/, ""));
+    // The address the hop will connect to: the first answer, which is IPv4 when the host has one
+    // (resolve lists A before AAAA). Destructured, so "no address" is a checked undefined.
+    const [address] = addresses;
     // No address: nothing safe to connect to (also the fail-closed answer if DNS is unavailable).
-    if (addresses.length === 0) return { ok: false, reason: "the site's address could not be looked up" };
-    // One private address is enough to refuse: the connection may pick any of them.
+    if (address === undefined) return { ok: false, reason: "the site's address could not be looked up" };
+    // One private address is enough to refuse: a rebinding answer could hide it among public ones.
     if (!addresses.every(isPublicAddress)) return { ok: false, reason: "the site points at a private network address" };
-    // The request itself, redirects NOT followed.
-    const res = await deps.fetchHop(url.toString());
+    // The request itself, to the CHECKED address, redirects NOT followed.
+    const res = await deps.fetchHop(url.toString(), address);
     // A 404 is a dead link.
     if (res === null) return { ok: false, reason: "page not found" };
     // A redirect: check the next hop before following it.
