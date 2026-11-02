@@ -12,11 +12,11 @@
  * conflated them and produced a false all-clear, which is worse than no check
  * at all - so the predicate is now stated in each name:
  *
- *   HUMAN_ONLY_LANES      allowedAgents === ['human']      (15 edges)
+ *   HUMAN_ONLY_LANES      allowedAgents === ['human']      (16 edges)
  *     No automation will ever help. These need PROMINENT controls, because a
  *     person is the only thing that can move the row, ever.
  *
- *   HUMAN_REACHABLE_LANES allowedAgents.includes('human')  (36 edges)
+ *   HUMAN_REACHABLE_LANES allowedAgents.includes('human')  (37 edges)
  *     A human is permitted, often as a fallback for an agent. These still need
  *     controls, because the agent may not be running - and section 14 says a
  *     dead scheduled job is silent. `applying -> needs_verification` is the
@@ -214,9 +214,10 @@ const SCREENS_BY_SOURCE_STATUS: Readonly<
    * which is why it gets a real queue instead of an error log. */
   blocked_needs_human: { screen: 'System health, blocked queue', readiness: 'operable' },
 
-  /* The only edge out of `failed` leads to verification rather than back to
+  /* The screen's edge out of `failed` leads to verification rather than back to
    * the queue: a row that failed near the submit boundary must be checked by a
-   * person before anything moves it again. */
+   * person before anything moves it again. The second edge, -> passed_filters
+   * (2026-11-02), is HELD below and guarded in SQL to pre-approval failures. */
   failed: { screen: 'System health, failed rows', readiness: 'operable' },
 };
 
@@ -270,6 +271,17 @@ export const HELD_HUMAN_EDGES: ReadonlyArray<{
      * the operator. Held so awaiting_approval's operable claim stays true for the
      * moves it does perform, and the coverage numbers count this one as inoperable. */
     reason: 'Not offered: the Approval queue has no re-run button yet; a re-run after a master change is sent by the operator.',
+  },
+  {
+    // The System health failed queue, whose screen performs failed -> needs_verification.
+    from: 'failed',
+    // The pre-approval re-run added 2026-11-02 (migration 20261102203000).
+    to: 'passed_filters',
+    /* Held because most failed rows in that queue failed AT or AFTER approval, and the
+     * database refuses those (guard_failed_rerun: a second submission risk). A button
+     * offered to every failed row would mostly fail with 42501. The operator sends the
+     * pre-approval re-runs through advance_application_status instead. */
+    reason: 'Not offered: only rows that failed before approval may re-run, and the database checks that; the operator sends these.',
   },
 ];
 

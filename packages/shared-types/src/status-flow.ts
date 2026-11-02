@@ -53,14 +53,15 @@ export interface StatusTransition {
  *
  * BUT DO NOT READ THAT AS "THE GRAPH HAS NO BACKWARD EDGES" — corrected 2026-09-10,
  * because the previous wording ended "there is no backward path for a bug to wander
- * down" and that is false. TEN backward edges exist, deliberately, and they are the
+ * down" and that is false. ELEVEN backward edges exist, deliberately, and they are the
  * recovery lanes: `audit_flagged→tailored`, `interview→oa_pending`,
  * `blocked_needs_human→applied`, `blocked_needs_human→dropped_filter`,
  * `needs_verification→applied`, `needs_verification→approved`,
  * `failed→needs_verification`, (2026-10-31) `dropped_filter→passed_filters`,
  * the human re-adding a dropped job by pasting its link, and (2026-11-01)
  * `awaiting_approval→passed_filters` and `approved→passed_filters`, the human
- * re-running a row after the master changed.
+ * re-running a row after the master changed, and (2026-11-02) `failed→passed_filters`,
+ * re-running a row that failed before approval (guarded in SQL, see guard_failed_rerun).
  *
  * The true statement is narrower and is what the prose above was reaching for: no
  * backward edge exists on the AUTOMATED FORWARD PATH, and every backward edge except
@@ -171,7 +172,11 @@ export const STATUS_TRANSITIONS: readonly StatusTransition[] = [
   { from: 'blocked_needs_human', to: 'applied', allowedAgents: ['human'], note: 'Human finished the submission by hand.' },
   { from: 'blocked_needs_human', to: 'dropped_filter', allowedAgents: ['human'], note: 'Human decided it was not worth finishing.' },
   { from: 'blocked_needs_human', to: 'failed', allowedAgents: ['human'], note: 'Human could not complete it either.' },
-  { from: 'failed', to: 'needs_verification', allowedAgents: ['human'], note: 'The ONLY edge out of failed, and it leads to verification rather than to the queue. A row that failed near the submit boundary must be checked by a person before it can move again.' },
+  { from: 'failed', to: 'needs_verification', allowedAgents: ['human'], note: 'Verification, not the queue, for a row that failed near the submit boundary: a person checks it before it moves again. Pre-approval failures may instead re-run via failed -> passed_filters.' },
+  // Re-run a row that failed BEFORE approval (2026-11-02, migration 20261102203000). Human-only,
+  // and guarded in SQL by guard_failed_rerun: a row whose previous_status is approved or later
+  // may already have been submitted, so the database refuses to send it back (constraint #7).
+  { from: 'failed', to: 'passed_filters', allowedAgents: ['human'], note: 'Human re-runs a row that failed before approval; guard_failed_rerun refuses one that failed at or after approval.' },
 ] as const;
 
 /**

@@ -263,6 +263,10 @@ test('the master-change re-run edges are claimed but never counted operable', ()
   const operable = new Set(OPERABLE_HUMAN_CONTROLS.map(key));
   assert.ok(!operable.has(key({ from: 'awaiting_approval', to: 'passed_filters' })));
   assert.ok(!operable.has(key({ from: 'approved', to: 'passed_filters' })));
+  // 2026-11-02: the pre-approval re-run out of failed is held the same way; the SQL guard is the control.
+  assert.notEqual(heldReason('failed', 'passed_filters'), null);
+  // And never counted operable, even though the failed queue itself is.
+  assert.ok(!operable.has(key({ from: 'failed', to: 'passed_filters' })));
 });
 
 /* --- isHumanOnlyLane -------------------------------------------------- */

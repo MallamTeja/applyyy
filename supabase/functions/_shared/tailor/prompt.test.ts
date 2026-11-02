@@ -478,3 +478,55 @@ test("the instruction region lists achievement and certification refs under thei
   // And the credential falls under the certification header, not the award one.
   assert.ok(certHeader > achHeader && certHeader < lines.indexOf("- ref=cert_synthetic_sql :: Synthetic SQL Certificate (Example Issuer)"));
 });
+
+// The 2026-11-02 refusal pattern (11 of 15 tailor refusals): the schema REQUIRES a
+// `bullets` array on every node, so for a bullet-less education or certification node
+// the model filled it by copying the node's own line as a bullet, and the validator
+// refused `unresolved_ref` (ref=edu_mlrit under edu_mlrit). The prompt must say, per
+// bullet-less node, that the honest answer is an empty array.
+test("a bullet-less node gets an explicit no-bullets line; a node with bullets does not", () => {
+  // MASTER's own nodes all HAVE bullets; add one bullet-less qualification and one
+  // bullet-less credential, which is the live master's shape for both sections.
+  const prompt = buildTailorPrompt({
+    master: {
+      ...MASTER,
+      // Kept after MASTER's edu-mlrit so a node WITH bullets sits in the same section.
+      education: [
+        ...MASTER.education,
+        { id: "edu_synthetic_school", institution: "Synthetic Junior College", degree: "Intermediate", field: "MPC", start_display: "2020", end_display: "2022", start_date: null, end_date: null, grade_display: null, bullets: [] },
+      ],
+      // A credential with no bullets, like all three on the live master.
+      certifications: [{ id: "cert_synthetic_ml", label: "Synthetic ML Certificate", description: null, bullets: [] }],
+    },
+    masterVersion: PINNED_VERSION,
+    jobDescription: CLEAN_JD,
+    jobTitle: "Backend Intern",
+    company: "Zomato",
+  });
+  // Whole-line matching, as in the test above, so a loose substring cannot pass.
+  const lines = prompt.systemInstruction.split("\n");
+  // The qualification's no-bullets line sits DIRECTLY under its node line, so the
+  // model reads it as belonging to that node and no other.
+  const eduNode = lines.indexOf("- ref=edu_synthetic_school :: Intermediate MPC at Synthetic Junior College");
+  // Found at all, else the index arithmetic below would compare against -1.
+  assert.ok(eduNode >= 0, "bullet-less education node line missing");
+  // The very next line is the explicit empty-array instruction for that id.
+  assert.equal(lines[eduNode + 1], `    (no bullets: return "bullets": [] for edu_synthetic_school)`);
+  // Same for the credential.
+  const certNode = lines.indexOf("- ref=cert_synthetic_ml :: Synthetic ML Certificate");
+  // Found at all, for the same reason.
+  assert.ok(certNode >= 0, "bullet-less certification node line missing");
+  // Directly under it, naming its own id.
+  assert.equal(lines[certNode + 1], `    (no bullets: return "bullets": [] for cert_synthetic_ml)`);
+  // A node WITH bullets is unchanged: its next line is still its real bullet line.
+  const mlritNode = lines.indexOf("- ref=edu-mlrit :: B.Tech Computer Science at MLR Institute of Technology");
+  // The real bullet keeps the `    - ref=<id> :: <text>` shape it always had.
+  assert.equal(lines[mlritNode + 1], "    - ref=edu-bullet-coursework :: Coursework in data structures and databases");
+  // Counted, not searched for absence: exactly the two bullet-less nodes get the line,
+  // so none of MASTER's bullet-bearing experience/project/education nodes did.
+  assert.equal(lines.filter((line) => line.startsWith("    (no bullets:")).length, 2);
+  // The policy rule that names the failure: a bullet's ref is never its node's ref.
+  assert.ok(lines.includes("- A bullet's ref is always one of the INDENTED `- ref=` ids listed under its node, and"));
+  // Its second line, which carries the "never" and the empty-array answer.
+  assert.ok(lines.includes("  never the node's own ref. A node with no indented bullets returns \"bullets\": []."));
+});

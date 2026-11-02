@@ -97,6 +97,18 @@ function neutralizeFenceSequences(untrusted: string): string {
 // Render the master profile into the instruction region. Trusted input, so it is
 // interpolated directly — and it must be, because the ids ARE the interface the
 // model answers in (§10 defense 1). A model that cannot see an id cannot cite it.
+// The line rendered under a node that has NO bullets. Without it a bullet-less node is
+// followed by nothing, yet the response schema still REQUIRES a `bullets` array for it,
+// and on 2026-11-02 the model filled that array by copying the node's own ref as a
+// bullet (11 of 15 tailor refusals, all `unresolved_ref`, e.g. ref=edu_mlrit under
+// edu_mlrit). One definition, so the five sections below cannot drift apart in wording.
+// Deliberately NOT in the `- ref=<id> :: ` bullet shape: a line that looks like a bullet
+// is exactly what the model was copying.
+function noBulletsLine(nodeId: string): string {
+  // Indented like a bullet so it reads as belonging to the node line directly above it.
+  return `    (no bullets: return "bullets": [] for ${nodeId})`;
+}
+
 function renderMasterProfile(master: MasterProfile, masterVersion: number): string {
   // Accumulated section by section so the id namespaces stay visually separated.
   const sections: string[] = [];
@@ -114,6 +126,9 @@ function renderMasterProfile(master: MasterProfile, masterVersion: number): stri
     // aa's TailoredExperience has no field for them, so an employer cannot be renamed.
     // Includes start and end dates for context.
     sections.push(`- ref=${node.id} :: ${node.role} at ${node.company} (${node.start_display}–${node.end_display})`);
+    // A bullet-less node says so explicitly, so its required `bullets` array comes back
+    // empty instead of holding the node's own ref (see noBulletsLine).
+    if (node.bullets.length === 0) sections.push(noBulletsLine(node.id));
     // Its bullets, indented, each with the id the model must return.
     // Loop over bullets under this specific experience parent node.
     for (const bullet of node.bullets) {
@@ -128,6 +143,8 @@ function renderMasterProfile(master: MasterProfile, masterVersion: number): stri
   for (const node of master.projects) {
     // The project line formatting with unique project ref ID.
     sections.push(`- ref=${node.id} :: ${node.name}`);
+    // Same explicit empty-array line for a bullet-less project, for the same reason.
+    if (node.bullets.length === 0) sections.push(noBulletsLine(node.id));
     // Its bullets, indented under project parent node.
     // Loop over project bullets for this project.
     for (const bullet of node.bullets) {
@@ -142,6 +159,9 @@ function renderMasterProfile(master: MasterProfile, masterVersion: number): stri
   for (const node of master.education) {
     // The qualification line including degree, optional field, and institution.
     sections.push(`- ref=${node.id} :: ${node.degree} ${node.field ?? ""} at ${node.institution}`.trimEnd());
+    // The live master's qualifications have no bullets; this line is what stops the
+    // model copying edu_mlrit / edu_tkr into their own `bullets` arrays.
+    if (node.bullets.length === 0) sections.push(noBulletsLine(node.id));
     // Its bullets, indented under education parent node.
     // Loop over education bullets for this qualification.
     for (const bullet of node.bullets) {
@@ -158,6 +178,8 @@ function renderMasterProfile(master: MasterProfile, masterVersion: number): stri
     // The label is shown for selection but not requestable as text: a tailored
     // achievement has no label field, so "Winner" cannot become "International Winner".
     sections.push(`- ref=${node.id} :: ${node.label}${node.description === null ? "" : ` (${node.description})`}`);
+    // Most awards are one line with no bullets, so most get the explicit empty-array line.
+    if (node.bullets.length === 0) sections.push(noBulletsLine(node.id));
     // Its bullets, often none — most awards are one line.
     for (const bullet of node.bullets) {
       // Same line shape as every other bullet, so the model reads one convention.
@@ -172,6 +194,9 @@ function renderMasterProfile(master: MasterProfile, masterVersion: number): stri
   for (const node of master.certifications) {
     // Label and qualifying detail, shown for selection only — same reason as above.
     sections.push(`- ref=${node.id} :: ${node.label}${node.description === null ? "" : ` (${node.description})`}`);
+    // The live master's certifications have no bullets; without this line the model
+    // copied cert_ibm_sql / cert_prompt_eng / cert_ibm_ml into their own arrays.
+    if (node.bullets.length === 0) sections.push(noBulletsLine(node.id));
     // Its bullets; the live master's three certifications have none.
     for (const bullet of node.bullets) {
       // Same line shape again.
@@ -221,6 +246,12 @@ const TAILOR_POLICY = [
   "- Select achievements and certifications from the master by ref, the same way as",
   // Rule 5 part 2: when an empty array is the honest answer.
   "  education. Return an empty array only when none is relevant to the posting.",
+  // Rule 6 part 1: where a bullet's ref may come from. Stated because a node line and a
+  // bullet line share the `ref=` shape, and the model gave bullet-less nodes a bullet
+  // carrying the node's own ref (2026-11-02, 11 of 15 refusals).
+  "- A bullet's ref is always one of the INDENTED `- ref=` ids listed under its node, and",
+  // Rule 6 part 2: the forbidden copy, and the honest answer when there is nothing to cite.
+  "  never the node's own ref. A node with no indented bullets returns \"bullets\": [].",
   // Section separator.
   "",
   // Section header for automated honesty enforcement rules.
