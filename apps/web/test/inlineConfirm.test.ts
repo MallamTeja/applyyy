@@ -8,7 +8,8 @@
  *   3. Confirm calls the write path exactly once, even when clicked twice;
  *   4. Cancel and Escape write nothing and return focus to the button that opened the confirm;
  *   5. one confirm at a time across instances: arming another closes the first;
- *   6. neither call-site file calls the browser's confirm() any more (AST, so a comment cannot trip it).
+ *   6. no file under src raises a browser-native dialog: alert/confirm/prompt or a beforeunload
+ *      listener (AST, so a comment cannot trip it; widened from the two call sites 2026-11-04).
  *
  * HOW, WITHOUT A DOM. apps/web has no DOM renderer. RecoveryRowView, AnswerBankRowActions and
  * ConfirmActions are hook-free, so calling them returns their element tree, and this file calls the
@@ -19,7 +20,7 @@
 // The .tsx loader; must be the first import so it runs before any component loads.
 import './support/registerTsxHooks.ts';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterEach, before, describe, it } from 'node:test';
 
@@ -512,32 +513,45 @@ describe('one pending confirm across instances', () => {
   });
 });
 
-/* ---- no browser confirm() left at either call site ---- */
+/* ---- no browser-native dialog anywhere in the app ----
+ * Teja, 2026-11-04 19:06 IST: "i dont need that popup not at all in any page". The browser draws four
+ * modal dialogs the app cannot style: alert(), confirm(), prompt(), and the "Leave site?" box a
+ * beforeunload listener raises. None may exist in apps/web/src; an in-page UI (InlineConfirm) asks instead. */
 
-describe('no browser confirm() call at the two call sites', () => {
+describe('no browser-native dialog (alert/confirm/prompt/beforeunload) anywhere in apps/web/src', () => {
   // typescript is a devDependency of apps/web; resolved as noJsxCommentText.test.ts does.
   const ts = createRequire(import.meta.url)('typescript') as typeof import('typescript');
+  // The three dialog functions the browser puts on window.
+  const DIALOG_FNS = ['alert', 'confirm', 'prompt'];
+  // The global objects they hang off; window.confirm and globalThis.confirm are the same function.
+  const GLOBALS = ['window', 'globalThis', 'self'];
 
-  // Counts calls to confirm() (bare, window. or globalThis.) and to armConfirm() in one file, by AST,
-  // so a comment that documents the old popup cannot trip it.
-  function calls(path: string): { browserConfirm: number; armConfirm: number } {
-    // Parsed as TSX.
-    const sf = ts.createSourceFile(path, readFileSync(new URL(path, import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  // Counts native-dialog sites and armConfirm() calls in one file, by AST, so a comment or a string
+  // that documents the old popup (or an XSS payload like 'javascript:alert(1)') cannot trip it.
+  function calls(path: URL): { nativeDialog: number; armConfirm: number } {
+    // Parsed as TSX; a plain .ts file parses the same way.
+    const sf = ts.createSourceFile(path.pathname, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
     // Tallies.
-    const out = { browserConfirm: 0, armConfirm: 0 };
+    const out = { nativeDialog: 0, armConfirm: 0 };
     // Every node.
     const visit = (node: import('typescript').Node): void => {
-      // Only calls matter.
+      // Calls: the dialog functions, the beforeunload listener, and the inline confirm's door.
       if (ts.isCallExpression(node)) {
         // The callee as written.
         const callee = node.expression;
-        // confirm(...)
-        if (ts.isIdentifier(callee) && callee.text === 'confirm') out.browserConfirm += 1;
-        // window.confirm(...) or globalThis.confirm(...)
-        if (ts.isPropertyAccessExpression(callee) && callee.name.text === 'confirm' && ts.isIdentifier(callee.expression) && ['window', 'globalThis', 'self'].includes(callee.expression.text)) out.browserConfirm += 1;
+        // alert(...), confirm(...), prompt(...)
+        if (ts.isIdentifier(callee) && DIALOG_FNS.includes(callee.text)) out.nativeDialog += 1;
+        // window.confirm(...), globalThis.alert(...), self.prompt(...)
+        if (ts.isPropertyAccessExpression(callee) && DIALOG_FNS.includes(callee.name.text) && ts.isIdentifier(callee.expression) && GLOBALS.includes(callee.expression.text)) out.nativeDialog += 1;
+        // The first argument, which names the event for an addEventListener call.
+        const first = node.arguments[0];
+        // x.addEventListener('beforeunload', ...): the listener is what makes the browser ask "Leave site?".
+        if (ts.isPropertyAccessExpression(callee) && callee.name.text === 'addEventListener' && first !== undefined && ts.isStringLiteralLike(first) && first.text === 'beforeunload') out.nativeDialog += 1;
         // The inline confirm's door.
         if (ts.isIdentifier(callee) && callee.text === 'armConfirm') out.armConfirm += 1;
       }
+      // window.onbeforeunload = ...: the property form of the same listener.
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isPropertyAccessExpression(node.left) && node.left.name.text === 'onbeforeunload') out.nativeDialog += 1;
       // Recurse.
       ts.forEachChild(node, visit);
     };
@@ -547,21 +561,47 @@ describe('no browser confirm() call at the two call sites', () => {
     return out;
   }
 
-  it('RecoveryQueue.tsx: no browser confirm(); its moves open the inline confirm', () => {
+  it('RecoveryQueue.tsx: no native dialog; its moves open the inline confirm', () => {
     // The file's calls.
-    const c = calls('../src/features/health/RecoveryQueue.tsx');
+    const c = calls(new URL('../src/features/health/RecoveryQueue.tsx', import.meta.url));
     // Positive shape first: the moves go through armConfirm.
     assert.ok(c.armConfirm >= 1, 'RecoveryQueue.tsx must open the inline confirm');
     // And no popup.
-    assert.equal(c.browserConfirm, 0, 'RecoveryQueue.tsx must not call the browser confirm()');
+    assert.equal(c.nativeDialog, 0, 'RecoveryQueue.tsx must not raise a browser dialog');
   });
 
-  it('AnswerBankPage.tsx: no browser confirm(); Delete opens the inline confirm', () => {
+  it('AnswerBankPage.tsx: no native dialog; Delete opens the inline confirm', () => {
     // The file's calls.
-    const c = calls('../src/features/settings/AnswerBankPage.tsx');
+    const c = calls(new URL('../src/features/settings/AnswerBankPage.tsx', import.meta.url));
     // Positive shape first.
     assert.ok(c.armConfirm >= 1, 'AnswerBankPage.tsx must open the inline confirm');
     // And no popup.
-    assert.equal(c.browserConfirm, 0, 'AnswerBankPage.tsx must not call the browser confirm()');
+    assert.equal(c.nativeDialog, 0, 'AnswerBankPage.tsx must not raise a browser dialog');
+  });
+
+  it('every .ts/.tsx file under src: zero native dialogs', () => {
+    // The source root.
+    const srcRoot = new URL('../src/', import.meta.url);
+    // Every source file, nested included (Node's recursive listing, as attestBullet.test.ts uses).
+    const files = readdirSync(srcRoot, { recursive: true, encoding: 'utf8' }).filter((f) => /\.tsx?$/.test(f));
+    // Positive shape: the walk saw the real tree (90 files on 2026-11-04), so a broken path can't pass on zero.
+    assert.ok(files.length >= 50, `expected the whole src tree, saw ${files.length} files`);
+    // Each offending file with its count.
+    const offenders: string[] = [];
+    // Total inline-confirm doors, to prove the visitor reads real call sites.
+    let doors = 0;
+    // Scan each file.
+    for (const f of files) {
+      // Its tallies.
+      const c = calls(new URL(f.replaceAll('\\', '/'), srcRoot));
+      // Collected, so one run names every offender.
+      if (c.nativeDialog > 0) offenders.push(`${f}: ${c.nativeDialog}`);
+      // Summed.
+      doors += c.armConfirm;
+    }
+    // Positive shape: the two known call sites were seen through this same walk.
+    assert.ok(doors >= 2, `expected armConfirm() at RecoveryQueue and AnswerBankPage, saw ${doors}`);
+    // The rule itself.
+    assert.deepEqual(offenders, [], 'browser-native dialogs found; use an in-page UI such as InlineConfirm');
   });
 });

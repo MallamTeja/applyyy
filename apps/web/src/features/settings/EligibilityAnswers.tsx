@@ -222,27 +222,9 @@ export function EligibilityAnswers({ questions, loading, loadError, onSaved }: P
   ];
   // What "Save all answers" would write right now; empty means the button has nothing to do.
   const planned = planSaveAll(entries);
-  // Unsaved typing or picking, as opposed to a suggestion nobody touched: only this warns on leave.
-  const hasUnsavedEdits = planned.some((p) => p.question.key in drafts);
-
-  // Warn before closing or reloading the tab while edits are unsaved. Cheap: one listener,
-  // registered only while there is something to lose. In-app route changes are not covered.
-  useEffect(() => {
-    // Nothing typed and unsaved: no listener, so leaving never nags.
-    if (!hasUnsavedEdits) return;
-    // The browser shows its own generic prompt; custom text is ignored by modern browsers.
-    const onBeforeUnload = (e: BeforeUnloadEvent): void => {
-      // The standard way to ask for the prompt.
-      e.preventDefault();
-      // Legacy browsers need returnValue set as well.
-      e.returnValue = '';
-    };
-    // Registered while edits are pending.
-    window.addEventListener('beforeunload', onBeforeUnload);
-    // Removed as soon as they are saved or the section unmounts.
-    return () => window.removeEventListener('beforeunload', onBeforeUnload);
-    // Re-evaluated whenever the pending-edits answer changes.
-  }, [hasUnsavedEdits]);
+  // No "Leave site?" warning on tab close: Teja ruled 2026-11-04 19:06 IST that no browser-native
+  // dialog (alert/confirm/prompt/beforeunload) may appear anywhere in the app. Unsaved fields
+  // still show "Not saved yet" in place; test/inlineConfirm.test.ts fails if a listener returns.
 
   /* "Save all answers": one click for every changed field. Each field still goes through
    * saveBankAnswer, so each row gets its own upsert and the trigger stamps each one. */
