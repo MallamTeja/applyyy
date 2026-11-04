@@ -199,6 +199,10 @@ it: sha256 = `173cffbd0242d72a9d5bb98b993637269d4a3ea0f4e8217686a4e8bc3850d9ce`.
   ~0.7–0.8, but that's a description, not a ceiling. Never delete an explanation to hit a number.
 - **In `.tsx`, comments between JSX tags must be `{/* */}`.** A `//` there renders as text, and
   neither tsc nor a shape test catches it.
+- **No native browser dialogs, ever** (Teja, 2026-11-04 19:06; confirmed 2026-11-05): no
+  `alert`/`confirm`/`prompt`, no `beforeunload`/`onbeforeunload`. Confirm inline with
+  `apps/web/src/app/InlineConfirm.tsx`. Enforced by `apps/web/test/inlineConfirm.test.ts`, an
+  AST scan of all of `apps/web/src`.
 - When you delete a feature, grep the file's own header/docstring for it.
 - **Theming:** use `light-dark()` or semantic tokens. `[data-theme='dark']` rules are dead (the
   `system` preference removes the attribute). The only exception is `--lift`.
