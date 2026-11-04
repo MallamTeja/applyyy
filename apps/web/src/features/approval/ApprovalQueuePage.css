@@ -258,3 +258,187 @@
   /* Body text color: the tint carries the signal, the words stay fully legible. */
   color: var(--text-primary);
 }
+
+/* --- Toolbar: search, sort, work type (2026-11-04) ----------------------- */
+
+/* One wrapping row of native controls above the buckets. Wraps instead of scrolling, so at phone
+   width each control drops to its own line and the page never scrolls sideways. */
+.queue__toolbar {
+  /* Flex, so the controls sit side by side when there is room... */
+  display: flex;
+  /* ...and wrap onto new lines when there is not, never scrolling sideways. */
+  flex-wrap: wrap;
+  /* Bottom-aligned, so the controls' boxes line up although only some carry a label above. */
+  align-items: flex-end;
+  /* Row gap, then column gap: the step the bucket rows use between their parts. */
+  gap: var(--gap-3) var(--gap-4);
+  /* Clear of the page header above and of the first bucket below, on the bucket scale. */
+  margin: var(--gap-5) 0 var(--gap-4);
+}
+
+/* The search box takes the spare width, but never less than a phone-width column. */
+.queue__toolbar-search {
+  /* Grows first, so the sort and the chips keep their natural width beside it. */
+  flex: 1 1 16rem;
+  /* Lets it shrink inside a narrow viewport instead of forcing the row wider than the screen. */
+  min-width: 0;
+}
+
+/* The work-type group. Fieldset defaults are zeroed, as ThemeToggle's .theme does: the element is
+   here for its grouping semantics, not for anything it draws. */
+.queue__worktype {
+  /* The browser's fieldset padding matches nothing in this design. */
+  padding: 0;
+  /* Nor does its margin; the toolbar's gap does the spacing. */
+  margin: 0;
+  /* Nor its etched border. */
+  border: none;
+  /* The fieldset default is min-content, which would stop the chips wrapping on a phone. */
+  min-width: 0;
+  /* Flex column: the legend sits above the chips with a real gap, not notched into a border. */
+  display: flex;
+  flex-direction: column;
+  /* The label-to-control gap .field uses. */
+  gap: var(--gap-1);
+}
+
+/* The legend shares .field__label's type; only the browser's default padding goes. */
+.queue__worktype legend {
+  /* Flush with the chips below, like the other labels. */
+  padding: 0;
+}
+
+/* The chips themselves, wrapping onto a second line at phone width. */
+.queue__worktype-options {
+  /* A row of chips... */
+  display: flex;
+  /* ...that wraps rather than overflowing. */
+  flex-wrap: wrap;
+  /* Separate chips, not a segmented bar: four labels with counts are too wide to join on a phone. */
+  gap: var(--gap-2);
+}
+
+/* One work-type chip: a label wrapping its own radio, so the whole chip is the hit target. */
+.queue__worktype-option {
+  /* A comfortable target, on the spacing scale. */
+  padding: var(--gap-1) var(--gap-3);
+  /* The same edge .field__control draws, so the toolbar reads as one set of controls. */
+  border: 1px solid var(--rule-strong);
+  /* Same corner as the search box and the select. */
+  border-radius: var(--radius-control);
+  /* Paper fill, the tone .field__control uses. */
+  background: var(--sheet);
+  /* Secondary ink until chosen. */
+  color: var(--text-secondary);
+  /* The table-meta size: a filter, not body text. */
+  font-size: var(--size-sm);
+  /* The pointer says the label is clickable; it is, because it wraps the radio. */
+  cursor: pointer;
+  /* Only fill and text move, as on every control here. */
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+/* Hover on any chip: the shared wash, as on the Bucket A rows. */
+.queue__worktype-option:hover {
+  /* A theme-aware token, so hover works in both schemes. */
+  background: var(--surface-hover);
+}
+
+/* The chosen chip. Accent edge and text on the accent's subtle tint (theme-aware tokens), plus a
+   weight change, so the choice does not rest on colour alone. */
+.queue__worktype-option--selected {
+  /* First channel: the edge. */
+  border-color: var(--accent);
+  /* Second: the tinted fill. */
+  background: var(--accent-subtle);
+  /* Third: the accent ink. */
+  color: var(--accent);
+  /* Fourth, colour-free: the weight. */
+  font-weight: 600;
+}
+
+/* The radio, out of the layout but still in the accessibility tree and still focusable, as in
+   ThemeToggle: display:none would make the group unreachable by keyboard. */
+.queue__worktype-input {
+  /* Out of the flow, so the chip's text is not pushed aside. */
+  position: absolute;
+  /* One pixel, not zero: some screen readers skip zero-size controls. */
+  width: 1px;
+  height: 1px;
+  /* Invisible; the chip draws the state instead. */
+  opacity: 0;
+  /* Stops the hidden pixel from adding a stray margin to the chip. */
+  margin: 0;
+  /* Clicks fall through to the label, which checks the radio anyway. */
+  pointer-events: none;
+}
+
+/* The focus ring, drawn by the chip because its radio is one invisible pixel. :focus-visible, so a
+   mouse click does not leave a ring behind. */
+.queue__worktype-option:has(.queue__worktype-input:focus-visible) {
+  /* The accent ring the cards use, as an outline so no box-shadow can hide it. */
+  outline: 2px solid var(--accent);
+  /* Off the chip's own border, so the ring is not lost against it. */
+  outline-offset: 2px;
+}
+
+/* "Showing X of Y": quiet, secondary text at the end of the row. */
+.queue__showing {
+  /* Muted: it describes the view, it is not a control. */
+  color: var(--text-secondary);
+  /* The same size as the chips beside it. */
+  font-size: var(--size-sm);
+  /* No paragraph margin: the toolbar's gap does the spacing. */
+  margin: 0;
+  /* Lifts the text onto the controls' baseline instead of the bottom of their boxes. */
+  padding-bottom: var(--gap-1);
+}
+
+/* Filters hide every row. Neutral sheet with a plain hairline: neither the sage "done" rule of
+   .queue__empty nor the alarm of .queue__failed, because nothing is finished and nothing failed. */
+.queue__no-match {
+  /* The sentence and its Clear filters button on one line when they fit... */
+  display: flex;
+  /* ...stacked when they do not. */
+  flex-wrap: wrap;
+  /* Text and button centred on one line. */
+  align-items: center;
+  /* Space between the sentence and the button. */
+  gap: var(--gap-3);
+  /* Below the toolbar, on the bucket scale. */
+  margin-top: var(--gap-4);
+  /* Same inner spacing as the empty and failed states, so the three read as one component. */
+  padding: var(--gap-4) var(--gap-5);
+  /* Same measure as those states. */
+  max-width: 52ch;
+  /* Paper, like every panel on this page. */
+  background: var(--sheet);
+  /* A plain hairline on all four sides: no coloured left rule, because no status is claimed. */
+  border: 1px solid var(--rule);
+  /* Same corner as the cards. */
+  border-radius: var(--radius-sheet);
+  /* Body size: it is a sentence to read. */
+  font-size: var(--size-base);
+}
+
+/* --- Row chips: fit, ATS score, deadline, queued-at (2026-11-04) -------- */
+
+/* The four tag-pills under each queue row's line. Wraps, so at phone width they fold onto a second
+   line instead of widening the page. */
+.queue__row-chips {
+  /* A row of pills... */
+  display: flex;
+  /* ...that wraps rather than overflowing a phone. */
+  flex-wrap: wrap;
+  /* The gap DiffView's own pill row uses. */
+  gap: var(--gap-2);
+  /* Separated from the title line above, by the same step as the row's other parts. */
+  margin-top: var(--gap-2);
+}
+
+/* tag-pill capitalises every word, which suits one-word tags ("Remote"); these are phrases, and
+   "Fit 72 · Master Vs JD" would misread, so the casing is left as written. */
+.queue__row-chips > .tag-pill {
+  /* The only tag-pill property overridden here. */
+  text-transform: none;
+}

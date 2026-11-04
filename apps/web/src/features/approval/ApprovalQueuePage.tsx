@@ -48,7 +48,8 @@ import { DiffView } from './DiffView';
 // EditAction/EditResult are the save contract between the diff's controls and this page.
 import type { ClaimDecision, EditAction, EditResult } from './DiffView';
 import { buildResumeDiff } from './diffAdapter';
-import { deriveBucket } from './diffModel';
+// coveragePercent (2026-11-04): the row's "ATS score" chip, the same honest figure as the badge and the 'ats' sort.
+import { coveragePercent, deriveBucket } from './diffModel';
 import type { ResumeDiff } from './diffModel';
 // The bucket a save moved a row from and to, for the page-level announcement.
 import type { ReviewBucket } from './diffModel';
@@ -105,6 +106,14 @@ import { createChatStore } from './resumeChat';
 const chatStore = supabase === null ? undefined : createChatStore(supabase);
 // Newest arrival in review first; pure, so the order is testable without rendering the page.
 import { newestInReviewFirst } from './queueOrder';
+/* The toolbar's sort, work-type filter and search (Teja asked 2026-11-04). Pure, so every rule has a
+   named test and the chip counts read the same normalisation as the filter. Client-side only. */
+import { DEFAULT_QUEUE_VIEW, QUEUE_ARRANGEMENT_LABELS, QUEUE_SORT_LABELS, applyQueueView, countByArrangement } from './queueView';
+// The view's types: the state the toolbar edits, and the closed unions its controls choose from.
+import type { QueueArrangement, QueueSort, QueueView } from './queueView';
+/* "3 days ago" for the queued-at chip (2026-11-04): the discovery page's own phrase builder, reused
+   so both pages say an age the same way. Pure (no supabase, no JSX), so importing it costs nothing. */
+import { postedAgo } from '../discovery/discoveredList';
 
 import './ApprovalQueuePage.css';
 
@@ -440,6 +449,110 @@ function notSaved(why: string): EditResult {
   return { ok: false, reason: `Not saved: ${why}` };
 }
 
+/* --- Toolbar options (2026-11-04) -------------------------------------------------------------
+   The option lists, read off the label Records, so the <select> and the chips can only offer a value
+   the view module has a label for. `as` because Object.keys types its result as string[]; the
+   Records are total over their unions, so the keys are exactly those unions. */
+// Every sort, in the order the view module declares them.
+const QUEUE_SORTS = Object.keys(QUEUE_SORT_LABELS) as QueueSort[];
+// Every work-type chip, 'all' first, in declaration order.
+const QUEUE_ARRANGEMENTS = Object.keys(QUEUE_ARRANGEMENT_LABELS) as QueueArrangement[];
+
+/* --- Row chips (Teja asked 2026-11-04) --------------------------------------------------------
+   Four facts per queue row, weighed before approving. Each is SHAPE-checked before it is shown,
+   because missing data quietly becoming an answer is this repo's dominant bug (CLAUDE.md section 6):
+   a null score reads "—", never "0", and junk never parses into a date. */
+
+/* The raw values the chips are built from, captured in the load pass and keyed by application id.
+   Held as `unknown`: the client is untyped, so the formatters below are where the shape is proven.
+   A side map like `stamps`, not fields on ResumeDiff: diffModel/diffAdapter are not this page's to
+   change, and none of these facts changes when the resume is edited. */
+interface RowChipFacts {
+  // applications.match_score: the matcher's fit of the MASTER profile to the JD, 0..100.
+  readonly fit: unknown;
+  // jobs.raw_payload->>application_deadline: the board's own deadline text, when it sent one.
+  readonly deadline: unknown;
+  // applications.status_changed_at: when the row reached awaiting_approval.
+  readonly queuedAt: unknown;
+}
+
+/* An ISO calendar date at the start of a string. Date.parse alone is no shape check: it reads "-5"
+   as the year -5 and silently rolls "2026-02-31" over to 3 March. */
+const ISO_DATE_PREFIX = /^\d{4}-\d{2}-\d{2}/;
+
+/* The ISO day a value starts with, or null unless it is a real calendar day. */
+function isoDay(value: unknown): string | null {
+  // Only a string can carry a date; a number or an object is no date at all.
+  if (typeof value !== 'string') return null;
+  // Shape first, so the lenient parser is never asked about junk.
+  const day = ISO_DATE_PREFIX.exec(value)?.[0];
+  // No ISO prefix: not a date.
+  if (day === undefined) return null;
+  // The date-only ISO form parses as UTC midnight, so no time zone can shift the day.
+  const ms = Date.parse(day);
+  // Round-tripped, so an impossible day that Date.parse rolls forward (2026-02-31) is refused.
+  return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 10) === day ? day : null;
+}
+
+/* "Fit 72 · master vs JD": how well the MASTER profile fits the JD (the matcher's score). Never
+   labelled "ATS": that name belongs to the tailored resume's coverage, so one thing has one name. */
+function fitChip(score: unknown): string {
+  // A finite number on the matcher's 0..100 scale; null, NaN, a string or out-of-range is unknown.
+  if (typeof score === 'number' && Number.isFinite(score) && score >= 0 && score <= 100) {
+    // Rounded: the column is numeric(5,2), and a chip is no place for decimals.
+    return `Fit ${Math.round(score)} · master vs JD`;
+  }
+  // Unknown reads as a dash, never as 0.
+  return 'Fit —';
+}
+
+/* "ATS score 85% · tailored vs JD": honest keyword coverage of the TAILORED resume, the same figure
+   as DiffView's "ATS Match Score" badge and the toolbar's 'ats' sort. */
+function atsChip(diff: ResumeDiff): string {
+  // The badge's own call, so the chip, the badge and the sort can never disagree.
+  const measure = coveragePercent(diff.coverage, 'honest');
+  // A closed union: only the measured arm has a percent; no JD keywords means nothing was measured.
+  return measure.kind === 'measured' ? `ATS score ${measure.percent}% · tailored vs JD` : 'ATS score —';
+}
+
+/* The posting's deadline, shown only when it is a real date. Live 2026-11-04: 0 of 112 queued rows
+   carry one, so every row reads "No deadline listed" today. */
+function deadlineChip(value: unknown): string {
+  // Shape-checked and round-tripped; anything else is "not listed", never a guessed date.
+  const day = isoDay(value);
+  // The ISO day verbatim: unambiguous, and no locale or time zone can move it.
+  return day === null ? 'No deadline listed' : `Deadline ${day}`;
+}
+
+/* "Added to queue 3 days ago", from when the row reached awaiting_approval. */
+function queuedChip(value: unknown, nowMs: number): string {
+  // postedAgo only refuses NaN, and Date.parse reads "-5" as a real year, so the ISO shape comes first.
+  const ago = typeof value === 'string' && isoDay(value) !== null ? postedAgo(value, nowMs) : null;
+  // No readable stamp (or one more than a day in the future): a dash, never a made-up age.
+  return ago === null ? 'Added to queue —' : `Added to queue ${ago}`;
+}
+
+/* The four chips under a queue row's line, in both buckets. One component, so Bucket A and Bucket B
+   can never show different facts or different words for the same fact. */
+function QueueRowChips({ diff, facts }: { readonly diff: ResumeDiff; readonly facts: RowChipFacts | undefined }): ReactElement {
+  // Read once per render; an age on a review screen need not tick while it is open.
+  const now = Date.now();
+  return (
+    /* A wrapping flex row (ApprovalQueuePage.css), so four chips fold onto two lines at phone width
+       instead of pushing the page sideways. */
+    <div className="queue__row-chips">
+      {/* tag-pill is DiffView's pill (DiffView.css), reused so the chips match the card's own tags. */}
+      <span className="tag-pill">{fitChip(facts?.fit)}</span>
+      {/* The tailored resume's coverage, beside the master's fit, so the two scores read as a pair. */}
+      <span className="tag-pill">{atsChip(diff)}</span>
+      {/* When the posting closes, if the board said. */}
+      <span className="tag-pill">{deadlineChip(facts?.deadline)}</span>
+      {/* How long this row has waited for a verdict. */}
+      <span className="tag-pill">{queuedChip(facts?.queuedAt, now)}</span>
+    </div>
+  );
+}
+
 export function ApprovalQueuePage(): ReactElement {
   /* Feedback for the one irreversible action in the product. */
   const toast = useToast();
@@ -526,6 +639,12 @@ export function ApprovalQueuePage(): ReactElement {
      Page state (not DiffView state) so it survives the remount an adoption that moves the row
      between buckets causes, and stays on the card until the operator acts on that row again. */
   const [staleNotices, setStaleNotices] = useState<ReadonlyMap<string, string>>(new Map());
+  /* The toolbar's choices: sort, work type and search (2026-11-04). Page state, never stored:
+     Teja asked for a view, not a preference, so a reload starts from the default again. */
+  const [view, setView] = useState<QueueView>(DEFAULT_QUEUE_VIEW);
+  /* Each row's chip facts (fit, deadline, queued-at), from the same load pass as the queue. State,
+     not a ref: only the render reads it, and no async path ever writes it after the load. */
+  const [chipFacts, setChipFacts] = useState<ReadonlyMap<string, RowChipFacts>>(() => new Map());
 
   /* Put a stale-refusal notice on one row's card and move focus there, so a refused click is never
      silent. Functional update: settle() runs across awaits, and its render closure is stale.
@@ -584,7 +703,9 @@ export function ApprovalQueuePage(): ReactElement {
              query never asked for it. Everything here is an explicit column
              list rather than jobs:job_id(*) so that adding a column to the
              jobs table does not silently start shipping it to the browser. */
-          .select('*, jobs:job_id(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, description_raw)')
+          /* application_deadline (2026-11-04): ONE key out of raw_payload for the deadline chip, never
+             the whole board JSON - discoveredList.ts measured raw_payload at ~37% of a job's bytes. */
+          .select('*, jobs:job_id(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, description_raw, application_deadline:raw_payload->>application_deadline)')
           .eq('status', 'awaiting_approval')
           /* Newest entry into review first (2026-10-24): status_changed_at is when the row reached
              awaiting_approval, served by the (user_id, status, status_changed_at desc) index. Not
@@ -627,6 +748,8 @@ export function ApprovalQueuePage(): ReactElement {
         const masters = new Map<number, MasterProfile | null>();
         // Each row's concurrency stamp from the same read, seeded into latestStamps below.
         const stamps = new Map<string, string>();
+        // Each reviewable row's chip facts from the same read (2026-11-04), published with the queue.
+        const facts = new Map<string, RowChipFacts>();
         // Re-ordered client-side too, for the id tie-break and a malformed stamp sorting last.
         for (const app of newestInReviewFirst(data)) {
           const job = app.jobs as unknown as JobRow | null;
@@ -759,6 +882,16 @@ export function ApprovalQueuePage(): ReactElement {
           /* Only a real string: String(undefined) would be the stamp "undefined", sent as if it were
              a timestamp. Without one the row has no stamp, so it can never be approved (unverifiable). */
           if (typeof app.updated_at === 'string') stamps.set(app.id, app.updated_at);
+          /* The chips' raw inputs, as loaded; the formatters shape-check them at render. The deadline
+             is read off the embed: it is the one jobs field JobRow does not declare. */
+          facts.set(app.id, {
+            // The matcher's 0..100 fit of the master, already in the `*`.
+            fit: app.match_score,
+            // The select's single raw_payload key; null when the board sent none (every row, 2026-11-04).
+            deadline: (job as JobRow & { readonly application_deadline?: unknown }).application_deadline,
+            // When the row entered review; the same stamp the queue is ordered by.
+            queuedAt: app.status_changed_at,
+          });
           // Kept so a save rebuilds this exact diff with the new resume.
           rowSources.set(app.id, {
             application,
@@ -779,6 +912,8 @@ export function ApprovalQueuePage(): ReactElement {
         setResumes(snapshots);
         // Same pass, so every rendered row can be rebuilt after a save.
         setSources(rowSources);
+        // Same pass, so a rendered row never shows another load's chips.
+        setChipFacts(facts);
         // The ref starts from the same load, like latestResumes below.
         latestSources.current = new Map(rowSources);
         // The refs start from the same load, so the first edit and approval read what is on screen.
@@ -804,14 +939,45 @@ export function ApprovalQueuePage(): ReactElement {
   /* Partition by bucket. Derived from the findings on each row, never stored -
      a row carrying a stored bucket alongside its findings will eventually
      disagree with them, and the badge is what the operator would trust. */
-  const { bucketA, bucketB, pendingRefused } = useMemo(() => {
+  /* THE TOOLBAR'S VIEW (2026-11-04) is applied HERE, before the split, so both buckets, their
+     headings and the Approve-all button all read the rows the operator can SEE. `pending` stays
+     unfiltered: it is what the counts and the "Queue is empty" gate must judge, because a filter
+     that hides every row is not an empty queue. */
+  const { bucketA, bucketB, bucketBFilteredOut, bucketBShownCount, pendingRefused, pendingCount, arrangementCounts } = useMemo(() => {
+    // Every row still waiting, in queue order (newest first), which applyQueueView requires as input.
     const pending = queue.filter((diff) => !settled.has(diff.applicationId));
+    // Work type, then search, then sort; a new array, so `queue` keeps its fetched order.
+    const shown = applyQueueView(pending, view);
+    // Membership, to find the Bucket B rows the view hides.
+    const shownIds = new Set(shown.map((diff) => diff.applicationId));
+    // Split AFTER the view, so Bucket B's visible rows keep the chosen sort.
+    const shownB = shown.filter((diff) => deriveBucket(diff) === 'B');
+    /* Bucket B rows the view hides. Still MOUNTED (with `hidden`), never dropped: a Bucket B
+       DiffView holds the operator's claim decisions and half-typed edits in its own state, and the
+       fold rule above (2026-11-02) keeps it mounted for exactly that reason. Typing a search must
+       not wipe a review in progress. Bucket A rows unmount, as they already do when folded. */
+    const filteredOutB = pending.filter((diff) => deriveBucket(diff) === 'B' && !shownIds.has(diff.applicationId));
     return {
-      bucketA: pending.filter((diff) => deriveBucket(diff) === 'A'),
-      bucketB: pending.filter((diff) => deriveBucket(diff) === 'B'),
+      // Split AFTER the view too: only visible rows, in the chosen order, so Approve all sends what is seen.
+      bucketA: shown.filter((diff) => deriveBucket(diff) === 'A'),
+      /* Bucket B in RENDER order: the visible rows, then the hidden ones. One list, so React keeps each
+         row's DiffView by key as it moves between visible and hidden; two lists would remount it. */
+      bucketB: [...shownB, ...filteredOutB],
+      // Which Bucket B cards render `hidden`.
+      bucketBFilteredOut: new Set(filteredOutB.map((diff) => diff.applicationId)),
+      // Bucket B's VISIBLE count, for its heading; bucketB.length also counts the hidden rows.
+      bucketBShownCount: shownB.length,
+      /* NOT filtered: a refused row has no diff to search or sort, and every one needs a decision
+         (reject or re-tailor), so hiding one behind a search would strand it. */
       pendingRefused: unreviewable.filter((row) => !settled.has(row.applicationId)),
+      // The unfiltered count: the empty-state gate, the toolbar's presence and "of Y".
+      pendingCount: pending.length,
+      // Each work-type chip's count over every waiting row, so a chip says what choosing it would show.
+      arrangementCounts: countByArrangement(pending),
     };
-  }, [queue, unreviewable, settled]);
+  }, [queue, unreviewable, settled, view]);
+  // How many reviewable rows the view lets through, for "Showing X of Y" and the no-match state.
+  const shownCount = bucketA.length + bucketBShownCount;
 
   /* THE DOOR. Wired to the database on 2026-09-17; until then this function
      added ids to a React Set and wrote nothing, so the row vanished from the
@@ -1551,7 +1717,9 @@ export function ApprovalQueuePage(): ReactElement {
 
   /* Nothing left. An empty queue is the normal end state of a review session,
      so it is written as a finished-for-now statement rather than a void. */
-  if (bucketA.length === 0 && bucketB.length === 0 && pendingRefused.length === 0) {
+  /* Gated on the UNFILTERED count (2026-11-04): with a search that matches nothing, both buckets are
+     empty while rows still wait, and this branch would tell the operator the queue is done. */
+  if (pendingCount === 0 && pendingRefused.length === 0) {
     return (
       <div className="page">
         <PageHeader path="approvals" />
@@ -1574,6 +1742,117 @@ export function ApprovalQueuePage(): ReactElement {
       <p className="visually-hidden" role="status" aria-live="polite">
         {announcement}
       </p>
+
+      {/* THE TOOLBAR (Teja asked 2026-11-04): search, sort and work type, all client-side over the
+          rows already loaded. Shown whenever any reviewable row waits, INCLUDING when the filters
+          hide all of them, so the operator can always undo a filter from where they set it. Native
+          controls only: a search input, a select and a radio group, so keyboard and screen-reader
+          behaviour come from the browser. Refused rows above are never filtered. */}
+      {pendingCount > 0 ? (
+        <div className="queue__toolbar" role="search" aria-label="Filter and sort the queue">
+          {/* .field: the app's label-over-control pair (base.css), so the toolbar reads like every form. */}
+          <div className="field queue__toolbar-search">
+            {/* A visible label, not a placeholder: a placeholder vanishes the moment you type. */}
+            <label className="field__label" htmlFor="queue-search">
+              Search
+            </label>
+            <input
+              id="queue-search"
+              /* type=search: the browser draws its own clear button and Escape clears it. */
+              type="search"
+              className="field__control"
+              placeholder="Title, company or location"
+              value={view.search}
+              /* Live on every keystroke: the rows are in memory, so there is nothing to submit. */
+              onChange={(event) => {
+                // Read now: the functional update below runs after this handler returns.
+                const search = event.target.value;
+                // Functional, so a quick sort change in between is never overwritten.
+                setView((previous) => ({ ...previous, search }));
+              }}
+            />
+          </div>
+          {/* Same label-over-control pair as Search. */}
+          <div className="field">
+            <label className="field__label" htmlFor="queue-sort">
+              Sort
+            </label>
+            <select
+              id="queue-sort"
+              className="field__control"
+              value={view.sort}
+              onChange={(event) => {
+                /* Looked up, not cast: only a value the option list holds becomes the sort, so a
+                   tampered option can never put an unknown sort into state. */
+                const sort = QUEUE_SORTS.find((option) => option === event.target.value);
+                // An unknown value changes nothing.
+                if (sort !== undefined) setView((previous) => ({ ...previous, sort }));
+              }}
+            >
+              {QUEUE_SORTS.map((option) => (
+                // The view module's own words, so the option and the sort it runs share one name.
+                <option key={option} value={option}>
+                  {QUEUE_SORT_LABELS[option]}
+                </option>
+              ))}
+            </select>
+          </div>
+          {/* A fieldset + legend: one named group of radios, the same pattern as ThemeToggle, so a
+              screen reader says "Work type" before each option and arrow keys move between them. */}
+          <fieldset className="queue__worktype">
+            <legend className="field__label">Work type</legend>
+            <div className="queue__worktype-options">
+              {QUEUE_ARRANGEMENTS.map((option) => (
+                /* The label wraps its radio, so the whole chip is the hit target. */
+                <label
+                  key={option}
+                  className={view.arrangement === option ? 'queue__worktype-option queue__worktype-option--selected' : 'queue__worktype-option'}
+                >
+                  <input
+                    type="radio"
+                    /* One shared name makes these one group to the browser and to assistive tech. */
+                    name="queue-worktype"
+                    value={option}
+                    checked={view.arrangement === option}
+                    /* The option is a closed-union value from the map, so no lookup is needed here. */
+                    onChange={() => setView((previous) => ({ ...previous, arrangement: option }))}
+                    /* Visually hidden, still focusable; the chip draws its focus ring (CSS :has). */
+                    className="queue__worktype-input"
+                  />
+                  {/* The count says what choosing this chip shows, before it is chosen. */}
+                  {QUEUE_ARRANGEMENT_LABELS[option]} ({arrangementCounts[option]})
+                </label>
+              ))}
+            </div>
+          </fieldset>
+          {/* The toolbar's own polite region: it sits outside both buckets, so a bucket move cannot
+              unmount it, and it speaks only when the visible count changes. */}
+          <p className="queue__showing" aria-live="polite">
+            Showing {shownCount} of {pendingCount}
+          </p>
+        </div>
+      ) : null}
+
+      {/* FILTERS HID EVERY ROW. Said in words, with the undo beside it, so a filtered-out queue is never
+          mistaken for a finished one. Not .queue__empty: that sage "you are done" framing would be a lie. */}
+      {pendingCount > 0 && shownCount === 0 ? (
+        <div className="queue__no-match">
+          <p>No applications match these filters.</p>
+          <button
+            type="button"
+            className="button button--secondary button--small"
+            onClick={() => {
+              // Back to the page as it loads: newest first, every work type, no search.
+              setView(DEFAULT_QUEUE_VIEW);
+              /* This button unmounts once rows return; focus goes to the search box, which stays,
+                 instead of falling to <body>. */
+              document.getElementById('queue-search')?.focus();
+            }}
+          >
+            Clear filters
+          </button>
+        </div>
+      ) : null}
 
       {/* REFUSED ROWS FIRST, above even Bucket B. They are not a third bucket
           and carry no approve button: this screen cannot form a verdict on
@@ -1641,11 +1920,14 @@ export function ApprovalQueuePage(): ReactElement {
       ) : null}
 
       {/* BUCKET B FIRST. Deliberate ordering - see the note at the top. */}
+      {/* Mounted while ANY Bucket B row waits, shown or filtered out (2026-11-04: bucketB holds both),
+          so a filter can never unmount a review in progress; hidden whole when the view shows none. */}
       {bucketB.length > 0 ? (
-        <section className="queue__bucket" aria-labelledby="bucket-b-heading">
+        <section className="queue__bucket" aria-labelledby="bucket-b-heading" hidden={bucketBShownCount === 0}>
           <h2 id="bucket-b-heading" className="queue__bucket-heading">
-            {bucketB.length}{' '}
-            {bucketB.length === 1 ? 'Application Requires Review' : 'Applications Require Review'}
+            {/* The VISIBLE count (2026-11-04), so the heading counts the cards beneath it. */}
+            {bucketBShownCount}{' '}
+            {bucketBShownCount === 1 ? 'Application Requires Review' : 'Applications Require Review'}
           </h2>
           <p className="queue__bucket-note">
             Flagged modifications or untraced claims requiring manual verification.
@@ -1654,7 +1936,11 @@ export function ApprovalQueuePage(): ReactElement {
           {/* Expanded, one after another, open by default: a row that must be read
               starts in front of the operator. Each can be folded by hand (2026-11-02). */}
           <ul className="queue__list">
+            {/* Shown rows first, in the view's order, then the filtered-out ones (2026-11-04). Keyed by
+                id, so React keeps each row's DiffView (and its unsaved state) as it moves between them. */}
             {bucketB.map((diff) => {
+              // Whether the toolbar's view hides this row; it stays mounted either way.
+              const isFilteredOut = bucketBFilteredOut.has(diff.applicationId);
               // Whether the operator folded this row's review away; false until they click.
               const isFolded = foldedB.has(diff.applicationId);
               // Region id for the review disclosure, same builder shape as Bucket A's.
@@ -1679,6 +1965,9 @@ export function ApprovalQueuePage(): ReactElement {
                   /* Focus lands here after a stale refusal; the description makes a screen reader read the
                      notice WITH the card's name, since a live region inserted already filled is not reliably spoken. */
                   aria-describedby={staleNotices.has(diff.applicationId) ? staleNoticeId(diff.applicationId) : undefined}
+                  /* `hidden`, not unmounted, when the toolbar's view leaves it out: same reason as the fold
+                     below. A hidden card cannot take focus, so a bucket-move focus never lands here. */
+                  hidden={isFilteredOut}
                 >
                   {/* A refused stale Approve, said at the TOP of the card the focus lands on. A status,
                       not an alert: nothing failed, the operator just has newer words to read. */}
@@ -1704,6 +1993,9 @@ export function ApprovalQueuePage(): ReactElement {
                       {isFolded ? 'Review' : 'Hide review'}
                     </button>
                   </div>
+                  {/* Fit, ATS score, deadline and queued-at (2026-11-04), shown folded or open: DiffView
+                      shows only the ATS badge, so the other three would vanish when a row opens. */}
+                  <QueueRowChips diff={diff} facts={chipFacts.get(diff.applicationId)} />
                   {/* `hidden`, NOT a conditional mount: unmounting would drop the AI chat, a
                       half-typed edit and the row's attestations. Bucket A can unmount because
                       its rows open fresh; a Bucket B row may be mid-review when folded. */}
@@ -1851,6 +2143,9 @@ export function ApprovalQueuePage(): ReactElement {
                       </button>
                     </span>
                   </div>
+                  {/* The same four chips as Bucket B (2026-11-04), on their own wrapping line: the badge
+                      row above does not wrap, and four more pills there would overflow a phone. */}
+                  <QueueRowChips diff={diff} facts={chipFacts.get(diff.applicationId)} />
 
                   {/* The full comparison, identical to Bucket B's, approving through
                       the same RPC path. Only mounted when open: thirty diffs rendered
@@ -1918,6 +2213,9 @@ export function ApprovalQueuePage(): ReactElement {
                decisions to record - only the fact that this was the batch path. */
             onClick={() =>
               void settle(
+                /* Only the rows the toolbar shows (2026-11-04): bucketA is split from the view's output,
+                   so the count on this button is exactly what it sends, and a hidden row is never
+                   approved unseen. */
                 bucketA.map((diff) => diff.applicationId),
                 'approved',
                 { review_path: 'bucket_a_batch' },
