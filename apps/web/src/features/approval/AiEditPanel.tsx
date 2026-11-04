@@ -26,6 +26,16 @@
  * applying it writes a new claim into the master (aiEdit.shouldAutoApply). Without the prop the chat
  * behaves exactly as before.
  *
+ * WHAT THE CHAT SAYS IS WHAT THE RESUME SHOWS (2026-11-04). Teja found replies saying "I have added C"
+ * over a resume that never changed: the reply is the model's prose, written before the server
+ * dropped its op, and a dropped op used to vanish into a "(1 proposed edit did not fit)" suffix. Now:
+ * every op that cannot land is its own "Could not do" card with the reason (aiEdit `rejected`);
+ * right under the reply, a status line counts what is applied, what is not yet, and what could not
+ * be done, read from the resume (isApplied), never from the reply; and the model reads the same
+ * outcome ahead of its earlier replies (aiEdit.outcomeNote), so it stops believing its own claims.
+ * The chat also offers starter questions, takes messages up to 1500 characters with a visible count
+ * (a pasted JD used to be cut at 500 without a word), and the AI can now remove skills and entries.
+ *
  * Pure presentation: the ask, the save and the chat store are all injected; no client here. */
 
 // useId ties labels to inputs; useState holds local state; useEffect loads and scrolls; useRef holds the log.
@@ -37,10 +47,10 @@ import type { ReactElement } from 'react';
 import type { ResumeDiff } from './diffModel';
 // Type only: the action vocabulary and save result the page already understands.
 import type { EditAction, EditResult } from './DiffView';
-// The pure halves: build the ask, resolve and apply ops, read applied state, format the bill.
-import { buildAssistDraft, formatUsage, isApplied, resolveOps, shouldAutoApply, toEditAction } from './aiEdit';
+// The pure halves: build the ask, resolve and apply ops, read applied state and outcomes, format the bill.
+import { buildAssistDraft, formatUsage, isApplied, outcomeNote, resolveOps, sectionTitle, shouldAutoApply, toEditAction } from './aiEdit';
 // Types for the ask and its parts.
-import type { AssistBody, AssistResult, AssistStructure, AuditAdvice, StoredOp } from './aiEdit';
+import type { ApplicableOp, AssistBody, AssistResult, AssistStructure, AuditAdvice, StoredOp } from './aiEdit';
 // The memory: grouping into chats and the window sent back as context.
 import { groupThreads, historyFor } from './resumeChat';
 // Types for stored messages and the injected store.
@@ -51,6 +61,44 @@ import './AiEditPanel.css';
 
 /* An Apply in flight or refused; applied state itself is derived from the resume. */
 type OpState = { readonly status: 'applying' } | { readonly status: 'failed'; readonly reason: string };
+
+// The edge function's instruction cap (resume-assist MAX_INSTRUCTION); longer is refused there.
+const MAX_MESSAGE = 1500;
+// The count appears from here on, so a long paste is never cut without the operator seeing it.
+const SHOW_COUNT_FROM = 1200;
+
+/* Starter messages for an empty chat (2026-11-04): two questions the AI could not answer before it
+   read the posting, and two edits that stay within what the master supports. A click only fills the
+   composer; nothing is sent until the operator presses Send. */
+const SUGGESTIONS = [
+  'Which keywords from this job is my resume missing?',
+  'Where is this role based, and is it remote?',
+  'Tighten my summary for this job without adding new claims.',
+  'Remove skills that do not matter for this job.',
+] as const;
+
+/* One reply's status line, read from the resume (never from the reply's text). */
+function replySummary(ops: readonly StoredOp[], diff: ResumeDiff, structure: AssistStructure | null): string {
+  // A reply with no ops changed nothing, whatever its text says: said in so many words.
+  if (ops.length === 0) return 'No changes made to the resume.';
+  // Cards that can never land.
+  const impossible = ops.filter((op) => op.op === 'rejected').length;
+  // Cards that can land.
+  const possible = ops.length - impossible;
+  // Of those, the ones on the resume now.
+  const applied = ops.filter((op) => isApplied(op, diff, structure)).length;
+  // The parts that are not zero, most important first.
+  const parts = [
+    // Done, out of what could be done.
+    possible > 0 ? `${applied} of ${possible} change${possible === 1 ? '' : 's'} applied` : null,
+    // Waiting for a click, failed, or undone since.
+    possible - applied > 0 ? `${possible - applied} not applied yet` : null,
+    // Refused, each with its reason on its card.
+    impossible > 0 ? `${impossible} could not be done` : null,
+  ].filter((part): part is string => part !== null);
+  // One line.
+  return `${parts.join(' · ')}.`;
+}
 
 /* A key for one op of one message, stable across renders. */
 function opKey(message: ChatMessage, index: number): string {
@@ -74,11 +122,9 @@ function AdviceLine({ advice }: { readonly advice: AuditAdvice }): ReactElement 
   return <p className="ai-chat__audit">Audit would flag {parts.join('; ')}.</p>;
 }
 
-/* A section key as a heading word ("projects" -> "Projects"); the keys are single lower-case words. */
-function sectionName(section: string): string {
-  // First letter up, rest as is.
-  return section.charAt(0).toUpperCase() + section.slice(1);
-}
+/* A section key as a heading word ("projects" -> "Projects"): aiEdit's own, so a card and the
+   outcome line the model reads always spell a section the same way. */
+const sectionName = sectionTitle;
 
 /* What one stored op changes, with what the audit would say. Exported for the render test. */
 export function OpBody({
@@ -200,6 +246,44 @@ export function OpBody({
       </div>
     );
   }
+  // A change that could not be made: what was asked, and why, in place of any Apply.
+  if (op.op === 'rejected') {
+    // Stacked like an edit card.
+    return (
+      // The card root: ai-chat__change stacks the change and its notes.
+      <div className="ai-chat__change">
+        {/* Labelled first, so the card is never read as a proposal. */}
+        <span className="ai-chat__where">Could not do</span>
+        {/* The change as the AI proposed it. */}
+        <span>{op.what}</span>
+        {/* The one check it failed, in the warning colour. */}
+        <p className="ai-chat__audit">{op.why}</p>
+      </div>
+    );
+  }
+  // A skill off the resume: its name, struck.
+  if (op.op === 'remove_skill') {
+    // One line; <del> carries "removed" to screen readers.
+    return (
+      // The card root: ai-chat__change stacks the change and its notes.
+      <p className="ai-chat__change">
+        Remove skill <del className="ai-chat__old">{op.name}</del>
+      </p>
+    );
+  }
+  // A whole entry off the resume: its section and label, struck.
+  if (op.op === 'remove_entry') {
+    // Stacked like the add-back card it mirrors.
+    return (
+      // The card root: ai-chat__change stacks the change and its notes.
+      <div className="ai-chat__change">
+        {/* The section it leaves. */}
+        <span className="ai-chat__where">Remove from {sectionName(op.section)}</span>
+        {/* The entry, with all its bullets. */}
+        <del className="ai-chat__old">{op.label}</del>
+      </div>
+    );
+  }
   // A removal: the bullet that goes.
   if (op.op === 'remove') {
     // The whole bullet, struck, so the operator sees exactly what leaves the PDF.
@@ -282,6 +366,8 @@ export function AiEditPanel({
   const [groups, setGroups] = useState<ReadonlyMap<string, string>>(new Map());
   // The scrolling log, kept at its newest message.
   const logRef = useRef<HTMLOListElement | null>(null);
+  // The message box, focused after a starter message fills it so Enter sends it.
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   // Load this resume's stored chats once per application.
   useEffect(() => {
@@ -339,8 +425,12 @@ export function AiEditPanel({
     setAsking(true);
     // A new ask clears the old failure.
     setError(null);
-    // Built from the diff as it is NOW (every applied edit included), its structure, and the chat's last turns.
-    const draft = buildAssistDraft(diff, categories, text, historyFor(active), structure ?? null);
+    /* The chat's last turns, each earlier reply led by what its changes amount to NOW, read from the
+       resume (aiEdit.outcomeNote). First, because historyFor cuts each turn at 500 characters, and
+       the outcome is the part the model must not lose: "I added C" alone was resent as a fact. */
+    const turns = active.map((m) => (m.role === 'assistant' && m.ops !== null ? { ...m, content: [outcomeNote(m.ops, diff, structure ?? null), m.content].filter((part) => part !== '').join(' ') } : m));
+    // Built from the diff as it is NOW (every applied edit included), its structure, and those turns.
+    const draft = buildAssistDraft(diff, categories, text, historyFor(turns), structure ?? null);
     // The call; never throws.
     const result = await onAssist(draft.body);
     // A failed ask is said and nothing is stored; the instruction stays for a retry.
@@ -352,17 +442,12 @@ export function AiEditPanel({
       // Nothing else changes.
       return;
     }
-    // Each op resolved to this resume's targets, in order (so repeated moves pass different siblings);
-    // null for an id the ask never sent or a move already at the end.
-    const resolved = resolveOps(result.ops, draft);
-    // The ones that could be resolved.
-    const ops = resolved.filter((op): op is StoredOp => op !== null);
-    // Dropped by the server plus unresolved here: said in the stored note, so it survives a reload.
-    const dropped = result.dropped + (resolved.length - ops.length);
-    // The AI's note, or a plain sentence when it gave none.
-    const note = result.note !== '' ? result.note : ops.length > 0 ? `Proposed ${ops.length} edit(s).` : 'No edits proposed.';
-    // The stored note carries the drop count.
-    const content = (dropped > 0 ? `${note} (${dropped} proposed edit(s) did not fit this resume and were left out.)` : note).slice(0, 2000);
+    /* Each op resolved to this resume's targets, in order (so repeated moves pass different siblings);
+       one that cannot land here comes back as a "Could not do" card with its reason. The server's own
+       refusals follow as cards too, so nothing the AI proposed is ever silently left out (2026-11-04). */
+    const ops: StoredOp[] = [...resolveOps(result.ops, draft), ...result.rejected.map((r) => ({ op: 'rejected' as const, what: r.what, why: r.why }))];
+    // The AI's reply as it wrote it; the status line under it says what actually happened.
+    const content = (result.note !== '' ? result.note : 'The AI sent no reply text.').slice(0, 2000);
     // The exchange, question and answer together.
     const exchange: NewChatMessage[] = [
       // The operator's message; no ops, no usage (the table check requires it).
@@ -388,8 +473,8 @@ export function AiEditPanel({
        until they land. A skill the operator did not name stays a card. First failure stops the run,
        since the row probably changed and later saves would fail the same way. */
     for (const [index, op] of (reply?.ops ?? []).entries()) {
-      // Left as a card for a click.
-      if (!shouldAutoApply(op, text)) continue;
+      // Left as a card for a click (or a "Could not do" card, which has nothing to apply).
+      if (op.op === 'rejected' || !shouldAutoApply(op, text)) continue;
       // Applied; a refusal shows on its card with Retry.
       if (reply !== undefined && !(await apply(op, opKey(reply, index)))) break;
     }
@@ -412,8 +497,9 @@ export function AiEditPanel({
     });
   }
 
-  /* Apply one op through the page's guarded save. Answers whether it landed. */
-  async function apply(op: StoredOp, key: string): Promise<boolean> {
+  /* Apply one op through the page's guarded save. Answers whether it landed. ApplicableOp, so a
+     "Could not do" card cannot reach a save even by mistake. */
+  async function apply(op: ApplicableOp, key: string): Promise<boolean> {
     // Shown as in progress. No popup: the card already showed every flag before this click.
     setOpState(key, { status: 'applying' });
     // The page's save; a refusal comes back as a reason.
@@ -432,6 +518,8 @@ export function AiEditPanel({
     setApplyingAll(true);
     // One at a time: each save writes the whole resume, so two in flight would race.
     for (const [index, op] of (message.ops ?? []).entries()) {
+      // Nothing to apply on a "Could not do" card.
+      if (op.op === 'rejected') continue;
       // Already on the resume: skipped.
       if (isApplied(op, diff, structure ?? null)) continue;
       /* A new bullet writes a new claim into the MASTER, so it always takes its own click, never a
@@ -442,6 +530,14 @@ export function AiEditPanel({
     }
     // Unlocks.
     setApplyingAll(false);
+  }
+
+  /* Put a starter message in the composer and focus it; the operator still presses Send. */
+  function suggest(text: string): void {
+    // Filled, replacing whatever was half-typed (the operator chose this one).
+    setInstruction(text);
+    // Focused, so Enter sends it or the operator edits it first.
+    inputRef.current?.focus();
   }
 
   /* Start an empty chat; stored chats stay in the picker. */
@@ -491,7 +587,17 @@ export function AiEditPanel({
         {/* An empty chat explains itself instead of showing blank space. */}
         {active.length === 0 ? (
           <li className="ai-chat__empty">
-            {loading ? 'Loading chats…' : 'Say what to change, e.g. "Add Kafka to skills and make the first bullet about latency". The AI makes the edits; Reset in the comparison below undoes any of them.'}
+            {loading ? 'Loading chats…' : 'Say what to change, or ask about this job. The AI makes the edits and each card says whether it landed; Reset in the comparison below undoes any of them.'}
+            {/* Starter messages, once the chats have loaded: a click fills the box, Send still sends. */}
+            {loading ? null : (
+              <div className="ai-chat__suggestions">
+                {SUGGESTIONS.map((text) => (
+                  <button type="button" className="ai-chat__suggestion" key={text} onClick={() => suggest(text)} disabled={locked}>
+                    {text}
+                  </button>
+                ))}
+              </div>
+            )}
           </li>
         ) : null}
         {/* Each message in order. */}
@@ -507,8 +613,8 @@ export function AiEditPanel({
           }
           // The reply's proposals, with their applied state read from the resume.
           const ops = message.ops ?? [];
-          // Ops not yet on the resume that Apply all will take (a new bullet always needs its own click).
-          const open = ops.filter((op) => op.op !== 'new_bullet' && !isApplied(op, diff, structure ?? null)).length;
+          // Ops not yet on the resume that Apply all will take (a new bullet always needs its own click; a rejected card has none).
+          const open = ops.filter((op) => op.op !== 'new_bullet' && op.op !== 'rejected' && !isApplied(op, diff, structure ?? null)).length;
           // Bullet edits the audit rule ran on: the denominator of the flag count.
           const audited = ops.filter((op) => op.op === 'edit' && op.advice?.kind === 'checked');
           // Of those, the ones it would flag: the number that decides whether the audit should ever block.
@@ -517,8 +623,10 @@ export function AiEditPanel({
           return (
             // Same keying as the user bubble.
             <li key={`${message.createdAt}|assistant`} className="ai-chat__msg ai-chat__msg--ai">
-              {/* The AI's own sentence about what it changed. */}
+              {/* The AI's reply, as it wrote it: its answer, never the record of what changed. */}
               <p className="ai-chat__note">{message.content}</p>
+              {/* The record, read from the resume right now: what is applied, what is not, what could not be done. */}
+              <p className="ai-chat__summary">{replySummary(ops, diff, structure ?? null)}</p>
               {/* The proposals, each with its own Apply. */}
               {ops.length > 0 ? (
                 <ol className="ai-chat__ops">
@@ -529,9 +637,9 @@ export function AiEditPanel({
                     const state = opStates.get(key);
                     // On the resume now: read from the diff, never stored.
                     const applied = isApplied(op, diff, structure ?? null);
-                    // One card.
+                    // One card; a "Could not do" card is marked so it never reads as a pending proposal.
                     return (
-                      <li key={key} className={`ai-chat__op${applied ? ' ai-chat__op--applied' : ''}`}>
+                      <li key={key} className={`ai-chat__op${applied ? ' ai-chat__op--applied' : ''}${op.op === 'rejected' ? ' ai-chat__op--rejected' : ''}`}>
                         <OpBody
                           op={op}
                           /* The master's groups, the only ones a skill may print under. */
@@ -543,9 +651,11 @@ export function AiEditPanel({
                           /* Applied or in flight: the group is settled. */
                           locked={applied || locked || state?.status === 'applying'}
                         />
-                        {/* Applied items say so instead of offering the button again. */}
+                        {/* Applied items say so; a "Could not do" card says that instead of offering a button. */}
                         {applied ? (
                           <span className="ai-chat__done">Applied</span>
+                        ) : op.op === 'rejected' ? (
+                          <span className="ai-chat__not-done">Not done</span>
                         ) : (
                           <button
                             type="button"
@@ -615,14 +725,16 @@ export function AiEditPanel({
           Message to the AI
         </label>
         <textarea
+          /* Read by suggest() to focus the box after a starter fills it. */
+          ref={inputRef}
           /* Matches the label. */
           id={`${baseId}-input`}
-          /* Styled in AiEditPanel.css. */
+          /* Styled in AiEditPanel.css, which also grows it with its content. */
           className="ai-chat__input"
-          /* Short; resize: vertical lets it grow. */
+          /* Short until typed into. */
           rows={2}
-          // The edge function's cap; longer is refused there anyway.
-          maxLength={500}
+          /* The edge function's cap (1500 since 2026-11-04, was 500); the count below shows before it bites. */
+          maxLength={MAX_MESSAGE}
           /* Short, since the empty chat already shows an example. */
           placeholder="Message the AI about this resume"
           /* Controlled, so ask() reads exactly what is shown. */
@@ -642,6 +754,12 @@ export function AiEditPanel({
           /* Frozen while asking, so the text shown is the text that was sent. */
           disabled={asking}
         />
+        {/* The length near the cap: maxLength cuts a paste silently, so the count makes the cut visible. */}
+        {instruction.length >= SHOW_COUNT_FROM ? (
+          <span className="ai-chat__meta">
+            {instruction.length}/{MAX_MESSAGE}
+          </span>
+        ) : null}
         {/* Primary: the one action the composer exists for. */}
         <button type="submit" className="button button--primary button--small" disabled={locked || instruction.trim() === ''}>
           {/* The label says when an ask is in flight. */}

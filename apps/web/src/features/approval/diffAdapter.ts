@@ -657,6 +657,9 @@ function skillsLine(resolved: ResolvedResume, master: MasterProfile, original: R
     supersededClaims: [],
     /* What the UI renders as "added by you", each with its own Remove. */
     addedSkills: added.map((skill) => ({ ref: skill.ref, name: skill.name })),
+    /* Every printed skill with its group, for the AI chat (2026-11-04): only on this editable
+       branch, because the chat mounts only where a save can land. */
+    printedSkills: resolved.skills.map((skill) => ({ ref: skill.ref, name: skill.name, category: skill.category })),
   };
 }
 

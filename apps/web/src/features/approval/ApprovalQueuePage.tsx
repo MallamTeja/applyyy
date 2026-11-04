@@ -67,8 +67,8 @@ import {
   // The auditor's pin rules behind it, so a resume with a bad pin is refused by name (7b).
   classifyTailored,
   rebuildOriginal,
-  // T3: take back a skill the operator added; the tailor's own are refused.
-  removeAddedSkill,
+  // Take any printed skill off the resume, the tailor's or the operator's (since 2026-11-04).
+  removeSkill,
   removeBullet,
   resetTarget,
   // Structural edits (2026-11-01): each returns a new resume or a refusal, like the text edits.
@@ -411,9 +411,9 @@ function pureEdit(
     // T3: only the ref crosses from the UI; the skill is built from the PINNED master.
     case 'add_skill':
       return addSkill(current, master, action.ref);
-    // T3: only skills the operator added; the tailor's are refused by name.
+    // Any printed skill; the AI chat's "remove the duplicate Testing" lands here too (2026-11-04).
     case 'remove_skill':
-      return removeAddedSkill(current, original, action.ref);
+      return removeSkill(current, action.ref);
     // Back to the tailor's text, or a removed bullet back in place.
     case 'reset':
       return resetTarget(current, original, action.target);

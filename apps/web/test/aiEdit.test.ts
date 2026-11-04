@@ -82,8 +82,8 @@ describe('resolveOps (one op) + toEditAction', () => {
     const summary = one({ op: 'edit', id: 'summary', text: 'S.', newNumbers: [] }, draft);
     // Applied on the summary.
     assert.deepEqual(summary && ai.toEditAction(summary), { kind: 'edit', target: { kind: 'summary' }, text: 'S.' });
-    // An id that was never sent resolves to nothing.
-    assert.equal(one({ op: 'remove', id: 'b7' }, draft), null);
+    // An id that was never sent becomes a "not done" card with its reason, never a silent drop (2026-11-04).
+    assert.deepEqual(one({ op: 'remove', id: 'b7' }, draft), { op: 'rejected', what: 'Remove bullet b7', why: 'The AI named a bullet it was not shown.' });
     // A skill records whether the master had it, and applies through the attest path.
     const skill = one({ op: 'add_skill', name: 'Kafka', category: 'Tools' }, draft);
     // Kafka is in the fixture's master skills.
@@ -136,7 +136,7 @@ describe('requestAssist', () => {
       body,
     );
     // Read through.
-    assert.deepEqual(result, { kind: 'ok', ops: [{ op: 'remove', id: 'b0' }], dropped: 1, note: 'n', usage: { input: 10, cached: null, output: null, thinking: null } });
+    assert.deepEqual(result, { kind: 'ok', ops: [{ op: 'remove', id: 'b0' }], rejected: [{ what: '1 proposed change', why: 'The AI service did not say why.' }], note: 'n', usage: { input: 10, cached: null, output: null, thinking: null } });
   });
 
   it("shows the function's own refusal message", async () => {
@@ -347,15 +347,15 @@ describe('resolveOps (structure ops, played in order)', () => {
   it('gives repeated moves different siblings, and drops a move past the end', () => {
     // b2 (x_b3) up three times: past x_b2, past x_b1, then it is already first.
     const ops = ai.resolveOps(Array.from({ length: 3 }, () => ({ op: 'move', id: 'b2', direction: 'up' }) as const), draft());
-    // The pasts, then null.
-    assert.deepEqual(ops.map((op) => (op?.op === 'move' ? op.past : null)), ['x_b2', 'x_b1', null]);
-    // The first bullet cannot go up, and the last of an entry cannot go down.
-    assert.deepEqual(ai.resolveOps([{ op: 'move', id: 'b0', direction: 'up' }, { op: 'move', id: 'b3', direction: 'down' }], draft()), [null, null]);
+    // The pasts, then a rejected card.
+    assert.deepEqual(ops.map((op) => (op.op === 'move' ? op.past : op.op)), ['x_b2', 'x_b1', 'rejected']);
+    // The first bullet cannot go up, and the last of an entry cannot go down: each says why.
+    assert.deepEqual(ai.resolveOps([{ op: 'move', id: 'b0', direction: 'up' }, { op: 'move', id: 'b3', direction: 'down' }], draft()).map((op) => (op.op === 'rejected' ? op.why : op.op)), ['That bullet is already first in its entry.', 'That bullet is already last in its entry.']);
     // A removal earlier in the answer shortens the order: b1 becomes first, so it cannot go up.
-    assert.equal(ai.resolveOps([{ op: 'remove', id: 'b0' }, { op: 'move', id: 'b1', direction: 'up' }], draft())[1], null);
+    assert.equal(ai.resolveOps([{ op: 'remove', id: 'b0' }, { op: 'move', id: 'b1', direction: 'up' }], draft())[1]?.op, 'rejected');
   });
 
-  it('resolves section moves, add-backs and new bullets to real targets, and unknown ids to null', () => {
+  it('resolves section moves, add-backs and new bullets to real targets, and unknown ids to "not done" cards', () => {
     // Projects up passes experience; an unprinted section and unknown ids resolve to nothing.
     const ops = ai.resolveOps(
       [
@@ -372,12 +372,12 @@ describe('resolveOps (structure ops, played in order)', () => {
     // Each stored shape carries what its card and its Apply need.
     assert.deepEqual(ops, [
       { op: 'move_section', section: 'projects', direction: 'up', past: 'experience' },
-      null,
+      { op: 'rejected', what: 'Move section Education up', why: 'Education is not printed on this resume.' },
       { op: 'add_bullet', ref: 'x_b4', text: 'Mentored two interns.', parentLabel: 'Aczen Technologies · Full Stack AI Engineer' },
       { op: 'add_entry', section: 'achievements', ref: 'ach_1', label: 'LeetCode' },
-      null,
+      { op: 'rejected', what: 'Add back m9', why: 'The AI named a master item it was not shown.' },
       { op: 'new_bullet', section: 'projects', parentRef: 'p', parentLabel: 'F1 Race Pace Predictor', text: 'Modelled tyre wear.' },
-      null,
+      { op: 'rejected', what: 'New bullet under e7', why: 'The AI named an entry it was not shown.' },
     ]);
   });
 
@@ -385,7 +385,7 @@ describe('resolveOps (structure ops, played in order)', () => {
     // The pre-structure draft.
     const flat = ai.buildAssistDraft(sdiff, [], 'x');
     // Nothing to move among, nothing available, no entries.
-    assert.deepEqual(ai.resolveOps([{ op: 'move', id: 'b1', direction: 'up' }, { op: 'add_back', id: 'm0' }, { op: 'new_bullet', entry: 'e0', text: 't' }], flat), [null, null, null]);
+    assert.deepEqual(ai.resolveOps([{ op: 'move', id: 'b1', direction: 'up' }, { op: 'add_back', id: 'm0' }, { op: 'new_bullet', entry: 'e0', text: 't' }], flat).map((op) => op.op), ['rejected', 'rejected', 'rejected']);
   });
 });
 
@@ -510,5 +510,250 @@ describe('structureFromDiff (the chat reads the structure the page renders, 2026
   it('is null for a diff without sections, so the chat keeps its old behaviour', () => {
     // A hand-built fixture predating sections.
     assert.equal(ai.structureFromDiff({ lines: [] } as never), null);
+  });
+});
+
+// --- an honest chat with full read/write (2026-11-04) ---------------------------------
+// Live evidence that drove these: 20 of 25 stored AI replies carried no ops, and several still said
+// "I have added C to the Languages skill group". The reply text was the model's, written before the
+// server dropped its ops. These tests pin the fix: what the chat says was done is derived from the
+// resume, every dropped op is shown with its reason, and the AI can read the JD and remove skills/entries.
+
+// The skills line as the page renders it now: every printed skill with its ref and group.
+const skillsLine = {
+  id: 'skills',
+  kind: 'skills',
+  masterText: 'TypeScript, Postgres, Kafka, Testing',
+  tailoredRuns: [run('TypeScript, Postgres, Testing')],
+  editTarget: { kind: 'skills' },
+  editState: 'original',
+  printedSkills: [
+    { ref: 'sk_ts', name: 'TypeScript', category: 'Languages' },
+    { ref: 'sk_pg', name: 'Postgres', category: 'Databases' },
+    { ref: 'sk_test', name: 'Testing', category: 'Tools' },
+  ],
+};
+
+// sdiff with that skills line and the posting's own fields, as diffAdapter passes them through.
+const jdiff = {
+  ...(sdiff as object),
+  lines: [...(sdiff as unknown as { lines: unknown[] }).lines, skillsLine],
+  locations: ['Bengaluru, India', 'Remote'],
+  workArrangement: 'hybrid',
+  jobDescription: '<p>We need <b>Go</b> and   Kafka.</p><ul><li>Location: Bengaluru</li></ul>',
+} as never;
+
+describe('buildAssistDraft reads the posting and the skill groups (2026-11-04)', () => {
+  it('sends the location, arrangement and the JD as plain text, and every printed skill with its group', () => {
+    // Built with the structure, as the page builds it.
+    const draft = ai.buildAssistDraft(jdiff, ['Languages', 'Databases', 'Tools'], 'where is this role?', [], structure as never);
+    // Where the job is, so "is this remote?" has an answer.
+    assert.equal(draft.body.job.location, 'Bengaluru, India; Remote');
+    // How it is worked.
+    assert.equal(draft.body.job.arrangement, 'hybrid');
+    // Tags stripped and whitespace collapsed, exactly as DiffView shows the posting.
+    assert.equal(draft.body.job.description, 'We need Go and Kafka. Location: Bengaluru');
+    // Every printed skill with the group it prints under, so "which group?" is answerable.
+    assert.deepEqual(draft.body.printedSkills, [
+      { name: 'TypeScript', category: 'Languages' },
+      { name: 'Postgres', category: 'Databases' },
+      { name: 'Testing', category: 'Tools' },
+    ]);
+    // Refs still never leave the browser.
+    assert.doesNotMatch(JSON.stringify(draft.body), /sk_/);
+  });
+
+  it('cuts a long JD to the function cap and leaves absent fields out entirely', () => {
+    // A 9000-character posting.
+    const long = ai.buildAssistDraft({ ...(jdiff as object), jobDescription: 'a'.repeat(9000) } as never, [], 'x');
+    // Cut to the edge function's 8000, never refused there.
+    assert.equal(long.body.job.description?.length, 8000);
+    // The old fixture has none of the new fields: the job block is exactly what an old server read.
+    assert.deepEqual(Object.keys(ai.buildAssistDraft(sdiff, [], 'x').body.job).sort(), ['company', 'missing', 'title']);
+  });
+});
+
+describe('remove_skill and remove_entry (full write, 2026-11-04)', () => {
+  // The draft the ops resolve against.
+  const draft = () => ai.buildAssistDraft(jdiff, ['Tools'], 'remove testing', [], structure as never);
+
+  it('resolve to the refs the save path removes, and unknown names to a reason', () => {
+    // A printed skill by name, any case; an unprinted one; a known entry; an unknown one.
+    const ops = ai.resolveOps(
+      [
+        { op: 'remove_skill', name: 'testing' },
+        { op: 'remove_skill', name: 'Kafka' },
+        { op: 'remove_entry', id: 'e1' },
+        { op: 'remove_entry', id: 'e9' },
+      ],
+      draft(),
+    );
+    // Each carries what its card and its Apply need.
+    assert.deepEqual(ops, [
+      { op: 'remove_skill', ref: 'sk_test', name: 'Testing' },
+      { op: 'rejected', what: 'Remove skill "Kafka"', why: '"Kafka" is not on the resume.' },
+      { op: 'remove_entry', section: 'projects', ref: 'p', label: 'F1 Race Pace Predictor' },
+      { op: 'rejected', what: 'Remove entry e9', why: 'The AI named an entry it was not shown.' },
+    ]);
+  });
+
+  it("map onto the page's own actions, apply by themselves, and read applied from the resume", () => {
+    // The two stored shapes.
+    const skill = { op: 'remove_skill', ref: 'sk_test', name: 'Testing' } as const;
+    const entry = { op: 'remove_entry', section: 'projects', ref: 'p', label: 'F1 Race Pace Predictor' } as const;
+    // The save path's existing actions; no new write path.
+    assert.deepEqual([ai.toEditAction(skill), ai.toEditAction(entry)], [
+      { kind: 'remove_skill', ref: 'sk_test' },
+      { kind: 'remove_entry', section: 'projects', ref: 'p' },
+    ]);
+    /* Review finding (2026-11-04): the JD is untrusted text in the prompt, so a posting could induce
+       removals. A skill auto-applies only when the operator named it (the add_skill rule); a whole
+       entry, the biggest removal, always waits for a click. */
+    assert.deepEqual([ai.shouldAutoApply(skill, 'remove the duplicate testing'), ai.shouldAutoApply(skill, 'trim my skills'), ai.shouldAutoApply(entry, 'remove the F1 project')], [true, false, false]);
+    // Testing still prints: not applied.
+    assert.equal(ai.isApplied(skill, jdiff, structure as never), false);
+    // A skill whose ref no longer prints: applied.
+    assert.equal(ai.isApplied({ op: 'remove_skill', ref: 'sk_kafka', name: 'Kafka' }, jdiff, structure as never), true);
+    // The project is still on the resume: not applied; without it: applied.
+    assert.equal(ai.isApplied(entry, jdiff, structure as never), false);
+    // Only the job entry left.
+    assert.equal(ai.isApplied(entry, jdiff, { ...structure, entries: [structure.entries[0]] } as never), true);
+    // Both round-trip through the store.
+    assert.deepEqual([ai.readStoredOp(skill), ai.readStoredOp(entry)], [skill, entry]);
+  });
+
+  it('reads a skill removal by ref, so removing one of two same-named skills reads as done', () => {
+    // Teja's case: "Testing" printed twice, under two groups; the AI removed one copy.
+    const twice = { ...(jdiff as object), lines: [{ ...skillsLine, tailoredRuns: [run('TypeScript, Testing')], printedSkills: [skillsLine.printedSkills[0], { ref: 'sk_test_ai', name: 'Testing', category: 'AI' }] }] } as never;
+    // The removed copy's ref is gone: done, although the name still prints once.
+    assert.equal(ai.isApplied({ op: 'remove_skill', ref: 'sk_test', name: 'Testing' }, twice), true);
+    // The copy still printed: not done.
+    assert.equal(ai.isApplied({ op: 'remove_skill', ref: 'sk_test_ai', name: 'Testing' }, twice), false);
+  });
+});
+
+describe('rejected cards (every dropped op is shown with its reason, 2026-11-04)', () => {
+  // One rejected card.
+  const rejected = { op: 'rejected', what: 'Add skill "C"', why: "The AI's answer did not name the skill." } as const;
+
+  it('never apply, never read as applied, and round-trip through the store', () => {
+    // Nothing to apply.
+    assert.equal(ai.shouldAutoApply(rejected, 'add c'), false);
+    // Never "Applied", whatever the resume holds.
+    assert.equal(ai.isApplied(rejected, jdiff, structure as never), false);
+    // Stored and read back.
+    assert.deepEqual(ai.readStoredOp(rejected), rejected);
+    // A card with no reason is not one.
+    assert.equal(ai.readStoredOp({ op: 'rejected', what: 'x' }), null);
+  });
+
+  it('come from the server with their reasons, plus a count the server did not itemise', async () => {
+    // The new server shape: two reasons listed, three dropped in all.
+    const client = { functions: { invoke: async () => ({ data: { status: 'ok', ops: [], dropped: 3, rejected: [{ what: 'Add skill "C"', why: 'No name.' }, { what: 'Add skill "Go"', why: 'Not a group.' }], note: 'n', usage: {} }, error: null }) } };
+    // Read.
+    const result = await ai.requestAssist(client, { instruction: 'x', job: { title: '', company: '', missing: [] }, summary: null, bullets: [], skills: '', categories: [], history: [] });
+    // Both listed, and the third said rather than lost.
+    assert.deepEqual(result.kind === 'ok' ? result.rejected : null, [
+      { what: 'Add skill "C"', why: 'No name.' },
+      { what: 'Add skill "Go"', why: 'Not a group.' },
+      { what: '1 more proposed change', why: 'The AI service did not say why.' },
+    ]);
+  });
+
+  it('refuse a malformed reason list instead of showing part of it', async () => {
+    // A reason that is not a string.
+    const client = { functions: { invoke: async () => ({ data: { status: 'ok', ops: [], rejected: [{ what: 'x', why: 1 }], note: '', usage: {} }, error: null }) } };
+    // An error, like an unreadable op.
+    assert.equal((await ai.requestAssist(client, { instruction: 'x', job: { title: '', company: '', missing: [] }, summary: null, bullets: [], skills: '', categories: [], history: [] })).kind, 'error');
+  });
+});
+
+describe('outcomeNote: what the chat remembers as done (2026-11-04)', () => {
+  it('lists applied, not-yet-applied and impossible changes from the resume, never from the AI text', () => {
+    // One applied (Testing is printed), one waiting (a new bullet), one rejected.
+    const note = ai.outcomeNote(
+      [
+        { op: 'add_skill', name: 'Testing', category: 'Tools', inMaster: true },
+        { op: 'new_bullet', section: 'projects', parentRef: 'p', parentLabel: 'F1', text: 'Modelled tyre wear across a race.' },
+        { op: 'rejected', what: 'Add skill "C"', why: "The AI's answer did not name the skill." },
+      ],
+      jdiff,
+      structure as never,
+    );
+    // The model reads this ahead of its own old reply, so it cannot believe a change it only claimed.
+    assert.equal(note, '[Applied: add skill "Testing" | Not applied yet: new bullet "Modelled tyre wear across a race." | Could not do: Add skill "C" (The AI\'s answer did not name the skill.)]');
+    // No ops: nothing to say.
+    assert.equal(ai.outcomeNote([], jdiff, structure as never), '');
+  });
+});
+
+describe('AiEditPanel shows the truth on each card (2026-11-04)', () => {
+  it('renders a rejected card as "Not done" with its reason and no Apply button', () => {
+    // Static markup without React's text separators.
+    const html = render(h(panel.OpBody, { op: { op: 'rejected', what: 'Add skill "C"', why: "The AI's answer did not name the skill." } } as never)).replace(/<!-- -->/g, '');
+    // What was asked and why it did not happen.
+    assert.match(html, /Add skill &quot;C&quot;.*The AI&#x27;s answer did not name the skill\./);
+    // No button inside a card body.
+    assert.doesNotMatch(html, /<button/);
+  });
+
+  it('renders remove_skill and remove_entry cards', () => {
+    // Static markup without React's text separators.
+    const card = (op: unknown) => render(h(panel.OpBody, { op } as never)).replace(/<!-- -->/g, '');
+    // The skill, struck.
+    assert.match(card({ op: 'remove_skill', ref: 'sk_test', name: 'Testing' }), /Remove skill <del[^>]*>Testing<\/del>/);
+    // The entry, struck, with its section.
+    assert.match(card({ op: 'remove_entry', section: 'projects', ref: 'p', label: 'F1' }), /Remove from Projects.*<del[^>]*>F1<\/del>/);
+  });
+
+  it('offers starter questions in an empty chat', () => {
+    // Static render with no store.
+    const html = render(h(panel.AiEditPanel, { diff: jdiff, onEdit: async () => ({ ok: true }), onAssist: async () => ({ kind: 'error', message: '' }), busy: false, categories: [] }));
+    // At least one suggestion button, typed into the composer on click.
+    assert.match(html, /<button type="button" class="ai-chat__suggestion"/);
+  });
+});
+
+describe('review fixes (2026-11-04)', () => {
+  it('removes the named copy when one skill name prints under two groups, and the first copy otherwise', () => {
+    // Testing under Frameworks and under Tools.
+    const twice = { ...(jdiff as object), lines: [{ ...skillsLine, printedSkills: [{ ref: 'sk_t_fw', name: 'Testing', category: 'Frameworks' }, { ref: 'sk_t_tools', name: 'Testing', category: 'Tools' }] }] } as never;
+    // The draft over it.
+    const draft = ai.buildAssistDraft(twice, [], 'x');
+    // "from Tools" takes the Tools copy; no group takes the first, as the server's spelling does.
+    assert.deepEqual(ai.resolveOps([{ op: 'remove_skill', name: 'Testing', category: 'Tools' }, { op: 'remove_skill', name: 'testing' }], draft).map((op) => (op.op === 'remove_skill' ? op.ref : op.op)), ['sk_t_tools', 'sk_t_fw']);
+  });
+
+  it('refuses later ops on an entry this answer already removes, instead of failing them at save time', () => {
+    // The job entry e0 holds b0..b2; the project e1 holds b3.
+    const draft = ai.buildAssistDraft(sdiff, [], 'x', [], structure as never);
+    // Remove the job, then edit and move its bullets and write under it; the project edit is untouched.
+    const ops = ai.resolveOps(
+      [
+        { op: 'remove_entry', id: 'e0' },
+        { op: 'edit', id: 'b0', text: 'New.', newNumbers: [] },
+        { op: 'move', id: 'b1', direction: 'down' },
+        { op: 'new_bullet', entry: 'e0', text: 'x' },
+        { op: 'add_back', id: 'm0' },
+        { op: 'edit', id: 'b3', text: 'Fine.', newNumbers: [] },
+      ],
+      draft,
+    );
+    // Each dependent op says why; the independent one resolves.
+    assert.deepEqual(ops.map((op) => (op.op === 'rejected' ? op.why : op.op)), [
+      'remove_entry',
+      'An earlier change in this answer removes its entry.',
+      'An earlier change in this answer removes its entry.',
+      'An earlier change in this answer removes its entry.',
+      'An earlier change in this answer removes its entry.',
+      'edit',
+    ]);
+  });
+
+  it('keeps a literal "<" in the posting instead of losing the rest of the text', () => {
+    // A requirement written with "<" and no closing ">".
+    const draft = ai.buildAssistDraft({ ...(jdiff as object), jobDescription: '<p>Need <3 years of Go.</p> Location: Pune' } as never, [], 'x');
+    // Only the real tags go.
+    assert.equal(draft.body.job.description, 'Need <3 years of Go. Location: Pune');
   });
 });

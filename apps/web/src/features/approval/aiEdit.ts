@@ -20,10 +20,24 @@
  * path: tracesToMaster checks every one at the save boundary. Without a structure the body is
  * exactly what it was before, so the page can ship this before it computes one.
  *
+ * AN HONEST CHAT WITH FULL READ/WRITE (2026-11-04). Teja: "the changes I requested, the AI said it
+ * applied, but they were not applied". The live table agreed: 20 of 25 replies carried no ops, and
+ * several still said "I have added C". The reply is model prose written BEFORE the server drops
+ * invalid ops, so it can never be the record of what happened. Three changes:
+ *   1. Nothing is dropped silently any more. An op that cannot land (refused by the server, or
+ *      unresolvable here) becomes a `rejected` StoredOp with what was asked and why it could not be
+ *      done, shown as its own card. resolveOps returns one StoredOp per op, never a null.
+ *   2. What the chat remembers as done comes from the resume (outcomeNote, from isApplied), and is
+ *      what the model reads about its own earlier turns, so it cannot believe a change it only claimed.
+ *   3. The AI reads the posting (location, arrangement, the JD as plain text) and every printed
+ *      skill with its group, and can remove a skill or a whole entry: both through the save path's
+ *      existing remove_skill / remove_entry actions, so still no new write path.
+ *
  * Pure apart from the injected client, so node --test drives it with a fake. */
 
-// Types only: the diff the page renders, and the action vocabulary the save path understands.
-import type { ResumeDiff } from './diffModel';
+// Types only: the diff the page renders, the printed-skill record its skills line carries, and the
+// action vocabulary the save path understands.
+import type { PrintedSkill, ResumeDiff } from './diffModel';
 // Type-only import from the view: the action union is declared there, beside the controls.
 import type { EditAction } from './DiffView';
 /* Types only from the core edits: section names, directions, and the shape of a master item not on
@@ -40,8 +54,22 @@ import { TAILOR_SECTION_KINDS } from '../../../../../supabase/functions/_shared/
 export interface AssistBody {
   // The operator's words.
   readonly instruction: string;
-  // The job, reduced to what steers wording.
-  readonly job: { readonly title: string; readonly company: string; readonly missing: readonly string[] };
+  /* The job: what steers wording, plus (2026-11-04) what answers questions about the role. The
+     three extras are sent only when the posting has them, so an old body stays byte-identical. */
+  readonly job: {
+    // The posting's title.
+    readonly title: string;
+    // The hiring company.
+    readonly company: string;
+    // JD keywords the resume does not yet match.
+    readonly missing: readonly string[];
+    // Where the role is, the locations joined: "is this remote?" had no answer without it.
+    readonly location?: string;
+    // onsite | hybrid | remote | unknown, as the scout stored it.
+    readonly arrangement?: string;
+    // The posting as plain text, cut to the function's cap; the AI said "I cannot see the JD" before.
+    readonly description?: string;
+  };
   // The current summary, or null.
   readonly summary: string | null;
   // Current bullet text under short ids, with the short id of its entry when a structure was given.
@@ -50,6 +78,8 @@ export interface AssistBody {
   readonly skills: string;
   // The master's skill groups.
   readonly categories: readonly string[];
+  // Every printed skill with its group (2026-11-04); sent only when the skills line carries them.
+  readonly printedSkills?: readonly { readonly name: string; readonly category: string }[];
   // Earlier messages of the active chat, oldest first (chat memory, 2026-11-01).
   readonly history: readonly ChatTurn[];
   // STRUCTURE (2026-11-01); the three fields below are sent only when the page passed a structure.
@@ -110,7 +140,20 @@ export type AssistOp =
   // A master item back onto the resume, by its "mN" or "nN" id.
   | { readonly op: 'add_back'; readonly id: string }
   // New bullet text under an entry, by its "eN" id.
-  | { readonly op: 'new_bullet'; readonly entry: string; readonly text: string };
+  | { readonly op: 'new_bullet'; readonly entry: string; readonly text: string }
+  // A printed skill off the resume, by its printed name (2026-11-04).
+  | { readonly op: 'remove_skill'; readonly name: string; readonly category?: string }
+  // A whole entry off the resume, by its "eN" id (2026-11-04).
+  | { readonly op: 'remove_entry'; readonly id: string };
+
+/* One change the AI proposed that cannot land, said in words (2026-11-04): what was asked, and the
+   one check it failed. Shown as its own card, so a refusal is never hidden behind the AI's text. */
+export interface Rejection {
+  // The change as proposed, e.g. 'Add skill "C"'.
+  readonly what: string;
+  // Why it was not made, one sentence.
+  readonly why: string;
+}
 
 /* Billed token counts for one ask; null where Google did not report a number. */
 export interface AssistUsage {
@@ -126,8 +169,8 @@ export interface AssistUsage {
 
 /* The answer, read into a closed union; an unreadable answer is an error, never "no changes". */
 export type AssistResult =
-  // The validated ops, how many the server dropped, the model's note and the bill.
-  | { readonly kind: 'ok'; readonly ops: readonly AssistOp[]; readonly dropped: number; readonly note: string; readonly usage: AssistUsage }
+  // The validated ops, every op the server refused with its reason, the model's note and the bill.
+  | { readonly kind: 'ok'; readonly ops: readonly AssistOp[]; readonly rejected: readonly Rejection[]; readonly note: string; readonly usage: AssistUsage }
   // Anything else, in words the operator can act on.
   | { readonly kind: 'error'; readonly message: string };
 
@@ -153,6 +196,8 @@ export interface AssistDraft {
   readonly availableEntries: ReadonlyMap<string, AddableEntry>;
   // The structure the ask was built from: the orders a move is resolved against. Null without one.
   readonly structure: AssistStructure | null;
+  // Printed skills by lower-cased name -> every copy, in print order (a name can print under two groups).
+  readonly printedSkills: ReadonlyMap<string, readonly PrintedSkill[]>;
 }
 
 /* What the audit would say about one AI edit, shown BEFORE Apply. Advice only (2026-10-31):
@@ -186,6 +231,21 @@ const MAX_AVAILABLE = 30;
 const MAX_LABEL = 120;
 // Same: the longest AVAILABLE bullet text (MAX_AVAILABLE_TEXT). Only the model's choice reads it.
 const MAX_AVAILABLE_TEXT = 200;
+/* 2026-11-04, the posting and the skill groups. Same mirror-and-cut rule: the function REFUSES an
+   oversize field, so everything is cut here first. The JD cap bounds the bill: ~2k tokens, sitting
+   in the JOB block ahead of the chat, so repeat asks on one row reuse it from the implicit cache. */
+// The posting's plain text (resume-assist MAX_DESCRIPTION).
+const MAX_DESCRIPTION = 8000;
+// The joined locations (MAX_LOCATION).
+const MAX_LOCATION = 300;
+// The arrangement word (MAX_ARRANGEMENT).
+const MAX_ARRANGEMENT = 20;
+// The most printed skills sent (resume-assist MAX_PRINTED_SKILLS); the function refuses more.
+const MAX_PRINTED_SKILLS = 80;
+// A printed skill name past this is refused there, so such a skill is left out here instead.
+const MAX_SKILL_NAME = 60;
+// A label in a card or the outcome line quotes at most this much of a bullet.
+const MAX_QUOTE = 40;
 
 /* A display string cut to `max` characters, never blank. The function refuses a blank or oversized
    label outright, which would refuse the whole ask over one odd master node. */
@@ -295,6 +355,8 @@ export function buildAssistDraft(
   let summary: string | null = null;
   // The skills line, empty until found.
   let skills = '';
+  // Every printed skill with its ref and group, when the skills line carries them (2026-11-04).
+  let printed: readonly PrintedSkill[] = [];
   // Every line once, in print order.
   for (const line of diff.lines) {
     // A bullet that is still printed and can be edited: the only ones an op could target.
@@ -329,6 +391,9 @@ export function buildAssistDraft(
       skillTokens = new Set(tokenizeText(line.masterText ?? ''));
       // The same joined names, split back into whole names for the "already in your master" check.
       masterSkills = new Set((line.masterText ?? '').split(',').map((name) => name.trim().toLowerCase()).filter((name) => name !== ''));
+      /* Within the function's caps: a name it would refuse is left out rather than failing the
+         whole ask over one odd master skill (it then simply cannot be removed by name). */
+      printed = (line.printedSkills ?? []).filter((skill) => skill.name.trim() !== '' && skill.name.length <= MAX_SKILL_NAME && skill.category.trim() !== '' && skill.category.length <= MAX_ITEM).slice(0, MAX_PRINTED_SKILLS);
     }
   }
   // The summary is editable under its reserved id.
@@ -351,14 +416,36 @@ export function buildAssistDraft(
   const shownBullets = placeable.slice(0, MAX_AVAILABLE - availableEntries.size);
   // "mN" -> master bullet.
   const availableBullets = new Map<string, AddableBullet>(shownBullets.map(({ bullet }, index) => [`m${index}`, bullet]));
+  // Where the role is: every location the scout stored, joined, cut to the function's cap.
+  const location = clip((diff.locations ?? []).join('; '), MAX_LOCATION, '');
+  // How it is worked, only a short word; anything longer is not one of the scout's values.
+  const arrangement = (diff.workArrangement ?? '').trim();
+  /* The posting as plain text: real tags out, whitespace collapsed. Stricter than DiffView's display
+     strip, whose optional ">" deletes everything after a literal "<" ("<3 years"): that loss only
+     hides text on screen, but here the AI would answer from a JD cut short (review finding, 2026-11-04).
+     It is untrusted ATS text: the function labels it data, every op it could induce still crosses the
+     same save gate and stays visible on its card, and removals wait for a click. Cut, never refused. */
+  const description = (diff.jobDescription ?? '').replace(/<\/?[a-zA-Z][^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, MAX_DESCRIPTION);
   // The body, every list capped.
   const body: AssistBody = {
     instruction: instruction.trim(),
-    job: { title: diff.jobTitle, company: diff.companyName, missing },
+    job: {
+      title: diff.jobTitle,
+      company: diff.companyName,
+      missing,
+      // Each extra only when present, so a posting without them sends the pre-2026-11-04 job block.
+      ...(location === '' ? {} : { location }),
+      // Only a real short word.
+      ...(arrangement === '' || arrangement.length > MAX_ARRANGEMENT ? {} : { arrangement }),
+      // Only when the posting has text.
+      ...(description === '' ? {} : { description }),
+    },
     summary,
     bullets,
     skills,
     categories: shortList(categories),
+    // Name and group only; the ref stays in the browser, like every other ref.
+    ...(printed.length === 0 ? {} : { printedSkills: printed.map((skill) => ({ name: skill.name, category: skill.category })) }),
     // The caller (resumeChat.historyFor) already windowed and trimmed it to the function's caps.
     history,
     // The structure, only when the page passed one, so an old body stays byte-identical.
@@ -378,8 +465,12 @@ export function buildAssistDraft(
           ],
         }),
   };
+  // Printed skills by lower-cased name, every copy kept in print order: remove_skill picks one by group.
+  const printedSkills = new Map<string, PrintedSkill[]>();
+  // Grouped by name.
+  for (const skill of printed) printedSkills.set(skill.name.trim().toLowerCase(), [...(printedSkills.get(skill.name.trim().toLowerCase()) ?? []), skill]);
   // Sent with the maps the answer and the audit advice need.
-  return { body, refs, before, masterText, skillTokens, masterSkills, entries, availableBullets, availableEntries, structure };
+  return { body, refs, before, masterText, skillTokens, masterSkills, entries, availableBullets, availableEntries, structure, printedSkills };
 }
 
 /* The audit's verdict on one AI op, or null for an op that changes no wording. */
@@ -430,21 +521,59 @@ export type StoredOp =
   // A whole master entry back onto the resume.
   | { readonly op: 'add_entry'; readonly section: BulletSection; readonly ref: string; readonly label: string }
   // New bullet text under an entry; Apply writes it into the master first (attestBullet).
-  | { readonly op: 'new_bullet'; readonly section: BulletSection; readonly parentRef: string; readonly parentLabel: string; readonly text: string };
+  | { readonly op: 'new_bullet'; readonly section: BulletSection; readonly parentRef: string; readonly parentLabel: string; readonly text: string }
+  // A printed skill off the resume (2026-11-04): its master ref for the save, its name for the card.
+  | { readonly op: 'remove_skill'; readonly ref: string; readonly name: string }
+  // A whole entry off the resume (2026-11-04), with its label for the card.
+  | { readonly op: 'remove_entry'; readonly section: BulletSection; readonly ref: string; readonly label: string }
+  /* A change that cannot land (2026-11-04): refused by the server or unresolvable here. Stored like
+     any card so a reloaded chat still says what was NOT done and why; it has no action at all. */
+  | ({ readonly op: 'rejected' } & Rejection);
 
-/* Resolve an answer's ops against the ask they came from, in order; null for each one that cannot
-   apply to this resume (an id never sent, a move already at the end). Replaced the one-op
-   toStoredOp on 2026-11-01, because a move can only be resolved knowing the moves before it. The orders
-   are copied and each move (and removal) is played on the copy, because the saves land in order:
-   "move b3 up" twice must pass two different siblings, and a bullet already first cannot go up. */
-export function resolveOps(ops: readonly AssistOp[], draft: AssistDraft): (StoredOp | null)[] {
+/* Every stored op that a click can apply: all but a rejected card. toEditAction takes only these, so
+   an Apply button on a rejected card does not typecheck. */
+export type ApplicableOp = Exclude<StoredOp, { readonly op: 'rejected' }>;
+
+/* A display name for a section key ("projects" -> "Projects"); the keys are single lower-case words. Exported so the chat panel spells sections the same way. */
+export function sectionTitle(section: string): string {
+  // First letter up, rest as is.
+  return section.charAt(0).toUpperCase() + section.slice(1);
+}
+
+/* A bullet quoted for a label: one line, cut, in quotes; the short id when there is no text. */
+function quote(text: string | null, fallback: string): string {
+  // No text to quote: the id the AI used.
+  return text === null || text.trim() === '' ? fallback : `"${clip(text, MAX_QUOTE, fallback)}"`;
+}
+
+/* A rejected card. */
+function reject(what: string, why: string): StoredOp {
+  // The closed shape readStoredOp reads back.
+  return { op: 'rejected', what, why };
+}
+
+/* Resolve an answer's ops against the ask they came from, in order: one StoredOp per op. One that
+   cannot apply to this resume (an id never sent, a move already at the end) becomes a rejected card
+   with its reason; until 2026-11-04 it was a null the panel filtered out, which is how a reply could
+   say "added" over nothing. Replaced the one-op toStoredOp on 2026-11-01, because a move can only be
+   resolved knowing the moves before it. The orders are copied and each move (and removal) is played
+   on the copy, because the saves land in order: "move b3 up" twice must pass two different siblings,
+   and a bullet already first cannot go up. */
+export function resolveOps(ops: readonly AssistOp[], draft: AssistDraft): StoredOp[] {
   // Each entry's bullet refs, copied so the ask's structure is never changed.
   const lists = (draft.structure?.entries ?? []).map((entry) => [...entry.bulletRefs]);
   // The section order, copied the same way.
   const sections = [...(draft.structure?.sections ?? [])];
+  /* What an earlier remove_entry in this answer took away (review finding, 2026-11-04): each removed
+     entry as "entry:<section>:<ref>" and each of its bullets by ref. A later op on any of them would
+     auto-apply against a resume that no longer holds it, fail, and stop the rest of the run. */
+  const gone = new Set<string>();
   // One op at a time, against the orders as the earlier ops left them.
-  return ops.map((op) => resolveOne(op, draft, lists, sections));
+  return ops.map((op) => resolveOne(op, draft, lists, sections, gone));
 }
+
+// The reason every op on something an earlier remove_entry took away is refused with.
+const GONE_WITH_ENTRY = 'An earlier change in this answer removes its entry.';
 
 /* Swap list[at] with its neighbour one place `direction`; answers the neighbour, or undefined at
    either end (and for an item that is not in the list). Mutates: callers pass resolveOps' copies. */
@@ -465,53 +594,99 @@ function swapPast<T>(list: T[], item: T, direction: MoveDirection): T | undefine
   return past;
 }
 
-/* One op against the orders as played so far (see resolveOps). */
-function resolveOne(op: AssistOp, draft: AssistDraft, lists: string[][], sections: SectionKind[]): StoredOp | null {
+/* One op against the orders as played so far (see resolveOps); a rejected card, with the one check it
+   failed, wherever it cannot land. */
+function resolveOne(op: AssistOp, draft: AssistDraft, lists: string[][], sections: SectionKind[], gone: Set<string>): StoredOp {
   // A skill needs no target; the master check is made once, now.
   if (op.op === 'add_skill') return { op: 'add_skill', name: op.name, category: op.category, inMaster: draft.masterSkills.has(op.name.trim().toLowerCase()) };
+  // A skill off: it must be printed now; the page's own record gives its ref and spelling.
+  if (op.op === 'remove_skill') {
+    // Every printed copy of that name, compared the way every skill check here compares names.
+    const copies = draft.printedSkills.get(op.name.trim().toLowerCase()) ?? [];
+    /* The copy in the named group when the name prints under two (review finding, 2026-11-04: "remove
+       Testing from Frameworks" took the other copy); otherwise the first, as the server spells it. */
+    const skill = copies.find((copy) => op.category !== undefined && copy.category.trim().toLowerCase() === op.category.trim().toLowerCase()) ?? copies[0];
+    // Not printed (or the page sent no skill records): said by name.
+    return skill === undefined ? reject(`Remove skill "${op.name}"`, `"${op.name}" is not on the resume.`) : { op: 'remove_skill', ref: skill.ref, name: skill.name };
+  }
+  // A whole entry off: one the ask listed.
+  if (op.op === 'remove_entry') {
+    // The entry, by short id.
+    const entry = draft.entries.get(op.id);
+    // An id never sent cannot be applied.
+    if (entry === undefined) return reject(`Remove entry ${op.id}`, 'The AI named an entry it was not shown.');
+    // Recorded, so later ops in this answer on the entry or its bullets are refused, not failed.
+    gone.add(`entry:${entry.section}:${entry.ref}`);
+    // Its bullets, as the copy holds them now: lists is index-aligned with structure.entries, whose objects draft.entries reuses.
+    const list = lists[draft.structure?.entries.indexOf(entry) ?? -1];
+    // Each one gone with it, and the copy emptied so no later move finds a sibling there.
+    for (const ref of list?.splice(0) ?? entry.bulletRefs) gone.add(ref);
+    // Its section and ref are what remove_entry saves against; its label is what the card shows.
+    return { op: 'remove_entry', section: entry.section, ref: entry.ref, label: entry.label };
+  }
   // A section: it must be in the order, with a neighbour on that side.
   if (op.op === 'move_section') {
+    // The card's wording, used by every refusal below.
+    const what = `Move section ${sectionTitle(op.section)} ${op.direction}`;
     // The sent name, matched to its typed form (the wire carries a plain string).
     const section = sections.find((name) => name === op.section);
+    // Not in the printed order: nothing to move.
+    if (section === undefined) return reject(what, `${sectionTitle(op.section)} is not printed on this resume.`);
     // The neighbour it passes, played on the copy.
-    const past = section === undefined ? undefined : swapPast(sections, section, op.direction);
-    // Unknown or already at that end: cannot apply.
-    return section === undefined || past === undefined ? null : { op: 'move_section', section, direction: op.direction, past };
+    const past = swapPast(sections, section, op.direction);
+    // Already at that end.
+    return past === undefined ? reject(what, `${sectionTitle(section)} is already ${op.direction === 'up' ? 'first' : 'last'}.`) : { op: 'move_section', section, direction: op.direction, past };
   }
   // A master item back: an "mN" bullet or an "nN" entry.
   if (op.op === 'add_back') {
     // A bullet first.
     const bullet = draft.availableBullets.get(op.id);
+    // Its entry was removed earlier in this answer: addMasterBullet would find no parent.
+    if (bullet !== undefined && gone.has(`entry:${bullet.section}:${bullet.parentRef}`)) return reject(`Add back ${quote(bullet.text, op.id)}`, GONE_WITH_ENTRY);
     // Its master text and entry label travel with it, for the card.
     if (bullet !== undefined) return { op: 'add_bullet', ref: bullet.ref, text: bullet.text, parentLabel: bullet.parentLabel };
     // Otherwise a whole entry.
     const entry = draft.availableEntries.get(op.id);
     // An id never sent cannot be applied.
-    return entry === undefined ? null : { op: 'add_entry', section: entry.section, ref: entry.ref, label: entry.label };
+    return entry === undefined ? reject(`Add back ${op.id}`, 'The AI named a master item it was not shown.') : { op: 'add_entry', section: entry.section, ref: entry.ref, label: entry.label };
   }
   // A new bullet: under an entry that was sent.
   if (op.op === 'new_bullet') {
     // The entry, by short id.
     const entry = draft.entries.get(op.entry);
+    // An id never sent cannot be applied.
+    if (entry === undefined) return reject(`New bullet under ${op.entry}`, 'The AI named an entry it was not shown.');
+    // Removed earlier in this answer: nothing left to write under.
+    if (gone.has(`entry:${entry.section}:${entry.ref}`)) return reject(`New bullet under "${clip(entry.label, MAX_QUOTE, op.entry)}"`, GONE_WITH_ENTRY);
     // Its section and ref are what attestBullet files the new master bullet under.
-    return entry === undefined ? null : { op: 'new_bullet', section: entry.section, parentRef: entry.ref, parentLabel: entry.label, text: op.text };
+    return { op: 'new_bullet', section: entry.section, parentRef: entry.ref, parentLabel: entry.label, text: op.text };
   }
   // The text the id stood for at ask time.
   const before = draft.before.get(op.id) ?? null;
+  // The verb on this op's card.
+  const verb = op.op === 'edit' ? 'Edit' : op.op === 'remove' ? 'Remove' : 'Move';
   // The summary has its own target; the server never proposes removing or moving it.
-  if (op.id === 'summary') return op.op === 'edit' ? { op: 'edit', target: { kind: 'summary' }, before, text: op.text, advice: auditAdvice(op, draft) } : null;
+  if (op.id === 'summary') return op.op === 'edit' ? { op: 'edit', target: { kind: 'summary' }, before, text: op.text, advice: auditAdvice(op, draft) } : reject(`${verb} summary`, 'The summary can be edited, not removed or moved.');
   // The bullet's ref, from the ask that produced this op.
   const ref = draft.refs.get(op.id);
   // An id we never sent cannot be applied.
-  if (ref === undefined) return null;
+  if (ref === undefined) return reject(`${verb} bullet ${op.id}${op.op === 'move' ? ` ${op.direction}` : ''}`, 'The AI named a bullet it was not shown.');
+  // Its entry was removed earlier in this answer: the bullet is no longer on the resume to change.
+  if (gone.has(ref)) return reject(`${verb} bullet ${quote(before, op.id)}${op.op === 'move' ? ` ${op.direction}` : ''}`, GONE_WITH_ENTRY);
   // The sibling list holding this bullet, if a structure was sent.
   const list = lists.find((refs) => refs.includes(ref));
   // A move needs that list and a neighbour on that side.
   if (op.op === 'move') {
+    // The card's wording.
+    const what = `Move bullet ${quote(before, op.id)} ${op.direction}`;
+    // No structure: the page did not send the layout a move is played against.
+    if ((draft.structure?.entries ?? []).length === 0) return reject(what, 'Bullets can only be moved when the page shows the resume by section.');
+    // In no list now: an earlier change in this answer removed it.
+    if (list === undefined) return reject(what, 'An earlier change in this answer removes that bullet.');
     // Played on the copy.
-    const past = list === undefined ? undefined : swapPast(list, ref, op.direction);
-    // No structure, or already at that end: cannot apply.
-    return past === undefined ? null : { op: 'move', ref, direction: op.direction, past, before };
+    const past = swapPast(list, ref, op.direction);
+    // Already at that end of its entry.
+    return past === undefined ? reject(what, `That bullet is already ${op.direction === 'up' ? 'first' : 'last'} in its entry.`) : { op: 'move', ref, direction: op.direction, past, before };
   }
   // A removal shortens the copy too, so a later move in this answer sees the right neighbour.
   if (op.op === 'remove') list?.splice(list.indexOf(ref), 1);
@@ -532,12 +707,20 @@ function resolveOne(op: AssistOp, draft: AssistDraft, lists: string[][], section
    true master text. A new bullet never does: applying it writes a new claim into the master, the
    same reason as an unnamed skill, so its card always waits for a click. */
 export function shouldAutoApply(op: StoredOp, instruction: string): boolean {
+  // A rejected card has nothing to apply.
+  if (op.op === 'rejected') return false;
   // A new claim in the master is the operator's call, every time.
   if (op.op === 'new_bullet') return false;
-  // Edits, removals, moves and add-backs are resume-only and reversible.
-  if (op.op !== 'add_skill') return true;
-  // Already a master claim: printing it claims nothing new.
-  if (op.inMaster) return true;
+  /* A whole entry off is the biggest change one op can make, and since 2026-11-04 the untrusted JD is
+     in the prompt, so a posting could ask for it (review finding): always the operator's click. */
+  if (op.op === 'remove_entry') return false;
+  /* Edits, bullet removals, moves and add-backs are resume-only and reversible: Reset on the line
+     brings the tailor's version back. */
+  if (op.op !== 'add_skill' && op.op !== 'remove_skill') return true;
+  // Already a master claim: printing it claims nothing new (a removal is never "in the master" this way).
+  if (op.op === 'add_skill' && op.inMaster) return true;
+  /* A skill the master lacks (add), or any skill off (remove, 2026-11-04, same JD reason): only when
+     the operator named it; "remove the duplicate testing" names Testing, "trim my skills" names none. */
   // The operator's words, as the auditor tokenises text.
   const said = new Set(tokenizeText(instruction));
   // Every word of the skill's name must have been typed ("CN" needs "cn"; "Code review" needs both).
@@ -547,8 +730,9 @@ export function shouldAutoApply(op: StoredOp, instruction: string): boolean {
 }
 
 /* The page action a stored op becomes on Apply. A switch over the closed union: a new StoredOp arm
-   without an action here fails typecheck (the function would not return on every path). */
-export function toEditAction(stored: StoredOp): EditAction {
+   without an action here fails typecheck (the function would not return on every path). Takes only
+   ApplicableOp, so a rejected card can never be turned into a save. */
+export function toEditAction(stored: ApplicableOp): EditAction {
   // One case per stored shape.
   switch (stored.op) {
     /* A skill always goes through the attest path: it reuses the master's own node when the latest
@@ -577,6 +761,12 @@ export function toEditAction(stored: StoredOp): EditAction {
     // New text: into the master first, then onto the resume by its new ref.
     case 'new_bullet':
       return { kind: 'attest_bullet', section: stored.section, parentRef: stored.parentRef, text: stored.text };
+    // The skill off, by master ref: the same action the skills row's own Remove makes.
+    case 'remove_skill':
+      return { kind: 'remove_skill', ref: stored.ref };
+    // The entry off, by section and ref: the same action the entry's own Remove makes.
+    case 'remove_entry':
+      return { kind: 'remove_entry', section: stored.section, ref: stored.ref };
   }
 }
 
@@ -585,19 +775,26 @@ export function toEditAction(stored: StoredOp): EditAction {
    Structural ops are read from `structure` (the current resume's, from the page); without one they
    read as not applied, since nothing could confirm them. */
 export function isApplied(stored: StoredOp, diff: ResumeDiff, structure: AssistStructure | null = null): boolean {
-  // The five structural shapes have their own reader.
-  if (stored.op === 'move' || stored.op === 'move_section' || stored.op === 'add_bullet' || stored.op === 'add_entry' || stored.op === 'new_bullet') {
+  // A rejected card never landed, whatever the resume holds now.
+  if (stored.op === 'rejected') return false;
+  // The six structural shapes have their own reader.
+  if (stored.op === 'move' || stored.op === 'move_section' || stored.op === 'add_bullet' || stored.op === 'add_entry' || stored.op === 'new_bullet' || stored.op === 'remove_entry') {
     // Nothing to read them against.
     return structure !== null && structureApplied(stored, diff, structure);
   }
-  // A skill is applied when it prints.
-  if (stored.op === 'add_skill') {
+  // A skill add or removal is read off the printed skills line.
+  if (stored.op === 'add_skill' || stored.op === 'remove_skill') {
     // The skills line, if the diff has one.
     const skillsLine = diff.lines.find((line) => line.kind === 'skills');
+    /* A removal is read by REF when the line carries refs: the same name can print twice (two
+       groups), and "remove one of the two" must read as done while the other copy still prints. */
+    if (stored.op === 'remove_skill' && skillsLine?.printedSkills !== undefined) return !skillsLine.printedSkills.some((skill) => skill.ref === stored.ref);
     // Printed names, compared case-insensitively like every other skill check here.
     const printed = lineText(skillsLine?.tailoredRuns ?? []).split(',').map((name) => name.trim().toLowerCase());
-    // Present means applied.
-    return printed.includes(stored.name.trim().toLowerCase());
+    // Whether this skill prints now.
+    const prints = printed.includes(stored.name.trim().toLowerCase());
+    // An add is applied when it prints; a removal when it no longer does.
+    return stored.op === 'add_skill' ? prints : !prints;
   }
   // The targeted bullet's ref, or null for the summary.
   const ref = stored.op === 'remove' ? stored.ref : stored.target.kind === 'bullet' ? stored.target.ref : null;
@@ -619,7 +816,7 @@ function above<T>(list: readonly T[], a: T, b: T): boolean {
 
 /* isApplied for the structural shapes, against the current resume's structure. */
 function structureApplied(
-  stored: Extract<StoredOp, { op: 'move' | 'move_section' | 'add_bullet' | 'add_entry' | 'new_bullet' }>,
+  stored: Extract<StoredOp, { op: 'move' | 'move_section' | 'add_bullet' | 'add_entry' | 'new_bullet' | 'remove_entry' }>,
   diff: ResumeDiff,
   structure: AssistStructure,
 ): boolean {
@@ -641,6 +838,9 @@ function structureApplied(
     // The entry is on the resume in its section.
     case 'add_entry':
       return structure.entries.some((entry) => entry.section === stored.section && entry.ref === stored.ref);
+    // The mirror: the entry is no longer on the resume in its section (structureFromDiff skips removed ones).
+    case 'remove_entry':
+      return !structure.entries.some((entry) => entry.section === stored.section && entry.ref === stored.ref);
     // A bullet under its entry now prints exactly this text (its ref is new, so the text is the key).
     case 'new_bullet': {
       // The parent entry's bullets.
@@ -749,6 +949,17 @@ export function readStoredOp(value: unknown): StoredOp | null {
       ? { op: 'new_bullet', section, parentRef: value.parentRef as string, parentLabel: value.parentLabel as string, text: value.text as string }
       : null;
   }
+  // A skill off: its master ref and printed name.
+  if (value.op === 'remove_skill') return allStrings(value, ['ref', 'name']) ? { op: 'remove_skill', ref: value.ref as string, name: value.name as string } : null;
+  // An entry off: a bullet section, a ref and a label.
+  if (value.op === 'remove_entry') {
+    // Closed.
+    const section = bulletSection(value.section);
+    // Typed exactly.
+    return section !== null && allStrings(value, ['ref', 'label']) ? { op: 'remove_entry', section, ref: value.ref as string, label: value.label as string } : null;
+  }
+  // A rejected card: what was asked and why; without a reason it would say "not done" over nothing.
+  if (value.op === 'rejected') return allStrings(value, ['what', 'why']) ? { op: 'rejected', what: value.what as string, why: value.why as string } : null;
   // A skill: name, group, and the master flag.
   if (value.op === 'add_skill') {
     // All three typed exactly.
@@ -802,7 +1013,7 @@ export function readUsage(value: unknown): AssistUsage {
   return { input: count(usage.input), cached: count(usage.cached), output: count(usage.output), thinking: count(usage.thinking) };
 }
 
-/* One op from the wire, or null when it is not one of the seven shapes. */
+/* One op from the wire, or null when it is not one of the nine shapes. */
 function readOp(value: unknown): AssistOp | null {
   // Must be an object.
   if (!isRecord(value)) return null;
@@ -816,6 +1027,13 @@ function readOp(value: unknown): AssistOp | null {
   if (value.op === 'add_back' && typeof value.id === 'string') return { op: 'add_back', id: value.id };
   // A new bullet: an entry id and text.
   if (value.op === 'new_bullet' && typeof value.entry === 'string' && typeof value.text === 'string') return { op: 'new_bullet', entry: value.entry, text: value.text };
+  // A skill off: its printed name (2026-11-04).
+  if (value.op === 'remove_skill' && typeof value.name === 'string' && (value.category === undefined || typeof value.category === 'string')) {
+    // The group only when sent: it picks one of two same-named copies.
+    return value.category === undefined ? { op: 'remove_skill', name: value.name } : { op: 'remove_skill', name: value.name, category: value.category };
+  }
+  // An entry off: its short id (2026-11-04).
+  if (value.op === 'remove_entry' && typeof value.id === 'string') return { op: 'remove_entry', id: value.id };
   // An edit carries an id, text and a list of new numbers.
   if (value.op === 'edit' && typeof value.id === 'string' && typeof value.text === 'string' && Array.isArray(value.newNumbers)) {
     // Every flagged number must be a string, or the warning shown would be wrong.
@@ -832,6 +1050,77 @@ function readOp(value: unknown): AssistOp | null {
   }
   // Any other shape.
   return null;
+}
+
+/* One server refusal from the wire, or null when it is not two strings. */
+function readRejection(value: unknown): Rejection | null {
+  // Both fields must be strings; a reason shown as "undefined" would be worse than an error.
+  return isRecord(value) && typeof value.what === 'string' && typeof value.why === 'string' ? { what: value.what, why: value.why } : null;
+}
+
+/* A short label for one stored op, lower-case first so it reads inside a sentence. The outcome line
+   below uses it; a rejected card keeps the AI-facing wording it was stored with. */
+export function describeOp(op: StoredOp): string {
+  // One case per stored shape.
+  switch (op.op) {
+    // The summary, or a bullet quoted by its old text.
+    case 'edit':
+      return op.target.kind === 'summary' ? 'edit summary' : `edit bullet ${quote(op.before, 'bullet')}`;
+    // The bullet quoted.
+    case 'remove':
+      return `remove bullet ${quote(op.before, 'bullet')}`;
+    // By name.
+    case 'add_skill':
+      return `add skill "${op.name}"`;
+    // By name.
+    case 'remove_skill':
+      return `remove skill "${op.name}"`;
+    // The bullet and the way it goes.
+    case 'move':
+      return `move bullet ${quote(op.before, 'bullet')} ${op.direction}`;
+    // The section and the way it goes.
+    case 'move_section':
+      return `move section ${sectionTitle(op.section)} ${op.direction}`;
+    // The master text coming back.
+    case 'add_bullet':
+      return `add back bullet ${quote(op.text, 'bullet')}`;
+    // The entry coming back.
+    case 'add_entry':
+      return `add back "${clip(op.label, MAX_QUOTE, op.section)}"`;
+    // The entry going.
+    case 'remove_entry':
+      return `remove entry "${clip(op.label, MAX_QUOTE, op.section)}"`;
+    // The new wording.
+    case 'new_bullet':
+      return `new bullet ${quote(op.text, 'bullet')}`;
+    // What was asked, as stored.
+    case 'rejected':
+      return op.what;
+  }
+}
+
+/* What one reply's changes amount to NOW, read from the resume (2026-11-04): "[Applied: … |
+   Not applied yet: … | Could not do: … (why)]", or '' for a reply with no ops. The chat sends this
+   ahead of each earlier AI reply, so the model reads the outcome of its own turns instead of its own
+   claims; the old note "I added C" was resent as fact and the model went on believing it. */
+export function outcomeNote(ops: readonly StoredOp[], diff: ResumeDiff, structure: AssistStructure | null): string {
+  // Landed, by the same reading the cards use.
+  const applied = ops.filter((op) => isApplied(op, diff, structure)).map(describeOp);
+  // Could land, has not: waiting for a click, failed, or undone since.
+  const open = ops.filter((op) => op.op !== 'rejected' && !isApplied(op, diff, structure)).map(describeOp);
+  // Could never land, with the reason.
+  const impossible = ops.flatMap((op) => (op.op === 'rejected' ? [`${op.what} (${op.why})`] : []));
+  // Only the non-empty groups, in that order.
+  const groups = [
+    // Done.
+    applied.length > 0 ? `Applied: ${applied.join('; ')}` : null,
+    // Not yet.
+    open.length > 0 ? `Not applied yet: ${open.join('; ')}` : null,
+    // Never.
+    impossible.length > 0 ? `Could not do: ${impossible.join('; ')}` : null,
+  ].filter((group): group is string => group !== null);
+  // Bracketed so the model reads it as the app's record, not as its own words.
+  return groups.length === 0 ? '' : `[${groups.join(' | ')}]`;
 }
 
 /* supabase-js hides a non-2xx body behind error.context (a fetch Response); read it defensively.
@@ -874,11 +1163,21 @@ export async function requestAssist(client: AssistClient | null, body: AssistBod
     const ops = data.ops.map(readOp);
     // One unreadable op means the contract drifted; say so rather than show a partial list.
     if (ops.some((op) => op === null)) return { kind: 'error', message: 'The AI answer had an unexpected shape.' };
+    // The server's refusals with reasons (2026-11-04); absent from a server deployed before then.
+    const listed = data.rejected === undefined ? [] : Array.isArray(data.rejected) ? data.rejected.map(readRejection) : null;
+    // A malformed list is a drifted contract, like an unreadable op: never shown in part.
+    if (listed === null || listed.some((item) => item === null)) return { kind: 'error', message: 'The AI answer had an unexpected shape.' };
+    // Every refusal the server reported.
+    const rejected = listed.filter((item): item is Rejection => item !== null);
+    // How many it dropped in all; the list is capped there, and an older server sends only this.
+    const unlisted = (count(data.dropped) ?? 0) - rejected.length;
+    // Any it counted but did not itemise are still said, never lost.
+    if (unlisted > 0) rejected.push({ what: `${unlisted} ${rejected.length > 0 ? 'more ' : ''}proposed change${unlisted === 1 ? '' : 's'}`, why: 'The AI service did not say why.' });
     // The validated answer.
     return {
       kind: 'ok',
       ops: ops.filter((op): op is AssistOp => op !== null),
-      dropped: count(data.dropped) ?? 0,
+      rejected,
       note: typeof data.note === 'string' ? data.note : '',
       // The bill, every count checked.
       usage: readUsage(data.usage),

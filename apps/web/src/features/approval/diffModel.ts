@@ -58,6 +58,14 @@ export interface AddedSkill {
   readonly name: string;
 }
 
+/* One printed skill as the AI chat reads it (2026-11-04). Unlike AddedSkill it carries the group:
+ * the chat must show the model where each skill sits, or "which group should Kafka go in?" gets
+ * answered blind. Copied from the resume's own skill, so it cannot drift from what prints. */
+export interface PrintedSkill extends AddedSkill {
+  /* The group the skill prints under, as the resume stores it (the master's own spelling). */
+  readonly category: string;
+}
+
 /* The two skill-selection actions the page performs, beyond DiffView's text EditAction
  * (T3). Declared HERE, not in DiffView.tsx, because the page must handle them before the
  * UI agent widens DiffView's EditAction union; once it does, both unions name the same
@@ -67,7 +75,8 @@ export interface AddedSkill {
 export type SkillEditAction =
   /* Put one unselected master skill onto the resume, appended after the tailor's own. */
   | { readonly kind: 'add_skill'; readonly ref: string }
-  /* Take back one skill the operator added; the tailor's own skills are not removable here. */
+  /* Take one printed skill off the resume, the tailor's or the operator's (tailoredEdits.removeSkill;
+     the tailor's became removable on 2026-11-04 for the AI chat). */
   | { readonly kind: 'remove_skill'; readonly ref: string };
 
 /* Which review path this row takes (section 11). DERIVED from whether any
@@ -145,6 +154,12 @@ export interface DiffLine {
    * Optional because only the skills line has such a list; absent on every other line, and on
    * hand-built fixtures that predate T3 (absent reads as "none added", the truthful reading). */
   readonly addedSkills?: readonly AddedSkill[];
+  /* Skills line only (2026-11-04): EVERY printed skill, in print order, with its master ref and
+   * group. The AI chat needs it twice: to tell the model which group each skill sits in (asked
+   * "in which group?" it had only a flat list), and to turn "remove Testing" into the ref the save
+   * path removes. Optional for the same reason as addedSkills; absent means the chat sends the old
+   * flat line and offers no skill removal. */
+  readonly printedSkills?: readonly PrintedSkill[];
   /* Bullet lines only (2026-11-01): the section and entry the bullet prints under, so the screen
    * can group it under its employer or project and a Move control knows its siblings. Optional
    * because summary and skills lines have no entry, and hand-built fixtures predate it. */

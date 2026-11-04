@@ -238,14 +238,14 @@ describe('addSkill', () => {
   });
 });
 
-describe('removeAddedSkill', () => {
+describe('removeSkill', () => {
   it('removes an added skill and returns exactly the resume before the add', () => {
     // Docker added.
     const withDocker = added(original(), 'skill-docker');
     // Captured to prove the input is not mutated.
     const json = snapshot(withDocker);
     // The operator takes it back off.
-    const out = fn('removeAddedSkill')(withDocker, original(), 'skill-docker');
+    const out = fn('removeSkill')(withDocker, 'skill-docker');
     // Accepted.
     assert.equal(out.ok, true);
     // Exactly the tailor's version again: nothing else drifted on the round trip.
@@ -258,15 +258,24 @@ describe('removeAddedSkill', () => {
     assert.equal(snapshot(withDocker), json);
   });
 
-  it("refuses to remove a tailor-selected skill, or a skill that isn't on the resume", () => {
-    // Docker added, so the resume has one removable skill.
+  /* 2026-11-04: Teja asked the AI chat to "remove one of the two testings" and nothing could, because
+     only operator-added skills were removable. A tailor's skill is a master skill like any other, so
+     removing it keeps every printed skill traced (tracesToMaster) and Reset still brings it back. */
+  it("removes a tailor-selected skill too, and refuses a skill that isn't on the resume", () => {
+    // Docker added, so the resume has both kinds of skill.
     const withDocker = added(original(), 'skill-docker');
-    // Node.js is the tailor's selection: removing it is not "undo an add".
-    assert.equal(fn('removeAddedSkill')(withDocker, original(), 'skill-node').ok, false);
-    // Kubernetes was never added.
-    assert.equal(fn('removeAddedSkill')(withDocker, original(), 'skill-k8s').ok, false);
-    // Positive control: the added one is removable.
-    assert.equal(fn('removeAddedSkill')(withDocker, original(), 'skill-docker').ok, true);
+    // Node.js is the tailor's selection: now removable, the operator's call.
+    const out = fn('removeSkill')(withDocker, 'skill-node');
+    // Accepted.
+    assert.equal(out.ok, true);
+    // Gone from the printed list, every other skill in its place.
+    assert.deepEqual(out.resume.skills.map((skill: { ref: string }) => skill.ref), withDocker.skills.map((skill: { ref: string }) => skill.ref).filter((ref: string) => ref !== 'skill-node'));
+    // Its name, for the event log.
+    assert.equal(out.before, 'Node.js');
+    // Kubernetes was never on the resume: "removed" must never be said for a no-op.
+    assert.equal(fn('removeSkill')(withDocker, 'skill-k8s').ok, false);
+    // Positive control: the added one is removable as before.
+    assert.equal(fn('removeSkill')(withDocker, 'skill-docker').ok, true);
   });
 });
 
@@ -291,7 +300,7 @@ describe("tracesToMaster with a master (R0' rule 2, skills)", () => {
   // The 4-arg contract call; previous defaults to the tailor's version.
   const check = (next: Resume, previous: Resume = original()): boolean => (edits.tracesToMaster as unknown as AnyFn)(previous, next, original(), MASTER);
 
-  it('accepts the outputs of addSkill, removeAddedSkill and reset', () => {
+  it('accepts the outputs of addSkill, removeSkill and reset', () => {
     // One add.
     const one = added(original(), 'skill-docker');
     // An honest add is text-only for R0's purposes.
@@ -301,7 +310,7 @@ describe("tracesToMaster with a master (R0' rule 2, skills)", () => {
     // Also accepted, from the previous step.
     assert.equal(check(two, one), true);
     // Undo of one add.
-    const removed = fn('removeAddedSkill')(two, original(), 'skill-k8s');
+    const removed = fn('removeSkill')(two, 'skill-k8s');
     // Precondition.
     assert.equal(removed.ok, true);
     // Accepted.
@@ -609,7 +618,7 @@ describe('review fix 3: editRow refuses an edit when the resume pin no longer ma
     const start = page.indexOf('async function editRow(');
     // A missing anchor fails loudly instead of slicing nothing.
     assert.ok(start >= 0, 'anchor not found: async function editRow(');
-    // End anchor: the pure operation that calls addSkill/removeAddedSkill/applyTextEdit.
+    // End anchor: the pure operation that calls addSkill/removeSkill/applyTextEdit.
     const end = page.indexOf('const outcome =', start);
     // Must exist after the start, or the slice is meaningless.
     assert.ok(end > start, 'anchor not found after editRow: const outcome =');

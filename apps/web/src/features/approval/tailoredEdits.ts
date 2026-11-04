@@ -333,15 +333,12 @@ export function addSkill(resume: ResolvedResume, master: MasterProfile, skillRef
   return { ok: true, resume: { ...resume, skills: [...resume.skills, added] }, before: null, after: node.name };
 }
 
-/* Take back one skill the OPERATOR added. The tailor's own choices are refused: removing them is
- * a different decision (it changes what the tailor argued for) and is out of scope; Reset is the
- * path back to the tailor's list. */
-export function removeAddedSkill(resume: ResolvedResume, original: ResolvedResume, skillRef: string): EditOutcome {
-  /* The tailor chose it: not this action's to remove. */
-  if (original.skills.some((skill) => skill.ref === skillRef)) {
-    /* Named so the operator knows why the button is not there for this one. */
-    return { ok: false, reason: "That skill was chosen by the tailor; only skills you added can be removed." };
-  }
+/* Take one printed skill off the resume, whoever chose it. Until 2026-11-04 this was
+ * removeAddedSkill and refused the tailor's own choices as "out of scope"; then Teja asked the AI
+ * chat to drop a duplicate "Testing" and nothing on the page could. Removing any skill is safe:
+ * what remains is still a subset of master skills, so tracesToMaster passes, editState turns
+ * 'edited' (the row leaves Bucket A), and Reset on the skills line brings the tailor's list back. */
+export function removeSkill(resume: ResolvedResume, skillRef: string): EditOutcome {
   /* The printed skill, for the event's `before`. */
   const old = resume.skills.find((skill) => skill.ref === skillRef);
   /* Not on the resume: nothing to remove, and "removed" must never be shown for a no-op. */

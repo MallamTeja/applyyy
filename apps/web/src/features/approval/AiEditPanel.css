@@ -310,4 +310,84 @@
   border-radius: var(--radius-control);
   /* Only taller, never wider. */
   resize: vertical;
+  /* Grows with what is typed (2026-11-04), so a pasted paragraph is visible, not hidden behind two rows. */
+  field-sizing: content;
+  /* Never taller than a short paragraph; past this it scrolls. */
+  max-height: 12rem;
+}
+
+/* 2026-11-04: what the reply's changes amount to, read from the resume. Set apart from the AI's own
+   text, because that text is the model talking and this line is the record. */
+.ai-chat__summary {
+  /* Small, like the meta line, but not muted: it is the verdict on the reply. */
+  font-size: var(--size-xs);
+  /* A label weight, so it reads as the app speaking. */
+  font-weight: 500;
+  /* The secondary ink: present without competing with the reply. */
+  color: var(--ink-secondary);
+  /* Tight under the reply. */
+  margin-top: var(--gap-1);
+}
+
+/* A change that could not be made: the warning wash, so it never reads as a pending proposal. */
+.ai-chat__op--rejected {
+  /* The fabrication wash the diff uses for what must be looked at. */
+  background: var(--fabricated-wash);
+}
+
+/* "Not done" in place of the button on such a card. */
+.ai-chat__not-done {
+  /* The screen's warning colour, as in the card's reason. */
+  color: var(--fabricated-strong);
+  /* Small, like "Applied". */
+  font-size: var(--size-sm);
+}
+
+/* The starter messages in an empty chat. */
+.ai-chat__suggestions {
+  /* In a row that wraps. */
+  display: flex;
+  /* Wraps on a narrow screen instead of overflowing. */
+  flex-wrap: wrap;
+  /* Spaced. */
+  gap: var(--gap-2);
+  /* Under the hint. */
+  margin-top: var(--gap-2);
+}
+
+/* One starter message: a chip, quieter than the real buttons, since a click only fills the box. */
+.ai-chat__suggestion {
+  /* Body font, not the browser's button font. */
+  font: inherit;
+  /* Small, like the hint around it. */
+  font-size: var(--size-sm);
+  /* Inset. */
+  padding: var(--gap-1) var(--gap-2);
+  /* The sheet, a step off the panel. */
+  background: var(--sheet);
+  /* Full ink: it is something to say. */
+  color: var(--ink);
+  /* Hairline edge. */
+  border: 1px solid var(--rule);
+  /* The badge radius: a chip, not a primary control. */
+  border-radius: var(--radius-badge);
+  /* A real button. */
+  cursor: pointer;
+  /* Left-aligned text when a long suggestion wraps. */
+  text-align: left;
+}
+
+/* Hover and keyboard focus both show the chip is live. */
+.ai-chat__suggestion:hover:not(:disabled),
+.ai-chat__suggestion:focus-visible {
+  /* The accent edge the other controls use for focus. */
+  border-color: var(--accent);
+}
+
+/* Waiting for a load or a save. */
+.ai-chat__suggestion:disabled {
+  /* Faded, and not clickable. */
+  opacity: 0.6;
+  /* No pointer over a dead control. */
+  cursor: default;
 }

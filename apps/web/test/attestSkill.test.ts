@@ -241,7 +241,7 @@ describe('attestSkill: one click puts the skill in the master, then on the resum
     assert.equal(out.ok, true);
     if (!out.ok) return;
     // Undo is the existing remove_skill path, against the original rebuilt at the new pin.
-    const undone = edits.removeAddedSkill(out.resume, out.original, out.skillRef);
+    const undone = edits.removeSkill(out.resume, out.skillRef);
     assert.equal(undone.ok, true);
     if (undone.ok) assert.deepEqual(undone.resume.skills, originalV3().skills);
   });
