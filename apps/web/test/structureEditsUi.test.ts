@@ -540,8 +540,8 @@ describe('each control dispatches its own EditAction (source shape: no DOM to cl
     for (const [kind, shape] of cases) assert.match(pageSrc, shape, `pureEdit does not route ${kind}`);
     // editRow sends attest_bullet to its own path BEFORE any pure edit is built.
     const editRow = pageSrc.slice(pageSrc.indexOf('async function editRow('), pageSrc.indexOf('const outcome =', pageSrc.indexOf('async function editRow(')));
-    // The route.
-    assert.match(editRow, /if \(action\.kind === 'attest_bullet'\)\s*return attestBulletRow\(applicationId, action, source, source\.original, current, stamp, supabase\);/);
+    // The route, carrying who decided it (editSource, 2026-11-04) into the history note.
+    assert.match(editRow, /if \(action\.kind === 'attest_bullet'\)\s*return attestBulletRow\(applicationId, action, source, source\.original, current, stamp, supabase, editSource\);/);
     // And a row without FULL is refused before anything is built.
     assert.match(editRow, /if \(source\.full === null\)\s*return notSaved\(FULL_UNRESOLVED_REASON\);/);
   });

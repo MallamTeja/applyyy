@@ -222,6 +222,8 @@ function run(answers: Parameters<typeof fakeClient>[0], overrides: Record<string
     tailorRefs: clone(TAILOR_REFS),
     // The concurrency stamp.
     expectedUpdatedAt: LOADED_STAMP,
+    // A hand attest on the page.
+    source: 'operator',
     // The id the new master bullet takes.
     newBulletId: NEW_ID,
     ...overrides,

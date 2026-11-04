@@ -59,6 +59,8 @@ import { safeHref } from '../../app/safeHref.ts';
 import type { DiscoverySource } from '../../data/contract';
 /* Types only: the structural-edit vocabulary (contract stubs live beside the pure edits). */
 import type { BulletSection, MoveDirection, SectionKind } from './tailoredEdits';
+/* Type only: who decided an edit, passed through to the page for the history note (2026-11-04). */
+import type { EditSource } from './saveTailoredEdit';
 /* The AI box: proposes edits that apply through this view's own save path. */
 import { AiEditPanel } from './AiEditPanel';
 /* Types only: the ask and answer of the AI box. */
@@ -118,7 +120,9 @@ export interface DiffViewProps {
   readonly onReject: (reason: string) => void;
   /* Async because it is a real write. Absent means "this screen offers no editing", which keeps
      any render-only caller (and the tests) working without stubbing a save path. */
-  readonly onEdit?: ((action: EditAction) => Promise<EditResult>) | undefined;
+  /* The page's save; editSource (2026-11-04) says who decided the edit, for the history note. This
+     view's own controls always pass 'operator' (operatorEdit below); only the AI chat passes its own. */
+  readonly onEdit?: ((action: EditAction, editSource: EditSource) => Promise<EditResult>) | undefined;
   /* D4: why editing is off for this row, shown instead of controls that could not be honest. */
   readonly editDisabledReason?: string | null | undefined;
   /* Whether the row carries a generated cover letter, which an edit does not regenerate. */
@@ -262,12 +266,14 @@ export function CoverageBar({
   /* Vouching needs a save path AND at least one honest group to print the skill under. */
   const canAttest = Boolean(onEdit) && (attestCategories?.length ?? 0) > 0;
 
-  /* Open the question for one missing keyword, defaulting to the master's first group. */
+  /* Open the question for one missing keyword, with NO group chosen (2026-11-04). It used to default
+     to the master's first group, so one click filed Code review, Machine learning and Testing under
+     "AI" (live master v14): a default that is a real group turns "not chosen" into a wrong answer. */
   function askAttest(keyword: string): void {
     // A new question clears the last failure, so the operator is not shown a stale reason.
     setAddError(null);
-    // The default group; the select lets the operator change it before confirming.
-    setAttestCategory(attestCategories?.[0] ?? '');
+    // Nothing chosen: the select shows "Choose a group" and Add waits for a real pick.
+    setAttestCategory('');
     // Shows the question under the chips.
     setPendingAttest(keyword);
   }
@@ -555,6 +561,10 @@ export function CoverageBar({
             Group{' '}
             {/* Locked mid-save, so what is sent is what the operator sees. */}
             <select value={attestCategory} disabled={busy === true} onChange={(e) => setAttestCategory(e.target.value)}>
+              {/* The starting value: an explicit non-choice, never a real group (see askAttest). */}
+              <option value="" disabled>
+                Choose a group
+              </option>
               {/* One option per existing group, in master order. */}
               {(attestCategories ?? []).map((category) => (
                 // The group name is unique in the list (skillGroups dedupes), so it is a stable key.
@@ -565,8 +575,8 @@ export function CoverageBar({
               ))}
             </select>
           </label>
-          {/* Confirm: the one click that writes. */}
-          <button type="button" className="button button--small" disabled={busy === true} onClick={() => void confirmAttest()}>
+          {/* Confirm: the one click that writes; waits until a group is chosen (attestSkill also refuses a blank one). */}
+          <button type="button" className="button button--small" disabled={busy === true || attestCategory === ''} onClick={() => void confirmAttest()}>
             {/* Names the skill, so the button says exactly what it will do. */}
             Add {pendingAttest}
           </button>
@@ -1771,12 +1781,12 @@ export function DiffView({
   const runEdit =
     onEdit === undefined
       ? null
-      : async (action: EditAction): Promise<EditResult> => {
+      : async (action: EditAction, editSource: EditSource): Promise<EditResult> => {
           // Locks every control in this view.
           setSaving(true);
           try {
-            // The page does the real work.
-            return await onEdit(action);
+            // The page does the real work, told who decided it.
+            return await onEdit(action, editSource);
           } catch (cause) {
             /* A throw here escaped the page, so whether the write landed is unknown; said as unknown
                (the prefix is no longer added at render), never as "not saved". */
@@ -1786,6 +1796,10 @@ export function DiffView({
             setSaving(false);
           }
         };
+
+  /* Every control in this view is the operator's own hand: one binding, so no control can forget
+     to say so and no AI path can borrow it by accident. */
+  const operatorEdit = runEdit === null ? null : (action: EditAction): Promise<EditResult> => runEdit(action, 'operator');
 
   function decide(key: string, decision: ClaimDecision): void {
     setDecisions((previous) => {
@@ -1802,7 +1816,7 @@ export function DiffView({
     // A new attempt clears the old failure.
     setRemoveError(null);
     // Same save path as every other edit.
-    const result = await runEdit({ kind: 'remove', target });
+    const result = await runEdit({ kind: 'remove', target }, 'operator');
     // The bullet is still there; say so in the band.
     if (!result.ok) setRemoveError(result.reason);
   }
@@ -1819,7 +1833,7 @@ export function DiffView({
      honestly on (a save path, and no editDisabledReason). Lines used to get runEdit and decide from
      their editTarget, which stays set when FULL is null, so the banner said "off" while text stayed
      click-to-edit and every save was refused after typing (review finding, 2026-11-01). */
-  const structureEdit = runEdit !== null && !editDisabledReason ? runEdit : null;
+  const structureEdit = operatorEdit !== null && !editDisabledReason ? operatorEdit : null;
   // The structural sentences behind part of editCount; absent on fixtures that predate them.
   const structureChanges = diff.structureChanges ?? [];
   // The sections the PDF prints, in print order: what the Section order list reorders.
@@ -1980,7 +1994,7 @@ export function DiffView({
               a hand-built diff without a layout keeps the flat list it always had. */}
           {diff.sections !== undefined
             ? // Headings, entries and their tools, with the same Line for every bullet.
-              groupedRows(diff, diff.sections, runEdit, structureEdit, busy, editDisabledReason ?? null)
+              groupedRows(diff, diff.sections, operatorEdit, structureEdit, busy, editDisabledReason ?? null)
             : // The pre-2026-11-01 flat list, unchanged.
               diff.lines.map((line) => (
                 <Line
@@ -1989,7 +2003,7 @@ export function DiffView({
                   // The line to draw.
                   line={line}
                   // The save path; each line switches its own controls off when it has no target or editing is off.
-                  onEdit={runEdit}
+                  onEdit={operatorEdit}
                   // One write at a time.
                   busy={busy}
                   // Threaded down so each line's title can say why it is not clickable (D4).

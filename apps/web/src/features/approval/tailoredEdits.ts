@@ -272,8 +272,9 @@ export function resetTarget(current: ResolvedResume, original: ResolvedResume, t
  * Lowercased; split on anything that is not a letter, digit, '+' or '#' (so "C++" and "C#" stay
  * themselves, never "c"); and one alias: a trailing "js" token is dropped, so "React" = "React.js"
  * and "Node" = "Node.js". Deliberately NOT "reactjs": that is one token, and the producer rule does
- * not find "ReactJS" in "React.js" either, so adding React.js would not clear that miss. */
-function skillTokens(phrase: string): string {
+ * not find "ReactJS" in "React.js" either, so adding React.js would not clear that miss.
+ * Exported 2026-11-04 so attestSkill's "already printed?" check uses this same identity rule. */
+export function skillTokens(phrase: string): string {
   /* Tokens in order; empty pieces from leading/trailing punctuation are dropped. */
   const tokens = phrase.toLowerCase().split(/[^a-z0-9+#]+/).filter((token) => token !== '');
   /* The ".js" alias only when something precedes it: a bare "JS" keyword stays "js", never "". */

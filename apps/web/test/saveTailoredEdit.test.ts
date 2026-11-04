@@ -93,7 +93,8 @@ const NEW_STAMP = '2026-10-06T10:05:00.000Z';
 const STORED = { resume: resume('Someone else wrote this'), updatedAt: '2026-10-06T10:03:00.000Z', status: 'approved' };
 
 // The event the page would send for an ordinary bullet edit.
-const EVENT = { kind: 'resume_edit', ref: 'b-tests', before: 'Old text', after: 'New text' } as const;
+// source (2026-11-04): who decided the edit; 'operator' is a hand edit on the page.
+const EVENT = { kind: 'resume_edit', ref: 'b-tests', before: 'Old text', after: 'New text', source: 'operator' } as const;
 
 // One recorded call: which method, with which arguments, on which table.
 type Call = { table: string; method: string; args: unknown[] };
@@ -395,8 +396,8 @@ describe('saveTailoredEdit: the event INSERT', () => {
       event_type: 'note',
       // The operator, not an agent.
       agent: 'human',
-      // What changed.
-      detail: { kind: 'resume_edit', ref: 'b-tests', before: 'Old text', after: 'New text' },
+      // What changed, and who decided it.
+      detail: { kind: 'resume_edit', ref: 'b-tests', before: 'Old text', after: 'New text', source: 'operator' },
     });
     // user_id is left to the column default (auth.uid()), never set by the browser.
     assert.equal('user_id' in row, false);
@@ -712,5 +713,20 @@ describe('confirmSettle carries the stored row when nothing landed', () => {
     const r = await settled({ data: { tailored_profile: NEXT, updated_at: NEW_STAMP, status: 'awaiting_approval' }, error: null });
     // The page adopts this instead of approving the old diff.
     assert.deepEqual(r, { kind: 'not_landed', stored: { resume: NEXT, updatedAt: NEW_STAMP, status: 'awaiting_approval' } });
+  });
+});
+
+describe('the history note says when the AI chat made the edit (2026-11-04)', () => {
+  it('records an AI chat edit as such: agent stays human (the RLS policy forces it for the browser), detail.source names the chat', async () => {
+    // The chat applied this edit by itself, right after its answer.
+    const { done, calls } = run({}, NEXT, { ...EVENT, source: 'ai_chat_auto' });
+    // Saved.
+    assert.equal((await done).ok, true);
+    // The one note.
+    const row = inserts(calls)[0]!.args[0] as { agent: string; detail: { source: string } };
+    // The browser can only write agent 'human' ("append own events" policy, 20261009131000).
+    assert.equal(row.agent, 'human');
+    // So the provenance lives in the detail, where the history can read it.
+    assert.equal(row.detail.source, 'ai_chat_auto');
   });
 });

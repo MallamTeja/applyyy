@@ -47,6 +47,12 @@ import type { ReactElement } from 'react';
 import type { ResumeDiff } from './diffModel';
 // Type only: the action vocabulary and save result the page already understands.
 import type { EditAction, EditResult } from './DiffView';
+// Type only: who decided an edit, for the history note (2026-11-04).
+import type { EditSource } from './saveTailoredEdit';
+
+/* The two ways an AI chat edit lands: by itself after the answer, or by the operator's click on its card.
+   Narrower than EditSource, so this panel can never log an edit as a hand edit on the page. */
+type ChatSource = Extract<EditSource, 'ai_chat_auto' | 'ai_chat_click'>;
 // The pure halves: build the ask, resolve and apply ops, read applied state and outcomes, format the bill.
 import { buildAssistDraft, formatUsage, holdReason, isApplied, outcomeNote, resolveOps, sectionTitle, shouldAutoApply, toEditAction } from './aiEdit';
 // Types for the ask and its parts.
@@ -330,8 +336,8 @@ export function AiEditPanel({
 }: {
   // The rendered diff: the AI's context is built from it, so it sees what the operator sees.
   readonly diff: ResumeDiff;
-  // The page's guarded save; one call per applied edit.
-  readonly onEdit: (action: EditAction) => Promise<EditResult>;
+  // The page's guarded save; one call per applied edit, saying whether the AI or a click applied it.
+  readonly onEdit: (action: EditAction, editSource: ChatSource) => Promise<EditResult>;
   // The ask; injected so this component never holds a client.
   readonly onAssist: (body: AssistBody) => Promise<AssistResult>;
   // A save is in flight somewhere in this diff; one write at a time per resume.
@@ -476,7 +482,7 @@ export function AiEditPanel({
       // Left as a card for a click (or a "Could not do" card, which has nothing to apply).
       if (op.op === 'rejected' || !shouldAutoApply(op, text)) continue;
       // Applied; a refusal shows on its card with Retry.
-      if (reply !== undefined && !(await apply(op, opKey(reply, index)))) break;
+      if (reply !== undefined && !(await apply(op, opKey(reply, index), 'ai_chat_auto'))) break;
     }
     // Unlocks.
     setAsking(false);
@@ -499,11 +505,11 @@ export function AiEditPanel({
 
   /* Apply one op through the page's guarded save. Answers whether it landed. ApplicableOp, so a
      "Could not do" card cannot reach a save even by mistake. */
-  async function apply(op: ApplicableOp, key: string): Promise<boolean> {
+  async function apply(op: ApplicableOp, key: string, editSource: ChatSource): Promise<boolean> {
     // Shown as in progress. No popup: the card already showed every flag before this click.
     setOpState(key, { status: 'applying' });
     // The page's save; a refusal comes back as a reason.
-    const result = await onEdit(toEditAction(op.op === 'add_skill' ? { ...op, category: groups.get(key) ?? op.category } : op));
+    const result = await onEdit(toEditAction(op.op === 'add_skill' ? { ...op, category: groups.get(key) ?? op.category } : op), editSource);
     // Landed: the diff re-renders and isApplied turns the card to "Applied".
     if (result.ok) setOpState(key, undefined);
     // Refused or unknown, in the save path's words.
@@ -526,7 +532,7 @@ export function AiEditPanel({
          batch (review finding, 2026-11-01): a hostile job text that induces one cannot ride along. */
       if (op.op === 'new_bullet') continue;
       // A failure usually means the row changed; later saves would fail the same way.
-      if (!(await apply(op, opKey(message, index)))) break;
+      if (!(await apply(op, opKey(message, index), 'ai_chat_click'))) break;
     }
     // Unlocks.
     setApplyingAll(false);
@@ -662,7 +668,7 @@ export function AiEditPanel({
                             /* Secondary: the primary action here is sending. */
                             className="button button--secondary button--small"
                             /* One guarded save through the page. */
-                            onClick={() => void apply(op, key)}
+                            onClick={() => void apply(op, key, 'ai_chat_click')}
                             /* Waits for any save, ask or batch. */
                             disabled={locked || state?.status === 'applying'}
                           >

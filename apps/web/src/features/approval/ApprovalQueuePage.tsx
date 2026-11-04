@@ -87,7 +87,7 @@ import type { BulletSection, EditOutcome } from './tailoredEdits';
 // isNoAnswer + confirmSettle: a lost RPC response is re-read, never reported as failed (item 6);
 // buildSettleArgs: the RPC arguments, with the stamp passed through byte-for-byte (item 4).
 import { buildSettleArgs, confirmFresh, confirmSettle, isNoAnswer, saveTailoredEdit } from './saveTailoredEdit';
-import type { EditEventKind, StoredRow } from './saveTailoredEdit';
+import type { EditEventKind, EditSource, StoredRow } from './saveTailoredEdit';
 // Vouching for a skill the master lacks: master version first, then the re-pinned resume.
 import { attestSkill } from './attestSkill';
 // The same two-step write for a brand-new bullet under one entry (2026-11-01).
@@ -1387,6 +1387,8 @@ export function ApprovalQueuePage(): ReactElement {
     stamp: string,
     // The connected client; editRow refused a null one.
     client: NonNullable<typeof supabase>,
+    // Who decided it (a hand click or the AI chat), for the history note (2026-11-04).
+    editSource: EditSource,
     // The same result shape as any edit, so DiffView locks, reports and undoes it the same way.
   ): Promise<EditResult> {
     // Emptied first, so the same sentence twice is still re-announced.
@@ -1417,6 +1419,8 @@ export function ApprovalQueuePage(): ReactElement {
         expectedUpdatedAt: stamp,
         // A fresh master node id; NodeIds must be unique across the whole master.
         newSkillId: `skill_${crypto.randomUUID()}`,
+        // Into the history note's detail.source.
+        source: editSource,
       });
     // Runs on success, refusal and throw alike.
     } finally {
@@ -1481,6 +1485,8 @@ export function ApprovalQueuePage(): ReactElement {
     stamp: string,
     // The connected client; editRow refused a null one.
     client: NonNullable<typeof supabase>,
+    // Who decided it (a hand click or the AI chat), for the history note (2026-11-04).
+    editSource: EditSource,
     // The same result shape as any edit, so DiffView locks and reports it the same way.
   ): Promise<EditResult> {
     // Emptied first, so the same sentence twice is still re-announced.
@@ -1512,6 +1518,8 @@ export function ApprovalQueuePage(): ReactElement {
         expectedUpdatedAt: stamp,
         // A fresh master node id; NodeIds must be unique across the whole master.
         newBulletId: `bullet_${crypto.randomUUID()}`,
+        // Into the history note's detail.source.
+        source: editSource,
       });
     // Runs on success, refusal and throw alike.
     } finally {
@@ -1558,7 +1566,9 @@ export function ApprovalQueuePage(): ReactElement {
      resume (or, if the save is refused or unconfirmed, with what IS stored). Nothing is shown as
      changed until the database has accepted it, so the preview, the Download and the score can
      never describe a resume that was not stored. */
-  async function editRow(applicationId: string, action: PageEditAction): Promise<EditResult> {
+  /* editSource (2026-11-04): who decided the edit, written to the history note; required, so no path
+     is logged as the operator by omission. Named editSource because `source` below is the RowSource. */
+  async function editRow(applicationId: string, action: PageEditAction, editSource: EditSource): Promise<EditResult> {
     // Editing IS reviewing the latest version, which is what the stale notice asked for, so it retires.
     clearStale(applicationId);
     // What this row's diff was built from, as last published (never the render closure's copy).
@@ -1589,9 +1599,9 @@ export function ApprovalQueuePage(): ReactElement {
     if (source.full === null) return notSaved(FULL_UNRESOLVED_REASON);
 
     // Vouching for a missing skill also writes the master, so it has its own path (attestRow above).
-    if (action.kind === 'attest_skill') return attestRow(applicationId, action, source, source.original, current, stamp, supabase);
+    if (action.kind === 'attest_skill') return attestRow(applicationId, action, source, source.original, current, stamp, supabase, editSource);
     // A brand-new bullet writes the master too, so it has the same kind of path (attestBulletRow above).
-    if (action.kind === 'attest_bullet') return attestBulletRow(applicationId, action, source, source.original, current, stamp, supabase);
+    if (action.kind === 'attest_bullet') return attestBulletRow(applicationId, action, source, source.original, current, stamp, supabase, editSource);
 
     /* The pure operation. Each returns a NEW resume, or a refusal before any write; tracesToMaster
        then checks at the save boundary that every node still traces to the pinned master. */
@@ -1622,8 +1632,8 @@ export function ApprovalQueuePage(): ReactElement {
         master: source.master,
         // Optimistic concurrency: refused if another tab changed the row (fix 2a).
         expectedUpdatedAt: stamp,
-        // What changed, for the append-only log.
-        event: { kind: EVENT_KIND[action.kind], ref: eventRef(action), before: outcome.before, after: outcome.after },
+        // What changed and who decided it, for the append-only log.
+        event: { kind: EVENT_KIND[action.kind], ref: eventRef(action), before: outcome.before, after: outcome.after, source: editSource },
       });
     } finally {
       // Released whatever happened, so a failure never strands the row as "saving".
@@ -2008,7 +2018,7 @@ export function ApprovalQueuePage(): ReactElement {
                     /* The shared rejection path; see rejectReviewed. */
                     onReject={(reason) => rejectReviewed(diff.applicationId, reason)}
                     /* Saves for real; see editRow. */
-                    onEdit={(action) => editRow(diff.applicationId, action)}
+                    onEdit={(action, editSource) => editRow(diff.applicationId, action, editSource)}
                     /* D4: only when the tailor's original could not be rebuilt. */
                     editDisabledReason={editOffReason(sources.get(diff.applicationId))}
                     /* So the diff can say the letter predates the edits. */
@@ -2160,7 +2170,7 @@ export function ApprovalQueuePage(): ReactElement {
                         /* Same rejection edge as Bucket B. */
                         onReject={(reason) => rejectReviewed(diff.applicationId, reason)}
                         /* Same save path as Bucket B; an edit moves the row there (R2). */
-                        onEdit={(action) => editRow(diff.applicationId, action)}
+                        onEdit={(action, editSource) => editRow(diff.applicationId, action, editSource)}
                         /* D4, as in Bucket B. */
                         editDisabledReason={editOffReason(sources.get(diff.applicationId))}
                         /* Cover-letter note, as in Bucket B. */

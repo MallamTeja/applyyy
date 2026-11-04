@@ -162,6 +162,8 @@ function run(answers: Parameters<typeof fakeClient>[0], overrides: Record<string
     tailorRefs: clone(TAILOR_REFS),
     expectedUpdatedAt: LOADED_STAMP,
     newSkillId: NEW_ID,
+    // A hand attest on the page unless a test says otherwise.
+    source: 'operator',
     ...overrides,
   } as never);
   return { done, calls: fake.calls };
@@ -270,5 +272,36 @@ describe('attestSkill: one click puts the skill in the master, then on the resum
       assert.equal((await done).ok, false);
       assert.equal(calls.length, 0);
     }
+  });
+});
+
+describe('attestSkill audit-trail honesty (2026-11-04)', () => {
+  it('refuses a skill the resume already prints instead of inserting a duplicate master skill', async () => {
+    // Live 2026-11-01: "Testing" attested twice 9 s apart became two master skills and two printed copies.
+    const { done, calls } = run({}, { keyword: 'PostgreSQL', category: 'Databases' });
+    // Refused, by name.
+    const out = await done;
+    // Not saved.
+    assert.equal(out.ok, false);
+    // Said plainly, and nothing was written to the master.
+    if (!out.ok) {
+      // The operator's words back.
+      assert.match(out.message, /PostgreSQL" is already on this resume/);
+      // No version made.
+      assert.equal(out.masterInserted, false);
+    }
+    // Neither a master version nor a row write.
+    assert.deepEqual([callsOf(calls, 'master_profiles', 'insert').length, callsOf(calls, 'applications', 'update').length], [0, 0]);
+  });
+
+  it('writes the source into the history note', async () => {
+    // Applied from an AI chat card by the operator's click.
+    const { done, calls } = run({}, { source: 'ai_chat_click' });
+    // Saved.
+    assert.equal((await done).ok, true);
+    // The note.
+    const note = callsOf(calls, 'application_events', 'insert')[0]!.args[0] as { detail: { source: string } };
+    // Named.
+    assert.equal(note.detail.source, 'ai_chat_click');
   });
 });
