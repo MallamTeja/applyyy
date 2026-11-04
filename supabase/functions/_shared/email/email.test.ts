@@ -196,6 +196,20 @@ test("classifyRawEmail classifies application receipt confirmation as 'unknown'"
   assert.equal(result.outcome, "unknown");
 });
 
+// Receipts worded with the contraction "We've" (2026-11-04). Live, Bjak's Ashby receipt arrived
+// as "We’ve Received Your Application" (typographic apostrophe) and was stored `unclassified`,
+// because the only "received" pattern spelled out "we have". Both apostrophes are tested, since
+// mail clients swap ' for ’ freely. The body is deliberately empty so the subject alone decides.
+for (const subject of ["We’ve Received Your Application", "We've received your application"]) {
+  // The subject is the test name, so a red line names the wording that regressed.
+  test(`parseEmail reads "${subject}" as an application receipt`, () => {
+    // An empty body isolates the subject, which is where Bjak's receipt carried the phrase.
+    const parsed = parseEmail({ subject, body: "", sender: "Bjak Talent Acquisition Team <no-reply@ashbyhq.com>" });
+    // The receipt flag is what decide.ts turns into `application_received`.
+    assert.equal(parsed.isAutoReplyOrConfirmation, true);
+  });
+}
+
 // Test safety against prompt injection payloads in untrusted input.
 test("classifyRawEmail handles prompt injection attempts safely and classifies based on content", () => {
   // Input containing an adversarial prompt injection phrase in the body.

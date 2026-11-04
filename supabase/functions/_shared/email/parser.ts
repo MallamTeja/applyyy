@@ -150,7 +150,9 @@ const AUTO_REPLY_PATTERNS: readonly RegExp[] = [
   // Standard application receipt subject/body phrases.
   /\bthank\s+you\s+for\s+applying\b/i,
   /\bapplication\s+(?:has\s+been\s+)?received\b/i,
-  /\bwe\s+have\s+received\s+your\s+application\b/i,
+  // "we have" OR the contraction "we've"/"we’ve" (either apostrophe): Bjak's live Ashby receipt
+  // (2026-11-04) said "We’ve Received Your Application" and went unclassified under "we have" alone.
+  /\bwe(?:\s+have|['’]ve)\s+received\s+your\s+application\b/i,
   /\bapplication\s+confirmation\b/i,
   /\bout\s+of\s+office\b/i,
   /\bautomatic\s+reply\b/i,
