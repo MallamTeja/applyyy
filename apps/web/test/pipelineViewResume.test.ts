@@ -97,6 +97,18 @@ describe('DrawerAppCard', () => {
     // Non-vacuity: the second card really rendered (its heading is there), so absence is meaningful.
     assert.match(withoutResume, /<h3[^>]*class="drawer__app-role"/);
   });
+
+  // One name per number (2026-11-04): match_score is the master-vs-JD FIT, which the approval queue's
+  // chip calls "Fit N · master vs JD". "Match" is the tailored resume's ATS coverage (DiffView's
+  // "ATS Match Score"), so the drawer used to give the fit number the other figure's name.
+  it('labels the matcher score as fit, worded like the approval chip, never as "Match"', () => {
+    // A numeric(5,2) value as PostgREST returns it; the label rounds it as the chip does.
+    const html = render(h(card.DrawerAppCard, { app: { ...row(null), score: 72.5 } as never, onViewResume: () => {} }));
+    // The chip's exact wording.
+    assert.match(html, /Fit 73 · master vs JD/);
+    // And not the old, borrowed name.
+    assert.doesNotMatch(html, /Match:/);
+  });
 });
 
 describe('readResumeSnapshot', () => {

@@ -593,8 +593,10 @@ export function DrawerAppCard({
         <span className="identifier">{app.id.slice(0, 8)}</span>
         {/* Local date: the operator thinks in their own timezone. */}
         <span>{new Date(app.createdAt).toLocaleDateString()}</span>
-        {/* Omitted before scoring, so an unscored row never reads as 0%. */}
-        {app.score !== null && app.score !== undefined && <span>Match: {app.score}%</span>}
+        {/* Omitted before scoring, so an unscored row never reads as 0. Worded like the approval
+            queue's fit chip (ApprovalQueuePage fitChip): match_score is the master-vs-JD FIT, and
+            "Match" names the tailored resume's ATS coverage, so one number keeps one name. */}
+        {app.score !== null && app.score !== undefined && <span>{`Fit ${Math.round(app.score)} · master vs JD`}</span>}
         {/* ABSENT, NOT DISABLED, when there is no snapshot: a disabled "View resume"
             invites the question "why not?" and the next fix is a fallback to the master,
             which would show a resume this row was never tailored with. In ANY status,
