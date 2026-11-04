@@ -48,7 +48,7 @@ import type { ResumeDiff } from './diffModel';
 // Type only: the action vocabulary and save result the page already understands.
 import type { EditAction, EditResult } from './DiffView';
 // The pure halves: build the ask, resolve and apply ops, read applied state and outcomes, format the bill.
-import { buildAssistDraft, formatUsage, isApplied, outcomeNote, resolveOps, sectionTitle, shouldAutoApply, toEditAction } from './aiEdit';
+import { buildAssistDraft, formatUsage, holdReason, isApplied, outcomeNote, resolveOps, sectionTitle, shouldAutoApply, toEditAction } from './aiEdit';
 // Types for the ask and its parts.
 import type { ApplicableOp, AssistBody, AssistResult, AssistStructure, AuditAdvice, StoredOp } from './aiEdit';
 // The memory: grouping into chats and the window sent back as context.
@@ -587,7 +587,7 @@ export function AiEditPanel({
         {/* An empty chat explains itself instead of showing blank space. */}
         {active.length === 0 ? (
           <li className="ai-chat__empty">
-            {loading ? 'Loading chats…' : 'Say what to change, or ask about this job. The AI makes the edits and each card says whether it landed; Reset in the comparison below undoes any of them.'}
+            {loading ? 'Loading chats…' : 'Say what to change, or ask about this job. The AI applies edits your master profile backs up; anything else waits for your click, and each card says whether it landed. Reset in the comparison below undoes any of them.'}
             {/* Starter messages, once the chats have loaded: a click fills the box, Send still sends. */}
             {loading ? null : (
               <div className="ai-chat__suggestions">
@@ -672,6 +672,8 @@ export function AiEditPanel({
                         )}
                         {/* The save path's refusal, verbatim. */}
                         {state?.status === 'failed' ? <p className="ai-chat__error">{state.reason}</p> : null}
+                        {/* Why a card that is not applied waits for a click (2026-11-04, audit-gated), so "not applied yet" is never unexplained. */}
+                        {!applied && state === undefined && holdReason(op) !== null ? <p className="ai-chat__meta ai-chat__hold">{holdReason(op)}</p> : null}
                       </li>
                     );
                   })}

@@ -184,8 +184,9 @@
   background: var(--traced-wash);
 }
 
-/* A refusal spans both columns under the change. */
-.ai-chat__op > .ai-chat__error {
+/* A refusal, or why a card waits for a click (2026-11-04), spans both columns under the change. */
+.ai-chat__op > .ai-chat__error,
+.ai-chat__op > .ai-chat__hold {
   /* Full width. */
   grid-column: 1 / -1;
 }

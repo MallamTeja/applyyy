@@ -489,10 +489,51 @@ export function auditAdvice(op: AssistOp, draft: AssistDraft): AuditAdvice | nul
   const master = draft.masterText.get(op.id);
   // No master text means no comparison; never reported as clean.
   if (master === undefined || master === null) return { kind: 'not_checked', why: 'No master bullet to compare against.' };
-  // Rule 5, the auditor's own function.
-  const gaps = bulletGroundingGaps(op.text, master, draft.skillTokens);
+  /* Rule 5, the auditor's own function. Since 2026-11-04 its verdict also decides whether the edit
+     applies without a click (shouldAutoApply), so it FAILS CLOSED: a throw or an answer of the wrong
+     shape is "not checked", which holds the edit, never a clean pass. */
+  let gaps: unknown;
+  // The call itself may throw on input it was never written for.
+  try {
+    // The auditor's own verdict on this wording against its master bullet.
+    gaps = bulletGroundingGaps(op.text, master, draft.skillTokens);
+  } catch {
+    // Unknown is not grounded.
+    return { kind: 'not_checked', why: 'The audit could not run on this edit.' };
+  }
+  // Two lists of strings, or the verdict is unreadable (CLAUDE.md section 6: validate the shape).
+  if (!isRecord(gaps) || !isStringList(gaps.metrics) || !isStringList(gaps.terms)) return { kind: 'not_checked', why: 'The audit gave an unreadable answer for this edit.' };
   // Each word once: the auditor's list keeps repeats, which only add noise on a card.
   return { kind: 'checked', metrics: [...new Set(gaps.metrics)], terms: [...new Set(gaps.terms)] };
+}
+
+/* True for an array holding only strings. */
+function isStringList(value: unknown): value is readonly string[] {
+  // Every entry checked; one non-string makes the list unreadable.
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+/* Rule 5 found nothing the master lacks (2026-11-04): the ONLY advice that lets an edit apply
+   without a click. Read defensively, because stored rows and old answers reach it too. */
+function isGrounded(advice: AuditAdvice | null): boolean {
+  // Checked, both lists real and empty; anything else (null, not_checked, a drifted shape) is not.
+  return advice !== null && advice.kind === 'checked' && isStringList(advice.metrics) && isStringList(advice.terms) && advice.metrics.length === 0 && advice.terms.length === 0;
+}
+
+/* Why a card waits for the operator's click, when the reason is not already on the card; null when it
+   applies by itself or its body already says why (a new bullet, a skill the master lacks). */
+export function holdReason(op: StoredOp): string | null {
+  // A text edit the audit did not pass.
+  if (op.op === 'edit' && !isGrounded(op.advice)) {
+    // Checked and flagged: the flags are listed above this line.
+    return op.advice?.kind === 'checked'
+      ? 'Waiting for your click: the audit found words or numbers your master profile does not have.'
+      : 'Waiting for your click: the audit cannot check this edit, so it never applies by itself.';
+  }
+  // A whole entry off: always the operator's call.
+  if (op.op === 'remove_entry') return 'Waiting for your click: removing a whole entry always needs your OK.';
+  // Nothing to add.
+  return null;
 }
 
 /* A proposed edit as the chat STORES it (2026-11-01): short ids resolved to this resume's real
@@ -697,7 +738,8 @@ function resolveOne(op: AssistOp, draft: AssistDraft, lists: string[][], section
 }
 
 /* Whether the chat applies this op by itself, right after the answer (Teja, 2026-11-01: "my ai
-   need to perform the actions"). Edits and removals: yes; they change only this resume, the row
+   need to perform the actions"). Edits: only when rule 5 finds them grounded (2026-11-04, see the
+   edit line below). Removals: yes; they change only this resume, the row
    still needs Approve, and every edited line keeps its Reset in the diff. A skill: only when the
    master already has it, or the operator NAMED it in this message. Otherwise applying writes a new
    claim into the master profile, which every future resume inherits, and the AI must not invent
@@ -714,8 +756,12 @@ export function shouldAutoApply(op: StoredOp, instruction: string): boolean {
   /* A whole entry off is the biggest change one op can make, and since 2026-11-04 the untrusted JD is
      in the prompt, so a posting could ask for it (review finding): always the operator's click. */
   if (op.op === 'remove_entry') return false;
-  /* Edits, bullet removals, moves and add-backs are resume-only and reversible: Reset on the line
-     brings the tailor's version back. */
+  /* A text edit applies by itself only when rule 5 found it grounded (Teja, 2026-11-04, "Audit-gated").
+     The untrusted JD is in the prompt, so a posting can steer the wording; an injected claim almost
+     always carries words the master lacks, which rule 5 names. Summary edits have no rule 5 and wait. */
+  if (op.op === 'edit') return isGrounded(op.advice);
+  /* Bullet removals, moves and add-backs insert no text that is not the master's own, and are
+     resume-only and reversible: Reset on the line brings the tailor's version back. */
   if (op.op !== 'add_skill' && op.op !== 'remove_skill') return true;
   // Already a master claim: printing it claims nothing new (a removal is never "in the master" this way).
   if (op.op === 'add_skill' && op.inMaster) return true;
