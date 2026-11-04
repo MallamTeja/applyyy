@@ -83,7 +83,9 @@ var APPLYY_ATS_SENDERS = [
   // Workday's two domains.
   'myworkday.com', 'workday.com',
   // The rest of the classifier's vendor vocabulary.
-  'smartrecruiters.com', 'bamboohr.com', 'jobvite.com', 'recruitee.com', 'breezy.hr', 'rippling.com', 'icims.com'
+  'smartrecruiters.com', 'bamboohr.com', 'jobvite.com', 'recruitee.com', 'breezy.hr', 'rippling.com', 'icims.com',
+  // Workable (2026-11-04), added with parser.ts's list; needs a re-paste to take effect in Google.
+  'workable.com'
 ];
 
 /**

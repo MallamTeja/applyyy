@@ -774,3 +774,70 @@ test("W33: a matched or classified email keeps its text", () => {
   // Kept whole.
   assert.deepEqual([classified.subject, classified.snippet], [STORABLE.subject, STORABLE.snippet]);
 });
+
+// ---- ATS subjects are kept (Teja, 2026-11-04 20:35 IST: "Keep subjects from ATS senders") ----
+//
+// The re-match below reads From and Subject only. Live, Axiad's Greenhouse mail named the company
+// ONLY in its subject ("Security code for your application to Axiad"), so blanking it made the
+// email unmatchable forever. Only the subject is kept: body and To stay blanked, which is the
+// narrowest reading of the ruling.
+
+test("ATS subject kept: an unclassified, unmatched Greenhouse email keeps its subject, not its body or To", () => {
+  // The live Axiad email's sender and subject.
+  const ats = { ...STORABLE, from: "Greenhouse <no-reply@us.greenhouse-mail.io>", subject: "Security code for your application to Axiad" };
+  // Built exactly as index.ts builds it.
+  const row = receipt.emailEventRowOf(ats, { classification: "unclassified", confidence: 0.3 }, null, "x");
+  // Subject kept; body and To still blanked.
+  assert.deepEqual([row.subject, row.snippet, row.recipient_to], [ats.subject, "", null]);
+});
+
+test("ATS subject kept: workable.com is on the allowlist (85's spec, 2026-11-04)", () => {
+  // A look-alike that merely ENDS in the vendor's letters: `notworkable.com` is not workable.com.
+  const ats = { ...STORABLE, from: "Printful Hiring <noreply@notworkable.com>", subject: "x" };
+  // A workable.com subdomain sender, the shape the suffix rule must cover.
+  const workable = { ...STORABLE, from: "Printful Hiring <no-reply@apply.workable.com>", subject: "Your application to Printful" };
+  // Kept.
+  assert.equal(receipt.emailEventRowOf(workable, { classification: "unclassified", confidence: 0.3 }, null, "x").subject, workable.subject);
+  // A look-alike domain is NOT workable.com and stays blanked: the list is closed, not a substring.
+  assert.equal(receipt.emailEventRowOf(ats, { classification: "unclassified", confidence: 0.3 }, null, "x").subject, "");
+});
+
+test("ATS subject kept: a gmail.com sender is still blanked", () => {
+  // Webmail is never an ATS, whatever the subject says.
+  const webmail = { ...STORABLE, from: "Someone <someone@gmail.com>", subject: "Your application to Acme" };
+  // Blanked as before.
+  assert.equal(receipt.emailEventRowOf(webmail, { classification: "unclassified", confidence: 0.3 }, null, "x").subject, "");
+});
+
+// ---- Re-match (2026-11-04): an email stored unmatched is linked once its row is tracked ----
+//
+// Live: 0 of 106 emails ever linked. The 2 job emails both arrived while their row was outside the
+// match pool (Bjak blocked_needs_human, Axiad applying under the pre-W6 pool) and the match ran once.
+
+// Bjak as the replay's applications read returns it, with its first approval time.
+const BJAK_APP: ActiveApplication = { id: "bjak-1", status: "applied", job_id: "j", jobs: { company_name: "Bjak", company_slug: "bjak", title: "Software Engineer" } };
+// The live receipt, as email_events stores it (unmatched).
+const BJAK_RECEIPT = { id: "e-bjak", matched_application_id: null, from_address: "Bjak Talent Acquisition Team <no-reply@ashbyhq.com>", subject: "We’ve Received Your Application", snippet: "", received_at: "2026-10-29T09:17:26+00:00" };
+
+test("re-match: the live Bjak receipt links to the Bjak row approved before it arrived", () => {
+  // Approved 2026-10-24 13:44 IST, five days before the receipt.
+  const plan = receipt.rematchUnmatched([BJAK_RECEIPT], [BJAK_APP], new Map([["bjak-1", "2026-10-24T08:14:13+00:00"]]));
+  // One link, to that row.
+  assert.deepEqual(plan, [{ eventId: "e-bjak", applicationId: "bjak-1" }]);
+});
+
+test("re-match: an email received BEFORE the row was approved never attaches to it", () => {
+  // Approved after the email arrived: the email is about an earlier application, not this one.
+  const plan = receipt.rematchUnmatched([BJAK_RECEIPT], [BJAK_APP], new Map([["bjak-1", "2026-10-30T00:00:00+00:00"]]));
+  // Nothing.
+  assert.deepEqual(plan, []);
+});
+
+test("re-match: no approval time, a malformed time, or an already-matched row links nothing", () => {
+  // No approval on record: fail closed (CLAUDE.md §6).
+  assert.deepEqual(receipt.rematchUnmatched([BJAK_RECEIPT], [BJAK_APP], new Map()), []);
+  // A received_at Date.parse can't read is not "now".
+  assert.deepEqual(receipt.rematchUnmatched([{ ...BJAK_RECEIPT, received_at: "soon" }], [BJAK_APP], new Map([["bjak-1", "2026-10-24T08:14:13+00:00"]])), []);
+  // An email already matched elsewhere is never re-pointed.
+  assert.deepEqual(receipt.rematchUnmatched([{ ...BJAK_RECEIPT, matched_application_id: "other" }], [BJAK_APP], new Map([["bjak-1", "2026-10-24T08:14:13+00:00"]])), []);
+});

@@ -23,6 +23,10 @@ import {
   statusMoveFor,
   // The rows the tracker follows; the same list index.ts loads.
   TRACKED_STATUSES,
+  // Which stored, unmatched emails now match a tracked row (2026-11-04).
+  rematchUnmatched,
+  // The matcher's application shape, for the re-match candidates.
+  type ActiveApplication,
   // A fresh verdict's shape, for the evidence it carries.
   type MessageDecision,
 } from "./decide.ts";
@@ -102,6 +106,78 @@ async function readChunked(ids: readonly string[], page: (chunk: string[], from:
   return rows;
 }
 
+/**
+ * THE RE-MATCH WRITE (2026-11-04): link stored, still-unmatched emails to the tracked row they
+ * now match. The decision is decide.ts's rematchUnmatched; this is only its reads and writes.
+ * Returns its errors; never throws (the caller's try covers a client that throws anyway).
+ */
+async function linkUnmatchedEmails(db: SupabaseClient, apps: readonly ActiveApplication[]): Promise<string[]> {
+  // Each candidate's FIRST entry into approved, so an older email can't attach to a newer row.
+  const approvals = await readChunked(apps.map((app) => app.id), (chunk, from, to) =>
+    db
+      // The append-only event log; read only.
+      .from("application_events")
+      // The two fields the guard reads.
+      .select("application_id, created_at")
+      // Written by the log_status_change trigger, one per move.
+      .eq("event_type", "status_change")
+      // Only entries INTO approved.
+      .eq("to_status", "approved")
+      // Scoped to the candidates, one chunk at a time.
+      .in("application_id", chunk)
+      // Stable pages on an append-only table.
+      .order("id")
+      // One page.
+      .range(from, to)
+  );
+  // Unreadable history: link nothing, and say so (fail closed, §6).
+  if (typeof approvals === "string") return [`rematch: approvals read failed: ${approvals}`];
+  // Earliest approval per application.
+  const firstApprovedAt = new Map<string, string>();
+  // Shape-checked; a malformed row is skipped, and its application then simply has no candidacy.
+  for (const row of approvals) {
+    // Only string fields are a usable approval.
+    if (typeof row.application_id !== "string" || typeof row.created_at !== "string") continue;
+    // The one already kept, if any.
+    const kept = firstApprovedAt.get(row.application_id);
+    // Keep the earlier one.
+    if (kept === undefined || Date.parse(row.created_at) < Date.parse(kept)) firstApprovedAt.set(row.application_id, row.created_at);
+  }
+  // The newest still-unmatched emails, with the fields the matcher reads.
+  // ponytail: newest REPLAY_WINDOW only, and unmatched noise accumulates, so an email older than the
+  // newest 200 unmatched is never re-matched; page this read if job mail ever falls out of the window.
+  const { data, error } = await db
+    // RLS scopes it to Teja's rows.
+    .from("email_events")
+    // Sender, subject and body are what matchApplication reads; the rest are the link and the guard.
+    .select("id, matched_application_id, from_address, subject, snippet, received_at")
+    // Still unmatched.
+    .is("matched_application_id", null)
+    // Newest first.
+    .order("received_at", { ascending: false })
+    // The per-run bound.
+    .limit(REPLAY_WINDOW);
+  // Without the emails there is nothing to link.
+  if (error !== null) return [`rematch: email_events read failed: ${error.message}`];
+  // §6: a non-array is a broken answer, not "no emails".
+  if (!Array.isArray(data)) return ["rematch: email_events read was not an array"];
+  // The pure decision.
+  const links = rematchUnmatched(data as Record<string, unknown>[], apps, firstApprovedAt);
+  // Collected per link.
+  const errors: string[] = [];
+  // One guarded write per link.
+  for (const link of links) {
+    // `is null` again on the write: a row matched meanwhile (by an ingest) is never re-pointed.
+    const { error: linkError } = await db.from("email_events").update({ matched_application_id: link.applicationId }).eq("id", link.eventId).is("matched_application_id", null);
+    // A refused write is a run error; the email stays unmatched and is retried next run.
+    if (linkError !== null) errors.push(`rematch: link ${link.eventId} -> ${link.applicationId} failed: ${linkError.message}`);
+    // Operational trace.
+    else console.info(`[email-tracker-intake] re-matched email ${link.eventId} to app ${link.applicationId}`);
+  }
+  // Everything that went wrong.
+  return errors;
+}
+
 /** What one sweep did: moves made, and every error, each of which the run row counts. */
 export interface ReplayResult {
   // Moves that committed.
@@ -137,20 +213,34 @@ export async function replayStoredMoves(
     // just moved to applied is seen at applied.
     // Paged (Review #3): applied rows pile up past PostgREST's 1000-row cap, and a cut-short
     // read would silently leave rows out of the sweep. Ordered by id so the pages are stable.
-    const apps = await readAllPages((from, to) => db.from("applications").select("id, status").in("status", [...TRACKED_STATUSES]).order("id").range(from, to));
+    // The joined job (2026-11-04) is what the re-match below matches on, the same fields index.ts loads.
+    const apps = await readAllPages((from, to) => db.from("applications").select("id, status, jobs(company_name, company_slug, title)").in("status", [...TRACKED_STATUSES]).order("id").range(from, to));
     // No statuses, no decisions.
     if (typeof apps === "string") return { moved, errors: [...errors, `replay: applications read failed: ${apps}`] };
     // Shape-checked: only a string id with a tracked status becomes a candidate row.
     const statusById = new Map<string, ApplicationStatus>();
+    // The same rows in the matcher's shape, only those whose joined job has a string slug and name.
+    const matchable: ActiveApplication[] = [];
     // One entry per tracked row.
-    for (const row of apps as { id?: unknown; status?: unknown }[]) {
+    for (const row of apps as { id?: unknown; status?: unknown; jobs?: { company_name?: unknown; company_slug?: unknown; title?: unknown } | null }[]) {
       // Anything else is skipped; skipped rows can't be moved.
-      if (typeof row.id === "string" && TRACKED_STATUSES.includes(row.status as ApplicationStatus)) statusById.set(row.id, row.status as ApplicationStatus);
+      if (typeof row.id !== "string" || !TRACKED_STATUSES.includes(row.status as ApplicationStatus)) continue;
+      // A move candidate.
+      statusById.set(row.id, row.status as ApplicationStatus);
+      // A re-match candidate too, when its job can be matched on (§6: no slug, no match).
+      if (typeof row.jobs?.company_slug === "string" && typeof row.jobs.company_name === "string") {
+        // job_id is not read by the matcher, so it is not selected; the title is optional there.
+        matchable.push({ id: row.id, status: row.status as ApplicationStatus, job_id: "", jobs: { company_name: row.jobs.company_name, company_slug: row.jobs.company_slug, title: typeof row.jobs.title === "string" ? row.jobs.title : null } });
+      }
     }
     // Nothing tracked: nothing to replay.
     if (statusById.size === 0) return { moved, errors };
     // The ids every read below is scoped to.
     const ids = [...statusById.keys()];
+
+    // RE-MATCH FIRST (2026-11-04), so an email linked here is read as owed just below and moves in
+    // this same run. Its errors are counted but never refuse the moves: they are a separate write.
+    if (matchable.length > 0) errors.push(...(await linkUnmatchedEmails(db, matchable)));
 
     // Stored, matched, move-capable emails of tracked rows, moved and pending alike (the
     // moved ones tell replayQueue what is already settled). Newest first; see REPLAY_WINDOW.

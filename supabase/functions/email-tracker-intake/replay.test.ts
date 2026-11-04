@@ -23,6 +23,10 @@ function fakeDb(canned: {
   emails?: Canned;
   notes?: Canned;
   stageMoves?: Canned;
+  // The first-approval read the re-match uses (2026-11-04); told apart by its to_status filter.
+  approvals?: Canned;
+  // What an email_events UPDATE (the re-match link) resolves to; success when unset.
+  updateError?: { message: string } | null;
   rpcError?: { message: string } | null;
 }) {
   // Every RPC call's arguments, and every query's recorded filters, for the assertions.
@@ -43,11 +47,15 @@ function fakeDb(canned: {
       if (table === "email_events") return canned.emails ?? ok([]);
       // The tracker's own move notes.
       if (filters["eq:event_type"] === "note") return canned.notes ?? ok([]);
+      // The re-match's first-approval read: status_change rows INTO approved.
+      if (filters["eq:to_status"] === "approved") return canned.approvals ?? ok([]);
       // Everything else on application_events is the stage-move read.
       return canned.stageMoves ?? ok([]);
     };
     // Which canned result this query resolves to, paged when the query asked for a range.
     const pick = (): Result => {
+      // An UPDATE resolves { error } only, as supabase-js does without .select().
+      if (filters.update !== undefined) return { data: null, error: canned.updateError ?? null };
       // A per-query answer sees the filters, range included.
       const raw = answer();
       // Resolved to one Result.
@@ -65,6 +73,10 @@ function fakeDb(canned: {
       select: () => builder,
       // Recorded so a test can pin which rows the read asks for.
       in: (column: string, values: unknown) => ((filters[`in:${column}`] = values), builder),
+      // `.is(column, null)`: the re-match's "still unmatched" filter, read and write alike.
+      is: (column: string, value: unknown) => ((filters[`is:${column}`] = value), builder),
+      // An UPDATE's payload, recorded so a test can assert exactly what was written.
+      update: (payload: unknown) => ((filters.update = payload), builder),
       // Same.
       eq: (column: string, value: unknown) => ((filters[`eq:${column}`] = value), builder),
       // Order recorded for the window test.
@@ -115,7 +127,8 @@ test("W6: a stored rejection whose move never happened is re-driven", async () =
   // And names the stored row, for a human audit.
   assert.equal((call.p_detail as Record<string, unknown>).email_event_id, "e1");
   // The emails read asks only for matched rows of tracked applications, move classifications only.
-  const emailsQuery = calls.queries.find((query) => query.table === "email_events")!;
+  // The MATCHED read, told apart from the re-match's unmatched read (2026-11-04) by its filter.
+  const emailsQuery = calls.queries.find((query) => query.table === "email_events" && query.filters["in:matched_application_id"] !== undefined)!;
   // Matched to the tracked rows.
   assert.deepEqual(emailsQuery.filters["in:matched_application_id"], ["a1"]);
   // Newest first, bounded.
@@ -293,4 +306,44 @@ test("Review #3: an email outside the first id chunk is still replayed, oldest f
   assert.deepEqual(result, { moved: 2, errors: [] });
   // Oldest first, the order the employer sent them.
   assert.deepEqual(calls.rpc.map((call) => call.p_application_id), ["a0", `a${ID_CHUNK_SIZE}`]);
+});
+
+// ---- Re-match (2026-11-04): unmatched stored emails are linked once their row is tracked ----
+//
+// Live: 0 of 106 emails ever linked. Bjak's receipt (10-29) arrived while its row sat in
+// blocked_needs_human; a human set applied on 11-01; the ingest-time match never ran again.
+
+// The Bjak row as the applications read returns it, joined job included.
+const BJAK_ROW = { id: "bjak-1", status: "applied", jobs: { company_name: "Bjak", company_slug: "bjak", title: "Software Engineer" } };
+// Its first approval, 2026-10-24 13:44 IST: five days before the receipt.
+const BJAK_APPROVED = { application_id: "bjak-1", created_at: "2026-10-24T08:14:13+00:00" };
+// The live receipt as email_events holds it: stored, classified, never matched.
+const BJAK_UNMATCHED = { id: "e-bjak", provider_message_id: "1a186f32ebc6fc08", matched_application_id: null, from_address: "Bjak Talent Acquisition Team <no-reply@ashbyhq.com>", subject: "We’ve Received Your Application", snippet: "", classification: "application_received", classification_confidence: 0.9, received_at: "2026-10-29T09:17:26+00:00" };
+// The unmatched read (it filters `is matched_application_id null`) sees the receipt; the matched read sees nothing.
+const unmatchedOnly = (filters: Record<string, unknown>): Result => ({ data: filters["is:matched_application_id"] === null ? [BJAK_UNMATCHED] : [], error: null });
+
+test("links a stored unmatched email once its company's row enters a tracked status", async () => {
+  // The live Bjak state.
+  const { db, calls } = fakeDb({ apps: { data: [BJAK_ROW], error: null }, approvals: { data: [BJAK_APPROVED], error: null }, emails: unmatchedOnly });
+  // Switch on.
+  const result = await replayStoredMoves(db, true, NO_LIVE);
+  // Nothing moved, nothing wrong.
+  assert.deepEqual(result, { moved: 0, errors: [] });
+  // Exactly one write: the link, guarded so a row matched meanwhile is never re-pointed.
+  const writes = calls.queries.filter((query) => query.filters.update !== undefined);
+  // One update, on the stored receipt, only while it is still unmatched.
+  assert.deepEqual(writes.map((w) => [w.table, w.filters.update, w.filters["eq:id"], w.filters["is:matched_application_id"]]), [["email_events", { matched_application_id: "bjak-1" }, "e-bjak", null]]);
+  // A receipt maps to no status: Bjak is linked as application_received with NO status move.
+  assert.equal(calls.rpc.length, 0);
+});
+
+test("re-match: a link write that fails is a run error, never a crash", async () => {
+  // Same state; the UPDATE is refused.
+  const { db } = fakeDb({ apps: { data: [BJAK_ROW], error: null }, approvals: { data: [BJAK_APPROVED], error: null }, emails: unmatchedOnly, updateError: { message: "permission denied" } });
+  // Switch on.
+  const result = await replayStoredMoves(db, true, NO_LIVE);
+  // Counted on the run row, naming the email and the reason.
+  assert.deepEqual([result.moved, result.errors.length], [0, 1]);
+  // Named.
+  assert.match(result.errors[0]!, /e-bjak.*permission denied/);
 });

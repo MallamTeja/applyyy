@@ -6,6 +6,9 @@
 
 // Structural feature extraction (domain, auto-reply flag, cleaned text).
 import { parseEmail } from "../_shared/email/parser.ts";
+// The re-match reads a stored sender's employer domain (the same parse parseEmail uses), and the
+// stored-row builder asks whether an ATS sent the email (2026-11-04).
+import { extractCompanyDomain, isAtsVendorSender } from "../_shared/email/parser.ts";
 // Outcome classifier; it already ranks outcomes above the auto-reply fallback internally.
 import { classifyEmail } from "../_shared/email/classifier.ts";
 // Schema-owned enum types, so a typo here is a compile error, not a 22P02 at runtime.
@@ -334,6 +337,64 @@ export function matchApplication(
   return titled.length === 1 ? titled[0]!.id : null;
 }
 
+/** One link the re-match will write: this stored email belongs to this application. */
+export interface RematchLink {
+  // The email_events row id.
+  readonly eventId: string;
+  // The application it now matches.
+  readonly applicationId: string;
+}
+
+/**
+ * RE-MATCH (2026-11-04): which stored, still-unmatched emails now match a tracked row.
+ *
+ * WHY: the ingest-time match runs ONCE, against the rows tracked at that instant. Live, 0 of 106
+ * emails ever linked: Bjak's receipt (10-29) arrived while its row sat in blocked_needs_human, and
+ * a human set it applied on 11-01; nothing ever looked again. This re-runs the SAME
+ * matchApplication (never a fork) over stored rows. Each candidate must have been approved BEFORE
+ * the email arrived, so an old email can never attach to a newer application at the same company.
+ * Every field is shape-checked and anything malformed links nothing (CLAUDE.md §6).
+ */
+export function rematchUnmatched(
+  // Stored email_events rows, untrusted shape.
+  emails: readonly Record<string, unknown>[],
+  // The tracked rows with their joined job, as the replay's applications read returns them.
+  applications: readonly ActiveApplication[],
+  // Each application's FIRST entry into `approved`, as the database's ISO text.
+  firstApprovedAt: ReadonlyMap<string, string>,
+): RematchLink[] {
+  // The links to write.
+  const links: RematchLink[] = [];
+  // One pass; the matcher is pure and cheap.
+  for (const email of emails) {
+    // Shape: a string id, still unmatched (an email matched elsewhere is never re-pointed).
+    if (typeof email.id !== "string" || email.matched_application_id !== null) continue;
+    // The matcher reads sender, subject and body text; every one must be a string.
+    if (typeof email.from_address !== "string" || typeof email.subject !== "string" || typeof email.snippet !== "string") continue;
+    // A received time Date.parse can't read is not a time (CLAUDE.md §6).
+    const receivedMs = typeof email.received_at === "string" ? Date.parse(email.received_at) : NaN;
+    // Unreadable: skip, never "now".
+    if (!Number.isFinite(receivedMs)) continue;
+    // Only rows approved before this email arrived; no approval on record, no candidacy.
+    const candidates = applications.filter((app) => {
+      // That row's first approval, if any.
+      const approvedMs = Date.parse(firstApprovedAt.get(app.id) ?? "");
+      // Finite and strictly earlier.
+      return Number.isFinite(approvedMs) && approvedMs < receivedMs;
+    });
+    // Nothing could own it.
+    if (candidates.length === 0) continue;
+    // The message shape matchApplication reads.
+    const message = { from: email.from_address, subject: email.subject, snippet: email.snippet };
+    // The same matcher the ingest path runs, with the same sender-domain parse.
+    const applicationId = matchApplication(message, extractCompanyDomain(email.from_address), candidates);
+    // Exactly one owner, or nothing.
+    if (applicationId !== null) links.push({ eventId: email.id, applicationId });
+  }
+  // Everything to write.
+  return links;
+}
+
 // ---- Receipt confirmation: a verified ATS receipt marks a submitted row `applied` ----------
 //
 // Teja ruled (2026-10-09 23:24 IST) that a Greenhouse "application received" email may move
@@ -405,6 +466,11 @@ export function emailEventRowOf(
   // after the 202, so the mail is never re-sent. The cost: such an email's text is not
   // re-readable here if the classifier improves; it is still in Gmail.
   const redact = decision.classification === "unclassified" && matchedApplicationId === null;
+  // Teja, 2026-11-04 20:35 IST: "Keep subjects from ATS senders". An ATS email often names the
+  // company ONLY in its subject (Axiad's Greenhouse mail did), and the re-match reads From +
+  // Subject; a blanked subject made that email unmatchable forever. Subject only: body and To
+  // stay blanked for these rows, the narrowest reading of the ruling.
+  const keepSubject = isAtsVendorSender(message.from);
   return {
     // Deduplication key, half of `(user_id, provider_message_id)`.
     provider_message_id: message.message_id,
@@ -417,8 +483,8 @@ export function emailEventRowOf(
     label_ids: [...message.label_ids],
     // Sender header. Kept even when redacted: it is the signal for tuning the Gmail query.
     from_address: message.from,
-    // Subject line; emptied (the column is NOT NULL) on a redacted row.
-    subject: redact ? "" : message.subject,
+    // Subject line; emptied (the column is NOT NULL) on a redacted row, unless an ATS sent it.
+    subject: redact && !keepSubject ? "" : message.subject,
     // Body excerpt; emptied (NOT NULL) on a redacted row.
     snippet: redact ? "" : message.snippet,
     // When Gmail received it.

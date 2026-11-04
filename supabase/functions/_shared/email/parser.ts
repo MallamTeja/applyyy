@@ -81,6 +81,9 @@ export const ATS_VENDOR_DOMAINS: ReadonlySet<string> = new Set([
   // NOT yet verified against our own mailbox (added 2026-10-06 from general knowledge, not a captured header).
   // Listed as the registrable name so the suffix rule below also covers any regional subdomain.
   "greenhouse-mail.io",
+  // Workable (added 2026-11-04 by 85's spec for the ATS-subject allowlist). Its candidate-mail
+  // sender domain is NOT yet verified against our mailbox (no Workable mail has arrived).
+  "workable.com",
 ]);
 
 // Is this host a vendor domain or a subdomain of one? (`hire.lever.co` -> lever.co.)
@@ -202,6 +205,38 @@ export function normalizeText(text: string): string {
 // WHY DOMAIN EXTRACTION IS ISOLATED: Identifying the employer's domain allows matching an incoming
 // email event to existing application records in the database by company domain.
 export function extractCompanyDomain(senderHeader: string): string | null {
+  // The sender's host, or null when the header holds no parseable address.
+  const rawDomain = senderHost(senderHeader);
+  // Nothing parseable: no employer domain.
+  if (rawDomain === null) return null;
+
+  // If raw domain is in public email provider list, it does not represent an employer domain.
+  if (PUBLIC_EMAIL_DOMAINS.has(rawDomain)) return null;
+
+  // If raw domain is a known ATS vendor domain OR a subdomain of one, filter it out as vendor infra.
+  // Suffix-aware here, in the one shared function, so every caller of the parse gets it.
+  if (isAtsVendorHost(rawDomain)) return null;
+
+  // Return valid extracted domain.
+  return rawDomain;
+}
+
+// Is this sender an ATS vendor (on ATS_VENDOR_DOMAINS, or a subdomain of one)?
+//
+// WHY (2026-11-04): Teja ruled "Keep subjects from ATS senders". The tracker blanks the subject of
+// an unclassified, unmatched email, and Axiad's Greenhouse mail named the company ONLY in its
+// subject, so blanking it made a later re-match impossible. A closed list, never a substring
+// test (CLAUDE.md §6): `notgreenhouse.io` must not pass.
+export function isAtsVendorSender(senderHeader: string): boolean {
+  // The same address parse extractCompanyDomain uses, so the two can never disagree on the host.
+  const host = senderHost(senderHeader);
+  // No address, no vendor.
+  return host !== null && isAtsVendorHost(host);
+}
+
+// The lowercased host of the sender's address, or null. Shared by extractCompanyDomain and
+// isAtsVendorSender (split out 2026-11-04) so one header is never parsed two different ways.
+function senderHost(senderHeader: string): string | null {
   // Return null if sender header is empty or undefined.
   if (!senderHeader || senderHeader.trim().length === 0) return null;
 
@@ -220,18 +255,8 @@ export function extractCompanyDomain(senderHeader: string): string | null {
   // If address does not have exactly 2 parts (local@domain), domain cannot be parsed.
   if (parts.length !== 2) return null;
 
-  // Extract raw domain string.
-  const rawDomain = parts[1]!.trim();
-
-  // If raw domain is in public email provider list, it does not represent an employer domain.
-  if (PUBLIC_EMAIL_DOMAINS.has(rawDomain)) return null;
-
-  // If raw domain is a known ATS vendor domain OR a subdomain of one, filter it out as vendor infra.
-  // Suffix-aware here, in the one shared function, so every caller of the parse gets it.
-  if (isAtsVendorHost(rawDomain)) return null;
-
-  // Return valid extracted domain.
-  return rawDomain;
+  // The host, trimmed; the caller decides what it means.
+  return parts[1]!.trim();
 }
 
 // Scan body content for known interview scheduling tool URLs.
