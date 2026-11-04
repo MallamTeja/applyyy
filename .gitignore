@@ -118,3 +118,7 @@ worker/dist/
 # write-into-tree half of the combination so a mistake on the staging half
 # cannot reach a commit.
 reference/
+# CI test-step output (ci.yml tees each node --test run to <pkg>-tests.log). Running those
+# steps locally drops eight of these at the repo root; they are throwaway output, never source.
+# Added 2026-11-04 after eight stale copies from 2026-11-02 sat untracked for two days.
+*-tests.log

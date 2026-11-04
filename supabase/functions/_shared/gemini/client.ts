@@ -260,6 +260,116 @@ function gapReserveMs(gap: number): number {
   return BACKOFF_BASE_MS[Math.min(gap, BACKOFF_BASE_MS.length - 1)]! * (1 + BACKOFF_JITTER);
 }
 
+// --- USAGE LOG (W41, 2026-11-02) ---------------------------------------------------------------
+// One `gemini_usage` row per ATTEMPT, written from the loop below because the loop is the one
+// place every Gemini request passes: the claim at the top of each iteration is what bumps
+// requests_today, so one row per attempt makes the log count exactly what the quota counts.
+// Measured before this: only 3 of 9 agents counted calls (agent_runs.gemini_calls, ~40% of
+// requests_today) and nothing recorded tokens.
+//
+// Its own insert, NOT new parameters on report_gemini_result, for three reasons: the loop skips
+// that RPC on two exits (404, unparseable 200), so the log would undercount; widening its argument
+// list needs a DROP + CREATE, because a second overload makes PostgREST refuse the deployed
+// 4-argument callers as ambiguous; and a failing usage insert inside it would roll back the
+// cooldown write the pool depends on. The price is one more short round trip per attempt.
+
+// The write's ceiling. Edge to DB is tens of ms, so this only bites when the DB is hung, and then
+// it stops the log from holding back an answer Gemini already gave.
+const USAGE_WRITE_TIMEOUT_MS = 1000;
+
+// A token count only when Google sent a non-negative integer. Anything else is null, never 0:
+// a 0 would claim "Google said none" when it said nothing usable (CLAUDE.md §6, the lenient reader).
+function tokenCount(value: unknown): number | null {
+  // Number.isSafeInteger rejects strings, NaN, fractions and Infinity in one test.
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+// The calling function's name, read from its entrypoint. Live it is
+// file:///tmp/user_fn_<ref>_<id>_<n>/source/supabase/functions/<slug>/index.ts (entrypoint_path in
+// `supabase functions list`, 2026-11-02), so no caller has to pass its own name. Anything else
+// (node tests, the worker, a changed runtime layout) is "unknown": a wrong name would silently move
+// calls between agents, while "unknown" shows up in the totals as a gap to fix.
+function agentName(): string {
+  // Probed through globalThis because Deno does not exist under node --test.
+  const main = (globalThis as { Deno?: { mainModule?: unknown } }).Deno?.mainModule;
+  // The same character class as the table's check, so every match is insertable.
+  const slug = typeof main === "string" ? /\/functions\/([a-z0-9][a-z0-9_-]{0,62})\/index\.ts$/.exec(main)?.[1] : undefined;
+  // No match is an honest unknown, never a guess.
+  return slug ?? "unknown";
+}
+
+// How one attempt ended, in the closed vocabulary the table's check accepts.
+function usageOutcome(result: GeminiExecutionResult<unknown>): string {
+  // Gemini answered with a JSON body. An empty (safety-blocked) answer is still "ok" here: it was
+  // a billed request, and generateGeminiContent's empty_response check runs after the loop.
+  if (result.ok) return "ok";
+  // Status 0 comes from the executor's catch; its statusText says whether the abort timer fired.
+  if (result.status === 0) return result.statusText?.startsWith("timeout") === true ? "timeout" : "network_error";
+  // A non-ok 200 is the executor's "invalid JSON body".
+  if (result.status === 200) return "invalid_json";
+  // Every other failure is its HTTP status, e.g. "429" or "503".
+  return String(result.status);
+}
+
+// Writes one attempt's row. NEVER THROWS AND NEVER WAITS LONGER THAN USAGE_WRITE_TIMEOUT_MS.
+// This is the one place in the client where failing open is correct: the row is bookkeeping about
+// a call that already happened, so losing it costs a gap in a report, while throwing would discard
+// Gemini's answer (and the quota it cost). Every lost row is still counted by a console.warn.
+async function recordUsage(
+  db: SupabaseClient,
+  keyIndex: number,
+  // The model this attempt's URL used; undefined only for a direct caller that named none.
+  model: string | undefined,
+  result: GeminiExecutionResult<unknown>,
+): Promise<void> {
+  // Held so the finally can clear it; a live timer would keep the isolate (or node) busy.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // Only a success carries usageMetadata; the body is untrusted JSON, so shape-check each step.
+    const meta = result.ok && typeof result.data === "object" && result.data !== null ? (result.data as { usageMetadata?: unknown }).usageMetadata : undefined;
+    // A missing or non-object usageMetadata reads as "no counts", which tokenCount turns into nulls.
+    const usage = (typeof meta === "object" && meta !== null ? meta : {}) as Record<string, unknown>;
+    // user_id and created_at are column defaults (auth.uid(), now()), so they cannot be forged here.
+    const row = {
+      // Which edge function made the call.
+      agent: agentName(),
+      // Which pool key it spent.
+      key_index: keyIndex,
+      // Which model answered (after a 503 fallback switch, the fallback).
+      model: model ?? null,
+      // ok, invalid_json, timeout, network_error, or the HTTP status.
+      outcome: usageOutcome(result),
+      // Input tokens, cached ones included.
+      prompt_tokens: tokenCount(usage.promptTokenCount),
+      // Visible output tokens.
+      output_tokens: tokenCount(usage.candidatesTokenCount),
+      // Thinking tokens, billed as output but never shown.
+      thoughts_tokens: tokenCount(usage.thoughtsTokenCount),
+      // Google's own total, stored rather than summed so a field we do not read is not lost.
+      total_tokens: tokenCount(usage.totalTokenCount),
+    };
+    // Wrapped so a synchronous throw from the client becomes a rejection the race below sees.
+    const write = (async () => await db.from("gemini_usage").insert(row))();
+    // The ceiling, as a value the race can return instead of the write.
+    const ceiling = new Promise<"timeout">((resolve) => {
+      // Resolves, never rejects, so a timeout is a branch and not an exception.
+      timer = setTimeout(() => resolve("timeout"), USAGE_WRITE_TIMEOUT_MS);
+    });
+    // Whichever settles first. A late rejection of `write` stays handled: race attached to it.
+    const settled = await Promise.race([write, ceiling]);
+    // A hung DB: the row is abandoned, the answer is not.
+    if (settled === "timeout") console.warn(`[gemini-usage] usage row not written for key ${keyIndex}: timed out after ${USAGE_WRITE_TIMEOUT_MS}ms`);
+    // supabase-js reports failures as `{ error }` (RLS, a missing table before the migration), not throws.
+    else if (settled.error !== null) console.warn(`[gemini-usage] usage row not written for key ${keyIndex}: ${settled.error.message}`);
+  } catch (err) {
+    // A thrown client error (or a broken test double) is counted the same way and swallowed.
+    console.warn(`[gemini-usage] usage row not written for key ${keyIndex}: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    // No timer may outlive the write it was guarding.
+    clearTimeout(timer);
+  }
+}
+
 // In-Flight Multi-Key Retry Middleware (1a) with Pacing (1c).
 export async function callGeminiWithFailover<T>(
   db: SupabaseClient,
@@ -323,6 +433,11 @@ export async function callGeminiWithFailover<T>(
     // 2. Execute the request through the deterministic token pacer.
     // The model is passed per attempt because a fallback switch changes it mid-call.
     const execResult = await pacer.pace(() => options.execute(apiKey, keyIndex, currentModel));
+    // 2b. Log the attempt BEFORE branching on it, so every exit below is counted exactly once,
+    // including the 404 and unparseable-200 exits that never call reportResult. Outside the pacer,
+    // so the write never holds the serial queue. `currentModel` is still this attempt's model:
+    // a fallback switch happens later, in the transient branch.
+    await recordUsage(db, keyIndex, currentModel, execResult);
 
     // 3. On success: record positive outcome in Postgres and return.
     if (execResult.ok) {
@@ -663,6 +778,8 @@ export interface GeminiResponseBody {
     readonly candidatesTokenCount?: number;
     // Thinking tokens, billed as output but never shown.
     readonly thoughtsTokenCount?: number;
+    // Google's own sum of the above (plus any tool-use prompt tokens); gemini_usage stores it as sent.
+    readonly totalTokenCount?: number;
   };
 }
 

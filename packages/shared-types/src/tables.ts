@@ -832,6 +832,44 @@ export interface GeminiKeyStateRow {
 export type GeminiKeyStateInsert = { user_id?: string; key_index: number; enabled?: boolean };
 
 // ---------------------------------------------------------------------------
+// gemini_usage — one row per Gemini ATTEMPT (W41, 20261104200000)
+// ---------------------------------------------------------------------------
+
+/**
+ * The call and token log Teja asked for on 2026-11-02 ("both the call count and the token
+ * counts"), written by supabase/functions/_shared/gemini/client.ts recordUsage, one row per
+ * attempt the key pool claimed, so count(*) equals what requests_today counted. Append-only
+ * (UPDATE and DELETE raise), like application_events. Read it with the queries in
+ * docs/tooling/2026-11-02-gemini-usage.md.
+ */
+export interface GeminiUsageRow {
+  /** `bigint generated always as identity`: a NUMBER, the same exception as ApplicationEventRow.id. */
+  id: number;
+  /** Defaulted to auth.uid(); RLS refuses any other value on insert. */
+  user_id: string;
+  /** When the attempt finished; defaulted to now(). */
+  created_at: string;
+  /** The edge function slug from Deno.mainModule ("matcher", "tailor", ...), or "unknown" when the path did not match. */
+  agent: string;
+  /** The pool key spent; same domain as GeminiKeyStateRow.key_index, deliberately no foreign key. */
+  key_index: number;
+  /** The model id this attempt used (the fallback after a 503 switch); null only when a direct caller named none. */
+  model: string | null;
+  /** Closed by a regex check: 'ok' | 'invalid_json' | 'timeout' | 'network_error' | a 3-digit HTTP status ("429"). */
+  outcome: string;
+  /** Google's promptTokenCount. NULL means Google sent no usable count, never zero. */
+  prompt_tokens: number | null;
+  /** Google's candidatesTokenCount (visible output). NULL, never zero, when absent. */
+  output_tokens: number | null;
+  /** Google's thoughtsTokenCount (billed, never shown). NULL, never zero, when absent. */
+  thoughts_tokens: number | null;
+  /** Google's own totalTokenCount, stored as sent. NULL, never zero, when absent. */
+  total_tokens: number | null;
+}
+/** Insert shape: user_id and created_at are column defaults and id is identity, so the writer sends only these. */
+export type GeminiUsageInsert = Pick<GeminiUsageRow, 'agent' | 'key_index' | 'model' | 'outcome' | 'prompt_tokens' | 'output_tokens' | 'thoughts_tokens' | 'total_tokens'>;
+
+// ---------------------------------------------------------------------------
 // Settings tables
 // ---------------------------------------------------------------------------
 

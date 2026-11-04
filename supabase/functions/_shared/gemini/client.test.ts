@@ -1242,3 +1242,119 @@ test("generateGeminiContent without generation sends the pre-2026-10-31 body unc
   // Exactly the schema half, nothing added: a red here means an existing caller's bill changed.
   assert.deepEqual(sent.generationConfig, { responseMimeType: "application/json", responseSchema: { type: "OBJECT" } });
 });
+
+// --- USAGE LOG (W41, 2026-11-02) ---------------------------------------------------
+// Every attempt the loop makes writes one `gemini_usage` row: which function, which key, which
+// model, how it ended, and Google's own token counts. Before this, ~60% of calls were invisible.
+
+// The live entrypoint shape, copied from `supabase functions list` on 2026-11-02 (matcher v33).
+const LIVE_MATCHER_MAIN = "file:///tmp/user_fn_xynqxekcqizwhtskzqrq_07754f65-948c-4791-94f8-f0f54ba4cf6f_33/source/supabase/functions/matcher/index.ts";
+
+// A Gemini reply with one text part, plus whatever usageMetadata the case wants.
+function replyWith(extra: Record<string, unknown>): typeof fetch {
+  // A fresh Response per call: a body can be read only once.
+  return async () => new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "{}" }] } }], ...extra }), { status: 200 });
+}
+
+// Claims keys 1 then 2, and records every `from(table).insert(row)` the client makes.
+// `insert` decides what the write returns, so a case can make it fail, throw or hang.
+function usageRig(insert: () => unknown = () => Promise.resolve({ error: null })) {
+  // The claim/report half is the fake every other test here uses.
+  const base = fakeClient({ claimSequence: [{ data: 1, error: null }, { data: 2, error: null }] }) as unknown as { rpc: unknown };
+  // What the client tried to write, with the table name folded in.
+  const rows: Array<Record<string, unknown>> = [];
+  // Only `rpc` and `from().insert()` are reached on these paths (every claim returns a key).
+  const db = { rpc: base.rpc, from: (table: string) => ({ insert: (row: Record<string, unknown>) => (rows.push({ table, ...row }), insert()) }) };
+  // Cast like fakeClient: the code under test only touches these two members.
+  return { db: db as unknown as Parameters<typeof claimKey>[0], rows };
+}
+
+// One generateGeminiContent call with instant pacing and an explicit model.
+function usageCall(db: Parameters<typeof claimKey>[0], fetchSeam: typeof fetch) {
+  // Zero spacing and a virtual clock, so the test never waits on the pacer.
+  const pacer = new GeminiPacer({ minIntervalMs: 0, clock: createVirtualClock(1000) });
+  // Explicit model, so the row's model is the one asserted, not whatever GEMINI_MODEL says.
+  return generateGeminiContent(db, { readKey: keysFrom({ 1: "k1", 2: "k2" }), pacer, model: "gemini-test-model", fetchSeam, prompt: { systemInstruction: "s", userContent: "u" } });
+}
+
+test("a successful call records agent, key, model and the three token counts", async () => {
+  // Records the write.
+  const rig = usageRig();
+  // Stand in for the edge runtime: Deno exists and names the function's entrypoint.
+  const g = globalThis as { Deno?: unknown };
+  // Kept so the stub cannot leak into the next test.
+  const saved = g.Deno;
+  // env.get answers nothing, so no model or fallback secret is invented.
+  g.Deno = { mainModule: LIVE_MATCHER_MAIN, env: { get: () => undefined } };
+  try {
+    // Google's usageMetadata as generateContent returns it.
+    const outcome = await usageCall(rig.db, replyWith({ usageMetadata: { promptTokenCount: 120, candidatesTokenCount: 30, thoughtsTokenCount: 50, totalTokenCount: 200 } }));
+    // The call itself is untouched by the logging.
+    assert.equal(outcome.ok, true);
+  } finally {
+    // Restore exactly: node has no Deno, and resolveModel probes for one.
+    if (saved === undefined) delete g.Deno;
+    else g.Deno = saved;
+  }
+  // One attempt, one row: the slug from the entrypoint, the claimed key, and Google's counts.
+  assert.deepEqual(rig.rows, [
+    { table: "gemini_usage", agent: "matcher", key_index: 1, model: "gemini-test-model", outcome: "ok", prompt_tokens: 120, output_tokens: 30, thoughts_tokens: 50, total_tokens: 200 },
+  ]);
+});
+
+test("a call whose reply has no usageMetadata records nulls, not zeros", async () => {
+  // Two calls into one rig: keys 1 and 2.
+  const rig = usageRig();
+  // No usageMetadata at all.
+  await usageCall(rig.db, replyWith({}));
+  // Present but malformed: a string, a negative, a fraction, a null. None is a count (§6).
+  await usageCall(rig.db, replyWith({ usageMetadata: { promptTokenCount: "12", candidatesTokenCount: -1, thoughtsTokenCount: 1.5, totalTokenCount: null } }));
+  // Zero would claim "Google said none"; null says "Google said nothing usable".
+  const tokens = rig.rows.map((r) => [r.prompt_tokens, r.output_tokens, r.thoughts_tokens, r.total_tokens]);
+  // Every count on both rows is null.
+  assert.deepEqual(tokens, [[null, null, null, null], [null, null, null, null]]);
+  // Node has no Deno.mainModule, so the agent is the honest fallback, never a guess.
+  assert.deepEqual(rig.rows.map((r) => r.agent), ["unknown", "unknown"]);
+});
+
+test("every attempt is recorded, the 429 included, so rows match the keys claimed", async () => {
+  // Keys 1 and 2.
+  const rig = usageRig();
+  // Attempt 1 is rate limited; attempt 2 answers with usage.
+  let n = 0;
+  // Fresh Response per attempt.
+  const fetchSeam: typeof fetch = async () =>
+    ++n === 1
+      ? new Response(JSON.stringify({ error: { status: "RESOURCE_EXHAUSTED" } }), { status: 429 })
+      : new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "{}" }] } }], usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 3, totalTokenCount: 10 } }), { status: 200 });
+  // The loop rotates past the 429 and succeeds.
+  const outcome = await usageCall(rig.db, fetchSeam);
+  // Rotated, not failed.
+  assert.equal(outcome.ok, true);
+  // claim_gemini_key counted two requests, so the log holds two rows: a 429 costs quota too.
+  assert.deepEqual(rig.rows.map((r) => [r.key_index, r.outcome, r.total_tokens, r.thoughts_tokens]), [[1, "429", null, null], [2, "ok", 10, null]]);
+});
+
+test("a failed usage write never fails the Gemini call", { timeout: 10000 }, async () => {
+  // The three ways a write fails: PostgREST says no, the client throws, the request never returns.
+  const failures: Array<() => unknown> = [
+    () => Promise.resolve({ error: { message: "permission denied for table gemini_usage" } }),
+    () => { throw new Error("db.from is broken"); },
+    () => new Promise(() => {}),
+  ];
+  // Each failure mode on its own call.
+  for (const fail of failures) {
+    // A rig whose write fails this way.
+    const rig = usageRig(fail);
+    // Started now, to prove the hung write is bounded.
+    const started = Date.now();
+    // The call must still hand back Gemini's answer.
+    const outcome = await usageCall(rig.db, replyWith({ usageMetadata: { totalTokenCount: 5 } }));
+    // Gemini answered, so the caller sees ok.
+    assert.equal(outcome.ok, true);
+    // And the data is Gemini's, unchanged.
+    if (outcome.ok) assert.equal(outcome.data.candidates?.[0]?.content?.parts?.[0]?.text, "{}");
+    // A hung write costs at most the write timeout, never the caller's whole budget.
+    assert.ok(Date.now() - started < 3000, "a hung usage write must be cut off by its timeout");
+  }
+});
