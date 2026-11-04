@@ -28,7 +28,7 @@ of `supabase/functions/**` for what exists.
 
 | # | Agent | Runs on | Calls Gemini? | State |
 |---|---|---|---|---|
-| 1 | **Scout-ATS** | Edge Function, on demand; the worker's scout CLI also runs on GitHub Actions every 6 h (`scout.yml`) | no | **logic built, no entrypoint** |
+| 1 | **Scout-ATS** | Edge Function, on demand; the worker's scout CLI also runs on GitHub Actions twice daily (`scout.yml`) | no | **logic built, no entrypoint** |
 | 2 | **Scout-Aggregator** | Edge Function, on demand | no | **not built** |
 | 3 | **Normalizer** | Edge Function, on demand | no | **logic built, no entrypoint** |
 | 4 | **Screener** | Edge Function, on demand | **no — deliberately** | **logic built, no entrypoint** |
@@ -49,9 +49,16 @@ column above is historical — every Edge Function agent now has an entrypoint; 
 say "cron" for the Edge Function agents and the Sweeper. They run **on demand only**
 (the console's pipeline button, or `run-one.yml`): Teja ruled no scheduler, and
 `pg_cron` is not installed (`select * from pg_extension where extname='pg_cron'` is
-empty). The only schedules are GitHub Actions crons: `scout.yml` (every 6 h),
-`apply.yml` (daily, dry by default) and `keepalive.yml`. Regenerate the list with
-`grep -n "cron:" .github/workflows/*.yml`.
+empty). The only schedules are GitHub Actions crons. *Updated 2026-11-05:* they are
+`scout.yml` (twice daily), `scout-remote.yml`, `apply.yml` (daily, dry by default),
+`apply-kit.yml`, `satellites.yml` (the five satellite agents, daily) and `keepalive.yml`.
+Regenerate the list with `grep -n "cron:" .github/workflows/*.yml`.
+
+*Not in this roster* (added after 2026-09-10): `job-link-intake` (pasted-link intake that
+acts as `human`), `resume-assist` (AI edit box), `gmail-sync` (sync-now proxy), and the
+satellites `cover-letter`, `follow-up`, `interview-prep`, `referral`, `skill-gap`. See
+[`../SYSTEM_ARCHITECTURE.md`](../SYSTEM_ARCHITECTURE.md) §2 and the dated inventory
+[`../stack/2026-11-05-services-agents-modules.md`](../stack/2026-11-05-services-agents-modules.md).
 
 That last point is the real state of the project and it is better news than it
 sounds — see §5.
@@ -115,6 +122,11 @@ trusting a number here:
 > Note: PROJECT_PLAN and several docs say **44 edges**. Measured live tonight it
 > is **45** — migration `20260910190000` added `approved → blocked_needs_human`
 > and the older figure was never swept. Trust the query, not the prose.
+>
+> *Update 2026-11-05:* **50** live. Five human-only re-entry edges into `passed_filters`
+> came from migrations `20261031200000`, `20261101173000` and `20261102203000`.
+> `deduped → passed_filters` now also admits `human`, and `applying → applied` admits
+> `tracker`. The count will move again, so run the query.
 
 ### 1. Scout-ATS — finds jobs on company boards
 Polls the company watchlist's Greenhouse, Lever and Ashby boards and inserts
@@ -137,9 +149,12 @@ budget.
 Same job via Adzuna/Jooble, for postings that never touch an ATS board.
 *Built (2026-10):* as `supabase/functions/scout-web/` (identity `scout_aggregator`):
 Gemini with web search proposes Greenhouse/Lever/Ashby URLs, deterministic code verifies
-each against the live board, rows insert at `discovered`. The Adzuna/Jooble/Workable/
-SmartRecruiters adapters in `_shared/scout/adapters/` are **not reached** —
+each against the live board, rows insert at `discovered`. The Adzuna/Jooble/Workable
+adapters in `_shared/scout/adapters/` are **not reached** —
 `grep -rn "scout/tiers" supabase/functions worker/src | grep -v test` returns nothing.
+*Updated 2026-11-05:* SmartRecruiters (2026-10-24) and Workday (2026-11-01) are registered
+in `_shared/ats/registry.ts`. Every SmartRecruiters board is refused by its robots.txt
+(`Disallow: /`; boards disabled by the 2026-11-01 ruling).
 
 ### 3. Normalizer — deduplicates and dates
 `discovered` → `deduped` / `dropped_duplicate` / `failed`. Fingerprints each job
@@ -312,9 +327,9 @@ a Supabase JWT; it authenticates on `X-Applyy-Intake-Secret` instead.
 `_shared/email/classifier.ts` / `email-tracker-intake/decide.ts` runs inside the intake,
 which then advances matched applications via `advance_application_status` as `tracker`.
 
-⚠️ Known gap: `email_events.thread_id` exists since `20260918213000`, but the intake
-still does not write it (`grep -n thread_id supabase/functions/email-tracker-intake/index.ts`). That is the one that hurts — `thread_id` is the key for "has this
-recruiter already replied?"
+~~Known gap: `email_events.thread_id` is never written.~~ *Fixed 2026-10-23:*
+`decide.ts` (`emailEventRowOf`) writes `thread_id`, the key for "has this recruiter already
+replied?". Re-check: `grep -n thread_id supabase/functions/email-tracker-intake/decide.ts`.
 
 ### 10. Sweeper — cleans up after crashes
 **One edge, and it is the important one: `applying → needs_verification`.**
@@ -346,7 +361,9 @@ run in 9 days"* — otherwise you believe the automation is working while gettin
 no interviews.
 
 ### `human` — you, and by far the most powerful identity
-**31 of the 45 edges permit a human; 11 permit *only* a human.**
+**31 of the 45 edges permit a human; 11 permit *only* a human.** *(2026-11-05: 37 of 50,
+and 16 human-only. Re-count with `select count(*) filter (where 'human' = any(allowed_agents)),
+count(*) filter (where allowed_agents = '{human}') from application_status_transitions`.)*
 
 Those are two different facts and conflating them caused a real UI bug, where a
 completeness check reported full coverage while the control for the
@@ -361,8 +378,12 @@ being added. Nothing reaches `approved` without you.
 
 ## 4. Which agents cost you Gemini calls
 
-Only **Matcher, Tailor, Auditor** and the Tracker's classifier. That is why the
-Screener is deterministic — it kills most jobs before any of these run.
+*Corrected 2026-11-05:* the Auditor and the Tracker's classifier are deterministic; they
+make no Gemini calls. The callers are **Matcher, Tailor**, `scout-web`, `job-link-intake`,
+`resume-assist` and the four Gemini satellites (`cover-letter`, `follow-up`,
+`interview-prep`, `referral`). Regenerate:
+`grep -rlE "_shared/gemini|gemini/client" supabase/functions/*/index.ts supabase/functions/_shared/follow-up`.
+That is why the Screener is deterministic — it kills most jobs before any of these run.
 
 The pool draws on **six** keys (`GEMINI_API_KEY_01`–`_06`, not the fifteen §6
 aspires to) with a daily budget and a circuit breaker, because without a cap one

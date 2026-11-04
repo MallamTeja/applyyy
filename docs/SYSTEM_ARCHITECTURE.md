@@ -2,8 +2,9 @@
 
 The current architecture of the job-application pipeline. **This file holds no counts and
 no line numbers** — every inventory points at the command that regenerates it, so run the
-command rather than trusting prose. Last reconciled against code and the live database on
-2026-10-23. History and reasoning: [`architecture/agents.md`](architecture/agents.md) (why
+command rather than trusting prose. Last reconciled against code (HEAD `00ecabb`) and the live
+database on 2026-11-05. Inventories with numbers (languages, LOC, dependencies, integrations,
+vulnerabilities) are dated snapshots under [`stack/`](stack/README.md). History and reasoning: [`architecture/agents.md`](architecture/agents.md) (why
 each agent is shaped the way it is) and
 [`architecture/graph-engineering.md`](architecture/graph-engineering.md) (the status graph as
 a control structure). Live status: the "Current state" section of [`PROGRESS.md`](PROGRESS.md).
@@ -24,34 +25,56 @@ worker (`worker/`, GitHub Actions and the local terminal); Gemini as the LLM. pn
 
 ```mermaid
 flowchart LR
-  subgraph Browser["apps/web (Vercel)"]
-    D[Discovery / Web Scout]
+  subgraph Browser["apps/web (Vercel static SPA)"]
+    D[Discovery / Web Scout /<br/>Add a job by link]
     PR[Run pipeline<br/>pipelineRunner.ts]
-    AQ[Approval queue +<br/>resume editor]
+    AQ[Approval queue +<br/>resume editor + AI edit]
+    EM[Emails page]
+  end
+  subgraph Vercel["api/ (Vercel Node function)"]
+    RJ[render-job-page.ts<br/>headless Chromium, SSRF-layered]
   end
   subgraph Edge["supabase/functions (Deno)"]
     SA[scout-ats]
     SW[scout-web]
+    JL[job-link-intake]
     N[normalizer] --> S[screener] --> M[matcher] --> T[tailor] --> A[auditor]
-    AUX[cover-letter · follow-up · interview-prep<br/>referral · skill-gap · rls-proof]
+    AUX[cover-letter · follow-up · interview-prep<br/>referral · skill-gap]
+    RA[resume-assist]
     ET[email-tracker-intake]
+    GS[gmail-sync]
+    RP[rls-proof — diagnostic]
   end
   subgraph Worker["worker/src/cli (Node)"]
-    SC[scout.ts — cron]
+    SC[scout.ts / scout-remote.ts — cron]
     RO[run-one.ts]
     AS[assist.ts — headed]
     AP[apply.ts — submits, DRY_RUN default]
+    AK[apply-kit.ts — manual kits, never submits]
   end
+  GHA[GitHub Actions<br/>drains · satellites · cron]
   DB[(Postgres + RLS<br/>applications.status graph)]
   GAS[Google Apps Script] --> ET
   D --> SA
   D --> SW
+  D --> JL
+  JL -.->|JS-only page| RJ
+  JL -->|waitUntil| M
   PR --> N
   RO --> M
+  AQ --> RA
   AQ -->|human: awaiting_approval → approved| DB
+  EM --> GS --> GAS
+  GHA --> N
+  GHA --> M
+  GHA --> AUX
+  GHA --> Worker
   Edge --> DB
   Worker --> DB
 ```
+
+Inventories: `ls apps/web/src/features` (console pages), `ls packages` (shared libraries:
+types, résumé template, master ingest, PDF parse, robots gate), `ls api` (Vercel function).
 
 ### Edge functions
 
@@ -62,23 +85,29 @@ posture is per function in `supabase/config.toml`.
 |---|---|---|---|---|
 | `scout-ats` | `scout_ats` | — (inserts) | inserts `passed_filters` / `dropped_filter` (screened at insert); `discovered` only if screening is unavailable | manual (Discovery page) |
 | `scout-web` | `scout_aggregator` | — (inserts) | inserts `discovered` | manual (Web Scout panel) |
-| `normalizer` | `normalizer` | `discovered` | `deduped`, `dropped_duplicate` | manual (Run pipeline); `?application_id=` targets one row |
-| `screener` | `screener` | `deduped` | `passed_filters`, `dropped_filter` | manual (Run pipeline); `?application_id=` targets one row |
-| `matcher` | `matcher` | `passed_filters` | `scored`, `dropped_filter` | Run pipeline · run-one |
-| `tailor` | `tailor` | `scored` | `tailored` (+ `tailored_profile`, `tailor_refs`, `master_version`) | Run pipeline · run-one |
-| `auditor` | `auditor` | `tailored`, `audit_clean`, `audit_flagged` | `audit_clean`/`audit_flagged` → `awaiting_approval` | Run pipeline · run-one |
-| `cover-letter` | `cover_letter` | `tailored`, `audit_clean`, `audit_flagged` | none (letter only; never written at `awaiting_approval`) | manual HTTP only |
-| `follow-up` | `follow_up` | `applied` | none (`follow_up_nudges` drafts) | manual HTTP only |
-| `interview-prep` | `interview_prep` | `interview` | none (`interview_prep_packs`) | manual HTTP only |
-| `referral` | `referral` | `passed_filters`, `scored` | none (drafts) | manual HTTP only |
-| `skill-gap` | `skill_gap` | `scored`, `applied` | none (`skill_gap_reports`) | manual HTTP only |
-| `email-tracker-intake` | `tracker` | `applied` … `interview` | post-apply edges (deterministic classifier, `decide.ts`) | push from Apps Script, `X-Applyy-Intake-Secret` |
-| `rls-proof` | — | — | — | one-shot diagnostic |
+| `normalizer` | `normalizer` | `discovered` | `deduped`, `dropped_duplicate` | Run pipeline · `prescreen-drain.yml` (dispatch); `?application_id=` targets one row |
+| `screener` | `screener` | `deduped` | `passed_filters`, `dropped_filter` (tech gate → work-auth/country gate → cascade, incl. `experience_ceiling` read from the JD) | Run pipeline · `prescreen-drain.yml` (dispatch); `?application_id=` targets one row |
+| `matcher` | `matcher` | `passed_filters` | `scored`, `dropped_filter`, `failed` | Run pipeline · run-one · `postscreen-drain.yml` · `pregate-sweep.yml` (`?mode=pregate_only`) · job-link-intake (background) |
+| `tailor` | `tailor` | `scored` | `tailored` (+ `tailored_profile`, `tailor_refs`, `master_version`) | Run pipeline · run-one · `postscreen-drain.yml` · job-link-intake (background) |
+| `auditor` | `auditor` | `tailored`, `audit_clean`, `audit_flagged` | `audit_clean`/`audit_flagged` → `awaiting_approval` | Run pipeline · run-one · `postscreen-drain.yml` · job-link-intake (background) |
+| `job-link-intake` | `human` (user-triggered) | — (inserts, or revives `discovered`/`deduped`/`dropped_filter`/`failed`) | inserts or moves to `passed_filters` as `human`, then runs matcher → tailor → auditor via `EdgeRuntime.waitUntil` | Add-a-job-by-link panel · `ingest-links.yml` |
+| `resume-assist` | — | — | none (proposes edit ops; the human applies them through the guarded save) | approval page AI edit box |
+| `cover-letter` | `cover_letter` | `tailored`, `audit_clean`, `audit_flagged` | none (letter only; never written at `awaiting_approval`) | `satellites.yml` daily cron + dispatch |
+| `follow-up` | `follow_up` | `applied` | none (`follow_up_nudges` drafts) | `satellites.yml` daily cron + dispatch |
+| `interview-prep` | `interview_prep` | `interview` | none (`interview_prep_packs`) | `satellites.yml` daily cron + dispatch |
+| `referral` | `referral` | `passed_filters`, `scored` | none (drafts) | `satellites.yml` daily cron + dispatch |
+| `skill-gap` | `skill_gap` | `scored`, `applied` | none (`skill_gap_reports`) | `satellites.yml` daily cron + dispatch |
+| `email-tracker-intake` | `tracker` | `applying`, `needs_verification`, `applied` … `interview` | receipt → `applied`; post-apply edges (deterministic classifier, `decide.ts`) | push from Apps Script, `X-Applyy-Intake-Secret` |
+| `gmail-sync` | — | — | none (proxies "sync now" to the Apps Script Web App) | Emails page |
+| `rls-proof` | — | — | — | one-shot diagnostic; refuses the prod ref |
+
+Gemini callers: `grep -rlE "_shared/gemini|gemini/client" supabase/functions/*/index.ts supabase/functions/_shared/follow-up`.
 
 There is **no database scheduler**: `select extname from pg_extension where extname in
-('pg_cron','pg_net')` returns nothing. Edge agents run only when something invokes them.
+('pg_cron','pg_net')` returns nothing. Edge agents run only when the browser, a worker CLI or a
+GitHub Actions workflow invokes them.
 
-### Worker CLIs (`worker/package.json` scripts)
+### Worker CLIs (`ls worker/src/cli`)
 
 | Script | File | What it does | Trigger |
 |---|---|---|---|
@@ -87,10 +116,15 @@ There is **no database scheduler**: `select extname from pg_extension where extn
 | `assist` | `cli/assist.ts` | opens ONE `approved` application headed, fills it, **human clicks Submit**, y/n records the outcome | local terminal |
 | `apply` | `cli/apply.ts` | batch applier; submits `approved` rows (cap `APPLY_MAX_SUBMITS`, default 3, + circuit breaker; robots.txt-gated) | `apply.yml` cron — `DRY_RUN` defaults true; a scheduled run is live only while repo variable `APPLYY_CRON_LIVE` is `true` |
 | `keepalive` | `cli/keepalive.ts` | DB activity + repo activity so nothing pauses silently | `keepalive.yml` cron |
-| `scout:remote` | `cli/scout-remote.ts` | RemoteOK/Jobicy/Arbeitnow | **no workflow invokes it** |
+| `scout:remote` | `cli/scout-remote.ts` | RemoteOK/Jobicy/Arbeitnow through the same screener path | `scout-remote.yml` cron + dispatch |
+| — (no script) | `cli/apply-kit.ts` | builds manual apply kits (plans fields, renders the résumé, one note); never claims, fills or submits; robots-gated; sweep honours the kill switch | `apply-kit.yml` cron + `workflow_run` after apply + dispatch |
 
-Workflow schedules: `grep -n "cron:" .github/workflows/*.yml`. GitHub's scheduled runs can
-start hours late; read actual start times with `gh run list --workflow <file>`.
+Workflows (`ls .github/workflows`) fall in three classes. **CI:** `ci.yml`. **Scheduled:**
+`scout`, `scout-remote`, `apply`, `apply-kit`, `satellites`, `keepalive`. **Dispatch-only:**
+`run-one`, `ingest-links`, `prescreen-drain`, `postscreen-drain`, `pregate-sweep`. The drains
+call edge functions with the app-user secrets and fail closed. Schedules:
+`grep -n "cron:" .github/workflows/*.yml`. GitHub's scheduled runs can start hours late; read
+actual start times with `gh run list --workflow <file>`.
 
 ## 3. Status graph (generated from the live edge table)
 
@@ -103,9 +137,10 @@ touches that table.**
 stateDiagram-v2
   [*] --> discovered
   discovered --> deduped: normalizer
+  discovered --> passed_filters: human
   discovered --> dropped_duplicate: normalizer
   discovered --> failed: normalizer, human
-  deduped --> passed_filters: screener
+  deduped --> passed_filters: screener, human
   deduped --> dropped_filter: screener, human
   deduped --> failed: screener, human
   passed_filters --> scored: matcher
@@ -120,11 +155,13 @@ stateDiagram-v2
   audit_clean --> awaiting_approval: auditor
   audit_flagged --> awaiting_approval: auditor
   audit_flagged --> tailored: human
+  awaiting_approval --> passed_filters: human
   awaiting_approval --> approved: human
   awaiting_approval --> dropped_filter: human
+  approved --> passed_filters: human
   approved --> applying: applier
   approved --> blocked_needs_human: applier
-  applying --> applied: applier
+  applying --> applied: applier, tracker
   applying --> blocked_needs_human: applier
   applying --> needs_verification: sweeper, human
   applying --> failed: applier
@@ -140,14 +177,22 @@ stateDiagram-v2
   interview --> oa_pending: tracker, human
   interview --> offer: tracker, human
   interview --> rejected: tracker, human
+  dropped_filter --> passed_filters: human
   blocked_needs_human --> applied: human
   blocked_needs_human --> dropped_filter: human
   blocked_needs_human --> failed: human
   needs_verification --> approved: human
   needs_verification --> applied: human
   needs_verification --> failed: human
+  failed --> passed_filters: human
   failed --> needs_verification: human
 ```
+
+Regenerated from the live table on 2026-11-05. The `→ passed_filters` re-entry edges are
+human-only: a pasted link (migration `20261031200000`), a master-profile change re-run
+(`20261101173000`) and a failed-before-approval re-run (`20261102203000`, bounded by
+`guard_failed_rerun`). `applying → applied` also admits `tracker`: an emailed receipt confirms
+a submit.
 
 Invariants worth re-checking after any graph migration:
 - Every edge into `approved` is human-only:
@@ -162,6 +207,7 @@ Invariants worth re-checking after any graph migration:
 flowchart LR
   scout[scout-ats / scout.ts / scout-web] -->|insert| N[normalizer] --> S[screener]
   scout -.->|screened at insert| M
+  PL[pasted link: job-link-intake] -->|human| M
   S --> M[matcher<br/>Gemini] --> T[tailor<br/>Gemini, refs only] --> A[auditor<br/>anti-fabrication]
   A --> Q[awaiting_approval<br/>approval queue + editor]
   Q -->|HUMAN approves| AP[approved]
@@ -182,13 +228,17 @@ validator resolves every ref against the pinned master. The Auditor is the separ
   browser from an agent.
 - **Agent key.** Machine clients send `x-applyy-agent-key` (`_shared/db/agent-key.ts`, env
   `APPLYY_AGENT_KEY`). `applyy_internal.agent_key_state()` (SECURITY DEFINER) compares its
-  SHA-256 with `applyy_internal.agent_key` and returns `unconfigured | missing | invalid | valid`.
-  Guarded: `advance_application_status` when `p_agent <> 'human'`, and
-  `claim_applications` / `release_application_claim` for **every** caller.
-  **Rollout state: the key IS seeded (since 2026-10-09 ~13:40 IST), so enforcement is ON** —
-  a request without the right key is refused (42501). An empty table would only warn;
-  `delete from applyy_internal.agent_key` is the deliberate kill switch that turns
-  enforcement off. Check: `select count(*) from applyy_internal.agent_key` (expect 1).
+  SHA-256 with `applyy_internal.agent_key` and returns
+  `unconfigured_locked | unconfigured | missing | invalid | valid`.
+  Guarded: `advance_application_status` when `p_agent <> 'human'`, `claim_applications`,
+  `release_application_claim`, `sweep_stale_claims`, and the `application_events` "append
+  own events" policy. The key is seeded (since 2026-10-09 ~13:40 IST), so a request without
+  the right key is refused (42501). **Fail-closed since migration `20261102210000`
+  (2026-11-04):** an empty key table returns `unconfigured_locked` and locks every machine
+  agent out. Running agents without the key takes two deliberate statements: delete the key
+  AND set `applyy_internal.agent_key_emergency.allow_unkeyed_agents = true`. Never "fix" a
+  lockout by deleting the key. Check: `select count(*) from applyy_internal.agent_key`
+  (expect 1) and `select allow_unkeyed_agents from applyy_internal.agent_key_emergency`.
 - **Grants.** anon/PUBLIC EXECUTE is revoked on those three RPCs. Check:
   `select proname, proacl from pg_proc where proname in ('advance_application_status','claim_applications','release_application_claim')`.
 - **Transition guard.** `guard_status_transition` (BEFORE UPDATE) refuses an edge absent
@@ -198,6 +248,8 @@ validator resolves every ref against the pinned master. The Auditor is the separ
 - **Freeze.** `guard_tailored_profile_freeze` refuses any change to
   `tailored_profile` unless the row *was* at `scored`, `audit_flagged` or
   `awaiting_approval` (42501). What was approved is what gets sent.
+- **Failed-rerun guard.** `guard_failed_rerun` (BEFORE UPDATE) refuses `failed →
+  passed_filters` for a row that failed at or after approval, so a re-run can never re-submit.
 - **Stale-read gate.** `advance_application_status(..., p_expected_updated_at)` raises
   SQLSTATE `PT409` (HTTP 409) if the row changed since it was read. Callers that pass it:
   `grep -rln p_expected_updated_at apps/web/src worker/src supabase/functions`.
@@ -223,7 +275,8 @@ validator resolves every ref against the pinned master. The Auditor is the separ
 ## 7. Deploy model
 
 - **Web:** Vercel auto-deploys on push to `main`. Prove what is live with a present and an
-  absent bundle sentinel (repo `CLAUDE.md` §8).
+  absent bundle sentinel (repo `CLAUDE.md` §4). The Vercel Node function
+  `api/render-job-page.ts` (headless Chromium, SSRF-layered) ships on the same push.
 - **Database and functions:** deployed only with Teja's direct approval, by the
   orchestrator session, from a **pinned clean worktree** — never the shared tree, which
   carries peers' uncommitted edits. Recipe in `CLAUDE.md` §3:
@@ -249,23 +302,21 @@ Package:     pnpm --filter @applyy/web …   # NOT `--filter web`, which matches
 
 Read a checker's own exit code, never `$?` after a pipe. `fail 0` means something only
 next to a non-zero `tests`. CI (`.github/workflows/ci.yml`) runs typecheck and tests on
-every push to `main`.
+every push and PR to `main`, including the web build Vercel would deploy and the `api/`
+function check.
 
 ## 9. Not built / known gaps (re-check each)
 
 | Gap | Re-check |
 |---|---|
-| Agent-key enforcement ON (seeded 2026-10-09 ~13:40 IST; a request without the right key gets 42501; an empty table = off, warn-only) | `select count(*) from applyy_internal.agent_key` (expect 1) |
-| No scheduler for edge agents (pipeline is click-driven) | `select extname from pg_extension where extname='pg_cron'` |
-| Auxiliary functions have no invoker in repo | `grep -rnE "cover-letter\|follow-up\|interview-prep\|referral\|skill-gap" apps/web/src worker/src .github` |
-| `scout-ats/index.ts` fetches boards with a bare `fetch`, not the robots-gated transport (`_shared/http` callers are gated since `111791c`, fail-closed on a soft-200; the scout-ats port is IN FLIGHT, peer 2) | `grep -n "await fetch(" supabase/functions/scout-ats/index.ts` — a hit means still ungated |
-| Aggregator adapters (Adzuna/Jooble/Workable/SmartRecruiters) unreachable | `grep -rn "scout/tiers" supabase/functions worker/src \| grep -v test` |
-| ATS simulator unwired | `grep -rln "ats-simulator" supabase/functions apps/web/src \| grep -v test` |
-| `scout-remote.ts` invoked by nothing | `grep -n "scout:remote" .github/workflows/*.yml` |
+| Agent key is fail-closed (empty table = every machine agent locked out; emergency flag in `applyy_internal.agent_key_emergency`) | `select count(*) from applyy_internal.agent_key` (expect 1) |
+| No database scheduler: edge agents run on clicks, worker CLIs and GitHub Actions (cron is best-effort, often hours late) | `select extname from pg_extension where extname='pg_cron'` |
+| Aggregator adapters Adzuna/Jooble/Workable unreached; SmartRecruiters is registered but refused by its robots.txt (`Disallow: /`, ruling 2026-11-01) | `grep -rn "scout/tiers" supabase/functions worker/src \| grep -v test` |
+| ATS simulator unwired | `grep -rlnE "from \"[^\"]*ats-simulator" supabase/functions apps/web/src \| grep -v test` |
 | `interview ↔ oa_pending` cycle unbounded | §3 invariants |
-| No live declared-vs-graph diff test | `grep -rln application_status_transitions --include=*.test.ts .` |
-| `email_events.thread_id` never written | `grep -n thread_id supabase/functions/email-tracker-intake/index.ts` |
-| `experience_ceiling` / `degree_mismatch` cannot fire — re-verified 2026-10-23: the rules are registered, enabled and tested (`_shared/filter/cascade.ts`), but NO producer writes `jobs.min_experience_years` / `requires_advanced_degree` — `ParsedPosting` (`_shared/ats/types.ts`) has no slot for them and no JD parser exists anywhere (the web UI's degree regex in `filtersStore.ts` is display-only, never written back). Making them live is NEW extraction work, not a wiring fix. Skips are recorded in `agent_runs.error_detail` | `select count(*) filter (where min_experience_years is not null) from jobs` |
+| No LIVE declared-vs-graph diff test (`packages/shared-types/test/enum-parity.test.ts` compares migrations with the mirror only) | `grep -rln application_status_transitions --include=*.test.ts .` |
+| `experience_ceiling` is live since `20261104193000` (`_shared/screen/required-experience.ts` reads the JD; `max_years` in the rule config). `degree_mismatch` still has no producer | `select rule_type, enabled, config from filter_rules where rule_type in ('experience_ceiling','degree_mismatch')` |
 | NOT a gap (verified 2026-10-23): two `application_events` rows per transition is deliberate — the `log_status_change` trigger writes the `status_change` witness (from/to status), the RPC adds a `note` row carrying the caller's `p_detail` (scores, hashes, block history), and only when `p_detail` is non-empty. Removing either loses data the other never sees | `select application_id, count(*) from application_events group by 1 order by 2 desc limit 5` |
-| Nothing alerts on a failed Vercel deploy | `grep -in vercel .github/workflows/*.yml` |
+| Nothing alerts on a failed Vercel deploy (`ci.yml` builds the same artifact but does not watch Vercel) | Vercel MCP `list_deployments`, or the Vercel dashboard |
+| Wildcard CORS on every edge function; GitHub secret and code scanning off | [security/2026-11-05-vulnerability-remeasure.md](security/2026-11-05-vulnerability-remeasure.md) |
 | Where rows sit | `select status, count(*) from applications group by 1 order by 1` |

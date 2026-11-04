@@ -13,6 +13,7 @@ No row here carries a count: each living doc names the command that regenerates 
 | [SYSTEM_ARCHITECTURE.md](SYSTEM_ARCHITECTURE.md) | Current architecture: components, agents, status graph, security, deploys, known gaps |
 | [architecture/agents.md](architecture/agents.md) | Agent roster in depth — why each is shaped the way it is, transitions, Gemini cost, kill switch |
 | [architecture/graph-engineering.md](architecture/graph-engineering.md) | The repo's graphs (status, provenance, pipeline, hash chain) and their invariants |
+| [stack/README.md](stack/README.md) | Tech-stack inventory: the commands that regenerate languages, LOC, files, dependencies, services, agents, integrations, APIs, DB and vulnerability numbers, plus an index of dated snapshots (latest: [stack/2026-11-05-overview.md](stack/2026-11-05-overview.md)) |
 | [PROGRESS.md](PROGRESS.md) | "Current state" with regenerating commands + re-verified open items; the Sept 2026 dated log is archived at [status/2026-09-progress-log-archive.md](status/2026-09-progress-log-archive.md) |
 | [verification-traps.md](verification-traps.md) | Checks that report success for the wrong reason — read before trusting a green |
 | [line-endings-determinism.md](line-endings-determinism.md) | Why CRLF breaks byte-identical approval; the `.gitattributes` rule |
@@ -32,7 +33,9 @@ No row here carries a count: each living doc names the command that regenerates 
 | [handoff/](handoff/) | Orchestrator transfer notes; each is true as of its date. Resume from [2026-11-04-2100-orchestrator-handoff.md](handoff/2026-11-04-2100-orchestrator-handoff.md), with open work in [2026-11-04-2100-pending-tasks.md](handoff/2026-11-04-2100-pending-tasks.md) |
 | [status/](status/) | Point-in-time status snapshots, peer assignments, post-mortems |
 | [audit/](audit/) | Verification passes — claims checked against code and the live DB at a given HEAD |
-| [security/](security/) | Dependency-advisory plans and re-measures, identity-gap proposals |
+| [security/](security/) | Dependency-advisory plans and re-measures, identity-gap proposals. Latest: [2026-11-05-vulnerability-remeasure.md](security/2026-11-05-vulnerability-remeasure.md) |
+| `stack/2026-*.md` | Dated tech-stack snapshots (counts pinned to a commit) |
+| `tooling/2026-*.md` | Dated tooling measurements (deploy drift, Gemini usage) |
 | [design/](design/) | Single-feature design write-ups (palette, discovery filtering) |
 | [decisions/](decisions/) | Recorded decisions and recommendations with their reasoning |
 | [harvest/briefs/](harvest/briefs/) | Self-contained work packets from 2026-09-16 — your recon overrides them |
