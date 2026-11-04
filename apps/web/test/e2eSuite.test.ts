@@ -1033,14 +1033,17 @@ describe('Playwright E2E Operator Console Suite', () => {
       // Dismissed: confirm() then returns false, as a Cancel would.
       void d.dismiss().catch(() => {});
     };
-    // Bottom edge of the row's table in document coordinates (scroll-independent): with one row, the
-    // table's bottom is where the next content starts, so a taller row moves it.
-    const tableBottom = (): Promise<number> =>
+    // Height of the row's table: with one row, the content below starts at the table's top plus this,
+    // so a taller row moves it. Its own height, NOT its bottom edge in the document: /health has other
+    // queues ABOVE this one that may finish loading between the two reads, and they move the whole
+    // table (measured 2026-11-04 under a 6x CPU throttle: top and bottom both -3.0 px at 1280 or
+    // +340.5 px at 390, height 0.0 in every run). That is CI's intermittent red on 51b8608/eb49243.
+    const tableHeight = (): Promise<number> =>
       // The queue table holding this row, found by its row header's title (the id). Not by the move
       // button: while asking, that button is visibility:hidden and out of the accessibility tree.
       page.locator('table.recovery__table', { has: page.locator(`th[title="${row.id}"]`) })
-        // Read in the page, so the scroll offset and the rect come from the same instant.
-        .evaluate((el) => el.getBoundingClientRect().bottom + window.scrollY);
+        // The border-box height, which only this table's own rows can change.
+        .evaluate((el) => el.getBoundingClientRect().height);
     // The name of whatever has focus, the way the operator's screen reader would get it.
     const focusedName = (): Promise<string | null> => page.evaluate(() => document.activeElement?.getAttribute('aria-label') ?? null);
     // Page-level: wins over the context's catch-all [] for this table only.
@@ -1064,7 +1067,7 @@ describe('Playwright E2E Operator Console Suite', () => {
     });
     // Attached before the first click, so no dialog can open unseen.
     page.on('dialog', onDialog);
-    // Table-bottom deltas per viewport width, reported together at the end.
+    // Table-height deltas per viewport width, reported together at the end.
     const shifts: string[] = [];
     try {
       // Phone and desktop: the cell is a stacked block at 390 px and a table column at 1280 px.
@@ -1077,8 +1080,8 @@ describe('Playwright E2E Operator Console Suite', () => {
         const moveBtn = page.getByRole('button', { name: moveName, exact: true });
         // Waiting proves the route above fed the queue.
         await moveBtn.waitFor();
-        // Where the next content starts before asking.
-        const before = await tableBottom();
+        // The table's height before asking.
+        const before = await tableHeight();
         // Arm: the first click must only ask.
         await moveBtn.click();
         // The confirm's Cancel, named for the move and the row.
@@ -1091,8 +1094,8 @@ describe('Playwright E2E Operator Console Suite', () => {
         assert.equal(rpcCalls, 0, `${width}px: the first click must not write`);
         // (c) Cancel is the focused default.
         assert.equal(await focusedName(), `Cancel: ${moveName}`, `${width}px: Cancel must have focus when the confirm opens`);
-        // (d) Where the next content starts while asking; the moves keep their box (visibility:hidden).
-        const after = await tableBottom();
+        // (d) The table's height while asking; the moves keep their box (visibility:hidden).
+        const after = await tableHeight();
         // Recorded with its width; asserted after both widths ran, so both numbers are reported.
         shifts.push(`${width}px: ${(after - before).toFixed(1)}px`);
         // Cancel with the mouse.
@@ -1132,8 +1135,8 @@ describe('Playwright E2E Operator Console Suite', () => {
       assert.equal(rpcCalls, 1, 'Confirm must send exactly one advance_application_status');
       // The outcome strip says it moved (the mocked answer), so the write ran through advanceRecovery.
       await page.locator('.recovery__note--ok').first().waitFor();
-      // (d) Both widths: the row's table ends where it did before asking.
-      assert.deepEqual(shifts, ['390px: 0.0px', '1280px: 0.0px'], `arming the confirm moved the content below the row: ${shifts.join(', ')}`);
+      // (d) Both widths: the row's table is exactly as tall as before asking, so nothing below it moves.
+      assert.deepEqual(shifts, ['390px: 0.0px', '1280px: 0.0px'], `arming the confirm changed the row's table height: ${shifts.join(', ')}`);
     } finally {
       // Later tests must not be counted or have their dialogs dismissed.
       page.off('dialog', onDialog);
