@@ -18,11 +18,18 @@ export interface FilterRuleConfig {
   readonly config: Record<string, unknown>;
 }
 
+// Teja's experience ceiling: a hard requirement above 1 year drops the job (2026-11-01, confirmed
+// 2026-11-04). ONE constant for the built-in default below and the Filters page's "Early Career
+// SDE" preset: both wrote 2 until 2026-11-04 20:35 IST, while migration 20261104193000 had set the
+// live rule to 1, so a single preset click would have let every "2+ years" job back in.
+export const EARLY_CAREER_MAX_YEARS = 1;
+
 export const DEFAULT_FILTER_RULES: readonly FilterRuleConfig[] = [
   {
     ruleType: 'experience_ceiling',
     isEnabled: true,
-    config: { max_years: 2 },
+    // The shared constant, never a literal, so the default and the preset cannot disagree.
+    config: { max_years: EARLY_CAREER_MAX_YEARS },
   },
   {
     ruleType: 'title_blocklist',

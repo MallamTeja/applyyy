@@ -139,7 +139,7 @@ test('evaluateJobMatch rejects postings exceeding experience ceiling', () => {
     locations: ['Bangalore'],
     location_raw: 'Bangalore, India',
     employment_type: 'full_time',
-    min_experience_years: '6', // Demands 6 years, ceiling is 2
+    min_experience_years: '6', // Demands 6 years; the built-in ceiling is 1 since 2026-11-04 (was 2)
     requires_advanced_degree: false,
     ats_provider: 'greenhouse',
     discovered_via: ['portal_api'],
@@ -150,7 +150,8 @@ test('evaluateJobMatch rejects postings exceeding experience ceiling', () => {
 
   const res = evaluateJobMatch(fakeJob, DEFAULT_FILTER_RULES, true);
   assert.equal(res.passed, false);
-  assert.ok(res.dropReason?.includes('ceiling is 2 yrs'));
+  // The reason quotes the built-in ceiling, Teja's 1 year (EARLY_CAREER_MAX_YEARS).
+  assert.ok(res.dropReason?.includes('ceiling is 1 yrs'));
 });
 
 test('evaluateJobMatch rejects locations not in allowlist', () => {

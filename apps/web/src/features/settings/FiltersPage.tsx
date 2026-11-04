@@ -24,6 +24,8 @@ import { FILTER_RULE_TYPES } from '../../data/contract.ts';
 import type { FilterRuleType } from '../../data/contract.ts';
 import {
   DEFAULT_FILTER_RULES,
+  // The one experience-ceiling value the preset writes (2026-11-04).
+  EARLY_CAREER_MAX_YEARS,
   getFilterRulesReadError,
   getTechOnlyPreference,
   loadFilterRules,
@@ -215,7 +217,8 @@ export function FiltersPage(): ReactElement {
     setRules((prev) =>
       prev.map((r) => {
         if (r.ruleType === 'experience_ceiling') {
-          return { ...r, isEnabled: true, config: { max_years: 2 } };
+          // Teja's 1-year ceiling, from the store's one constant (was a literal 2 until 2026-11-04).
+          return { ...r, isEnabled: true, config: { max_years: EARLY_CAREER_MAX_YEARS } };
         }
         if (r.ruleType === 'title_blocklist') {
           return {
