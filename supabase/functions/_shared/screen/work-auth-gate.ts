@@ -8,10 +8,20 @@
 // the tech gate's config lives there: no new filter_rule_type enum value, no cascade.ts change.
 // "Visa-free" means visa-free WORK: for an Indian citizen, Nepal and Bhutan (treaty).
 //
+// TEJA'S RULINGS, 2026-11-04, REVERSING THE 10-24 REMOTE HALF. 18:26 IST: "i dont need country
+// lokced remote except indain remote jobs", then "i want remote jobs with no country lock too".
+// He had read "remote" as "work from India for a US company"; "Remote - US" means "must live and
+// be authorised in the US", which no visa reaches. So a remote part that NAMES places outside the
+// list now counts as elsewhere, under search_preferences.remote_location_policy
+// 'unlocked_or_authorized' (migration 20261104193000, the default). 'any' keeps the 10-24
+// behaviour and is one Settings choice away. Unclear locations ("In-Office", "2 Locations") are
+// KEPT (same day) unless the JD's own "Location:" line names only places outside the list.
+//
 // THE RULE, in one line:
-//   DROP iff a list is set AND (every location part names a country outside the list and none
-//   says remote, OR no part is in the list AND the JD states a US-specific legal requirement
-//   while the US is not on the list).
+//   DROP iff a list is set AND (every location part names a place outside the list and, under
+//   'any', none says remote; OR the board location names no place and the JD's location line
+//   names only places outside the list; OR no part is in the list AND the JD states a
+//   US-specific legal requirement while the US is not on the list).
 //
 // WHY LOCATION FIRST. Measured on the 2535 live passed_filters rows (2026-10-24): the location
 // string is where boards say where the work happens. US-specific requirement text appeared on
@@ -23,8 +33,25 @@
 // "in person", Replit 15/15 "hybrid"). Remote is read from the location text only.
 //
 // FAIL-OPEN ON MISSING DATA (CLAUDE.md section 6). An unset list, a location part naming no
-// country the gate knows, a missing location and a remote part all KEEP the job. Only a
-// positive signal drops. A missing answer must never become a rejection.
+// country the gate knows, a missing location and a remote part that names no place all KEEP the
+// job (under 'any', every remote part). Only a positive signal drops. A missing answer must never
+// become a rejection.
+
+// The HTML stripper the ATS adapters use, so the JD's location line is read from plain text with
+// its paragraph breaks kept (they are what end the line).
+import { stripHtml } from "../ats/types.ts";
+
+// What a remote location part means (search_preferences.remote_location_policy, 2026-11-04).
+// A CLOSED UNION, never a boolean: the column holds exactly these two literals (CHECK constraint),
+// and a third reading must not compile.
+export type RemoteLocationPolicy =
+  // Teja's 11-04 default: remote is kept when it names no place or a place on the list.
+  | "unlocked_or_authorized"
+  // The 10-24 behaviour: any part that says remote is kept, wherever it is locked to.
+  | "any";
+
+// The two literals, for the one mapper that reads the column (context.ts) to check shape against.
+export const REMOTE_LOCATION_POLICIES: readonly RemoteLocationPolicy[] = ["unlocked_or_authorized", "any"];
 
 // The verdict: the same three-outcome shape as the tech gate's, so one reading covers both.
 export type WorkAuthVerdict =
@@ -55,7 +82,8 @@ export interface WorkAuthJob {
 const PART_SEPARATOR = /[;|\n]|\s&\s|\s+(?:and|or)\s+/i;
 
 // Words saying the work can be done from anywhere (or anywhere in a region). "Hybrid" is not one.
-const REMOTE = /\b(?:remote|work from home|wfh|anywhere|worldwide)\b/i;
+// "Home based" added 2026-11-04: Canonical-style boards write "Home based - EMEA" for remote.
+const REMOTE = /\b(?:remote|work from home|wfh|anywhere|worldwide|home[- ]?based)\b/i;
 
 // Words joined into one case-insensitive alternation, whole-word on both ends.
 const words = (list: readonly string[]): RegExp => new RegExp(`\\b(?:${list.join("|")})(?![a-z])`, "i");
@@ -91,6 +119,10 @@ const COUNTRIES: readonly { readonly name: string; readonly patterns: readonly R
         "philadelphia", "dallas", "houston", "portland", "salt lake city", "raleigh", "boulder", "ann arbor", "detroit",
         "minneapolis", "phoenix", "nashville", "baltimore", "arlington", "reston", "irvine", "santa monica", "bellevue",
         "redmond", "kirkland", "emeryville", "foster city", "burlingame", "stamford", "sacramento", "honolulu",
+        // 2026-11-04 gaps: lower-case "sf" (7 live rows; "sf" is no English word, so case-insensitive
+        // is safe) and Alpharetta, which resolves "Alpharetta, Georgia" without naming the
+        // ambiguous state.
+        "sf", "alpharetta",
       ]),
       // Codes only safe case-sensitively: "US" (not "us"), "SF", "NY", and ", XX" state codes.
       // AR, GA, IN, MN, OR, TN and UT are left out: they are also Indian codes (Arunachal, Goa,
@@ -119,7 +151,8 @@ const COUNTRIES: readonly { readonly name: string; readonly patterns: readonly R
   { name: "Belgium", patterns: [words(["belgium", "brussels"])] },
   { name: "Luxembourg", patterns: [words(["luxembourg"])] },
   { name: "Denmark", patterns: [words(["denmark", "copenhagen", "aarhus"])] },
-  { name: "Sweden", patterns: [words(["sweden", "stockholm"])] },
+  // Malmö and Gothenburg added 2026-11-04 (13 live "Malmö" rows passed).
+  { name: "Sweden", patterns: [words(["sweden", "stockholm", "malmö", "malmo", "gothenburg", "göteborg"])] },
   { name: "Norway", patterns: [words(["norway", "oslo"])] },
   { name: "Finland", patterns: [words(["finland", "helsinki", "tampere"])] },
   { name: "Iceland", patterns: [words(["iceland", "reykjavík", "reykjavik"])] },
@@ -146,11 +179,17 @@ const COUNTRIES: readonly { readonly name: string; readonly patterns: readonly R
   { name: "Malaysia", patterns: [words(["malaysia", "kuala lumpur"])] },
   { name: "Philippines", patterns: [words(["philippines", "manila"])] },
   { name: "Vietnam", patterns: [words(["vietnam", "ho chi minh"])] },
+  // Added 2026-11-04 (7 live "Bangkok" rows passed). Visa-free for Indian tourists, not for work.
+  { name: "Thailand", patterns: [words(["thailand", "bangkok"])] },
   { name: "Australia", patterns: [words(["australia", "sydney", "melbourne"])] },
   { name: "New Zealand", patterns: [words(["new zealand", "auckland"])] },
   // The Americas outside the US and Canada. "(?<!new )" keeps New Mexico in the US.
   { name: "Brazil", patterns: [words(["brazil", "são paulo", "sao paulo"])] },
   { name: "Mexico", patterns: [/(?<!new )\bmexico\b/i, /,\s*MX\b/] },
+  // Added 2026-11-04: Thoughtworks graduate roles in Santiago and Quito reached the queue.
+  { name: "Chile", patterns: [words(["chile"])] },
+  // Same source.
+  { name: "Ecuador", patterns: [words(["ecuador", "quito"])] },
   // Africa.
   { name: "Mauritius", patterns: [words(["mauritius", "ebene"])] },
 ];
@@ -181,15 +220,93 @@ const US_REQUIREMENT: readonly { readonly label: string; readonly pattern: RegEx
   { label: "security clearance", pattern: /\bsecurity clearance\b|\bts\/sci\b/i },
 ];
 
-// Every country a piece of text names, by canonical name. Used for job locations AND for the
-// user's own list entries, so "USA" in Settings and "Remote, USA" on a job resolve alike.
+// Member lists for the regions below, by canonical name from COUNTRIES. A region resolves to its
+// members, so "Remote, EU" is outside Teja's list and inside a list that holds Germany.
+const EUROPE = [
+  // The UK and Ireland.
+  "United Kingdom", "Ireland",
+  // Every continental row in COUNTRIES.
+  "France", "Germany", "Netherlands", "Spain", "Portugal", "Poland", "Italy", "Switzerland", "Austria", "Belgium",
+  "Luxembourg", "Denmark", "Sweden", "Norway", "Finland", "Iceland", "Czech Republic", "Romania", "Serbia", "Slovenia",
+  "Lithuania", "Greece", "North Macedonia", "Kosovo",
+];
+// The Middle East rows.
+const MIDDLE_EAST = ["Israel", "United Arab Emirates", "Qatar", "Saudi Arabia"];
+// North America.
+const NORTH_AMERICA = ["United States", "Canada", "Mexico"];
+// Latin America rows.
+const LATIN_AMERICA = ["Mexico", "Brazil", "Chile", "Ecuador"];
+
+// Regions boards write instead of a country (2026-11-04: "EMEA", "Europe", "Middle East",
+// "North America", "Remote, EU" all passed as unknown). APAC and "Asia" are deliberately ABSENT:
+// they contain India, so leaving them unknown keeps the job, which is the right answer for Teja
+// and the safe one for anyone else.
+const REGIONS: readonly { readonly patterns: readonly RegExp[]; readonly members: readonly string[] }[] = [
+  // Europe and the EU ("Southern Europe" matches too).
+  { patterns: [words(["europe", "european union", "eu"])], members: EUROPE },
+  // EMEA: Europe, the Middle East and the African row the table has.
+  { patterns: [words(["emea"])], members: [...EUROPE, ...MIDDLE_EAST, "Mauritius"] },
+  // The Middle East.
+  { patterns: [words(["middle east", "mena"])], members: MIDDLE_EAST },
+  // North America.
+  { patterns: [words(["north america"])], members: NORTH_AMERICA },
+  // The whole Americas ("AMER" is MongoDB's spelling).
+  { patterns: [words(["americas", "amer"])], members: [...NORTH_AMERICA, ...LATIN_AMERICA] },
+  // Latin America.
+  { patterns: [words(["latam", "latin america", "south america"])], members: LATIN_AMERICA },
+];
+
+// Every country a piece of text names, by canonical name, regions expanded to their members.
+// Used for job locations AND for the user's own list entries, so "USA" in Settings and
+// "Remote, USA" on a job resolve alike.
 function countriesIn(text: string): Set<string> {
   // A Set, because one part can name a country twice ("San Francisco, CA, USA").
-  return new Set(COUNTRIES.filter(({ patterns }) => patterns.some((pattern) => pattern.test(text))).map(({ name }) => name));
+  const named = new Set(COUNTRIES.filter(({ patterns }) => patterns.some((pattern) => pattern.test(text))).map(({ name }) => name));
+  // Each region the text names adds all its members.
+  for (const region of REGIONS) {
+    // Members join the set; a region never removes anything.
+    if (region.patterns.some((pattern) => pattern.test(text))) for (const member of region.members) named.add(member);
+  }
+  // The places this text names.
+  return named;
+}
+
+// The JD's own location line, for a board location that names no place ("In-Office", "Hybrid",
+// "2 Locations", null). Live Cloudflare JDs write "Available Locations: Lisbon, or London",
+// "Position Location: Austin, TX | Lisbon, Portugal", or "Available Locations Austin, US" with no
+// colon. The label must OPEN a line (stripHtml turns each <p> into one), so "Relocation:",
+// "Headquarters location: San Francisco" and "Interview location:" never read as where the job
+// is (code review, 2026-11-04). A label word (available/position/job/office/work) or a colon is
+// required. The capture runs to the line end.
+const JD_LOCATION_LINE = /^\s*(?:(?:available|position|job|office|work)\s+locations?\b\s*:?|locations?\s*:)\s*(.+)$/im;
+
+// A real location list fits well inside this. A longer "line" means prose ran into it (a JD with no
+// paragraph breaks), and judging that text could drop on a country named in passing, so it is
+// treated as no line at all (fail-open). Long enough for seven cities with countries.
+const JD_LOCATION_MAX_CHARS = 300;
+
+// Read the JD's location line, or null when the JD has none (or none that is plainly a list).
+function jdLocationLine(description: string | null): string | null {
+  // Plain text with line breaks, so the capture ends where the paragraph ends.
+  const text = stripHtml(description) ?? "";
+  // The first line that opens with a location label.
+  const match = text.match(JD_LOCATION_LINE);
+  // No such line.
+  if (match === null) return null;
+  // The list itself, trimmed.
+  const line = match[1]!.trim();
+  // Too short to name a place, or too long to be only a list: no line.
+  return line.length >= 2 && line.length <= JD_LOCATION_MAX_CHARS ? line : null;
 }
 
 // Run the gate over one job against the user's work-authorised countries.
-export function screenWorkAuth(job: WorkAuthJob, authorizedCountries: readonly string[] | null): WorkAuthVerdict {
+// `remotePolicy` is REQUIRED, not optional with a default: every caller must say which reading
+// of remote it applies, so a forgotten argument cannot silently restore the 10-24 behaviour.
+export function screenWorkAuth(
+  job: WorkAuthJob,
+  authorizedCountries: readonly string[] | null,
+  remotePolicy: RemoteLocationPolicy,
+): WorkAuthVerdict {
   // Unset: open, and say so, because an open gate drops nothing and that should be visible.
   if (authorizedCountries === null) {
     return { drop: false, warning: "work_auth gate open: search_preferences.work_authorized_countries is not set" };
@@ -211,22 +328,61 @@ export function screenWorkAuth(job: WorkAuthJob, authorizedCountries: readonly s
     return { drop: false, warning: `work_auth gate open: no work_authorized_countries entry recognised (${authorizedCountries.join(", ")})` };
   }
 
-  // The location's separate parts, blanks removed so "Belfast;" is one part, not two.
-  const parts = (job.locationRaw ?? "").split(PART_SEPARATOR).map((part) => part.trim()).filter((part) => part !== "");
-  // Each part's countries, read once.
-  const partCountries = parts.map(countriesIn);
-  // True when some part is in a country the user may work in.
-  const anyAuthorized = partCountries.some((names) => [...names].some((name) => authorized.has(name)));
+  // A location string split into its separate parts, blanks removed so "Belfast;" is one part.
+  const splitParts = (text: string): string[] => text.split(PART_SEPARATOR).map((part) => part.trim()).filter((part) => part !== "");
+  // A part is provably elsewhere when it names at least one place, none of them authorised, and
+  // (under 'any' only) does not say remote. Under 'unlocked_or_authorized' a remote part that
+  // names places is judged by those places, which is Teja's 11-04 "no country-locked remote".
+  // Each part's places, resolved once: countriesIn runs ~70 regexes, and one part is asked about
+  // up to three times below (code review, 2026-11-04).
+  const placesOf = new Map<string, Set<string>>();
+  // The cached lookup.
+  const places = (part: string): Set<string> => {
+    // Resolve on first ask.
+    if (!placesOf.has(part)) placesOf.set(part, countriesIn(part));
+    // Always set by now.
+    return placesOf.get(part)!;
+  };
+  const isElsewhere = (part: string): boolean => {
+    // The places this part names.
+    const names = places(part);
+    // No place named: unknown, or a bare "Remote". Never provably elsewhere.
+    if (names.size === 0) return false;
+    // One authorised place makes the part reachable.
+    if ([...names].some((name) => authorized.has(name))) return false;
+    // Elsewhere, unless the old policy treats every remote part as reachable.
+    return remotePolicy === "unlocked_or_authorized" || !REMOTE.test(part);
+  };
 
-  // LOCATION: drop only when EVERY part is provably elsewhere. A part is provably elsewhere when it
-  // names at least one country, none of them authorised, and does not say remote. One remote,
-  // authorised or unknown part means the job can be done somewhere allowed, or we cannot tell.
-  const everyPartElsewhere =
-    parts.length > 0 &&
-    parts.every((part, index) => !REMOTE.test(part) && partCountries[index]!.size > 0 && ![...partCountries[index]!].some((name) => authorized.has(name)));
-  // Quote the location so a wrong drop is diagnosable from the run summary.
-  if (everyPartElsewhere) {
-    return { drop: true, code: "work_auth", reason: `location "${job.locationRaw}" is on-site/hybrid outside the work-authorised countries` };
+  // The board location's parts.
+  const parts = splitParts(job.locationRaw ?? "");
+  // True when some part is in a country the user may work in.
+  const anyAuthorized = parts.some((part) => [...places(part)].some((name) => authorized.has(name)));
+
+  // LOCATION: drop only when EVERY part is provably elsewhere. One remote-and-open, authorised or
+  // unknown part means the job can be done somewhere allowed, or we cannot tell.
+  if (parts.length > 0 && parts.every(isElsewhere)) {
+    // Say which kind of lock matched, so the run summary reads truthfully.
+    const kind = parts.some((part) => REMOTE.test(part)) ? "remote, locked to places" : "on-site/hybrid";
+    // Quote the location so a wrong drop is diagnosable from the run summary.
+    return { drop: true, code: "work_auth", reason: `location "${job.locationRaw}" is ${kind} outside the work-authorised countries` };
+  }
+
+  // JD LOCATION LINE: only when the board location names no place at all and does not say
+  // remote. A bare "Remote" is open by Teja's ruling, so its JD is not second-guessed, and a board
+  // location that names any place has already decided above.
+  const boardNamesNothing = parts.every((part) => places(part).size === 0 && !REMOTE.test(part));
+  // The JD's own line, read only in that case.
+  const line = boardNamesNothing ? jdLocationLine(job.description) : null;
+  // Drop only when every part of the line is provably elsewhere, exactly as for the board string.
+  if (line !== null) {
+    // The line's parts.
+    const lineParts = splitParts(line);
+    // The same all-parts test.
+    if (lineParts.length > 0 && lineParts.every(isElsewhere)) {
+      // Quote both, since the board string alone would not explain the drop.
+      return { drop: true, code: "work_auth", reason: `JD location "${line}" is outside the work-authorised countries (board location "${job.locationRaw ?? ""}")` };
+    }
   }
 
   // TEXT: a JD that legally requires US status, unless the user may work in the US or some

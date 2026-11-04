@@ -184,7 +184,8 @@ test("a missing preferences row yields an open gate rather than an error", async
   const result = await loadScreenContext(queries({ searchPreferences: () => Promise.resolve({ rows: [], error: null }) }), NOW);
   assert.equal(result.ok, true);
   // workAuthorizedCountries null = never set: the work-auth gate is open too, never "nowhere".
-  assert.deepEqual(result.ok && result.value.preferences, { titles: [], keywords: [], excludedKeywords: [], workAuthorizedCountries: null });
+  // remoteLocationPolicy 'any' = no stored policy: the fail-open reading.
+  assert.deepEqual(result.ok && result.value.preferences, { titles: [], keywords: [], excludedKeywords: [], workAuthorizedCountries: null, remoteLocationPolicy: "any" });
 });
 
 // An ERROR is still an error, even though an empty result is not. The same distinction
@@ -239,5 +240,36 @@ for (const [name, stored, expected] of [
     );
     // Mapped exactly.
     assert.deepEqual(result.ok && result.value.preferences.workAuthorizedCountries, expected);
+  });
+}
+
+// --- stage-0b preference: remote location policy (Teja, 2026-11-04) -------------------
+
+// Only the two literals are answers; anything else reads as 'any', the fail-open policy.
+for (const [name, stored, expected] of [
+  // The migration default.
+  ["the default", "unlocked_or_authorized", "unlocked_or_authorized"],
+  // The 10-24 reading, chosen in Settings.
+  ["any", "any", "any"],
+  // Key absent (a row read without the column).
+  ["absent", undefined, "any"],
+  // Null.
+  ["null", null, "any"],
+  // A near-miss spelling is not an answer.
+  ["a typo", "unlocked", "any"],
+  // A boolean is not an answer.
+  ["a boolean", true, "any"],
+] as const) {
+  // One named test per stored shape.
+  test(`remote_location_policy: ${name} maps to ${expected}`, async () => {
+    // A row carrying the stored value, everything else empty.
+    const row = { titles: [], keywords: [], excluded_keywords: [], ...(stored === undefined ? {} : { remote_location_policy: stored }) };
+    // Loaded through the real mapper; the cast lets the junk cases reach it as junk would.
+    const result = await loadScreenContext(
+      queries({ searchPreferences: () => Promise.resolve({ rows: [row as never], error: null }) }),
+      NOW,
+    );
+    // Mapped exactly.
+    assert.equal(result.ok && result.value.preferences.remoteLocationPolicy, expected);
   });
 }

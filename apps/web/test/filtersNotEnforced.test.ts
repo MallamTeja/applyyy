@@ -32,9 +32,12 @@ before(async () => {
 const row = (ruleType: string) => render(h(page.RuleText as never, { ruleType, copy: page.RULE_COPY[ruleType as never] }));
 
 describe('Filters page: rules that cannot fire say so (B1)', () => {
-  it('experience_ceiling renders a "Not enforced" note', () => {
-    // A note element, so assistive tech announces it as an aside about the row.
-    assert.match(row('experience_ceiling'), /<p class="cascade__drops cascade__not-enforced" role="note">Not enforced: job data doesn(&#x27;|')t include this\.<\/p>/);
+  // 2026-11-04: experience_ceiling FIRES now. The screener reads the JD's required years when
+  // jobs.min_experience_years is null (_shared/screen/required-experience.ts), after Axiad's
+  // "6-8 years" reached manual apply. The note would claim the opposite of what runs.
+  it('experience_ceiling renders NO "Not enforced" note now that the screener parses JD years', () => {
+    // No note element on the row at all.
+    assert.doesNotMatch(row('experience_ceiling'), /role="note"/);
   });
 
   it('degree_mismatch renders the note, and says the Discovered view differs', () => {
@@ -46,11 +49,11 @@ describe('Filters page: rules that cannot fire say so (B1)', () => {
     assert.match(html, /role="note">[^<]*the screener does not\.<\/p>/);
   });
 
-  it('only those two rules carry the note; a working rule renders none', () => {
-    // Every rule whose copy sets notEnforced, so a third cannot be added unremarked.
+  it('only degree_mismatch carries the note; a working rule renders none', () => {
+    // Every rule whose copy sets notEnforced, so another cannot be added unremarked.
     const flagged = Object.entries(page.RULE_COPY).filter(([, copy]) => copy?.notEnforced !== undefined).map(([type]) => type).sort();
-    // Exactly the two the screener skips on null job data.
-    assert.deepEqual(flagged, ['degree_mismatch', 'experience_ceiling']);
+    // Only the rule the screener still skips on null job data (experience_ceiling fires since 11-04).
+    assert.deepEqual(flagged, ['degree_mismatch']);
     // A rule that does fire: no note element at all.
     assert.doesNotMatch(row('title_blocklist'), /role="note"/);
   });

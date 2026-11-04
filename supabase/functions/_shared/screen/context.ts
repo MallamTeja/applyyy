@@ -25,6 +25,8 @@ import type { ScreenContext } from "../filter/cascade.ts";
 import type { FilterRuleRow } from "../contracts/shared-types.ts";
 // Stage 0's config shape, so the loader hands back something the gates can use directly.
 import type { ScreenPreferences } from "./screen-batch.ts";
+// The remote policy's closed union and its literals, owned by the gate that reads them.
+import { REMOTE_LOCATION_POLICIES, type RemoteLocationPolicy } from "./work-auth-gate.ts";
 
 // One query's outcome, in the shape postgrest already returns.
 //
@@ -89,6 +91,9 @@ export interface SearchPreferencesRow {
   // TYPE because a row read before migration 20261024190000 has no such key; absent and null
   // both mean "never set", and the gate stays open for that.
   readonly work_authorized_countries?: readonly string[] | null;
+  // What a remote location part means (migration 20261104193000, Teja 2026-11-04). Optional in
+  // the TYPE for the same reason as the list above: a row read before the migration has no key.
+  readonly remote_location_policy?: string | null;
 }
 
 // What a successful load hands the caller: the rules and the context, together, because
@@ -133,13 +138,25 @@ function strictTimestampMs(value: string | null): number | null {
 // read as "never set", not "nowhere": the Settings page saves null for an empty box, so an
 // empty array can only come from a hand edit, and reading it as "authorised nowhere" would drop
 // every on-site job on a single slip.
-function countryList(value: unknown): readonly string[] | null {
+// EXPORTED 2026-11-04 so the matcher's pre-gate reads the column through this same shape check
+// rather than a second, drifting copy.
+export function countryList(value: unknown): readonly string[] | null {
   // Not a list at all: never set.
   if (!Array.isArray(value)) return null;
   // Real, non-blank strings only, trimmed.
   const entries = value.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "").map((entry) => entry.trim());
   // Nothing usable left: never set.
   return entries.length > 0 ? entries : null;
+}
+
+// The stored remote policy by SHAPE: exactly one of the two literals, or 'any' for anything else.
+// 'any' is the fail-open reading (it keeps every remote part, the 10-24 behaviour), because a
+// missing or garbled setting must never become a rejection (CLAUDE.md section 6). After migration
+// 20261104193000 the column is NOT NULL with a CHECK, so this fallback is reachable only by a row
+// read without the column. Shared by the screener and the matcher.
+export function remoteLocationPolicy(value: unknown): RemoteLocationPolicy {
+  // Only a known literal is an answer; `includes` on the closed list is the shape check.
+  return REMOTE_LOCATION_POLICIES.includes(value as RemoteLocationPolicy) ? (value as RemoteLocationPolicy) : "any";
 }
 
 // Fetch everything the cascade needs that is not on the job row.
@@ -227,6 +244,8 @@ export async function loadScreenContext(queries: ScreenQueries, now: Date): Prom
         // a non-array, or a list with nothing usable in it all collapse to null = never set,
         // which opens the gate rather than dropping every on-site job (CLAUDE.md section 6).
         workAuthorizedCountries: countryList(preferencesRow?.work_authorized_countries),
+        // One of the two literals; anything else reads as 'any', the fail-open policy.
+        remoteLocationPolicy: remoteLocationPolicy(preferencesRow?.remote_location_policy),
       },
       // Passed through untouched, `sort_order` included — the cascade sorts on it, so
       // re-deriving or reordering here would silently reshape the whole cascade.

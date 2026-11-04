@@ -11,7 +11,12 @@ import type { FormEvent, ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
 import { EMPLOYMENT_TYPES, WORK_ARRANGEMENTS } from '../../data/contract';
-import type { EmploymentType, WorkArrangement } from '../../data/contract';
+// Domain types through the schema seam; SearchPreferencesRow added 2026-11-04 for the remote policy.
+import type { EmploymentType, SearchPreferencesRow, WorkArrangement } from '../../data/contract';
+
+// The remote policy's two literals, taken from the schema owner's Row type rather than redeclared
+// (contract.ts rule: no domain type is declared under apps/web).
+type RemoteLocationPolicy = SearchPreferencesRow['remote_location_policy'];
 import { supabase } from '../../data/supabase';
 import { DiscoveryModal } from '../pipeline/DiscoveryModal';
 
@@ -88,6 +93,10 @@ export function SearchPreferencesPage(): ReactElement {
   // as the comma list the box shows. Starts empty, which saves as null = never set: the
   // screener then drops nothing, so an unread row can never become "authorised nowhere".
   const [workAuthCountries, setWorkAuthCountries] = useState<string>('');
+  // How the screener reads a remote job (search_preferences.remote_location_policy, Teja
+  // 2026-11-04). Starts at the column default, so an unsaved page shows what the DB holds for a
+  // new row; a loaded row replaces it below.
+  const [remotePolicy, setRemotePolicy] = useState<RemoteLocationPolicy>('unlocked_or_authorized');
 
   // Multi-select Employment Types
   const [selectedEmploymentTypes, setSelectedEmploymentTypes] = useState<Set<EmploymentType>>(
@@ -194,6 +203,12 @@ export function SearchPreferencesPage(): ReactElement {
         if (Array.isArray(data.locations) && data.locations.length > 0) setLocations(data.locations.join(', '));
         // Only a real list is an answer; anything else leaves the box empty (never set).
         if (Array.isArray(data.work_authorized_countries)) setWorkAuthCountries(data.work_authorized_countries.join(', '));
+        // Only one of the two literals is an answer (the column's CHECK); anything else, including
+        // a row read before migration 20261104193000, leaves the default showing.
+        if (data.remote_location_policy === 'unlocked_or_authorized' || data.remote_location_policy === 'any') {
+          // The stored choice.
+          setRemotePolicy(data.remote_location_policy);
+        }
 
         if (Array.isArray(data.employment_types) && data.employment_types.length > 0) {
           setSelectedEmploymentTypes(new Set(data.employment_types as EmploymentType[]));
@@ -328,6 +343,8 @@ export function SearchPreferencesPage(): ReactElement {
       salary_currency: currency,
       // An empty box saves null (never set, gate open), never an empty list meaning "nowhere".
       work_authorized_countries: parseList(workAuthCountries).length > 0 ? parseList(workAuthCountries) : null,
+      // Always one of the two literals: the select below offers nothing else.
+      remote_location_policy: remotePolicy,
     };
 
     if (supabase === null) {
@@ -579,7 +596,8 @@ export function SearchPreferencesPage(): ReactElement {
               {/* Says what the list does and what an empty box means, so it is not a mystery filter. */}
               <span className="field__help">
                 Comma-separated English country names, e.g. India, Nepal, Bhutan. On-site and hybrid jobs located only
-                outside these countries are dropped before matching; remote jobs are kept. Leave empty to drop nothing.
+                outside these countries are dropped before matching; remote jobs follow the Remote jobs choice below.
+                Leave empty to drop nothing.
               </span>
               {/* Same comma-list control as the locations box above. */}
               <input
@@ -594,6 +612,39 @@ export function SearchPreferencesPage(): ReactElement {
                 /* Says "not set" first: a bare country list in grey read as a SAVED value (browser proof, 2026-10-25). */
                 placeholder="Not set: filter off. e.g. India, Nepal, Bhutan"
               />
+            </label>
+
+            {/* Remote policy (Teja, 2026-11-04): a "Remote - US" job needs the right to live and work in the US. */}
+            <label className="field field--wide">
+              {/* Teja's word for the setting. */}
+              <span className="field__label">Remote jobs</span>
+              {/* Says what each choice does in his terms, so "remote" is never read as "from anywhere" by accident. */}
+              <span className="field__help">
+                {/* The exception is real, not a hedge: the gate's US-requirement check drops a bare remote job too. */}
+                Many remote jobs are locked to one country (e.g. &quot;Remote - US&quot;) and need the right to work there.
+                Remote jobs with no country, or locked to a country above, are kept, unless the job description
+                legally requires US status (ITAR, a security clearance, US work authorization).
+              </span>
+              {/* A two-option select, the same control as Currency; a closed choice, never free text. */}
+              <select
+                /* Same control styling as the other fields. */
+                className="field__control"
+                /* The draft; nothing is written until Save. */
+                value={remotePolicy}
+                /* Only the two literals below can arrive here. */
+                onChange={(e) => setRemotePolicy(e.target.value as RemoteLocationPolicy)}
+              >
+                {/* The 11-04 default: country-locked remote outside the list is dropped. */}
+                <option value="unlocked_or_authorized">
+                  {/* Teja's own wording of the rule, so the choice reads as he ruled it. */}
+                  Only remote jobs I can do from my countries (no country lock, or locked to a country above)
+                </option>
+                {/* The 10-24 behaviour, one click away. */}
+                <option value="any">
+                  {/* The permissive choice: every remote job is kept wherever it is locked to. */}
+                  Any remote job
+                </option>
+              </select>
             </label>
           </div>
         </section>

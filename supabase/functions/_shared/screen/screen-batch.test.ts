@@ -78,7 +78,9 @@ const TITLE_RULE = rule("title_blocklist", { blocked_titles: ["senior", "staff",
 // behaviour the unconfigured-preferences branch guarantees.
 // workAuthorizedCountries: null leaves stage 0b (the work-auth gate) open, so these tests see
 // exactly the verdicts they saw before that gate existed (plus its one "gate open" warning).
-const OPEN_PREFS: ScreenPreferences = { titles: [], keywords: [], excludedKeywords: [], workAuthorizedCountries: null };
+// remoteLocationPolicy 'any' keeps the 10-24 remote reading these tests were written against; the
+// 11-04 policy has its own tests at the end of the file.
+const OPEN_PREFS: ScreenPreferences = { titles: [], keywords: [], excludedKeywords: [], workAuthorizedCountries: null, remoteLocationPolicy: "any" };
 
 // A configured gate, for the stage-0 tests at the end of this file.
 const TECH_PREFS: ScreenPreferences = {
@@ -87,6 +89,8 @@ const TECH_PREFS: ScreenPreferences = {
   excludedKeywords: ["sales", "recruiter"],
   // Open, for the same reason as OPEN_PREFS: these tests are about the tech gate.
   workAuthorizedCountries: null,
+  // Irrelevant with the list open; stated because the field is required.
+  remoteLocationPolicy: "any",
 };
 
 // --- the JobInsert -> ScreenableJob adapter ---------------------------------------
@@ -113,10 +117,58 @@ test("the adapter carries across the fields every rule reads", () => {
 // agent_runs.error_detail — the rules are loud about being skipped, but still inert.)
 // If a future change starts populating these columns, this
 // test fails and whoever made that change learns the two rules just came alive.
-test("experience and degree arrive as null because nothing populates them", () => {
+// 2026-11-04: experience_ceiling CAME ALIVE on purpose. toScreenableJob now reads the JD's
+// required years (required-experience.ts) when the column is null, after Axiad's "6-8 years"
+// reached manual apply. BASE_ROW's JD states no years, so it still arrives as null here; the
+// degree half is still inert.
+test("experience and degree arrive as null when the JD states no years and nothing populates them", () => {
   const job = toScreenableJob(BASE_ROW);
   assert.equal(job.minExperienceYears, null);
   assert.equal(job.requiresAdvancedDegree, null);
+});
+
+// The producer the rule lacked: the JD's hard minimum, as the string the cascade expects.
+test("experience: a JD's '6-8 years of ... experience' arrives as minExperienceYears '6'", () => {
+  // The Axiad wording, on a non-intern title (BASE_ROW is an intern, which is exempt).
+  const job = toScreenableJob({ ...BASE_ROW, title: "AI-First Golang Developer", description_raw: "6-8 years of hands-on software development experience" });
+  // The lower bound, as a string.
+  assert.equal(job.minExperienceYears, "6");
+});
+
+// A stored column still wins over the parser, so a future producer's value is never overwritten.
+test("experience: a stored min_experience_years wins over the JD text", () => {
+  // Stored 0, JD says 5.
+  const job = toScreenableJob({ ...BASE_ROW, min_experience_years: 0, description_raw: "5+ years of experience" } as typeof BASE_ROW);
+  // The stored value.
+  assert.equal(job.minExperienceYears, "0");
+});
+
+// End to end through the real cascade rule, with the ceiling migration 20261104193000 sets.
+test("experience: the cascade's experience_ceiling drops a '5+ years' JD at max_years 1", () => {
+  const planned = planScreenedApplications(
+    // A JD with a hard 5-year minimum, on a non-intern title.
+    [{ jobId: "exp-1", row: { ...BASE_ROW, title: "Backend Engineer", description_raw: "5+ years of backend engineering experience" } }],
+    // Only the experience rule, configured as Teja ruled.
+    [rule("experience_ceiling", { max_years: 1 })],
+    BASE_CONTEXT,
+    OPEN_PREFS,
+  );
+  // Born dropped under the cascade rule's own name.
+  assert.deepEqual(planned.inserts, [{ job_id: "exp-1", status: "dropped_filter", drop_reason: "experience_ceiling" }]);
+});
+
+// And the same JD on an intern title is kept (Teja's 11-01 ruling).
+test("experience: an intern title with a '5+ years' JD passes the ceiling", () => {
+  const planned = planScreenedApplications(
+    // An intern title.
+    [{ jobId: "exp-2", row: { ...BASE_ROW, title: "Software Engineering Intern", description_raw: "5+ years of experience" } }],
+    // The same ceiling.
+    [rule("experience_ceiling", { max_years: 1 })],
+    BASE_CONTEXT,
+    OPEN_PREFS,
+  );
+  // Passed.
+  assert.equal(planned.inserts[0]!.status, "passed_filters");
 });
 
 // --- the verdict -> applications row decision --------------------------------------
@@ -386,6 +438,20 @@ test("work auth: India and US-remote postings pass through to the cascade", () =
   );
   // Both passed.
   assert.deepEqual(planned.inserts.map((i) => i.status), ["passed_filters", "passed_filters"]);
+});
+
+// Teja's 11-04 policy reaches the gate: the same US-remote posting now drops, India still passes.
+test("work auth: under unlocked_or_authorized, US-remote drops and India passes", () => {
+  const planned = planScreenedApplications(
+    // BASE_ROW is Bengaluru; the second is remote locked to the US.
+    [{ jobId: "in-2", row: BASE_ROW }, { jobId: "us-r2", row: { ...BASE_ROW, fingerprint: "fp-r2", location_raw: "Remote, USA" } }],
+    [TITLE_RULE],
+    BASE_CONTEXT,
+    // Teja's list with the live policy.
+    { ...TEJA_PREFS, remoteLocationPolicy: "unlocked_or_authorized" },
+  );
+  // India passes; the locked remote row drops under the gate's code.
+  assert.deepEqual(planned.inserts.map((i) => i.drop_reason), [null, "work_auth"]);
 });
 
 // Never set: nothing drops, and the open gate is reported.

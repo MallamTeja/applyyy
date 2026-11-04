@@ -12,27 +12,50 @@ import { test } from "node:test";
 // Strict, so null and undefined are not conflated.
 import assert from "node:assert/strict";
 // Units under test.
-import { nextSweepCursor, parseMatcherMode, preGateRow, selectScorer, withTechPreGate, type PreGateOutcome } from "./tech-pregate.ts";
-// The shared config type, so a fixture cannot drift from what the gate reads.
-import type { TechGatePreferences } from "../_shared/screen/tech-gate.ts";
+import {
+  firstPreGateDrop,
+  nextSweepCursor,
+  parseMatcherMode,
+  preGateRow,
+  selectScorer,
+  withTechPreGate,
+  type PreGateJob,
+  type PreGateOutcome,
+  type PreGatePreferences,
+} from "./tech-pregate.ts";
 // The client shape the fake must satisfy.
 import type { MatchScoreClient } from "./write-score.ts";
 
+// The two 2026-11-04 stages, OPEN: no country list, the old remote reading, no ceiling. Spread
+// into the tech fixtures so every pre-11-04 test sees exactly the tech gate it was written for.
+const OPEN_LATER_STAGES = { workAuthorizedCountries: null, remoteLocationPolicy: "any", experienceMaxYears: null } as const;
+
 // A configured gate: titles AND keywords set, so a non-match drops as unclassified.
-const PREFS: TechGatePreferences = {
+const PREFS: PreGatePreferences = {
   titles: ["software engineer"],
   keywords: ["react"],
   excludedKeywords: ["sales"],
+  ...OPEN_LATER_STAGES,
 };
 
 // Nothing configured: the only config under which a non-match still passes.
-const EMPTY: TechGatePreferences = { titles: [], keywords: [], excludedKeywords: [] };
+const EMPTY: PreGatePreferences = { titles: [], keywords: [], excludedKeywords: [], ...OPEN_LATER_STAGES };
+
+// Teja's live config after migration 20261104193000: his list, the 11-04 remote policy, ceiling 1.
+const TEJA: PreGatePreferences = {
+  titles: ["software engineer"],
+  keywords: ["react"],
+  excludedKeywords: ["sales"],
+  workAuthorizedCountries: ["India", "Nepal", "Bhutan"],
+  remoteLocationPolicy: "unlocked_or_authorized",
+  experienceMaxYears: 1,
+};
 
 // A non-engineering posting matching no PREFS title or keyword, the 99.6% case Teja measured.
-const PARTNERSHIPS = { title: "Partnerships Lead", descriptionRaw: "Grow our channel partners." };
+const PARTNERSHIPS: PreGateJob = { title: "Partnerships Lead", descriptionRaw: "Grow our channel partners.", locationRaw: null, minExperienceYears: null };
 
 // A posting PREFS recognises by title.
-const ENGINEER = { title: "Senior Software Engineer", descriptionRaw: null };
+const ENGINEER: PreGateJob = { title: "Senior Software Engineer", descriptionRaw: null, locationRaw: null, minExperienceYears: null };
 
 // One applications row plus the RPC, modelling the live semantics (migration 20261008160000):
 // the write applies only when every .eq() filter matches, set_updated_at bumps the stamp,
@@ -108,6 +131,71 @@ function fakeRow(opts: { status?: string; writeError?: string } = {}) {
   return { db, row, updates, events, rpcArgs };
 }
 
+// --- 2026-11-04: the work-auth and experience stages re-run on re-run rows ----------------
+
+// A software engineer posting the tech gate passes, varied only in the field each test is about.
+const swe = (over: Partial<PreGateJob>): PreGateJob => ({ title: "Software Engineer", descriptionRaw: "React frontend.", locationRaw: "Bengaluru, India", minExperienceYears: null, ...over });
+
+// The live leak: a US on-site row sent back by the master-change re-run.
+test("pre-gate 11-04: a US on-site re-run row drops as work_auth, column and event agreeing", async () => {
+  // A passed_filters row.
+  const { db, row, events } = fakeRow();
+  // Coinbase's location.
+  const outcome = await preGateRow(db, "a1", swe({ locationRaw: "Hybrid - San Francisco, CA" }), TEJA);
+  // Dropped under the work-auth gate's own code.
+  assert.equal(outcome.kind === "dropped" && outcome.code, "work_auth");
+  // Through the same edge and columns as a tech drop.
+  assert.equal(row.status, "dropped_filter");
+  // The column names the gate.
+  assert.equal(row.drop_reason, "work_auth");
+  // The event agrees and names the stage.
+  assert.equal(events[0].detail.reason, "work_auth");
+  // Same stage marker as every pre-gate drop.
+  assert.equal(events[0].detail.stage, "matcher_pre_gate");
+});
+
+// Teja's 11-04 remote policy reaches the matcher too.
+test("pre-gate 11-04: 'Remote - US' drops as work_auth under unlocked_or_authorized", () => {
+  // Pure check; no database needed for the verdict.
+  assert.equal(firstPreGateDrop(swe({ locationRaw: "Remote - US" }), TEJA)?.code, "work_auth");
+});
+
+// The incident row: Axiad's "6-8 years" in the JD, ceiling 1.
+test("pre-gate 11-04: a '6-8 years' JD drops as experience_ceiling", async () => {
+  // A passed_filters row.
+  const { db, row } = fakeRow();
+  // India location, so only the experience stage objects.
+  const outcome = await preGateRow(db, "a1", swe({ descriptionRaw: "React. 6-8 years of hands-on software development experience." }), TEJA);
+  // Dropped under the cascade rule's own name.
+  assert.equal(outcome.kind === "dropped" && outcome.code, "experience_ceiling");
+  // The column agrees, so the dashboard groups it with screener drops.
+  assert.equal(row.drop_reason, "experience_ceiling");
+});
+
+// The screener's order: tech first, then work-auth, then experience.
+test("pre-gate 11-04: stages run in the screener's order", () => {
+  // Excluded title, US location, 5-year JD: the tech gate wins.
+  assert.equal(firstPreGateDrop(swe({ title: "Sales Software Engineer", locationRaw: "Seattle, WA", descriptionRaw: "5+ years of experience" }), TEJA)?.code, "tech_gate");
+  // Recognised title, US location, 5-year JD: work-auth wins.
+  assert.equal(firstPreGateDrop(swe({ locationRaw: "Seattle, WA", descriptionRaw: "React. 5+ years of experience" }), TEJA)?.code, "work_auth");
+});
+
+// India, open remote, and fresher-friendly JDs continue to scoring.
+test("pre-gate 11-04: India, bare remote and a 1-year JD all continue", () => {
+  // India.
+  assert.equal(firstPreGateDrop(swe({}), TEJA), null);
+  // Bare remote: no lock.
+  assert.equal(firstPreGateDrop(swe({ locationRaw: "Remote" }), TEJA), null);
+  // One year is within the ceiling.
+  assert.equal(firstPreGateDrop(swe({ descriptionRaw: "React. 1+ years of experience." }), TEJA), null);
+});
+
+// Open stages stay open: the pre-11-04 fixtures must see only the tech gate.
+test("pre-gate 11-04: with the later stages open, a US 5-year row continues", () => {
+  // PREFS has no list and no ceiling.
+  assert.equal(firstPreGateDrop(swe({ locationRaw: "Seattle, WA", descriptionRaw: "React. 5+ years of experience" }), PREFS), null);
+});
+
 // --- preGateRow ------------------------------------------------------------------------
 
 test("pre-gate: a configured non-match is dropped as tech_gate_unclassified, column and event agreeing", async () => {
@@ -163,7 +251,7 @@ test("pre-gate: an empty config continues with no writes, even for a non-enginee
 test("pre-gate: an excluded term is dropped with code tech_gate", async () => {
   // Matches the "sales" exclusion AND the "software engineer" title: exclusions win.
   const { db, row } = fakeRow();
-  const outcome = await preGateRow(db, "a1", { title: "Sales Software Engineer", descriptionRaw: null }, PREFS);
+  const outcome = await preGateRow(db, "a1", { title: "Sales Software Engineer", descriptionRaw: null, locationRaw: null, minExperienceYears: null }, PREFS);
   // The exclusion code, distinct from the unclassified one.
   assert.equal(outcome.kind === "dropped" && outcome.code, "tech_gate");
   // The column agrees.
@@ -195,7 +283,7 @@ test("pre-gate: a write error is reported as error, with no rpc", async () => {
 // --- withTechPreGate -------------------------------------------------------------------
 
 // A queue row as the matcher reads it, with its embedded job.
-type Row = { id: string; job: { title: string; descriptionRaw: string | null } };
+type Row = { id: string; job: PreGateJob };
 
 // Reads title/body from the row, as the caller's readJob would.
 const readJob = (r: Row) => r.job;

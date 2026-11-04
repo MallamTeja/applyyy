@@ -54,8 +54,10 @@ export const RULE_COPY: Readonly<Partial<Record<FilterRuleType, RuleCopy>>> = {
     name: 'Experience ceiling',
     drops: 'Filters out postings exceeding your maximum target years.',
     threshold: { kind: 'number', label: 'Maximum experience required', suffix: 'years', key: 'max_years' },
-    // cascade.ts:157 skips this rule whenever min_experience_years is null, and no job carries it.
-    notEnforced: "Not enforced: job data doesn't include this.",
+    // ENFORCED since 2026-11-04. cascade.ts:157 still skips the rule when min_experience_years is
+    // null, but the screener now fills it from the JD's required years
+    // (supabase/functions/_shared/screen/required-experience.ts), so the old "Not enforced" note
+    // was removed rather than left claiming the opposite of what runs.
   },
   title_blocklist: {
     name: 'Title blocklist',

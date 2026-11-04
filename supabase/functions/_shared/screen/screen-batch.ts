@@ -23,7 +23,9 @@ import { screenJob, type ScreenableJob, type ScreenContext } from "../filter/cas
 // the cascade not change, and a title comparison is cheaper than any rule in it.
 import { screenTechRole, type TechGatePreferences } from "./tech-gate.ts";
 // Stage 0b, the work-authorisation gate: same outside-the-cascade placement, same reason.
-import { screenWorkAuth } from "./work-auth-gate.ts";
+import { screenWorkAuth, type RemoteLocationPolicy } from "./work-auth-gate.ts";
+// The JD's required years, the producer the cascade's experience_ceiling rule never had (11-04).
+import { requiredExperienceYears } from "./required-experience.ts";
 // Row shapes from the schema owner. Never redefined — a redefined type drifts.
 import type { FilterRuleRow, JobInsert, JobRow } from "../contracts/shared-types.ts";
 
@@ -92,6 +94,9 @@ export interface DroppedJob {
 export interface ScreenPreferences extends TechGatePreferences {
   // Countries the user may work in without a visa; null = never set (gate open).
   readonly workAuthorizedCountries: readonly string[] | null;
+  // What a remote part means (Teja, 2026-11-04). REQUIRED like the list above, so no caller can
+  // screen without stating it; 'any' is the explicit 10-24 reading.
+  readonly remoteLocationPolicy: RemoteLocationPolicy;
 }
 
 // Everything one screened batch produced.
@@ -118,9 +123,15 @@ export interface ScreenedBatchPlan {
 // pass everything, which is the failure mode this whole parcel is cleaning up.
 export function toScreenableJob(row: JobInsert | JobRow): ScreenableJob {
   // Read min_experience_years if available (numeric or null), formatted as string for cascade.
-  const minExp = row.min_experience_years !== undefined && row.min_experience_years !== null
+  const storedMinExp = row.min_experience_years !== undefined && row.min_experience_years !== null
     ? String(row.min_experience_years)
     : null;
+  // NOTHING writes jobs.min_experience_years (measured 2026-11-04), so experience_ceiling skipped
+  // every job and Axiad's "6-8 years" reached manual apply. The JD's own text fills the gap; a
+  // stored value still wins. Null (no hard requirement, or an intern/junior title) keeps the job.
+  const parsedMinExp = storedMinExp === null ? requiredExperienceYears(row.title, row.description_raw ?? null) : null;
+  // The string the cascade expects, or null when neither source states a requirement.
+  const minExp = storedMinExp ?? (parsedMinExp === null ? null : String(parsedMinExp));
   // Read requires_advanced_degree if available (boolean or null).
   const reqAdvDeg = row.requires_advanced_degree ?? null;
 
@@ -218,6 +229,8 @@ export function planScreenedApplications(
       { title: entry.row.title, locationRaw: entry.row.location_raw ?? null, description: entry.row.description_raw ?? null },
       // The user's list; null (never set) opens the gate and warns.
       preferences.workAuthorizedCountries,
+      // Teja's remote reading: country-locked remote drops under 'unlocked_or_authorized'.
+      preferences.remoteLocationPolicy,
     );
     // The open-gate warning is the only sign the setting was never set (or holds a typo).
     if ("warning" in authVerdict) warnings.add(authVerdict.warning);

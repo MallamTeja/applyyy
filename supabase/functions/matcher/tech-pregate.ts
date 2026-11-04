@@ -15,18 +15,44 @@
 // SAME WRITE PATH: a drop goes through writeMatchScore (guarded on status = passed_filters,
 // returning the stamp) and advanceScoredRow (stamp-guarded RPC, PT409 -> skipped_stale), so
 // a pre-gate drop has exactly the race protection a score does.
+//
+// WIDENED 2026-11-04 (Teja: "re-scored rows get re-screened"): the pre-gate now also runs the
+// work-auth gate and the experience ceiling, in the screener's own order (tech, then work-auth,
+// then experience). Rows the master-change re-run sends back (awaiting_approval/approved ->
+// passed_filters, human, 87fff82) never meet the screener; 6 US on-site jobs reached the
+// approval queue that way. Every passed_filters row meets the matcher, so one check here covers
+// every road in. Same functions as the screener's, so the two stages still cannot drift.
+// The file keeps its old name to keep this diff small. ponytail: rename to pregate.ts (and
+// withTechPreGate to withPreGate) when this file is next touched for its own sake.
 
-// The single shared verdict function, plus its config type and drop codes.
-import { screenTechRole, type TechGateDropCode, type TechGatePreferences } from "../_shared/screen/tech-gate.ts";
+// The single shared verdict function, plus its drop codes.
+import { screenTechRole, type TechGateDropCode } from "../_shared/screen/tech-gate.ts";
+// Stage 0b, the screener's work-auth gate, called with the same three inputs.
+import { screenWorkAuth, type WorkAuthDropCode } from "../_shared/screen/work-auth-gate.ts";
+// The matcher's twin of the cascade's experience_ceiling rule (same parser, same max_years).
+import { screenRequiredExperience, type ExperienceDropCode } from "../_shared/screen/required-experience.ts";
+// The screener's preference shape, extended below rather than redefined, so the fields match.
+import type { ScreenPreferences } from "../_shared/screen/screen-batch.ts";
 // The guarded write and the guarded move, reused rather than rebuilt.
 import { advanceScoredRow, writeMatchScore, type MatchScoreClient } from "./write-score.ts";
+
+// Every code a pre-gate drop can carry: each gate's own, so drop_reason groups with the screener's.
+export type PreGateDropCode = TechGateDropCode | WorkAuthDropCode | ExperienceDropCode;
+
+// Everything the three gates read, loaded together by the matcher from the user's current rows.
+// ALL REQUIRED: a caller that leaves one out does not compile, so no gate can be skipped by
+// omission. An open gate is stated explicitly (null list, 'any', null ceiling).
+export interface PreGatePreferences extends ScreenPreferences {
+  // filter_rules experience_ceiling config.max_years; null = not configured (the rule keeps).
+  readonly experienceMaxYears: number | null;
+}
 
 // What happened to one row at the gate. Closed: the wrapped scorer runs ONLY on `continue`.
 export type PreGateOutcome =
   // The gate has no objection; the row goes on to Gemini scoring.
   | { readonly kind: "continue" }
-  // Rejected by stage 0 and moved to dropped_filter by this run.
-  | { readonly kind: "dropped"; readonly code: TechGateDropCode; readonly reason: string }
+  // Rejected by a pre-gate stage and moved to dropped_filter by this run.
+  | { readonly kind: "dropped"; readonly code: PreGateDropCode; readonly reason: string }
   // Another run moved or wrote the row first; nothing was done here.
   | { readonly kind: "skipped_stale" }
   // The drop write or move failed; the row stays at passed_filters for the next run.
@@ -36,8 +62,43 @@ export type PreGateOutcome =
 export interface PreGateJob {
   // The posting title.
   readonly title: string;
-  // The raw body; the gate reads only its first 300 characters.
+  // The raw body; the tech gate reads only its first 300 characters, the others all of it.
   readonly descriptionRaw: string | null;
+  // The board's location string, for the work-auth gate. Required: null states "missing".
+  readonly locationRaw: string | null;
+  // jobs.min_experience_years as stored (PostgREST sends numerics as strings); null is the norm.
+  readonly minExperienceYears: number | string | null;
+}
+
+// The first objection any pre-gate stage has, in the screener's order, or null for none.
+// Pure, so the order and each stage's verdict are testable without a database.
+export function firstPreGateDrop(job: PreGateJob, preferences: PreGatePreferences): { readonly code: PreGateDropCode; readonly reason: string } | null {
+  // Stage 0: title and keywords, the cheapest test.
+  const tech = screenTechRole(job.title, job.descriptionRaw, preferences);
+  // A tech rejection ends the check.
+  if (tech.drop) return { code: tech.code, reason: tech.reason };
+  // Stage 0b: where the work is, under the user's list and remote policy.
+  const auth = screenWorkAuth(
+    // The same three texts the screener passes.
+    { title: job.title, locationRaw: job.locationRaw, description: job.descriptionRaw },
+    // The user's list; null keeps the gate open.
+    preferences.workAuthorizedCountries,
+    // Teja's 11-04 remote reading, or 'any'.
+    preferences.remoteLocationPolicy,
+  );
+  // A work-auth rejection ends the check.
+  if (auth.drop) return { code: auth.code, reason: auth.reason };
+  // The experience ceiling, last, as the cascade runs after the two stage gates.
+  const experience = screenRequiredExperience(
+    // The JD and the stored column; the parser fills in when the column is null.
+    { title: job.title, description: job.descriptionRaw, minExperienceYears: job.minExperienceYears },
+    // The configured ceiling; null keeps.
+    preferences.experienceMaxYears,
+  );
+  // An experience rejection.
+  if (experience.drop) return { code: experience.code, reason: experience.reason };
+  // No objection from any stage.
+  return null;
 }
 
 // Run the gate on one row and, if it rejects, drop the row through the matcher's own edge.
@@ -48,8 +109,8 @@ export async function preGateRow(
   applicationId: string,
   // Title and body of its job; null when the embedded job row is missing.
   job: PreGateJob | null,
-  // The user's CURRENT search_preferences, mapped by toTechGatePreferences.
-  preferences: TechGatePreferences,
+  // The user's CURRENT search_preferences and experience ceiling, for all three stages.
+  preferences: PreGatePreferences,
 ): Promise<PreGateOutcome> {
   // A missing job is missing DATA, not an empty title: judged as "", it would be dropped as
   // tech_gate_unclassified, turning an absence into an answer (CLAUDE.md §6). Report it and
@@ -60,10 +121,10 @@ export async function preGateRow(
   // deleted job. fail-exit.ts's usable-job gate runs first and reports it the same way, so in
   // the live wiring this branch is defence in depth.
   if (job === null) return { kind: "error", message: "pre-gate: job row missing for this application" };
-  // The exact verdict the screener would give this posting today.
-  const verdict = screenTechRole(job.title, job.descriptionRaw, preferences);
+  // The exact verdict the screener would give this posting today, all three stages.
+  const verdict = firstPreGateDrop(job, preferences);
   // No objection (recognised, or an empty config that passes with a warning): score it.
-  if (!verdict.drop) return { kind: "continue" };
+  if (verdict === null) return { kind: "continue" };
 
   // STEP 1, the payload: drop_reason carries the gate's code, as the screener writes it.
   // match_score and match_reasoning are CLEARED, not left alone: if an overlapping run's
@@ -191,8 +252,8 @@ export function nextSweepCursor(page: {
 export function withTechPreGate<R extends { readonly id: string }, C>(
   // The client used for a pre-gate drop.
   db: MatchScoreClient,
-  // The user's current config.
-  preferences: TechGatePreferences,
+  // The user's current config for all three stages.
+  preferences: PreGatePreferences,
   // How to read title/body from a queue row, whose embedded job shape is the caller's; null
   // when the embed is missing, which preGateRow reports as an error rather than judging "".
   readJob: (row: R) => PreGateJob | null,

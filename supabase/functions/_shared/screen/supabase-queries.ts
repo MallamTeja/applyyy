@@ -245,8 +245,10 @@ export function supabaseScreenQueries(client: { from(table: string): unknown }, 
     // at most that user's own row — no filter is needed and none is applied.
     // work_authorized_countries needs migration 20261024190000 applied FIRST: before it, this
     // select fails, and the loader stops the run with a named error (never a silent pass).
+    // remote_location_policy needs migration 20261104193000 FIRST, for the same reason: deploy
+    // this only after `db push` lists that migration as applied.
     searchPreferences(): Promise<ScreenQueryResult<SearchPreferencesRow>> {
-      return Promise.resolve(db.from("search_preferences").select("titles, keywords, excluded_keywords, work_authorized_countries")).then(
+      return Promise.resolve(db.from("search_preferences").select("titles, keywords, excluded_keywords, work_authorized_countries, remote_location_policy")).then(
         (response) => toResult(response, (rows) => rows as SearchPreferencesRow[]),
       );
     },

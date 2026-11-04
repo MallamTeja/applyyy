@@ -865,6 +865,14 @@ export interface SearchPreferencesRow {
    * (CLAUDE.md §6). Nullable with no default on purpose. Added here 2026-11-02 (W20).
    */
   work_authorized_countries: string[] | null;
+  /**
+   * How the work-auth gate reads a remote location (migration 20261104193000, Teja 2026-11-04).
+   * 'unlocked_or_authorized' (the default): remote is kept only when it names no place or a place
+   * in work_authorized_countries, so "Remote - US" drops and "Remote" / "Remote - India" stay.
+   * 'any': every remote part is kept (the 2026-10-24 behaviour). A CLOSED union matching the
+   * column's CHECK, never a boolean, so a third reading cannot be written.
+   */
+  remote_location_policy: 'unlocked_or_authorized' | 'any';
   created_at: string;
   updated_at: string;
 }

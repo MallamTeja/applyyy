@@ -84,6 +84,10 @@ import { settleModelFailures, withUsableJob, type MatcherFailureReason, type Mod
 import { nextSweepCursor, parseMatcherMode, PREGATE_ONLY_MAX_BATCH, selectScorer, withTechPreGate, type MatcherMode } from "./tech-pregate.ts";
 // The one mapper from a search_preferences row to the gate's config.
 import { toTechGatePreferences } from "../_shared/screen/tech-gate.ts";
+// The screener's own shape checks for the work-auth list and the remote policy (2026-11-04).
+import { countryList, remoteLocationPolicy } from "../_shared/screen/context.ts";
+// The shape check for filter_rules experience_ceiling config.max_years.
+import { experienceCeilingMaxYears } from "../_shared/screen/required-experience.ts";
 
 // Default batch limit for one invocation to preserve key pool quota.
 // Controls how many application rows are processed per function call.
@@ -312,8 +316,9 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   const { data: preferencesRow, error: preferencesError } = await db
     // Where stage 0's config lives.
     .from("search_preferences")
-    // Only the three lists the gate reads.
-    .select("titles, keywords, excluded_keywords")
+    // The three tech lists, plus the work-auth list and remote policy (2026-11-04). The policy
+    // column needs migration 20261104193000 applied FIRST, or this read fails and the run 503s.
+    .select("titles, keywords, excluded_keywords, work_authorized_countries, remote_location_policy")
     // One row per user; none is a normal state (an empty config).
     .maybeSingle();
   // A FAILED read stops the run before any Gemini call. Reading it as "no config" would
@@ -322,8 +327,38 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     // Same 503 shape as the master-profile read above.
     return await failRun(503, "preferences_unreadable", preferencesError.message);
   }
-  // A missing row and null columns both map to empty lists, exactly as the screener maps them.
-  const techGatePreferences = toTechGatePreferences(preferencesRow);
+  // The experience ceiling the cascade reads (filter_rules experience_ceiling config.max_years),
+  // for the pre-gate's re-check of re-run rows (Teja, 2026-11-04). RLS scopes it to this user.
+  const { data: ceilingRow, error: ceilingError } = await db
+    // Where the cascade's rules live.
+    .from("filter_rules")
+    // Only the config carries the threshold.
+    .select("config")
+    // The one rule this re-check mirrors.
+    .eq("rule_type", "experience_ceiling")
+    // A disabled rule does not run in the screener, so it must not run here either.
+    .eq("enabled", true)
+    // filter_rules is unique on (user_id, rule_type), so RLS returns at most one row.
+    .maybeSingle();
+  // A FAILED read stops the run, for the same reason as the preferences read above.
+  if (ceilingError) {
+    // Same 503 shape.
+    return await failRun(503, "filter_rules_unreadable", ceilingError.message);
+  }
+  // No row, or config {} without max_years, is null, which keeps every job, as the cascade does.
+  const experienceMaxYears = experienceCeilingMaxYears(ceilingRow?.config);
+  // A missing row and null columns map exactly as the screener maps them, through the screener's
+  // own shape checks, so the two stages read the same config the same way.
+  const preGatePreferences = {
+    // The three tech lists.
+    ...toTechGatePreferences(preferencesRow),
+    // null = never set, which keeps the work-auth gate open.
+    workAuthorizedCountries: countryList(preferencesRow?.work_authorized_countries),
+    // One of the two literals, or 'any' (fail-open).
+    remoteLocationPolicy: remoteLocationPolicy(preferencesRow?.remote_location_policy),
+    // The ceiling read above.
+    experienceMaxYears,
+  };
 
   // Resolve batch size limit from URL search parameters limit parameter string.
   // Clamps batch size within safe operating bounds.
@@ -444,9 +479,13 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // landed (step 1), or written after it so our stamped move was refused (step 2, PT409).
   // Neither scored nor failed by THIS run, so they get their own counter.
   let skippedStaleCount = 0;
-  // Rows the pre-gate dropped before scoring (excluded term, or no configured title/keyword
-  // matched). Apart from droppedCount, which counts score-floor drops that DID cost a call.
-  let techGateDroppedCount = 0;
+  // Rows the pre-gate dropped before scoring (excluded term, no configured title/keyword matched,
+  // and since 2026-11-04 work-auth and experience_ceiling too). Apart from droppedCount, which
+  // counts score-floor drops that DID cost a call. Renamed from techGateDroppedCount on 11-04,
+  // when it stopped meaning only the tech gate.
+  let preGateDroppedCount = 0;
+  // The same drops by drop_reason code, so a run summary says WHICH gate dropped them.
+  const preGateDroppedByCode: Record<string, number> = {};
   // Sweep only: rows the gate passed and left at passed_filters for a later scoring run.
   let preGateSurvivorCount = 0;
   // Initialize array holding individual application row processing failure records.
@@ -484,21 +523,44 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     withTechPreGate(
     db,
     // The config read above; re-judges the backlog against today's lists.
-    techGatePreferences,
-    // Title and body from the embedded job; null when the embed is missing, so the pre-gate
-    // reports it instead of judging an empty title as "matched nothing".
+    preGatePreferences,
+    // Title, body, location and stored years from the embedded job; null when the embed is
+    // missing, so the pre-gate reports it instead of judging an empty title as "matched nothing".
     (row) => {
-      // Same embedded-relation cast the scorer uses.
-      const job = row.jobs as unknown as { title?: string; description_raw?: string | null } | null;
+      // Same embedded-relation cast the scorer uses; the select at the batch query fetches all four.
+      const job = row.jobs as unknown as {
+        // The tech gate's main input.
+        title?: string;
+        // Read by all three stages (tech: first 300 chars; work-auth and experience: all of it).
+        description_raw?: string | null;
+        // The work-auth gate's main input.
+        location_raw?: string | null;
+        // Numeric arrives as a string from PostgREST; null on every live row today.
+        min_experience_years?: number | string | null;
+      } | null;
       // Missing data stays missing.
       if (job === null) return null;
-      // Only the two fields the gate reads.
-      return { title: job.title ?? "", descriptionRaw: job.description_raw ?? null };
+      // The four fields the three stages read; absent keys are stated as null (missing).
+      return {
+        // An absent title is "", exactly as before 2026-11-04.
+        title: job.title ?? "",
+        // Absent body: the gates read nothing, which keeps the row.
+        descriptionRaw: job.description_raw ?? null,
+        // Absent location: the work-auth gate keeps the row (missing is never a drop).
+        locationRaw: job.location_raw ?? null,
+        // Absent years: the experience twin falls back to the JD parser.
+        minExperienceYears: job.min_experience_years ?? null,
+      };
     },
     // Counted by kind, so each lands in the same place a scorer outcome of that kind would.
     (row, outcome) => {
       // A pre-gate drop moved the row: progress, not failure.
-      if (outcome.kind === "dropped") techGateDroppedCount += 1;
+      if (outcome.kind === "dropped") {
+        // The total the workflows account with.
+        preGateDroppedCount += 1;
+        // And the breakdown by gate.
+        preGateDroppedByCode[outcome.code] = (preGateDroppedByCode[outcome.code] ?? 0) + 1;
+      }
       // Another run got there first: the existing lost-race counter.
       else if (outcome.kind === "skipped_stale") skippedStaleCount += 1;
       // A failed drop write: recorded like any other row failure.
@@ -723,7 +785,7 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // A batch where every row was DROPPED moved every row, so it counts as progress, not failure.
   // Pre-gate drops moved their rows too, so they count as progress alongside the other two.
   // Rows this run moved to failed (W2) left the queue as well, so they count the same way.
-  const runStatus = (rows ?? []).length > 0 && scoredCount + droppedCount + techGateDroppedCount + failedReasons.length === 0 && failures.length > 0 ? "failed" : "succeeded";
+  const runStatus = (rows ?? []).length > 0 && scoredCount + droppedCount + preGateDroppedCount + failedReasons.length === 0 && failures.length > 0 ? "failed" : "succeeded";
   // The first few DISTINCT reasons, capped: ten rows failing the same way is one fact,
   // and error_detail is a health-page line, not a log. This is the FAILURE half only; a
   // deadline stop adds its own note below, so error_detail can be non-null with error_count 0.
@@ -740,7 +802,7 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // deadline note): visible on the health page, never counted in error_count.
   const staleNote = skippedStaleCount > 0 ? `skipped_stale: ${skippedStaleCount} row(s) lost a race to another run` : null;
   // Pre-gate drops are not errors either; a note, so Health shows the backlog being pruned.
-  const preGateNote = techGateDroppedCount > 0 ? `tech_gate_dropped: ${techGateDroppedCount} row(s) dropped by the pre-gate before scoring` : null;
+  const preGateNote = preGateDroppedCount > 0 ? `pre-gate dropped ${preGateDroppedCount} row(s) before scoring (${JSON.stringify(preGateDroppedByCode)})` : null;
   // A sweep says so on Health, with its survivors, so it is never mistaken for a scoring run
   // that scored nothing.
   const sweepNote = mode.kind === "pregate_only" ? `pregate_only sweep: ${preGateSurvivorCount} survivor(s) left at passed_filters` : null;
@@ -794,8 +856,14 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     dropped: droppedCount,
     // Rows another run took first; not failures, and not scored by this run.
     skipped_stale: skippedStaleCount,
-    // Rows the pre-gate dropped before scoring, at zero Gemini cost.
-    tech_gate_dropped: techGateDroppedCount,
+    // Rows the pre-gate dropped before scoring, at zero Gemini cost: ALL pre-gate stages.
+    // LEGACY NAME kept on purpose: postscreen-drain.yml:281 and pregate-sweep.yml:171/226 require
+    // this key and sum it into their row accounting, so renaming it here alone would break both.
+    // ponytail: rename to pre_gate_dropped together with both workflows in one change.
+    tech_gate_dropped: preGateDroppedCount,
+    // The same drops by drop_reason code (tech_gate, tech_gate_unclassified, work_auth,
+    // experience_ceiling), so a reader is never told a work-auth drop was a title problem.
+    pre_gate_dropped_by_code: preGateDroppedByCode,
     // Rows moved to failed (W2): an unusable job, or an answer that could never be read.
     failed: failedReasons.length,
     // Which run this was; a sweep also reports its survivors and where to resume.
