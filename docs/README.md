@@ -29,7 +29,7 @@ No row here carries a count: each living doc names the command that regenerates 
 
 | Folder | What lives there |
 |---|---|
-| [handoff/](handoff/) | Orchestrator transfer notes, including `RESUME-HERE.md`; each is true as of its date |
+| [handoff/](handoff/) | Orchestrator transfer notes; each is true as of its date. Resume from [2026-11-04-2100-orchestrator-handoff.md](handoff/2026-11-04-2100-orchestrator-handoff.md), with open work in [2026-11-04-2100-pending-tasks.md](handoff/2026-11-04-2100-pending-tasks.md) |
 | [status/](status/) | Point-in-time status snapshots, peer assignments, post-mortems |
 | [audit/](audit/) | Verification passes — claims checked against code and the live DB at a given HEAD |
 | [security/](security/) | Dependency-advisory plans and re-measures, identity-gap proposals |
