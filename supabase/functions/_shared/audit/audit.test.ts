@@ -838,3 +838,24 @@ test("bulletGroundingGaps passes a rewording that stays inside the master and th
   // Grounded: nothing to flag.
   assert.deepEqual(gaps, { metrics: [], terms: [] });
 });
+
+// --- Ground truth is the pinned master, never the resume under audit (2026-11-04) ------------
+// `master_text` rides inside the tailored profile for the §15 diff view. The detector used to
+// prefer it over the master's own bullet, so a profile whose copy agreed with its fabrication
+// audited clean (probe on live rows, 2026-11-04: inflated metric + matching master_text -> 0 findings).
+test("detectAuditFindings ignores a master_text carried in the resume", () => {
+  // Construct clean resume fixture object
+  const resume = createCleanResume();
+  // The same inflation the "flags invented metric" test catches: 500 users becomes 5000.
+  const inflated = "Built a REST API with Express and Node.js for a college event portal, handling 5000 users";
+  // The claim itself.
+  resume.experience[0]!.bullets[0]!.text = inflated;
+  // And the carried copy made to agree with it: the only thing that changed vs that test.
+  resume.experience[0]!.bullets[0]!.master_text = inflated;
+  // Audited against the master profile, which still says 500.
+  const outcome = auditApplication(TEST_MASTER, resume);
+  // The carried copy must not launder the claim.
+  assert.equal(outcome.status, "audit_flagged");
+  // Named for the metric, as the master is what it was compared against.
+  assert.ok(outcome.findings.some((f) => f.kind === "unfaithful_rewording" && f.reason.includes("5000")), JSON.stringify(outcome.findings));
+});

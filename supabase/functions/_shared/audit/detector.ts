@@ -437,8 +437,8 @@ export function detectAuditFindings(
             });
           }
 
-          // Content & Metric Fidelity Checks against master bullet text
-          const masterText = bullet.master_text ?? masterBulletInfo.bullet.text;
+          // Fidelity is checked against the PINNED master's bullet only, never the resume's own master_text copy (it lives in the audited object, so it could agree with a fabrication; 2026-11-04).
+          const masterText = masterBulletInfo.bullet.text;
 
           // Rule 5 in its one shared definition (also run by the review page's AI box).
           const gaps = bulletGroundingGaps(bullet.text, masterText, index.skillTokens);
