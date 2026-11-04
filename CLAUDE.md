@@ -178,8 +178,11 @@ same `authenticated` app user, so `auth.uid()` cannot tell a browser from an age
 discriminator is the `x-applyy-agent-key` header, checked by `applyy_internal.agent_key_state()`
 inside `advance_application_status`, `claim_applications`, `release_application_claim` and
 `sweep_stale_claims`. **The key IS seeded** (since 2026-10-09 ~13:40 IST), so a request without the
-right key is refused (42501). An EMPTY key table would only warn, and `delete from
-applyy_internal.agent_key` is the deliberate kill switch that reopens that hole. The
+right key is refused (42501). **Fail-closed since 2026-11-04 20:28 IST** (migration
+`20261102210000`): an EMPTY key table now LOCKS every machine agent out
+(`agent_key_state()` = `unconfigured_locked`). Running agents without the key takes two
+deliberate statements: delete the key AND set `applyy_internal.agent_key_emergency.allow_unkeyed_agents
+= true`. The exact on/off SQL is in that migration's header. Never "fix" a lockout by deleting the key. The
 `answer_bank.attested_by_human` trigger reads the same state: "no key header" = human. Remaining
 gap: any holder of Teja's JWT who omits the header is treated as human. `anon` has no EXECUTE on these. Re-check:
 `select oid::regprocedure, has_function_privilege('anon',oid,'execute'), position('agent_key_state' in prosrc)>0 from pg_proc where proname in ('advance_application_status','sweep_stale_claims','claim_applications','release_application_claim')` plus `select count(*) from applyy_internal.agent_key` (expect 1).
