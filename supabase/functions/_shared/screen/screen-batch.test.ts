@@ -470,3 +470,61 @@ test("work auth: an unset list passes a US on-site posting and warns", () => {
   // The warning names the unset column.
   assert.match(planned.warnings.join(" "), /work_authorized_countries/);
 });
+
+// --- missing description (2026-11-05) ----------------------------------------------
+
+// THE INCIDENT: the Workday adapter declares `descriptionRaw: null` for every posting (its list
+// endpoint carries none), so 5612 of 5612 Workday jobs were saved with no description. The
+// screener passed 459 of them, judging the experience and JD-text work-auth stages on nothing,
+// and the matcher then failed 391 as `missing_description`. That was a wasted queue slot each,
+// and a sweep log that never said so. A job with no text to judge is now refused at birth.
+test("a job with no description is born dropped_filter missing_description, never passed_filters", () => {
+  const planned = planScreenedApplications(
+    // A technical title, so the tech gate passes it and only the description can decide.
+    [{ jobId: "wd-1", row: { ...BASE_ROW, title: "Software Engineer", description_raw: null } }],
+    // No cascade rules: nothing else could drop it.
+    [],
+    BASE_CONTEXT,
+    // A configured gate, so "passed the tech gate" is a real verdict and not an open gate.
+    TECH_PREFS,
+  );
+  // Born dropped, under its own code.
+  assert.deepEqual(planned.inserts, [{ job_id: "wd-1", status: "dropped_filter", drop_reason: "missing_description" }]);
+  // The run summary names the same code, so the scout's log can count it.
+  assert.equal(planned.dropped[0]!.ruleType, "missing_description");
+  // Counters agree with the rows.
+  assert.equal(planned.passedCount, 0);
+});
+
+// The shape that passes is a non-empty string after trimming. A lenient truthiness read would
+// let "   " through, and an absent key (a select that lost the column) is no text either.
+test("an empty, whitespace-only or absent description is blank too", () => {
+  // Each blank form, built from the base row.
+  const blanks: JobInsert[] = [
+    // The empty string.
+    { ...BASE_ROW, fingerprint: "fp-empty", description_raw: "" },
+    // Whitespace only: spaces, a tab, a newline.
+    { ...BASE_ROW, fingerprint: "fp-space", description_raw: " \t\n " },
+    // The key missing altogether.
+    (({ description_raw: _omitted, ...rest }) => ({ ...rest, fingerprint: "fp-absent" }))(BASE_ROW) as JobInsert,
+  ];
+  // One batch, so a per-entry bug cannot hide behind a single-entry test.
+  const planned = planScreenedApplications(blanks.map((row, i) => ({ jobId: `blank-${i}`, row })), [], BASE_CONTEXT, OPEN_PREFS);
+  // Every one dropped for the description.
+  assert.deepEqual(planned.inserts.map((row) => row.drop_reason), ["missing_description", "missing_description", "missing_description"]);
+});
+
+// Order matters for two reasons. The tech gate is cheaper, and its code keeps the dashboard's
+// title-junk count honest (3203 Workday rows were tech_gate drops). And the Workday detail
+// fetch runs only for title survivors, so a title drop must never become a description drop.
+test("missing description: the tech gate still runs first", () => {
+  const planned = planScreenedApplications(
+    // A title the gate excludes, and no description.
+    [{ jobId: "wd-2", row: { ...BASE_ROW, title: "Enterprise Sales Executive", description_raw: null } }],
+    [],
+    BASE_CONTEXT,
+    TECH_PREFS,
+  );
+  // The title verdict wins.
+  assert.equal(planned.inserts[0]!.drop_reason, "tech_gate");
+});

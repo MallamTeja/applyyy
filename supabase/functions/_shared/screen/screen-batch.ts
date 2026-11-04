@@ -219,6 +219,23 @@ export function planScreenedApplications(
       continue;
     }
 
+    // STAGE 0a: no description, no verdict. Every stage after this one reads the JD: the
+    // work-auth gate's text signals, the experience parser in toScreenableJob, and then the
+    // matcher, which fails a blank JD as `missing_description` anyway. Judged on nothing, those
+    // stages PASS, so a blank JD became "screened clean" (2026-11-04: 459 Workday rows passed,
+    // 391 later failed). The shape is checked, never truthiness: only a string with
+    // non-whitespace text counts. After the tech gate, so a title drop keeps its own code.
+    const description = entry.row.description_raw;
+    // Null, absent, "" and whitespace-only are all blank.
+    if (typeof description !== "string" || description.trim().length === 0) {
+      // drop_reason names the stage, like the two gates around it.
+      inserts.push({ job_id: entry.jobId, status: "dropped_filter", drop_reason: "missing_description" });
+      // The prose says what was missing, for the run summary.
+      dropped.push({ jobId: entry.jobId, title: entry.row.title, ruleType: "missing_description", reason: "the posting has no description to screen" });
+      // Nothing after a drop runs.
+      continue;
+    }
+
     // STAGE 0b: an on-site/hybrid job outside the user's work-authorised countries, or a JD that
     // legally requires US status the user does not have.
     // After the tech gate because it reads the whole description (dearer than a title

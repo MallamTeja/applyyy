@@ -4,6 +4,10 @@
 # (set 2026-09-11 for apply.yml), not on the operator's PC; same reason run-one.yml exists.
 # The sweep DROPS rows (tech_gate_dropped) and drops are one-way, so every abort below
 # fails CLOSED: any response we cannot read exactly stops the run rather than paging on.
+# The sweep can also move rows to `failed` (an unusable job, e.g. no description). Those
+# are printed as failed= with the matcher's reasons, and do not block CLEAN: a failed row is
+# terminal, so a retry pass cannot change it. On 2026-11-04 the log said nothing while 358
+# rows failed, which is why every page now states the count.
 name: applyy pre-gate sweep
 
 # Manual trigger ONLY. Teja ruled no scheduler for this (2026-10-09): a sweep that drops
@@ -152,7 +156,7 @@ jobs:
           console.log(`::add-mask::${token}`);
 
           // Strict shape check of one page (CLAUDE.md §6: never ask a lenient parser whether
-          // it gave up). Returns the page or aborts. Field types per matcher index.ts:688-724.
+          // it gave up). Returns the page or aborts. Field types per matcher index.ts:838-882.
           function readPage(httpStatus, text) {
             // Any non-2xx stops the run: 400 bad params, 401/403 auth, 409, 503, 500.
             if (httpStatus < 200 || httpStatus > 299) abort(`matcher HTTP ${httpStatus}: ${text.slice(0, 200)}`);
@@ -167,10 +171,19 @@ jobs:
             if (body.status === 'skipped_disabled') abort(`matcher is disabled: ${body.detail ?? ''}`);
             // done must be a real boolean; null or absent is "unknown", which stops the run.
             if (typeof body.done !== 'boolean') abort('done is missing or not a boolean');
-            // Both counters must be non-negative integers.
-            for (const key of ['unjudged_errors', 'gemini_calls', 'rows_in', 'tech_gate_dropped', 'pregate_survivors']) {
+            // Every counter must be a non-negative integer. `failed` is among them: a body
+            // without it must stop the run, never be read as "nothing failed".
+            for (const key of ['unjudged_errors', 'gemini_calls', 'rows_in', 'tech_gate_dropped', 'pregate_survivors', 'failed']) {
               // Number.isInteger refuses NaN, strings and floats in one check.
               if (!Number.isInteger(body[key]) || body[key] < 0) abort(`${key} is missing or not a non-negative integer`);
+            }
+            // The pre-gate drops by drop_reason code (index.ts:866): a plain object whose every
+            // value is a non-negative integer. Absent, null, an array or a text count all stop.
+            const byCode = body.pre_gate_dropped_by_code;
+            // typeof null and typeof [] are both 'object', so both are refused by name.
+            if (byCode === null || typeof byCode !== 'object' || Array.isArray(byCode) || !Object.values(byCode).every((n) => Number.isInteger(n) && n >= 0)) {
+              // Named so the operator can see which field broke.
+              abort('pre_gate_dropped_by_code is not an object of non-negative integers');
             }
             // The cursor is null or a UUID; anything else would be sent back as after_id.
             if (body.next_after_id !== null && !(typeof body.next_after_id === 'string' && UUID.test(body.next_after_id))) {
@@ -189,6 +202,12 @@ jobs:
           let totalDropped = 0;
           // Rows processed across the run, for the summary.
           let totalRowsIn = 0;
+          // Rows the matcher moved to failed across the run, for the summary.
+          let totalFailed = 0;
+          // The pre-gate drops by code across the run, merged key by key.
+          const totalByCode = {};
+          // A by-code map as `code:n,code:n`, sorted so the log line is stable; 'none' when empty.
+          const byCodeText = (map) => Object.keys(map).sort().map((code) => `${code}:${map[code]}`).join(',') || 'none';
 
           // One pass is a walk from the start of the backlog to done (or to a restart).
           for (let pass = 1; pass <= PASS_CAP; pass += 1) {
@@ -226,8 +245,15 @@ jobs:
               totalDropped += page.tech_gate_dropped;
               // Same.
               totalRowsIn += page.rows_in;
+              // Same; failed rows never enter passErrors, because a retry cannot change them.
+              totalFailed += page.failed;
+              // Each code's count added to the run's, so the summary splits drops by cause too.
+              for (const [code, n] of Object.entries(page.pre_gate_dropped_by_code)) totalByCode[code] = (totalByCode[code] ?? 0) + n;
               // One line per page in the log: counts and cursor only, never a secret.
-              console.log(`pass ${pass} page ${pages}: after_id=${afterId ?? '-'} rows_in=${page.rows_in} dropped=${page.tech_gate_dropped} survivors=${page.pregate_survivors} unjudged_errors=${page.unjudged_errors} gemini_calls=${page.gemini_calls} status=${page.status} done=${page.done} next_after_id=${page.next_after_id ?? 'null'}`);
+              console.log(`pass ${pass} page ${pages}: after_id=${afterId ?? '-'} rows_in=${page.rows_in} dropped=${page.tech_gate_dropped} failed=${page.failed} by_code=${byCodeText(page.pre_gate_dropped_by_code)} survivors=${page.pregate_survivors} unjudged_errors=${page.unjudged_errors} gemini_calls=${page.gemini_calls} status=${page.status} done=${page.done} next_after_id=${page.next_after_id ?? 'null'}`);
+              // The count says how many failed; the matcher's error_detail says why (index.ts:811
+              // lists the distinct reasons). Bounded, since it is free text from the response.
+              if (page.failed > 0) console.log(`pass ${pass} page ${pages} failed_detail: ${String(page.error_detail ?? 'none').slice(0, 300)}`);
 
               // End of the backlog with a clean last page: the pass is over.
               if (page.done) { passDone = true; break; }
@@ -244,7 +270,7 @@ jobs:
             // The only success: a pass that reached done with zero errors across all its pages.
             if (passDone && passErrors === 0) {
               // The summary line the orchestrator reads.
-              console.log(`CLEAN: pass ${pass} ended done=true with 0 unjudged_errors; pages=${pages} rows_in=${totalRowsIn} dropped=${totalDropped}`);
+              console.log(`CLEAN: pass ${pass} ended done=true with 0 unjudged_errors; pages=${pages} rows_in=${totalRowsIn} dropped=${totalDropped} failed=${totalFailed} by_code=${byCodeText(totalByCode)}`);
               // Green.
               process.exit(0);
             }
@@ -253,7 +279,7 @@ jobs:
           }
 
           // Every pass used and none was clean: red, so a human looks at the errors.
-          abort(`pass cap ${PASS_CAP} reached without a clean pass; pages=${pages} dropped=${totalDropped}`);
+          abort(`pass cap ${PASS_CAP} reached without a clean pass; pages=${pages} dropped=${totalDropped} failed=${totalFailed}`);
           JS
         # Credentials exist ONLY for this step: the same secret names run-one.yml uses.
         env:
