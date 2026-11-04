@@ -44,6 +44,14 @@ export const OPERATIONS_SECTION: ConsoleSection = {
       lede: 'Status tracking across active and submitted applications.',
     },
     {
+      /* Every application past a confirmed submission (2026-11-04). Right after Pipeline because it
+         is where a pipeline row goes once applied. Without this entry the header reads "Unknown screen"
+         and the rail has no way in: the path must match App.tsx's <Route path="applied">. */
+      path: 'applied',
+      label: 'Applied jobs',
+      lede: 'Every submitted application: its stage, the resume that was sent, and what has happened since.',
+    },
+    {
       path: 'discovered',
       label: 'Discovered jobs',
       lede: 'Explore discovered jobs across watched ATS career pages and hiring feeds.',

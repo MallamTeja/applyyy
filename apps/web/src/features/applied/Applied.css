@@ -1,0 +1,238 @@
+/* Applied jobs page (2026-11-04). Semantic tokens only (they carry light-dark()), so both themes and
+   the default "system" preference work with no [data-theme] rule (docs/ui/theming-convention.md).
+   Cards, not a table: at 390px a table pushes the stage buttons off-screen into a sideways scroll. */
+
+/* The toolbar: search, sort and stage side by side, wrapping on a phone. */
+.applied__toolbar {
+  /* One row that wraps instead of overflowing. */
+  display: flex;
+  /* Wraps at narrow widths. */
+  flex-wrap: wrap;
+  /* Controls line up on their bottom edge, under labels of one height. */
+  align-items: flex-end;
+  /* Space between the controls. */
+  gap: var(--gap-3);
+  /* Separates the toolbar from the page lede above. */
+  margin-top: var(--gap-5);
+}
+
+/* The search grows to take the spare width; the two selects keep their natural size. */
+.applied__search {
+  /* Grows first. */
+  flex: 1 1 16rem;
+  /* Never wider than its container on a phone. */
+  min-width: 0;
+}
+
+/* Status lines: loading, empty, counts, the cap notice. */
+.applied__note {
+  /* Space above, so each note sits apart from what precedes it. */
+  margin-top: var(--gap-3);
+  /* Quieter than row text. */
+  color: var(--text-secondary);
+  /* The app's small size. */
+  font-size: var(--size-sm);
+}
+
+/* The cards. */
+.applied__list {
+  /* No bullets: each card is its own box. */
+  list-style: none;
+  /* The list's own indent removed, so cards align with the toolbar. */
+  padding: 0;
+  /* Stacked cards with breathing room. */
+  display: flex;
+  /* One card per line. */
+  flex-direction: column;
+  /* Space between cards. */
+  gap: var(--gap-3);
+  /* Separates the list from the count line. */
+  margin-top: var(--gap-3);
+}
+
+/* One application. */
+.applied-row {
+  /* Inner space. */
+  padding: var(--gap-4);
+  /* The app's card surface. */
+  background: var(--sheet);
+  /* A quiet edge. */
+  border: 1px solid var(--rule);
+  /* The app's card radius. */
+  border-radius: var(--radius-sheet);
+  /* Pieces stacked with even spacing. */
+  display: flex;
+  /* One piece per line. */
+  flex-direction: column;
+  /* Space between pieces. */
+  gap: var(--gap-2);
+  /* Long untrusted words (a URL-like title) wrap instead of widening the page. */
+  overflow-wrap: anywhere;
+}
+
+/* Title and chip on one line, the chip wrapping under on a phone. */
+.applied-row__head {
+  /* Side by side. */
+  display: flex;
+  /* Wraps when the title is long. */
+  flex-wrap: wrap;
+  /* Centre the chip on the title's line. */
+  align-items: center;
+  /* Space between title and chip. */
+  gap: var(--gap-2);
+}
+
+/* The job title: the card's heading. */
+.applied-row__title {
+  /* The app's card-header size and weight. */
+  font-size: var(--font-size-card-header);
+  /* Card-header weight token. */
+  font-weight: var(--font-weight-card-header);
+  /* Primary ink. */
+  color: var(--text-primary);
+}
+
+/* Company and places. */
+.applied-row__where {
+  /* Secondary ink. */
+  color: var(--text-secondary);
+}
+
+/* Applied date and day count. */
+.applied-row__meta {
+  /* Muted: supporting facts. */
+  color: var(--text-muted);
+  /* The small size. */
+  font-size: var(--size-sm);
+}
+
+/* The posting link: the console's link colour. */
+.applied-row__link {
+  /* The interactive accent. */
+  color: var(--accent);
+  /* Shrinks to its text rather than spanning the card. */
+  align-self: flex-start;
+}
+
+/* Visible focus on the link, the details summaries and the buttons inside a card. */
+.applied-row a:focus-visible,
+.applied-row summary:focus-visible,
+.applied-row button:focus-visible {
+  /* The accent ring the app's controls use. */
+  outline: 2px solid var(--accent);
+  /* Off the edge, so it is not hidden by the border. */
+  outline-offset: 2px;
+}
+
+/* Documents and stage moves: rows of controls that wrap. */
+.applied-row__docs,
+.applied-row__move-buttons {
+  /* Side by side. */
+  display: flex;
+  /* Wraps on a phone. */
+  flex-wrap: wrap;
+  /* Text and buttons share a line. */
+  align-items: center;
+  /* Space between items. */
+  gap: var(--gap-2);
+}
+
+/* One download and its error. */
+.applied-row__doc {
+  /* Button then error, inline. */
+  display: inline-flex;
+  /* Wraps the error under the button when narrow. */
+  flex-wrap: wrap;
+  /* Aligned on the text line. */
+  align-items: center;
+  /* Space between button and error. */
+  gap: var(--gap-1);
+}
+
+/* The moves block: the confirm cell, then its explanation and error. */
+.applied-row__moves {
+  /* Stacked. */
+  display: flex;
+  /* One piece per line. */
+  flex-direction: column;
+  /* Space between pieces. */
+  gap: var(--gap-1);
+}
+
+/* Explanations: no file, no moves, no history, no cover letter. */
+.applied-row__muted {
+  /* Muted ink. */
+  color: var(--text-muted);
+  /* The small size. */
+  font-size: var(--size-sm);
+}
+
+/* A refused move or a failed download: "needs a human", not "fabricated". */
+.applied-row__error {
+  /* The needs-a-human token. */
+  color: var(--signal);
+  /* The small size. */
+  font-size: var(--size-sm);
+}
+
+/* The rebuild disclosure and the timeline disclosure. */
+.applied-row__rebuild,
+.applied-row__timeline {
+  /* Full card width when open. */
+  width: 100%;
+}
+
+/* The disclosure triangles' text, as a quiet control. */
+.applied-row__rebuild > summary,
+.applied-row__timeline > summary {
+  /* A clickable cursor; it is a control. */
+  cursor: pointer;
+  /* Secondary ink. */
+  color: var(--text-secondary);
+  /* The small size. */
+  font-size: var(--size-sm);
+}
+
+/* The rebuilt preview scrolls inside its own box, so the page never scrolls sideways. */
+.applied-row__preview {
+  /* Its own horizontal scroll. */
+  overflow-x: auto;
+  /* Space under the summary. */
+  margin-top: var(--gap-2);
+}
+
+/* The timeline lines. */
+.applied-row__events {
+  /* Plain list: the times already order it. */
+  list-style: none;
+  /* Indent removed. */
+  padding: 0;
+  /* Space under the summary. */
+  margin-top: var(--gap-2);
+  /* Stacked lines. */
+  display: flex;
+  /* One per line. */
+  flex-direction: column;
+  /* Space between lines. */
+  gap: var(--gap-1);
+  /* The small size. */
+  font-size: var(--size-sm);
+}
+
+/* The time in each timeline line. */
+.applied-row__when {
+  /* Muted, tabular, so the times align as a column. */
+  color: var(--text-muted);
+  /* Digits of equal width. */
+  font-variant-numeric: tabular-nums;
+}
+
+/* Interview prep, set apart from the row above it. */
+.applied-row__prep {
+  /* Space above. */
+  margin-top: var(--gap-2);
+  /* Inner space. */
+  padding-top: var(--gap-2);
+  /* A rule separates it from the row's own facts. */
+  border-top: 1px solid var(--rule);
+}

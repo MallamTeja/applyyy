@@ -18,6 +18,8 @@ import { HealthPage } from './features/health/HealthPage';
 // The manual-apply kits: jobs Teja applies to by hand, with the form pre-answered.
 import { ManualApplyPage } from './features/manual-apply/ManualApplyPage';
 import { EmailMonitoringPage } from './features/emails/EmailMonitoringPage';
+// Every application past a confirmed submission, with its stage and what was sent (2026-11-04).
+import { AppliedJobsPage } from './features/applied/AppliedJobsPage';
 
 /* Import the ReferralOutreachPage for cold outreach routing. */
 import { ReferralOutreachPage } from './features/referral/ReferralOutreachPage';
@@ -79,6 +81,8 @@ export function App(): ReactElement {
 
           <Route path="approvals" element={guarded(<ApprovalQueuePage />)} />
           <Route path="pipeline" element={guarded(<PipelinePage />)} />
+          {/* Same path string as the PageHeader lookup, so the route and its heading cannot disagree. */}
+          <Route path="applied" element={guarded(<AppliedJobsPage />)} />
           <Route path="discovered" element={guarded(<DiscoveredJobsPage />)} />
           {/* Same path string as routes.ts, so the rail item and the route cannot disagree. */}
           <Route path="manual-apply" element={guarded(<ManualApplyPage />)} />
