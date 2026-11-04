@@ -81,6 +81,11 @@ that one function's deploys and says nothing about age.
 
 - **Deploy order:** code that CALLS a new DB parameter ships AFTER the migration; code a
   migration ENFORCES ships BEFORE enforcement is switched on.
+  For an edge function and the web: the CONSUMER of a new response shape ships before the
+  PRODUCER emits it. Don't assume "server first": the web's `aiEdit.ts` refuses a whole AI answer
+  over one unknown op kind, so a new resume-assist op would break every open tab
+  (2026-11-04, `remove_skill`/`remove_entry`). Check which side is the strict reader before you
+  pick the order.
 - A leftover locked dir at `%TEMP%\applyyy-deploy` (unregistered worktree) can block reusing
   that name — pick a fresh path if `worktree add` refuses.
 - PowerShell 5.1: no `*> $null` on `git worktree add` inside a conditional — it sets `$?`
