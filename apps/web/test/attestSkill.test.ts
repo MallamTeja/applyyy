@@ -223,6 +223,20 @@ describe('attestSkill: one click puts the skill in the master, then on the resum
     assert.equal(written.master_version, 4);
   });
 
+  it('refuses a skill the master already holds under another case ("ai" held, "AI" attested): no master version, no row write', async () => {
+    // Latest master v4 = v3 + "ai" (lower case), as a hand edit on the Master page would store it.
+    const v4 = { ...clone(MASTER_V3), skills: [...MASTER_V3.skills, { id: 'skill-ai', name: 'ai', category: 'AI' }] };
+    // The operator vouches for "AI".
+    const { done, calls } = run({ latest: { data: { profile: v4, version: 4 }, error: null } }, { keyword: 'AI', category: 'AI' });
+    const out = await done;
+    // Refused, naming the master's own spelling and group.
+    assert.deepEqual(out, { ok: false, message: '"AI" is already in your master profile as "ai" (AI); nothing was added.', masterInserted: false });
+    // No duplicate master version: the live v11/v14 bug.
+    assert.equal(callsOf(calls, 'master_profiles', 'insert').length, 0);
+    // And the row is untouched.
+    assert.equal(callsOf(calls, 'applications', 'update').length, 0);
+  });
+
   it('refuses when the latest master would change a claim the tailor made, and writes nothing', async () => {
     // Latest master reworded a bullet the resume carries: a re-pin would silently change that line.
     const changed = clone(MASTER_V3);

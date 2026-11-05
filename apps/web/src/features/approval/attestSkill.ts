@@ -17,6 +17,8 @@ import { loadCurrentMasterProfile, storeMasterProfile, storeRefusalMessage } fro
 // The ingest gate: fills the nullable keys the table's check constraint demands, and refuses a
 // malformed or duplicate-id profile before it can become a version.
 import { checkMasterProfile } from '../settings/masterIngest';
+// The Master page's own name match (bf's e136e52), so both add paths refuse the same duplicates.
+import { masterSkillNamed } from '../settings/masterAdd';
 // The pure edits: the shape check, the rebuild from tailor_refs, the existing add/match rules.
 import { addableSkillFor, addSkill, deepEqual, masterFromRow, rebuildOriginal, skillTokens } from './tailoredEdits';
 // The write boundary every resume edit goes through, now able to move the pin with the resume.
@@ -145,6 +147,15 @@ export async function attestSkill(client: Client, args: AttestArgs): Promise<Att
   /* Another row may already have attested this skill: reuse that master skill by its id rather than
      inserting a duplicate version. Same matching rule the existing "＋ Add" offer uses. */
   const existing = addableSkillFor(name, args.current, latestMaster);
+  /* Not addable, yet the master already holds the name (2026-11-05, with bf's e136e52): appending it
+     would store a duplicate master version (live v11/v14 held a second and third "Testing"). Refused
+     with the master's own spelling and group; nothing is written. */
+  const held = existing === null ? masterSkillNamed(latestMaster, name) : undefined;
+  // Already in the master under this name (any case): say where, add nothing.
+  if (held !== undefined) {
+    // No insert ran, so masterInserted is false.
+    return { ok: false, message: `"${name}" is already in your master profile as "${held.name}" (${held.category}); nothing was added.`, masterInserted: false };
+  }
   // The master skill that will go on the resume.
   const skillRef = existing?.ref ?? args.newSkillId;
   // The master the row will be pinned to, before the database assigns a version.
