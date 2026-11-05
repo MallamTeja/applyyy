@@ -36,7 +36,7 @@ import { supabase } from '../../data/supabase';
 import { CompanySuggestionsModal } from './CompanySuggestionsModal';
 /* The dropdown offers only providers the Scout polls; the list and its registry parity
    test live in companyCatalog.ts, because node --test cannot import this .tsx (W24). */
-// ADDABLE, not SELECTABLE: SmartRecruiters is still polled but never added (robots ruling 2026-11-01).
+// ADDABLE, not SELECTABLE: "may be added" is its own question (SmartRecruiters, off since the robots ruling 2026-11-01, was the case).
 import { ADDABLE_ATS_PROVIDERS, isAddableCompany, type SuggestedCompany } from './companyCatalog';
 import { DiscoveryModal } from '../pipeline/DiscoveryModal';
 

@@ -1,9 +1,9 @@
-/* SmartRecruiters is not ADDABLE (robots ruling 2026-11-01: never seed SR boards), but it stays
- * SELECTABLE: the scout registry still polls existing SR rows, and companyCatalog.test.ts holds
- * SELECTABLE_ATS_PROVIDERS equal to that registry. These tests pin the split:
+/* SmartRecruiters is fully OFF (robots ruling 2026-11-01): never added, and since 2026-11-06 (fc5097f
+ * unregistered its scout adapter) never polled, so it left SELECTABLE_ATS_PROVIDERS too, which
+ * companyCatalog.test.ts holds equal to the registry. These tests pin it:
  *   1. ADDABLE_ATS_PROVIDERS is the exact allowed set (a positive shape, so ANY provider that
  *      creeps back in goes red, not only SR).
- *   2. No curated SR suggestion is addable, and every other selectable one still is.
+ *   2. The curated catalog holds no SR board at all (its 7 rows left with the adapter).
  *   3. The Watchlist add-board <select> and the suggestions modal consume the addable list
  *      (source shape with asserted anchors, comments stripped; WatchlistPage cannot render
  *      statically here because it imports the live Supabase client).
@@ -54,21 +54,17 @@ before(async () => {
 test('ADDABLE_ATS_PROVIDERS is exactly greenhouse, lever, ashby, workday (no smartrecruiters)', () => {
   // The exact set, in the order the dropdown shows it.
   assert.deepEqual([...ADDABLE_ATS_PROVIDERS], ['greenhouse', 'lever', 'ashby', 'workday']);
-  // And SR is still selectable (polled), so old rows keep rendering and polling.
-  assert.ok((SELECTABLE_ATS_PROVIDERS as readonly string[]).includes('smartrecruiters'));
+  // And the polled list is the same exact set: SR is no longer polled either (2026-11-06).
+  assert.deepEqual([...SELECTABLE_ATS_PROVIDERS], ['greenhouse', 'lever', 'ashby', 'workday']);
 });
 
-test('no curated smartrecruiters suggestion is addable; every other selectable one is', () => {
-  // The SR entries; asserted non-empty so the check below cannot pass over nothing.
-  const sr = CURATED_COMPANIES.filter((c) => c.atsProvider === 'smartrecruiters');
-  // The catalog holds SR boards (7 on 2026-11-05); zero would make this test vacuous.
-  assert.ok(sr.length > 0, 'expected curated smartrecruiters entries to exist');
-  // None of them may be offered for adding.
-  assert.deepEqual(sr.filter(isAddableCompany), []);
-  // Every non-SR entry stays addable, so the filter removed only SR.
-  const rest = CURATED_COMPANIES.filter((c) => c.atsProvider !== 'smartrecruiters');
-  // Same length after the filter means nothing else was cut.
-  assert.equal(rest.filter(isAddableCompany).length, rest.length);
+test('the curated catalog holds no smartrecruiters board, and every curated board is addable', () => {
+  // The catalog is non-empty, so "every entry" below is not checked over nothing.
+  assert.ok(CURATED_COMPANIES.length > 0, 'expected curated companies');
+  // No SR row survives: its 7 boards (Canva, PhonePe, ...) left with the adapter on 2026-11-06.
+  assert.deepEqual(CURATED_COMPANIES.filter((c) => (c.atsProvider as string) === 'smartrecruiters').map((c) => c.name), []);
+  // Every remaining suggestion can be added, so no dead, never-offered row is left behind.
+  assert.equal(CURATED_COMPANIES.filter(isAddableCompany).length, CURATED_COMPANIES.length);
 });
 
 test('the Watchlist add-board select maps ADDABLE_ATS_PROVIDERS, never SELECTABLE', () => {

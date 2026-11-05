@@ -2,7 +2,7 @@
  *
  * WHAT THESE PROTECT:
  *   1. Curated companies invariant: Every entry must have a valid ATS provider
- *      ('greenhouse', 'lever', 'ashby', 'smartrecruiters', 'workable'), non-empty
+ *      (one the scout polls: SELECTABLE_ATS_PROVIDERS), non-empty
  *      board slug, domain, location, category (GCC, Mid-Scale MNC, Startup / Unicorn, Service-Based),
  *      and well-formed cooldown periods.
  *   2. Filtering correctness: Text search, location filtering, category filtering,
@@ -68,8 +68,8 @@ test('curated companies catalog has all expected baseline employers across 4 cat
     'Zepto',
     'CleverTap',
     'Thoughtworks',
-    'Nagarro',
-    'Persistent Systems',
+    // Nagarro and Persistent Systems left on 2026-11-06: their only boards were SmartRecruiters,
+    // which the robots ruling (2026-11-01) turns fully off, so a catalog row for them is a dead add.
     'Infosys',
   ];
 

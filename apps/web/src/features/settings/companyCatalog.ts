@@ -59,12 +59,13 @@ export type CompanyCategory =
  * selected, so it polls nothing, forever, and nothing reports it (W24, 2026-11-02).
  * `workable` is REMOVED for that reason: its adapter is written but not registered.
  * Re-add it here in the same change that registers it; companyCatalog.test.ts compares
- * this list to the registry and goes red when the two disagree. */
+ * this list to the registry and goes red when the two disagree.
+ * `smartrecruiters` is REMOVED (2026-11-06, with fc5097f unregistering its adapter): the robots
+ * ruling of 2026-11-01 turns SR fully off, so existing SR rows are no longer polled either. */
 export const SELECTABLE_ATS_PROVIDERS = [
   'greenhouse',
   'lever',
   'ashby',
-  'smartrecruiters',
   // Workday boards are pollable since 2026-11-01 (scout adapter workday.ts).
   'workday',
 ] as const satisfies readonly AtsProvider[];
@@ -72,15 +73,11 @@ export const SELECTABLE_ATS_PROVIDERS = [
 /* Derived from the list, so the type and the dropdown cannot drift apart. */
 export type SupportedAtsProvider = (typeof SELECTABLE_ATS_PROVIDERS)[number];
 
-/* The providers a NEW board may be added under: every polled provider except SmartRecruiters.
- * Robots ruling 2026-11-01: SmartRecruiters' robots.txt disallows us, so never seed an SR board.
- * SR stays in SELECTABLE_ATS_PROVIDERS above because the scout registry still polls existing SR
- * rows, and companyCatalog.test.ts holds that list equal to the registry. Derived by filter, not
- * hand-typed, so a provider registered later is addable without a second edit here. */
-export const ADDABLE_ATS_PROVIDERS = SELECTABLE_ATS_PROVIDERS.filter(
-  // A type guard, so the result's element type drops 'smartrecruiters' too.
-  (p): p is Exclude<SupportedAtsProvider, 'smartrecruiters'> => p !== 'smartrecruiters',
-);
+/* The providers a NEW board may be added under. Today every polled provider: SmartRecruiters, the
+ * one polled-but-never-added provider, left both lists on 2026-11-06 (robots ruling 2026-11-01).
+ * Kept as its own name because "may be added" and "is polled" are different questions; a future
+ * polled-but-not-addable provider is filtered out here, and every add path already reads this name. */
+export const ADDABLE_ATS_PROVIDERS: readonly SupportedAtsProvider[] = SELECTABLE_ATS_PROVIDERS;
 
 /* One rule for "may this suggestion be added", shared by the suggestions modal (what it shows)
  * and WatchlistPage (what the 1-click add accepts), so the two cannot disagree. */
@@ -133,7 +130,7 @@ export type BoardVerification =
       readonly evidence: 'parsed-board-json';
     }
   /* Probed and refuted: no board on a provider the scout can poll (greenhouse,
-   * lever, ashby, and since 2026-10-24 smartrecruiters) under any plausible
+   * lever, ashby, workday) under any plausible
    * slug. The row is KEPT rather than deleted — a half-removed catalog is worse
    * than a marked one — but nothing here may be offered as pollable. */
   | {
@@ -568,17 +565,6 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     /* Probed 2026-10-23: old token 'doordash' 404s; the live board is 'doordashusa', 464 jobs. */
     verification: verified(BOARD_PROBE_DATE_2026_10_23, 464),
   },
-  {
-    name: 'Canva',
-    category: 'Mid-Scale MNC',
-    domain: 'Visual Content Generation / WebAssembly / Cloud Rendering',
-    location: 'Remote / Global',
-    atsProvider: 'smartrecruiters',
-    atsIdentifier: 'Canva',
-    cooldown: { interview: '6 Months', screening: 'None' },
-    /* Probed 2026-10-23: greenhouse/lever 404; real board is SmartRecruiters token Canva. Re-probed 2026-10-24 when the SR adapter was registered: /v1/companies/Canva/postings = 97, company.name "Canva". */
-    verification: verified(BOARD_PROBE_DATE_2026_10_24, 97),
-  },
 
   /* ---- Added 2026-09-17: boards the probe found and the catalog lacked. ----
    * `location` on these is editorial like every other row — the probe verified
@@ -780,19 +766,6 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'darwinbox (clevertap.com/careers)' }),
   },
   {
-    name: 'PhonePe',
-    category: 'Startup / Unicorn',
-    domain: 'FinTech / UPI Payments & Distributed Storage',
-    location: 'Bengaluru',
-    // PROVIDER CORRECTED 2026-10-24: the old greenhouse/phonepe board is gone; phonepe.com's own job feed now links every public opening to SmartRecruiters.
-    atsProvider: 'smartrecruiters',
-    // The legal-entity token read off phonepe.com's feed, not name-derived; SR's postings response names it "PHONEPE LIMITED".
-    atsIdentifier: 'PHONEPELIMITED',
-    cooldown: { interview: '6 Months', screening: 'None' },
-    /* Probed 2026-10-24: greenhouse phonepe still 404; SR /v1/companies/PHONEPELIMITED/postings = 118, matching the 118 PUBLIC rows of phonepe.com's own feed. Verified the same day the SR adapter was registered; "PHONEPE LIMITED" passes the identity guard against "PhonePe" (identity.test.ts pins the pair). */
-    verification: verified(BOARD_PROBE_DATE_2026_10_24, 118),
-  },
-  {
     name: 'Swiggy',
     category: 'Startup / Unicorn',
     domain: 'On-Demand Delivery / Hyperlocal Routing / Geofencing',
@@ -940,28 +913,6 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     verification: verified(BOARD_PROBE_DATE_2026_09_17, 40),
   },
   {
-    name: 'Nagarro',
-    category: 'Service-Based',
-    domain: 'Digital Engineering / Cloud Native Platforms',
-    location: 'Delhi NCR',
-    atsProvider: 'smartrecruiters',
-    atsIdentifier: 'Nagarro1',
-    cooldown: { interview: '3–6 Months', screening: 'None' },
-    /* Probed 2026-10-23: token 'nagarro' nonexistent; real SR token is 'Nagarro1'. Re-probed 2026-10-24 when the SR adapter was registered: /v1/companies/Nagarro1/postings = 585 (six 100-posting pages), company.name "Nagarro". */
-    verification: verified(BOARD_PROBE_DATE_2026_10_24, 585),
-  },
-  {
-    name: 'Persistent Systems',
-    category: 'Service-Based',
-    domain: 'Enterprise Software & Cloud Modernization',
-    location: 'Pune',
-    atsProvider: 'smartrecruiters',
-    atsIdentifier: 'persistentsystems',
-    cooldown: { interview: '6 Months', screening: 'None' },
-    /* Probed 2026-10-23: careers HTML carries zwayam + naukri signatures. */
-    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'zwayam (careers.persistent.com)' }),
-  },
-  {
     name: 'EPAM Systems',
     category: 'Service-Based',
     domain: 'Global Platform Engineering & Product Development',
@@ -993,28 +944,6 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     cooldown: { interview: '6 Months', screening: 'None' },
     /* Probed 2026-10-23: own career pages, no third-party ATS signature. */
     verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'custom (globallogic.com/career-search-page)' }),
-  },
-  {
-    name: 'Hexaware',
-    category: 'Service-Based',
-    domain: 'IT Automation & Legacy Modernization',
-    location: 'Mumbai',
-    atsProvider: 'smartrecruiters',
-    atsIdentifier: 'hexaware',
-    cooldown: { interview: '3–6 Months', screening: 'None' },
-    /* Probed 2026-10-23: careers site loads an Oracle Cloud HCM tenant. */
-    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'oracle-hcm (jobs.hexaware.com)' }),
-  },
-  {
-    name: 'Cognizant',
-    category: 'Service-Based',
-    domain: 'Cloud Enterprise Transformation & Healthcare Tech',
-    location: 'Bengaluru',
-    atsProvider: 'smartrecruiters',
-    atsIdentifier: 'cognizant',
-    cooldown: { interview: '6 Months', screening: 'None' },
-    /* Probed 2026-10-23: careers.cognizant.com 403s to bots; iCIMS is the third-party claim, unverified first-hand. */
-    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'believed', portal: 'icims' }),
   },
   {
     name: 'Infosys',
@@ -1059,17 +988,6 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     cooldown: { interview: '6 Months', screening: 'None' },
     /* Probed 2026-10-23: own job-search page, no third-party ATS signature. */
     verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'custom (capgemini.com job-search)' }),
-  },
-  {
-    name: 'Tech Mahindra',
-    category: 'Service-Based',
-    domain: 'Telecom Tech / 5G Enterprise Cloud & Networking',
-    location: 'Pune',
-    atsProvider: 'smartrecruiters',
-    atsIdentifier: 'techmahindra',
-    cooldown: { interview: '6 Months', screening: 'None' },
-    /* Probed 2026-10-23: own portal, no third-party ATS signature. */
-    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'custom (careers.techmahindra.com)' }),
   },
   {
     name: 'Wipro',
