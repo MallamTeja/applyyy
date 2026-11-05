@@ -47,19 +47,10 @@ const DEFAULT_BATCH_SIZE = 10;
 // Prevents caller queries from requesting excessive batch sizes that exhaust LLM quota or memory limits.
 const MAX_BATCH_SIZE = 25;
 
-// Define standard CORS headers dictionary object for cross-origin browser requests.
-// Configures headers required by browser clients interacting with Supabase Edge Functions.
-const corsHeaders = {
-  // Allow requests from any origin domain during browser cross-origin requests.
-  // Security is maintained via Supabase JWT authorization tokens and RLS rules.
-  "Access-Control-Allow-Origin": "*",
-  // List permitted HTTP request headers allowed in client API calls.
-  // Includes standard Supabase client headers and standard JSON content-type.
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  // List supported HTTP verbs allowed for this edge function endpoint.
-  // Permits POST for execution, GET for manual query tests, and OPTIONS for CORS preflights.
-  "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-};
+// CORS comes from _shared/cors.ts, the one source (P2 #3, 2026-11-05): this function used to
+// carry a private `Access-Control-Allow-Origin: *` copy. withCors (below, around Deno.serve)
+// adds the per-request origin decision; corsHeaders keeps the shared header/method list.
+import { corsHeaders, withCors } from "../_shared/cors.ts";
 
 // Interface contract defining structure of generated referral outreach draft payload object.
 // Represents the structured output containing message subject, body text, and networking notes.
@@ -138,7 +129,8 @@ function resolveBatchSize(
 
 // Register main Deno HTTP server request handler callback.
 // Listens for incoming HTTP requests dispatched to the referral edge function.
-Deno.serve(async (req: Request): Promise<Response> => {
+// withCors: every response, preflight included, gets the allowlisted origin and Vary: Origin.
+Deno.serve(withCors(async (req: Request): Promise<Response> => {
   // Check if incoming request method is OPTIONS preflight request.
   // Evaluates HTTP request method for CORS preflight handling.
   if (req.method === "OPTIONS") {
@@ -574,4 +566,4 @@ Job Description Context: ${job.description_raw ? job.description_raw.slice(0, 10
     // List of recorded operational warning message strings.
     warnings,
   });
-});
+}));

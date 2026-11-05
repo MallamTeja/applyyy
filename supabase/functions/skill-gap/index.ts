@@ -8,7 +8,11 @@
 import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 // The request logic, split out so node --test can import it without the jsr client.
 import { handleSkillGap } from "./handler.ts";
+// The per-request origin decision (P2 #3): handler.ts spreads the shared header list, and
+// since 2026-11-05 the allow-origin header itself is added only by this wrapper.
+import { withCors } from "../_shared/cors.ts";
 
 // Entry point: the real sign-in into the tested handler.
 // The caller is verified BEFORE the password sign-in (W15, 2026-11-05): a refused caller costs no grant.
-Deno.serve((req: Request) => handleSkillGap(req, () => createAuthorizedAppUserClient(req)));
+// withCors so the browser sees the allowlisted origin on every response, preflight included.
+Deno.serve(withCors((req: Request) => handleSkillGap(req, () => createAuthorizedAppUserClient(req))));

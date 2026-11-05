@@ -16,12 +16,10 @@ import { authorizeCaller } from "../_shared/db/gates.ts";
 // GMAIL_SYNC_SECRET_ENV_VAR and upstreamRequest (W16): its own secret, sent in a POST body.
 import { configVerdict, GMAIL_SYNC_SECRET_ENV_VAR, upstreamRequest, upstreamVerdict } from "./respond.ts";
 
-// Browser-invoked, so the standard CORS trio (same values as the other functions).
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
+// CORS comes from _shared/cors.ts, the one source (P2 #3, 2026-11-05): this function used to
+// carry a private `Access-Control-Allow-Origin: *` copy. withCors (below, around Deno.serve)
+// adds the per-request origin decision; corsHeaders keeps the shared header/method list.
+import { corsHeaders, withCors } from "../_shared/cors.ts";
 
 // JSON response helper, CORS included on every path.
 function json(status: number, data: Record<string, unknown>): Response {
@@ -31,7 +29,8 @@ function json(status: number, data: Record<string, unknown>): Response {
   });
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+// withCors: every response, preflight included, gets the allowlisted origin and Vary: Origin.
+Deno.serve(withCors(async (req: Request): Promise<Response> => {
   // Preflight for the browser's Authorization header.
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   // The contract is POST-only; anything else is a caller bug.
@@ -98,4 +97,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const verdict = upstreamVerdict(upstreamStatus, upstreamText, config.secret);
   // One exit for the success and failure shapes alike.
   return json(verdict.status, { ...verdict.body });
-});
+}));

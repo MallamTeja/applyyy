@@ -52,7 +52,8 @@ describe("scout-ats: Workday detail read wiring", () => {
 
   it("starts the read budget at handler entry, before the screen context loads", () => {
     // The handler's first line.
-    const entry = at("Deno.serve(async");
+    // (Wrapped in withCors since P2 #3, 2026-11-05; still the handler's first line.)
+    const entry = at("Deno.serve(withCors(async");
     // The run's countdown.
     const deadline = at("createDeadline({ budgetMs: SCOUT_ATS_BUDGET_MS })");
     // The context load, which is where the run is built.

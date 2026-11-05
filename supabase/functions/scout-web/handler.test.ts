@@ -285,8 +285,10 @@ test("upstream overload is a 503 with Retry-After and a failed run, never skippe
   assert.equal((await res.json()).status, "upstream_unavailable");
   // Tells well-behaved clients when to come back.
   assert.equal(res.headers.get("retry-after"), "60");
-  // CORS must survive the extra header, or the browser cannot read the body.
-  assert.ok(res.headers.get("access-control-allow-origin"));
+  // CORS must survive the extra header, or the browser cannot read the body. Since P2 #3
+  // (2026-11-05) the allow-ORIGIN header is added per request by withCors around the handler,
+  // so the handler's own response carries the shared header list, which is what survives here.
+  assert.ok(res.headers.get("access-control-allow-headers"));
   // A failure from the run's point of view, and not hidden in quota stats.
   assert.equal(spy.runs[0]?.status, "failed");
   assert.equal(spy.runs[0]?.error_count, 1);

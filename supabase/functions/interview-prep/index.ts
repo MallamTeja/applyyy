@@ -42,19 +42,10 @@ const DEFAULT_BATCH_SIZE = 5;
 // Batch ceiling. WHY: prevents excessive LLM quota burn in a single execution.
 const MAX_BATCH_SIZE = 10;
 
-// Standard CORS headers object.
-// WHY: Required for cross-origin browser client requests.
-const corsHeaders = {
-  // Allow all origins.
-  // WHY: Authorization header and RLS enforce security.
-  "Access-Control-Allow-Origin": "*",
-  // Allowed request headers.
-  // WHY: Permits auth token and content type.
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  // Allowed HTTP methods.
-  // WHY: Supports GET, POST, and OPTIONS preflights.
-  "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-};
+// CORS comes from _shared/cors.ts, the one source (P2 #3, 2026-11-05): this function used to
+// carry a private `Access-Control-Allow-Origin: *` copy. withCors (below, around Deno.serve)
+// adds the per-request origin decision; corsHeaders keeps the shared header/method list.
+import { corsHeaders, withCors } from "../_shared/cors.ts";
 
 // Formats JSON HTTP responses with status code and CORS headers.
 // WHY: Encapsulates response creation with standard content type and CORS.
@@ -83,7 +74,8 @@ function resolveBatchSize(raw: string | null): number {
 
 // Register Deno HTTP server request handler.
 // WHY: Entrypoint for edge function execution.
-Deno.serve(async (req: Request): Promise<Response> => {
+// withCors: every response, preflight included, gets the allowlisted origin and Vary: Origin.
+Deno.serve(withCors(async (req: Request): Promise<Response> => {
   // WHY: browser CORS preflight must be answered before any work.
   if (req.method === "OPTIONS") {
     // WHY: completes the preflight.
@@ -340,4 +332,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Per-row problems.
     warnings,
   });
-});
+}));
