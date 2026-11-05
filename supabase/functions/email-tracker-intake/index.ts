@@ -58,10 +58,12 @@ import {
   emailEventRowOf,
   mayAdvanceStatus,
   classifyMessage,
-  matchApplication,
+  // Tracked rows first, then match-only rows (2026-11-05).
+  matchTrackedFirst,
+  // The pool index.ts loads: tracked + match-only.
+  MATCH_POOL_STATUSES,
   receiptConfirmsApplied,
   titleNamedIn,
-  TRACKED_STATUSES,
   verifyReceiptSender,
   type ActiveApplication,
   type MessageDecision,
@@ -285,12 +287,14 @@ Deno.serve(async (request: Request): Promise<Response> => {
     // hidden from the matcher, its row would stop making a same-company receipt ambiguous,
     // and its late receipt could then confirm the WRONG applying row (security review,
     // 2026-10-23). The move itself stays refused by CONFIRMABLE_STATUSES and the graph.
-    // The list is decide.ts's TRACKED_STATUSES (2026-11-01), shared with the replay sweep.
+    // The list is decide.ts's TRACKED_STATUSES (2026-11-01), shared with the replay sweep; since 2026-11-05
+    // MATCH_POOL_STATUSES adds the match-only rows (approved, awaiting_approval, blocked_needs_human), which
+    // an email may link but never move (statusMoveFor refuses them).
     const { data: appsData, error: appsError } = await client.db
       .from("applications")
       // `title` is read by the receipt confirmation and, since W7, by the matcher's tiebreak (titleNamedIn).
       .select("id, status, job_id, updated_at, jobs(company_name, company_slug, title)")
-      .in("status", [...TRACKED_STATUSES]);
+      .in("status", [...MATCH_POOL_STATUSES]);
     // An error result is a failed batch.
     if (appsError !== null) {
       // The detail goes to the log, not to the caller.
@@ -330,7 +334,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
     // an outcome email for a row awaiting a human check is stored matched and the replay
     // applies it later; see the TRACKED_STATUSES comment for the trade-off.
     // Exactly one application, or null for none/ambiguous.
-    const matchedApplicationId = matchApplication(message, decision.senderDomain, activeApplications);
+    const matchedApplicationId = matchTrackedFirst(message, decision.senderDomain, activeApplications);
     // Kept together until the upsert result is known.
     return { message, decision, matchedApplicationId };
   });

@@ -8,7 +8,8 @@
  * a LinkedIn alert (job_alert), an interview invite already tracked, and an unclassified promo.
  *
  * RED-ON-REVERT: putting the hard-coded "Interview Invite" badge back fails test 1 at the HackerRank
- * badge; reading "Last checked" from this visit's sync alone fails test 1 at the time. */
+ * badge; reading "Last checked" from this visit's sync alone fails test 1 at the time; skipping the
+ * duplicate lookup fails test 5 (it would create a second HackerRank job). */
 
 // Strict asserts.
 import assert from 'node:assert/strict';
@@ -53,6 +54,10 @@ describe('Emails page in a browser (fake session, every Supabase call answered l
   // Writes seen: read-mark PATCHes and track RPCs, with their bodies.
   const patches: unknown[] = [];
   const rpcs: unknown[] = [];
+  // The duplicate lookups the page sent.
+  const appReads: string[] = [];
+  // What the lookup finds; test 4 has none, test 5 has the HackerRank one.
+  let existingApps: unknown[] = [];
   // Browser dialogs opened; must stay 0.
   let dialogs = 0;
 
@@ -85,17 +90,28 @@ describe('Emails page in a browser (fake session, every Supabase call answered l
       if (url.pathname === '/functions/v1/gmail-sync') return json(200, { ok: true, cooldown: true });
       // The tracker's newest successful run.
       if (url.pathname === '/rest/v1/agent_runs') return json(200, [{ finished_at: TRACKER_FINISHED_AT }]);
-      // The read mark: stamp exactly the requested unread rows and return them, as PostgREST would.
+      // A PATCH: the read mark (id=in.(...), read_at=is.null) or the link (id=eq...., matched_application_id=is.null).
       if (url.pathname === '/rest/v1/email_events' && req.method() === 'PATCH') {
-        // Kept for the assertion.
-        patches.push({ query: url.search, body: req.postDataJSON() });
-        // The ids in id=in.(a,b).
-        const ids = (url.searchParams.get('id') ?? '').replace(/^in\.\(|\)$/g, '').split(',');
-        // Stamped in the mock table.
-        const stamp = (req.postDataJSON() as { read_at: string }).read_at;
-        rows = rows.map((r) => (ids.includes(String(r.id)) && r.read_at === null ? { ...r, read_at: stamp } : r));
-        // The changed rows.
-        return json(200, rows.filter((r) => ids.includes(String(r.id))).map((r) => ({ id: r.id, read_at: r.read_at })));
+        // The body, kept for the assertion.
+        const body = req.postDataJSON() as Record<string, unknown>;
+        patches.push({ query: url.search, body });
+        // The ids, from either filter shape.
+        const idParam = url.searchParams.get('id') ?? '';
+        const ids = idParam.startsWith('eq.') ? [idParam.slice(3)] : idParam.replace(/^in\.\(|\)$/g, '').split(',');
+        // The null guard this PATCH carries, honoured as PostgREST would.
+        const guard = url.searchParams.has('read_at') ? 'read_at' : 'matched_application_id';
+        // Changed rows only.
+        const changed = rows.filter((r) => ids.includes(String(r.id)) && r[guard] === null).map((r) => String(r.id));
+        rows = rows.map((r) => (changed.includes(String(r.id)) ? { ...r, ...body } : r));
+        // The changed rows, as return=representation gives them.
+        return json(200, rows.filter((r) => changed.includes(String(r.id))));
+      }
+      // The duplicate lookup: this user's applications at the email's company slug.
+      if (url.pathname === '/rest/v1/applications') {
+        // Kept, to pin the filter.
+        appReads.push(url.search);
+        // HackerRank may already have one (live: approved, being marked applied by hand).
+        return json(200, url.searchParams.get('jobs.company_slug') === 'eq.hackerrank' ? existingApps : []);
       }
       // The list read.
       if (url.pathname === '/rest/v1/email_events') return json(200, rows);
@@ -205,8 +221,9 @@ describe('Emails page in a browser (fake session, every Supabase call answered l
   });
 
   it('4. Add to Applied: prefilled form, inline confirm, one RPC with the slug, then the row is tracked', async () => {
-    // The receipt unmatched again.
+    // The receipt unmatched again, and no existing HackerRank application.
     rows = [RECEIPT, ALERT, TRACKED];
+    existingApps = [];
     // The page.
     await page.goto(`${base}/emails`, { waitUntil: 'domcontentloaded' });
     // The receipt's button (the alert has none: an alert is not about an application).
@@ -232,6 +249,49 @@ describe('Emails page in a browser (fake session, every Supabase call answered l
     // The re-read shows it tracked.
     await card('We have received your Application').locator('.email-card__tracked').waitFor();
     // No browser dialog anywhere.
+    assert.equal(dialogs, 0);
+  });
+
+  it('5. an email whose company already has an application offers "Link to ..." first; linking creates nothing', async () => {
+    // The receipt unmatched, and HackerRank's existing application (live: approved).
+    rows = [RECEIPT, ALERT, TRACKED];
+    existingApps = [{ id: 'a1000000-0000-4000-8000-000000000077', status: 'approved', jobs: { title: 'AI Researcher Intern', company_slug: 'hackerrank' } }];
+    // Fresh counts for this test.
+    rpcs.length = 0;
+    patches.length = 0;
+    // The page.
+    await page.goto(`${base}/emails`, { waitUntil: 'domcontentloaded' });
+    // Add to Applied on the receipt.
+    const name = 'We have received your Application || AI Researcher Intern';
+    await page.getByRole('button', { name: `Add to Applied: ${name}`, exact: true }).click();
+    // The existing application is offered, named with its stage.
+    const link = page.getByRole('button', { name: `Link to AI Researcher Intern (approved): ${name}`, exact: true });
+    await link.waitFor();
+    // The lookup asked for this company's slug.
+    assert.ok((appReads.at(-1) ?? '').includes('jobs.company_slug=eq.hackerrank'), appReads.at(-1));
+    // "Add as a new job" stays available, AFTER the link in reading order.
+    await page.getByRole('button', { name: `Add as a new job: ${name}`, exact: true }).waitFor();
+    const order = await page.locator('.email-link__options button').evaluateAll((els) => els.map((el) => el.getAttribute('aria-label') ?? ''));
+    assert.ok(order[0]?.startsWith('Link to '), `first option: ${order[0]}`);
+    // Link: the inline confirm first.
+    await link.click();
+    const confirm = page.getByRole('button', { name: `Confirm: Link to AI Researcher Intern (approved): ${name}`, exact: true });
+    await confirm.waitFor();
+    // Nothing written on arming.
+    assert.equal(patches.length, 0);
+    // Confirm: one PATCH.
+    const write = page.waitForRequest((r) => r.method() === 'PATCH' && r.url().includes('/rest/v1/email_events'), { timeout: 5_000 }).catch(() => null);
+    await confirm.click();
+    await (await write)?.response();
+    // It sets matched_application_id only, guarded to an unlinked email.
+    const last = patches.at(-1) as { query: string; body: Record<string, unknown> };
+    assert.deepEqual(last.body, { matched_application_id: 'a1000000-0000-4000-8000-000000000077' });
+    assert.ok(last.query.includes('matched_application_id=is.null'), last.query);
+    // ZERO new jobs or applications: the create route was never called.
+    assert.equal(rpcs.length, 0);
+    // The row reads as tracked after the re-read.
+    await card('We have received your Application').locator('.email-card__tracked').waitFor();
+    // No browser dialog.
     assert.equal(dialogs, 0);
   });
 });

@@ -8,8 +8,10 @@
 
 // Type only: the stored row.
 import type { EmailEventRow } from './emailSync.ts';
-// Type only: the class union, from the shared contract (enums.ts EMAIL_CLASSIFICATIONS).
-import type { EmailClassification } from '../../data/contract.ts';
+// Type only: the class and status unions, from the shared contract.
+import type { ApplicationStatus, EmailClassification } from '../../data/contract.ts';
+// The runtime status list, for the candidates' shape check.
+import { APPLICATION_STATUSES } from '../../data/contract.ts';
 
 /* Every class's label. A Record over the union, so a new class without a label fails to compile. */
 const CLASS_LABELS: Readonly<Record<EmailClassification, string>> = {
@@ -201,6 +203,42 @@ export function applyEmailFilters(events: readonly EmailEventRow[], filters: Ema
 export function unreadCount(events: readonly EmailEventRow[]): number {
   // read_at is the app's own mark; Gmail's read state is never read or written.
   return events.filter((e) => e.read_at === null).length;
+}
+
+/* An application the email may be ABOUT already (2026-11-05, the duplicate guard): same company slug, any
+   status. Live case: HackerRank's "AI Researcher Intern" receipt did not match its application because the
+   matcher needs sender label == company slug ('hackerrankcareers' is not 'hackerrank'); creating a job from
+   it would have made a second HackerRank application. Linking sets email_events.matched_application_id only. */
+export interface LinkCandidate {
+  // The application to link to.
+  readonly id: string;
+  // Its stage, shown in the button so the right one is picked.
+  readonly status: ApplicationStatus;
+  // Its job's title.
+  readonly title: string;
+}
+
+// The real statuses, for the shape check.
+const STATUSES: ReadonlySet<string> = new Set(APPLICATION_STATUSES);
+
+/* The lookup's rows, validated: a row without a string id, a real status and a title is dropped, never guessed. */
+export function parseLinkCandidates(raw: unknown): LinkCandidate[] {
+  // Not a list: no candidates.
+  if (!Array.isArray(raw)) return [];
+  // Each row proven field by field.
+  const out: LinkCandidate[] = [];
+  for (const row of raw) {
+    // Loose read, then checks.
+    const r = row as { id?: unknown; status?: unknown; jobs?: unknown } | null;
+    // The join is an object, or a one-element array in the to-many shape.
+    const job = (Array.isArray(r?.jobs) ? r.jobs[0] : r?.jobs) as { title?: unknown } | null | undefined;
+    // All three, or the row is skipped.
+    if (typeof r?.id !== 'string' || typeof r.status !== 'string' || !STATUSES.has(r.status) || typeof job?.title !== 'string') continue;
+    // Shaped.
+    out.push({ id: r.id, status: r.status as ApplicationStatus, title: job.title });
+  }
+  // The valid ones, in the order read.
+  return out;
 }
 
 /* The company slug sent to track_email_as_applied. THE rule, the same as scout-web slugFromToken:

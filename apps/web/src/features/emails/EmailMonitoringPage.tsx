@@ -7,6 +7,12 @@
  * The default view is all job mail; the filters narrow it by class, tracked or not, sender text and
  * date, and sort it. The filter state lives in the URL, so a filtered view survives a reload.
  *
+ * DUPLICATE GUARD (2026-11-05). Before offering a NEW job, Add to Applied looks up this user's applications
+ * at the email's company slug (any status). Found: the row offers "Link to <title> (<status>)" FIRST, which
+ * sets email_events.matched_application_id only (no new rows, no status move), and keeps "Add as a new job"
+ * second. The live case: HackerRank's receipt did not match its own application, and creating would have
+ * made a second one.
+ *
  * NOT TRACKED + ADD TO APPLIED. The "Not tracked" filter is the list of job emails matched to no
  * application. On mail ABOUT an application (emailView.ts isTrackable) the row offers Add to Applied:
  * Teja confirms the company and title, then ONE call to public.track_email_as_applied creates the job and
@@ -58,9 +64,11 @@ import {
   filtersToParams,
   isTrackable,
   parseEmailFilters,
+  parseLinkCandidates,
   prefillOf,
   unreadCount,
   type EmailFilters,
+  type LinkCandidate,
 } from './emailView.ts';
 
 // The page's styles.
@@ -125,6 +133,12 @@ export function EmailRow(props: {
   readonly note: string | null;
   // The open Add to Applied form, or null.
   readonly draft: TrackDraft | null;
+  // Existing applications at this email's company, shown BEFORE the form; null when not looked up.
+  readonly links: readonly LinkCandidate[] | null;
+  // The confirmed link to one of them; only InlineConfirm's Confirm reaches it.
+  readonly onLink: (applicationId: string) => void;
+  // Skip the candidates and open the new-job form.
+  readonly onAddNew: () => void;
   // Mark this email read in the app.
   readonly onMarkRead: () => void;
   // Open the Add to Applied form.
@@ -137,7 +151,7 @@ export function EmailRow(props: {
   readonly onTrack: () => void;
 }): ReactElement {
   // Destructured for readability.
-  const { event, locked, note, draft } = props;
+  const { event, locked, note, draft, links } = props;
   // The Gmail permalink, built from the stored id (encoded: it is untrusted text).
   const gmailHref = `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(event.provider_message_id)}`;
   // Unread in the app.
@@ -196,14 +210,65 @@ export function EmailRow(props: {
             Mark read
           </button>
         ) : null}
-        {/* Add to Applied: only on unmatched mail about an application, and only while no form is open. */}
-        {isTrackable(event) && draft === null ? (
+        {/* Add to Applied: only on unmatched mail about an application, and only while no form or candidate list is open. */}
+        {isTrackable(event) && draft === null && links === null ? (
           /* Opens the form; writes nothing. */
           <button type="button" className="email-card__action" disabled={locked} aria-label={`Add to Applied: ${name}`} onClick={props.onOpenTrack}>
             Add to Applied
           </button>
         ) : null}
       </div>
+
+      {/* The duplicate guard: existing applications at this company, offered before a new job. */}
+      {links !== null && links.length > 0 && draft === null && event.matched_application_id === null ? (
+        /* The confirm replaces the options in place. */
+        <InlineConfirm id={`email-link:${event.id}`}>
+          {/* Reading order is the recommendation: link first, new job last. */}
+          <div className="email-link__options" role="group" aria-label={`Already tracked at this company: ${name}`}>
+            {/* Said, so the choice is understood. */}
+            <span className="email-track__hint">This company already has {links.length === 1 ? 'an application' : `${links.length} applications`}. Link the email instead of adding a duplicate:</span>
+            {links.map((l) => {
+              // The button's name: the target and the email, so every row's buttons differ.
+              const action = `Link to ${l.title} (${l.status}): ${name}`;
+              return (
+                /* One per application; keyed by its id. */
+                <button
+                  /* One button per application id. */
+                  key={l.id}
+                  /* Never a form submit. */
+                  type="button"
+                  /* The row actions' look. */
+                  className="email-card__action"
+                  /* Off while this row has a write in flight. */
+                  disabled={locked}
+                  /* Names the target AND the email, so every row's buttons are distinct. */
+                  aria-label={action}
+                  /* Arms the confirm; nothing is written until Confirm. */
+                  onClick={(e) => armConfirm(`email-link:${event.id}`, {
+                    // What happens, and what does not.
+                    message: `Link this email to "${l.title}" (${l.status})? This only links it: no new job, no status change.`,
+                    // For the Confirm and Cancel names.
+                    action,
+                    // The one write.
+                    onConfirm: () => props.onLink(l.id),
+                    // Focus returns here on Cancel.
+                    trigger: e.currentTarget,
+                  })}
+                >
+                  {/* The visible text names the target. */}
+                  Link to {l.title} ({l.status})
+                </button>
+              );
+            })}
+            {/* The secondary path: a genuinely different job at the same company. Opens the form; writes nothing. */}
+            <button type="button" className="email-card__action" disabled={locked} aria-label={`Add as a new job: ${name}`} onClick={props.onAddNew}>
+              Add as a new job
+            </button>
+            {/* Closes the options; writes nothing. */}
+            <button type="button" className="email-card__action" onClick={props.onCancelTrack}>Cancel</button>
+          </div>
+        </InlineConfirm>
+      ) : null}
 
       {/* The open form: company and title, then a confirmed call. */}
       {draft !== null ? (
@@ -291,6 +356,8 @@ export function EmailMonitoringPage(): ReactElement {
   const setFilter = useCallback((change: Partial<EmailFilters>) => setSearchParams(filtersToParams({ ...filters, ...change }), { replace: true }), [filters, setSearchParams]);
   /* Open Add to Applied forms, by email id. */
   const [drafts, setDrafts] = useState<Readonly<Record<string, TrackDraft>>>({});
+  /* Existing applications at each open email's company (the duplicate guard), by email id. */
+  const [links, setLinks] = useState<Readonly<Record<string, readonly LinkCandidate[]>>>({});
   /* Rows with a write in flight: rendered disabled. */
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   /* Each row's last outcome sentence. */
@@ -488,6 +555,75 @@ export function EmailMonitoringPage(): ReactElement {
     }
   };
 
+  /* Add to Applied, step one: look for this company's existing applications before offering a new job. */
+  const openAdd = async (event: EmailEventRow): Promise<void> => {
+    // The prefill names the company; its slug is the lookup key.
+    const prefill = prefillOf(event);
+    // The same slug rule the create call sends.
+    const slug = companySlugOf(prefill.company);
+    // No client or no slug: nothing to look up, straight to the form.
+    if (supabase === null || slug === '') {
+      // The form, so the operator can still type a company.
+      setDrafts((prev) => ({ ...prev, [event.id]: prefill }));
+      return;
+    }
+    // A write already in flight on this row: this click does nothing.
+    if (!claim([event.id])) return;
+    try {
+      // This user's applications whose job has this slug, any status (RLS scopes it to the caller).
+      const { data, error: readError } = await supabase.from('applications').select('id, status, jobs!inner(title, company_slug)').eq('jobs.company_slug', slug).limit(20);
+      // Candidates when the read worked; a failed read is said, and the form still opens.
+      const found = readError ? [] : parseLinkCandidates(data);
+      // A failed lookup must not silently turn into "no duplicates".
+      if (readError) noteOn([event.id], `Could not check for an existing application (${readError.message}); check before adding.`);
+      // Some: offer them first. None: the form.
+      if (found.length > 0) setLinks((prev) => ({ ...prev, [event.id]: found }));
+      // None: straight to the new-job form, prefilled.
+      else setDrafts((prev) => ({ ...prev, [event.id]: prefill }));
+    } catch {
+      // A throwing client: said, and the form opens so the operator decides.
+      noteOn([event.id], 'Could not check for an existing application; check before adding.');
+      // The form still opens: the operator decides, warned.
+      setDrafts((prev) => ({ ...prev, [event.id]: prefill }));
+    } finally {
+      // Always released.
+      release([event.id]);
+    }
+  };
+
+  /* Closes this row's candidates and form. */
+  const closeAdd = (id: string): void => {
+    // The candidate list closes.
+    setLinks((prev) => Object.fromEntries(Object.entries(prev).filter(([k]) => k !== id)));
+    // And the form, if it was open.
+    setDrafts((prev) => Object.fromEntries(Object.entries(prev).filter(([k]) => k !== id)));
+  };
+
+  /* The confirmed link: matched_application_id only, and only while the email is still unlinked. */
+  const link = async (event: EmailEventRow, applicationId: string): Promise<void> => {
+    // No client, or already in flight.
+    if (supabase === null || !claim([event.id])) return;
+    try {
+      // One guarded update; "is null" means a link made meanwhile (by the tracker) is never overwritten.
+      const { data, error: writeError } = await supabase.from('email_events').update({ matched_application_id: applicationId }).eq('id', event.id).is('matched_application_id', null).select('id');
+      // The database's words on a failure.
+      if (writeError) return noteOn([event.id], `Not linked: ${writeError.message}`);
+      // Zero rows: it was linked already; the re-read shows to what.
+      // One row changed = linked; zero = someone linked it first (the null guard refused this write).
+      noteOn([event.id], (data ?? []).length === 1 ? 'Linked to the existing application.' : 'Not linked: this email was already linked. Refreshed.');
+      // Options closed either way: linked, or nothing left to link.
+      closeAdd(event.id);
+      // What is stored now.
+      await fetchEvents();
+    } catch {
+      // A lost answer: retrying is safe (the null guard makes a second link a no-op).
+      noteOn([event.id], 'Not confirmed: the request failed. Refresh to see whether it was linked.');
+    } finally {
+      // Always released.
+      release([event.id]);
+    }
+  };
+
   /* The confirmed Add to Applied: one call, then the list re-reads so the row shows as tracked. */
   const track = async (event: EmailEventRow): Promise<void> => {
     // The confirmed draft.
@@ -671,10 +807,23 @@ export function EmailMonitoringPage(): ReactElement {
               locked={busy.has(event.id)}
               note={notes[event.id] ?? null}
               draft={drafts[event.id] ?? null}
+              /* The duplicate guard's candidates, once looked up. */
+              links={links[event.id] ?? null}
+              /* The confirmed link: matched_application_id only. */
+              onLink={(applicationId) => void link(event, applicationId)}
+              /* From the candidates to the new-job form. */
+              onAddNew={() => {
+                // From the candidates to the form: the operator says this is a different job.
+                setLinks((prev) => Object.fromEntries(Object.entries(prev).filter(([k]) => k !== event.id)));
+                // The form, prefilled as usual.
+                setDrafts((prev) => ({ ...prev, [event.id]: prefillOf(event) }));
+              }}
               onMarkRead={() => void markRead([event.id])}
-              onOpenTrack={() => setDrafts((prev) => ({ ...prev, [event.id]: prefillOf(event) }))}
+              /* Looks for existing applications first (the duplicate guard), then opens the right step. */
+              onOpenTrack={() => void openAdd(event)}
               onDraftChange={(draft) => setDrafts((prev) => ({ ...prev, [event.id]: draft }))}
-              onCancelTrack={() => setDrafts((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => id !== event.id)))}
+              /* Closes the candidates and the form; writes nothing. */
+              onCancelTrack={() => closeAdd(event.id)}
               onTrack={() => void track(event)}
             />
           ))}

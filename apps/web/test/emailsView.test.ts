@@ -125,3 +125,22 @@ describe('unread count and Add to Applied eligibility', () => {
     assert.equal(prefillOf(row({ from_address: 'careers@globex.com' })).company, 'Globex');
   });
 });
+
+describe('link candidates: the duplicate guard before Add to Applied (2026-11-05)', () => {
+  it('keeps only well-formed applications, in either join shape, and drops the rest', async () => {
+    // Imported here so the earlier tests do not depend on the new export.
+    const { parseLinkCandidates } = await import('../src/features/emails/emailView.ts');
+    // PostgREST's object join, its array join, and three malformed rows.
+    const parsed = parseLinkCandidates([
+      { id: 'a1', status: 'approved', jobs: { title: 'AI Researcher Intern' } },
+      { id: 'a2', status: 'applied', jobs: [{ title: 'Backend Engineer' }] },
+      { id: 'a3', status: 'not_a_status', jobs: { title: 'X' } },
+      { id: 4, status: 'applied', jobs: { title: 'Y' } },
+      null,
+    ]);
+    // The two real ones, with their titles.
+    assert.deepEqual(parsed, [{ id: 'a1', status: 'approved', title: 'AI Researcher Intern' }, { id: 'a2', status: 'applied', title: 'Backend Engineer' }]);
+    // Not a list: none, never a crash.
+    assert.deepEqual(parseLinkCandidates({}), []);
+  });
+});

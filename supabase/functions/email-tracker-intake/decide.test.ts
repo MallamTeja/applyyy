@@ -882,3 +882,59 @@ test("job_alert: an unmatched alert keeps its subject and body (W33 redacts uncl
   // Kept whole: an alert is job mail Teja asked to keep.
   assert.deepEqual([row.subject, row.snippet, row.recipient_to], ["Jobs for you", "5 new jobs", "teja@x.com"]);
 });
+
+// ---- Match-only rows (2026-11-05): approved / awaiting_approval / blocked_needs_human ------------
+// Live: HackerRank's "AI Researcher Intern" mail (oa_invite, 11-04 19:19 UTC) never matched its
+// application because that row was `approved`, outside TRACKED_STATUSES. These rows are now MATCH
+// candidates (the email is linked) but never MOVE candidates (statusMoveFor refuses them), and they
+// are tried only after the tracked rows, never for a company that already has a tracked row.
+
+// The live email's shape, from the recon.
+const HACKERRANK_MAIL = { from: "HackerRank Careers <careers@hackerrankcareers.com>", subject: "Exciting News: We have received your Application || AI Researcher Intern || HackerRank", snippet: "" };
+// A row of a given status at a given company, with a title for the tiebreak.
+const poolApp = (id: string, status: ActiveApplication["status"], slug: string, title: string): ActiveApplication => ({ id, status, job_id: `job-${id}`, jobs: { company_name: slug, company_slug: slug, title } });
+
+test("match-only: an approved HackerRank row is matched by the subject, and its status never moves", async () => {
+  // Imported here so the earlier tests do not depend on the new exports.
+  const { matchTrackedFirst, MATCH_POOL_STATUSES } = await import("./decide.ts");
+  // The pool now includes approved.
+  assert.ok(MATCH_POOL_STATUSES.includes("approved"));
+  // Sender label 'hackerrankcareers' is not the slug; the subject names it as a whole word.
+  const id = matchTrackedFirst(HACKERRANK_MAIL, "hackerrankcareers.com", [poolApp("hr-1", "approved", "hackerrank", "AI Researcher Intern")]);
+  // Linked.
+  assert.equal(id, "hr-1");
+  // Its verdict, as the intake stores it, moves nothing from approved.
+  assert.equal(statusMoveFor({ classification: "oa_invite", confidence: 0.95 }, "approved"), null);
+});
+
+test("match-only: no status move out of any match-only status, even a confident rejection", () => {
+  // Every match-only lane.
+  for (const status of ["approved", "awaiting_approval", "blocked_needs_human"] as const) {
+    // A confident outcome of each kind.
+    for (const classification of ["rejection", "interview_invite", "oa_invite", "offer", "recruiter_outreach"] as const) {
+      // Refused by the explicit match-only rule, not only by the graph's missing edge.
+      assert.equal(statusMoveFor({ classification, confidence: 0.99 }, status), null, `${classification} at ${status}`);
+    }
+  }
+});
+
+test("match-only: a company with a TRACKED row never falls back to its match-only rows", async () => {
+  // Imported as above.
+  const { matchTrackedFirst } = await import("./decide.ts");
+  // Acme: one applied row, one awaiting_approval row for another role.
+  const apps = [poolApp("acme-applied", "applied", "acme", "Backend Engineer"), poolApp("acme-queue", "awaiting_approval", "acme", "Data Engineer")];
+  // An Acme rejection naming no title: the tracked row wins, exactly as before the pool grew.
+  assert.equal(matchTrackedFirst(REJECTION, null, apps), "acme-applied");
+  // Two tracked Acme rows and an untitled email stay ambiguous: never resolved to the queue row.
+  const twoTracked = [...apps, poolApp("acme-applied-2", "applied", "acme", "SRE")];
+  assert.equal(matchTrackedFirst(REJECTION, null, twoTracked), null);
+});
+
+test("match-only: the replay's re-match links a stored email to an approved row approved before it arrived", () => {
+  // The stored email, unmatched, as the replay reads it.
+  const stored = [{ id: "ev-hr", matched_application_id: null, from_address: HACKERRANK_MAIL.from, subject: HACKERRANK_MAIL.subject, snippet: "", received_at: "2026-11-04T19:19:00.000Z" }];
+  // The approved HackerRank row, first approved the day before.
+  const links = receipt.rematchUnmatched(stored, [poolApp("hr-1", "approved", "hackerrank", "AI Researcher Intern")], new Map([["hr-1", "2026-11-03T10:00:00.000Z"]]));
+  // Linked; the move is a separate question statusMoveFor refuses.
+  assert.deepEqual(links, [{ eventId: "ev-hr", applicationId: "hr-1" }]);
+});

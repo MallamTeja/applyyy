@@ -22,7 +22,8 @@ import {
   // Where an owed email moves its row, if anywhere: the first-try rule.
   statusMoveFor,
   // The rows the tracker follows; the same list index.ts loads.
-  TRACKED_STATUSES,
+  // The match pool (tracked + match-only, 2026-11-05); moves still go through statusMoveFor, which refuses match-only rows.
+  MATCH_POOL_STATUSES,
   // Which stored, unmatched emails now match a tracked row (2026-11-04).
   rematchUnmatched,
   // The matcher's application shape, for the re-match candidates.
@@ -214,7 +215,7 @@ export async function replayStoredMoves(
     // Paged (Review #3): applied rows pile up past PostgREST's 1000-row cap, and a cut-short
     // read would silently leave rows out of the sweep. Ordered by id so the pages are stable.
     // The joined job (2026-11-04) is what the re-match below matches on, the same fields index.ts loads.
-    const apps = await readAllPages((from, to) => db.from("applications").select("id, status, jobs(company_name, company_slug, title)").in("status", [...TRACKED_STATUSES]).order("id").range(from, to));
+    const apps = await readAllPages((from, to) => db.from("applications").select("id, status, jobs(company_name, company_slug, title)").in("status", [...MATCH_POOL_STATUSES]).order("id").range(from, to));
     // No statuses, no decisions.
     if (typeof apps === "string") return { moved, errors: [...errors, `replay: applications read failed: ${apps}`] };
     // Shape-checked: only a string id with a tracked status becomes a candidate row.
@@ -224,7 +225,7 @@ export async function replayStoredMoves(
     // One entry per tracked row.
     for (const row of apps as { id?: unknown; status?: unknown; jobs?: { company_name?: unknown; company_slug?: unknown; title?: unknown } | null }[]) {
       // Anything else is skipped; skipped rows can't be moved.
-      if (typeof row.id !== "string" || !TRACKED_STATUSES.includes(row.status as ApplicationStatus)) continue;
+      if (typeof row.id !== "string" || !MATCH_POOL_STATUSES.includes(row.status as ApplicationStatus)) continue;
       // A move candidate.
       statusById.set(row.id, row.status as ApplicationStatus);
       // A re-match candidate too, when its job can be matched on (§6: no slug, no match).

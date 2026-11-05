@@ -219,6 +219,9 @@ export function targetStatusFor(classification: EmailClassification): Applicatio
 // One pure answer for "does anything change": a target exists, the graph lets the tracker walk
 // that edge, AND the confidence gate passes. `index.ts` calls this so the tested rule is the live one.
 export function statusMoveFor(decision: Pick<MessageDecision, "classification" | "confidence">, current: ApplicationStatus): ApplicationStatus | null {
+  // A match-only row (approved, awaiting_approval, blocked_needs_human) is linked, never moved: an email
+  // must not jump the graph before submission. Stated here, not left to the graph's missing edges.
+  if (MATCH_ONLY_STATUSES.includes(current)) return null;
   // The status the classification implies, if any.
   const target = targetStatusFor(decision.classification);
   // No target, or an edge the tracker may not walk: no move.
@@ -403,7 +406,8 @@ export function rematchUnmatched(
     // The message shape matchApplication reads.
     const message = { from: email.from_address, subject: email.subject, snippet: email.snippet };
     // The same matcher the ingest path runs, with the same sender-domain parse.
-    const applicationId = matchApplication(message, extractCompanyDomain(email.from_address), candidates);
+    // Tracked rows first, match-only rows only for companies no tracked row holds (2026-11-05).
+    const applicationId = matchTrackedFirst(message, extractCompanyDomain(email.from_address), candidates);
     // Exactly one owner, or nothing.
     if (applicationId !== null) links.push({ eventId: email.id, applicationId });
   }
@@ -447,6 +451,35 @@ export const CONFIRMABLE_STATUSES: readonly ApplicationStatus[] = ["applying"];
 // has a row mid-submit, is now ambiguous (null) instead of matched to the post-submit row.
 // That is a refusal, never a wrong move; the W7 title tiebreak resolves the titled ones.
 export const TRACKED_STATUSES: readonly ApplicationStatus[] = ["applying", "needs_verification", "applied", "employer_screening", "oa_pending", "interview"];
+
+// MATCH-ONLY rows (2026-11-05): an email may be LINKED to them but never MOVES them (statusMoveFor
+// refuses). Live case: HackerRank's "AI Researcher Intern" mail (oa_invite) matched nothing because its
+// application sat at `approved`, outside TRACKED_STATUSES: Teja had applied by hand, before the worker.
+// awaiting_approval and blocked_needs_human are the same story one step earlier or later.
+export const MATCH_ONLY_STATUSES: readonly ApplicationStatus[] = ["awaiting_approval", "approved", "blocked_needs_human"];
+
+// Every status index.ts and the replay load as match candidates: tracked first, match-only second.
+export const MATCH_POOL_STATUSES: readonly ApplicationStatus[] = [...TRACKED_STATUSES, ...MATCH_ONLY_STATUSES];
+
+/**
+ * The matcher over the whole pool, TRACKED ROWS FIRST (2026-11-05). Match-only rows are tried only when
+ * the tracked rows give no match, and never for a company that has any tracked row: a queue of
+ * awaiting_approval roles at Acme must not make an Acme rejection ambiguous, and an email two tracked Acme
+ * rows tie on must not resolve to a third, untracked one. One matcher (matchApplication), two pools.
+ */
+export function matchTrackedFirst(message: DecidableMessage, senderDomain: string | null, applications: readonly ActiveApplication[]): string | null {
+  // The tracked rows, exactly the pool before 2026-11-05.
+  const tracked = applications.filter((app) => TRACKED_STATUSES.includes(app.status));
+  // Their match first; unchanged behaviour whenever it finds one.
+  const first = matchApplication(message, senderDomain, tracked);
+  if (first !== null) return first;
+  // Companies a tracked row already holds: their mail never falls through to an untracked row.
+  const trackedSlugs = new Set(tracked.map((app) => app.jobs?.company_slug).filter((slug): slug is string => typeof slug === "string"));
+  // The match-only rows of every other company.
+  const fallback = applications.filter((app) => MATCH_ONLY_STATUSES.includes(app.status) && typeof app.jobs?.company_slug === "string" && !trackedSlugs.has(app.jobs.company_slug));
+  // The same matcher over them; null for none or ambiguous, as always.
+  return fallback.length === 0 ? null : matchApplication(message, senderDomain, fallback);
+}
 
 /**
  * Whether the tracker may ADVANCE any status this run, given the kill switch
