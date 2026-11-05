@@ -169,6 +169,19 @@ export interface KitResolve {
   readonly onMove: (to: ApplicationStatus) => void;
 }
 
+// The ISO-8601 shape PostgREST returns for a timestamptz. Proven before display because Date.parse is
+// lenient ("-5" parses as year -5): a malformed approve time must read "unknown", never a wrong date.
+const ISO_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
+/* An approve time as a <time> (exact stamp in dateTime, readable text in the operator's locale, as the
+   Applied page formats times), or the plain words "approve time unknown" when it is missing or malformed. */
+function ApproveTime(props: { readonly at: string | null }): ReactElement {
+  // Absent or not the ISO shape: said, not guessed.
+  if (props.at === null || !ISO_STAMP.test(props.at)) return <>approve time unknown</>;
+  // The machine-readable stamp plus the same en-IN medium/short format AppliedJobsPage uses.
+  return <time dateTime={props.at}>{new Date(props.at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}</time>;
+}
+
 /* One job's card. Pure: everything arrives as props, so a static render tests exactly what is shown.
    `resolve` is required, so a card can never be drawn with its resolve buttons silently missing. */
 export function KitCard(props: { readonly row: ManualApplyRow; readonly kit: KitState; readonly resolve: KitResolve }): ReactElement {
@@ -216,8 +229,15 @@ export function KitCard(props: { readonly row: ManualApplyRow; readonly kit: Kit
         </div>
       ) : null}
       {/* The kit body: none, unreadable, or the full form. Never a partial form. */}
-      {kit.kind === 'none' ? (
-        /* No kit event for this application yet. */
+      {kit.kind === 'none' && row.status === 'approved' ? (
+        /* Approved, kit on its way: dispatch-apply starts the kit workflow on approve (5c3ce87), so this is
+           a wait, not a fault. role=status so the state is announced; the kit-only actions above are absent. */
+        <p className="panel__note" role="status">
+          {/* The state, then when the wait began, then why the resume and answers are missing. */}
+          <strong>Kit pending</strong>, approved <ApproveTime at={row.approvedAt} />. The resume and pre-answered fields appear here when the kit lands (usually within minutes); Refresh kits to check. You can still open the form and apply by hand.
+        </p>
+      ) : kit.kind === 'none' ? (
+        /* No kit event for this application yet, and none is on its way at this status. */
         <p className="panel__note">Kit not generated yet: ask the orchestrator to generate it.</p>
       ) : kit.kind === 'unreadable' ? (
         /* role=alert: a kit that cannot be trusted must not be used, and the reason says what broke. */

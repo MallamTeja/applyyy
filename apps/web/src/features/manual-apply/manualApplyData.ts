@@ -33,27 +33,33 @@ export interface ManualApplyRow {
   readonly applyUrl: string | null;
   // updated_at exactly as returned: the stale-stamp guard of the card's Mark applied / Mark failed (never parsed).
   readonly stamp: string;
+  // When the row was approved (applications.status_changed_at) for an `approved` row; null at any other
+  // status. Raw, as returned: the card proves its shape before showing it ("Kit pending, approved <time>").
+  readonly approvedAt: string | null;
 }
 
 // A Set for the status membership test.
 const KNOWN: ReadonlySet<string> = new Set(APPLICATION_STATUSES);
 // The only shape an application id has; anything else never reaches an `in` filter.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// The columns both application reads need.
-const ROW_SELECT = 'id, status, updated_at, jobs:job_id(title, company_name, apply_url)';
+// The columns every application read needs; status_changed_at is the approve time of an approved row
+// (the transition trigger sets it only when the status changes, so later edits do not move it).
+const ROW_SELECT = 'id, status, updated_at, status_changed_at, jobs:job_id(title, company_name, apply_url)';
 // Bounds every read; far above any real manual queue, so it only stops a pathological table.
 const READ_CAP = 200;
 
 /* One raw application row, validated, or null. */
 function parseRow(raw: unknown): ManualApplyRow | null {
   // Loose read, then proven.
-  const r = raw as { id?: unknown; status?: unknown; updated_at?: unknown; jobs?: unknown } | null;
+  const r = raw as { id?: unknown; status?: unknown; updated_at?: unknown; status_changed_at?: unknown; jobs?: unknown } | null;
   // An id, a known status and the stamp are required; a row without them cannot be resolved safely.
   if (typeof r?.id !== 'string' || typeof r.status !== 'string' || !KNOWN.has(r.status) || typeof r.updated_at !== 'string') return null;
   // The joined job, tolerating the to-many array shape like rowLabel does.
   const job = (Array.isArray(r.jobs) ? r.jobs[0] : r.jobs) as { apply_url?: unknown } | null | undefined;
+  // The approve time: meaningful only while the row sits at approved (at other statuses it is when THAT status began).
+  const approvedAt = r.status === 'approved' && typeof r.status_changed_at === 'string' ? r.status_changed_at : null;
   // Shaped for the card.
-  return { id: r.id, status: r.status as ApplicationStatus, label: rowLabel(r.id, r.jobs), applyUrl: typeof job?.apply_url === 'string' ? job.apply_url : null, stamp: r.updated_at };
+  return { id: r.id, status: r.status as ApplicationStatus, label: rowLabel(r.id, r.jobs), applyUrl: typeof job?.apply_url === 'string' ? job.apply_url : null, stamp: r.updated_at, approvedAt };
 }
 
 /* The kit events, newest first, as one exact-filtered read. */
@@ -100,7 +106,29 @@ async function readRows(filter: { readonly statuses: readonly ApplicationStatus[
   return { rows: (data ?? []).map(parseRow).filter((r: ManualApplyRow | null): r is ManualApplyRow => r !== null) };
 }
 
-/* Everything the page shows: the rows (lanes first, then open kit rows) and each one's kit state. */
+/* The page's row list from its three reads: lanes first (the urgent ones), then every approved row, then
+ * the other open kit rows; each application once. Pure, so the "approved row never hidden" rule is
+ * tested without a database (test/manualApplyKitPending.test.ts).
+ *
+ * WHY APPROVED ROWS ARE READ ON THEIR OWN (2026-11-05). The page used to list only lane rows and rows
+ * that already had a kit. dispatch-apply starts the kit workflow on approve (5c3ce87), so for the
+ * minutes until the kit lands an approved row was in neither set and the page showed "Nothing to apply
+ * by hand" over 5 approved jobs. An approved row is now listed with or without its kit ("Kit pending"). */
+export function mergeManualApplyRows(reads: {
+  // Rows in the two manual-action lanes.
+  readonly lanes: readonly ManualApplyRow[];
+  // Every approved row, kit or not.
+  readonly approved: readonly ManualApplyRow[];
+  // Rows that have a kit, at any status.
+  readonly kitRows: readonly ManualApplyRow[];
+}): readonly ManualApplyRow[] {
+  // Lanes, then approved, then kit rows (a kit row past the submit stage needs nothing more, so it is left
+  // out). Keyed by id so a row from two reads is listed once: a Map keeps the FIRST insertion's position,
+  // which is the most urgent placement (both copies are the same database row).
+  return [...new Map([...reads.lanes, ...reads.approved, ...reads.kitRows.filter((k) => isOpenKitStatus(k.status))].map((r) => [r.id, r] as const)).values()];
+}
+
+/* Everything the page shows: the rows (see mergeManualApplyRows) and each one's kit state. */
 export async function loadManualApply(): Promise<{ readonly rows: readonly ManualApplyRow[]; readonly kits: ReadonlyMap<string, KitState> } | { readonly error: string }> {
   // The kits first: their ids decide which extra rows to read.
   const kits = await readKitEvents();
@@ -108,18 +136,17 @@ export async function loadManualApply(): Promise<{ readonly rows: readonly Manua
   if ('error' in kits) return kits;
   // Kit ids that are real application ids.
   const kitIds = [...kits.states.keys()].filter((id) => UUID.test(id));
-  // Both row reads in parallel; they are independent.
-  const [lanes, kitRows] = await Promise.all([readRows({ statuses: MANUAL_ACTION_STATUSES }), readRows({ ids: kitIds })]);
+  // The three row reads in parallel; they are independent. Approved rows are read by status, so one
+  // whose kit has not landed yet is still listed (as "Kit pending").
+  const [lanes, approved, kitRows] = await Promise.all([readRows({ statuses: MANUAL_ACTION_STATUSES }), readRows({ statuses: ['approved'] }), readRows({ ids: kitIds })]);
   // Either failing is said.
   if ('error' in lanes) return lanes;
+  // Same for the approved rows: a failed read must not look like "no approved jobs".
+  if ('error' in approved) return approved;
   // Same for the kit rows.
   if ('error' in kitRows) return kitRows;
-  // Lane rows by id, so a kit row already in a lane is listed once.
-  const seen = new Set(lanes.rows.map((r) => r.id));
-  // Kit rows not already listed and still at a submit stage: a row past the submit needs nothing more.
-  const extra = kitRows.rows.filter((r) => !seen.has(r.id) && isOpenKitStatus(r.status));
-  // Lanes first (they are the urgent ones), then the open kit rows.
-  return { rows: [...lanes.rows, ...extra], kits: kits.states };
+  // One list, each row once, lanes first.
+  return { rows: mergeManualApplyRows({ lanes: lanes.rows, approved: approved.rows, kitRows: kitRows.rows }), kits: kits.states };
 }
 
 /* The statuses of every application that has a kit, for the rail badge. A failure yields [] so the
