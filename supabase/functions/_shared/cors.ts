@@ -65,6 +65,12 @@ export function withCors(
     headers.delete("Access-Control-Allow-Origin");
     // The per-request decision.
     for (const [name, value] of Object.entries(allowOriginFor(req.headers.get("origin")))) headers.set(name, value);
+    // A preflight with no Max-Age is cached by Chrome for only 5 s, so every AI ask and approve
+    // paid an extra OPTIONS round trip (measured 0.17-0.54 s warm, 2.4 s cold, 2026-11-05).
+    if (req.method === "OPTIONS") {
+      // One day, as asked. Browsers clamp it to their own ceiling (Chrome 2 h, Firefox 24 h).
+      headers.set("Access-Control-Max-Age", "86400");
+    }
     // The answer depends on Origin, so caches must key on it.
     headers.append("Vary", "Origin");
     // Same body and status, new headers.

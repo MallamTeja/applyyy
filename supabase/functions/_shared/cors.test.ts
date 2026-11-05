@@ -32,6 +32,20 @@ test("cors: the production origin is echoed with Vary: Origin", async () => {
   assert.equal(res.headers.get("vary"), "Origin");
 });
 
+// Bug 4: no Max-Age meant Chrome re-preflighted every 5 s, an extra round trip per AI ask.
+test("cors: a preflight carries Access-Control-Max-Age 86400, other methods do not", async () => {
+  // A handler answering the way every function answers OPTIONS.
+  const handler = withCors(() => Promise.resolve(new Response("ok", { status: 200 })));
+  // A browser preflight from the web app.
+  const pre = await handler(new Request("https://example.test/", { method: "OPTIONS", headers: { origin: "https://applyyy.vercel.app" } }));
+  // One day, so the browser caches the preflight instead of repeating it.
+  assert.equal(pre.headers.get("access-control-max-age"), "86400");
+  // The real call afterwards: Max-Age belongs to the preflight only.
+  const post = await handler(new Request("https://example.test/", { method: "POST", headers: { origin: "https://applyyy.vercel.app" } }));
+  // Absent on a non-preflight answer.
+  assert.equal(post.headers.get("access-control-max-age"), null);
+});
+
 // `vite dev` is the second allowed origin.
 test("cors: the local dev origin is allowed", () => {
   // The default vite port.
