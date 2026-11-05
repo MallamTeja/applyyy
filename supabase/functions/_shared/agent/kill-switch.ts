@@ -46,7 +46,12 @@ export type KillSwitchVerdict =
   // recorded as `skipped_disabled` so the health page can say why nothing happened.
   | { readonly allowed: false; readonly reason: "disabled"; readonly detail: null }
   // The account was never bootstrapped. Needs a human, but a different human action
-  // than an outage would: call `bootstrap_user_defaults()` once.
+  // than an outage would: the orchestrator, AS postgres, runs
+  // `select applyy_internal.seed_user_defaults('<user_id>')` once (the id copied from
+  // auth.users). Not `public.bootstrap_user_defaults()`: since migration 20261105203000
+  // `authenticated` has no EXECUTE on it, and as postgres it reads a NULL auth.uid() and
+  // refuses (42501). Normally the signup trigger (20261008180000) seeds the row, so this
+  // reason means that trigger raised its never-blocking WARNING for this user.
   | { readonly allowed: false; readonly reason: "no_settings_row"; readonly detail: null }
   // The control panel could not be read. The only one of the three that is an incident.
   | { readonly allowed: false; readonly reason: "unreadable"; readonly detail: string };
