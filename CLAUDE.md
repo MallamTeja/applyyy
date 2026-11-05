@@ -73,8 +73,16 @@ pinned to a SHA (the CLI ships the *working tree*, including peers' uncommitted 
 git worktree add --detach "$env:TEMP\applyyy-deploy" <sha>
 # copy supabase/.temp/{project-ref,pooler-url,linked-project.json,postgres-version} into it
 $env:SUPABASE_ACCESS_TOKEN = $null   # the user env var belongs to the WRONG account
-supabase functions deploy <fn> --project-ref xynqxekcqizwhtskzqrq --use-api
+supabase functions deploy <fn> --project-ref xynqxekcqizwhtskzqrq --use-api --import-map supabase/functions/deno.json
 ```
+
+- **`--import-map` is mandatory since `bb55391` (2026-11-05).** `supabase/functions/deno.json` maps the bare
+  `@supabase/supabase-js`. `--use-api` (server-side bundling) does NOT read deno.json on its own: without the flag the
+  deploy fails at bundle time ("Relative import path … not prefixed with / or ./"). Deploy one low-traffic function
+  (`rls-proof`) first whenever the import map changes.
+- **Moving an exported name out of a function file:** `worker/` and `apps/web/` import function code by RELATIVE path.
+  `git grep` the whole repo and run worker tsc + vitest, not only the functions suite (`7a98b79` broke the worker on
+  main this way, 2026-11-05).
 
 Order `function` versions by `updated_at`, never by version number. The version counts
 that one function's deploys and says nothing about age.
