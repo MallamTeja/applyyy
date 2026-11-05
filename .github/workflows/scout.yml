@@ -1,7 +1,7 @@
 # applyy — scheduled ATS scout (job discovery).
 #
 # Regularly polls registered company career boards (Greenhouse, Lever, Ashby,
-# SmartRecruiters) from public.company_watchlist, deduplicates postings by canonical
+# Workday; SmartRecruiters is off since the 2026-11-01 robots ruling) from public.company_watchlist, deduplicates postings by canonical
 # fingerprint into public.jobs, and screens each new posting at insert, so its
 # public.applications row is born at 'passed_filters' or 'dropped_filter' ('discovered'
 # only when the screener cannot load). Corrected 2026-11-01: this said 'discovered'.
@@ -22,9 +22,14 @@ on:
     # day. Minute 17, not 0: GitHub delays, and under heavy load drops, scheduled runs at
     # the top of the hour; runs here started 3-6 hours late (measured 2026-10-29..11-01).
     # Change together with what assumes this cadence: the Health threshold
-    # (apps/web/src/data/agentFreshness.ts) and the scan panel's "twice a day"
+    # (apps/web/src/data/agentFreshness.ts, guarded against this file by
+    # apps/web/test/scoutScheduleFreshness.test.ts) and the scan panel's "three times a day"
     # (apps/web/src/features/pipeline/DiscoveryModal.tsx).
     - cron: '17 0,12 * * *'
+    # Third run (2026-11-05): 04:17 UTC = 09:47 IST, so the Indian morning review sees a scan
+    # that is hours old, not one from 05:47. Costs ~10 more Actions minutes a day. The longest
+    # gap between runs is still 12:17 -> 00:17 UTC (12 h), so the Health threshold is unchanged.
+    - cron: '17 4 * * *'
   workflow_dispatch:
     inputs:
       force:

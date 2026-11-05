@@ -123,8 +123,13 @@ export const AGENT_CADENCE: Readonly<Partial<Record<AgentName, Cadence>>> = {
      2026-10-29..11-01), so a healthy gap between two successes reaches ~18 hours;
      20 flags ONE missed run under those delays without calling a late one dead.
      The 30 above still governs the once-a-day aggregator below. A manual button
-     scan also writes `scout_ats`: it can make a dead schedule look alive, never the reverse. */
-  scout_ats: { expected: 'twice a day', staleAfterHours: 20 },
+     scan also writes `scout_ats`: it can make a dead schedule look alive, never the reverse.
+     Three runs a day since 2026-11-05 (`17 4 * * *` added, 09:47 IST). 20 is KEPT on purpose:
+     the threshold is set by the LONGEST scheduled gap, 12:17 -> 00:17 UTC = 12 h, which the
+     new run does not shorten; 12 h + the 6 h delay = 18 h still needs 20. Lowering it would
+     call a healthy late night run dead. test/scoutScheduleFreshness.test.ts recomputes the
+     gap from scout.yml, so a schedule change that outgrows 20 goes red there. */
+  scout_ats: { expected: 'three times a day', staleAfterHours: 20 },
   scout_aggregator: { expected: 'every morning', staleAfterHours: 30 },
   /* Deterministic, cheap, runs with discovery. */
   normalizer: { expected: 'every morning', staleAfterHours: 30 },
