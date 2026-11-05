@@ -37,8 +37,9 @@ import { createSupabaseGateway, type GatewayConfig, type SupabaseLike } from './
 export const KIT_STATUSES: readonly ApplicationStatus[] = ['approved', 'applying', 'needs_verification', 'blocked_needs_human'];
 
 /**
- * A refusal that is the system working, not a fault (B2, 2026-11-05): robots.txt refused the form, or the
- * posting is closed. The sweep records it once (an apply_kit_skipped note) and reports it, so the run stays
+ * A refusal that is the system working, not a fault (B2, 2026-11-05): the posting is closed. ('robots_refused'
+ * is no longer thrown since K2, 2026-11-06, which gives that row a resume-only kit; the code stays because
+ * old skip notes carry it and the web reads them.) The sweep records it once (an apply_kit_skipped note) and reports it, so the run stays
  * green and the row is not retried until its status changes. A closed set of codes, so a new cause is a
  * deliberate change here, never a guessed string.
  */
@@ -207,6 +208,46 @@ function refusalWarning(blocker: FillBlocker | { readonly label: string; readonl
 }
 
 /**
+ * The kit's resume: the row's snapshot CONTENT under the latest master's IDENTITY, rendered and uploaded,
+ * or null (with a warning) when the row has no snapshot. Identity drift is pushed onto `warnings`.
+ */
+async function renderKitResume(input: BuildApplyKitInput, row: KitApplication, master: MasterProfile, warnings: string[]): Promise<ApplyKitDetail['resume']> {
+  // No snapshot: there is no resume to hand over, and the warning says so.
+  if (row.tailoredProfile === null) {
+    // Said, so an empty resume slot is explained.
+    warnings.push('the row has no tailored_profile, so no resume was rendered');
+    return null;
+  }
+  // Every identity drift between the snapshot and the master, said out loud.
+  warnings.push(...identityDriftWarnings(row.tailoredProfile.identity, master.identity));
+  // The one merge the ruling makes: identity swapped, every content section kept.
+  const merged: ResolvedResume = { ...row.tailoredProfile, identity: master.identity };
+  // apply-one's renderer, so this PDF is the one a bot run would attach.
+  const rendered = await input.renderResume(merged);
+  // A NEW timestamped path under the row's prefix; resume_storage_path is not touched.
+  return { storage_path: await input.gateway.uploadResume(row.id, rendered.bytes), file_name: resumeFileName(merged) };
+}
+
+/**
+ * K2 (2026-11-06): the kit for a form the system cannot read (robots refused, or no fields and no
+ * closed evidence). No form answers, the resume, and the reason as the first warning, recorded as an
+ * ordinary v1 apply_kit note: the web shows it as a kit, and the sweep counts it as current, so the
+ * row is not retried every run. A posting the page itself calls closed is still a KitSkip.
+ */
+async function writeResumeOnlyKit(input: BuildApplyKitInput, row: KitApplication, master: MasterProfile, formUrl: string, reasons: string[]): Promise<ApplyKitDetail> {
+  // The reasons first, so the top warning says why there are no answers.
+  const warnings = [...reasons];
+  // The same resume a full kit carries.
+  const resume = await renderKitResume(input, row, master, warnings);
+  // THE NOTE, in the v1 contract, with no fields.
+  const detail: ApplyKitDetail = { kind: 'apply_kit', v: 1, generated_at: input.now().toISOString(), run_id: input.runId, form_url: formUrl, resume, fields: [], warnings };
+  // The kit's one row write: append-only, and no status moves.
+  await input.gateway.appendApplicationNote(row.id, detail as unknown as Record<string, unknown>);
+  // Returned too, so the CLI can print it.
+  return detail;
+}
+
+/**
  * Build one apply kit, record it as a note, and return it.
  *
  * Order: read the row (refuse a wrong status before touching anything), read the master
@@ -239,10 +280,13 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
   const formUrl = input.resolveFormUrl === undefined ? row.applyUrl : await input.resolveFormUrl(row);
   // The gate, on the URL that will be loaded.
   const robots = await input.checkRobots(formUrl);
-  // Refused, waiting or unreadable: the form is not opened, and nothing is written. A definite refusal is
-  // the gate working (arbeitnow's 403, P3 #8), so it is a typed skip the sweep reports, not a failure; a
-  // 'wait' (transient) stays a plain error, because tomorrow may differ and a red run is how that is seen.
-  if (robots.kind === 'refuse') throw new KitSkip('robots_refused', `apply kit: robots.txt did not allow ${formUrl} (${robots.kind}: ${robots.reason})`);
+  // Refused, waiting or unreadable: the form is never opened. A 'wait' (transient) stays a plain error that
+  // writes nothing, because tomorrow may differ and a red run is how that is seen. (B2 made a definite
+  // refusal a typed skip; K2 below replaced that with a resume-only kit.)
+  // K2 (2026-11-06): a definite refusal now gets a RESUME-ONLY kit. The resume needs no page fetch, so the
+  // page stays unopened and the robots ruling holds; Teja gets the resume and the link instead of
+  // "Kit pending" (Tether 04d5c6e4, arbeitnow's 403). Written once, so the sweep does not retry it.
+  if (robots.kind === 'refuse') return writeResumeOnlyKit(input, row, master, formUrl, [`robots.txt refuses ${formUrl} (${robots.reason}), so the form was not opened or read; open it and fill it by hand with this resume`]);
   // Waiting or unreadable: a real failure.
   if (robots.kind !== 'allow') throw new Error(`apply kit: robots.txt did not allow ${formUrl} (${robots.kind}: ${robots.reason})`);
 
@@ -255,15 +299,18 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
   // ZERO FIELDS IS NOT EVIDENCE OF A CLOSED POSTING (T1, 2026-11-05). An Ashby form read before it
   // rendered had 0 fields, and the backstop below called 11 open postings closed. goto now waits for
   // the form, so 0 fields means the page never rendered one we can read (an iframe-only company page, a
-  // client app slower than the wait). Closed only when the page itself says so; otherwise a plain
-  // failure, so the next sweep retries it and the red run shows it, rather than a skip that hides it.
+  // client app slower than the wait). Closed only when the page itself says so; otherwise (K2) a
+  // resume-only kit that says the form could not be read, never a skip that would call it closed.
   if (fields.length === 0) {
     // The page's own evidence: an HTTP error status or a closed-posting sentence. Absent method = none.
     const closed = page.postingClosed === undefined ? null : await page.postingClosed();
     // The page said it: a closed posting, quoted.
     if (closed !== null) throw new KitSkip('posting_closed', `apply kit: posting_closed: ${formUrl}: ${closed}`);
-    // No evidence either way: unreadable, never closed.
-    throw new Error(`apply kit: ${formUrl} rendered no readable form fields (none appeared within the wait, and the page does not say the posting is closed)`);
+    // No evidence either way: unreadable, never closed. K2: a resume-only kit, written once, instead of a
+    // failure retried on every run (L&T 7890ff1b's peoplestrong form sat at "Kit pending" this way).
+    const unreadable = `could not read the form at ${formUrl} (no form fields appeared within the wait, and the page does not say the posting is closed); open it and fill it by hand with this resume`;
+    // The note, with the wall if one was seen.
+    return writeResumeOnlyKit(input, row, master, formUrl, wall === null ? [unreadable] : [unreadable, `the form page shows a ${wall} wall; expect to clear it by hand`]);
   }
   // THE CLOSED-POSTING BACKSTOP (leak 3, 2026-11-05). GitLab 267dcfcd closed in September; its link
   // redirected to the careers index, and the kit listed "Search" and "Department" as the form. Every
@@ -289,21 +336,8 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
   // A captcha or login wall named up front.
   if (wall !== null) warnings.push(`the form page shows a ${wall} wall; expect to clear it by hand`);
 
-  // THE RESUME: the snapshot's CONTENT under the latest master's IDENTITY.
-  let resume: ApplyKitDetail['resume'] = null;
-  if (row.tailoredProfile !== null) {
-    // Every identity drift between the snapshot and the master, said out loud.
-    warnings.push(...identityDriftWarnings(row.tailoredProfile.identity, master.identity));
-    // The one merge the ruling makes: identity swapped, every content section kept.
-    const merged: ResolvedResume = { ...row.tailoredProfile, identity: master.identity };
-    // apply-one's renderer, so this PDF is the one a bot run would attach.
-    const rendered = await input.renderResume(merged);
-    // A NEW timestamped path under the row's prefix; resume_storage_path is not touched.
-    resume = { storage_path: await gateway.uploadResume(row.id, rendered.bytes), file_name: resumeFileName(merged) };
-  } else {
-    // No snapshot: the form still gets planned, but there is no resume to hand over.
-    warnings.push('the row has no tailored_profile, so no resume was rendered');
-  }
+  // THE RESUME: the snapshot's CONTENT under the latest master's IDENTITY (shared with the resume-only kit).
+  const resume = await renderKitResume(input, row, master, warnings);
 
   // Lookups for the field walk.
   const fillById = new Map(plan.fills.map((fill) => [fill.id, fill]));

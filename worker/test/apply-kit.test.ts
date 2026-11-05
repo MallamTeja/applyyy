@@ -295,18 +295,20 @@ describe('the manual apply kit on the real GitLab form', () => {
   }
 
   // T1 (2026-11-05): zero fields was read as "closed" by the email backstop, which parked 11 OPEN Ashby
-  // postings. Without the page's own evidence it is now a plain failure (retried, and red), never a skip.
-  test('a page that renders no form and does not say it is closed fails plainly; it is NOT posting_closed', async () => {
+  // postings. K2 (2026-11-06): it was then a plain failure, retried every run forever (L&T's peoplestrong
+  // form read 0 fields on every run and sat at "Kit pending"). Without the page's own evidence it is now a
+  // RESUME-ONLY kit: no form answers, the resume, and a "fill it by hand" warning, written once.
+  test('a page that renders no form and does not say it is closed gets a resume-only kit; it is NOT posting_closed', async () => {
     // A short render wait: the page never renders a control.
-    const { error, calls } = await kitOn('/synthetic/no-form.html', { formRenderTimeoutMs: 300 });
-    // A plain Error naming the cause...
-    expect(error).toBeInstanceOf(Error);
-    // ...never the typed skip, which would hide the row from the next sweep.
-    expect(error).not.toBeInstanceOf(KitSkip);
-    // The message says what happened, not "closed".
-    expect((error as Error).message).toMatch(/rendered no readable form fields/);
-    // Nothing written.
-    expect(calls.filter((call) => call === 'uploadResume' || call === 'appendApplicationNote')).toEqual([]);
+    const { kit, error, calls } = await kitOn('/synthetic/no-form.html', { formRenderTimeoutMs: 300 });
+    // No error of any kind: a kit was made.
+    expect(error).toBeNull();
+    // No form answers...
+    expect(kit?.fields).toEqual([]);
+    // ...said in a warning Teja reads.
+    expect(kit?.warnings.some((warning) => /could not read the form/.test(warning))).toBe(true);
+    // The resume and the one note were written, so the sweep sees a current kit and stops retrying.
+    expect(calls.filter((call) => call === 'uploadResume' || call === 'appendApplicationNote')).toEqual(['uploadResume', 'appendApplicationNote']);
   }, 60_000);
 
   test('a page with no form that SAYS the posting is closed is posting_closed, quoting the page', async () => {
@@ -425,39 +427,52 @@ describe('the kit gateway over a supabase-js client', () => {
   });
 });
 
-// B2 (2026-11-05, P3 #8): arbeitnow's robots.txt refuses us (403). That is the gate working, so the
-// kit refuses with a TYPED skip the sweep reports (exit 0); a 'wait' (transient) stays a plain failure.
-describe('buildApplyKit robots refusal (B2)', () => {
-  // Every write the kit attempts; a refusal must make none.
-  const writes: string[] = [];
-  // The smallest gateway the robots gate needs: the row, the master, the answers.
-  const gateway = {
-    // A row in a kit lane.
-    fetchApplication: async () => ({ id: 'app-r', status: 'approved', applyUrl: 'https://example.test/job', tailoredProfile: null, jobTitle: 't', company: 'c' }),
-    // A master exists, so the robots gate is reached.
-    fetchLatestProfile: async () => ({}),
-    // No answers needed.
-    fetchAnswers: async () => [],
-    // Must never run on a refusal.
-    uploadResume: async () => { writes.push('uploadResume'); return 'x'; },
-    // Must never run on a refusal.
-    appendApplicationNote: async () => { writes.push('appendApplicationNote'); },
-  } as unknown as KitGateway;
-  // A page that must never be opened.
+// B2 (2026-11-05, P3 #8): arbeitnow's robots.txt refuses us (403). K2 (2026-11-06): Tether 04d5c6e4 is on
+// arbeitnow and sat at "Kit pending". The resume needs no page fetch, so a refusal now gets a RESUME-ONLY
+// kit WITHOUT opening the page (the robots ruling holds); a 'wait' (transient) stays a plain failure.
+describe('buildApplyKit robots refusal (B2, K2)', () => {
+  // A fresh gateway per case, recording every write.
+  function gatewayRecording(writes: string[], notes: Array<Record<string, unknown>>): KitGateway {
+    return {
+      // A row in a kit lane, with a resume snapshot so the resume-only kit has a resume.
+      fetchApplication: async () => ({ ...application, id: 'app-r', applyUrl: 'https://example.test/job' }),
+      // The latest master: the kit's identity source.
+      fetchLatestProfile: async () => latestMaster,
+      // No answers needed.
+      fetchAnswers: async () => [],
+      // The resume upload.
+      uploadResume: async () => { writes.push('uploadResume'); return 'resumes/app-r/x.pdf'; },
+      // The one note.
+      appendApplicationNote: async (_id: string, detail: Record<string, unknown>) => { writes.push('appendApplicationNote'); notes.push(detail); },
+    } as unknown as KitGateway;
+  }
+  // A page that must never be opened: robots said no.
   const page = { goto: async () => { throw new Error('page opened despite robots'); } } as never;
-  // A renderer that must never run.
-  const renderResume = (async () => { throw new Error('rendered despite robots'); }) as never;
+  // A renderer returning a tiny PDF.
+  const renderResume = (async () => ({ bytes: new Uint8Array([37, 80, 68, 70]) })) as never;
 
-  test('robots "refuse" is a KitSkip(robots_refused), writing nothing; "wait" is a plain error', async () => {
+  test('robots "refuse" gets a resume-only kit without opening the page', async () => {
+    // The writes and notes this case made.
+    const writes: string[] = [];
+    const notes: Array<Record<string, unknown>> = [];
     // Refused.
-    const refused = buildApplyKit({ applicationId: 'app-r', gateway, page, renderResume, checkRobots: async () => ({ kind: 'refuse', reason: 'HTTP 403', source: 'status' }) as never, runId: null, now: () => new Date() });
-    // Typed, with its code.
-    await expect(refused).rejects.toMatchObject({ name: 'KitSkip', code: 'robots_refused' });
+    const kit = await buildApplyKit({ applicationId: 'app-r', gateway: gatewayRecording(writes, notes), page, renderResume, checkRobots: async () => ({ kind: 'refuse', reason: 'HTTP 403', source: 'status' }) as never, runId: null, now: () => new Date() });
+    // No form answers, and the warning says why.
+    expect(kit.fields).toEqual([]);
+    expect(kit.warnings.some((warning) => /robots\.txt/.test(warning) && /by hand/.test(warning))).toBe(true);
+    // The resume and one apply_kit note (not a skip note), with the form URL for "Open the form".
+    expect(writes).toEqual(['uploadResume', 'appendApplicationNote']);
+    expect(notes[0]).toMatchObject({ kind: 'apply_kit', form_url: 'https://example.test/job', fields: [] });
+  });
+
+  test('robots "wait" is a plain error, writing nothing', async () => {
+    // The writes this case made.
+    const writes: string[] = [];
     // A transient wait.
-    const waited = buildApplyKit({ applicationId: 'app-r', gateway, page, renderResume, checkRobots: async () => ({ kind: 'wait', reason: 'HTTP 503' }) as never, runId: null, now: () => new Date() });
+    const waited = buildApplyKit({ applicationId: 'app-r', gateway: gatewayRecording(writes, []), page, renderResume, checkRobots: async () => ({ kind: 'wait', reason: 'HTTP 503' }) as never, runId: null, now: () => new Date() });
     // Rejected, but NOT a skip: tomorrow may differ, and a red run is how it is seen.
     await expect(waited).rejects.not.toBeInstanceOf(KitSkip);
-    // Nothing uploaded or noted either way.
+    // Nothing uploaded or noted.
     expect(writes).toEqual([]);
   });
 });
