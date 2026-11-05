@@ -8,8 +8,9 @@
 // bank, the custom questions.
 //
 // WHAT IT MUST NEVER DO, and how each is made structural rather than promised:
-// - Send anything. The page port is `KitPage`: goto, extractFields and detectBlocker
-//   ONLY. There is no fill, attachFile or submit on it to call, so no form input is ever
+// - Send anything. The page port is `KitPage`: goto, extractFields, detectBlocker,
+//   postingClosed and readMenuOptions (opens a combobox menu, reads it, presses Escape) ONLY.
+//   There is no fill, attachFile or submit on it to call, so no form input is ever
 //   typed into a browser that could submit it.
 // - Move a row. The gateway port is `KitGateway`: no status method, no claim, no release.
 // - Invent an answer (CLAUDE.md §6). Values come from planFill, the SAME planner apply-one
@@ -73,7 +74,7 @@ export interface ApplyKitField {
   readonly required: boolean;
   // How to enter it.
   readonly input_type: KitInputType;
-  // The form's own options, when they are readable without interaction.
+  // The form's own options: read without interaction (selects, radios), or from a combobox's opened menu.
   readonly options?: string[];
 }
 
@@ -125,7 +126,9 @@ export interface KitGateway {
 }
 
 /** The page operations the kit may use: reading only. No fill, attachFile or submit exists here. */
-export type KitPage = Pick<ApplicationPage, 'goto' | 'extractFields' | 'detectBlocker'>;
+// postingClosed and readMenuOptions only READ (opening a menu and closing it types nothing); both are
+// optional on ApplicationPage, so a test page without them still type-checks.
+export type KitPage = Pick<ApplicationPage, 'goto' | 'extractFields' | 'detectBlocker' | 'postingClosed' | 'readMenuOptions'>;
 
 /** Everything one kit needs, injected. */
 export interface BuildApplyKitInput {
@@ -249,6 +252,19 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
   const wall = await page.detectBlocker();
   // The form's controls, read from the accessibility tree.
   const fields = await page.extractFields();
+  // ZERO FIELDS IS NOT EVIDENCE OF A CLOSED POSTING (T1, 2026-11-05). An Ashby form read before it
+  // rendered had 0 fields, and the backstop below called 11 open postings closed. goto now waits for
+  // the form, so 0 fields means the page never rendered one we can read (an iframe-only company page, a
+  // client app slower than the wait). Closed only when the page itself says so; otherwise a plain
+  // failure, so the next sweep retries it and the red run shows it, rather than a skip that hides it.
+  if (fields.length === 0) {
+    // The page's own evidence: an HTTP error status or a closed-posting sentence. Absent method = none.
+    const closed = page.postingClosed === undefined ? null : await page.postingClosed();
+    // The page said it: a closed posting, quoted.
+    if (closed !== null) throw new KitSkip('posting_closed', `apply kit: posting_closed: ${formUrl}: ${closed}`);
+    // No evidence either way: unreadable, never closed.
+    throw new Error(`apply kit: ${formUrl} rendered no readable form fields (none appeared within the wait, and the page does not say the posting is closed)`);
+  }
   // THE CLOSED-POSTING BACKSTOP (leak 3, 2026-11-05). GitLab 267dcfcd closed in September; its link
   // redirected to the careers index, and the kit listed "Search" and "Department" as the form. Every
   // application form asks for an email, so a page without one is not a form. Matched by kind OR by
@@ -294,6 +310,23 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
   // The facts that make a profile value `identity` rather than `derived`.
   const facts = identityFacts(master.identity);
 
+  // T3 (2026-11-05): every combobox's options, read by opening its menu, so Teja answers with an
+  // option's exact text (a free-typed answer never matched one). One at a time, in form order: two
+  // menus open at once would be read into each other. Kept beside the fields, never written into
+  // FormField.options, so the plan above (already made) keeps its fill-time checking for comboboxes.
+  const menuOptions = new Map<string, string[]>();
+  // Only when the page can read menus.
+  if (page.readMenuOptions !== undefined) {
+    for (const field of fields) {
+      // Comboboxes only: native selects and radios already carry their options.
+      if (field.kind !== 'combobox') continue;
+      // A widget that will not open costs this field its list, never the kit.
+      const texts = await page.readMenuOptions(field.id).catch(() => null);
+      // Only a real list is kept; null (a search box) leaves the field without one.
+      if (texts !== null) menuOptions.set(field.id, texts);
+    }
+  }
+
   // EVERY FIELD, in form order.
   const kitFields: ApplyKitField[] = fields.map((field) => {
     // An upload's own label is "Attach"; the group's ("Resume/CV") is the question.
@@ -301,7 +334,10 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
     // Required on the control, or (for uploads) on its group.
     const required = field.required || field.groupRequired === true;
     // Shared shape for every branch below.
-    const base = { label, required, input_type: inputTypeOf(field.kind), ...(field.options === undefined ? {} : { options: [...field.options] }) };
+    // The form's options: read without interaction, or (comboboxes) from the opened menu above.
+    const options = field.options ?? menuOptions.get(field.id);
+    // Shared shape for every branch below; the key is absent when no list is known.
+    const base = { label, required, input_type: inputTypeOf(field.kind), ...(options === undefined ? {} : { options: [...options] }) };
     // The resume box gets the freshly rendered file.
     if (field.kind === 'file') {
       // Only the planner's chosen box, and only when a resume exists.

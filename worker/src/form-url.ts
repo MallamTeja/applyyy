@@ -13,7 +13,8 @@
 // THE RULE: NEVER A GUESS. The board token comes from company_watchlist, and catalog tokens
 // have been guessed wrong before (greenhouse 'tcs' is Thornbury, not Tata). So before the
 // form is used, Greenhouse's own API must confirm that exact job id is on that board under
-// the same company name. Unknown token, a failed check, or any error: the stored URL is
+// the same company name, or with an absolute_url that is the very page we hold (T4: Rubrik's
+// board is named "Rubrik Job Board"). Unknown token, a failed check, or any error: the stored URL is
 // returned unchanged, which is today's behaviour (the row parks for a human).
 //
 // ONE RESOLVER, TWO CALLERS: apply-one (the applier) and apply-kit (the manual kit) both call
@@ -80,6 +81,27 @@ function sameCompany(a: string, b: string): boolean {
 }
 
 /**
+ * Whether Greenhouse's own `absolute_url` for the job is the page we hold: same host, same path,
+ * same gh_jid. Parsed, never compared as raw strings, so a tracking parameter or the order of the
+ * query does not matter, but a different company's site always does.
+ */
+function sameJobPage(absoluteUrl: unknown, applyUrl: string): boolean {
+  // The API field may be missing or not a string; that proves nothing.
+  if (typeof absoluteUrl !== 'string') return false;
+  try {
+    // Both through the parser.
+    const theirs = new URL(absoluteUrl);
+    // Ours parsed before (ghJobId), so this cannot throw for a URL that reached here.
+    const ours = new URL(applyUrl);
+    // Host (case-insensitive by the parser), path, and the job id the embed reads.
+    return theirs.hostname === ours.hostname && theirs.pathname === ours.pathname && theirs.searchParams.get('gh_jid') === ours.searchParams.get('gh_jid');
+  } catch {
+    // An unparseable absolute_url confirms nothing.
+    return false;
+  }
+}
+
+/**
  * The production resolver over a board lookup and a JSON fetch.
  *
  * The lookup runs only for a URL with a valid gh_jid, so the common case costs no read.
@@ -98,13 +120,18 @@ export function createFormUrlResolver(lookup: BoardLookup, fetchJson: FetchJson)
       // Greenhouse's own record of that job on that board.
       const res = await fetchJson(`${GREENHOUSE_API}/${board.token}/jobs/${jid}`);
       // Loose read of the body, proven below.
-      const job = res.body as { id?: unknown; company_name?: unknown } | null;
+      const job = res.body as { id?: unknown; company_name?: unknown; absolute_url?: unknown } | null;
       // Only a 200 can confirm; a 404 means the job is not on this board.
       if (res.status !== 200 || typeof job !== 'object' || job === null) return row.applyUrl;
       // The same job: a number whose digits are exactly the gh_jid.
       if (typeof job.id !== 'number' || String(job.id) !== jid) return row.applyUrl;
-      // The same company: a guessed token on another company's board fails here.
-      if (typeof job.company_name !== 'string' || !sameCompany(job.company_name, board.companyName)) return row.applyUrl;
+      // The same company, by either of two proofs. A guessed token on another company's board fails both.
+      // (1) The board's name equals the job's company name.
+      const nameMatches = typeof job.company_name === 'string' && sameCompany(job.company_name, board.companyName);
+      // (2) Greenhouse's own public URL for this job IS the page we hold (T4, 2026-11-05). Needed because
+      // some boards are named differently from the company: Rubrik's API says "Rubrik Job Board", so
+      // check (1) refused every Rubrik row although absolute_url was our apply_url character for character.
+      if (!nameMatches && !sameJobPage(job.absolute_url, row.applyUrl)) return row.applyUrl;
       // Confirmed: the form the company's iframe would load.
       return `${GREENHOUSE_EMBED}?for=${board.token}&token=${jid}`;
     } catch {

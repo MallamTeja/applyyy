@@ -1,0 +1,28 @@
+<!doctype html>
+<!-- T1 (2026-11-05): an Ashby-shaped page. Ashby boards are a client-side app: at
+     domcontentloaded the page holds NO controls, and the form appears seconds later (a live
+     Quora posting: 0 controls at 6.4 s, 22 fields at 9.1 s). Read before then, the kit called
+     11 open postings closed. Synthetic: the timing shape, not a copy; 1.2 s keeps the test fast. -->
+<html lang="en">
+<head>
+  <!-- Plain document. -->
+  <meta charset="utf-8">
+  <!-- Names the page like a posting. -->
+  <title>Software Engineer - Application</title>
+</head>
+<body>
+  <!-- The app's mount point, empty at domcontentloaded exactly as Ashby's is. -->
+  <div id="root"></div>
+  <script>
+    // Renders the form after a delay, standing in for the SPA's data fetch and first render.
+    setTimeout(() => {
+      // The same two controls every application form has: a name and an email.
+      document.getElementById('root').innerHTML =
+        // Labelled by <label for>, which the extractor reads.
+        '<form><label for="_systemfield_name">Full Name</label><input id="_systemfield_name" type="text" required>' +
+        // An email box, so the kit's closed-posting backstop sees a real form.
+        '<label for="_systemfield_email">Email</label><input id="_systemfield_email" type="email" required></form>';
+    }, 1200);
+  </script>
+</body>
+</html>

@@ -1,0 +1,40 @@
+<!doctype html>
+<!-- T2 (2026-11-05): a TRIMMED copy of the live Lever form at
+     jobs.lever.co/netomi/ffe81537-5d1b-437e-a5e8-43546aa8c655/apply, read the same day (robots allowed).
+     The question markup is verbatim; kept are one of each shape (the resume upload, three standard
+     questions, one custom "card" dropdown, one required and one optional card text box). Removed:
+     scripts, styles, icons, the page chrome and the other questions. What it proves: Lever controls
+     have NO aria-label, NO id (except the resume) and NO <label for>; the question lives in the
+     `.application-label` of the enclosing li.application-question, and required-ness is a ✱ mark.
+     The extractor read 0 fields from this form before T2. -->
+<html lang="en">
+<head>
+  <!-- Plain document; nothing here runs. -->
+  <meta charset="utf-8">
+  <!-- The live page's own title shape. -->
+  <title>Netomi - Application</title>
+</head>
+<body>
+  <!-- Lever's form posts to the apply URL; never submitted in tests. -->
+  <form method="POST" action="#" enctype="multipart/form-data">
+    <!-- Lever's own machinery: a hidden card template, which the extractor must skip. -->
+    <input type="hidden" name="cards[c8afb62e-f85f-45cd-82f8-acaef1a6c56f][baseTemplate]" value="{}">
+    <ul>
+      <!-- The resume upload: the only control with an id, and no required attribute (only the ✱). -->
+      <li class="application-question resume"><label><div class="application-label">Resume/CV <span class="required">✱</span></div><div class="application-field"><a href="#" class="postings-btn template-btn-utility visible-resume-upload"><span class="filename"></span><span class="default-label">ATTACH RESUME/CV</span><input class="application-file-input invisible-resume-upload" data-qa="input-resume" id="resume-upload-input" name="resume" tabindex="-1" type="file"></a><span class="resume-upload-failure"><div class="resume-upload-label">Couldn't auto-read resume.</div></span><span class="resume-upload-working"><div class="loading-indicator"></div><div class="resume-upload-label">Analyzing resume...</div></span><span class="resume-upload-success"><div class="loading-indicator completed"></div><div class="resume-upload-label">Success!</div></span></div></label><span class="resume-upload-oversize"><p class="error-message">File exceeds the maximum upload size of <b>100MB</b>. Please try a smaller size.</p></span></li>
+      <!-- A standard question: wrapped in a <label>, no id. -->
+      <li class="application-question"><label><div class="application-label">Full name<span class="required">✱</span></div><div class="application-field"><input type="text" data-qa="name-input" name="name" required></div></label></li>
+      <!-- The email box: type=email, no id (the pattern attribute is dropped; it changes nothing read). -->
+      <li class="application-question"><label><div class="application-label">Email<span class="required">✱</span></div><div class="application-field"><input name="email" data-qa="email-input" type="email" required></div></label></li>
+      <!-- A standard question whose ✱ follows a space. -->
+      <li class="application-question"><label><div class="application-label">Phone <span class="required">✱</span></div><div class="application-field"><input type="text" data-qa="phone-input" name="phone" required></div></label></li>
+      <!-- A custom card dropdown: NOT wrapped in a <label>, a native select with a placeholder option. -->
+      <li class="application-question custom-question"><div><div class="application-label full-width dropdown"><div class="text">What is your Current Location?<span class="required">✱</span></div></div><div class="application-field full-width required-field"><div class="application-dropdown"><select name="cards[c8afb62e-f85f-45cd-82f8-acaef1a6c56f][field0]" required><option value="">Select...</option><option value="Delhi NCR">Delhi NCR</option><option value="Bangalore">Bangalore</option><option value="Pune">Pune</option><option value="Hyderabad">Hyderabad</option><option value="Mumbai">Mumbai</option><option value="Any Other">Any Other</option></select></div></div></div></li>
+      <!-- A required custom card text box. -->
+      <li class="application-question custom-question"><div><div class="application-label full-width text"><div class="text">Please share the relevant experience in Kubernetes.<span class="required">✱</span></div></div><div class="application-field full-width required-field"><input required="required" class="card-field-input" type="text" placeholder="Type your response" value="" name="cards[4a073f98-1fdf-49db-8024-f859d2d3cad8][field0]" /></div></div></li>
+      <!-- An optional custom card text box: no ✱, no required attribute. -->
+      <li class="application-question custom-question"><div><div class="application-label full-width text"><div class="text">Please share the relevant experience in Linux.</div></div><div class="application-field full-width"><input class="card-field-input" type="text" placeholder="Type your response" value="" name="cards[4a073f98-1fdf-49db-8024-f859d2d3cad8][field3]" /></div></div></li>
+    </ul>
+  </form>
+</body>
+</html>

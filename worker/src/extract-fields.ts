@@ -12,7 +12,8 @@ import type { Page } from 'playwright';
 /** One fillable control on an application form. */
 export interface FormField {
   // The DOM id, used to build a selector when filling. Opaque for custom
-  // questions, which is precisely why `label` exists separately.
+  // questions, which is precisely why `label` exists separately. For a control that had no id
+  // (Lever), the extractor assigns `applyyy-name-<name>` on the live page; see THE ADDRESS below.
   readonly id: string;
   // The human-readable question, recovered from the accessibility tree. This is
   // the key the answer bank is looked up by.
@@ -226,6 +227,16 @@ export async function extractFields(page: Page): Promise<FormField[]> {
         label = element.closest('label')?.textContent?.trim() ?? '';
       }
 
+      // LEVER (T2, 2026-11-05). Lever's controls carry no aria-label, no id and no <label for>: the
+      // question sits in the `.application-label` of the enclosing `li.application-question`, for its
+      // standard questions (wrapped in a <label>) and its custom "cards" (not wrapped at all). Read
+      // from a live Netomi form; without it every Lever text input was dropped as unlabelled. The
+      // label element only, never the whole <li>: the <li> also holds upload status text and options.
+      // Read once, reused below for the required marker.
+      const leverLabel = element.closest('.application-question')?.querySelector('.application-label') ?? null;
+      // Only when nothing above named the control, so other boards' labels never change.
+      if (!label && leverLabel !== null) label = leverLabel.textContent?.trim() ?? '';
+
       // No recoverable label means no way to look up an answer honestly, and a
       // field we cannot name is one we must not guess at (constraint #4). These
       // are dropped rather than emitted blank, so the caller's "can I answer
@@ -233,8 +244,30 @@ export async function extractFields(page: Page): Promise<FormField[]> {
       if (!label) continue;
 
       // Required markers render as a trailing asterisk inside the label text on
-      // real forms; stripping it keeps the answer-bank key stable.
-      label = label.replace(/\s*\*\s*$/, '').trim();
+      // real forms; stripping it keeps the answer-bank key stable. Lever prints U+2731 (✱)
+      // instead of "*", so both marks are stripped.
+      label = label.replace(/\s*[*✱]\s*$/, '').trim();
+
+      // THE ADDRESS (T2). fill() and every later step find a control by its id, and Lever's inputs
+      // have none. A field nobody can address must not be emitted (the radio branch skips one), so
+      // a nameless, id-less control is dropped; a named one is given a stable id derived from its
+      // name. The id is not submitted (only name/value are), so the form sends exactly what it would
+      // have. Derived, not random: the kit and the applier each load the page afresh and must reach
+      // the same id for the same control.
+      if (!element.id) {
+        // The form's own submit name, the one stable handle such a control has.
+        const name = element.getAttribute('name');
+        // Neither id nor name: nothing can address it.
+        if (!name) continue;
+        // The base id; a prefix no ATS uses, so it cannot collide with the page's own ids.
+        const base = `applyyy-name-${name}`;
+        // A second control with the same name (a checkbox list) gets a counted suffix.
+        let candidate = base;
+        // Bounded by the number of controls on the page, so the loop always ends.
+        for (let n = 2; document.getElementById(candidate) !== null; n += 1) candidate = `${base}-${n}`;
+        // Assigned on the live element, so fill() resolves it with the same [id="..."] selector.
+        element.id = candidate;
+      }
 
       // Normalise the control kind. role="combobox" identifies React-select
       // widgets, which look like text inputs but must be driven by click-and-
@@ -286,7 +319,9 @@ export async function extractFields(page: Page): Promise<FormField[]> {
       // aria-required is what the real form uses; the native attribute is
       // checked too because other ATS vendors mark required-ness that way.
       const required =
-        element.getAttribute('aria-required') === 'true' || element.hasAttribute('required');
+        element.getAttribute('aria-required') === 'true' || element.hasAttribute('required') ||
+        // Lever's file input has no required attribute; its question's `.required` mark (✱) is the signal.
+        leverLabel?.querySelector('.required') != null;
 
       // GROUP METADATA — strictly additive. Nothing above this point changes.
       //

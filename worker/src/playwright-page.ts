@@ -64,6 +64,20 @@ const BLOCKER_SELECTORS: ReadonlyArray<readonly [string, BlockReason]> = [
  */
 /* B2 (P1-6, 2026-11-05): the sentences ATS boards print on a closed posting. Whole phrases, so a
    job description that merely mentions "expired" or "filled" does not match. Case-insensitive. */
+/* T1 (2026-11-05): a fillable control, the sign that a form has rendered. Ashby boards are a
+   client-side app: at `domcontentloaded` the page holds 0 controls and the form appears ~6 s
+   later (measured on a live Quora posting: 0 controls at 6.4 s, 22 fields at 9.1 s). Read
+   before then, the kit called 11 open Ashby postings closed. Hidden inputs do not count: a
+   shell page can carry tokens before any question renders. */
+export const FORM_CONTROL_SELECTOR = 'input:not([type="hidden"]), textarea, select';
+// How long goto waits for that control before handing the page over as it is. A page that
+// never renders one (a careers index, an iframe-only company page) costs this much once per
+// load; 15 s clears the measured 6-9 s Ashby render with room for a slow CI runner.
+export const FORM_RENDER_TIMEOUT_MS = 15_000;
+// T3: the bound on readMenuOptions' click and Escape. A visible widget answers in milliseconds;
+// one that cannot be clicked (hidden, covered) costs this once, then the kit lists it without options.
+const MENU_ACTION_TIMEOUT_MS = 2_000;
+
 export const CLOSED_POSTING = /no longer accepting applications|(?:this |the )?(?:position|role|job) has been filled|(?:this |the )?(?:job|position|posting)(?: posting)? is no longer (?:available|open|active)|this job (?:has )?(?:expired|closed)|job not found|(?:the )?page you(?:'re| are) looking for (?:could not|cannot|can't) be found/i;
 
 const VISIBLE_CHALLENGE_SELECTORS: readonly string[] = [
@@ -407,6 +421,9 @@ export interface PlaywrightPageOptions {
   readonly rejectionSettleMs?: number;
   // How long attachFile waits for a Greenhouse upload to finish; FILE_UPLOAD_TIMEOUT_MS by default.
   readonly fileUploadTimeoutMs?: number;
+  // How long goto waits for a fillable control; FORM_RENDER_TIMEOUT_MS by default. The
+  // never-renders test sets it low so it does not sit through 15 real seconds.
+  readonly formRenderTimeoutMs?: number;
 }
 
 export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions = {}): ClosableApplicationPage {
@@ -416,6 +433,8 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
   const rejectionSettleMs = options.rejectionSettleMs ?? REJECTION_SETTLE_MS;
   // The bound on a Greenhouse file upload finishing; overridable so tests fail fast.
   const fileUploadTimeoutMs = options.fileUploadTimeoutMs ?? FILE_UPLOAD_TIMEOUT_MS;
+  // How long goto waits for a form to render: the test override, or the production constant.
+  const formRenderTimeoutMs = options.formRenderTimeoutMs ?? FORM_RENDER_TIMEOUT_MS;
   /** Whether any challenge frame is on screen now. Shared by detectBlocker and submit. */
   async function visibleChallenge(): Promise<boolean> {
     for (const selector of VISIBLE_CHALLENGE_SELECTORS) {
@@ -437,6 +456,11 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
       const response = await page.goto(url, { waitUntil: 'domcontentloaded' });
       // Kept for postingClosed: a 404/410 form page is a closed posting, not a form to fill.
       lastStatus = response?.status() ?? null;
+      // T1: wait (bounded) for the first fillable control, so a client-rendered form is read
+      // after it exists, not before. Attached, not visible: Lever hides its real file input.
+      // A timeout is not an error here: the page is handed over as it is, and the caller's
+      // own checks (zero fields, postingClosed) decide what an empty page means.
+      await page.waitForSelector(FORM_CONTROL_SELECTOR, { state: 'attached', timeout: formRenderTimeoutMs }).catch(() => undefined);
     },
 
     /* B2 (P1-6, 2026-11-05): does the OPENED page say the posting is closed? The evidence string, or
@@ -459,6 +483,40 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
       // Delegated so the accessibility-tree logic has exactly one home; see
       // extract-fields.ts for why identification is not attribute-driven.
       return extractFields(page);
+    },
+
+    async readMenuOptions(id: string): Promise<string[] | null> {
+      // The widget by its id, as fill() addresses it.
+      const target = page.locator(byId(id));
+      // HYDRATION FIRST. goto returns once the server-rendered input exists, before React attaches its
+      // handlers; a click then does nothing (live Stripe form: Country stayed aria-expanded="false" with 0
+      // options). Waiting for `load` fixed it in 3 of 3 live runs (~1.8 s after goto). Instant once loaded,
+      // so only the first combobox on a page pays it; bounded, and a timeout just proceeds.
+      await page.waitForLoadState('load', { timeout: formRenderTimeoutMs }).catch(() => undefined);
+      // Opens the menu; react-select renders its options only while open. Bounded: Playwright's
+      // default 30 s actionability wait would stall the kit once per widget that cannot be clicked.
+      await target.click({ timeout: MENU_ACTION_TIMEOUT_MS });
+      try {
+        // Bounded poll of THIS widget's scoped menu (readCombobox never reads page-wide).
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+          // Scoped read, untagged: this method only looks.
+          const menu = await page.evaluate(readCombobox, { inputId: id, mark: false });
+          // Options rendered: these are the exact texts fill() would compare against.
+          if (menu.resolved && menu.texts.length > 0) return menu.texts;
+          // A widget that still DECLARES itself closed after the click did not open (react-select sets
+          // aria-expanded="true" on open, measured on Greenhouse): nothing will render, so stop now.
+          // Only the explicit "false" counts; a widget without the attribute gets the full poll.
+          if ((await target.getAttribute('aria-expanded')) === 'false') return null;
+          // 50 ms x 10 = 0.5 s: react-select renders a static list on the click; a search box never does.
+          await page.waitForTimeout(50);
+        }
+        // Nothing rendered: a type-to-search box, honestly "no list", never an empty list.
+        return null;
+      } finally {
+        // Closed whatever happened, so an open menu cannot capture the next widget's click. A failed
+        // close must not replace the read's own result or error.
+        await target.press('Escape', { timeout: MENU_ACTION_TIMEOUT_MS }).catch(() => undefined);
+      }
     },
 
     async fill(id: string, value: string) {

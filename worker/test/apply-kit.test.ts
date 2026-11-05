@@ -108,14 +108,15 @@ function recordingGateway(row: KitApplication) {
  * that could type or send recorded. The kit's port type offers none of them; this proves
  * the runtime agrees.
  */
-async function openKitPage() {
+async function openKitPage(options: Parameters<typeof createPlaywrightPage>[1] = {}) {
   const raw = await browser.newPage();
   // Every request that could carry data out of the page.
   const sends: string[] = [];
   raw.on('request', (request) => {
     if (request.method() !== 'GET') sends.push(`${request.method()} ${request.url()}`);
   });
-  const port = createPlaywrightPage(raw);
+  // Options pass through, so a no-form test can shorten the render wait.
+  const port = createPlaywrightPage(raw, options);
   // Calls to the three operations the kit must never make.
   const forbidden: string[] = [];
   const page = {
@@ -266,6 +267,75 @@ describe('the manual apply kit on the real GitLab form', () => {
     } finally {
       await raw.close();
     }
+  }, 60_000);
+
+  /** Builds one kit against a synthetic page; the result or the rejection, plus what was written. */
+  async function kitOn(path: string, pageOptions: Parameters<typeof createPlaywrightPage>[1] = {}) {
+    // The production adapter over a fresh tab.
+    const { raw, page } = await openKitPage(pageOptions);
+    // The row points at the fixture.
+    const { gateway, calls } = recordingGateway({ ...application, applyUrl: `${server.url}${path}` });
+    try {
+      // Settled either way, so each test asserts on the outcome it expects.
+      const outcome = await buildApplyKit({
+        applicationId: application.id,
+        gateway,
+        page,
+        renderResume: recordingRenderer().render as never,
+        checkRobots: async () => ({ kind: 'allow' }) as never,
+        runId: null,
+        now: () => new Date(),
+      }).then((kit) => ({ kit, error: null }), (error: unknown) => ({ kit: null, error }));
+      // The writes the attempt made.
+      return { ...outcome, calls };
+    } finally {
+      // Closed either way.
+      await raw.close();
+    }
+  }
+
+  // T1 (2026-11-05): zero fields was read as "closed" by the email backstop, which parked 11 OPEN Ashby
+  // postings. Without the page's own evidence it is now a plain failure (retried, and red), never a skip.
+  test('a page that renders no form and does not say it is closed fails plainly; it is NOT posting_closed', async () => {
+    // A short render wait: the page never renders a control.
+    const { error, calls } = await kitOn('/synthetic/no-form.html', { formRenderTimeoutMs: 300 });
+    // A plain Error naming the cause...
+    expect(error).toBeInstanceOf(Error);
+    // ...never the typed skip, which would hide the row from the next sweep.
+    expect(error).not.toBeInstanceOf(KitSkip);
+    // The message says what happened, not "closed".
+    expect((error as Error).message).toMatch(/rendered no readable form fields/);
+    // Nothing written.
+    expect(calls.filter((call) => call === 'uploadResume' || call === 'appendApplicationNote')).toEqual([]);
+  }, 60_000);
+
+  test('a page with no form that SAYS the posting is closed is posting_closed, quoting the page', async () => {
+    // The closed notice is the evidence.
+    const { error } = await kitOn('/synthetic/closed-no-form.html', { formRenderTimeoutMs: 300 });
+    // The typed skip, with the sentence the page showed.
+    expect(error).toMatchObject({ name: 'KitSkip', code: 'posting_closed', message: expect.stringMatching(/no longer available/) });
+  }, 60_000);
+
+  test('a form that renders late is kitted in full (it is not posting_closed)', async () => {
+    // The Ashby-shaped page with the production wait.
+    const { kit, error } = await kitOn('/synthetic/late-render-form.html');
+    // Built.
+    expect(error).toBeNull();
+    // Both questions listed.
+    expect(kit?.fields.map((field) => field.label)).toEqual(['Full Name', 'Email']);
+  }, 60_000);
+
+  // T3 (2026-11-05): every combobox reached Teja with options=[] because react-select renders them
+  // only while open; an answer typed from memory never matched an option exactly.
+  test('a combobox lists the options its opened menu shows; a search box lists none', async () => {
+    // The react-select lookalikes.
+    const { kit, error } = await kitOn('/synthetic/combobox-menu.html');
+    // Built.
+    expect(error).toBeNull();
+    // The static list, exactly and in order.
+    expect(kit?.fields.find((field) => field.label === 'Do you require visa sponsorship?')?.options).toEqual(['Yes', 'No']);
+    // The search box: the key is absent, never an empty list.
+    expect(kit?.fields.find((field) => field.label === 'School')).not.toHaveProperty('options');
   }, 60_000);
 });
 

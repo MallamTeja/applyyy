@@ -82,9 +82,45 @@ describe('createFormUrlResolver', () => {
 
   test('board name mismatch → unchanged (a guessed token on someone else\'s board)', async () => {
     // The token points at a board whose job is another company's.
-    const url = await createFormUrlResolver(lookupOf({ token: 'aiven36', companyName: 'Aiven' }), fetchOf(200, { ...aivenJob, company_name: 'Thornbury' }))({ id: ROW_ID, applyUrl: AIVEN_URL });
+    // Realistic: another company's board publishes its job on ITS OWN site, so absolute_url differs too.
+    const thornburyJob = { ...aivenJob, company_name: 'Thornbury', absolute_url: 'https://thornbury.example/careers?gh_jid=4901533101' };
+    // Neither the name nor the page matches.
+    const url = await createFormUrlResolver(lookupOf({ token: 'aiven36', companyName: 'Aiven' }), fetchOf(200, thornburyJob))({ id: ROW_ID, applyUrl: AIVEN_URL });
     // Never sent to the wrong company's form.
     expect(url).toBe(AIVEN_URL);
+  });
+
+  // T4 (2026-11-05), the live Rubrik facts: watchlist token 'rubrik', job 8166537, and the API's
+  // company_name "Rubrik Job Board" (the BOARD's name), while jobs.company_name is "Rubrik". The
+  // name check refused every Rubrik row; Greenhouse's absolute_url is our apply_url exactly.
+  const RUBRIK_URL = 'https://www.rubrik.com/company/careers/departments/job.8166537?gh_jid=8166537';
+  // Trimmed to the fields the check reads, values as measured.
+  const rubrikJob = { id: 8166537, company_name: 'Rubrik Job Board', absolute_url: RUBRIK_URL };
+
+  test('board named differently, but absolute_url IS our page → the embed form (Rubrik)', async () => {
+    // The live answer.
+    const url = await createFormUrlResolver(lookupOf({ token: 'rubrik', companyName: 'Rubrik' }), fetchOf(200, rubrikJob))({ id: ROW_ID, applyUrl: RUBRIK_URL });
+    // Measured 200 with no redirect on 2026-11-05.
+    expect(url).toBe('https://job-boards.greenhouse.io/embed/job_app?for=rubrik&token=8166537');
+  });
+
+  test('board named differently and absolute_url on another site → unchanged', async () => {
+    // Same job id and board name, but Greenhouse publishes it somewhere else: not proven ours.
+    const elsewhere = { ...rubrikJob, absolute_url: 'https://careers.other.example/job.8166537?gh_jid=8166537' };
+    // Resolved against that.
+    const url = await createFormUrlResolver(lookupOf({ token: 'rubrik', companyName: 'Rubrik' }), fetchOf(200, elsewhere))({ id: ROW_ID, applyUrl: RUBRIK_URL });
+    // Neither proof holds.
+    expect(url).toBe(RUBRIK_URL);
+  });
+
+  test('board named differently and absolute_url missing or junk → unchanged', async () => {
+    // Each malformed shape the API field could take.
+    for (const absolute_url of [undefined, 42, 'not a url']) {
+      // Resolved against it.
+      const url = await createFormUrlResolver(lookupOf({ token: 'rubrik', companyName: 'Rubrik' }), fetchOf(200, { ...rubrikJob, absolute_url }))({ id: ROW_ID, applyUrl: RUBRIK_URL });
+      // Proves nothing.
+      expect(url).toBe(RUBRIK_URL);
+    }
   });
 
   test('job not on that board (404) → unchanged', async () => {

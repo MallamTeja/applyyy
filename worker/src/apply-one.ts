@@ -138,6 +138,12 @@ export interface ApplicationPage {
      dozens of test pages need not each grow it; the real page (playwright-page.ts) always has it, a
      shape test pins that, and recheckBeforeSubmit runs it whenever it exists. */
   postingClosed?(): Promise<string | null>;
+  /* T3 (2026-11-05): a combobox's option texts, read by opening its menu and closing it again, or
+     null when no option list rendered (a type-to-search box). ONLY the manual kit calls it, to show
+     Teja the exact options; the applier never does, because the planner treats a known option list
+     as strict and the filler's dial-code rule ("India" picks "India +91") would stop matching.
+     Optional for the same reason as postingClosed; the real page always has it. */
+  readMenuOptions?(id: string): Promise<string[] | null>;
 }
 
 /**

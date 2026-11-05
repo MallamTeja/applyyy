@@ -1,0 +1,84 @@
+<!doctype html>
+<!-- T3 (2026-11-05): react-select lookalikes whose options exist ONLY while the menu is open,
+     measured on a live Greenhouse form (Stripe 8031833): closed, the input has no aria-controls and
+     no option is in the DOM; on click it gains aria-controls="react-select-<id>-listbox" and renders
+     the options; Escape closes it. The kit never saw such a list, so every combobox blocker reached
+     Teja with no options. Synthetic: the behaviour, not a copy. -->
+<html lang="en">
+<head>
+  <!-- Plain document. -->
+  <meta charset="utf-8">
+  <!-- Names the page like a form. -->
+  <title>Job Application</title>
+</head>
+<body>
+  <form>
+    <!-- An email box, so the kit's closed-posting backstop sees a real form. -->
+    <label for="email">Email</label>
+    <!-- type=text, as Greenhouse renders its email box. -->
+    <input id="email" type="text" aria-required="true">
+
+    <!-- A static-list combobox: its options render on open. -->
+    <div class="select__container">
+      <!-- The question, referenced by aria-labelledby as on the real form. -->
+      <label id="sponsor-label">Do you require visa sponsorship?</label>
+      <!-- The widget's input. data-options is this fixture's own list, read by the script below. -->
+      <input id="question_1" role="combobox" aria-labelledby="sponsor-label" aria-required="true" aria-expanded="false" type="text" data-options="Yes|No">
+    </div>
+
+    <!-- A type-to-search combobox: opening it renders no options until something is typed. -->
+    <div class="select__container">
+      <!-- The question. -->
+      <label id="school-label">School</label>
+      <!-- An empty data-options: nothing to show on open. -->
+      <input id="school--0" role="combobox" aria-labelledby="school-label" aria-required="true" aria-expanded="false" type="text" data-options="">
+    </div>
+  </form>
+  <script>
+    // Every combobox in the fixture behaves the same way; the list comes from data-options.
+    for (const input of document.querySelectorAll('[role="combobox"]')) {
+      // The menu's id, as react-select names it.
+      const listId = `react-select-${input.id}-listbox`;
+      // Opening: link the menu and render its options, as react-select does on click.
+      input.addEventListener('click', () => {
+        // A second click on an open menu changes nothing.
+        if (document.getElementById(listId)) return;
+        // The menu element, after the widget like the real one.
+        const menu = document.createElement('div');
+        // The id aria-controls will name.
+        menu.id = listId;
+        // A listbox, as the real menu is.
+        menu.setAttribute('role', 'listbox');
+        // One option per listed text; none for a search box.
+        for (const text of input.dataset.options.split('|').filter(Boolean)) {
+          // Each option as react-select renders it.
+          const option = document.createElement('div');
+          // The role the reader looks for.
+          option.setAttribute('role', 'option');
+          // The visible text.
+          option.textContent = text;
+          // Added to the menu.
+          menu.appendChild(option);
+        }
+        // Rendered next to the widget.
+        input.parentElement.appendChild(menu);
+        // The live ARIA link, present only while open.
+        input.setAttribute('aria-controls', listId);
+        // Marked open.
+        input.setAttribute('aria-expanded', 'true');
+      });
+      // Escape closes the menu and removes its options, as react-select does.
+      input.addEventListener('keydown', (event) => {
+        // Only Escape closes.
+        if (event.key !== 'Escape') return;
+        // The menu goes away entirely.
+        document.getElementById(listId)?.remove();
+        // The link goes with it.
+        input.removeAttribute('aria-controls');
+        // Marked closed.
+        input.setAttribute('aria-expanded', 'false');
+      });
+    }
+  </script>
+</body>
+</html>
