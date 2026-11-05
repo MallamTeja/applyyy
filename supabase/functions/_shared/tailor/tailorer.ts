@@ -81,9 +81,70 @@ export type TailorOutcome =
   // reads that column, and nothing wrote it, so the check could never fire.
   // `jdKeywords` is the posting's skill terms (jd-keywords.ts), carried ON the verdict so
   // persist.ts writes them in the same statement as the resume they were measured against.
-  | { readonly kind: "tailored"; readonly resume: ResolvedResume; readonly refs: TailoredProfile; readonly jdKeywords: readonly string[] }
+  // `dedupedRefs` (2026-11-05) lists every repeated ref dedupeRepeatedRefs dropped before validation: empty
+  // for a clean answer, and persisted in the event so a prompt that repeats itself stays visible.
+  | { readonly kind: "tailored"; readonly resume: ResolvedResume; readonly refs: TailoredProfile; readonly jdKeywords: readonly string[]; readonly dedupedRefs: readonly DedupedRef[] }
   // Never persisted as a profile; the reasons go to the dashboard and the row fails.
   | { readonly kind: "refused"; readonly violations: readonly TailorViolation[] };
+
+// One copy of a ref the model repeated inside one section, which dedupeRepeatedRefs dropped.
+export interface DedupedRef {
+  // The repeated node id.
+  readonly ref: string;
+  // The section it repeated in, in the validator's own words ("skills", "summary refs", ...).
+  readonly where: string;
+}
+
+/* NORMALISATION, NOT LENIENCY (2026-11-05). The model sometimes lists one master node twice in the same
+ * section (live: EA "Data Science Intern", match 84, failed on duplicate_ref skill_python in skills).
+ * A repeat adds no claim: the second copy points at the very node the first one does. So, BEFORE the
+ * validator, each section keeps the FIRST copy of each ref and drops the rest, deterministically.
+ *
+ * What this does NOT do: it never adds, rewrites or vouches for anything. Every surviving ref is still
+ * resolved against the master, every bullet token still checked, and a ref repeated ACROSS two sections
+ * is left alone, so the validator still refuses it (that is a wrong-section claim, not a repeat). The
+ * validator itself is unchanged and still refuses duplicates: rebuildOriginal (web tailoredEdits.ts)
+ * re-validates the STORED refs, which are this deduplicated profile, so the rebuild still equals the
+ * snapshot. And the repair is reported (dedupedRefs), never silent: validator.ts:405 warns that silent
+ * repair hides a misbehaving prompt. Exported for the test. */
+export function dedupeRepeatedRefs(tailored: TailoredProfile): { readonly profile: TailoredProfile; readonly deduped: readonly DedupedRef[] } {
+  // Every dropped copy, in document order.
+  const deduped: DedupedRef[] = [];
+  // Keeps the first item per ref in one section; the rest are recorded and dropped.
+  const firstOnly = <T>(items: readonly T[], refOf: (item: T) => string, where: string): T[] => {
+    // Refs already kept in this section only: a repeat across sections is the validator's to refuse.
+    const seen = new Set<string>();
+    // Order kept: the first copy stays where the model put it.
+    return items.filter((item) => {
+      // The item's node id.
+      const ref = refOf(item);
+      // A repeat: recorded, then dropped.
+      if (seen.has(ref)) {
+        deduped.push({ ref, where });
+        return false;
+      }
+      // The first copy: kept.
+      seen.add(ref);
+      return true;
+    });
+  };
+  // Each ref-bearing section, named as validator.ts names it in its duplicate_ref violations.
+  const profile: TailoredProfile = {
+    // Everything that carries no ref list, as parsed.
+    ...tailored,
+    // The summary's own ref list, when there is a summary.
+    summary: tailored.summary === null ? null : { ...tailored.summary, refs: firstOnly(tailored.summary.refs, (ref) => ref, "summary refs") },
+    // Each section of {ref, ...} items.
+    skills: firstOnly(tailored.skills, (s) => s.ref, "skills"),
+    experience: firstOnly(tailored.experience, (e) => e.ref, "experience"),
+    projects: firstOnly(tailored.projects, (p) => p.ref, "projects"),
+    education: firstOnly(tailored.education, (e) => e.ref, "education"),
+    achievements: firstOnly(tailored.achievements, (a) => a.ref, "achievements"),
+    certifications: firstOnly(tailored.certifications, (c) => c.ref, "certifications"),
+  };
+  // A clean answer comes back unchanged in content, with nothing reported.
+  return { profile, deduped };
+}
 
 // One posting in, one verdict out. Named so call sites read as a noun.
 export type Tailorer = (input: TailorJobInput) => Promise<TailorOutcome>;
@@ -221,7 +282,12 @@ export function createTailorer(deps: TailorDeps): Tailorer {
     // Throws on prose or a wrong-shaped object — see the header on why that is not a
     // refusal. Deliberately before the validator, so the validator only ever sees the
     // type it was written against.
-    const tailored = parseTailoredProfile(raw);
+    const parsed = parseTailoredProfile(raw);
+
+    // Repeated refs normalised away BEFORE the gate (see dedupeRepeatedRefs: normalisation, never
+    // leniency). The deduplicated profile is the one validated AND the one stored, so tailor_refs
+    // re-validates to exactly the stored resume.
+    const { profile: tailored, deduped } = dedupeRepeatedRefs(parsed);
 
     // The honesty gate. This is the only call in the codebase that can produce a
     // `ResolvedResume`, which is what makes "the renderer cannot resolve a ref even by
@@ -236,6 +302,6 @@ export function createTailorer(deps: TailorDeps): Tailorer {
     // `tailored` is the parsed model output that passed validation — the refs, unresolved.
     // `jdKeywords` comes from the SAME posting the model was given, never re-read later,
     // so the keywords and the resume can never describe two different versions of a job.
-    return { kind: "tailored", resume: validation.resume, refs: tailored, jdKeywords: extractJdKeywords(input.jobDescription) };
+    return { kind: "tailored", resume: validation.resume, refs: tailored, jdKeywords: extractJdKeywords(input.jobDescription), dedupedRefs: deduped };
   };
 }

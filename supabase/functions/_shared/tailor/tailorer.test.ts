@@ -372,3 +372,34 @@ test("a reply claiming a different schema_version is refused, never restamped", 
   // Thrown as a shape failure, like every other malformed reply.
   await assert.rejects(tailor(POSTING), /schema_version/);
 });
+
+
+// ---- A ref the model emitted twice is normalised, not refused (2026-11-05) -------------------------
+// Live: EA "Data Science Intern" (match 84) failed with one violation, duplicate_ref skill_python in
+// skills: the model listed one master skill twice. The validator still refuses duplicates (its own test
+// stays); the TAILORER now drops the second copy BEFORE validating, and says so in the outcome.
+
+test("a skill listed twice is deduplicated before the validator, and the dedupe is reported", async () => {
+  // EA's shape: an honest tailoring whose one skill appears twice.
+  const repeated: TailoredProfile = { ...HONEST_TAILORING, skills: [{ ref: "skill-node" }, { ref: "skill-node" }] };
+  const outcome = await tailorerReturning(JSON.stringify(repeated))(POSTING);
+  // Tailored, not refused.
+  assert.equal(outcome.kind, "tailored");
+  if (outcome.kind !== "tailored") return;
+  // The stored refs hold the skill once: tailor_refs must re-validate to the same resume.
+  assert.deepEqual(outcome.refs.skills, [{ ref: "skill-node" }]);
+  // The repair is visible, never silent: one dropped copy, named by ref and section.
+  assert.deepEqual(outcome.dedupedRefs, [{ ref: "skill-node", where: "skills" }]);
+});
+
+test("control: a FABRICATED ref is still refused, duplicate or not", async () => {
+  // The same repeat plus a ref the master does not have.
+  const fabricated: TailoredProfile = { ...HONEST_TAILORING, skills: [{ ref: "skill-node" }, { ref: "skill-node" }, { ref: "skill-kubernetes-never-used" }] };
+  const outcome = await tailorerReturning(JSON.stringify(fabricated))(POSTING);
+  // Normalisation never vouches for content: the fabrication is refused as before.
+  assert.equal(outcome.kind, "refused");
+  if (outcome.kind !== "refused") return;
+  // For the fabricated ref, not for the repeat.
+  assert.ok(outcome.violations.some((v) => v.kind === "unresolved_ref"), JSON.stringify(outcome.violations));
+  assert.ok(!outcome.violations.some((v) => v.kind === "duplicate_ref"), JSON.stringify(outcome.violations));
+});

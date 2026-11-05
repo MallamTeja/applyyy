@@ -51,6 +51,40 @@ export type PersistOutcome =
   // Nothing further was attempted. The message carries postgrest's own text.
   | { readonly ok: false; readonly message: string };
 
+// The closed set of reasons a tailor fails an application for (2026-11-05). Written to
+// applications.failure_reason BEFORE the move, the way the matcher (fail-exit.ts) and the screener
+// (persist-verdict.ts) do it: log_status_change copies the column into the status_change event, and
+// until today every tailor failure left it NULL (22 live rows), with the cause only in a note.
+export type TailorFailureReason = "tailor_validation_failed" | "tailor_input_unusable";
+
+/* Fails one application for the tailor: failure_reason first, then the guarded move, whose detail
+   carries the same code plus the specifics. Never moves if the reason could not be written, so a
+   failed row always says why. Used by the refusal below and by index.ts's unusable-input skip. */
+export async function failTailorApplication(
+  client: TailorPersistClient,
+  applicationId: string,
+  reason: TailorFailureReason,
+  detail: Record<string, unknown>,
+): Promise<PersistOutcome> {
+  // The reason, as a payload-only update (the guard lets a same-status write through).
+  const write = await client.from("applications").update({ failure_reason: reason }).eq("id", applicationId);
+  // No reason, no move: the row stays at scored and the caller reports the failure.
+  if (write.error) return { ok: false, message: write.error.message };
+  // `scored -> failed` is legal for the tailor (`status_transition_guard.sql:118`).
+  const { error } = await client.rpc("advance_application_status", {
+    p_application_id: applicationId,
+    p_to_status: "failed",
+    p_agent: "tailor",
+    // The code first, then what made it, structured so a UI can branch on it.
+    p_detail: { reason, ...detail },
+  });
+  // Carried through rather than absorbed, so a caller can tell "failed cleanly" from
+  // "could not even record the failure".
+  if (error) return { ok: false, message: error.message };
+  // Failed, with its reason on the row and in the event.
+  return { ok: true, status: "failed" };
+}
+
 // Persist one verdict against one application row.
 export async function persistTailorOutcome(
   client: TailorPersistClient,
@@ -63,18 +97,9 @@ export async function persistTailorOutcome(
     // `scored -> failed` is legal for the tailor (`status_transition_guard.sql:118`).
     // The violations travel in the event detail: they are the dashboard's content, and
     // `validator.ts:70` requires they survive as data rather than as a stack trace.
-    const { error } = await client.rpc("advance_application_status", {
-      p_application_id: applicationId,
-      p_to_status: "failed",
-      p_agent: "tailor",
-      // Structured, not flattened to a string — a UI branches on `kind`, and prose
-      // would force it to parse a discriminant back out of English.
-      p_detail: { reason: "tailor_validation_failed", violations: outcome.violations },
-    });
-    // Carried through rather than absorbed, so a caller can tell "failed cleanly" from
-    // "could not even record the failure".
-    if (error) return { ok: false, message: error.message };
-    return { ok: true, status: "failed" };
+    // Since 2026-11-05 through failTailorApplication, so failure_reason is written first. The violations
+    // stay structured, not flattened to a string — a UI branches on `kind`.
+    return failTailorApplication(client, applicationId, "tailor_validation_failed", { violations: outcome.violations });
   }
 
   // THE PAYLOAD, FIRST. See the header: the status that follows is a claim this line
@@ -115,8 +140,9 @@ export async function persistTailorOutcome(
     p_application_id: applicationId,
     p_to_status: "tailored",
     p_agent: "tailor",
-    // Enough to reconstruct what was written without re-reading the row.
-    p_detail: { reason: "tailored_profile_written" },
+    // Enough to reconstruct what was written without re-reading the row; a dedupe the tailorer made is
+    // named here (2026-11-05), so a prompt that repeats refs is visible rather than silently repaired.
+    p_detail: outcome.dedupedRefs.length > 0 ? { reason: "tailored_profile_written", deduplicated_refs: outcome.dedupedRefs } : { reason: "tailored_profile_written" },
   });
   // A failure here leaves the profile written and the status unmoved — recoverable by
   // re-running, and deliberately preferred over the inverse, which is not.

@@ -54,7 +54,7 @@ const REFS = { master_version: 7, summary: null } as unknown as TailoredProfile;
 
 // A clean verdict, ready to persist.
 // `jdKeywords` is a recognisable pair so the keyword test can assert it arrived intact.
-const TAILORED: TailorOutcome = { kind: "tailored", resume: RESUME, refs: REFS, jdKeywords: ["Go", "PostgreSQL"] };
+const TAILORED: TailorOutcome = { kind: "tailored", resume: RESUME, refs: REFS, jdKeywords: ["Go", "PostgreSQL"], dedupedRefs: [] };
 
 // One recorded call against the database seam, in the order it was made.
 interface RecordedCall {
@@ -187,8 +187,10 @@ test("a refusal advances to failed and writes no profile", async () => {
   // NO PROFILE WRITE AT ALL. Persisting a partial or empty profile on a refusal is what
   // would put a `'{}'` row past the queue's null check — the hazard is created by a
   // writer, not by the gate, and this is the writer.
-  assert.deepEqual(calls.map((c) => c.kind), ["rpc"]);
-  const args = calls[0].payload.args as Record<string, unknown>;
+  // The one write before the move is the failure_reason (2026-11-05), and it carries NOTHING else.
+  assert.deepEqual(calls.map((c) => c.kind), ["update", "rpc"]);
+  assert.deepEqual((calls[0].payload as { values: unknown }).values, { failure_reason: "tailor_validation_failed" });
+  const args = calls[1].payload.args as Record<string, unknown>;
   // `scored -> failed` is legal for the tailor (status_transition_guard.sql:118).
   assert.equal(args.p_to_status, "failed");
   assert.equal(args.p_agent, "tailor");
@@ -205,7 +207,8 @@ test("a refusal carries its violations into the event detail", async () => {
 
   await persistTailorOutcome(client, APPLICATION_ID, refused);
 
-  const args = calls[0].payload.args as Record<string, unknown>;
+  // The move is the LAST call: failure_reason is written first (2026-11-05).
+  const args = calls.at(-1)!.payload.args as Record<string, unknown>;
   const detail = args.p_detail as Record<string, unknown>;
   // Carried as structured data, not a flattened message — the kind is what a UI
   // branches on, and a string would force it to parse prose back into a discriminant.
@@ -254,4 +257,45 @@ test("persist writes applications.master_version from the resume pin in the SAME
   assert.equal(values.tailored_profile, RESUME);
   // Still exactly one update and one rpc: the pin added no write that could half-fail.
   assert.deepEqual(calls.map((c) => c.kind), ["update", "rpc"]);
+});
+
+
+// ---- failure_reason on every tailor -> failed (2026-11-05) ----------------------------------------
+// Live: 22 rows sat at failed (previous_status scored) with failure_reason NULL; the cause was only in an
+// event note. log_status_change copies the column into the status_change event only if it is written
+// BEFORE the move, as the matcher (fail-exit.ts) and the screener (persist-verdict.ts) do.
+
+test("failure_reason: a refused failure_reason write stops before the status move", async () => {
+  // The update fails.
+  const { client, calls } = recordingClient("update");
+  const result = await persistTailorOutcome(client, APPLICATION_ID, { kind: "refused", violations: [{ kind: "master_version_mismatch", expected: 7, received: 6 }] });
+  // No move without its reason: the row stays at scored and the run reports it.
+  assert.deepEqual(calls.map((c) => c.kind), ["update"]);
+  assert.equal(result.ok, false);
+});
+
+test("failure_reason: the unusable-input failure writes its own code, then moves", async () => {
+  // Imported here so earlier tests do not depend on the new export.
+  const { failTailorApplication } = await import("./persist.ts");
+  const { client, calls } = recordingClient();
+  // The skip path index.ts takes for a row with no usable posting.
+  const result = await failTailorApplication(client, APPLICATION_ID, "tailor_input_unusable", { skip_reason: "missing_description" });
+  // Reason first, move second.
+  assert.deepEqual(calls.map((c) => c.kind), ["update", "rpc"]);
+  assert.deepEqual((calls[0].payload as { values: unknown }).values, { failure_reason: "tailor_input_unusable" });
+  // The event detail keeps the code and the specifics.
+  const args = calls[1].payload.args as Record<string, unknown>;
+  assert.deepEqual(args.p_detail, { reason: "tailor_input_unusable", skip_reason: "missing_description" });
+  assert.equal(args.p_to_status, "failed");
+  assert.equal(result.ok, true);
+});
+
+test("dedupe on the success path is recorded in the tailored event", async () => {
+  // A tailored verdict whose tailorer dropped a repeated skill.
+  const { client, calls } = recordingClient();
+  const tailored = { ...TAILORED, dedupedRefs: [{ ref: "skill-node", where: "skills" }] } as TailorOutcome;
+  await persistTailorOutcome(client, APPLICATION_ID, tailored);
+  // The move's detail names the repair, so a misbehaving prompt stays visible on the dashboard.
+  const args = calls.at(-1)!.payload.args as Record<string, unknown>;
+  assert.deepEqual(args.p_detail, { reason: "tailored_profile_written", deduplicated_refs: [{ ref: "skill-node", where: "skills" }] });
 });

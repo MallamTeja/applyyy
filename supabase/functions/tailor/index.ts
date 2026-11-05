@@ -35,7 +35,7 @@ import { allLivenessUnknown, classifyJobLiveness, LIVENESS_UNKNOWN_DETAIL } from
 // The runner: prompt -> model -> validate -> verdict.
 import { createTailorer } from "../_shared/tailor/tailorer.ts";
 // The write: payload first, status second, never the reverse.
-import { persistTailorOutcome } from "../_shared/tailor/persist.ts";
+import { failTailorApplication, persistTailorOutcome } from "../_shared/tailor/persist.ts";
 // The master shape, so the stored JSON is cast against the contract rather than inferred.
 import type { MasterProfile } from "../_shared/contracts/shared-types.ts";
 // Caller auth and the fail-closed kill switch, shared by every pipeline agent.
@@ -290,16 +290,11 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
     // row already at `failed` could not rejoin the queue. The query filter keeps these out
     // of the batch; reaching here means that filter was lost, and the skip still holds.
     if (skip.reason === "liveness_unknown" || skip.reason === "posting_disappeared") continue;
-    // Through the RPC — a bare status update is refused by the guard with 42501.
-    const { error } = await db.rpc("advance_application_status", {
-      p_application_id: skip.applicationId,
-      p_to_status: "failed",
-      p_agent: "tailor",
-      // The named skip reason, so the dashboard can say what was missing.
-      p_detail: { reason: "tailor_input_unusable", skip_reason: skip.reason },
-    });
-    // A refused move leaves the row at `scored`; recorded so it is not invisible.
-    if (error) failures.push({ applicationId: skip.applicationId, error: error.message });
+    // failure_reason first, then the guarded move (2026-11-05: it was left NULL); the named skip
+    // reason rides in the event so the dashboard can say what was missing.
+    const failed = await failTailorApplication(db, skip.applicationId, "tailor_input_unusable", { skip_reason: skip.reason });
+    // A refused write or move leaves the row at `scored`; recorded so it is not invisible.
+    if (!failed.ok) failures.push({ applicationId: skip.applicationId, error: failed.message });
   }
 
   // Sequential on purpose. The key pool paces itself, and firing ten concurrent calls
