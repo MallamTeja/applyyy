@@ -110,6 +110,11 @@ jobs:
       - name: Checkout
         # Same pin as every other workflow.
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        # Full history, so the gitleaks check below can scan exactly the pushed commit range
+        # (before..after); a depth-1 clone holds only the tip and the range would not resolve.
+        with:
+          # 0 = every commit. The repo is small; this costs seconds.
+          fetch-depth: 0
       # The Deno toolchain the Edge Functions are written for.
       - name: Install Deno
         # Official action, pinned by SHA like the others.
@@ -408,3 +413,42 @@ jobs:
         working-directory: worker
         # Runs the suite once, no watch mode.
         run: ./node_modules/.bin/vitest run
+
+      # (j) Secret scan. GitHub secret scanning and code scanning are OFF on this private repo
+      # (`…/secret-scanning/alerts` 404 "disabled"; docs/security/2026-11-05-vulnerability-remeasure.md
+      # finding #2), so a leaked key would raise no alert. gitleaks over the commits this push or PR
+      # adds is the free fallback. Diff-only on purpose: the remeasure's static scan found 0
+      # hardcoded keys in the tree, and scanning only the new range keeps the step to seconds.
+      - name: gitleaks secret scan of the pushed commits
+        # Runs after another check fails; skipped only after a setup failure or a cancel.
+        if: ${{ !cancelled() && steps.setup-done.outcome == 'success' }}
+        # The commit range, from the event, passed as env so no expression is spliced into the script.
+        env:
+          # A PR scans from its base; a push from the previous tip of main.
+          RANGE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          # A PR scans to its head; a push to the commit being tested.
+          RANGE_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # Exact release, never "latest": a moved tag must not change what CI runs.
+          version=8.30.1
+          # sha256 of gitleaks_8.30.1_linux_x64.tar.gz from the release's checksums.txt (read
+          # 2026-11-05). Hard-coded, so a swapped download fails the check instead of running.
+          expected=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          # Fetch the official release tarball; -f makes an HTTP error fail the step.
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tgz" "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz"
+          # Refuse to run anything whose bytes are not the pinned ones.
+          echo "${expected}  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
+          # Only the binary is needed out of the archive.
+          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
+          # A brand-new branch has an all-zero "before"; then scan everything reachable from head.
+          if [ -z "$RANGE_BASE" ] || [ "$RANGE_BASE" = "0000000000000000000000000000000000000000" ]; then
+            # No previous tip to diff from.
+            log_opts="$RANGE_HEAD"
+          else
+            # Only the commits this push or PR adds.
+            log_opts="${RANGE_BASE}..${RANGE_HEAD}"
+          fi
+          # Shown so the log says what was covered.
+          echo "gitleaks ${version} scanning ${log_opts}"
+          # --redact keeps a found secret out of the log; --exit-code 1 makes a finding fail CI.
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --exit-code 1 --log-opts="$log_opts" .
