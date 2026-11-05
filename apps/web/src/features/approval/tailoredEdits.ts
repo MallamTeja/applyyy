@@ -489,7 +489,7 @@ export function tracesToMaster(
   /* Rule 2: the summary is free text, but it must still BE text or null - not an object smuggled in. */
   if (next.summary !== null && typeof next.summary !== 'string') return false;
   /* Rule 2: unchanged skills are always fine, so an unrelated edit is never blocked by them; a
-     CHANGED list must be the tailor's list plus master skills only (T3, unchanged by R0'). */
+     CHANGED list must be the tailor's list (some possibly removed, 2026-11-05) plus master skills only (T3). */
   if (!deepEqual(prev['skills'], nxt['skills']) && !skillsAreOriginalPlusMaster(nxt['skills'], original, master)) return false;
   /* Rule 3: the order itself, and a slot for every section the edit changed. */
   if (!sectionOrderHolds(prev, nxt)) return false;
@@ -613,12 +613,13 @@ function sectionOrderHolds(prev: Record<string, unknown>, nxt: Record<string, un
 
 /* T3's save-boundary rule for a CHANGED skills list. True only when:
  *   1. it is an array of plain objects;
- *   2. every one of the tailor's skills is present, deep-equal to the validator's node, and in
- *      the tailor's relative order (a subsequence walk) - none dropped, none altered, none moved
- *      past another;
+ *   2. every tailor skill still printed is deep-equal to the validator's node and in the tailor's
+ *      relative order (a subsequence walk) - none altered, none moved past another. Since 2026-11-05
+ *      one may be DROPPED (remove_skill): a removal prints no new claim, so R0' still holds;
  *   3. every other entry deep-equals {ref, name, category} of a master skill, built from the
  *      master node - so no invented skill, and no real ref wearing an edited name or category;
- *   4. no ref appears twice.
+ *   4. no ref appears twice;
+ *   5. at least one skill is left (an empty skills section is malformed, not an edit).
  * Positive shape throughout: each entry must be proven to be one of the two allowed kinds. */
 function skillsAreOriginalPlusMaster(candidate: unknown, original: ResolvedResume, master: MasterProfile): boolean {
   /* Not an array: not a skills list at all. */
@@ -634,8 +635,6 @@ function skillsAreOriginalPlusMaster(candidate: unknown, original: ResolvedResum
   const tailorIndex = new Map<string, number>(original.skills.map((skill, index) => [skill.ref, index]));
   /* Refs seen so far, for the duplicate check. */
   const seen = new Set<string>();
-  /* How many of the tailor's skills have been seen, which must reach all of them by the end. */
-  let tailorSeen = 0;
   /* The last tailor skill's position; strictly increasing means the tailor's order is kept. */
   let lastTailorIndex = -1;
   /* Every entry, proven to be either a tailor skill or a master addition. */
@@ -660,8 +659,6 @@ function skillsAreOriginalPlusMaster(candidate: unknown, original: ResolvedResum
       if (at <= lastTailorIndex) return false;
       /* Advance the floor. */
       lastTailorIndex = at;
-      /* Count it toward "all of the tailor's skills are still here". */
-      tailorSeen += 1;
       /* Proven; next entry. */
       continue;
     }
@@ -670,8 +667,12 @@ function skillsAreOriginalPlusMaster(candidate: unknown, original: ResolvedResum
     /* Not in the master: an invented skill. Or in it with any other field: a relabelled one. */
     if (node === undefined || !deepEqual(entry, node)) return false;
   }
-  /* Every one of the tailor's skills is still printed; dropping one is not this page's edit. */
-  return tailorSeen === original.skills.length;
+  /* A tailor skill may be DROPPED (2026-11-05 ruling, for the AI chat's remove_skill): a removal prints
+     no new claim, so every skill left still traces to the tailor or the master and R0' holds. Until
+     then this required all of them, and every remove_skill was refused as "does not trace".
+     An EMPTY list is still refused: a skills section with nothing in it is a malformed resume, not an
+     edit (CLAUDE.md §6). Order is still enforced above, and every entry was proven to trace. */
+  return candidate.length > 0;
 }
 
 /* A skills list as it prints, for an event's before/after: names in order, comma-separated. */

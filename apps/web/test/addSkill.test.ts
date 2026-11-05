@@ -338,15 +338,22 @@ describe("tracesToMaster with a master (R0' rule 2, skills)", () => {
     assert.equal(check(withSkills(DOCKER)), true);
   });
 
-  it('refuses dropping or reordering the tailor-selected skills', () => {
+  it('accepts dropping a tailor-selected skill, refuses an empty list and any reorder', () => {
     // The tailor's two skills.
     const [node, pg] = original().skills;
-    // Node.js dropped: removing the tailor's choice is not an add-undo.
+    /* Node.js dropped (2026-11-05 ruling: the AI chat's remove_skill). A removal prints no new claim,
+       so every skill left still traces to the tailor or the master and R0' holds. */
     const dropped = clone(original()) as unknown as { skills: unknown[] };
     // Only PostgreSQL kept.
     dropped.skills = [pg];
+    // Accepted.
+    assert.equal(check(dropped as unknown as Resume), true);
+    // Every skill dropped: an empty skills section is malformed, never a valid edit (CLAUDE.md §6).
+    const emptied = clone(original()) as unknown as { skills: unknown[] };
+    // None left.
+    emptied.skills = [];
     // Refused.
-    assert.equal(check(dropped as unknown as Resume), false);
+    assert.equal(check(emptied as unknown as Resume), false);
     // Swapped order: order is part of the tailoring.
     const reordered = clone(original()) as unknown as { skills: unknown[] };
     // PostgreSQL first.

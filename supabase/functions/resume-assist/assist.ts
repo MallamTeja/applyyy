@@ -776,6 +776,46 @@ function describeOp(raw: unknown, request: AssistRequest): string {
 // Validate the model's JSON against the request: keep the ops the page can apply, drop the rest.
 // Since 2026-11-04 every dropped op is also NAMED in `rejected` (what it proposed, why it failed), so a
 // dropped change is never hidden behind a reply that claims it.
+/* A group name or an instruction as comparable words: lower-case, "&" read as "and", every other
+   non-alphanumeric a space, so "Backend & Systems" and "backend and systems group" share "backend and systems". */
+function groupWords(text: string): string {
+  // One pass of normalisation, then single spaces, padded so a match is whole words only.
+  // "+" and "#" stay (C++, C#); "." does not, or "tools." at a sentence end would miss "tools".
+  return ` ${text.toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9+#]+/g, " ").trim()} `;
+}
+
+/* The ONE skill group the owner named in the instruction, in the master's spelling (2026-11-05). Whole
+   words, so "Tools" never matches inside "toolset". Two or more named: undefined, because picking one
+   would be a guess (the op is then rejected with the groups listed, and the owner says which). */
+function groupNamedIn(instruction: string, categories: readonly string[]): string | undefined {
+  // The instruction's words, once.
+  const said = groupWords(instruction);
+  // Every group whose whole name appears in them.
+  const named = categories.filter((category) => groupWords(category).trim() !== "" && said.includes(groupWords(category)));
+  // Exactly one, or no answer.
+  return named.length === 1 ? named[0] : undefined;
+}
+
+/* A note sentence that reports a change in the first person ("I have added Node.js…", "I've moved…").
+   The model writes its note and its ops in one answer and cannot know which ops survive validation,
+   so such a sentence can be false (2026-11-04 "I added…" with ops: []; 2026-11-05 "I have added
+   Node.js" for a skill already printed). The panel lists every op and its outcome instead. */
+const CHANGE_CLAIM = /\b(?:i|i've|i have|i'll|i will|i've now|we|we've|we have)\b[^.!?]*\b(?:add(?:ed)?|remov(?:ed|e)|chang(?:ed|e)|mov(?:ed|e)|appl(?:ied|y)|updat(?:ed|e)|rewr(?:ote|ite|itten)|rephras(?:ed|e)|replac(?:ed|e)|delet(?:ed|e)|includ(?:ed|e)|insert(?:ed)?|swap(?:ped)?|put)\b/i;
+
+/* The reply the owner reads, derived from what survived (2026-11-05): every sentence that claims a
+   change is dropped, and an answer whose ops ALL failed leads with what happened instead. Never a
+   success sentence the outcome does not back. */
+function honestNote(raw: unknown, ops: readonly AssistOp[], rejected: readonly RejectedOp[]): string {
+  // The model's text, one line, or nothing.
+  const text = typeof raw === "string" ? oneLine(raw) : "";
+  // Sentences, each kept with its own end mark; a claim sentence is dropped whole.
+  const kept = (text.match(/[^.!?]+[.!?]*/g) ?? []).map((sentence) => sentence.trim()).filter((sentence) => sentence !== "" && !CHANGE_CLAIM.test(sentence));
+  // Ops proposed but none survived: say so first, with the first reason.
+  const lead = ops.length === 0 && rejected.length > 0 ? `Nothing was changed: ${rejected[0]!.why}` : "";
+  // Lead, then what the model said that was not a claim; capped as before.
+  return [lead, ...kept].filter((part) => part !== "").join(" ").slice(0, NOTE_MAX);
+}
+
 export function parseAssistOps(
   text: string,
   request: AssistRequest,
@@ -809,6 +849,8 @@ export function parseAssistOps(
   }
   // Groups by lower-case key, so "languages" maps to the master's own "Languages".
   const groups = new Map(request.categories.map((category) => [skillKey(category), category]));
+  // The one skill group the owner named in their own words, or undefined (none, or more than one).
+  const namedGroup = groupNamedIn(request.instruction, request.categories);
   // The owner's groups as a rejection lists them (2026-11-04): at most five, each clipped, so the
   // sentence stays under 200 characters even with long group names.
   const groupList = request.categories.length === 0 ? "there are none" : `${request.categories.slice(0, 5).map((category) => clip(category, 18)).join(", ")}${request.categories.length > 5 ? ", …" : ""}`;
@@ -893,20 +935,24 @@ export function parseAssistOps(
       const name = textField(raw.name);
       // The group as the AI wrote it.
       const category = textField(raw.category);
-      // The master's own spelling of the group, matched case-insensitively.
-      const group = groups.get(skillKey(category));
-      // No name, a group the master lacks, already printed, or already proposed: unusable. No name:
+      // No name, already printed, no usable group, or already proposed: unusable. No name:
       if (name === "") return WHY.noSkillName;
       // A printed skill name longer than this is a sentence, not a skill.
       if (name.length > MAX_SKILL_NAME) return `The skill name is longer than ${MAX_SKILL_NAME} characters.`;
-      // No group named.
-      if (category === "") return "The AI's answer did not say which skill group.";
-      // A group the master lacks, named with the ones it has.
-      if (group === undefined) return `"${clip(category, 30)}" is not one of your skill groups (${groupList}).`;
       // The resume's own spelling, when the skill is already printed.
       const spelling = printed.get(skillKey(name));
-      // Already printed: a duplicate add is never offered.
+      // Already printed: checked BEFORE the group (2026-11-05 live bug: a group-less add of a printed
+      // skill said "did not say which skill group", hiding the real reason; the model then claimed it).
       if (spelling !== undefined) return `"${clip(spelling, 40)}" is already on the resume.`;
+      /* The group, in the master's spelling (2026-11-05). The producer resolves it so the browser never
+         gets an op it must refuse: the AI's group when it is one of the owner's; else the one group
+         the owner NAMED in the instruction ("backend and systems group"); else the only group there
+         is. Never a guess between several: an unresolved group is a named rejection. */
+      const group = groups.get(skillKey(category)) ?? namedGroup ?? (request.categories.length === 1 ? request.categories[0] : undefined);
+      // No group from the AI, none named by the owner, several to choose from.
+      if (group === undefined && category === "") return "The AI's answer did not say which skill group.";
+      // A group the master lacks, named with the ones it has.
+      if (group === undefined) return `"${clip(category, 30)}" is not one of your skill groups (${groupList}).`;
       // The claim key, namespaced so a skill called "b0" cannot collide with a bullet id.
       const key = `skill:${skillKey(name)}`;
       // Already proposed (or removed) earlier in this answer.
@@ -1055,8 +1101,9 @@ export function parseAssistOps(
     // Kept.
     ops.push(result);
   }
-  // The note is display text; a missing one becomes empty, never a made-up sentence.
-  const note = typeof parsed.note === "string" ? oneLine(parsed.note).slice(0, NOTE_MAX) : "";
+  // The note is display text, never a made-up success: claim sentences dropped, and an all-failed answer
+  // led by what happened (honestNote). A missing note with nothing to report stays empty.
+  const note = honestNote(parsed.note, ops, rejected);
   // The surviving ops, the drop count, the named drops and the note.
   return { ok: true, ops, dropped, rejected, note };
 }

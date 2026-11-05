@@ -891,3 +891,52 @@ test("remove_skill keeps a category that names one of two same-named printed ski
   // No category on the op.
   assert.deepEqual(stray.ok ? stray.ops : null, [{ op: "remove_skill", name: "Testing" }]);
 });
+
+// --- live bugs of 2026-11-05 13:17 IST (Teja, Cursor row): a group-less add_skill and a claimed no-op ---
+
+test("add_skill: an already-printed skill is named as such even when the AI gave no group", () => {
+  // Live: "I have added Node.js…" with Node.js already printed and no group; the reason said
+  // "did not say which skill group", which hid the real one.
+  assert.deepEqual(rejectedFor({ op: "add_skill", name: "postgres" }), { what: 'Add skill "postgres"', why: '"Postgres" is already on the resume.' });
+});
+
+test("add_skill: a missing or unknown group is taken from the group the owner named in the instruction", () => {
+  // The owner's own words name the group; "&" and "and" are the same group.
+  const named = parseAssistRequest(body({ instruction: "i mean in backend and systems group, add Kafka", categories: ["Languages", "Backend & Systems"] }));
+  // Valid fixture.
+  assert.ok(named.ok);
+  // No group from the AI: the owner's group is used, in the master's spelling.
+  const missing = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Kafka" }], note: "" }), named.request);
+  // Kept, with the resolved group.
+  assert.deepEqual(missing.ok ? missing.ops : null, [{ op: "add_skill", name: "Kafka", category: "Backend & Systems" }]);
+  // A group the master lacks: the owner's named group still wins over the AI's guess.
+  const unknown = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Kafka", category: "Infra" }], note: "" }), named.request);
+  // Kept, same group.
+  assert.deepEqual(unknown.ok ? unknown.ops : null, [{ op: "add_skill", name: "Kafka", category: "Backend & Systems" }]);
+});
+
+test("add_skill: with one group only, a group-less add lands in it", () => {
+  // One group: nothing to choose between.
+  const single = parseAssistRequest(body({ categories: ["Tools"] }));
+  // Valid fixture.
+  assert.ok(single.ok);
+  // Kept under the only group.
+  const parsed = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Kafka" }], note: "" }), single.request);
+  // The resolved op.
+  assert.deepEqual(parsed.ok ? parsed.ops : null, [{ op: "add_skill", name: "Kafka", category: "Tools" }]);
+});
+
+test("the reply never claims a change: claim sentences are dropped, and a no-op answer says nothing changed", () => {
+  // The live answer: a claim, about a skill that was already printed (so no op survives).
+  const live = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Postgres", category: "Tools" }], note: "I have added Postgres to the Tools skill group as requested." }), request());
+  // Parsed.
+  assert.ok(live.ok);
+  // Nothing survived.
+  assert.deepEqual(live.ops, []);
+  // The reply comes from the outcome, never from the model's claim.
+  assert.equal(live.note, 'Nothing was changed: "Postgres" is already on the resume.');
+  // A claim beside a real answer: the claim goes, the answer stays.
+  const mixed = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Kafka", category: "Tools" }], note: "I added Kafka for you. Kafka fits Tools best." }), request());
+  // Only the non-claim sentence is left.
+  assert.equal(mixed.ok ? mixed.note : null, "Kafka fits Tools best.");
+});
