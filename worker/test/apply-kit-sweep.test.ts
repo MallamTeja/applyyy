@@ -4,15 +4,17 @@
 // status change, builds kits for a capped few, and never lets one failure stop the rest.
 import { describe, expect, test } from 'vitest';
 import { createSweepReader, parseKitTarget, runKitSweep, selectKitCandidates, shouldRedispatch, type KitStamp, type SweepRow } from '../src/apply-kit-sweep.ts';
+// B2: the typed skip a kit throws for a robots refusal or a closed posting.
+import { KitSkip } from '../src/apply-kit.ts';
 // The workflow pins below read apply-kit.yml as text.
 import { readFileSync } from 'node:fs';
 import type { SupabaseLike } from '../src/supabase-gateway.ts';
 
 // One row as the sweep reads it; the status change is the moment the row needed a kit.
 // The park facts default to "never parked", so every older case keeps its meaning (W29).
-function row(id: string, status: SweepRow['status'], statusChangedAt: string, park: Partial<Pick<SweepRow, 'blockReason' | 'blockUnusable'>> = {}): SweepRow {
+function row(id: string, status: SweepRow['status'], statusChangedAt: string, park: Partial<Pick<SweepRow, 'blockReason' | 'blockUnusable' | 'blockCode'>> = {}): SweepRow {
   // Unparked unless a case says otherwise; a case overrides only the fact it is about.
-  return { id, status, statusChangedAt, blockReason: null, blockUnusable: null, ...park };
+  return { id, status, statusChangedAt, blockReason: null, blockUnusable: null, blockCode: null, ...park };
 }
 
 // One kit note as the sweep reads it.
@@ -113,12 +115,14 @@ describe('runKitSweep', () => {
       cap: 5,
       // The run budget is not under test here: never out of time.
       outOfTime: () => false,
+      // B2: skips are not under test here.
+      recordSkip: async () => {},
       log: (line) => lines.push(line),
     });
     // The rows on either side of the failure were still built.
     expect(built).toEqual(['a', 'c']);
     // The failure is named, not swallowed.
-    expect(summary).toEqual({ eligible: 3, attempted: 3, remaining: 0, built: 2, failed: [{ id: 'b', reason: 'page load timed out' }] });
+    expect(summary).toEqual({ eligible: 3, attempted: 3, remaining: 0, built: 2, skipped: [], failed: [{ id: 'b', reason: 'page load timed out' }] });
     // And it reaches the log with its reason.
     expect(lines.some((line) => line.includes('b') && line.includes('page load timed out'))).toBe(true);
   });
@@ -135,11 +139,13 @@ describe('runKitSweep', () => {
       cap: 1,
       // The run budget is not under test here: never out of time.
       outOfTime: () => false,
+      // B2: skips are not under test here.
+      recordSkip: async () => {},
       log: () => {},
     });
     // Only the longest-waiting row was built; the other two wait for the next run.
     expect(built).toEqual(['a']);
-    expect(summary).toEqual({ eligible: 3, attempted: 1, remaining: 2, built: 1, failed: [] });
+    expect(summary).toEqual({ eligible: 3, attempted: 1, remaining: 2, built: 1, skipped: [], failed: [] });
   });
 
   test('zero eligible rows is said out loud, never a silent pass', async () => {
@@ -154,11 +160,13 @@ describe('runKitSweep', () => {
       cap: 5,
       // The run budget is not under test here: never out of time.
       outOfTime: () => false,
+      // B2: skips are not under test here.
+      recordSkip: async () => {},
       log: (line) => lines.push(line),
     });
     // The exact phrase the brief asked for, so a log search finds it.
     expect(lines.some((line) => line.includes('0 eligible'))).toBe(true);
-    expect(summary).toEqual({ eligible: 0, attempted: 0, remaining: 0, built: 0, failed: [] });
+    expect(summary).toEqual({ eligible: 0, attempted: 0, remaining: 0, built: 0, skipped: [], failed: [] });
   });
 
   test('kits are read only for the rows that could need one', async () => {
@@ -173,6 +181,8 @@ describe('runKitSweep', () => {
       cap: 5,
       // The run budget is not under test here: never out of time.
       outOfTime: () => false,
+      // B2: skips are not under test here.
+      recordSkip: async () => {},
       log: () => {},
     });
     // The applied row is not a kit candidate, so its notes are never read.
@@ -195,6 +205,8 @@ describe('runKitSweep', () => {
       cap: 5,
       // The run budget is not under test here: never out of time.
       outOfTime: () => false,
+      // B2: skips are not under test here.
+      recordSkip: async () => {},
       log: (line) => lines.push(line),
     });
     // The closed outcome the CLI must narrow on, never a zero summary posing as "nothing due".
@@ -217,6 +229,8 @@ describe('runKitSweep', () => {
       cap: 5,
       // The run budget is not under test here: never out of time.
       outOfTime: () => false,
+      // B2: skips are not under test here.
+      recordSkip: async () => {},
       log: () => {},
     });
     // The run goes red with the database's reason.
@@ -285,8 +299,8 @@ describe('createSweepReader', () => {
     );
     // Renamed to the sweep's fields, park facts included (W29).
     expect(await reader.listRows()).toEqual([
-      { id: 'a', status: 'applying', statusChangedAt: '2026-10-24T10:00:00+00:00', blockReason: null, blockUnusable: null },
-      { id: 'b', status: 'blocked_needs_human', statusChangedAt: '2026-10-24T11:00:00+00:00', blockReason: 'other', blockUnusable: 'no_apply_url' },
+      { id: 'a', status: 'applying', statusChangedAt: '2026-10-24T10:00:00+00:00', blockReason: null, blockUnusable: null, blockCode: null },
+      { id: 'b', status: 'blocked_needs_human', statusChangedAt: '2026-10-24T11:00:00+00:00', blockReason: 'other', blockUnusable: 'no_apply_url', blockCode: null },
     ]);
   });
 });
@@ -311,23 +325,25 @@ describe('apply-kit run budget and self re-dispatch', () => {
       cap: 25,
       // Checked before each row.
       outOfTime: () => spent,
+      // B2: skips are not under test here.
+      recordSkip: async () => {},
       log: () => {},
     });
     // One kit, then it stopped.
     expect(built).toEqual(['a']);
     // Two untried rows, counted, so the workflow re-dispatches.
-    expect(summary).toEqual({ eligible: 3, attempted: 1, remaining: 2, built: 1, failed: [] });
+    expect(summary).toEqual({ eligible: 3, attempted: 1, remaining: 2, built: 1, skipped: [], failed: [] });
   });
 
   test('shouldRedispatch: only when this run left rows untried AND built at least one kit (the chain always ends)', () => {
     // Batch or budget left rows: go again.
-    expect(shouldRedispatch({ eligible: 30, attempted: 25, remaining: 5, built: 20, failed: [] })).toBe(true);
+    expect(shouldRedispatch({ eligible: 30, attempted: 25, remaining: 5, built: 20, skipped: [], failed: [] })).toBe(true);
     // Everything tried, even with failures: failed rows wait for the daily cron, never a loop.
-    expect(shouldRedispatch({ eligible: 3, attempted: 3, remaining: 0, built: 1, failed: [{ id: 'x', reason: 'r' }, { id: 'y', reason: 'r' }] })).toBe(false);
+    expect(shouldRedispatch({ eligible: 3, attempted: 3, remaining: 0, built: 1, skipped: [], failed: [{ id: 'x', reason: 'r' }, { id: 'y', reason: 'r' }] })).toBe(false);
     // A full batch that all failed: those rows sort first again next run, so going again is a loop.
-    expect(shouldRedispatch({ eligible: 40, attempted: 25, remaining: 15, built: 0, failed: Array.from({ length: 25 }, (_, i) => ({ id: String(i), reason: 'r' })) })).toBe(false);
+    expect(shouldRedispatch({ eligible: 40, attempted: 25, remaining: 15, built: 0, skipped: [], failed: Array.from({ length: 25 }, (_, i) => ({ id: String(i), reason: 'r' })) })).toBe(false);
     // Nothing tried (budget gone before the first row): a re-dispatch would make no progress.
-    expect(shouldRedispatch({ eligible: 3, attempted: 0, remaining: 3, built: 0, failed: [] })).toBe(false);
+    expect(shouldRedispatch({ eligible: 3, attempted: 0, remaining: 3, built: 0, skipped: [], failed: [] })).toBe(false);
     // The kill switch's closed outcome never re-dispatches.
     expect(shouldRedispatch('skipped_disabled')).toBe(false);
   });
@@ -368,5 +384,93 @@ describe('apply-kit run budget and self re-dispatch', () => {
     expect(redispatchJob).toContain('gh workflow run apply-kit.yml --ref main --repo "$REPO"');
     // The concurrency group still coalesces (no parallel kit runs on rapid approves).
     expect(yml).toMatch(/group: applyy-apply-kit\n(?:\s+#.*\n)*\s+cancel-in-progress: false/);
+  });
+});
+
+// B2 (2026-11-05, P3 #8 + starvation): a robots refusal or a closed posting is a REPORTED SKIP, not a
+// failure. The skip is recorded once (an apply_kit_skipped note), so the row is not due again until its
+// status changes; a parked posting_closed row is never selected; skips count as progress.
+describe('kit skips (B2)', () => {
+  test('a KitSkip is recorded and reported, never a failure, and the next row still runs', async () => {
+    // The recorded skips.
+    const recorded: Array<[string, string, string]> = [];
+    // Kits built.
+    const built: string[] = [];
+    const summary = await runKitSweep({
+      // Kill switch on.
+      isSystemEnabled: async () => true,
+      // Two due rows.
+      listRows: async () => [row('a', 'approved', '2026-10-24T08:00:00Z'), row('b', 'approved', '2026-10-24T09:00:00Z')],
+      // No kits yet.
+      listKits: async () => [],
+      // The first is robots-refused.
+      buildOne: async (id) => { if (id === 'a') throw new KitSkip('robots_refused', 'robots.txt refused (HTTP 403)'); built.push(id); },
+      // A big batch.
+      cap: 25,
+      // Never out of time.
+      outOfTime: () => false,
+      // Recorded.
+      recordSkip: async (id, code, reason) => { recorded.push([id, code, reason]); },
+      // Quiet.
+      log: () => {},
+    });
+    // Skipped, recorded once, and the next row built.
+    expect(summary).toEqual({ eligible: 2, attempted: 2, remaining: 0, built: 1, skipped: [{ id: 'a', code: 'robots_refused', reason: 'robots.txt refused (HTTP 403)' }], failed: [] });
+    // The note's inputs.
+    expect(recorded).toEqual([['a', 'robots_refused', 'robots.txt refused (HTTP 403)']]);
+    // The next row ran.
+    expect(built).toEqual(['b']);
+  });
+
+  test('a skip that cannot be recorded is a failure (it would otherwise be retried every run, silently)', async () => {
+    const summary = await runKitSweep({
+      // Kill switch on.
+      isSystemEnabled: async () => true,
+      // One due row.
+      listRows: async () => [row('a', 'approved', '2026-10-24T08:00:00Z')],
+      // No kits yet.
+      listKits: async () => [],
+      // Closed posting.
+      buildOne: async () => { throw new KitSkip('posting_closed', 'no email field'); },
+      // A big batch.
+      cap: 25,
+      // Never out of time.
+      outOfTime: () => false,
+      // The note insert is refused.
+      recordSkip: async () => { throw new Error('insert refused (42501)'); },
+      // Quiet.
+      log: () => {},
+    });
+    // Red, naming both causes.
+    expect(summary).toMatchObject({ failed: [{ id: 'a', reason: expect.stringMatching(/no email field.*insert refused/) }], skipped: [] });
+  });
+
+  test('a row parked as posting_closed (block_detail.code) is never selected; a re-approved one is', () => {
+    // Parked by the applier's pre-submit re-check.
+    const closed = row('closed', 'blocked_needs_human', '2026-10-24T08:00:00Z', { blockReason: 'other', blockCode: 'posting_closed' });
+    // Re-approved after a parking: the code is history.
+    const back = row('back', 'approved', '2026-10-24T08:00:00Z', { blockReason: 'other', blockCode: 'posting_closed' });
+    // Only the re-approved one is due.
+    expect(selectKitCandidates([closed, back], [], 25)).toEqual({ eligible: ['back'], selected: ['back'] });
+  });
+
+  test('skips count as progress for the self re-dispatch', () => {
+    // Nothing built, but a skip took a row out of the due set for good.
+    expect(shouldRedispatch({ eligible: 40, attempted: 25, remaining: 15, built: 0, skipped: [{ id: 'a', code: 'robots_refused', reason: 'r' }], failed: [] })).toBe(true);
+  });
+
+  test('the kit-notes read also returns skip notes, so a skipped row is not due until its status changes', async () => {
+    // Every call on the builder, recorded.
+    const calls: Array<[string, unknown[]]> = [];
+    // A recording PostgREST chain.
+    const chain: Record<string, unknown> = {};
+    // select/eq/in each record their arguments and return the chain.
+    for (const method of ['select', 'eq', 'in']) chain[method] = (...args: unknown[]) => { calls.push([method, args]); return chain; };
+    // Thenable, like the real builder.
+    chain['then'] = (resolve: (value: unknown) => unknown) => resolve({ data: [], error: null });
+    // Read.
+    await createSweepReader({ from: () => chain } as unknown as SupabaseLike).listKits(['a']);
+    // Both note kinds.
+    expect(calls).toContainEqual(['in', ['detail->>kind', ['apply_kit', 'apply_kit_skipped']]]);
   });
 });

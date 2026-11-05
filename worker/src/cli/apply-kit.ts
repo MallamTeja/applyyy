@@ -179,6 +179,9 @@ async function main(): Promise<void> {
         cap: sweepCap,
         // Spent once the run has used runBudgetSeconds; checked before each row.
         outOfTime: () => (Date.now() - startedAt) / 1000 >= DEFAULT_RUN_WINDOW_LIMITS.runBudgetSeconds,
+        // B2: a skip is one append-only note of its own kind, so the row is not due again until its status
+        // changes; the web reads only kind apply_kit, so this note never reads as a kit.
+        recordSkip: (id, code, reason) => gateway.appendApplicationNote(id, { kind: 'apply_kit_skipped', code, reason }),
         log: (line) => console.log(line),
       });
       // The re-dispatch verdict, written for the workflow's next step (absent locally: nothing to write).
@@ -188,8 +191,9 @@ async function main(): Promise<void> {
       // An off switch is the switch working: the sweep already logged it, and the run stays green.
       if (summary === 'skipped_disabled') return;
       // The totals as one line, so the run page shows the outcome at a glance.
-      console.log(`[apply-kit sweep] done: eligible ${summary.eligible}, attempted ${summary.attempted}, remaining ${summary.remaining}, built ${summary.built}, failed ${summary.failed.length}${redispatch ? '; re-dispatching for the rest' : ''}`);
-      // A failed row turns the run red so it is seen, after every other row has had its turn.
+      console.log(`[apply-kit sweep] done: eligible ${summary.eligible}, attempted ${summary.attempted}, remaining ${summary.remaining}, built ${summary.built}, skipped ${summary.skipped.length}, failed ${summary.failed.length}${redispatch ? '; re-dispatching for the rest' : ''}`);
+      // A failed row turns the run red so it is seen, after every other row has had its turn. A SKIP does not
+      // (B2): a robots refusal or a closed posting is the system working, reported above.
       if (summary.failed.length > 0) process.exitCode = 1;
     }
   } finally {

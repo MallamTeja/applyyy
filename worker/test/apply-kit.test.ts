@@ -8,7 +8,7 @@ import { chromium, type Browser } from 'playwright';
 import type { AnswerBankRow, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 import { startFixtureServer, type FixtureServer } from '../src/fixture-server.ts';
 import { createPlaywrightPage } from '../src/playwright-page.ts';
-import { buildApplyKit, createKitGateway, type KitApplication, type KitGateway } from '../src/apply-kit.ts';
+import { buildApplyKit, createKitGateway, KitSkip, type KitApplication, type KitGateway } from '../src/apply-kit.ts';
 // The production file-name rule, so the expected name is never hand-copied.
 import { resumeFileName } from '../src/plan-resume-attachment.ts';
 import type { SupabaseLike } from '../src/supabase-gateway.ts';
@@ -242,6 +242,7 @@ describe('the manual apply kit on the real GitLab form', () => {
 
   // Leak 3 (2026-11-05): GitLab 267dcfcd closed in September; its link redirected to the careers
   // index, and the kit listed "Search" and "Department" as the form for Teja to fill by hand.
+  // B2 (2026-11-05): refused with a TYPED KitSkip, so the sweep reports it instead of turning the run red.
   test('a page with no email field (a closed posting redirected to the careers index) is refused as posting_closed, writing nothing', async () => {
     const { raw, page, forbidden } = await openKitPage();
     // The row points at the index page, as GitLab's closed link did after its redirect.
@@ -257,7 +258,7 @@ describe('the manual apply kit on the real GitLab form', () => {
           runId: null,
           now: () => new Date(),
         }),
-      ).rejects.toThrow(/posting_closed/);
+      ).rejects.toMatchObject({ name: 'KitSkip', code: 'posting_closed' });
       // No resume uploaded and no kit note written for a page that is not a form.
       expect(calls.filter((call) => call === 'uploadResume' || call === 'appendApplicationNote')).toEqual([]);
       // And nothing typed.
@@ -351,5 +352,42 @@ describe('the kit gateway over a supabase-js client', () => {
     expect(ops.filter((op) => op.startsWith('rpc.') || /\.(update|upsert|delete)$/.test(op))).toEqual([]);
     // Exactly the two writes the kit is allowed.
     expect(ops.filter((op) => op.includes('upload') || op.endsWith('.insert'))).toEqual(['storage.resumes.upload pdf', 'application_events.insert']);
+  });
+});
+
+// B2 (2026-11-05, P3 #8): arbeitnow's robots.txt refuses us (403). That is the gate working, so the
+// kit refuses with a TYPED skip the sweep reports (exit 0); a 'wait' (transient) stays a plain failure.
+describe('buildApplyKit robots refusal (B2)', () => {
+  // Every write the kit attempts; a refusal must make none.
+  const writes: string[] = [];
+  // The smallest gateway the robots gate needs: the row, the master, the answers.
+  const gateway = {
+    // A row in a kit lane.
+    fetchApplication: async () => ({ id: 'app-r', status: 'approved', applyUrl: 'https://example.test/job', tailoredProfile: null, jobTitle: 't', company: 'c' }),
+    // A master exists, so the robots gate is reached.
+    fetchLatestProfile: async () => ({}),
+    // No answers needed.
+    fetchAnswers: async () => [],
+    // Must never run on a refusal.
+    uploadResume: async () => { writes.push('uploadResume'); return 'x'; },
+    // Must never run on a refusal.
+    appendApplicationNote: async () => { writes.push('appendApplicationNote'); },
+  } as unknown as KitGateway;
+  // A page that must never be opened.
+  const page = { goto: async () => { throw new Error('page opened despite robots'); } } as never;
+  // A renderer that must never run.
+  const renderResume = (async () => { throw new Error('rendered despite robots'); }) as never;
+
+  test('robots "refuse" is a KitSkip(robots_refused), writing nothing; "wait" is a plain error', async () => {
+    // Refused.
+    const refused = buildApplyKit({ applicationId: 'app-r', gateway, page, renderResume, checkRobots: async () => ({ kind: 'refuse', reason: 'HTTP 403', source: 'status' }) as never, runId: null, now: () => new Date() });
+    // Typed, with its code.
+    await expect(refused).rejects.toMatchObject({ name: 'KitSkip', code: 'robots_refused' });
+    // A transient wait.
+    const waited = buildApplyKit({ applicationId: 'app-r', gateway, page, renderResume, checkRobots: async () => ({ kind: 'wait', reason: 'HTTP 503' }) as never, runId: null, now: () => new Date() });
+    // Rejected, but NOT a skip: tomorrow may differ, and a red run is how it is seen.
+    await expect(waited).rejects.not.toBeInstanceOf(KitSkip);
+    // Nothing uploaded or noted either way.
+    expect(writes).toEqual([]);
   });
 });

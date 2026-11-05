@@ -35,6 +35,26 @@ import { createSupabaseGateway, type GatewayConfig, type SupabaseLike } from './
 /** The statuses a kit may be built for: everything between approval and a final answer. */
 export const KIT_STATUSES: readonly ApplicationStatus[] = ['approved', 'applying', 'needs_verification', 'blocked_needs_human'];
 
+/**
+ * A refusal that is the system working, not a fault (B2, 2026-11-05): robots.txt refused the form, or the
+ * posting is closed. The sweep records it once (an apply_kit_skipped note) and reports it, so the run stays
+ * green and the row is not retried until its status changes. A closed set of codes, so a new cause is a
+ * deliberate change here, never a guessed string.
+ */
+export class KitSkip extends Error {
+  // Named for logs and for toMatchObject in tests.
+  override readonly name = 'KitSkip';
+  // The cause, written into the skip note.
+  readonly code: 'robots_refused' | 'posting_closed';
+  // A plain constructor: parameter properties are not erasable syntax (tsconfig erasableSyntaxOnly).
+  constructor(code: 'robots_refused' | 'posting_closed', message: string) {
+    // The message is the refusal's own text.
+    super(message);
+    // Kept for the sweep's note.
+    this.code = code;
+  }
+}
+
 /** The control kind as the web renders it. A closed union, mapped once from FormField['kind']. */
 export type KitInputType = 'text' | 'textarea' | 'select' | 'checkbox' | 'radio' | 'file' | 'other';
 
@@ -216,7 +236,11 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
   const formUrl = input.resolveFormUrl === undefined ? row.applyUrl : await input.resolveFormUrl(row);
   // The gate, on the URL that will be loaded.
   const robots = await input.checkRobots(formUrl);
-  // Refused, waiting or unreadable: the form is not opened, and nothing is written.
+  // Refused, waiting or unreadable: the form is not opened, and nothing is written. A definite refusal is
+  // the gate working (arbeitnow's 403, P3 #8), so it is a typed skip the sweep reports, not a failure; a
+  // 'wait' (transient) stays a plain error, because tomorrow may differ and a red run is how that is seen.
+  if (robots.kind === 'refuse') throw new KitSkip('robots_refused', `apply kit: robots.txt did not allow ${formUrl} (${robots.kind}: ${robots.reason})`);
+  // Waiting or unreadable: a real failure.
   if (robots.kind !== 'allow') throw new Error(`apply kit: robots.txt did not allow ${formUrl} (${robots.kind}: ${robots.reason})`);
 
   // Loading a form is fine from CI; only a submit trips the captcha.
@@ -235,7 +259,7 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
     // The labels found, so the log shows what page was opened instead of a form.
     const found = fields.map((field) => field.label).slice(0, 5).join(', ');
     // Named posting_closed: the usual cause, stated with its evidence rather than asserted.
-    throw new Error(`apply kit: posting_closed: ${formUrl} shows no email field (${fields.length} field(s): ${found || 'none'}); a closed posting usually redirects to the careers index`);
+    throw new KitSkip('posting_closed', `apply kit: posting_closed: ${formUrl} shows no email field (${fields.length} field(s): ${found || 'none'}); a closed posting usually redirects to the careers index`);
   }
 
   // THE SAME PLAN the bot would have typed: latest master for identity facts, the bank for

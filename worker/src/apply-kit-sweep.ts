@@ -21,7 +21,7 @@
 // BlockReason types the park fact, so a typo in the skip list fails to compile.
 import type { ApplicationStatus, BlockReason } from '@applyy/shared-types';
 // The statuses that wait on Teja: the same list buildApplyKit re-checks per row.
-import { KIT_STATUSES } from './apply-kit.ts';
+import { KIT_STATUSES, KitSkip } from './apply-kit.ts';
 // The client shape the production gateway accepts, so the reader runs on the same client.
 import type { SupabaseLike } from './supabase-gateway.ts';
 // The applier's UUID shape check, so a kit id and APPLY_ONLY_ID refuse the same junk.
@@ -60,6 +60,9 @@ export interface SweepRow {
   // applications.block_detail->>unusable: the applier's W4 cause ('no_apply_url' |
   // 'posting_disappeared'), or null. Typed as text: it is read from jsonb, not an enum.
   readonly blockUnusable: string | null;
+  // applications.block_detail->>code: e.g. 'posting_closed' from the applier's pre-submit re-check (B2).
+  // Text, read from jsonb.
+  readonly blockCode: string | null;
 }
 
 /** One existing kit note: whose, and when it was written. */
@@ -81,6 +84,9 @@ export interface SweepSummary {
   readonly remaining: number;
   // Rows that got a kit.
   readonly built: number;
+  // Rows refused for a reason that is the system working (robots refused, posting closed), each recorded
+  // once as an apply_kit_skipped note so it is not retried until its status changes (B2). Never a failure.
+  readonly skipped: ReadonlyArray<{ readonly id: string; readonly code: KitSkip['code']; readonly reason: string }>;
   // Rows that failed, each with its reason, so nothing is swallowed.
   readonly failed: ReadonlyArray<{ readonly id: string; readonly reason: string }>;
 }
@@ -102,6 +108,9 @@ export interface RunKitSweepInput {
   // The run budget (3000 s, run-window.ts), checked before each row: once spent, no new kit starts, so
   // the job timeout never kills a run mid-row. REQUIRED, so a sweep without a budget does not compile.
   readonly outOfTime: () => boolean;
+  // Writes the apply_kit_skipped note for a KitSkip (B2). REQUIRED, so a sweep cannot skip silently: an
+  // unrecorded skip would be retried every run, which is the starvation this exists to end.
+  readonly recordSkip: (applicationId: string, code: KitSkip['code'], reason: string) => Promise<void>;
   // One line per event; values never appear in it, only ids and reasons.
   readonly log: (line: string) => void;
 }
@@ -114,13 +123,15 @@ const TIMESTAMP_SHAPE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
 const UNOPENABLE_REASONS: readonly BlockReason[] = ['robots_refused'];
 // The applier's W4 cause for a job with no form URL (claim-loop.ts UnusableClaim).
 const UNOPENABLE_UNUSABLE: readonly string[] = ['no_apply_url'];
+// B2: the applier's pre-submit re-check parks a closed posting with block_detail.code 'posting_closed'.
+const UNOPENABLE_CODES: readonly string[] = ['posting_closed'];
 
 /** True for a row parked RIGHT NOW for a cause no kit can get past (W29). */
 function cannotOpenForm(row: SweepRow): boolean {
   // Only while parked: a re-approved row keeps its old block facts as history.
   if (row.status !== 'blocked_needs_human') return false;
   // Either cause is enough.
-  return (row.blockReason !== null && UNOPENABLE_REASONS.includes(row.blockReason)) || (row.blockUnusable !== null && UNOPENABLE_UNUSABLE.includes(row.blockUnusable));
+  return (row.blockReason !== null && UNOPENABLE_REASONS.includes(row.blockReason)) || (row.blockUnusable !== null && UNOPENABLE_UNUSABLE.includes(row.blockUnusable)) || (row.blockCode !== null && UNOPENABLE_CODES.includes(row.blockCode));
 }
 
 /** Milliseconds for a well-shaped timestamp, or null for anything else. */
@@ -204,7 +215,7 @@ export async function runKitSweep(input: RunKitSweepInput): Promise<SweepSummary
     // The exact phrase a log search for "0 eligible" finds.
     input.log('[apply-kit sweep] 0 eligible: every row waiting on Teja has a current kit or a form no kit can open (robots_refused, no_apply_url)');
     // Nothing tried, nothing failed.
-    return { eligible: 0, attempted: 0, remaining: 0, built: 0, failed: [] };
+    return { eligible: 0, attempted: 0, remaining: 0, built: 0, skipped: [], failed: [] };
   }
   // The plan, before any page opens.
   input.log(`[apply-kit sweep] ${eligible.length} eligible, building ${selected.length} this run (cap ${input.cap})`);
@@ -212,6 +223,8 @@ export async function runKitSweep(input: RunKitSweepInput): Promise<SweepSummary
   let attempted = 0;
   // Kits that landed.
   let built = 0;
+  // Rows skipped for a reason that is the system working, recorded, in order (B2).
+  const skipped: Array<{ id: string; code: KitSkip['code']; reason: string }> = [];
   // Rows that failed, with why, in order.
   const failed: Array<{ id: string; reason: string }> = [];
   // Serially: one browser, one form at a time, so a slow page cannot overlap another.
@@ -236,6 +249,29 @@ export async function runKitSweep(input: RunKitSweepInput): Promise<SweepSummary
     } catch (error) {
       // The reason as text, whatever was thrown.
       const reason = error instanceof Error ? error.message : String(error);
+      // B2: a refusal that is the gate working is recorded once and reported, never a failure.
+      if (error instanceof KitSkip) {
+        // Recorded first; an unrecorded skip would be retried every run, so a failed write IS a failure.
+        try {
+          // The note that takes the row out of the due set until its status changes.
+          await input.recordSkip(id, error.code, reason);
+          // Reported.
+          skipped.push({ id, code: error.code, reason });
+          // Said in the log with its code.
+          input.log(`[apply-kit sweep] ${id}: SKIPPED (${error.code}): ${reason}`);
+          // Next row.
+          continue;
+        } catch (writeError) {
+          // Both causes in one reason, so the red run explains itself.
+          const both = `${reason}; and the skip note was not written: ${writeError instanceof Error ? writeError.message : String(writeError)}`;
+          // A failure.
+          failed.push({ id, reason: both });
+          // Named in the log.
+          input.log(`[apply-kit sweep] ${id}: FAILED: ${both}`);
+          // Next row.
+          continue;
+        }
+      }
       // Recorded and skipped: one bad form must not starve the other rows of their kits.
       failed.push({ id, reason });
       // Named in the log, so a red run says which row and why.
@@ -243,7 +279,7 @@ export async function runKitSweep(input: RunKitSweepInput): Promise<SweepSummary
     }
   }
   // The totals, for the run summary and the exit code.
-  return { eligible: eligible.length, attempted, remaining: eligible.length - attempted, built, failed };
+  return { eligible: eligible.length, attempted, remaining: eligible.length - attempted, built, skipped, failed };
 }
 
 /**
@@ -255,8 +291,9 @@ export async function runKitSweep(input: RunKitSweepInput): Promise<SweepSummary
 export function shouldRedispatch(summary: SweepSummary | 'skipped_disabled'): boolean {
   // The kill switch is off: never.
   if (summary === 'skipped_disabled') return false;
-  // Untried rows, and at least one kit built (progress), so the chain always ends.
-  return summary.remaining > 0 && summary.built > 0;
+  // Untried rows, and progress: a kit built OR a skip recorded (both leave the due set for good, B2), so
+  // the chain always ends.
+  return summary.remaining > 0 && summary.built + summary.skipped.length > 0;
 }
 
 /** The sweep's two reads over a supabase-js client; errors throw, since supabase-js returns them. */
@@ -267,11 +304,11 @@ export function createSweepReader(client: SupabaseLike): Pick<RunKitSweepInput, 
     async listRows() {
       // The candidate lanes, with the stamp the transition trigger keeps (status_transition_guard),
       // and the two park facts W29 skips on: the enum column and the W4 cause inside block_detail.
-      const result = await client.from('applications').select('id, status, status_changed_at, block_reason, unusable:block_detail->>unusable').in('status', [...KIT_STATUSES]);
+      const result = await client.from('applications').select('id, status, status_changed_at, block_reason, unusable:block_detail->>unusable, code:block_detail->>code').in('status', [...KIT_STATUSES]);
       // A refused read must not look like "nothing to do".
       if (result.error) throw new Error(`apply kit sweep: read applications failed: ${result.error.message}`);
       // Narrowed to the sweep's shape.
-      return (result.data ?? []).map((r: { id: string; status: ApplicationStatus; status_changed_at: string; block_reason: BlockReason | null; unusable: string | null }) => ({
+      return (result.data ?? []).map((r: { id: string; status: ApplicationStatus; status_changed_at: string; block_reason: BlockReason | null; unusable: string | null; code?: string | null }) => ({
         // The row's id and lane, as before.
         id: r.id,
         status: r.status,
@@ -279,6 +316,8 @@ export function createSweepReader(client: SupabaseLike): Pick<RunKitSweepInput, 
         // Absent reads as null: "not parked for that cause", so the row is kitted as before W29.
         blockReason: r.block_reason ?? null,
         blockUnusable: r.unusable ?? null,
+        // B2: the park code (posting_closed), absent reads as null.
+        blockCode: r.code ?? null,
       }));
     },
     // The kit notes of exactly these rows.
@@ -291,8 +330,9 @@ export function createSweepReader(client: SupabaseLike): Pick<RunKitSweepInput, 
         .select('application_id, created_at')
         // Kits are notes...
         .eq('event_type', 'note')
-        // ...of this kind, so unknown-cause notes are not mistaken for kits.
-        .eq('detail->>kind', 'apply_kit')
+        // ...of these kinds, so unknown-cause notes are not mistaken for kits. A skip note (B2) counts like a
+        // kit: either one newer than the status change means the row is done until it changes again.
+        .in('detail->>kind', ['apply_kit', 'apply_kit_skipped'])
         // Bounded to the candidates, so the read stays small as history grows.
         .in('application_id', [...applicationIds]);
       // Same rule: an error is never "no kits" (which would re-kit everything silently).
