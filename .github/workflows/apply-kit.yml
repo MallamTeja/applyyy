@@ -40,11 +40,11 @@ on:
         default: ''
 
 # Read-only on the repository; every write the kit makes goes to Supabase under RLS.
+# actions: write is granted ONLY to the redispatch job below, never here: the kit job runs third-party
+# code (pnpm install scripts, Playwright, live job pages) that must not hold a token able to start or
+# cancel workflows (2026-11-05 security review).
 permissions:
   contents: read
-  # Only for the self re-dispatch step (gh workflow run); a GITHUB_TOKEN workflow_dispatch is the one
-  # event GitHub lets the token start, so leftovers do not wait for the daily cron.
-  actions: write
 
 concurrency:
   # Its own group: a kit takes no claim, so it neither blocks nor waits on the applier.
@@ -62,6 +62,10 @@ jobs:
     # The kill. The worker stops starting kits at 3000 s, and 3000 + 180 setup + 300 for the kit in
     # flight + 30 teardown = 3510 <= 3600 (the applier's W31 arithmetic; pinned in apply-kit-sweep.test.ts).
     timeout-minutes: 60
+    # The worker's re-dispatch verdict, handed to the separate job that holds actions: write.
+    outputs:
+      # 'true' or 'false', written by worker/src/cli/apply-kit.ts to GITHUB_OUTPUT.
+      redispatch: ${{ steps.kit.outputs.redispatch }}
 
     # NO job-level env, for the reason apply.yml gives: only the one step that runs the
     # worker may see the app-user password and the agent key.
@@ -74,6 +78,8 @@ jobs:
         with:
           # History is irrelevant to the worker.
           fetch-depth: 1
+          # No step needs git credentials, so the token is not left in .git/config for later steps.
+          persist-credentials: false
 
       # pnpm before setup-node, whose pnpm cache resolution shells out to pnpm.
       - name: Install pnpm
@@ -143,13 +149,26 @@ jobs:
           # The note insert is admitted for agent 'applier' only with a valid agent key.
           APPLYY_AGENT_KEY: ${{ secrets.APPLYY_AGENT_KEY }}
 
-      # Leftovers: the worker says redispatch=true only when the batch or the budget left due rows
-      # UNTRIED and this run tried at least one (apply-kit-sweep.ts shouldRedispatch), so the chain always
-      # shrinks the backlog and ends. Runs even after a red sweep (a failed row is per-row), never after a
-      # cancel. The new run queues in the concurrency group behind this one.
-      - name: Re-dispatch for the rows this run left
-        if: ${{ !cancelled() && steps.kit.outputs.redispatch == 'true' }}
-        # A blank sweep from main; the step's own token, scoped by the permissions block above.
+  # Leftovers: the worker says redispatch=true only when the batch or the budget left due rows UNTRIED
+  # and this run BUILT at least one kit (apply-kit-sweep.ts shouldRedispatch), so the chain always
+  # shrinks the backlog and ends. Its own job, so actions: write never reaches the kit job's code.
+  # Runs even after a red sweep (a failed row is per-row), never after a cancel. The new run queues in
+  # the concurrency group behind this one.
+  redispatch:
+    # After the sweep, reading its verdict.
+    needs: kit
+    # The verdict, exactly 'true'; anything else (including a missing output) means no re-dispatch.
+    if: ${{ !cancelled() && needs.kit.outputs.redispatch == 'true' }}
+    # Nothing to set up: gh is preinstalled on the runner.
+    runs-on: ubuntu-latest
+    # One API call.
+    timeout-minutes: 5
+    # The one job allowed to start a workflow; no repository access at all.
+    permissions:
+      actions: write
+    steps:
+      # A blank sweep from main.
+      - name: Re-dispatch for the rows the sweep left
         run: gh workflow run apply-kit.yml --ref main --repo "$REPO"
         env:
           # gh reads the token from here.

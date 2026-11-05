@@ -340,17 +340,32 @@ describe('apply-kit run budget and self re-dispatch', () => {
     expect([...yml.matchAll(/^\s+APPLY_KIT_SWEEP_CAP:\s*'(\d+)'\s*$/gm)].map((m) => m[1])).toEqual(['25']);
     // Exactly one timeout, and it is 60 minutes.
     const timeouts = [...yml.matchAll(/^\s+timeout-minutes:\s*(\d+)\s*$/gm)].map((m) => Number(m[1]));
-    // One job, one kill time.
-    expect(timeouts).toEqual([60]);
-    // Budget + setup + one in-flight kit + teardown fits inside the kill (run-window.ts's W31 arithmetic).
+    // Two jobs, two kill times: the sweep's 60 minutes, then the re-dispatch's 5.
+    expect(timeouts).toEqual([60, 5]);
+    // Budget + setup + one in-flight kit + teardown fits inside the kit job's kill (run-window.ts's W31 arithmetic).
     expect(3000 + 180 + 300 + 30).toBeLessThanOrEqual(timeouts[0]! * 60);
-    // The token may dispatch a workflow, and nothing broader than that plus reading the repo.
-    // Comment lines between the two keys are allowed; any other key there fails.
-    expect(yml).toMatch(/^permissions:\n {2}contents: read\n(?: {2}#.*\n)* {2}actions: write\n(?! {2}\w)/m);
-    // The re-dispatch runs only on the worker's own verdict, and even after a red sweep (per-row failures).
-    expect(yml).toContain("if: ${{ !cancelled() && steps.kit.outputs.redispatch == 'true' }}");
+    // The two job bodies, split at the second job's header (shape-checked, so a rename cannot pass vacuously).
+    const [head, redispatchJob] = yml.split('\n  redispatch:\n');
+    // Both exist.
+    expect(redispatchJob).toBeDefined();
+    // The workflow-level grant is read-only: the next line after contents is not another key.
+    expect(head).toMatch(/^permissions:\n {2}contents: read\n(?! {2}\w)/m);
+    // actions: write appears exactly once in the file, and it is in the re-dispatch job (2026-11-05
+    // security review: the kit job runs third-party code and must never hold it).
+    // Counted as a YAML key line, so the comments that explain the rule do not count.
+    expect(yml.match(/^\s+actions: write\s*$/gm)).toHaveLength(1);
+    // There, as that job's whole grant.
+    expect(redispatchJob).toMatch(/\n {4}permissions:\n(?: {6}#.*\n)* {6}actions: write\n/);
+    // The kit job leaves no token in .git/config for its later steps.
+    expect(head).toContain('persist-credentials: false');
+    // The kit job hands the worker's verdict out as a job output.
+    expect(head).toContain('redispatch: ${{ steps.kit.outputs.redispatch }}');
+    // The re-dispatch runs after the sweep, only on its verdict, and even after a red sweep (per-row failures).
+    expect(redispatchJob).toContain('needs: kit');
+    // Exactly 'true', never after a cancel.
+    expect(redispatchJob).toContain("if: ${{ !cancelled() && needs.kit.outputs.redispatch == 'true' }}");
     // And it starts this same workflow from main, as a blank sweep.
-    expect(yml).toContain('gh workflow run apply-kit.yml --ref main --repo "$REPO"');
+    expect(redispatchJob).toContain('gh workflow run apply-kit.yml --ref main --repo "$REPO"');
     // The concurrency group still coalesces (no parallel kit runs on rapid approves).
     expect(yml).toMatch(/group: applyy-apply-kit\n(?:\s+#.*\n)*\s+cancel-in-progress: false/);
   });
