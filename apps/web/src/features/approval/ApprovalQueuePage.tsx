@@ -767,6 +767,50 @@ export function ApprovalQueuePage(): ReactElement {
         const stamps = new Map<string, string>();
         // Each reviewable row's chip facts from the same read (2026-11-04), published with the queue.
         const facts = new Map<string, RowChipFacts>();
+        /* EVERY pinned version is read AT ONCE, before the row pass (2026-11-05). The row loop used
+           to await each new version in turn, so 4 versions cost 4 sequential round trips (~0.6-1.2 s)
+           before anything rendered. Same per-version maybeSingle read as before, only concurrent. */
+        // The versions some row will actually be diffed against; refused rows never need a master.
+        const pinned = new Set<number>();
+        // Same three gates as the row pass below, so no master is fetched for a row it refuses.
+        for (const app of data) {
+          // A missing job, a bad pin or a non-resume is refused below; skip its read.
+          if (app.jobs !== null && classifyTailored(app.tailored_profile) !== 'no_pin' && isResumeShape(app.tailored_profile)) {
+            // The version the Tailor resolved against, the only honest master for this row.
+            pinned.add(app.tailored_profile.master_version);
+          }
+        }
+        // One concurrent read per version; each result keeps its version so a failure can be named.
+        const masterReads = await Promise.all(
+          // One read per distinct version.
+          [...pinned].map(async (version) => {
+            // The same read the loop used to make serially.
+            const read = await supabase!.from('master_profiles').select('profile').eq('version', version).maybeSingle();
+            // The version travels with its answer.
+            return { version, data: read.data, error: read.error };
+          }),
+        );
+        // A cancelled render has nothing to report.
+        if (!live) return;
+        /* NO MASTER, NO AUDIT. Until 2026-10-04 a failed read diffed every resume against a
+           HARDCODED profile. Audit findings computed against invented data are worse than
+           none: they look like a verdict.
+           A TRANSPORT failure stops the page: nothing else can be trusted to load either. */
+        const failedRead = masterReads.find((read) => read.error);
+        // "Could not ask" is page-level: the operator's fix is the connection, not a row.
+        if (failedRead !== undefined) {
+          // Names the version, as the serial read did.
+          setLoadError(
+            `Could not load master profile version ${failedRead.version}, so no tailored resume can be audited against it. Nothing here was checked.`,
+          );
+          // Nothing below may run while the database is unreachable.
+          return;
+        }
+        /* Fix 4: a version that is simply NOT STORED refuses only the rows pinned to it. One
+           bad row used to blank the whole queue, hiding every reviewable row behind it.
+           A SHAPE check, not "is it an object": '{}' used to pass and be diffed against, so
+           every claim would read as untraced against a master with no content. */
+        for (const read of masterReads) masters.set(read.version, masterFromRow(read.data?.profile));
         // Re-ordered client-side too, for the id tie-break and a malformed stamp sorting last.
         for (const app of newestInReviewFirst(data)) {
           const job = app.jobs as unknown as JobRow | null;
@@ -836,37 +880,9 @@ export function ApprovalQueuePage(): ReactElement {
           // The version the Tailor resolved against; the only honest master to diff with.
           const version = resolved.master_version;
 
-          // Read each pinned version once.
-          let master = masters.get(version);
-          // Only a version never asked about is fetched; a cached null stays refused.
-          if (master === undefined) {
-            const { data: masterData, error: masterError } = await supabase!
-              .from('master_profiles')
-              .select('profile')
-              .eq('version', version)
-              .maybeSingle();
-            // A cancelled render has nothing to report.
-            if (!live) return;
-            /* NO MASTER, NO AUDIT. Until 2026-10-04 a failed read diffed every resume against a
-               HARDCODED profile. Audit findings computed against invented data are worse than
-               none: they look like a verdict.
-               A TRANSPORT failure stops the page: nothing else can be trusted to load either. */
-            if (masterError) {
-              // "Could not ask" is page-level: the operator's fix is the connection, not a row.
-              setLoadError(
-                `Could not load master profile version ${version}, so no tailored resume can be audited against it. Nothing here was checked.`,
-              );
-              // Nothing below may run while the database is unreachable.
-              return;
-            }
-            /* Fix 4: a version that is simply NOT STORED refuses only the rows pinned to it. One
-               bad row used to blank the whole queue, hiding every reviewable row behind it. */
-            /* A SHAPE check, not "is it an object": '{}' used to pass and be diffed against, so
-               every claim would read as untraced against a master with no content. */
-            master = masterFromRow(masterData?.profile);
-            // Cached either way: the master, or the fact that it is missing.
-            masters.set(version, master);
-          }
+          /* Read up front, above. A version absent from the map was never fetched; that must refuse
+             the row like a missing master, never diff it against nothing (fail closed). */
+          const master = masters.get(version) ?? null;
           // No pinned master: named in the refused list, never diffed against another version.
           if (master === null) {
             // Same shape as the other refusals, so the operator can reject it from the pipeline.

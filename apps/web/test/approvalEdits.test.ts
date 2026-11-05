@@ -379,7 +379,8 @@ describe('approval page wiring: per-row freshness (fixes 2b/3) and missing maste
 
   it('a missing pinned master refuses ONLY its own row, through the shape check', () => {
     // The master is resolved through the shape check, not "is it an object".
-    assert.match(page, /master = masterFromRow\(masterData\?\.profile\);/);
+    // (Since latency fix 1, 2026-11-05: read up front, one entry per version.)
+    assert.match(page, /masters\.set\(read\.version, masterFromRow\(read\.data\?\.profile\)\)/);
     // The branch taken when the pinned version is missing or not a profile.
     const missing = between('if (master === null) {', 'const original = rebuildOriginal(');
     // Named in the refused list with its own cause...
@@ -426,5 +427,16 @@ describe('approval page wiring: per-row freshness (fixes 2b/3) and missing maste
     const adapter = ts.createPrinter({ removeComments: true }).printFile(ts.createSourceFile('a.ts', readFileSync(fileURLToPath(new URL('../src/features/approval/diffAdapter.ts', import.meta.url)), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS));
     // Shape, not prose: the property assignment names only the snapshot.
     assert.match(adapter, /masterVersion: resolved\.master_version,/);
+  });
+
+  it('latency 1: every pinned master is read concurrently, before the row loop, never awaited per row', () => {
+    // The row pass: from its loop head to the publish of the queue.
+    const rowPass = between('for (const app of newestInReviewFirst(data))', 'setQueue(diffs);');
+    // No master read inside the row loop: that was the serial await, one round trip per version.
+    assert.doesNotMatch(rowPass, /from\('master_profiles'\)/);
+    // The loop only looks the master up; a never-fetched version refuses (null), never diffs.
+    assert.match(rowPass, /const master = masters\.get\(version\) \?\? null;/);
+    // The read sits inside one Promise.all over the distinct pinned versions.
+    assert.match(page, /await Promise\.all\(\s*\[\.\.\.pinned\]\.map\(async \(version\) => \{\s*const read = await supabase!\.from\('master_profiles'\)/);
   });
 });
