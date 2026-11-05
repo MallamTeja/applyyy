@@ -19,8 +19,12 @@ at ask time.
 
 ## Where things stand
 
-- **origin/main = `783940f`** (bf's T1-T4 worker form reads, pushed after 23:58). Local main = origin/main
-  at 00:0x on 11-06.
+- **origin/main = `783940f`** (bf's T1-T4 worker form reads; `87a7ade` before it, both pushed). CI last
+  verified green at `54fc2c7`. **Local main is ahead:** `c6391ef` (09's CLAUDE.md §3 commit) and this docs
+  commit; the orchestrator (applyyy-8b) pushes them.
+- **In flight at 00:00:** postscreen-drain run 42073925051 (started 22:52, dispatch-only; the 32 re-run rows
+  return to awaiting_approval) and apply-kit run 42084465698 (Enterpret `e1456a47` rebuild, 23:57). Read both.
+- **Live bridge from 09:** `C:\Users\tejam\AppData\Local\Temp\applyyy-handoff\orch-09.md`.
 - **The 14:40 held stack shipped:** `625a437`, `e63f979`, `c4e57c0`, `009f216` are on origin/main, with the
   P1-6 fix-up `a157d7f` on top.
 - **Uncommitted on disk (NOT abandoned, CLAUDE.md §2):** `CLAUDE.md` (the orchestrator's);
@@ -86,8 +90,14 @@ an `APPLYY_APP_USER_PASSWORD` line in the git-ignored root `.env`. The live AI c
   `C:\Users\tejam\AppData\Local\Temp\claude\2bf4570b4444f56a\9c909f6f-d548-4f8e-ad9a-8ddae8aa0dde\scratchpad\pg\`.
   Prove a migration there; `db push --dry-run` validates nothing semantic. It is in TEMP: copy it before it goes.
 
-## Peers retired at 23:48
+## Roster (since 2026-11-06 00:00)
 
-ae (security, tombstone, unanswered questions), f7 (approvals perf, AI chat), bf (worker form reads `783940f`,
-runner design; H1/H2 not started). Their open items are in the pending list under P1/P2. applyyy-fe takes over ae's partition
-(`supabase/functions/**`, new migrations, `docs/`).
+Retired at 23:48: ae (security, tombstone, unanswered questions), f7 (approvals perf, AI chat), bf (worker form
+reads `783940f`, runner design; H1/H2 not started). Orchestrator applyyy-09 retired at 23:59 (Teja).
+
+| Role | Session | Owns |
+|---|---|---|
+| Orchestrator | applyyy-8b | decides, pushes, deploys, live writes |
+| Peer 1 | applyyy-27 | `worker/**`, apply-kit pipeline: K1 → K2 → H1 → H2 → Cursor Ashby |
+| Peer 2 | applyyy-7f | `apps/web/**`: Manual apply resume, kit-skip reason, A1, A3, A4 |
+| Peer 3 | applyyy-fe | `supabase/functions/**`, new migrations, `docs/` |
