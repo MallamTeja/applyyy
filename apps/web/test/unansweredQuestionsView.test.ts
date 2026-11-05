@@ -100,6 +100,15 @@ test('an in-person acknowledgement is answerable and grouped as attest', () => {
   assert.equal(groupFor(r), 'attest');
 });
 
+// Teja's ruling of 2026-11-05 23:19 (worker H1, aabedc8): an attested answer to the EXACT label may
+// answer an EEO question, so a gender combobox the worker could not fill is a card he can answer.
+test('an EEO gender combobox is answerable by attestation (23:19 ruling, H1)', () => {
+  // The exact-label key the worker records for "Which gender do you identify as?".
+  const r = row({ question_key: 'which_gender_do_you_identify_as', question_text: 'Which gender do you identify as?', reason: 'human_only', field_kind: 'combobox' });
+  // 'attest', not 'rule': after H1 the worker reads his attested answer for this exact label.
+  assert.equal(groupFor(r), 'attest');
+});
+
 // Essays collapse per company.
 test('a textarea question is an essay', () => {
   // Runway's essay.
