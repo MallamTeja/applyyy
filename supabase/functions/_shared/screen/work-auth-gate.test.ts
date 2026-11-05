@@ -423,3 +423,27 @@ test("the drop reason names the matching signal", () => {
   // Mentions it.
   assert.match(byText.drop ? byText.reason : "", /itar/i);
 });
+
+// 2026-11-05: an Indian state code that is also a US/UK one made an Indian job read as foreign.
+// "Raipur, CT" (Chhattisgarh, not Connecticut), "Leh, LA" (Ladakh, not Louisiana) and "Dehradun, UK"
+// (Uttarakhand, not the United Kingdom) dropped. The fix is the "known Indian city wins" rule: the
+// India row now knows these cities and every state/UT name, and a part naming India is authorised.
+// NOT the broader "Indian code + unknown city = unknown" rule: live data has no such Indian string,
+// while it would have flipped real foreign rows to kept ("Cambridge, UK" x11, "New Haven, CT",
+// "New Orleans, LA"), measured 2026-11-05. Those stay dropping below.
+for (const location of ["Raipur, CT", "Leh, LA", "Dehradun, UK", "Bhilai, Chhattisgarh", "Kargil, Ladakh", "Haridwar, Uttarakhand"]) {
+  // One named test per shape.
+  test(`Teja: Indian "${location}" is kept, never read as US/UK`, () => {
+    // Kept.
+    assert.equal(screenWorkAuth(job(location), TEJA, UNLOCKED).drop, false);
+  });
+}
+
+// The controls: genuine US/UK places with the same codes keep dropping.
+for (const location of ["Palo Alto, CA", "Stamford, CT", "London, UK", "Cambridge, UK", "New Haven, CT", "New Orleans, LA"]) {
+  // One named test per shape.
+  test(`Teja: foreign "${location}" still drops`, () => {
+    // Dropped for work authorisation.
+    assert.equal(screenWorkAuth(job(location), TEJA, UNLOCKED).drop, true);
+  });
+}

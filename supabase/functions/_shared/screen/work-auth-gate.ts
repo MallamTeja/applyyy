@@ -95,7 +95,22 @@ const words = (list: readonly string[]): RegExp => new RegExp(`\\b(?:${list.join
 // the job, which is the safe direction.
 const COUNTRIES: readonly { readonly name: string; readonly patterns: readonly RegExp[] }[] = [
   // Teja's own country, its cities and states.
-  { name: "India", patterns: [words(["india", "ind", "bengaluru", "bangalore", "hyderabad", "pune", "mumbai", "delhi", "ncr", "gurugram", "gurgaon", "noida", "chennai", "kolkata", "lucknow", "gift city", "karnataka", "maharashtra", "haryana", "telangana"])] },
+  // 2026-11-05: every state/UT name and the major cities, so an Indian state code that is also a
+  // US/UK one ("Raipur, CT", "Leh, LA", "Dehradun, UK") resolves to India too, and a part naming
+  // India is authorised. Left out on purpose: "punjab" and "kashmir" (Pakistan has them too) and
+  // "salem" (also US towns): an unresolved part keeps the job anyway.
+  { name: "India", patterns: [words([
+    "india", "ind", "bengaluru", "bangalore", "hyderabad", "pune", "mumbai", "delhi", "ncr", "gurugram", "gurgaon", "noida", "chennai", "kolkata", "lucknow", "gift city", "karnataka", "maharashtra", "haryana", "telangana",
+    // States and union territories by name.
+    "andhra pradesh", "arunachal pradesh", "assam", "bihar", "chhattisgarh", "goa", "gujarat", "himachal pradesh", "jharkhand", "kerala",
+    "madhya pradesh", "manipur", "meghalaya", "mizoram", "nagaland", "odisha", "orissa", "rajasthan", "sikkim", "tamil nadu", "tripura",
+    "uttar pradesh", "uttarakhand", "west bengal", "ladakh", "jammu", "chandigarh", "puducherry", "pondicherry", "lakshadweep", "andaman",
+    // Cities: state capitals and the tech and metro hubs boards write.
+    "raipur", "bhilai", "leh", "kargil", "dehradun", "haridwar", "srinagar", "shimla", "gandhinagar", "ahmedabad", "vadodara", "surat",
+    "jaipur", "jodhpur", "udaipur", "bhopal", "indore", "patna", "ranchi", "bhubaneswar", "guwahati", "kochi", "cochin", "thiruvananthapuram",
+    "trivandrum", "coimbatore", "madurai", "mysuru", "mysore", "mangaluru", "mangalore", "visakhapatnam", "vizag", "vijayawada", "warangal",
+    "nagpur", "nashik", "thane", "navi mumbai", "panaji", "mohali", "ludhiana", "amritsar", "kanpur", "varanasi", "agra", "faridabad",
+  ])] },
   // Visa-free work for Indians by treaty.
   { name: "Nepal", patterns: [words(["nepal", "kathmandu", "lalitpur", "pokhara"])] },
   // Visa-free work for Indians by treaty.
