@@ -38,6 +38,7 @@ No row here carries a count: each living doc names the command that regenerates 
 | `tooling/2026-*.md` | Dated tooling measurements (deploy drift, Gemini usage) |
 | [design/](design/) | Single-feature design write-ups (palette, discovery filtering) |
 | [decisions/](decisions/) | Recorded decisions and recommendations with their reasoning |
+| [ops/](ops/) | Operations designs and runbooks. Latest: [2026-11-05-self-hosted-runner.md](ops/2026-11-05-self-hosted-runner.md) (pending two proofs) |
 | [harvest/briefs/](harvest/briefs/) | Self-contained work packets from 2026-09-16 — your recon overrides them |
 | [robots/](robots/) | Design and first-caller record of the robots.txt gate |
 | [screener/](screener/) | How the filter cascade got wired into scouting |
