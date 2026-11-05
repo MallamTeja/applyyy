@@ -13,7 +13,8 @@ Peers 1 (8b), 2 (8e), 3 (9b) and session 1b were told to stop at a safe point; 1
 ## Where things stand
 
 - **origin/main = `1341608`.** CI green on every pushed SHA today (one-job CI since `9384092`: ~160 s/run).
-- **Local main is 4 commits AHEAD, held on purpose (do not push blindly):**
+- **Local main is AHEAD of origin: the 4 held code commits below plus docs-only handoff commits (re-read
+  `git log origin/main..main`). Held on purpose (do not push blindly):**
 
 | SHA | What | Deploy when pushed |
 |---|---|---|
@@ -28,10 +29,18 @@ Peers 1 (8b), 2 (8e), 3 (9b) and session 1b were told to stop at a safe point; 1
   P1-6 fix-up), P1-2 (peer 3's scan popup), P1-3 (peer 1's slug-prefix match). The exact paths are listed there.
 - **Live counts at 14:40:** dropped_filter 33,944 · passed_filters 317 · failed 81 · awaiting_approval 44 ·
   scored 26 · approved 5 · applied 3. Master version 15.
-- **post-screen drain workflow is ENABLED** (Teja did not disable it). The leak fixes were live before it ran;
+- **post-screen drain workflow is DISABLED** (`disabled_manually` 14:45, Teja ruled manual drain only). The leak fixes were live before it ran;
   26 rows went through the new matcher pre-gate at ~14:01.
 - `system_settings.dry_run` is read by NOTHING (peer 2, grep-verified); live vs dry is decided only by
   `apply.yml` inputs / `APPLYY_CRON_LIVE` (unset → scheduled applies are dry).
+
+## Update 15:18 IST (session end)
+
+- Gmail Apps Script now ships by **clasp**, no paste: pushed the `33df511` content, live web-app deployment @3,
+  same URL. Recipe and IDs: pending decision #4.
+- `GITHUB_APPLY_DISPATCH_TOKEN` set (digest `4781828206f4…`, 15:15 IST, after a blank set at 15:00).
+- New request: watchlist scan daily ~10:00 IST (pending P3 #20, needs Teja's pick).
+- All peers stopped; no session is working.
 
 ## Live changes made today after 01:10 (all verified)
 
@@ -55,7 +64,7 @@ resume-assist v11, email-tracker-intake v32, gmail-sync v8, screener v30. `dispa
 - Gmail scope: application lifecycle + recruiter + job ALERT mail from ATS, boards and companies; one-click add,
   never auto-create.
 - No emojis anywhere (done; the guard decodes entities/escapes and scans dist).
-- Secrets pasted into session c5's chat: **do NOT rotate** (his choice). App password pasted into this chat: rotation offered, not decided.
+- Secrets pasted into session c5's chat: **do NOT rotate** (his choice). App password pasted into this chat: NOT rotated (Teja 14:44).
 - "Approve unchecked" label: keep.
 - Apply-on-approve: build behind an OFF switch; the first live run = ONE job; drain the rest only after it works;
   `APPLYY_CRON_LIVE` stays off until then. Per-run batch of 25 is an orchestrator engineering call (timeout safety).
