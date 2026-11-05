@@ -273,3 +273,13 @@ verify_jwt = true
 # True: the gateway rejects tokenless calls but passes the anon key (a signed JWT), so
 # the in-function caller check (W15, before any sign-in) is the layer that stops anonymous ones.
 verify_jwt = true
+
+# Live = true (read 2026-11-05 via `supabase functions list`); pinned so the "every function is
+# pinned" claim above is true (P2 #10). The BROWSER calls it (EmailMonitoringPage "sync now",
+# functions.invoke with the user's JWT); gmail-sync then calls the Apps Script Web App itself,
+# with its own GMAIL_SYNC secret in the POST body. So the inbound caller always has a user JWT,
+# and createAuthorizedAppUserClient + authorizeCaller check it in code (W15, before any sign-in).
+[functions.gmail-sync]
+# True: matches live and the JWT the browser always sends. Never false: the Apps Script is
+# called BY this function, it does not call it, so no secret-only caller needs the gateway off.
+verify_jwt = true
