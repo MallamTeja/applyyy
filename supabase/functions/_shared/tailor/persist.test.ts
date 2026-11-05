@@ -54,7 +54,7 @@ const REFS = { master_version: 7, summary: null } as unknown as TailoredProfile;
 
 // A clean verdict, ready to persist.
 // `jdKeywords` is a recognisable pair so the keyword test can assert it arrived intact.
-const TAILORED: TailorOutcome = { kind: "tailored", resume: RESUME, refs: REFS, jdKeywords: ["Go", "PostgreSQL"], dedupedRefs: [] };
+const TAILORED: TailorOutcome = { kind: "tailored", resume: RESUME, refs: REFS, jdKeywords: ["Go", "PostgreSQL"], dedupedRefs: [], retry: null };
 
 // One recorded call against the database seam, in the order it was made.
 interface RecordedCall {
@@ -178,6 +178,8 @@ test("a refusal advances to failed and writes no profile", async () => {
   // A verdict, not a crash: the row is failed with reasons a human can act on.
   const refused: TailorOutcome = {
     kind: "refused",
+    // No retry ran (2026-11-05: the field is required).
+    retry: null,
     violations: [{ kind: "master_version_mismatch", expected: 7, received: 6 }],
   };
   const { client, calls } = recordingClient();
@@ -201,6 +203,8 @@ test("a refusal carries its violations into the event detail", async () => {
   // persisted rather than lost in a stack trace, and this is where that happens.
   const refused: TailorOutcome = {
     kind: "refused",
+    // No retry ran (2026-11-05: the field is required).
+    retry: null,
     violations: [{ kind: "master_version_mismatch", expected: 7, received: 6 }],
   };
   const { client, calls } = recordingClient();
@@ -268,7 +272,7 @@ test("persist writes applications.master_version from the resume pin in the SAME
 test("failure_reason: a refused failure_reason write stops before the status move", async () => {
   // The update fails.
   const { client, calls } = recordingClient("update");
-  const result = await persistTailorOutcome(client, APPLICATION_ID, { kind: "refused", violations: [{ kind: "master_version_mismatch", expected: 7, received: 6 }] });
+  const result = await persistTailorOutcome(client, APPLICATION_ID, { kind: "refused", violations: [{ kind: "master_version_mismatch", expected: 7, received: 6 }], retry: null });
   // No move without its reason: the row stays at scored and the run reports it.
   assert.deepEqual(calls.map((c) => c.kind), ["update"]);
   assert.equal(result.ok, false);
@@ -298,4 +302,30 @@ test("dedupe on the success path is recorded in the tailored event", async () =>
   // The move's detail names the repair, so a misbehaving prompt stays visible on the dashboard.
   const args = calls.at(-1)!.payload.args as Record<string, unknown>;
   assert.deepEqual(args.p_detail, { reason: "tailored_profile_written", deduplicated_refs: [{ ref: "skill-node", where: "skills" }] });
+});
+
+
+// ---- The retry on record (2026-11-05) ---------------------------------------------------------------
+
+test("retry: a tailored verdict after a rewrite records both the first violations and the rewritten bullets", async () => {
+  // A verdict that needed the retry.
+  const { client, calls } = recordingClient();
+  const firstViolations = [{ kind: "unverifiable_token", ref: "b1", token: "robust" }];
+  await persistTailorOutcome(client, APPLICATION_ID, { ...TAILORED, retry: { firstViolations, rewrittenRefs: ["b1"] } } as TailorOutcome);
+  // The move's detail carries the retry.
+  const args = calls.at(-1)!.payload.args as Record<string, unknown>;
+  assert.deepEqual(args.p_detail, { reason: "tailored_profile_written", retry: { first_attempt_violations: firstViolations, rewritten_refs: ["b1"] } });
+});
+
+test("retry: a refusal after a rewrite records both attempts and the retry result", async () => {
+  // The rewrite still invented a word.
+  const { client, calls } = recordingClient();
+  const firstViolations = [{ kind: "unverifiable_token", ref: "b1", token: "robust" }];
+  const finalViolations = [{ kind: "unverifiable_token", ref: "b1", token: "scalable" }];
+  await persistTailorOutcome(client, APPLICATION_ID, { kind: "refused", violations: finalViolations, retry: { firstViolations, result: "still_invalid" } } as TailorOutcome);
+  // failure_reason first, unchanged code.
+  assert.deepEqual((calls[0].payload as { values: unknown }).values, { failure_reason: "tailor_validation_failed" });
+  // The event: the final verdict, the first attempt, and how the retry ended.
+  const args = calls.at(-1)!.payload.args as Record<string, unknown>;
+  assert.deepEqual(args.p_detail, { reason: "tailor_validation_failed", violations: finalViolations, first_attempt_violations: firstViolations, retry: "still_invalid" });
 });

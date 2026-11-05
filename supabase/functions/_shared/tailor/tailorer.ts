@@ -29,7 +29,7 @@
 // Collapsing either into the other is §5's pattern: malformed data becoming an answer.
 
 // The prompt assembly that fences untrusted posting text out of the instruction region.
-import { buildTailorPrompt, type TailorPrompt } from "./prompt.ts";
+import { buildBulletRewritePrompt, buildTailorPrompt, type TailorPrompt } from "./prompt.ts";
 // The honesty gate. The ONLY constructor of a `ResolvedResume`, per its own header.
 import { validateTailoredProfile, type TailorViolation } from "./validator.ts";
 // The posting's skill terms, deterministic and vocabulary-gated, for selected_jd_keywords.
@@ -83,9 +83,12 @@ export type TailorOutcome =
   // persist.ts writes them in the same statement as the resume they were measured against.
   // `dedupedRefs` (2026-11-05) lists every repeated ref dedupeRepeatedRefs dropped before validation: empty
   // for a clean answer, and persisted in the event so a prompt that repeats itself stays visible.
-  | { readonly kind: "tailored"; readonly resume: ResolvedResume; readonly refs: TailoredProfile; readonly jdKeywords: readonly string[]; readonly dedupedRefs: readonly DedupedRef[] }
+  // `retry` (2026-11-05): null when the first answer passed; else what failed first and which bullets the
+  // one-shot rewrite replaced, persisted in the event so the retry's yield can be measured.
+  | { readonly kind: "tailored"; readonly resume: ResolvedResume; readonly refs: TailoredProfile; readonly jdKeywords: readonly string[]; readonly dedupedRefs: readonly DedupedRef[]; readonly retry: null | { readonly firstViolations: readonly TailorViolation[]; readonly rewrittenRefs: readonly string[] } }
   // Never persisted as a profile; the reasons go to the dashboard and the row fails.
-  | { readonly kind: "refused"; readonly violations: readonly TailorViolation[] };
+  // `retry` (2026-11-05): null when no retry ran; else the first attempt's violations and how the retry ended.
+  | { readonly kind: "refused"; readonly violations: readonly TailorViolation[]; readonly retry: null | { readonly firstViolations: readonly TailorViolation[]; readonly result: "still_invalid" | "reply_unusable" } };
 
 // One copy of a ref the model repeated inside one section, which dedupeRepeatedRefs dropped.
 export interface DedupedRef {
@@ -144,6 +147,77 @@ export function dedupeRepeatedRefs(tailored: TailoredProfile): { readonly profil
   };
   // A clean answer comes back unchanged in content, with nothing reported.
   return { profile, deduped };
+}
+
+/* The bullets a one-shot rewrite may fix, with their untraceable words, or null for "do not retry"
+ * (2026-11-05). Retry ONLY when every violation is an unverifiable_token AND sits on a bullet of this
+ * profile: the rewrite only rewrites bullets, so a summary, skill, ref or metric problem would waste the
+ * call and fail anyway. Exported for the test. */
+export function retryableBullets(violations: readonly TailorViolation[], profile: TailoredProfile): Map<string, string[]> | null {
+  // Every bullet ref in the first attempt, across every bullet-carrying section.
+  const bulletRefs = new Set<string>();
+  // The five sections whose nodes carry bullets.
+  for (const section of [profile.experience, profile.projects, profile.education, profile.achievements, profile.certifications]) {
+    // Each node's bullets, when it has any.
+    for (const node of section as readonly { readonly bullets?: readonly { readonly ref: string }[] }[]) for (const b of node.bullets ?? []) bulletRefs.add(b.ref);
+  }
+  // Grouped by bullet, in the order reported.
+  const byBullet = new Map<string, string[]>();
+  // Every violation must qualify, or none is retried.
+  for (const v of violations) {
+    // Any other kind, or a word not on a bullet of this profile: no retry.
+    if (v.kind !== "unverifiable_token" || !bulletRefs.has(v.ref)) return null;
+    // The word, under its bullet.
+    byBullet.set(v.ref, [...(byBullet.get(v.ref) ?? []), v.token]);
+  }
+  // Nothing to fix is not a retry either.
+  return byBullet.size > 0 ? byBullet : null;
+}
+
+/* The master text of every bullet, by id, from every bullet-carrying section of the master. */
+function masterBulletTexts(master: MasterProfile): Map<string, string> {
+  // Id to text.
+  const texts = new Map<string, string>();
+  // The same five bullet-carrying sections, from the pinned master.
+  for (const section of [master.experience, master.projects, master.education, master.achievements, master.certifications]) {
+    // Each node's bullets, when it has any.
+    for (const node of section as readonly { readonly bullets?: readonly { readonly id: string; readonly text: string }[] }[]) for (const b of node.bullets ?? []) texts.set(b.id, b.text);
+  }
+  // Complete for the pinned master.
+  return texts;
+}
+
+/* The rewrite reply, validated: exactly one {ref, text} per asked bullet, no others. Null = unusable. */
+function parseRewriteReply(raw: string, asked: ReadonlySet<string>): Map<string, string> | null {
+  // Prose or broken JSON is unusable, not a throw: the first verdict is still a verdict.
+  let parsed: unknown;
+  // A parse failure is the reply's problem, recorded as reply_unusable.
+  try { parsed = JSON.parse(raw); } catch { return null; }
+  // The one array.
+  const bullets = isRecord(parsed) && Array.isArray(parsed.bullets) ? parsed.bullets : null;
+  // No array, no answer.
+  if (bullets === null) return null;
+  // Ref to new text.
+  const out = new Map<string, string>();
+  // Each entry proven before it is kept.
+  for (const b of bullets) {
+    // Shape, a ref that was asked for, and no ref twice.
+    if (!isRecord(b) || typeof b.ref !== "string" || typeof b.text !== "string" || !asked.has(b.ref) || out.has(b.ref)) return null;
+    // Kept.
+    out.set(b.ref, b.text);
+  }
+  // Every asked bullet answered: no partial merge.
+  return out.size === asked.size ? out : null;
+}
+
+/* The first attempt with exactly these bullets' text replaced; nothing else changes. */
+function mergeRewrites(profile: TailoredProfile, rewrites: ReadonlyMap<string, string>): TailoredProfile {
+  // One section's nodes, each node's bullets rewritten where asked.
+  const rewrite = <T extends { readonly bullets?: readonly { readonly ref: string; readonly text: string }[] }>(nodes: readonly T[]): T[] =>
+    // A node without bullets is returned as is.
+    nodes.map((node) => (node.bullets === undefined ? node : { ...node, bullets: node.bullets.map((b) => (rewrites.has(b.ref) ? { ...b, text: rewrites.get(b.ref)! } : b)) }));
+  // Every bullet-carrying section; the rest as parsed.
+  return { ...profile, experience: rewrite(profile.experience), projects: rewrite(profile.projects), education: rewrite(profile.education), achievements: rewrite(profile.achievements), certifications: rewrite(profile.certifications) } as TailoredProfile;
 }
 
 // One posting in, one verdict out. Named so call sites read as a noun.
@@ -296,12 +370,41 @@ export function createTailorer(deps: TailorDeps): Tailorer {
 
     // A refusal is DATA, not an exception: the violations are the dashboard's content
     // and the reason the row will be failed with something a human can act on.
-    if (!validation.ok) return { kind: "refused", violations: validation.violations };
+    if (!validation.ok) {
+      // The one-shot rewrite (2026-11-05), only when every violation is an untraceable word on a bullet.
+      const retryable = retryableBullets(validation.violations, tailored);
+      // Anything else fails exactly as before, with no extra call.
+      if (retryable === null) return { kind: "refused", violations: validation.violations, retry: null };
+      // Each failed bullet's master text (the only source) and its failed wording.
+      const masterTexts = masterBulletTexts(deps.master);
+      const firstTexts = new Map<string, string>();
+      // The first attempt's wording of every bullet, by ref.
+      for (const section of [tailored.experience, tailored.projects, tailored.education, tailored.achievements, tailored.certifications]) {
+        // Each node's bullets, when it has any.
+        for (const node of section as readonly { readonly bullets?: readonly { readonly ref: string; readonly text: string }[] }[]) for (const b of node.bullets ?? []) firstTexts.set(b.ref, b.text);
+      }
+      // The rewrite request: only the failed bullets.
+      const items = [...retryable].map(([ref, tokens]) => ({ ref, masterText: masterTexts.get(ref) ?? "", firstText: firstTexts.get(ref) ?? "", bannedTokens: tokens }));
+      // The SAME transport (key pool, fallback, usage row); a transport throw propagates exactly like the first call's.
+      const reply = await deps.callLlm(buildBulletRewritePrompt(items));
+      // A reply that does not answer exactly the asked bullets merges nothing.
+      const rewrites = parseRewriteReply(reply, new Set(retryable.keys()));
+      // Unusable: refused on the first verdict, the retry recorded as such.
+      if (rewrites === null) return { kind: "refused", violations: validation.violations, retry: { firstViolations: validation.violations, result: "reply_unusable" } };
+      // The whole profile, re-validated by the UNCHANGED gate: a rewrite is trusted for nothing.
+      const merged = mergeRewrites(tailored, rewrites);
+      // The gate, run on the whole merged profile against the same pinned master.
+      const second = validateTailoredProfile(merged, deps.master, deps.masterVersion);
+      // Still failing: refused, with both attempts on record.
+      if (!second.ok) return { kind: "refused", violations: second.violations, retry: { firstViolations: validation.violations, result: "still_invalid" } };
+      // Passed: the merged profile is what is stored, so tailor_refs re-validates to this resume.
+      return { kind: "tailored", resume: second.resume, refs: merged, jdKeywords: extractJdKeywords(input.jobDescription), dedupedRefs: deduped, retry: { firstViolations: validation.violations, rewrittenRefs: [...rewrites.keys()] } };
+    }
 
     // Clean. The resume is safe to persist and to hand to the Auditor, when one exists.
     // `tailored` is the parsed model output that passed validation — the refs, unresolved.
     // `jdKeywords` comes from the SAME posting the model was given, never re-read later,
     // so the keywords and the resume can never describe two different versions of a job.
-    return { kind: "tailored", resume: validation.resume, refs: tailored, jdKeywords: extractJdKeywords(input.jobDescription), dedupedRefs: deduped };
+    return { kind: "tailored", resume: validation.resume, refs: tailored, jdKeywords: extractJdKeywords(input.jobDescription), dedupedRefs: deduped, retry: null };
   };
 }

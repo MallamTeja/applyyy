@@ -403,3 +403,117 @@ test("control: a FABRICATED ref is still refused, duplicate or not", async () =>
   assert.ok(outcome.violations.some((v) => v.kind === "unresolved_ref"), JSON.stringify(outcome.violations));
   assert.ok(!outcome.violations.some((v) => v.kind === "duplicate_ref"), JSON.stringify(outcome.violations));
 });
+
+
+// ---- One-shot bullet rewrite (2026-11-05) ----------------------------------------------------------
+// 97 of 130 tailor violations in 30 days were unverifiable_token: a bullet reworded with a word the
+// master never says ("robust", "ensure", "auditing"). When EVERY violation is such a word on a BULLET, the
+// tailorer asks the model once to rewrite only those bullets, then re-validates the WHOLE profile with the
+// unchanged validator. Anything else fails as before, with no extra call.
+
+// The first attempt: the one bullet reworded with an invented adjective.
+const INVENTED_ONCE: TailoredProfile = {
+  ...HONEST_TAILORING,
+  experience: [{ ref: "exp-eventportal", bullets: [{ ref: "bullet-rest-api", text: "Built a robust REST API with Express and Node.js for a college event portal, handling 500 users" }] }],
+};
+
+// A tailorer whose model answers each call with the next reply, counting the calls.
+function tailorerReplying(replies: string[]) {
+  // Calls made, and the prompts they carried.
+  const prompts: { systemInstruction: string; userContent: string }[] = [];
+  const tailor = createTailorer({
+    // One reply per call, in order; a third call would be a bug.
+    callLlm: (prompt) => {
+      prompts.push(prompt);
+      const next = replies.shift();
+      return next === undefined ? Promise.reject(new Error("unexpected extra call")) : Promise.resolve(next);
+    },
+    master: MASTER,
+    masterVersion: MASTER_VERSION,
+  });
+  return { tailor, prompts };
+}
+
+test("retry: a bullet with one invented word is rewritten once and the whole profile passes", async () => {
+  // First: the invented word. Retry: the master's own wording.
+  const { tailor, prompts } = tailorerReplying([
+    JSON.stringify(INVENTED_ONCE),
+    JSON.stringify({ bullets: [{ ref: "bullet-rest-api", text: "Built a REST API with Express and Node.js for a college event portal, handling 500 users" }] }),
+  ]);
+  const outcome = await tailor(POSTING);
+  // Tailored, after exactly two calls.
+  assert.equal(outcome.kind, "tailored");
+  assert.equal(prompts.length, 2);
+  if (outcome.kind !== "tailored") return;
+  // The retry is on record: what failed first, and which bullets were rewritten.
+  assert.deepEqual(outcome.retry, { firstViolations: [{ kind: "unverifiable_token", ref: "bullet-rest-api", token: "robust" }], rewrittenRefs: ["bullet-rest-api"] });
+  // The retry prompt names the banned word and carries the master text, and never the posting.
+  assert.match(prompts[1]!.userContent, /robust/);
+  assert.match(prompts[1]!.systemInstruction, /Built a REST API with Express and Node\.js/);
+  assert.doesNotMatch(prompts[1]!.systemInstruction + prompts[1]!.userContent, /We need someone who knows/);
+});
+
+test("retry: a rewrite that still invents a word fails, with BOTH attempts' violations", async () => {
+  // The retry swaps one invented word for another.
+  const { tailor, prompts } = tailorerReplying([
+    JSON.stringify(INVENTED_ONCE),
+    JSON.stringify({ bullets: [{ ref: "bullet-rest-api", text: "Built a scalable REST API with Express and Node.js for a college event portal, handling 500 users" }] }),
+  ]);
+  const outcome = await tailor(POSTING);
+  // Refused after two calls: the gate is unchanged.
+  assert.equal(outcome.kind, "refused");
+  assert.equal(prompts.length, 2);
+  if (outcome.kind !== "refused") return;
+  // The final violations, and the first attempt's.
+  assert.deepEqual(outcome.violations, [{ kind: "unverifiable_token", ref: "bullet-rest-api", token: "scalable" }]);
+  assert.deepEqual(outcome.retry, { firstViolations: [{ kind: "unverifiable_token", ref: "bullet-rest-api", token: "robust" }], result: "still_invalid" });
+});
+
+test("retry: an unresolved ref is not retried (one call, fails as before)", async () => {
+  // A fabricated skill plus the invented word: not ONLY unverifiable tokens.
+  const { tailor, prompts } = tailorerReplying([JSON.stringify({ ...INVENTED_ONCE, skills: [{ ref: "skill-kubernetes-never-used" }] })]);
+  const outcome = await tailor(POSTING);
+  // Refused on the first verdict.
+  assert.equal(outcome.kind, "refused");
+  assert.equal(prompts.length, 1);
+  if (outcome.kind !== "refused") return;
+  // No retry on record.
+  assert.equal(outcome.retry, null);
+});
+
+test("retry: a word problem alongside a summary problem is not retried (one call)", async () => {
+  // A summary with prose but no refs fails summary_without_refs, which a bullet rewrite cannot fix.
+  const { tailor, prompts } = tailorerReplying([JSON.stringify({ ...INVENTED_ONCE, summary: { text: "Backend engineer.", refs: [] } })]);
+  const outcome = await tailor(POSTING);
+  // One call, refused.
+  assert.equal(outcome.kind, "refused");
+  assert.equal(prompts.length, 1);
+});
+
+test("retry: retryableBullets refuses any word violation that is not on a bullet of this profile", async () => {
+  // Imported here so earlier tests do not depend on the new export.
+  const { retryableBullets } = await import("./tailorer.ts");
+  // On the bullet: retryable, grouped by bullet.
+  assert.deepEqual(retryableBullets([{ kind: "unverifiable_token", ref: "bullet-rest-api", token: "robust" }], INVENTED_ONCE), new Map([["bullet-rest-api", ["robust"]]]));
+  // On the summary or a skill (refs that are not bullets here): no retry, the rewrite only fixes bullets.
+  assert.equal(retryableBullets([{ kind: "unverifiable_token", ref: "skill-node", token: "robust" }], INVENTED_ONCE), null);
+  assert.equal(retryableBullets([{ kind: "unverifiable_token", ref: "summary", token: "robust" }], INVENTED_ONCE), null);
+  // Any other kind in the list: no retry.
+  assert.equal(retryableBullets([{ kind: "unverifiable_token", ref: "bullet-rest-api", token: "robust" }, { kind: "empty_selection" }], INVENTED_ONCE), null);
+});
+
+test("retry: a reply naming a bullet that did not fail is unusable (no partial merge)", async () => {
+  // The rewrite answers for a ref that was never asked for.
+  const { tailor, prompts } = tailorerReplying([
+    JSON.stringify(INVENTED_ONCE),
+    JSON.stringify({ bullets: [{ ref: "bullet-other", text: "Built a REST API" }] }),
+  ]);
+  const outcome = await tailor(POSTING);
+  // Refused after the two calls, the reply recorded as unusable.
+  assert.equal(outcome.kind, "refused");
+  assert.equal(prompts.length, 2);
+  if (outcome.kind !== "refused") return;
+  assert.deepEqual(outcome.retry, { firstViolations: [{ kind: "unverifiable_token", ref: "bullet-rest-api", token: "robust" }], result: "reply_unusable" });
+  // The final violations are the first attempt's: nothing was merged.
+  assert.deepEqual(outcome.violations, [{ kind: "unverifiable_token", ref: "bullet-rest-api", token: "robust" }]);
+});

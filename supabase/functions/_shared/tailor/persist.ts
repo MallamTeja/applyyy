@@ -99,7 +99,12 @@ export async function persistTailorOutcome(
     // `validator.ts:70` requires they survive as data rather than as a stack trace.
     // Since 2026-11-05 through failTailorApplication, so failure_reason is written first. The violations
     // stay structured, not flattened to a string — a UI branches on `kind`.
-    return failTailorApplication(client, applicationId, "tailor_validation_failed", { violations: outcome.violations });
+    // A retry, when one ran (2026-11-05), is recorded beside the final violations: the first attempt and how it ended.
+    return failTailorApplication(client, applicationId, "tailor_validation_failed", outcome.retry === null
+      // No retry: the event exactly as before.
+      ? { violations: outcome.violations }
+      // A retry ran: the final verdict, the first one, and how the retry ended.
+      : { violations: outcome.violations, first_attempt_violations: outcome.retry.firstViolations, retry: outcome.retry.result });
   }
 
   // THE PAYLOAD, FIRST. See the header: the status that follows is a claim this line
@@ -142,7 +147,15 @@ export async function persistTailorOutcome(
     p_agent: "tailor",
     // Enough to reconstruct what was written without re-reading the row; a dedupe the tailorer made is
     // named here (2026-11-05), so a prompt that repeats refs is visible rather than silently repaired.
-    p_detail: outcome.dedupedRefs.length > 0 ? { reason: "tailored_profile_written", deduplicated_refs: outcome.dedupedRefs } : { reason: "tailored_profile_written" },
+    // The retry, when one ran (2026-11-05), so the rewrite's yield can be measured from the events.
+    p_detail: {
+      // The success code, as before.
+      reason: "tailored_profile_written",
+      // Only when the tailorer dropped a repeated ref.
+      ...(outcome.dedupedRefs.length > 0 ? { deduplicated_refs: outcome.dedupedRefs } : {}),
+      // Only when the one-shot rewrite ran.
+      ...(outcome.retry !== null ? { retry: { first_attempt_violations: outcome.retry.firstViolations, rewritten_refs: outcome.retry.rewrittenRefs } } : {}),
+    },
   });
   // A failure here leaves the profile written and the status unmoved — recoverable by
   // re-running, and deliberately preferred over the inverse, which is not.
