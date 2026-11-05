@@ -5,13 +5,21 @@
 // after one proven live submit. The browser calls this once after a successful approve; it starts
 // apply.yml as a live drain of the approved queue (drain_approved "true"), which GitHub runs.
 //
+// KITS ON EVERY APPROVE (2026-11-05, Teja 14:47 "they must run every time a job is in the queue";
+// orchestrator ruling 19:41): apply-kit.yml is dispatched on every approve WHATEVER the switch says.
+// A kit never submits and writes no status, so it needs no switch; without it an approved row had no
+// kit until the 12:00 UTC cron and Manual apply showed nothing. apply-kit.yml's concurrency group
+// coalesces rapid approves into one queued run. Only the applier's LIVE drain stays behind the switch.
+//
 // WHAT CAN STOP IT, in order, each answering WITHOUT touching GitHub:
 //   1. a caller who is not the app user: refused BEFORE any sign-in (W15, createAuthorizedAppUserClient
 //      in index.ts), so a visitor holding the public anon key cannot make it spend a password grant;
-//   2. the switch system_settings.auto_apply_on_approve is off, or its row is missing (200, said why);
+//   2. an unreadable switch (503: never guess "on" or "off");
 //   3. no approved row whose job is still live (200, said why);
 //   4. no GITHUB_APPLY_DISPATCH_TOKEN secret (503, named: never a silent 200).
-// A GitHub refusal or a network failure is a 502 with GitHub's status, never with the token.
+// Then the kit run is dispatched; then, only if system_settings.auto_apply_on_approve is exactly true
+// (a missing row reads as off), the applier's drain. Off is a 200 that says so.
+// A GitHub refusal or a network failure is a 502 with GitHub's status and the workflow, never the token.
 //
 // REALITY CHECK (kept here on purpose): as of 2026-11-05, 0 of 7 CI live submits have landed
 // (Greenhouse reCAPTCHA, unsupported_form, unanswerable_question); both `applied` rows were done by
@@ -30,6 +38,9 @@ import { authorizeCaller, type AuthorizedSignIn, type CallerAuthClient } from ".
 // The workflow dispatch endpoint for apply.yml on this repo (GitHub REST "Create a workflow dispatch
 // event"). Pinned by a test, so a typo in the owner, repo or file name fails there, not as a 404 live.
 export const DISPATCH_URL = "https://api.github.com/repos/MallamTeja/applyyy/actions/workflows/apply.yml/dispatches";
+
+// The same endpoint for apply-kit.yml (the kit builder), dispatched on every approve. Pinned by a test too.
+export const KIT_DISPATCH_URL = "https://api.github.com/repos/MallamTeja/applyyy/actions/workflows/apply-kit.yml/dispatches";
 
 // The secret's name: a fine-grained PAT scoped to this one repo, Actions read and write, nothing else.
 export const DISPATCH_TOKEN_ENV_VAR = "GITHUB_APPLY_DISPATCH_TOKEN";
@@ -84,8 +95,9 @@ export async function handleDispatchApply(req: Request, deps: DispatchDeps): Pro
   const settings = await conn.db.from("system_settings").select("auto_apply_on_approve").eq("user_id", conn.userId).maybeSingle();
   // An unreadable switch is never read as "on" (CLAUDE.md §6).
   if (settings.error) return json(503, { status: "error", message: "settings_unreadable" });
-  // Only an explicit true is on; a missing row or a missing column reads as off.
-  if (settings.data?.auto_apply_on_approve !== true) return json(200, { status: "ok", dispatched: false, reason: "auto_apply_off" });
+  // Only an explicit true is on; a missing row or a missing column reads as off. Read now, acted on
+  // last: the switch decides only the applier, never the kit run.
+  const autoApply = settings.data?.auto_apply_on_approve === true;
 
   // GATE 3: approved rows whose job is still live (a job the scout marked disappeared is never sent
   // for). A head count: no rows travel. The inner embed lets the filter read the job's column.
@@ -111,29 +123,47 @@ export async function handleDispatchApply(req: Request, deps: DispatchDeps): Pro
   // Blank counts as missing.
   if (token === "") return json(503, { status: "error", message: "dispatch_token_missing" });
 
-  // THE DISPATCH: apply.yml from main, live, the whole approved queue (its drain_approved input).
+  // THE KIT RUN, every approve: a sweep of every due row (application_id left at its blank default).
+  const kit = await dispatch(deps, token, KIT_DISPATCH_URL, { ref: "main" }, "apply-kit.yml");
+  // Refused or unreachable: said, and the applier is not started on top of a token GitHub just refused.
+  if (kit !== null) return kit;
+  // The switch is off: kits only, said by name (the expected state until Teja turns it on).
+  if (!autoApply) return json(200, { status: "ok", dispatched: false, reason: "auto_apply_off", kit_dispatched: true });
+  // THE DRAIN: apply.yml from main, live, the approved queue (its drain_approved input; 25 per run).
+  // Inputs are strings, exactly as apply.yml compares them ("false", "true").
+  const drain = await dispatch(deps, token, DISPATCH_URL, { ref: "main", inputs: { dry_run: "false", drain_approved: "true" } }, "apply.yml");
+  // Refused or unreachable: said.
+  if (drain !== null) return drain;
+  // Started. The count tells the browser how many rows the run will try.
+  return json(200, { status: "ok", dispatched: true, approved: counted.count, kit_dispatched: true });
+}
+
+/* One workflow dispatch. Null when GitHub accepted it; otherwise the 502 to answer with, naming the
+   workflow so the browser says WHICH run did not start. Never throws, never echoes the token. */
+async function dispatch(deps: DispatchDeps, token: string, url: string, body: Record<string, unknown>, workflow: string): Promise<Response | null> {
+  // The answer, once fetched.
   let res: Response;
   // A thrown fetch (network, timeout) is a 502 below.
   try {
     // GitHub answers 204 No Content on success.
-    res = await deps.fetch(DISPATCH_URL, {
+    res = await deps.fetch(url, {
       // Create a workflow dispatch event.
       method: "POST",
       // The token as a bearer; GitHub's documented media type and a pinned API version.
       headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json" },
-      // Inputs are strings, exactly as apply.yml compares them ("false", "true").
-      body: JSON.stringify({ ref: "main", inputs: { dry_run: "false", drain_approved: "true" } }),
+      // The ref and the workflow's own inputs.
+      body: JSON.stringify(body),
       // Bounded.
       signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
     });
   } catch (cause) {
     // The error's name only; a message could carry request details.
-    console.error("[dispatch-apply] GitHub unreachable:", cause instanceof Error ? cause.name : "unknown");
+    console.error(`[dispatch-apply] GitHub unreachable (${workflow}):`, cause instanceof Error ? cause.name : "unknown");
     // Upstream fault.
-    return json(502, { status: "error", message: "github_unreachable" });
+    return json(502, { status: "error", message: `github_unreachable (${workflow})` });
   }
   // Anything but a 2xx: GitHub's status, never the token or its body (it can echo the request).
-  if (!res.ok) return json(502, { status: "error", message: `github_refused: HTTP ${res.status}` });
-  // Started. The count tells the browser how many rows the run will try.
-  return json(200, { status: "ok", dispatched: true, approved: counted.count });
+  if (!res.ok) return json(502, { status: "error", message: `github_refused: HTTP ${res.status} (${workflow})` });
+  // Accepted.
+  return null;
 }

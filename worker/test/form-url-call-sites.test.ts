@@ -13,7 +13,7 @@ import type { MasterProfile } from '@applyy/shared-types';
 // The applier entry point and its port types.
 import { applyToOne as applyToOneRaw, type ApplierGateway, type ApplicationPage, type ClaimedApplication, type RobotsCheck } from '../src/apply-one.ts';
 // Every live test hands in an open re-check config (B2 fails closed without one).
-import { OPEN_RECHECK, loadOpenPreGatePreferences } from './open-pregate.ts';
+import { OPEN_RECHECK } from './open-pregate.ts';
 // applyToOne with an open re-check config by default.
 const applyToOne = (input: Parameters<typeof applyToOneRaw>[0]) => applyToOneRaw({ recheck: OPEN_RECHECK, ...input });
 // The kit entry point and its port types.

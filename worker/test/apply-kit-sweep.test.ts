@@ -3,7 +3,9 @@
 // The sweep picks every row waiting on Teja whose newest kit is older than the row's last
 // status change, builds kits for a capped few, and never lets one failure stop the rest.
 import { describe, expect, test } from 'vitest';
-import { createSweepReader, parseKitTarget, runKitSweep, selectKitCandidates, type KitStamp, type SweepRow } from '../src/apply-kit-sweep.ts';
+import { createSweepReader, parseKitTarget, runKitSweep, selectKitCandidates, shouldRedispatch, type KitStamp, type SweepRow } from '../src/apply-kit-sweep.ts';
+// The workflow pins below read apply-kit.yml as text.
+import { readFileSync } from 'node:fs';
 import type { SupabaseLike } from '../src/supabase-gateway.ts';
 
 // One row as the sweep reads it; the status change is the moment the row needed a kit.
@@ -109,12 +111,14 @@ describe('runKitSweep', () => {
         built.push(id);
       },
       cap: 5,
+      // The run budget is not under test here: never out of time.
+      outOfTime: () => false,
       log: (line) => lines.push(line),
     });
     // The rows on either side of the failure were still built.
     expect(built).toEqual(['a', 'c']);
     // The failure is named, not swallowed.
-    expect(summary).toEqual({ eligible: 3, attempted: 3, built: 2, failed: [{ id: 'b', reason: 'page load timed out' }] });
+    expect(summary).toEqual({ eligible: 3, attempted: 3, remaining: 0, built: 2, failed: [{ id: 'b', reason: 'page load timed out' }] });
     // And it reaches the log with its reason.
     expect(lines.some((line) => line.includes('b') && line.includes('page load timed out'))).toBe(true);
   });
@@ -129,11 +133,13 @@ describe('runKitSweep', () => {
       listKits: async () => [],
       buildOne: async (id) => { built.push(id); },
       cap: 1,
+      // The run budget is not under test here: never out of time.
+      outOfTime: () => false,
       log: () => {},
     });
     // Only the longest-waiting row was built; the other two wait for the next run.
     expect(built).toEqual(['a']);
-    expect(summary).toEqual({ eligible: 3, attempted: 1, built: 1, failed: [] });
+    expect(summary).toEqual({ eligible: 3, attempted: 1, remaining: 2, built: 1, failed: [] });
   });
 
   test('zero eligible rows is said out loud, never a silent pass', async () => {
@@ -146,11 +152,13 @@ describe('runKitSweep', () => {
       listKits: async () => [kit('a', '2026-10-24T09:00:00Z')],
       buildOne: async () => { throw new Error('must not be called'); },
       cap: 5,
+      // The run budget is not under test here: never out of time.
+      outOfTime: () => false,
       log: (line) => lines.push(line),
     });
     // The exact phrase the brief asked for, so a log search finds it.
     expect(lines.some((line) => line.includes('0 eligible'))).toBe(true);
-    expect(summary).toEqual({ eligible: 0, attempted: 0, built: 0, failed: [] });
+    expect(summary).toEqual({ eligible: 0, attempted: 0, remaining: 0, built: 0, failed: [] });
   });
 
   test('kits are read only for the rows that could need one', async () => {
@@ -163,6 +171,8 @@ describe('runKitSweep', () => {
       listKits: async (ids) => { askedFor = ids; return []; },
       buildOne: async () => {},
       cap: 5,
+      // The run budget is not under test here: never out of time.
+      outOfTime: () => false,
       log: () => {},
     });
     // The applied row is not a kit candidate, so its notes are never read.
@@ -183,6 +193,8 @@ describe('runKitSweep', () => {
       // A build is a page load on an employer's site: exactly what "off" forbids.
       buildOne: async (id) => { touched.push(`build:${id}`); },
       cap: 5,
+      // The run budget is not under test here: never out of time.
+      outOfTime: () => false,
       log: (line) => lines.push(line),
     });
     // The closed outcome the CLI must narrow on, never a zero summary posing as "nothing due".
@@ -203,6 +215,8 @@ describe('runKitSweep', () => {
       listKits: async () => { touched.push('listKits'); return []; },
       buildOne: async (id) => { touched.push(`build:${id}`); },
       cap: 5,
+      // The run budget is not under test here: never out of time.
+      outOfTime: () => false,
       log: () => {},
     });
     // The run goes red with the database's reason.
@@ -274,5 +288,70 @@ describe('createSweepReader', () => {
       { id: 'a', status: 'applying', statusChangedAt: '2026-10-24T10:00:00+00:00', blockReason: null, blockUnusable: null },
       { id: 'b', status: 'blocked_needs_human', statusChangedAt: '2026-10-24T11:00:00+00:00', blockReason: 'other', blockUnusable: 'no_apply_url' },
     ]);
+  });
+});
+
+// Task 2 (2026-11-05, Teja 14:47 "no limits/caps on apply-kit"): the fixed 5-kit cap is gone. A run
+// takes a batch of 25 and stops starting new kits once its 3000 s budget is spent, so the 60-minute
+// job kill never lands mid-row; the rows it left untried go to a run it dispatches itself.
+describe('apply-kit run budget and self re-dispatch', () => {
+  test('the run budget stops the sweep before the next row; the untried rows count as remaining', async () => {
+    // Three due rows; the budget runs out after the first kit.
+    const built: string[] = [];
+    // Flipped by the first build; the budget check reads it.
+    let spent = false;
+    const summary = await runKitSweep({
+      // The kill switch ON: this case is about the budget.
+      isSystemEnabled: async () => true,
+      listRows: async () => [row('a', 'applying', '2026-10-24T08:00:00Z'), row('b', 'applying', '2026-10-24T09:00:00Z'), row('c', 'applying', '2026-10-24T10:00:00Z')],
+      listKits: async () => [],
+      // The first build spends the budget.
+      buildOne: async (id) => { built.push(id); spent = true; },
+      // A batch big enough that only the budget can stop it.
+      cap: 25,
+      // Checked before each row.
+      outOfTime: () => spent,
+      log: () => {},
+    });
+    // One kit, then it stopped.
+    expect(built).toEqual(['a']);
+    // Two untried rows, counted, so the workflow re-dispatches.
+    expect(summary).toEqual({ eligible: 3, attempted: 1, remaining: 2, built: 1, failed: [] });
+  });
+
+  test('shouldRedispatch: only when this run left rows untried AND built at least one kit (the chain always ends)', () => {
+    // Batch or budget left rows: go again.
+    expect(shouldRedispatch({ eligible: 30, attempted: 25, remaining: 5, built: 20, failed: [] })).toBe(true);
+    // Everything tried, even with failures: failed rows wait for the daily cron, never a loop.
+    expect(shouldRedispatch({ eligible: 3, attempted: 3, remaining: 0, built: 1, failed: [{ id: 'x', reason: 'r' }, { id: 'y', reason: 'r' }] })).toBe(false);
+    // A full batch that all failed: those rows sort first again next run, so going again is a loop.
+    expect(shouldRedispatch({ eligible: 40, attempted: 25, remaining: 15, built: 0, failed: Array.from({ length: 25 }, (_, i) => ({ id: String(i), reason: 'r' })) })).toBe(false);
+    // Nothing tried (budget gone before the first row): a re-dispatch would make no progress.
+    expect(shouldRedispatch({ eligible: 3, attempted: 0, remaining: 3, built: 0, failed: [] })).toBe(false);
+    // The kill switch's closed outcome never re-dispatches.
+    expect(shouldRedispatch('skipped_disabled')).toBe(false);
+  });
+
+  test('apply-kit.yml: batch 25, a 60-minute job that fits the 3000 s budget, and the guarded self re-dispatch', () => {
+    // The workflow as committed.
+    // Line endings normalised: working copies on Windows are CRLF, the committed file is LF.
+    const yml = readFileSync(new URL('../../.github/workflows/apply-kit.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    // The batch: exactly '25', never the old '5' (shape-matched, so a renamed key cannot pass vacuously).
+    expect([...yml.matchAll(/^\s+APPLY_KIT_SWEEP_CAP:\s*'(\d+)'\s*$/gm)].map((m) => m[1])).toEqual(['25']);
+    // Exactly one timeout, and it is 60 minutes.
+    const timeouts = [...yml.matchAll(/^\s+timeout-minutes:\s*(\d+)\s*$/gm)].map((m) => Number(m[1]));
+    // One job, one kill time.
+    expect(timeouts).toEqual([60]);
+    // Budget + setup + one in-flight kit + teardown fits inside the kill (run-window.ts's W31 arithmetic).
+    expect(3000 + 180 + 300 + 30).toBeLessThanOrEqual(timeouts[0]! * 60);
+    // The token may dispatch a workflow, and nothing broader than that plus reading the repo.
+    // Comment lines between the two keys are allowed; any other key there fails.
+    expect(yml).toMatch(/^permissions:\n {2}contents: read\n(?: {2}#.*\n)* {2}actions: write\n(?! {2}\w)/m);
+    // The re-dispatch runs only on the worker's own verdict, and even after a red sweep (per-row failures).
+    expect(yml).toContain("if: ${{ !cancelled() && steps.kit.outputs.redispatch == 'true' }}");
+    // And it starts this same workflow from main, as a blank sweep.
+    expect(yml).toContain('gh workflow run apply-kit.yml --ref main --repo "$REPO"');
+    // The concurrency group still coalesces (no parallel kit runs on rapid approves).
+    expect(yml).toMatch(/group: applyy-apply-kit\n(?:\s+#.*\n)*\s+cancel-in-progress: false/);
   });
 });

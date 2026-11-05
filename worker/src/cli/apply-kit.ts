@@ -22,7 +22,11 @@ import { createFormUrlResolver, fetchJson, supabaseBoardLookup } from '../form-u
 // The kit itself, and its gateway over the supabase client.
 import { buildApplyKit, createKitGateway, type ApplyKitDetail } from '../apply-kit.ts';
 // The sweep: which rows are due, and the loop that builds them one by one.
-import { createSweepReader, parseKitTarget, runKitSweep } from '../apply-kit-sweep.ts';
+import { createSweepReader, parseKitTarget, runKitSweep, shouldRedispatch } from '../apply-kit-sweep.ts';
+// The applier's run budget (3000 s), reused so both workflows hold the same arithmetic against their 60-min kill.
+import { DEFAULT_RUN_WINDOW_LIMITS } from '../run-window.ts';
+// The step output the workflow's re-dispatch step reads.
+import { appendFileSync } from 'node:fs';
 // The production page adapter; the kit receives only its read-only operations.
 import { createPlaywrightPage } from '../playwright-page.ts';
 // The renderer apply-one uses, so the kit's PDF is the bot's PDF.
@@ -51,11 +55,11 @@ function readApplicationId(argv: readonly string[]): string | undefined {
   return parseKitTarget(raw);
 }
 
-/** The sweep's per-run cap from APPLY_KIT_SWEEP_CAP, default 5; anything but a positive integer is refused. */
+/** The sweep's per-run batch from APPLY_KIT_SWEEP_CAP, default 25; anything but a positive integer is refused. */
 function readSweepCap(): number {
-  // Unset means the default: five page loads and renders fit well inside the job timeout.
+  // Unset means the default batch (2026-11-05: 25, not 5; the run budget, not the batch, bounds the time).
   const raw = process.env['APPLY_KIT_SWEEP_CAP'];
-  if (raw === undefined || raw === '') return 5;
+  if (raw === undefined || raw === '') return 25;
   // Digits only, so "5abc" or "-1" cannot become a number by a lenient parse (§6).
   if (!/^[1-9]\d*$/.test(raw)) throw new Error(`APPLY_KIT_SWEEP_CAP must be a positive integer; got ${JSON.stringify(raw)}`);
   return Number(raw);
@@ -85,6 +89,8 @@ function logKit(applicationId: string, kit: ApplyKitDetail, perField: boolean): 
 async function main(): Promise<void> {
   // Validated before any sign-in, so a typo costs nothing; undefined selects the sweep.
   const applicationId = readApplicationId(process.argv.slice(2));
+  // The run clock starts before setup, so the budget counts sign-in and the browser launch too.
+  const startedAt = Date.now();
   // Read up front too, so a bad cap fails before a browser starts.
   const sweepCap = applicationId === undefined ? readSweepCap() : 0;
   // Required up front: without it the note insert fails closed with 42501.
@@ -171,12 +177,18 @@ async function main(): Promise<void> {
         // Each kit's counts reach the log; its values never do.
         buildOne: async (id) => logKit(id, await buildOne(id), false),
         cap: sweepCap,
+        // Spent once the run has used runBudgetSeconds; checked before each row.
+        outOfTime: () => (Date.now() - startedAt) / 1000 >= DEFAULT_RUN_WINDOW_LIMITS.runBudgetSeconds,
         log: (line) => console.log(line),
       });
+      // The re-dispatch verdict, written for the workflow's next step (absent locally: nothing to write).
+      const redispatch = shouldRedispatch(summary);
+      // Only inside Actions, where GITHUB_OUTPUT names the step's output file.
+      if (process.env['GITHUB_OUTPUT']) appendFileSync(process.env['GITHUB_OUTPUT'], `redispatch=${redispatch}\n`);
       // An off switch is the switch working: the sweep already logged it, and the run stays green.
       if (summary === 'skipped_disabled') return;
       // The totals as one line, so the run page shows the outcome at a glance.
-      console.log(`[apply-kit sweep] done: eligible ${summary.eligible}, attempted ${summary.attempted}, built ${summary.built}, failed ${summary.failed.length}`);
+      console.log(`[apply-kit sweep] done: eligible ${summary.eligible}, attempted ${summary.attempted}, remaining ${summary.remaining}, built ${summary.built}, failed ${summary.failed.length}${redispatch ? '; re-dispatching for the rest' : ''}`);
       // A failed row turns the run red so it is seen, after every other row has had its turn.
       if (summary.failed.length > 0) process.exitCode = 1;
     }

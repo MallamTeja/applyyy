@@ -9,7 +9,13 @@ name: applyy apply kit (automatic sweep, or one application)
 #
 # AUTOMATIC by default (Teja, 2026-10-24: kits are made by the system, not dispatched by
 # hand). With no application_id it SWEEPS (worker/src/apply-kit-sweep.ts): every row
-# waiting on Teja whose kit is missing or older than its last status change, capped per run.
+# waiting on Teja whose kit is missing or older than its last status change, in batches of 25.
+#
+# NO THROUGHPUT CAP (Teja 14:47 / approved 14:49, 2026-11-05: "they must run every time a job is in
+# the queue"). dispatch-apply starts this on EVERY approve. A run builds up to 25 kits and stops
+# starting new ones after 3000 s (run-window.ts), so the 60-minute kill never lands mid-row; if due
+# rows were left untried it dispatches itself again (the last step). Safety is unchanged: the kill
+# switch, the robots gate, no status writes, and the concurrency group below.
 on:
   # Minutes after every applier run, since that is when rows get parked for Teja.
   workflow_run:
@@ -21,7 +27,8 @@ on:
   # (a sweeper move, a manual status change). 12:00 UTC = 17:30 IST, after the applier's slot.
   schedule:
     - cron: '0 12 * * *'
-  # By hand: blank for a sweep now, or one id to rebuild that row's kit.
+  # By hand, by dispatch-apply on every approve, or by this workflow's own re-dispatch: blank for a
+  # sweep now, or one id to rebuild that row's kit.
   workflow_dispatch:
     inputs:
       # Optional: blank runs the sweep.
@@ -35,6 +42,9 @@ on:
 # Read-only on the repository; every write the kit makes goes to Supabase under RLS.
 permissions:
   contents: read
+  # Only for the self re-dispatch step (gh workflow run); a GITHUB_TOKEN workflow_dispatch is the one
+  # event GitHub lets the token start, so leftovers do not wait for the daily cron.
+  actions: write
 
 concurrency:
   # Its own group: a kit takes no claim, so it neither blocks nor waits on the applier.
@@ -49,8 +59,9 @@ jobs:
   kit:
     # The same runner image the applier uses, so Chromium behaves identically.
     runs-on: ubuntu-latest
-    # Up to the sweep cap of page loads and renders: minutes, never an hour.
-    timeout-minutes: 20
+    # The kill. The worker stops starting kits at 3000 s, and 3000 + 180 setup + 300 for the kit in
+    # flight + 30 teardown = 3510 <= 3600 (the applier's W31 arithmetic; pinned in apply-kit-sweep.test.ts).
+    timeout-minutes: 60
 
     # NO job-level env, for the reason apply.yml gives: only the one step that runs the
     # worker may see the app-user password and the agent key.
@@ -110,6 +121,8 @@ jobs:
       # The kit(s). The id travels as an environment variable, never interpolated into the
       # shell line, so an input can never become a command; the worker validates its UUID shape.
       - name: Build apply kits (sweep, or the one given id)
+        # Named, so the re-dispatch step can read this step's `redispatch` output.
+        id: kit
         # Run through pnpm's filter so it executes inside the worker package, as apply.yml does.
         run: pnpm --filter '@applyy/worker' exec node src/cli/apply-kit.ts
         # Step-scoped, as in apply.yml: no action or install script sees these.
@@ -117,8 +130,8 @@ jobs:
           # One application, or '' (every automatic trigger, and a blank dispatch) for the sweep.
           # Validated by shape in the worker (apply-kit-sweep.ts parseKitTarget).
           APPLY_KIT_ID: ${{ inputs.application_id }}
-          # The most kits one sweep builds; the rest wait for the next trigger.
-          APPLY_KIT_SWEEP_CAP: '5'
+          # The batch one run builds (was a 5-kit cap until 2026-11-05); the rest go to the re-dispatch.
+          APPLY_KIT_SWEEP_CAP: '25'
           # Supabase connection. Secrets, never committed (constraint #11).
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           # Public by design; authority comes from the app user's JWT below.
@@ -129,3 +142,17 @@ jobs:
           APPLYY_APP_USER_PASSWORD: ${{ secrets.APPLYY_APP_USER_PASSWORD }}
           # The note insert is admitted for agent 'applier' only with a valid agent key.
           APPLYY_AGENT_KEY: ${{ secrets.APPLYY_AGENT_KEY }}
+
+      # Leftovers: the worker says redispatch=true only when the batch or the budget left due rows
+      # UNTRIED and this run tried at least one (apply-kit-sweep.ts shouldRedispatch), so the chain always
+      # shrinks the backlog and ends. Runs even after a red sweep (a failed row is per-row), never after a
+      # cancel. The new run queues in the concurrency group behind this one.
+      - name: Re-dispatch for the rows this run left
+        if: ${{ !cancelled() && steps.kit.outputs.redispatch == 'true' }}
+        # A blank sweep from main; the step's own token, scoped by the permissions block above.
+        run: gh workflow run apply-kit.yml --ref main --repo "$REPO"
+        env:
+          # gh reads the token from here.
+          GH_TOKEN: ${{ github.token }}
+          # Passed as data, never interpolated into the shell line.
+          REPO: ${{ github.repository }}

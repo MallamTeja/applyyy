@@ -9,7 +9,7 @@ import { test } from "node:test";
 // Strict, so a missing field never compares equal to undefined.
 import assert from "node:assert/strict";
 // The handler under test and its seam types.
-import { DISPATCH_URL, handleDispatchApply, type DispatchDeps } from "./handler.ts";
+import { DISPATCH_URL, KIT_DISPATCH_URL, handleDispatchApply, type DispatchDeps } from "./handler.ts";
 // The pre-sign-in caller check index.ts composes (via createAuthorizedAppUserClient), used for real here.
 import { authorizeBeforeSignIn } from "../_shared/db/gates.ts";
 // Source reads for the two wiring pins below (index.ts and config.toml are not reachable from the handler).
@@ -84,17 +84,17 @@ async function body(res: Response): Promise<Record<string, unknown>> {
   return (await res.json()) as Record<string, unknown>;
 }
 
-test("switch off: no dispatch, a 200 that says why", async () => {
+test("switch off: approve builds kits (apply-kit dispatched) and does NOT start the applier", async () => {
   // Off, everything else ready.
   const { deps: d, calls } = deps({ switchOn: false });
   // Asked.
   const res = await handleDispatchApply(post(), d);
   // Not an error: the expected state until Teja turns it on.
   assert.equal(res.status, 200);
-  // Said by name.
-  assert.deepEqual(await body(res), { status: "ok", dispatched: false, reason: "auto_apply_off" });
-  // GitHub never reached.
-  assert.equal(calls.length, 0);
+  // Said by name: no applier run, but the kit run started (Teja 14:47 + orchestrator ruling 2026-11-05).
+  assert.deepEqual(await body(res), { status: "ok", dispatched: false, reason: "auto_apply_off", kit_dispatched: true });
+  // Exactly one GitHub call: apply-kit.yml, never apply.yml (a kit is not a submit).
+  assert.deepEqual(calls.map((c) => c.url), [KIT_DISPATCH_URL]);
 });
 
 test("no settings row reads as off (fail closed), never as on", async () => {
@@ -104,8 +104,8 @@ test("no settings row reads as off (fail closed), never as on", async () => {
   const res = await handleDispatchApply(post(), d);
   // Off.
   assert.equal((await body(res)).reason, "auto_apply_off");
-  // Nothing sent.
-  assert.equal(calls.length, 0);
+  // The applier is never started; only the kit run is.
+  assert.ok(!calls.some((c) => c.url === DISPATCH_URL));
 });
 
 test("an unreadable switch is a 503, never a dispatch", async () => {
@@ -217,17 +217,21 @@ test("the app user signs in exactly once; an unavailable sign-in is a 503", asyn
   assert.equal(res.status, 503);
 });
 
-test("switch on + approved rows + token: exactly one dispatch of the drain, with the right inputs", async () => {
+test("switch on + approved rows + token: the kit run, then exactly one dispatch of the drain, with the right inputs", async () => {
   // Everything ready, two rows.
   const { deps: d, calls } = deps({ count: 2 });
   // Asked.
   const res = await handleDispatchApply(post(), d);
   // Sent.
-  assert.deepEqual(await body(res), { status: "ok", dispatched: true, approved: 2 });
-  // Once.
-  assert.equal(calls.length, 1);
-  // The one call.
-  const call = calls[0]!;
+  assert.deepEqual(await body(res), { status: "ok", dispatched: true, approved: 2, kit_dispatched: true });
+  // Two calls: kits first (manual apply needs them whatever the applier does), then the applier, once.
+  assert.deepEqual(calls.map((c) => c.url), [KIT_DISPATCH_URL, DISPATCH_URL]);
+  // The kit call: a sweep of every due row (apply-kit.yml's application_id left at its blank default).
+  assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), { ref: "main" });
+  // Pinned so a typo in the file name fails here, not as a 404 in production.
+  assert.equal(KIT_DISPATCH_URL, "https://api.github.com/repos/MallamTeja/applyyy/actions/workflows/apply-kit.yml/dispatches");
+  // The applier call.
+  const call = calls[1]!;
   // The workflow's dispatch endpoint, on this repo.
   assert.equal(call.url, DISPATCH_URL);
   // Pinned so a typo in the repo or file name fails here, not as a 404 in production.

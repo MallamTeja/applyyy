@@ -76,6 +76,9 @@ export interface SweepSummary {
   readonly eligible: number;
   // Rows this run tried.
   readonly attempted: number;
+  // Due rows this run never tried (the batch or the run budget stopped it): eligible - attempted.
+  // Failed rows are NOT in it; they were tried, and wait for the next trigger.
+  readonly remaining: number;
   // Rows that got a kit.
   readonly built: number;
   // Rows that failed, each with its reason, so nothing is swallowed.
@@ -93,8 +96,12 @@ export interface RunKitSweepInput {
   readonly listKits: (applicationIds: readonly string[]) => Promise<readonly KitStamp[]>;
   // Builds one kit; buildApplyKit re-checks the status and the robots gate per row.
   readonly buildOne: (applicationId: string) => Promise<void>;
-  // The most kits one run builds; a page load and a render each, so it is bounded.
+  // The most kits one run builds (25 since 2026-11-05: a batch, not a throughput limit; the rest go to
+  // the run this one re-dispatches).
   readonly cap: number;
+  // The run budget (3000 s, run-window.ts), checked before each row: once spent, no new kit starts, so
+  // the job timeout never kills a run mid-row. REQUIRED, so a sweep without a budget does not compile.
+  readonly outOfTime: () => boolean;
   // One line per event; values never appear in it, only ids and reasons.
   readonly log: (line: string) => void;
 }
@@ -197,16 +204,27 @@ export async function runKitSweep(input: RunKitSweepInput): Promise<SweepSummary
     // The exact phrase a log search for "0 eligible" finds.
     input.log('[apply-kit sweep] 0 eligible: every row waiting on Teja has a current kit or a form no kit can open (robots_refused, no_apply_url)');
     // Nothing tried, nothing failed.
-    return { eligible: 0, attempted: 0, built: 0, failed: [] };
+    return { eligible: 0, attempted: 0, remaining: 0, built: 0, failed: [] };
   }
   // The plan, before any page opens.
   input.log(`[apply-kit sweep] ${eligible.length} eligible, building ${selected.length} this run (cap ${input.cap})`);
+  // Rows started, counted as they start, since the budget can stop the run before the batch ends.
+  let attempted = 0;
   // Kits that landed.
   let built = 0;
   // Rows that failed, with why, in order.
   const failed: Array<{ id: string; reason: string }> = [];
   // Serially: one browser, one form at a time, so a slow page cannot overlap another.
   for (const id of selected) {
+    // The budget, before the row: a kit already started always finishes.
+    if (input.outOfTime()) {
+      // Said, so a short run is not read as a broken one.
+      input.log(`[apply-kit sweep] run budget spent after ${attempted} of ${selected.length}; the rest go to the next run`);
+      // No new page opens.
+      break;
+    }
+    // Counted before the build, so a failure is still an attempt.
+    attempted += 1;
     // Each row in its own try, so its failure stays its own.
     try {
       // One kit; any refusal inside (status, robots, missing master) throws.
@@ -225,7 +243,20 @@ export async function runKitSweep(input: RunKitSweepInput): Promise<SweepSummary
     }
   }
   // The totals, for the run summary and the exit code.
-  return { eligible: eligible.length, attempted: selected.length, built, failed };
+  return { eligible: eligible.length, attempted, remaining: eligible.length - attempted, built, failed };
+}
+
+/**
+ * Whether the workflow should start another sweep right away (2026-11-05: kits must keep up with the
+ * queue, no fixed cap). Only when this run left due rows UNTRIED and BUILT at least one kit. Failed rows
+ * stay due and sort first next time, so "tried" is not progress: 25+ rows that always fail would chain
+ * runs forever. A built kit leaves the due set for good, so every chained run shrinks the backlog.
+ */
+export function shouldRedispatch(summary: SweepSummary | 'skipped_disabled'): boolean {
+  // The kill switch is off: never.
+  if (summary === 'skipped_disabled') return false;
+  // Untried rows, and at least one kit built (progress), so the chain always ends.
+  return summary.remaining > 0 && summary.built > 0;
 }
 
 /** The sweep's two reads over a supabase-js client; errors throw, since supabase-js returns them. */

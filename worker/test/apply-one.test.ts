@@ -41,7 +41,7 @@ import type { AnswerBankRow, MasterProfile, ResolvedResume } from '@applyy/share
 // production.
 import { syntheticResume } from './resolved-resume-fixture.ts';
 // Every live test hands in an open re-check config (B2 fails closed without one).
-import { OPEN_RECHECK, loadOpenPreGatePreferences } from './open-pregate.ts';
+import { OPEN_RECHECK } from './open-pregate.ts';
 
 
 /** A form the answer bank can fully satisfy, so nothing blocks by accident. */
