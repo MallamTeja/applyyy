@@ -308,6 +308,11 @@ describe('Applied jobs page in a browser (fake session, every Supabase call answ
     await page.getByRole('link', { name: 'Applied jobs', exact: true }).click();
     // The router took it there.
     await page.waitForURL(`${base}/applied`);
+    /* The URL changes BEFORE React renders the new route, so the heading is awaited, not read at once:
+       a bare textContent() here read the old page's "Pipeline" on CI's slower CPU (2026-11-05, c36b771;
+       reproduced 3/3 under a 6x CDP CPU throttle). A missing route entry reads "Unknown screen", so the
+       wait times out and the assert below names the wrong heading. */
+    await page.locator('h1.page__title', { hasText: /^Applied jobs$/ }).waitFor({ timeout: 10_000 }).catch(() => {});
     // The heading comes from the route table: without the entry it reads "Unknown screen".
     assert.equal(await page.locator('h1.page__title').textContent(), 'Applied jobs');
     // Both cards rendered from the read.
