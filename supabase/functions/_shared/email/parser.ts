@@ -86,6 +86,44 @@ export const ATS_VENDOR_DOMAINS: ReadonlySet<string> = new Set([
   "workable.com",
 ]);
 
+// Job boards whose mail is job mail (2026-11-05, Teja: "all jobs allerts apply portal application").
+// The Gmail tracker searches these senders (email-tracker.gs APPLYY_JOB_BOARD_SENDERS, held to this
+// list both ways by email-tracker.test.ts) and the intake reads a board's job-worded mail as job_alert.
+// Registrable names, so the suffix rule below covers alert subdomains (jobalerts-noreply@linkedin.com).
+export const JOB_BOARD_SENDER_DOMAINS: ReadonlySet<string> = new Set([
+  // The boards Teja named, in his order.
+  "linkedin.com",
+  "naukri.com",
+  "indeed.com",
+  "instahyre.com",
+  "wellfound.com",
+  // Hirist sends from its .tech site name.
+  "hirist.tech",
+  // foundit (formerly Monster India).
+  "foundit.in",
+  "cutshort.io",
+  "iimjobs.com",
+]);
+
+// Is this host on `domains`, or a subdomain of one? The same whole-label suffix rule for every list.
+function hostInList(host: string, domains: ReadonlySet<string>): boolean {
+  // Linear scan: a dozen entries, called once per email.
+  for (const domain of domains) {
+    // Exact host, or any subdomain of it; the dot refuses a look-alike such as notlinkedin.com.
+    if (host === domain || host.endsWith(`.${domain}`)) return true;
+  }
+  // On no list.
+  return false;
+}
+
+// Is this sender a job board (on JOB_BOARD_SENDER_DOMAINS, or a subdomain of one)?
+export function isJobBoardSender(senderHeader: string): boolean {
+  // The same address parse every sender check uses.
+  const host = senderHost(senderHeader);
+  // No address, no board.
+  return host !== null && hostInList(host, JOB_BOARD_SENDER_DOMAINS);
+}
+
 // Is this host a vendor domain or a subdomain of one? (`hire.lever.co` -> lever.co.)
 //
 // WHY SUFFIX-AWARE (2026-10-06): vendors send from subdomains (`hire.lever.co`), and an exact
@@ -94,13 +132,8 @@ export const ATS_VENDOR_DOMAINS: ReadonlySet<string> = new Set([
 // WHY THE LEADING DOT: a bare `endsWith("lever.co")` would also swallow an unrelated
 // `notlever.co`; the dot makes it a whole-label suffix.
 function isAtsVendorHost(domain: string): boolean {
-  // Linear scan: twelve-ish entries, called once per email.
-  for (const vendor of ATS_VENDOR_DOMAINS) {
-    // Exact vendor host, or any subdomain of it.
-    if (domain === vendor || domain.endsWith(`.${vendor}`)) return true;
-  }
-  // Not a known vendor.
-  return false;
+  // The shared suffix rule (hostInList, 2026-11-05), so the vendor and board lists cannot disagree on it.
+  return hostInList(domain, ATS_VENDOR_DOMAINS);
 }
 
 // Known scheduling platform patterns used by recruiters to set up interview calls.

@@ -228,3 +228,17 @@ test("EMAIL_OUTCOMES contains exact required outcome set", () => {
   // Check exact enum member set.
   assert.deepEqual([...EMAIL_OUTCOMES], ["interviewing", "rejected", "employer_screening", "offer", "unknown"]);
 });
+
+// ---- Job-board senders (2026-11-05) ------------------------------------------------------------------
+test("isJobBoardSender: a board or its subdomain passes; a look-alike does not", async () => {
+  // Imported here so the rest of the file does not depend on the new export.
+  const { isJobBoardSender, JOB_BOARD_SENDER_DOMAINS } = await import("./parser.ts");
+  // The list Teja named (2026-11-05), all present.
+  for (const board of ["linkedin.com", "naukri.com", "indeed.com", "instahyre.com", "wellfound.com", "hirist.tech", "foundit.in", "cutshort.io", "iimjobs.com"]) assert.ok(JOB_BOARD_SENDER_DOMAINS.has(board), `missing ${board}`);
+  // A subdomain sender.
+  assert.equal(isJobBoardSender("LinkedIn Job Alerts <jobalerts-noreply@linkedin.com>"), true);
+  // A whole-label suffix only: a look-alike domain is refused.
+  assert.equal(isJobBoardSender("x <alerts@notlinkedin.com>"), false);
+  // An employer is not a board.
+  assert.equal(isJobBoardSender("Acme <jobs@acme.com>"), false);
+});

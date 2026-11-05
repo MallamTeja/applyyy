@@ -841,3 +841,44 @@ test("re-match: no approval time, a malformed time, or an already-matched row li
   // An email already matched elsewhere is never re-pointed.
   assert.deepEqual(receipt.rematchUnmatched([{ ...BJAK_RECEIPT, matched_application_id: "other" }], [BJAK_APP], new Map([["bjak-1", "2026-10-24T08:14:13+00:00"]])), []);
 });
+
+// ---- Job alerts (2026-11-05, Teja: track "all jobs allerts apply portal application") -------------
+// A board's alert used to be `unclassified`, so W33 blanked it. It is now `job_alert`, kept whole,
+// and assigned only when no lifecycle class matched, so it can never pre-empt one.
+
+test("job_alert: a LinkedIn job alert is a job alert, not unclassified", () => {
+  // LinkedIn's alert sender and its usual subject shape.
+  const decision = classifyMessage({ from: "LinkedIn Job Alerts <jobalerts-noreply@linkedin.com>", subject: "Software Engineer: Google and 10 more jobs in Hyderabad", snippet: "Your job alert for Software Engineer in Hyderabad." });
+  // The new class.
+  assert.equal(decision.classification, "job_alert");
+  // It maps to no status: an alert says nothing about an application.
+  assert.equal(targetStatusFor(decision.classification), null);
+});
+
+test("job_alert: an alert phrase from any sender counts (a company's own careers mailer)", () => {
+  // Not a board sender; the subject says what it is.
+  const decision = classifyMessage({ from: "Acme Careers <careers@acme.com>", subject: "New jobs matching your profile", snippet: "Here are this week's openings." });
+  // The phrase alone is enough.
+  assert.equal(decision.classification, "job_alert");
+});
+
+test("job_alert: a board's non-job notification stays unclassified (precision)", () => {
+  // A board sender, but a social notification with no job wording.
+  const decision = classifyMessage({ from: "LinkedIn <notifications-noreply@linkedin.com>", subject: "Priya reacted to your post", snippet: "See who reacted." });
+  // Not an alert: it keeps the redacted default.
+  assert.equal(decision.classification, "unclassified");
+});
+
+test("job_alert: a board-sent interview invite is still an interview invite", () => {
+  // A lifecycle outcome from a board sender: the outcome wins, the alert reading is a fallback.
+  const decision = classifyMessage({ from: "Naukri <info@naukri.com>", subject: "Interview invitation from Acme", snippet: "We would like to invite you to interview for the Backend Engineer role." });
+  // Unchanged by the alert rule.
+  assert.equal(decision.classification, "interview_invite");
+});
+
+test("job_alert: an unmatched alert keeps its subject and body (W33 redacts unclassified only)", () => {
+  // The alert, stored as index.ts stores it.
+  const row = receipt.emailEventRowOf({ ...STORABLE, from: "Naukri <jobalert@naukri.com>", subject: "Jobs for you", snippet: "5 new jobs" }, { classification: "job_alert", confidence: 0.6 }, null, "2026-11-05T07:00:00.000Z");
+  // Kept whole: an alert is job mail Teja asked to keep.
+  assert.deepEqual([row.subject, row.snippet, row.recipient_to], ["Jobs for you", "5 new jobs", "teja@x.com"]);
+});

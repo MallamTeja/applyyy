@@ -210,17 +210,30 @@ configured"}` until these are done; nothing crashes in the meantime.
 2. In the Apps Script editor: **Deploy → New deployment → Type: Web app**
    (or **Manage deployments → Edit → Version: New version** if one exists).
    - **Execute as**: `Me (tejamallam00@gmail.com)`
-   - **Who has access**: `Anyone` (the `?secret=` check in `handleOnDemandSync_` is the
-     gate; the URL alone does nothing without it).
+   - **Who has access**: `Anyone`. The gate is the secret, not the URL: since W16
+     (2026-11-02) `doGet` refuses every request, and `doPost` accepts only a JSON body whose
+     `secret` equals the Script Property `APPLYY_SYNC_SECRET`. An unset property fails closed.
+     A `?secret=` in the URL is refused (it would land in Google's request logs).
 3. Copy the Web App URL (ends in `/exec`), WITHOUT any query string.
 4. Set it as a Supabase secret:
    `supabase secrets set APPLYY_GMAIL_SYNC_URL=<the /exec url>` (or Dashboard → Edge
-   Functions → Secrets). `EMAIL_INTAKE_SHARED_SECRET` already exists and is reused.
-5. Verify: `curl -X POST -H "Authorization: Bearer <your JWT>"
+   Functions → Secrets).
+5. Generate one NEW random string (not the intake secret) and set it in BOTH places: the
+   Supabase secret `APPLYY_GMAIL_SYNC_SECRET` (gmail-sync sends it in the POST body) and the
+   Script Property `APPLYY_SYNC_SECRET` (doPost checks it). W16 separated it from
+   `EMAIL_INTAKE_SHARED_SECRET`, so holding the intake secret no longer triggers a sync.
+6. Verify: `curl -X POST -H "Authorization: Bearer <your JWT>"
    https://xynqxekcqizwhtskzqrq.supabase.co/functions/v1/gmail-sync` → `{"ok":true,...}`,
    and a second call within 60 seconds → `{"ok":true,"cooldown":true}`.
 
 ### Re-enable after a script change (Teja, in Gmail)
+
+> **Pending re-paste (2026-11-05): job boards and alerts.** The repo's `email-tracker.gs` now
+> runs TWO Gmail searches per run: the lifecycle search (unchanged) and a new one for the job
+> boards (LinkedIn, Naukri, Indeed, Instahyre, Wellfound, Hirist, foundit, Cutshort, iimjobs) and
+> alert wording ("job alert", "jobs for you", ...). The intake stores those as `job_alert` with
+> their text kept. Until the steps below are done, the deployed copy keeps searching the old way.
+> Order: the orchestrator deploys the intake + migration FIRST; re-paste after that.
 
 > **Pending re-paste (2026-10-23):** the repo's `email-tracker.gs` now sends the
 > zero-mail heartbeat (see "What to check when it stops working"). The deployed copy

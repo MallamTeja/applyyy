@@ -281,7 +281,8 @@ export const AGENT_RUN_STATUSES = [
 export type AgentRunStatus = (typeof AGENT_RUN_STATUSES)[number];
 
 /**
- * What an incoming email means. Produced by Gemini inside the Edge Function, NOT by
+ * What an incoming email means. Produced by the rule-based classifier inside the
+ * email-tracker-intake Edge Function (decide.ts classifyMessage; no Gemini call), NOT by
  * Apps Script — Apps Script stays a dumb pipe so the intelligence stays in the repo.
  */
 export const EMAIL_CLASSIFICATIONS = [
@@ -292,8 +293,10 @@ export const EMAIL_CLASSIFICATIONS = [
   'offer',
   'recruiter_outreach',
   'other',
-  /** Default on insert: the row exists before it is classified, so a Gemini outage loses no mail. */
+  /** Default on insert: the row exists before it is classified, so a failed classification loses no mail. */
   'unclassified',
+  /** A job alert or recommendation (2026-11-05, migration 20261105124500). Appended: enum order is the contract. Kept, not redacted. */
+  'job_alert',
 ] as const;
 /** Union of every legal `email_events.classification` value. */
 export type EmailClassification = (typeof EMAIL_CLASSIFICATIONS)[number];

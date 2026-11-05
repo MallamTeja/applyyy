@@ -1,0 +1,26 @@
+-- WHY THIS MIGRATION EXISTS (2026-11-05).
+--
+-- Teja ruled (12:31 IST) that the Gmail tracker captures ALL job mail: application lifecycle mail,
+-- recruiter mail, AND job alerts / recommendations from the boards (LinkedIn, Naukri, Indeed,
+-- Instahyre, Wellfound, Hirist, foundit, Cutshort, iimjobs) and from company mailers.
+--
+-- An alert matches none of the lifecycle classes, so until today it was stored as 'unclassified',
+-- and W33 (email-tracker-intake decide.ts emailEventRowOf) BLANKS the subject and body of an
+-- unclassified, unmatched email. Alerts would have been captured and then emptied: kept in name only.
+-- This value gives them their own class, which W33 does not redact. The intake assigns it only when
+-- every lifecycle class failed (decide.ts classifyMessage), so it never pre-empts a receipt, an
+-- interview, a rejection or an offer, and it maps to no application status.
+--
+-- APPENDED, never positioned: Postgres orders an enum by declaration, and
+-- packages/shared-types/test/enum-parity.test.ts holds EMAIL_CLASSIFICATIONS (enums.ts) to that
+-- order, with 'job_alert' last there too.
+--
+-- In its own file: a value added by ALTER TYPE ... ADD VALUE cannot be used in the same transaction,
+-- so nothing else may ride in this migration.
+--
+-- Also corrected here rather than in the old migration (an applied migration is never edited): the
+-- enum's original comment (20260909234500_enums.sql) says classification is "by Gemini inside the
+-- Edge Function". It is not: decide.ts classifies by rules, with no Gemini call.
+--
+-- `if not exists` makes a re-run a no-op instead of a duplicate-value error.
+alter type public.email_classification add value if not exists 'job_alert';

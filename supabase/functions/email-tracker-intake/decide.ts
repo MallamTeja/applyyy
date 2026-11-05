@@ -8,7 +8,7 @@
 import { parseEmail } from "../_shared/email/parser.ts";
 // The re-match reads a stored sender's employer domain (the same parse parseEmail uses), and the
 // stored-row builder asks whether an ATS sent the email (2026-11-04).
-import { extractCompanyDomain, isAtsVendorSender } from "../_shared/email/parser.ts";
+import { extractCompanyDomain, isAtsVendorSender, isJobBoardSender } from "../_shared/email/parser.ts";
 // Outcome classifier; it already ranks outcomes above the auto-reply fallback internally.
 import { classifyEmail } from "../_shared/email/classifier.ts";
 // Schema-owned enum types, so a typo here is a compile error, not a 22P02 at runtime.
@@ -85,6 +85,20 @@ export interface MessageDecision {
   readonly senderDomain: string | null;
 }
 
+// A job alert's subject, from any sender (2026-11-05): the wording boards and company mailers use for
+// listings. Subject only: an alert's body is a list of postings that also mentions "interview" etc.
+const JOB_ALERT_SUBJECT = /\bjob\s+alerts?\b|\bjobs?\s+(?:for\s+you|matching|you\s+may\s+(?:like|be\s+interested))|\brecommended\s+(?:jobs?|for\s+you)\b|\bnew\s+jobs?\b|\bmore\s+jobs\b|\bis\s+hiring\b/i;
+
+// Job wording in a BOARD's subject: a board also sends social and account mail ("Priya reacted to your
+// post"), so a board sender alone is not enough; its subject must speak of jobs.
+const BOARD_JOB_SUBJECT = /\b(?:jobs?|hiring|openings?|vacanc(?:y|ies)|roles?|positions?|recruiters?)\b/i;
+
+// Is this mail a job alert or recommendation? Read only after every lifecycle class failed.
+function isJobAlert(message: DecidableMessage): boolean {
+  // Alert wording from anyone, or job wording from a known board.
+  return JOB_ALERT_SUBJECT.test(message.subject) || (isJobBoardSender(message.from) && BOARD_JOB_SUBJECT.test(message.subject));
+}
+
 // Out-of-office replies. Checked BEFORE the outcome classifier because an OOO that quotes
 // the thread ("Re: Interview invitation") would otherwise classify as the quoted outcome
 // and advance an application on a message that says nothing about it.
@@ -132,6 +146,8 @@ export function classifyMessage(message: DecidableMessage): MessageDecision {
   }
   // No outcome matched: only now is the receipt reading allowed.
   if (parsed.isAutoReplyOrConfirmation) return { classification: "application_received", ...base };
+  // Still nothing: a job alert or recommendation is the last reading tried, so it never pre-empts a lifecycle class.
+  if (isJobAlert(message)) return { classification: "job_alert", ...base, reasoning: "Job alert or recommendation; never advances an application." };
   // Nothing recognisable.
   return { classification: "unclassified", ...base };
 }

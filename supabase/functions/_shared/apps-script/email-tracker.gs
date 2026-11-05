@@ -106,7 +106,53 @@ var APPLYY_JOB_PHRASES = [
 ];
 
 /**
- * The Gmail query every run uses (W33, 2026-11-02). Until then it was the window plus the
+ * Job boards, searched by sender (2026-11-05, Teja: "all jobs allerts apply portal application").
+ * The same list as JOB_BOARD_SENDER_DOMAINS in `_shared/email/parser.ts`; `email-tracker.test.ts`
+ * fails if the two differ in either direction. The intake keeps a board's job-worded mail as
+ * job_alert and still redacts its social and account mail, so searching a whole board is safe.
+ */
+var APPLYY_JOB_BOARD_SENDERS = [
+  // The boards Teja named, in his order.
+  'linkedin.com', 'naukri.com', 'indeed.com', 'instahyre.com', 'wellfound.com',
+  // Hirist's .tech domain, foundit (formerly Monster India), Cutshort, iimjobs.
+  'hirist.tech', 'foundit.in', 'cutshort.io', 'iimjobs.com'
+];
+
+/**
+ * Alert and recruiter wording from ANY sender (2026-11-05): a company's own careers mailer, or a
+ * recruiter writing from their own domain. Kept short: every phrase also lands mail in the inbox
+ * that the intake then has to read.
+ */
+var APPLYY_ALERT_PHRASES = [
+  // Alerts and recommendations.
+  '"job alert"', '"jobs for you"', '"recommended jobs"', '"new jobs"', '"is hiring"',
+  // Recruiter contact.
+  '"job opportunity"'
+];
+
+/**
+ * The parts every search shares: the window, minus already-sent mail, minus the Social and Forums
+ * tabs (never job mail). Each search then ANDs one `{a b c}` OR-group onto these.
+ */
+function applyyQueryOf_(anyOf) {
+  // Gmail's `{a b c}` is OR; the outer terms are ANDed with it.
+  return [APPLYY_SEARCH_WINDOW, '-label:' + APPLYY_LABEL, '-category:social', '-category:forums', '{' + anyOf.join(' ') + '}'].join(' ');
+}
+
+/**
+ * The Gmail queries every run uses, in order (2026-11-05: two, not one). Gmail documents no query
+ * length limit, so the board search is a SECOND query instead of a longer first one: the W33 query
+ * (563 chars) is the longest proven to work live, and the test holds each query to that length.
+ */
+function applyySearchQueries_() {
+  // `from:x` per domain; Gmail matches subdomains such as jobalerts-noreply@linkedin.com.
+  var from = function (domain) { return 'from:' + domain; };
+  // Lifecycle mail first (the W33 query, unchanged), then boards and alerts.
+  return [applyySearchQuery_(), applyyQueryOf_(APPLYY_JOB_BOARD_SENDERS.map(from).concat(APPLYY_ALERT_PHRASES))];
+}
+
+/**
+ * The lifecycle query (W33, 2026-11-02). Until then it was the window plus the
  * label, i.e. THE WHOLE INBOX: live on 2026-11-01, 97/97 stored emails were unclassified and
  * none matched, Google security mail included. Now: the window, minus already-sent mail, minus
  * the Social and Forums tabs (never job mail), AND an ATS sender OR a job phrase.
@@ -117,17 +163,8 @@ var APPLYY_JOB_PHRASES = [
 function applyySearchQuery_() {
   // `from:x` per vendor; Gmail matches subdomains such as hire.lever.co.
   var senders = APPLYY_ATS_SENDERS.map(function (domain) { return 'from:' + domain; });
-  // Gmail's `{a b c}` is OR; the outer terms are ANDed with it.
-  return [
-    // Bounded in time.
-    APPLYY_SEARCH_WINDOW,
-    // Not already handed over.
-    '-label:' + APPLYY_LABEL,
-    // Never job mail.
-    '-category:social', '-category:forums',
-    // Either arm qualifies.
-    '{' + senders.concat(APPLYY_JOB_PHRASES).join(' ') + '}'
-  ].join(' ');
+  // An ATS sender or a job phrase qualifies; the shared parts come from applyyQueryOf_.
+  return applyyQueryOf_(senders.concat(APPLYY_JOB_PHRASES));
 }
 
 /** Messages per POST. Mirrors MAX_MESSAGES_PER_BATCH in `_shared/intake/email-contract.ts`. */
@@ -141,6 +178,35 @@ var APPLYY_SNIPPET_LIMIT = 4096;
 /** Threads to pull per run. A ceiling on work, so a backlog drains over several runs
  *  instead of one run timing out against Apps Script's own 6-minute execution limit. */
 var APPLYY_MAX_THREADS = 200;
+
+/**
+ * Runs every query in order and returns their threads, each thread once (2026-11-05). A LinkedIn
+ * thread can match both searches; it must be sent once. APPLYY_MAX_THREADS caps the whole run, so the
+ * later search gets only the room the earlier ones left and two searches never double the work.
+ */
+function applyySearchAll_() {
+  // Threads collected so far, and their ids for the de-duplication.
+  var threads = [];
+  var seen = {};
+  // Lifecycle first, so a full run is never crowded out by alerts.
+  var queries = applyySearchQueries_();
+  for (var q = 0; q < queries.length; q++) {
+    // The room left under the run's cap; a full run skips the rest.
+    var room = APPLYY_MAX_THREADS - threads.length;
+    if (room <= 0) break;
+    // This search, capped to the room left.
+    var found = GmailApp.search(queries[q], 0, room);
+    for (var t = 0; t < found.length; t++) {
+      // Thread ids are stable across searches, so one thread is kept once.
+      var id = found[t].getId();
+      if (seen[id]) continue;
+      seen[id] = true;
+      threads.push(found[t]);
+    }
+  }
+  // Every distinct thread, lifecycle threads first.
+  return threads;
+}
 
 /**
  * THE ENTRY POINT. Called by the hourly trigger, on demand via the Web App (doPost only since
@@ -163,7 +229,7 @@ function applyyIngest() {
     // Find or create the label. Doing it once per run keeps the per-thread work cheap.
     var label = applyyEnsureLabel_();
     // Recent job mail this script has not already handed over (W33: no longer the whole inbox).
-    var threads = GmailApp.search(applyySearchQuery_(), 0, APPLYY_MAX_THREADS);
+    var threads = applyySearchAll_();
     // Nothing to do is the common case — but a silent return here is indistinguishable
     // from a dead trigger on the Supabase side, which is how the tracker once sat dark
     // for a month (0 emails since 2026-09-11, noticed 2026-10-09). So the quiet path
