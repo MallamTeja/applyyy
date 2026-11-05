@@ -1014,7 +1014,7 @@ export function ApprovalQueuePage(): ReactElement {
      is a batch to the operator, not to the database: if the ninth of thirty
      fails, the eight that succeeded must stay succeeded, and the failure has to
      name which row. A bulk RPC would give us one error for thirty rows. */
-  /* Ask dispatch-apply to start the applier, and say what happened. Silent when it skipped on purpose
+  /* Ask dispatch-apply to start the runs (apply-kit always, the applier when the switch is on), and say what happened. Silent when it skipped on purpose
      (Teja's switch is off, or nothing live is approved): that is the expected state, not news. */
   async function dispatchAfterApprove(): Promise<void> {
     // No client means no connection; the approve toast already said what happened.
@@ -1023,8 +1023,9 @@ export function ApprovalQueuePage(): ReactElement {
     const result = await requestDispatch(supabase);
     // Started: say so, with how many rows the run will try.
     if (result.kind === 'dispatched') toast.info(`Applier started for ${result.approved} approved ${result.approved === 1 ? 'job' : 'jobs'}. Results show in Pipeline within a few minutes.`);
-    // Failed: the approve stands; only the automatic start did not happen.
-    else if (result.kind === 'error') toast.error(`Approved, but the applier did not start: ${result.message}`);
+    /* Failed: the approve stands; only the automatic start did not happen. "the run", not "the applier"
+       (2026-11-05): every approve also dispatches apply-kit, and the message already names which workflow. */
+    else if (result.kind === 'error') toast.error(`Approved, but GitHub did not start the run: ${result.message}`);
   }
 
   async function settle(
