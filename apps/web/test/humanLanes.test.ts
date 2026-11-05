@@ -194,11 +194,14 @@ test('OPERABLE_HUMAN_CONTROLS is exactly the edges the approval and recovery que
     'dropped_filter->passed_filters',
     // 2026-11-01: Reject on every Ready to tailor card (DiscoveredJobsPage, rejectJob.ts).
     'passed_filters->dropped_filter',
+    // 2026-11-05: Mark applied / Failed on every Manual apply kit card (migration 20261105121500).
+    'approved->applied',
+    'approved->failed',
   ];
   // Sorted on both sides so order in the graph does not matter, only membership.
   assert.deepEqual(OPERABLE_HUMAN_CONTROLS.map(key).sort(), [...expected].sort());
   // Stated as a number too, because the panel shows the number.
-  assert.equal(OPERABLE_HUMAN_CONTROLS.length, 11);
+  assert.equal(OPERABLE_HUMAN_CONTROLS.length, 13);
 });
 
 test('passed_filters is operable for Reject only; its -> failed move is held, not claimed', () => {
@@ -252,11 +255,13 @@ test('a status nothing claims returns null rather than a placeholder string', ()
 
 test('the master-change re-run edges are claimed but never counted operable', () => {
   /* Both moves were added 2026-11-01 (migration 20261101173000) and no screen
-     performs either yet. `approved` is claimed as affordance_only (the Pipeline
-     column shows the move disabled); the Approval queue's re-run move is HELD
-     because that screen IS operable for approve and decline. Counting either as
-     operable would be the false all-clear this file exists to prevent. */
-  assert.equal(controlReadiness('approved'), 'affordance_only');
+     performs either yet. Both are HELD because their screens ARE operable for
+     other moves: the Approval queue approves and declines, and since 2026-11-05
+     the Manual apply kit card marks `approved` rows applied or failed. Counting
+     either re-run as operable would be the false all-clear this file exists to prevent. */
+  assert.equal(controlReadiness('approved'), 'operable');
+  // The approved re-run explains itself like the awaiting_approval one.
+  assert.notEqual(heldReason('approved', 'passed_filters'), null);
   // A held edge always explains itself; null here would let the button fire.
   assert.notEqual(heldReason('awaiting_approval', 'passed_filters'), null);
   // Neither re-run edge may appear in the operable bucket.

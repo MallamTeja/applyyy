@@ -107,7 +107,7 @@ const READ_FAILED: ReadResult = { data: null, error: { code: '', message: 'TypeE
 const DROPPED: RpcResult = { error: { code: '', message: 'TypeError: Failed to fetch' }, status: 0 };
 
 // The default move under test: the stuck-submission queue's one human edge.
-const MOVE = { applicationId: ID, from: 'applying', to: 'needs_verification', stamp: STAMP } as const;
+const MOVE = { source: 'health_recovery', applicationId: ID, from: 'applying', to: 'needs_verification', stamp: STAMP } as const;
 
 describe('buildRecoveryArgs', () => {
   it('sends p_agent human, the stamp string byte-for-byte, the source in p_detail and the target', () => {
@@ -125,6 +125,15 @@ describe('buildRecoveryArgs', () => {
     assert.equal(args.p_application_id, ID);
     // The event log records where the move started.
     assert.equal((args.p_detail as { from: string }).from, 'applying');
+    // And which screen made it, as given.
+    assert.equal((args.p_detail as { source: string }).source, 'health_recovery');
+  });
+
+  it('records the Manual apply card as its own source, never as System health (append-only log)', () => {
+    // The same move made from the kit card.
+    const args = mod.buildRecoveryArgs({ ...MOVE, source: 'manual_apply' });
+    // The log names the screen the operator actually used.
+    assert.deepEqual(args.p_detail, { source: 'manual_apply', from: 'applying' });
   });
 });
 

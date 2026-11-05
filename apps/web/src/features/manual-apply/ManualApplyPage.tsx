@@ -8,10 +8,22 @@
  *
  * WHAT IT REUSES (ponytail): the resolves are the System health RecoveryQueue components themselves
  * (same confirm, locks and advance_application_status path), the link guard is safeHref, and the
- * lanes are humanLanes.ts MANUAL_ACTION_STATUSES. Nothing here writes a status. */
+ * lanes are humanLanes.ts MANUAL_ACTION_STATUSES. Nothing here writes a status except through them.
+ *
+ * RESOLVE ON THE CARD (2026-11-05, Teja): every card carries "I applied (mark applied)" and
+ * "Failed / skip", so a job applied to by hand is recorded where it was applied from. The buttons are
+ * RecoveryMoves and the write is useRecoveryMoves, the very pieces the System health queues use; the
+ * moves come from the graph (approved gained both human edges in migration 20261105121500), narrowed
+ * to those two by kitResolveMoves. A card at `applying` has none: the worker owns that row. A card in a
+ * manual-action lane has none either: its row is resolved in the queue under "After you apply", and two
+ * sets of buttons for one row would mean two lock owners that cannot see each other's moves. */
 
 // State for the read, the per-field copy feedback and the resume download.
 import { useCallback, useEffect, useState } from 'react';
+// Type only: the status union, for the move filter.
+import type { ApplicationStatus } from '../../data/contract';
+// The graph: the human moves out of a card's status.
+import { nextStatuses } from '../../data/contract';
 // The component return type, as elsewhere.
 import type { ReactElement } from 'react';
 // In-app link to the Answer bank, without a full page reload.
@@ -25,7 +37,7 @@ import { supabase } from '../../data/supabase';
 // The two manual-action lanes whose resolves this page offers, shared with System health and the badge.
 import { MANUAL_ACTION_STATUSES } from '../../data/humanLanes';
 // The working resolve queues, reused whole, and their manual-action wording.
-import { RecoveryQueue, manualActionMeaning, manualActionVerb } from '../health/RecoveryQueue';
+import { RecoveryMoves, RecoveryNotes, RecoveryQueue, manualActionMeaning, manualActionVerb, useRecoveryMoves } from '../health/RecoveryQueue';
 // The kit's "Copy all" text.
 import { copyAllText } from './applyKit';
 // Types only: a kit, a field and the per-application state.
@@ -136,10 +148,36 @@ function KitFieldRow(props: { readonly field: KitField; readonly index: number }
   );
 }
 
-/* One job's card. Pure: everything arrives as props, so a static render tests exactly what is shown. */
-export function KitCard(props: { readonly row: ManualApplyRow; readonly kit: KitState }): ReactElement {
+// The only moves a card offers: finishing the application, either way. Other human edges (approved ->
+// passed_filters, blocked_needs_human -> dropped_filter) stay on their own screens.
+const KIT_RESOLVES: readonly ApplicationStatus[] = ['applied', 'failed'];
+
+/* The resolve moves a card at `status` offers: the graph's human edges, narrowed to KIT_RESOLVES. From the
+   graph, so a status without the edge gets no button the database would refuse. Exported for the test. */
+export function kitResolveMoves(status: ApplicationStatus): readonly ApplicationStatus[] {
+  // A lane row's buttons live in its queue below (one lock owner per row); the card points there.
+  if (MANUAL_ACTION_STATUSES.includes(status)) return [];
+  // Graph first, then the narrowing; order follows the graph.
+  return nextStatuses(status, 'human').filter((to) => KIT_RESOLVES.includes(to));
+}
+
+/* What a card needs to resolve its row: the lock state and the confirmed write. The page owns both. */
+export interface KitResolve {
+  // A move is in flight on this row, or its last one ended unknown.
+  readonly locked: boolean;
+  // Its last move ended unknown: reload before moving it again.
+  readonly frozen: boolean;
+  // The write, called only from the inline confirm's Confirm.
+  readonly onMove: (to: ApplicationStatus) => void;
+}
+
+/* One job's card. Pure: everything arrives as props, so a static render tests exactly what is shown.
+   `resolve` is required, so a card can never be drawn with its resolve buttons silently missing. */
+export function KitCard(props: { readonly row: ManualApplyRow; readonly kit: KitState; readonly resolve: KitResolve }): ReactElement {
   // Destructured for readability.
-  const { row, kit } = props;
+  const { row, kit, resolve } = props;
+  // This card's resolve moves; empty at applying.
+  const moves = kitResolveMoves(row.status);
   // The kit's form URL first (it is the page the kit was read from), else the job's apply URL; both via safeHref.
   const formHref = safeHref(kit.kind === 'kit' ? kit.kit.formUrl : row.applyUrl);
   return (
@@ -165,6 +203,20 @@ export function KitCard(props: { readonly row: ManualApplyRow; readonly kit: Kit
         {/* Copy every answer at once, for pasting into notes or a long form. */}
         {kit.kind === 'kit' ? <CopyButton text={copyAllText(kit.kit)} what="all answers" /> : null}
       </div>
+      {/* After applying by hand: record it here. At applying the worker owns the row, which is said. */}
+      {row.status === 'applying' ? (
+        /* No button: a human move out of applying would race a live submit. */
+        <p className="panel__note">In flight: the worker owns it. If it stalls, it moves to System health for you to check.</p>
+      ) : MANUAL_ACTION_STATUSES.includes(row.status) ? (
+        /* Its queue below owns the buttons and their locks. */
+        <p className="panel__note">After you apply, resolve it below under "After you apply: resolve".</p>
+      ) : moves.length > 0 ? (
+        /* The System health buttons themselves, with a kit-card confirm slot so the queue below never shares it. */
+        <div className="kit-card__resolve">
+          {/* No lease: only applying has one, and applying gets no buttons. */}
+          <RecoveryMoves confirmId={`kit:${row.status}:${row.id}`} status={row.status} row={row} moves={moves} verb={manualActionVerb} meaning={manualActionMeaning} locked={resolve.locked} frozen={resolve.frozen} lease={null} onMove={resolve.onMove} />
+        </div>
+      ) : null}
       {/* The kit body: none, unreadable, or the full form. Never a partial form. */}
       {kit.kind === 'none' ? (
         /* No kit event for this application yet. */
@@ -221,6 +273,8 @@ export function ManualApplyPage(): ReactElement {
       setRead({ kind: 'error', message: 'The manual-apply list could not be read.' });
     }
   }, []);
+  // The card resolves: the System health locks, strip and write; each move re-reads the page so a resolved card leaves.
+  const { busy, frozen, notes, move } = useRecoveryMoves(load, 'manual_apply');
   // Read on mount.
   useEffect(() => {
     // load never throws.
@@ -232,6 +286,8 @@ export function ManualApplyPage(): ReactElement {
     <div className="page">
       {/* Heading and lede from routes.ts. */}
       <PageHeader path="manual-apply" />
+      {/* What each card resolve did, kept after the card leaves (a landed move removes it). */}
+      <RecoveryNotes notes={notes} />
       {/* Three honest states. */}
       {read.kind === 'loading' ? (
         /* Before the first answer. */
@@ -244,7 +300,18 @@ export function ManualApplyPage(): ReactElement {
         <p className="panel__clear">Nothing to apply by hand right now.</p>
       ) : (
         /* One card per job, urgent lanes first. */
-        read.rows.map((row) => <KitCard key={row.id} row={row} kit={read.kits.get(row.id) ?? NO_KIT} />)
+        read.rows.map((row) => (
+          /* Keyed by application id: the card, its locks and its confirm slot all follow the same row. */
+          <KitCard
+            key={row.id}
+            /* The validated row, with the stamp the move sends back. */
+            row={row}
+            /* Its newest kit, or "not generated yet". */
+            kit={read.kits.get(row.id) ?? NO_KIT}
+            /* In flight or frozen locks the buttons; frozen alone adds the reload sentence; the write runs through the shared move path. */
+            resolve={{ locked: busy.has(row.id) || frozen.has(row.id), frozen: frozen.has(row.id), onMove: (to) => void move(row, row.status, to) }}
+          />
+        ))
       )}
       {/* The resolves, reused whole from System health: after applying by hand, mark it here. */}
       <section className="panel" aria-label="Resolve manual applications">
@@ -259,7 +326,7 @@ export function ManualApplyPage(): ReactElement {
             {/* Which lane. */}
             <h3 className="kit-resolve__title"><span className="identifier">{status}</span></h3>
             {/* The working queue, with the manual-action wording. */}
-            <RecoveryQueue status={status} verb={manualActionVerb} meaning={manualActionMeaning} />
+            <RecoveryQueue source="manual_apply" status={status} verb={manualActionVerb} meaning={manualActionMeaning} />
           </div>
         ))}
       </section>

@@ -40,8 +40,15 @@ export interface RecoveryClient {
   from(table: string): any;
 }
 
+/* The screen a move was made from, written into the append-only event log. A CLOSED union and a
+   REQUIRED field (2026-11-05): the log cannot be corrected later, so a third screen must name itself
+   rather than silently inherit 'health_recovery', which is how the Manual apply card nearly would have. */
+export type RecoverySource = 'health_recovery' | 'manual_apply';
+
 /* One requested move, everything the RPC and the read-back need. */
 export interface RecoveryMove {
+  // Which screen made the move; recorded as p_detail.source.
+  readonly source: RecoverySource;
   // The row.
   readonly applicationId: string;
   // Where the operator SAW it; also what "not landed" is measured against.
@@ -81,7 +88,7 @@ export function buildRecoveryArgs(move: RecoveryMove): Record<string, unknown> {
     // 'human' is the only agent a browser may honestly claim.
     p_agent: 'human',
     // Recorded on the status event, so the log says which screen made the move and from where.
-    p_detail: { source: 'health_recovery', from: move.from },
+    p_detail: { source: move.source, from: move.from },
     // ALWAYS sent (see the header): a stale stamp is refused with PT409 under the row lock.
     p_expected_updated_at: move.stamp,
   };

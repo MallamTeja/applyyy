@@ -42,7 +42,7 @@ import { heldReason } from '../../data/humanLanes';
 // The write path, its outcome sentences and its confirm text.
 import { advanceRecovery, confirmText, describeRecovery } from './advanceRecovery';
 // The structural client type the engine takes, and the outcome kinds the strip colours by.
-import type { RecoveryClient, RecoveryOutcome } from './advanceRecovery';
+import type { RecoveryClient, RecoveryOutcome, RecoverySource } from './advanceRecovery';
 // The one gate between untrusted board URLs and an href: only http(s) passes, everything else is undefined.
 import { safeHref } from '../../app/safeHref';
 // The in-place confirm in front of every move: these moves have no human undo edge.
@@ -255,6 +255,110 @@ export function manualActionMeaning(to: ApplicationStatus): string | null {
   return null;
 }
 
+/* What a move needs to know about its row: the lock key, the guard stamp and the words. QueueRow and the
+   Manual apply page's row both carry these, so one move path serves both screens. */
+export interface MovableRow {
+  // The application id, also the lock key.
+  readonly id: string;
+  // updated_at exactly as returned: the stale-stamp guard.
+  readonly stamp: string;
+  // "Title at Company", for the outcome note.
+  readonly label: string;
+}
+
+/* The move path, as a hook: the locks, the outcome strip and the write (2026-11-05). Extracted from
+   RecoveryQueue so the Manual apply kit cards resolve through EXACTLY the same locks and
+   advanceRecovery call, instead of a second implementation that could drift from this one.
+   `reload` re-reads after every move, so what is on screen is what is stored; `source` names the screen
+   in the append-only event log. */
+export function useRecoveryMoves(reload: () => Promise<void>, source: RecoverySource): {
+  // Rows with a move in flight: every button on them renders disabled.
+  readonly busy: ReadonlySet<string>;
+  // Rows whose last move ended unknown: locked until reload.
+  readonly frozen: ReadonlySet<string>;
+  // The results strip, newest first.
+  readonly notes: readonly OutcomeNote[];
+  // One CONFIRMED move of `row` from `from` to `to`.
+  readonly move: (row: MovableRow, from: ApplicationStatus, to: ApplicationStatus) => Promise<void>;
+} {
+  // Rendered mirror of the in-flight lock.
+  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
+  // Rendered mirror of the unknown-outcome lock: a retry could double-apply.
+  const [frozen, setFrozen] = useState<ReadonlySet<string>>(new Set());
+  // The results strip, newest first.
+  const [notes, setNotes] = useState<readonly OutcomeNote[]>([]);
+  // Note keys, unique for the page's lifetime.
+  const noteSeq = useRef(0);
+  /* The REAL locks. `busy` / `frozen` state only drive rendering; a state read inside the click
+     handler is the value from the last render, so two clicks in one tick would both see "free".
+     Refs are read and written synchronously, so the second click sees the first one's claim. */
+  const inflight = useRef(new Set<string>());
+  // Same reasoning for rows frozen after an unknown outcome.
+  const frozenRef = useRef(new Set<string>());
+
+  // One CONFIRMED move: lock, write, record, unlock, re-read. The confirm already ran in RecoveryMoves
+  // (its InlineConfirm calls onMove only from Confirm), so nothing here asks again.
+  async function move(row: MovableRow, from: ApplicationStatus, to: ApplicationStatus): Promise<void> {
+    // A second click while the first is in flight, or after an unknown outcome, does nothing.
+    if (inflight.current.has(row.id) || frozenRef.current.has(row.id)) return;
+    // Claimed synchronously, before the first await, so a second Confirm in the same tick sees it.
+    inflight.current.add(row.id);
+    // Mirrored into state so the buttons render disabled.
+    setBusy((prev) => new Set(prev).add(row.id));
+    // The only write; never throws. No client is reported as a refusal rather than skipped silently.
+    const outcome: RecoveryOutcome =
+      supabase === null
+        ? { kind: 'refused', code: '', message: 'not connected to the database.' }
+        : await advanceRecovery(supabase as unknown as RecoveryClient, { source, applicationId: row.id, from, to, stamp: row.stamp });
+    // The sentence for this outcome, said once and stored.
+    const text = describeRecovery(outcome, { from, to });
+    // Newest first in the strip, capped so a long session does not grow it forever.
+    setNotes((prev) => [{ key: ++noteSeq.current, label: row.label, text, kind: outcome.kind }, ...prev].slice(0, 10));
+    // An unknown outcome keeps the row locked until reload (see the header).
+    if (outcome.kind === 'unconfirmed' || outcome.kind === 'unknown') {
+      // The real lock, read by the next click.
+      frozenRef.current.add(row.id);
+      // Its rendered mirror.
+      setFrozen((prev) => new Set(prev).add(row.id));
+    }
+    // The in-flight lock is released on every path (advanceRecovery never throws).
+    inflight.current.delete(row.id);
+    // And its rendered mirror.
+    setBusy((prev) => {
+      // Copied so React sees a new set.
+      const next = new Set(prev);
+      // This row's move is over.
+      next.delete(row.id);
+      // The remaining in-flight rows.
+      return next;
+    });
+    // What is stored now, so the list matches the database (a moved row leaves it).
+    await reload();
+  }
+
+  // The state for rendering and the one write path.
+  return { busy, frozen, notes, move };
+}
+
+/* The results strip. ALWAYS mounted: a live region inserted together with its first line is often
+   not announced, so the first outcome would go unheard. Empty, it renders nothing visible. Shared by
+   every screen that uses useRecoveryMoves. */
+export function RecoveryNotes(props: { readonly notes: readonly OutcomeNote[] }): ReactElement {
+  return (
+    /* The live region itself. */
+    <ul className="recovery__notes" aria-live="polite">
+      {/* One line per click, newest first; keyed by the click, not the row, so repeats stay separate. */}
+      {props.notes.map((note) => (
+        /* Green only for a landed move: every other outcome needs the operator's eyes. */
+        <li key={note.key} className={note.kind === 'moved' ? 'recovery__note recovery__note--ok' : 'recovery__note recovery__note--warn'}>
+          {/* Which row first, then what happened to it. */}
+          <strong>{note.label}:</strong> {note.text}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 /* Why a row cannot be moved right now beyond the edge itself, or null. Only `applying` has a lease. */
 function leaseBlock(status: ApplicationStatus, row: QueueRow, now: number): string | null {
   // Every other status has no live worker on it.
@@ -270,33 +374,21 @@ function leaseBlock(status: ApplicationStatus, row: QueueRow, now: number): stri
 export function RecoveryQueue(props: {
   // The status whose rows this queue lists.
   readonly status: ApplicationStatus;
+  // The screen drawing this queue, for the event log: System health and Manual apply both draw queues.
+  readonly source: RecoverySource;
   // The button text for a move, e.g. "Resolve as applied".
   readonly verb: (to: ApplicationStatus) => string;
   // Optional one-line meaning per move, shown beside the button (the blocked queue uses it).
   readonly meaning?: (to: ApplicationStatus) => string | null;
 }): ReactElement {
   // Destructured once so the hooks below depend on the status, not the props object.
-  const { status, verb, meaning } = props;
+  const { status, source, verb, meaning } = props;
   // The moves out of this status a human may make, straight from the graph.
   const moves = nextStatuses(status, 'human');
   // The current read.
   const [read, setRead] = useState<QueueRead>({ kind: 'loading' });
-  // Rows with a move in flight: every button on them renders disabled.
-  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
-  // Rows whose last move ended unknown: locked until reload, because a retry could double-apply.
-  const [frozen, setFrozen] = useState<ReadonlySet<string>>(new Set());
-  // The results strip, newest first.
-  const [notes, setNotes] = useState<readonly OutcomeNote[]>([]);
   // Request sequence: only the newest read may land, so a slow early read cannot overwrite a fresh one.
   const readSeq = useRef(0);
-  // Note keys, unique for the page's lifetime.
-  const noteSeq = useRef(0);
-  /* The REAL locks. `busy` / `frozen` state only drive rendering; a state read inside the click
-     handler is the value from the last render, so two clicks in one tick would both see "free".
-     Refs are read and written synchronously, so the second click sees the first one's claim. */
-  const inflight = useRef(new Set<string>());
-  // Same reasoning for rows frozen after an unknown outcome.
-  const frozenRef = useRef(new Set<string>());
 
   // One read of this status's rows, oldest first (the longest-stuck row is the most urgent).
   const load = useCallback(async () => {
@@ -369,63 +461,16 @@ export function RecoveryQueue(props: {
     void load();
   }, [load]);
 
-  // One CONFIRMED move: lock, write, record, unlock, re-read. The confirm already ran in RecoveryRowView
-  // (its InlineConfirm calls onMove only from Confirm), so nothing here asks again.
-  async function move(row: QueueRow, to: ApplicationStatus): Promise<void> {
-    // A second click while the first is in flight, or after an unknown outcome, does nothing.
-    if (inflight.current.has(row.id) || frozenRef.current.has(row.id)) return;
-    // Claimed synchronously, before the first await, so a second Confirm in the same tick sees it.
-    inflight.current.add(row.id);
-    // Mirrored into state so the buttons render disabled.
-    setBusy((prev) => new Set(prev).add(row.id));
-    // The only write; never throws. No client is reported as a refusal rather than skipped silently.
-    const outcome: RecoveryOutcome =
-      supabase === null
-        ? { kind: 'refused', code: '', message: 'not connected to the database.' }
-        : await advanceRecovery(supabase as unknown as RecoveryClient, { applicationId: row.id, from: status, to, stamp: row.stamp });
-    // The sentence for this outcome, said once and stored.
-    const text = describeRecovery(outcome, { from: status, to });
-    // Newest first in the strip, capped so a long session does not grow it forever.
-    setNotes((prev) => [{ key: ++noteSeq.current, label: row.label, text, kind: outcome.kind }, ...prev].slice(0, 10));
-    // An unknown outcome keeps the row locked until reload (see the header).
-    if (outcome.kind === 'unconfirmed' || outcome.kind === 'unknown') {
-      // The real lock, read by the next click.
-      frozenRef.current.add(row.id);
-      // Its rendered mirror.
-      setFrozen((prev) => new Set(prev).add(row.id));
-    }
-    // The in-flight lock is released on every path (advanceRecovery never throws).
-    inflight.current.delete(row.id);
-    // And its rendered mirror.
-    setBusy((prev) => {
-      // Copied so React sees a new set.
-      const next = new Set(prev);
-      // This row's move is over.
-      next.delete(row.id);
-      // The remaining in-flight rows.
-      return next;
-    });
-    // What is stored now, so the list matches the database (a moved row leaves it).
-    await load();
-  }
+  // The locks, the strip and the write, shared with the Manual apply kit cards; re-reads this queue after each move.
+  const { busy, frozen, notes, move } = useRecoveryMoves(load, source);
 
   // Read once per render, so every lease on screen is judged against the same instant.
   const now = Date.now();
 
   return (
     <>
-      {/* The results strip. ALWAYS mounted: a live region inserted together with its first line is
-          often not announced, so the first outcome would go unheard. Empty, it renders nothing visible. */}
-      <ul className="recovery__notes" aria-live="polite">
-        {/* One line per click, newest first; keyed by the click, not the row, so repeats stay separate. */}
-        {notes.map((note) => (
-          /* Green only for a landed move: every other outcome needs the operator's eyes. */
-          <li key={note.key} className={note.kind === 'moved' ? 'recovery__note recovery__note--ok' : 'recovery__note recovery__note--warn'}>
-            {/* Which row first, then what happened to it. */}
-            <strong>{note.label}:</strong> {note.text}
-          </li>
-        ))}
-      </ul>
+      {/* The results strip, always mounted (see RecoveryNotes). */}
+      <RecoveryNotes notes={notes} />
       {/* Three honest states; an empty list only after a successful read. */}
       {read.kind === 'loading' ? (
         /* Before the first answer: neither "nothing stuck" nor an error is known yet. */
@@ -483,7 +528,7 @@ export function RecoveryQueue(props: {
                     /* A live worker lease blocks every move on an applying row. */
                     lease={leaseBlock(status, row, now)}
                     /* The write, after the row's inline confirm, through the locks in move(). */
-                    onMove={(to) => void move(row, to)}
+                    onMove={(to) => void move(row, status, to)}
                   />
                 ))}
               </tbody>
@@ -519,8 +564,6 @@ export function RecoveryRowView(props: {
 }): ReactElement {
   // Destructured once for readability below.
   const { status, row, moves, verb, meaning, locked, frozen, lease, onMove } = props;
-  // This row's confirm slot. The status is in it because HealthPage and ManualApplyPage each draw queues.
-  const confirmId = `recovery:${status}:${row.id}`;
   return (
     /* One table row per application. */
     <tr>
@@ -554,7 +597,44 @@ export function RecoveryRowView(props: {
       </th>
       {/* The moves cell: one line per human edge out of this status. */}
       <td>
-        {/* The confirm opens in place of the moves, in this same cell, so the row keeps its height. */}
+        {/* Called as a function, not mounted as <RecoveryMoves>: it is hook-free, and inlining its tree
+            keeps the buttons reachable by tests that walk RecoveryRowView's returned tree. The status is
+            in the confirm id because HealthPage and ManualApplyPage each draw queues. */}
+        {RecoveryMoves({ confirmId: `recovery:${status}:${row.id}`, status, row, moves, verb, meaning, locked, frozen, lease, onMove })}
+      </td>
+    </tr>
+  );
+}
+
+/* The move buttons for one row, behind its inline confirm (2026-11-05). Pure and hook-free: extracted
+   from RecoveryRowView so a Manual apply kit card draws the SAME buttons, confirm text, held reasons and
+   lock rendering as the System health queues, with only its own confirm slot (`confirmId`). */
+export function RecoveryMoves(props: {
+  // This row's confirm slot; unique per screen and row, so two screens never open each other's confirm.
+  readonly confirmId: string;
+  // The row's status, the source of every move and of the held-edge lookup.
+  readonly status: ApplicationStatus;
+  // The row in words and by id: the button names, the confirm and the note ids.
+  readonly row: { readonly id: string; readonly label: string };
+  // The moves to offer, from the graph.
+  readonly moves: readonly ApplicationStatus[];
+  // Button text per move.
+  readonly verb: (to: ApplicationStatus) => string;
+  // Optional meaning line per move.
+  readonly meaning?: ((to: ApplicationStatus) => string | null) | undefined;
+  // True while a move is in flight or after an unknown outcome.
+  readonly locked: boolean;
+  // True after an unknown outcome only.
+  readonly frozen: boolean;
+  // The live-lease sentence, or null.
+  readonly lease: string | null;
+  // Called with the target status when a move is CONFIRMED; the button itself only opens the confirm.
+  readonly onMove: (to: ApplicationStatus) => void;
+}): ReactElement {
+  // Destructured once for readability below.
+  const { confirmId, status, row, moves, verb, meaning, locked, frozen, lease, onMove } = props;
+  return (
+        /* The confirm opens in place of the moves, in this same spot, so the row keeps its height. */
         <InlineConfirm id={confirmId}>
           {/* Stacked so a held move's reason sits under its own button. */}
           <div className="recovery__moves">
@@ -564,8 +644,9 @@ export function RecoveryRowView(props: {
               const held = heldReason(status, to);
               // The optional meaning line for this move.
               const why = meaning?.(to) ?? null;
-              // One id per row and move, so the button can point at its own explanation.
-              const noteId = `recovery-${row.id}-${to}`;
+              // One id per confirm slot and move, so the button can point at its own explanation; built from the
+              // slot so a row drawn on a kit card AND in a queue below it never repeats a DOM id.
+              const noteId = `${confirmId}:${to}`;
               // Whichever explanation applies, held first (it is permanent), then the lease.
               const blocker = held ?? lease;
               // The move and its row in words: the button's name, and the confirm's button names.
@@ -615,7 +696,5 @@ export function RecoveryRowView(props: {
             {frozen ? <span className="recovery__held">Outcome unknown: reload before moving this row again.</span> : null}
           </div>
         </InlineConfirm>
-      </td>
-    </tr>
   );
 }

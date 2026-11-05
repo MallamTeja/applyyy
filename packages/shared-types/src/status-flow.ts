@@ -139,6 +139,15 @@ export const STATUS_TRANSITIONS: readonly StatusTransition[] = [
   { from: 'awaiting_approval', to: 'passed_filters', allowedAgents: ['human'], note: 'Human sends it back to be re-scored and re-tailored, e.g. after the master changed.' },
   // Withdraws an approval before submission; the applier's later approved -> applying is refused by the guard.
   { from: 'approved', to: 'passed_filters', allowedAgents: ['human'], note: 'Human withdraws the approval to re-score and re-tailor before anything is sent.' },
+  // ---- Resolved by hand from the Manual apply page (2026-11-05, migration 20261105121500) -
+  // Teja applies to a captcha-blocked job by hand from its kit while the row is still at
+  // `approved` (the worker never reached `applying`). Without these two human-only edges a
+  // hand-sent job could not be recorded as sent or given up. They lead AWAY from applying:
+  // approved -> applying stays the only edge into it, and a worker that later tries
+  // applied -> applying is refused by the guard before any submit.
+  { from: 'approved', to: 'applied', allowedAgents: ['human'], note: 'Human applied by hand from the Manual apply kit; the worker never submitted it.' },
+  // The give-up twin, as blocked_needs_human and needs_verification already have.
+  { from: 'approved', to: 'failed', allowedAgents: ['human'], note: 'Human tried to apply by hand and it did not go through, or gave up on it.' },
 
   // ---- Submission: the one non-idempotent leg ------------------------------
   // 'tracker' since 20261009235000 (Teja, 2026-10-09): a DKIM/SPF-verified ATS receipt

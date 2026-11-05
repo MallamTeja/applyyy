@@ -12,11 +12,11 @@
  * conflated them and produced a false all-clear, which is worse than no check
  * at all - so the predicate is now stated in each name:
  *
- *   HUMAN_ONLY_LANES      allowedAgents === ['human']      (16 edges)
+ *   HUMAN_ONLY_LANES      allowedAgents === ['human']      (18 edges)
  *     No automation will ever help. These need PROMINENT controls, because a
  *     person is the only thing that can move the row, ever.
  *
- *   HUMAN_REACHABLE_LANES allowedAgents.includes('human')  (37 edges)
+ *   HUMAN_REACHABLE_LANES allowedAgents.includes('human')  (39 edges)
  *     A human is permitted, often as a fallback for an agent. These still need
  *     controls, because the agent may not be running - and section 14 says a
  *     dead scheduled job is silent. `applying -> needs_verification` is the
@@ -153,13 +153,13 @@ const SCREENS_BY_SOURCE_STATUS: Readonly<
    * false all-clear this file exists to prevent. */
   audit_flagged: { screen: 'Approval queue, send back for re-tailoring', readiness: 'affordance_only' },
 
-  /* Withdraw an approval to re-run the row on a newer master (2026-11-01, migration
-   * 20261101173000). Before that day `approved` had no human out-edge at all. Its one
-   * human move, -> passed_filters, is shown DISABLED on the Pipeline board's column
-   * (PipelinePage builds it from nextStatuses), and no screen performs it yet: the
-   * operator runs it through advance_application_status as 'human'. So affordance_only,
-   * never operable - claiming operable would be the false all-clear this file prevents. */
-  approved: { screen: 'Pipeline, disabled move on the card (re-run after a master change)', readiness: 'affordance_only' },
+  /* Operable since 2026-11-05 (migration 20261105121500): the Manual apply page's kit card
+   * sends approved -> applied ("I applied") and approved -> failed ("Failed / skip") through
+   * advance_application_status, the System health move path. Its third human move, the
+   * master-change re-run -> passed_filters (2026-11-01, migration 20261101173000), is still
+   * performed by no screen (the Pipeline column only shows it disabled), so it is HELD in
+   * HELD_HUMAN_EDGES below and counted inoperable - exactly as awaiting_approval's re-run is. */
+  approved: { screen: 'Manual apply, Mark applied / Failed on the kit card', readiness: 'operable' },
 
   /* --- The pipeline board --------------------------------------------- */
 
@@ -271,6 +271,16 @@ export const HELD_HUMAN_EDGES: ReadonlyArray<{
      * the operator. Held so awaiting_approval's operable claim stays true for the
      * moves it does perform, and the coverage numbers count this one as inoperable. */
     reason: 'Not offered: the Approval queue has no re-run button yet; a re-run after a master change is sent by the operator.',
+  },
+  {
+    // The Manual apply lane, whose kit card performs approved -> applied and approved -> failed only.
+    from: 'approved',
+    // The withdraw-and-re-run move added 2026-11-01 (migration 20261101173000).
+    to: 'passed_filters',
+    /* 2026-11-05: claiming `approved` operable for the two kit-card resolves must not claim this
+     * one too: no screen performs it (the operator sends re-runs). Held, so the operable count stays
+     * true; the Pipeline column keeps showing it disabled, and advanceRecovery refuses it locally. */
+    reason: 'Not offered: no screen withdraws an approval yet; a re-run after a master change is sent by the operator.',
   },
   {
     // The System health failed queue, whose screen performs failed -> needs_verification.

@@ -785,7 +785,7 @@ function StuckSubmissionQueuePanel(): ReactElement {
         advance the stalled submission to verification.
       </p>
       {/* The stuck rows with working moves (2026-10-09); was a disabled edge list. */}
-      <RecoveryQueue status="applying" verb={(to) => `Advance to ${to}`} />
+      <RecoveryQueue source="health_recovery" status="applying" verb={(to) => `Advance to ${to}`} />
     </section>
   );
 }
@@ -807,7 +807,7 @@ function NeedsVerificationQueuePanel(): ReactElement {
       {/* -> approved renders disabled with its reason (humanLanes.ts HELD_HUMAN_EDGES). Each row shows
           why it is here and its apply link, so the operator can check the portal or finish it by hand;
           the buttons use the manual-action wording ("I applied", "Failed / skip") shared with the blocked queue. */}
-      <RecoveryQueue status="needs_verification" verb={manualActionVerb} meaning={manualActionMeaning} />
+      <RecoveryQueue source="health_recovery" status="needs_verification" verb={manualActionVerb} meaning={manualActionMeaning} />
     </section>
   );
 }
@@ -824,7 +824,7 @@ function BlockedQueuePanel(): ReactElement {
       </p>
       {/* The three resolutions, in the same manual-action wording as the verification queue; each row
           shows its block reason and apply link, so a captcha-blocked application can be finished by hand. */}
-      <RecoveryQueue status="blocked_needs_human" verb={manualActionVerb} meaning={manualActionMeaning} />
+      <RecoveryQueue source="health_recovery" status="blocked_needs_human" verb={manualActionVerb} meaning={manualActionMeaning} />
     </section>
   );
 }
@@ -841,7 +841,7 @@ function FailedRowsPanel(): ReactElement {
         reviews failure diagnostics before re-queueing.
       </p>
       {/* One move out: back to verification, never straight to a retry. */}
-      <RecoveryQueue status="failed" verb={(to) => `Send to ${to}`} />
+      <RecoveryQueue source="health_recovery" status="failed" verb={(to) => `Send to ${to}`} />
     </section>
   );
 }

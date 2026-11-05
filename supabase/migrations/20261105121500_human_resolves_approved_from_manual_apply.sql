@@ -1,0 +1,49 @@
+-- WHY THIS MIGRATION EXISTS (2026-11-05).
+--
+-- Teja asked (12:04 IST) for "Mark applied" and "Mark failed" on each job card of the Manual apply
+-- page (/manual-apply). The cards list rows whose kit is still open, and at the time of writing every
+-- one of them sits at `approved`. That is the status of a job Teja applies to BY HAND: the worker
+-- wrote its kit, but a captcha (or a dry scheduled run) means the worker never submitted it.
+--
+-- Before this migration, NO human edge left `approved` for `applied` or `failed`:
+--
+--   approved -> applying            applier only: THE only edge into applying, the worker's submit.
+--   approved -> blocked_needs_human applier only.
+--   approved -> passed_filters      human, but that withdraws the approval for a re-tailor.
+--
+-- So a job Teja had already sent by hand could not be recorded as sent: the page could only point
+-- at the System health queues, which never list `approved`. This adds the two missing HUMAN-ONLY
+-- edges, the same pair blocked_needs_human and needs_verification already have:
+--
+--   approved -> applied   Teja submitted it by hand from the kit.
+--   approved -> failed    Teja tried and it did not go through, or gave up.
+--
+-- Human-only: no agent may claim a submit it did not make (the worker's path stays
+-- approved -> applying -> applied). The browser sends no x-applyy-agent-key, so it acts as `human`.
+--
+-- WHY THIS IS SAFE AGAINST A WORKER RACE (measured 2026-11-05, nothing new built for it):
+--   - The worker claims an approved row WITHOUT moving it, and moves approved -> applying only right
+--     before the submit click (worker/src/apply-one.ts, "THE NON-IDEMPOTENT WINDOW").
+--   - If the human moves first, advance_application_status clears the lease in the same update, and the
+--     worker's later move becomes applied -> applying (or failed -> applying): no such edge exists, so
+--     guard_status_transition refuses it with 23514 before any submit.
+--   - If the worker reaches `applying` first, these edges do not apply: there is still no human edge out
+--     of `applying` except applying -> needs_verification.
+--   - A row sent to `failed` from here cannot re-enter the pipeline: guard_failed_rerun only lets
+--     failed -> passed_filters through when previous_status is upstream of approval.
+--
+-- guard_status_transition stamps applied_at on the move into `applied`, so the Applied page sees it.
+--
+-- Kept in step: packages/shared-types/src/status-flow.ts (the TS mirror, checked against this file by
+-- packages/shared-types/test/enum-parity.test.ts) and apps/web/src/data/humanLanes.ts (names the
+-- Manual apply page as the control for both edges).
+--
+-- Not re-runnable as written (plain insert into a (from_status, to_status) primary key): run once, like
+-- every graph migration here.
+
+-- The two new edges, both human-only, with a note each: the column is NOT NULL and is the graph's documentation.
+insert into public.application_status_transitions (from_status, to_status, allowed_agents, note) values
+  -- The hand-submitted job: Teja applied by hand from the Manual apply kit.
+  ('approved', 'applied', array['human']::public.agent_name[], 'Human applied by hand from the Manual apply kit; the worker never submitted it.'),
+  -- The hand attempt that did not land, or that Teja abandoned.
+  ('approved', 'failed', array['human']::public.agent_name[], 'Human tried to apply by hand and it did not go through, or gave up on it.');

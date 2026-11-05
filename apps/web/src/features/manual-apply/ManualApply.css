@@ -178,3 +178,9 @@
   /* Space above, separating the two lanes. */
   margin: var(--gap-3) 0 var(--gap-1);
 }
+
+/* The Mark applied / Failed buttons under the card's actions (2026-11-05). */
+.kit-card__resolve {
+  /* Separates the resolve from the start-the-application row above it. */
+  margin-block-start: 0.75rem;
+}

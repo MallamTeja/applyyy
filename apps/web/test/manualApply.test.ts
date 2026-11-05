@@ -60,12 +60,13 @@ const row = (applyUrl: string | null = 'https://job-boards.greenhouse.io/gitlab/
   status: 'needs_verification' as const,
   label: 'Intermediate Backend Engineer, India at GitLab',
   applyUrl,
+  stamp: '2026-10-24T08:10:00.000000+00:00',
 });
 
 // One card, rendered inside a router.
 function renderCard(kit: unknown, applyUrl?: string | null): string {
   // The card under test with the given kit state.
-  return render(h(MemoryRouter, null, h(page.KitCard, { row: row(applyUrl), kit })));
+  return render(h(MemoryRouter, null, h(page.KitCard, { row: row(applyUrl), kit, resolve: { locked: false, frozen: false, onMove: () => undefined } })));
 }
 
 // The state a single kit event produces, through the same join the page uses.

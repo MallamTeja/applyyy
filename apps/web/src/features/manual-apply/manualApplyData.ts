@@ -31,6 +31,8 @@ export interface ManualApplyRow {
   readonly label: string;
   // The job's own apply URL, UNTRUSTED (safeHref at render); the fallback when the kit has no form URL.
   readonly applyUrl: string | null;
+  // updated_at exactly as returned: the stale-stamp guard of the card's Mark applied / Mark failed (never parsed).
+  readonly stamp: string;
 }
 
 // A Set for the status membership test.
@@ -38,20 +40,20 @@ const KNOWN: ReadonlySet<string> = new Set(APPLICATION_STATUSES);
 // The only shape an application id has; anything else never reaches an `in` filter.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // The columns both application reads need.
-const ROW_SELECT = 'id, status, jobs:job_id(title, company_name, apply_url)';
+const ROW_SELECT = 'id, status, updated_at, jobs:job_id(title, company_name, apply_url)';
 // Bounds every read; far above any real manual queue, so it only stops a pathological table.
 const READ_CAP = 200;
 
 /* One raw application row, validated, or null. */
 function parseRow(raw: unknown): ManualApplyRow | null {
   // Loose read, then proven.
-  const r = raw as { id?: unknown; status?: unknown; jobs?: unknown } | null;
-  // An id and a known status are required; a row without them cannot be resolved safely.
-  if (typeof r?.id !== 'string' || typeof r.status !== 'string' || !KNOWN.has(r.status)) return null;
+  const r = raw as { id?: unknown; status?: unknown; updated_at?: unknown; jobs?: unknown } | null;
+  // An id, a known status and the stamp are required; a row without them cannot be resolved safely.
+  if (typeof r?.id !== 'string' || typeof r.status !== 'string' || !KNOWN.has(r.status) || typeof r.updated_at !== 'string') return null;
   // The joined job, tolerating the to-many array shape like rowLabel does.
   const job = (Array.isArray(r.jobs) ? r.jobs[0] : r.jobs) as { apply_url?: unknown } | null | undefined;
   // Shaped for the card.
-  return { id: r.id, status: r.status as ApplicationStatus, label: rowLabel(r.id, r.jobs), applyUrl: typeof job?.apply_url === 'string' ? job.apply_url : null };
+  return { id: r.id, status: r.status as ApplicationStatus, label: rowLabel(r.id, r.jobs), applyUrl: typeof job?.apply_url === 'string' ? job.apply_url : null, stamp: r.updated_at };
 }
 
 /* The kit events, newest first, as one exact-filtered read. */
