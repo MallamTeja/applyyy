@@ -96,14 +96,23 @@ jobs:
           // pages; ~100 to tailor / 3 = 34 pages) so a queue that never shrinks stops red.
           // reads: the statuses each agent's own query selects, for the count gate below. A
           // superset is safe (the run just goes ahead); a missing status would skip real work.
+          // shortPageEnds: a clean page that read fewer rows than `limit` ends the stage at once,
+          // with no 45 s pause and no extra empty read (2026-11-05). Only safe where `processed`
+          // IS the number of rows the agent selected. The matcher reports that as rows_in
+          // (matcher/index.ts:815, the select's length). The tailor's `processed` is a sum of
+          // outcome buckets, and rows its deadline left unreached sit in none of them
+          // (tailor/index.ts:307-309, runBatchWithDeadline), so a FULL page cut by the deadline
+          // would look short and end the stage with rows still waiting: fail-open (CLAUDE.md §6).
+          // The tailor and auditor keep the old rule: only an empty page ends them.
           const STAGES = [
             // Stage 1: passed_filters -> scored | dropped_filter | failed (matcher/index.ts:392).
-            { name: 'matcher', limit: 10, pageCap: 40, reads: ['passed_filters'] },
+            { name: 'matcher', limit: 10, pageCap: 40, reads: ['passed_filters'], shortPageEnds: true },
             // Stage 2: scored -> tailored | failed (tailor/index.ts:217).
-            { name: 'tailor', limit: 3, pageCap: 90, reads: ['scored'] },
+            { name: 'tailor', limit: 3, pageCap: 90, reads: ['scored'], shortPageEnds: false },
             // Stage 3: tailored -> audit_clean | audit_flagged -> awaiting_approval; it also
             // resumes rows stranded at audit_clean/audit_flagged (auditor/index.ts:217).
-            { name: 'auditor', limit: 5, pageCap: 60, reads: ['tailored', 'audit_clean', 'audit_flagged'] },
+            // Off until its buckets are proven to cover every row it selects, as the tailor's are not.
+            { name: 'auditor', limit: 5, pageCap: 60, reads: ['tailored', 'audit_clean', 'audit_flagged'], shortPageEnds: false },
           ];
           // Pause after every page that read rows. The second live run (41305575499) sent ~10
           // calls every ~20 s, and by page 5 every key answered 429 RESOURCE_EXHAUSTED. A single
@@ -161,7 +170,7 @@ jobs:
             console.log(`plan: POST ${base || '<SUPABASE_URL>'}/functions/v1/${stage.name}?limit=${stage.limit}, page cap ${stage.pageCap}`);
           }
           // The stop rules, verbatim, so a reader of the log can check the run against them.
-          console.log(`plan: a stage ends when a page reads 0 rows; ${STALL_CAP} consecutive pages that read rows but advance none abort the run`);
+          console.log(`plan: a stage ends when a page reads 0 rows (${RUN_STAGES.filter((s) => s.shortPageEnds).map((s) => s.name).join(', ') || 'no stage'} also on a clean page shorter than its limit); ${STALL_CAP} consecutive pages that read rows but advance none abort the run`);
           // The pacing, likewise, so the run's length in the log is explained by its rules.
           console.log(`plan: ${GAP_MS / 1000}s pause after each page, ${QUOTA_BACKOFF_MS / 1000}s after a page with errors (Gemini ~15 RPM free tier)`);
           // The abort rules, likewise.
@@ -389,6 +398,12 @@ jobs:
 
               // The queue is empty: this stage is done.
               if (page.processed === 0) break;
+              // A short page is the queue's tail: the agent selected every row that was left, so
+              // the next read would be empty. Ending here saves a 45 s pause and an empty request.
+              // Only on a CLEAN page: errored rows stay at the input status and must get the 90 s
+              // backoff and a re-read below, never be left behind as "done". readPage() already
+              // aborted on any error read, and requireCount() proved `processed` an integer >= 0.
+              if (stage.shortPageEnds && page.processed < stage.limit && page.errored === 0) break;
               // Progress check: a page that read rows but moved none would re-read the
               // same head next time (no cursor exists). Count it toward the stall cap.
               if (page.advanced === 0) {

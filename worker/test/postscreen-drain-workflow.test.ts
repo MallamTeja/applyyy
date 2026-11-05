@@ -57,12 +57,39 @@ const EMPTY_PAGES = {
   auditor: { status: 'succeeded', audited: 0, resumed: 0, failed: 0, failures: [] },
 };
 
-/** Runs the drain with a fake count response; every fetch is logged as `FETCH <method> <url>`. */
-function runDrain(count: { status: number; contentRange: string | null }, fromStage = ''): { code: number | null; stdout: string } {
+/** One scripted agent answer: the HTTP status and the raw body text, so a case can send non-JSON. */
+type FakePage = { status: number; body: string };
+
+/** A 200 answer carrying `body` as JSON, the shape every agent sends on a finished page. */
+function okPage(body: Record<string, unknown>): FakePage {
+  // Serialised here so the child replays the exact text.
+  return { status: 200, body: JSON.stringify(body) };
+}
+
+/** A matcher page that read `rowsIn` rows and scored all of them (`errored` failures besides). */
+function matcherPage(rowsIn: number, errored = 0): FakePage {
+  // rows_in is what the drain reads as `processed`; scored keeps the page off the stall cap.
+  return okPage({ status: 'succeeded', rows_in: rowsIn, scored: rowsIn - errored, dropped: 0, tech_gate_dropped: 0, failed: 0, failures: Array.from({ length: errored }, (_, i) => ({ applicationId: `row-${i}`, error: 'gemini 429' })) });
+}
+
+/**
+ * Runs the drain with a fake count response; every fetch is logged as `FETCH <method> <url>`
+ * and every pacing pause as `SLEEP <ms>`. `pages` scripts each agent's answers in order;
+ * once an agent's list runs out it answers its empty page, which ends the stage.
+ */
+function runDrain(count: { status: number; contentRange: string | null }, fromStage = '', pages: Partial<Record<keyof typeof EMPTY_PAGES, FakePage[]>> = {}): { code: number | null; stdout: string } {
   // The fake fetch, as source text, so the child needs nothing from this process.
   const fakeFetch = [
-    // The count response the case wants, and the empty agent pages.
-    `const COUNT = ${JSON.stringify(count)}; const PAGES = ${JSON.stringify(EMPTY_PAGES)};`,
+    // The count response the case wants, the empty agent pages, and the scripted ones.
+    `const COUNT = ${JSON.stringify(count)}; const PAGES = ${JSON.stringify(EMPTY_PAGES)}; const SCRIPTED = ${JSON.stringify(pages)};`,
+    // The fake sleep. The script imports setTimeout from node:timers/promises; replacing it on the
+    // builtin and syncing makes the script's live ESM binding the fake, so the yml needs no test
+    // seam and a 45 s pause costs nothing. Logged, so a case can count pauses and their lengths.
+    "const TIMERS = process.getBuiltinModule('node:timers/promises');",
+    // Resolves at once; the log line is the only trace a pause leaves.
+    "TIMERS.setTimeout = async (ms) => { console.log(`SLEEP ${ms}`); };",
+    // Pushes the replaced export into the ESM namespace the script's import reads.
+    "process.getBuiltinModule('node:module').syncBuiltinESMExports();",
     // Replaces the global the script calls; Response is global in Node 18+.
     'globalThis.fetch = async (url, init = {}) => {',
     // Every call is logged, so a case can assert which endpoints were (not) reached.
@@ -75,7 +102,11 @@ function runDrain(count: { status: number; contentRange: string | null }, fromSt
     "  const agent = /functions\\/v1\\/(\\w+)/.exec(String(url))?.[1];",
     // An unexpected endpoint is a test bug; say so.
     "  if (!agent || !(agent in PAGES)) throw new Error(`unexpected fetch ${url}`);",
-    // The empty page for that agent.
+    // The next scripted answer for that agent, if the case scripted one.
+    '  const next = SCRIPTED[agent]?.shift();',
+    // Replayed as given: status and raw text, so error answers reach the script unchanged.
+    '  if (next) return new Response(next.body, { status: next.status });',
+    // Otherwise the empty page for that agent.
     '  return new Response(JSON.stringify(PAGES[agent]), { status: 200 });',
     '};',
   ].join('\n');
@@ -98,6 +129,18 @@ function runDrain(count: { status: number; contentRange: string | null }, fromSt
   });
   // stdout carries the FETCH lines and the script's own log; stderr is appended for failures.
   return { code: result.status, stdout: result.stdout + result.stderr };
+}
+
+/** The pacing pauses the run took, in ms, in order. */
+function sleeps(stdout: string): number[] {
+  // Only the fake sleep's lines; anything else in the log is not a pause.
+  return stdout.split('\n').flatMap((line) => /^SLEEP (\d+)$/.exec(line)?.[1] ?? []).map(Number);
+}
+
+/** The agent each call went to, in order, e.g. ['matcher', 'matcher', 'tailor']. */
+function agentNames(stdout: string): string[] {
+  // The path segment after /functions/v1/, without the query string.
+  return agentCalls(stdout).map((line) => line.split('/functions/v1/')[1]!.split('?')[0]!);
 }
 
 /** The FETCH lines that called an agent function. */
@@ -180,5 +223,88 @@ describe('postscreen-drain.yml count gate', () => {
     expect(run.stdout).toContain(`::error::ABORT: ${reason}`);
     // No agent ran on a count nobody could read.
     expect(agentCalls(run.stdout)).toEqual([]);
+  });
+});
+
+// The page loop's stop rules. Every case runs with eligible rows; only the named agent's answers
+// are scripted, and the other agents answer empty pages (one read each).
+describe('postscreen-drain.yml page loop', () => {
+  // Rows exist, so the count gate lets the agents run.
+  const ELIGIBLE = { status: 200, contentRange: '0-22/23' };
+
+  test('a short clean matcher page ends the stage with no pause and no extra read', () => {
+    // 4 rows read against a limit of 10: the queue's tail.
+    const run = runDrain(ELIGIBLE, '', { matcher: [matcherPage(4)] });
+    // Green.
+    expect(run.code, run.stdout).toBe(0);
+    // One read per stage: the matcher did NOT re-read an empty page after its short one.
+    expect(agentNames(run.stdout)).toEqual(['matcher', 'tailor', 'auditor']);
+    // And no 45 s pause anywhere: every stage ended on its first page.
+    expect(sleeps(run.stdout)).toEqual([]);
+  });
+
+  test('a full page then a short page: one 45 s pause, two reads', () => {
+    // 10 of 10, then the 3-row tail.
+    const run = runDrain(ELIGIBLE, '', { matcher: [matcherPage(10), matcherPage(3)] });
+    // Green.
+    expect(run.code, run.stdout).toBe(0);
+    // Two matcher reads, then one each for the later stages.
+    expect(agentNames(run.stdout)).toEqual(['matcher', 'matcher', 'tailor', 'auditor']);
+    // The only pause is the RPM gap after the full page.
+    expect(sleeps(run.stdout)).toEqual([45_000]);
+  });
+
+  test('an exactly-full page continues to the next read', () => {
+    // A full page says nothing about what is left, so the drain must look again.
+    const run = runDrain(ELIGIBLE, '', { matcher: [matcherPage(10)] });
+    // Green: the second read is the empty default page.
+    expect(run.code, run.stdout).toBe(0);
+    // Read again after the full page.
+    expect(agentNames(run.stdout)).toEqual(['matcher', 'matcher', 'tailor', 'auditor']);
+    // Paced before that read.
+    expect(sleeps(run.stdout)).toEqual([45_000]);
+  });
+
+  test('a short page WITH errors is not done: 90 s backoff, then a re-read', () => {
+    // 4 read, 1 errored in place (still at passed_filters), then the queue is empty.
+    const run = runDrain(ELIGIBLE, '', { matcher: [matcherPage(4, 1)] });
+    // Green once the re-read comes back empty.
+    expect(run.code, run.stdout).toBe(0);
+    // The errored row got its second look.
+    expect(agentNames(run.stdout)).toEqual(['matcher', 'matcher', 'tailor', 'auditor']);
+    // After the quota backoff, not the normal gap.
+    expect(sleeps(run.stdout)).toEqual([90_000]);
+  });
+
+  test.each([
+    // A server error is not a short page.
+    ['HTTP 500', { status: 500, body: '{"error":"boom"}' }, 'matcher: HTTP 500'],
+    // A soft-200 platform page is not a short page either.
+    ['non-JSON 200', { status: 200, body: '<html>timeout</html>' }, 'matcher: non-JSON response'],
+    // A body without rows_in is a changed shape, never 0 rows.
+    ['missing rows_in', { status: 200, body: JSON.stringify({ status: 'succeeded', scored: 0, dropped: 0, tech_gate_dropped: 0, failed: 0, failures: [] }) }, 'matcher: rows_in is missing'],
+  ])('a matcher page with %s stops the run red, never "stage done"', (_label, page, reason) => {
+    // The bad answer is the matcher's first page.
+    const run = runDrain(ELIGIBLE, '', { matcher: [page] });
+    // Red.
+    expect(run.code).toBe(1);
+    // With the reason.
+    expect(run.stdout).toContain(`::error::ABORT: ${reason}`);
+    // No later stage ran.
+    expect(agentNames(run.stdout)).toEqual(['matcher']);
+    // And the summary line the orchestrator reads is absent: the run never claimed it was clean.
+    expect(run.stdout).not.toContain('CLEAN:');
+  });
+
+  test('the short-page rule is the matcher\'s only: a short tailor page still re-reads', () => {
+    // 1 tailored row against a limit of 3. The tailor's count is a bucket sum that can miss
+    // deadline-unreached rows, so a short tailor page must not end the stage.
+    const run = runDrain(ELIGIBLE, 'tailor', { tailor: [okPage({ status: 'succeeded', tailored: 1, refused: 0, skipped: [], failures: [] })] });
+    // Green.
+    expect(run.code, run.stdout).toBe(0);
+    // The tailor read again; only the empty page ended it.
+    expect(agentNames(run.stdout)).toEqual(['tailor', 'tailor', 'auditor']);
+    // Paced before that re-read, as before this change.
+    expect(sleeps(run.stdout)).toEqual([45_000]);
   });
 });
