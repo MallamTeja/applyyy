@@ -150,6 +150,21 @@ export interface ClaimLoopInput {
   readonly onlyApplicationId?: string | undefined;
 }
 
+/** WHY a run ended, as a closed set (B1, 2026-11-05). apply.yml re-dispatches a drain on this value,
+ *  never on stoppedReason's text: a reworded message must not be able to start or stop a live run.
+ *  batch_cap = APPLY_MAX_SUBMITS; daily_cap = max_applications_per_day; breaker = the circuit breaker;
+ *  run_budget = the 3000 s wall-clock budget (run-window.ts); kill_switch = system_enabled false (at
+ *  start or mid-run); only_id = an APPLY_ONLY_ID run; queue_drained = the claim came back empty. */
+export type StopKind = 'queue_drained' | 'batch_cap' | 'daily_cap' | 'breaker' | 'run_budget' | 'kill_switch' | 'only_id';
+
+/** One gate's verdict to stop: the closed kind and the human-readable reason. */
+interface Stop {
+  // What kind of stop, for the re-dispatch decision.
+  readonly kind: StopKind;
+  // Why, for the log, the release reasons and agent_runs.
+  readonly reason: string;
+}
+
 /** What the run did, for the log and for `agent_runs`. */
 export interface RunSummary {
   readonly runId: string;
@@ -168,6 +183,26 @@ export interface RunSummary {
   // Always populated, because "we did 12 today" must be distinguishable from
   // "the queue only had 12" and from "the kill switch was off" (§14).
   readonly stoppedReason: string;
+  // The same ending as a closed kind (B1), for the drain's self re-dispatch.
+  readonly stopKind: StopKind;
+  // Whether this run could submit (resolveSubmissionMode). False for every dry run, so a dry run's
+  // summary can never ask for a LIVE re-dispatch.
+  readonly live: boolean;
+}
+
+/**
+ * B1 (2026-11-05, Teja: "no caps; run every time a job is in the queue"): should a LIVE drain start
+ * the next run itself? Only when it stopped on its own batch (batch_cap) or time (run_budget) AND sent
+ * at least one application this run (progress, so the chain ends). Never on the breaker, the kill
+ * switch, the daily cap, an APPLY_ONLY_ID run, a drained queue or a dry run.
+ */
+export function shouldRedispatchDrain(summary: RunSummary): boolean {
+  // A dry run never asks for another run, so it can never become a live one.
+  if (!summary.live) return false;
+  // Only the two "paused, not stopped" kinds.
+  if (summary.stopKind !== 'batch_cap' && summary.stopKind !== 'run_budget') return false;
+  // Progress: a run that sent nothing would only repeat itself.
+  return summary.submitted > 0;
 }
 
 // A canonical UUID, case-insensitive: the only shape an application id has.
@@ -278,6 +313,8 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
   let atsUnsupported = 0;
   let errors = 0;
   let stoppedReason = 'queue drained';
+  // Its closed twin; every place that ends the run sets both (B1).
+  let stopKind: StopKind = 'queue_drained';
   // Distinguishes a deliberate no-op from a failure when the run is closed.
   let disabled = false;
   // Every application id this run has claimed, so a row it already processed
@@ -306,14 +343,14 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
   /** Why to stop before the next application on this run's own budget, or null to go on. */
   // Separate from gateBeforeNextApplication: that gate is about time and auth, this one is
   // about how many real attempts this run has already made and whether it should keep making them.
-  function submitBudgetStop(): string | null {
+  function submitBudgetStop(): Stop | null {
     // The breaker wins: a tripped run stops even below its cap.
-    if (breakerReason !== null) return breakerReason;
+    if (breakerReason !== null) return { kind: 'breaker', reason: breakerReason };
     // Unknown outcomes COUNT toward the cap: each may well have been sent.
     const attempts = submitted + outcomeUnknown;
     // At the cap: stop claiming. Dry runs never reach it (both counters stay 0).
     if (attempts >= maxSubmits) {
-      return `APPLY_MAX_SUBMITS reached (${attempts} of ${maxSubmits} submit attempts); stopped claiming`;
+      return { kind: 'batch_cap', reason: `APPLY_MAX_SUBMITS reached (${attempts} of ${maxSubmits} submit attempts); stopped claiming` };
     }
     // THE SETTINGS DAILY CAP (W10): whatever went out in the last 24 h plus this run's
     // attempts may not exceed it. So the effective cap is min(per-run, daily - sent).
@@ -323,7 +360,7 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
     // same remainder; a DB-side count at claim time is the upgrade if runs ever overlap.
     if (daily !== null && daily.maxPerDay !== null && daily.sentSince + attempts >= daily.maxPerDay) {
       // Names the setting, the window count and this run's share, so the log is checkable.
-      return `max_applications_per_day reached (${daily.sentSince} in the last 24 h + ${attempts} this run, cap ${daily.maxPerDay}); stopped claiming`;
+      return { kind: 'daily_cap', reason: `max_applications_per_day reached (${daily.sentSince} in the last 24 h + ${attempts} this run, cap ${daily.maxPerDay}); stopped claiming` };
     }
     // Under the cap and the breaker untripped.
     return null;
@@ -389,7 +426,7 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
    * already returns nothing when the switch is off; before an application the
    * row is already ours, so only an explicit read can notice the switch.
    */
-  async function gateBeforeNextApplication(checkKillSwitch: boolean): Promise<string | null> {
+  async function gateBeforeNextApplication(checkKillSwitch: boolean): Promise<Stop | null> {
     // The run-window gate: wall-clock budget and token lifetime.
     const decision = canStartAnotherApplication(
       {
@@ -400,8 +437,9 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
       input.limits,
     );
 
-    // Out of budget or out of token: stop, with the gate's own explanation.
-    if (decision.action === 'stop') return decision.reason;
+    // Out of budget: stop, with the gate's own explanation. run-window's only 'stop' is the wall-clock
+    // budget (an expiring token is refreshed below, never a stop), so this is run_budget.
+    if (decision.action === 'stop') return { kind: 'run_budget', reason: decision.reason };
 
     // Re-authenticate HERE, before any row enters `applying`. Doing it
     // reactively on a 401 would mean discovering the problem inside the
@@ -414,7 +452,7 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
     // THE KILL SWITCH between applications. Fails closed with the gateway: a
     // missing settings row reads as off.
     if (checkKillSwitch && !(await gateway.isSystemEnabled())) {
-      return 'kill switch turned off mid-run (system_enabled = false); stopped between applications';
+      return { kind: 'kill_switch', reason: 'kill switch turned off mid-run (system_enabled = false); stopped between applications' };
     }
 
     // Both gates passed.
@@ -443,6 +481,8 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
     if (!(await gateway.isSystemEnabled())) {
       disabled = true;
       stoppedReason = 'kill switch is off (system_enabled = false); claimed nothing';
+      // Its kind: never a re-dispatch.
+      stopKind = 'kill_switch';
       return summarise();
     }
 
@@ -490,9 +530,12 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
       // The submit budget first: a capped or tripped run must not even claim, since every
       // claimed row would only be released again.
       const beforeClaim = submitBudgetStop() ?? (await gateBeforeNextApplication(false));
-      // A string is the reason to stop; null means carry on.
+      // A verdict is the reason to stop; null means carry on.
       if (beforeClaim !== null) {
-        stoppedReason = beforeClaim;
+        // The text for the log, the kind for the re-dispatch.
+        stoppedReason = beforeClaim.reason;
+        // Set together, so they cannot disagree.
+        stopKind = beforeClaim.kind;
         break;
       }
 
@@ -538,11 +581,14 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
         // batch untouched through the same path below, instead of attempting another employer.
         const beforeRow = submitBudgetStop() ?? (await gateBeforeNextApplication(true));
         if (beforeRow !== null) {
-          stoppedReason = beforeRow;
+          // The text for the log, the kind for the re-dispatch.
+          stoppedReason = beforeRow.reason;
+          // Set together, so they cannot disagree.
+          stopKind = beforeRow.kind;
           // The rest of this batch is leased to us and untouched; hand it back
           // so it is not stranded until the lease expires.
           for (const unstarted of fresh.slice(index)) {
-            await gateway.releaseClaim(unstarted.id, `not started: ${beforeRow}`);
+            await gateway.releaseClaim(unstarted.id, `not started: ${beforeRow.reason}`);
           }
           break claiming;
         }
@@ -662,6 +708,8 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
         stoppedReason = errors > 0
           ? `${stoppedReason}; APPLY_ONLY_ID ${input.onlyApplicationId} processed; run ends here`
           : `APPLY_ONLY_ID ${input.onlyApplicationId} processed; run ends here`;
+        // A one-row run ends here by design; never a re-dispatch.
+        stopKind = 'only_id';
         break;
       }
     }
@@ -671,6 +719,8 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
     // switch) stopped the run after the target was claimed, or the queue never
     // handed it to us at all (not `approved`, not ours, or leased elsewhere).
     if (input.onlyApplicationId !== undefined && !targetDone) {
+      // Still a one-row run: whatever stopped it, it is never a drain to continue.
+      stopKind = 'only_id';
       // `seen` holds every claimed id, so it says whether the target was ever claimed.
       stoppedReason = seen.has(input.onlyApplicationId)
         // Claimed, then a gate stopped the run; the gate's reason is kept.
@@ -744,6 +794,10 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
       atsUnsupported,
       errors,
       stoppedReason,
+      // B1: the closed kind beside the text.
+      stopKind,
+      // B1: whether this run could submit at all.
+      live,
     };
   }
 }

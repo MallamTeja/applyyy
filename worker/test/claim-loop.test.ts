@@ -13,6 +13,8 @@ import { loadOpenPreGatePreferences } from './open-pregate.ts';
 import {
   // The cap parser, tested directly below.
   parseMaxSubmits,
+  // B1: the drain re-dispatch verdict.
+  shouldRedispatchDrain,
   // The APPLY_ONLY_ID parser, tested directly below.
   parseOnlyApplicationId,
   // Renamed: the local runApplierBatch below wraps it with a default robots check.
@@ -200,6 +202,8 @@ describe('runApplierBatch', () => {
     // And the run says why, in a form the health page can render.
     expect(closed[0]?.status).toBe('skipped_disabled');
     expect(summary.stoppedReason).toMatch(/kill switch/i);
+    // The closed stop kind too (B1, 2026-11-05): apply.yml re-dispatches a drain on this, never on the text.
+    expect(summary.stopKind).toBe('kill_switch');
   });
 
   it('W31: sweeps stale claims even while the kill switch is off', async () => {
@@ -255,6 +259,8 @@ describe('runApplierBatch', () => {
 
     expect(calls).not.toContain('claim');
     expect(summary.stoppedReason).toMatch(/budget/i);
+    // The closed stop kind too (B1, 2026-11-05): apply.yml re-dispatches a drain on this, never on the text.
+    expect(summary.stopKind).toBe('run_budget');
   });
 
   it('closes the run even when an application throws', async () => {
@@ -410,6 +416,8 @@ describe('runApplierBatch', () => {
     // Only the first application ran.
     expect(summary.claimed).toBe(1);
     expect(summary.stoppedReason).toMatch(/kill switch/i);
+    // The closed stop kind too (B1, 2026-11-05): apply.yml re-dispatches a drain on this, never on the text.
+    expect(summary.stopKind).toBe('kill_switch');
     // The second was released untouched, with the reason it never started.
     expect(releases).toContainEqual({ id: 'app-2', reason: expect.stringMatching(/^not started: kill switch/) });
   });
@@ -739,6 +747,8 @@ describe('submit cap and circuit breaker', () => {
     );
     // And the run says why it ended.
     expect(summary.stoppedReason).toMatch(/APPLY_MAX_SUBMITS reached/);
+    // The closed stop kind too (B1, 2026-11-05): apply.yml re-dispatches a drain on this, never on the text.
+    expect(summary.stopKind).toBe('batch_cap');
   });
 
   it('submissions stop at the default cap of 3 when APPLY_MAX_SUBMITS is absent', async () => {
@@ -811,6 +821,8 @@ describe('submit cap and circuit breaker', () => {
     );
     // And the run says the breaker ended it.
     expect(summary.stoppedReason).toMatch(/circuit breaker/);
+    // The closed stop kind too (B1, 2026-11-05): apply.yml re-dispatches a drain on this, never on the text.
+    expect(summary.stopKind).toBe('breaker');
   });
 
   it('an unknown outcome names its cause in the run row error_detail', async () => {
@@ -1008,6 +1020,24 @@ describe('submit cap and circuit breaker', () => {
     expect(summary.dryRun).toBe(2);
     // The breaker did not fire.
     expect(summary.stoppedReason).not.toMatch(/circuit breaker/);
+  });
+
+  // B1 (2026-11-05): the closed stop kind and the live flag on a real capped run (needs this describe's fakes).
+  it('a real capped live run reports batch_cap, live: true and re-dispatches; a dry run reports live: false', async () => {
+    // Five approved, cap two, every submit confirmed.
+    const { gateway } = capQueueGateway(ids(5));
+    // Every page confirms.
+    const { openPage } = scriptedPages();
+    // Live.
+    const summary = await runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false', APPLY_MAX_SUBMITS: '2' }, clock: frozenClock });
+    // Stopped by its batch, live, two sent.
+    expect(summary).toMatchObject({ stopKind: 'batch_cap', live: true, submitted: 2 });
+    // So the drain goes on.
+    expect(shouldRedispatchDrain(summary)).toBe(true);
+    // The same queue, dry.
+    const dry = await runApplierBatch({ gateway: capQueueGateway(ids(2)).gateway, openPage: scriptedPages().openPage, renderResume, env: { DRY_RUN: 'true' }, clock: frozenClock });
+    // Not live, and drained.
+    expect(dry).toMatchObject({ live: false, stopKind: 'queue_drained' });
   });
 });
 
@@ -1324,4 +1354,24 @@ describe('B2: a live run without the re-check loader is refused (2026-11-05 revi
     // A dry run resolves normally.
     await expect(runApplierBatch({ gateway, openPage: async () => stubPage(), env: { DRY_RUN: 'true' }, clock: frozenClock, renderResume })).resolves.toBeDefined();
   });
+});
+
+// B1 (2026-11-05, Teja: "no caps; run every time a job is in the queue"): a live drain that stopped on
+// its own batch or time limit, having sent something, starts the next run itself. Never on the breaker,
+// the kill switch, the daily cap, a dry run or zero progress.
+describe('shouldRedispatchDrain', () => {
+  // A live run's summary, overridable per case.
+  const base = { runId: 'r', claimed: 25, submitted: 3, blocked: 22, dryRun: 0, outcomeUnknown: 0, robotsRefused: 0, atsUnsupported: 0, errors: 0, stoppedReason: 'x', live: true } as const;
+
+  it('re-dispatches only on batch_cap or run_budget, live, with at least one submit', () => {
+    // Its two triggers.
+    for (const stopKind of ['batch_cap', 'run_budget'] as const) expect(shouldRedispatchDrain({ ...base, stopKind }), stopKind).toBe(true);
+    // Every other stop kind is a stop, not a pause.
+    for (const stopKind of ['breaker', 'kill_switch', 'daily_cap', 'queue_drained', 'only_id'] as const) expect(shouldRedispatchDrain({ ...base, stopKind }), stopKind).toBe(false);
+    // Zero progress: going again would repeat the same run.
+    expect(shouldRedispatchDrain({ ...base, stopKind: 'run_budget', submitted: 0 })).toBe(false);
+    // A dry run never re-dispatches (and so can never become a live one).
+    expect(shouldRedispatchDrain({ ...base, stopKind: 'batch_cap', live: false })).toBe(false);
+  });
+
 });

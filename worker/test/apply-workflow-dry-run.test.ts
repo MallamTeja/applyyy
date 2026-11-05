@@ -180,3 +180,36 @@ describe('apply.yml drain_approved (P1-6)', () => {
     expect(out.cap).toBe('APPLY_MAX_SUBMITS=3');
   });
 });
+
+// B1 (2026-11-05): a live drain re-dispatches itself when the worker says so. The structure is the
+// control here (which job holds the token, which inputs gate it), so it is pinned from the YAML text.
+describe('apply.yml redispatch job (B1)', () => {
+  // The committed workflow, LF-normalised.
+  const yml = readFileSync(new URL('../../.github/workflows/apply.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  // Split at the second job's header; both halves must exist (a rename fails, never passes vacuously).
+  const [head, job] = yml.split('\n  redispatch:\n');
+
+  test('the redispatch job exists, after the applier, gated on a manual LIVE drain and the worker verdict', () => {
+    // Present.
+    expect(job).toBeDefined();
+    // Reads the applier job's output.
+    expect(job).toContain('needs: apply');
+    // Every condition, in one expression: manual, live, drain, the worker's 'true', not cancelled.
+    expect(job).toContain("if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.dry_run == 'false' && inputs.drain_approved == 'true' && needs.apply.outputs.redispatch == 'true' }}");
+    // And the new run carries exactly the same live-drain inputs (it can never be wider than this one).
+    expect(job).toContain('gh workflow run apply.yml --ref main --repo "$REPO" -f dry_run=false -f drain_approved=true');
+  });
+
+  test('only the redispatch job holds actions: write; the applier job hands out the step verdict', () => {
+    // The workflow grant stays read-only: the next line after contents is not another key.
+    expect(head).toMatch(/^permissions:\n {2}contents: read\n(?! {2}\w)/m);
+    // Exactly one actions: write key line in the file (comments do not count)...
+    expect(yml.match(/^\s+actions: write\s*$/gm)).toHaveLength(1);
+    // ...and it is the redispatch job's.
+    expect(job).toMatch(/\n {4}permissions:\n {6}actions: write\n/);
+    // The applier step is named and its verdict is the job output.
+    expect(head).toContain('id: applier');
+    // Wired through.
+    expect(head).toContain('redispatch: ${{ steps.applier.outputs.redispatch }}');
+  });
+});

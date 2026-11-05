@@ -71,6 +71,10 @@ jobs:
     # Hard ceiling on budget damage. A hung browser or a retry loop cannot burn
     # more than this, which is roughly one day's allowance rather than a month's.
     timeout-minutes: 60
+    # B1 (2026-11-05): the worker's re-dispatch verdict, handed to the separate redispatch job below.
+    outputs:
+      # 'true' or 'false', written by worker/src/cli/apply.ts (shouldRedispatchDrain) to GITHUB_OUTPUT.
+      redispatch: ${{ steps.applier.outputs.redispatch }}
 
     # NO job-level env (moved 2026-10-05). Job-level env is visible to EVERY step,
     # including third-party actions and the dependency install scripts that
@@ -142,6 +146,8 @@ jobs:
       # (§18.1) and claims nothing if it is off, so stopping everything never
       # requires deleting this cron or revoking a key at 2am.
       - name: Run the applier
+        # Named, so the job's redispatch output can read this step's output (B1).
+        id: applier
         # The run mode, then two guards, all in shell before the worker starts.
         # THE MODE (W30, wiring audit 2026-11-01) is decided here, not in a `${{ }}`
         # expression: GitHub's expression `==` ignores case, so `dry_run=FALSE` ran
@@ -194,8 +200,9 @@ jobs:
             exit 1
           fi
           # A drain gets a FINITE batch of 25 (2026-11-05 review): an unbounded drain with no daily cap could
-          # outlast timeout-minutes and be killed mid-submit, stranding a row at `applying`. Leftovers wait for
-          # the next dispatch; the breaker and max_applications_per_day still apply. Other runs keep the env's '3'.
+          # outlast timeout-minutes and be killed mid-submit, stranding a row at `applying`. Leftovers go to
+          # the run the redispatch job starts (B1); the breaker and max_applications_per_day still apply.
+          # Other runs keep the env's '3'.
           if [ "$DRAIN" = "true" ]; then export APPLY_MAX_SUBMITS=25; fi
           # Guard 2: set the filter only when there is one.
           if [ -n "$ONLY_ID" ]; then export APPLY_ONLY_ID="$ONLY_ID"; fi
@@ -252,3 +259,34 @@ jobs:
       # worker/screenshots/ directory the old upload-artifact step read, so it only
       # ever warned "No files were found". An unknown submit's cause is recorded in
       # agent_runs.error_detail (claim-loop.ts closeRun), not in a CI artifact.
+
+  # B1 (2026-11-05, Teja: "no caps; run every time a job is in the queue"): a live drain that stopped on
+  # its batch of 25 or its 3000 s budget, having sent at least one application, starts the next drain
+  # run itself. The worker decides (claim-loop.ts shouldRedispatchDrain: never on the breaker, the kill
+  # switch, the daily cap, a one-row run, a drained queue or a dry run); this `if` ALSO requires that
+  # this run was a manual live drain, and the new run gets exactly the same two inputs, so a dry run or
+  # a cron run can never start a live one. Its own job, so the applier step (secrets, third-party code)
+  # never holds a token able to start workflows. The new run queues in applyy-applier behind this one.
+  redispatch:
+    # After the applier, reading its verdict.
+    needs: apply
+    # A manual live drain, the worker's exact 'true', and never after a cancel.
+    # (Expression == ignores case, W30, so dry_run "FALSE" matches here; harmless: that run was DRY in the
+    # exact shell check above, so the worker reported live=false and wrote redispatch=false.)
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.dry_run == 'false' && inputs.drain_approved == 'true' && needs.apply.outputs.redispatch == 'true' }}
+    # Nothing to set up: gh is preinstalled on the runner.
+    runs-on: ubuntu-latest
+    # One API call.
+    timeout-minutes: 5
+    # The one job allowed to start a workflow; no repository access at all.
+    permissions:
+      actions: write
+    steps:
+      # The same inputs this run had: live, the approved queue.
+      - name: Re-dispatch the drain for the rows this run left
+        run: gh workflow run apply.yml --ref main --repo "$REPO" -f dry_run=false -f drain_approved=true
+        env:
+          # gh reads the token from here.
+          GH_TOKEN: ${{ github.token }}
+          # Passed as data, never interpolated into the shell line.
+          REPO: ${{ github.repository }}

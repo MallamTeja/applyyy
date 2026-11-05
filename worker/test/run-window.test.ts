@@ -103,8 +103,9 @@ describe('DEFAULT_RUN_WINDOW_LIMITS against apply.yml (W31)', () => {
     const workflow = readFileSync(new URL('../../.github/workflows/apply.yml', import.meta.url), 'utf8');
     // Every timeout-minutes line: the shape is asserted, so a renamed key cannot pass vacuously (§6).
     const timeouts = [...workflow.matchAll(/^\s+timeout-minutes:\s*(\d+)\s*$/gm)].map((match) => Number(match[1]));
-    // Exactly one job, exactly one timeout.
-    expect(timeouts).toHaveLength(1);
+    // Two jobs since B1 (2026-11-05): the applier's kill first, then the redispatch job's 5 minutes.
+    // Pinned exactly, so a reordered or added job fails here rather than measuring the wrong one.
+    expect(timeouts).toEqual([60, 5]);
     // The hard kill, in seconds. A killed run strands its row at `applying`.
     const killAtSeconds = timeouts[0]! * 60;
     // Setup before the worker starts: 45 s measured on a cache hit (2026-11-02); a cache miss

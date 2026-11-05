@@ -9,7 +9,9 @@ import { chromium } from 'playwright';
 // The APPLY_ONLY_ID parser lives beside the loop that consumes it, so it is testable
 // without importing this file (which runs main() on import).
 // parseMaxSubmits too, so the cap is announced (and a bad one refused) before sign-in.
-import { parseMaxSubmits, parseOnlyApplicationId, runApplierBatch } from '../claim-loop.ts';
+import { parseMaxSubmits, parseOnlyApplicationId, runApplierBatch, shouldRedispatchDrain } from '../claim-loop.ts';
+// The step output apply.yml's redispatch job reads (B1).
+import { appendFileSync } from 'node:fs';
 import { createSupabaseGateway, type SupabaseLike } from '../supabase-gateway.ts';
 // The production robots.txt check (master-robots under the applier's own token).
 import { createRobotsCheck } from '../apply-one.ts';
@@ -169,8 +171,16 @@ async function main(): Promise<void> {
     console.log(
       `[applyy] run ${summary.runId}: claimed=${summary.claimed} submitted=${summary.submitted} ` +
         `blocked=${summary.blocked} dryRun=${summary.dryRun} unknown=${summary.outcomeUnknown} ` +
-        `errors=${summary.errors} — ${summary.stoppedReason}`,
+        `errors=${summary.errors} stop=${summary.stopKind} — ${summary.stoppedReason}`,
     );
+
+    // B1 (2026-11-05): the re-dispatch verdict for apply.yml's redispatch job, which also requires a live
+    // manual drain (dry_run "false" + drain_approved "true"), so a cron or one-row run never chains.
+    const redispatch = shouldRedispatchDrain(summary);
+    // Only inside Actions, where GITHUB_OUTPUT names the step's output file.
+    if (process.env['GITHUB_OUTPUT']) appendFileSync(process.env['GITHUB_OUTPUT'], `redispatch=${redispatch}\n`);
+    // Said in the log too, so the next run's origin is visible from this one.
+    if (redispatch) console.log(`[applyy] stopped on ${summary.stopKind} after ${summary.submitted} sent; asking for the next drain run`);
 
     // A row whose outcome we could not determine is the one case that needs a
     // human, so it is called out separately rather than buried in the tally.
