@@ -1,8 +1,10 @@
 {
   "// purpose": "Deno's configuration root for supabase/functions/**. It exists for a second reason beyond settings: WITHOUT a deno.json here, Deno walks up the tree looking for a workspace root, finds pnpm-workspace.yaml, and REWRITES the repo's root package.json to add a `workspaces` key. That file belongs to another stream. Anchoring Deno here stops the walk.",
 
-  "// imports": "Import map. Reserved for the bare specifier @applyy/shared-types once Node's test runner can resolve it too. Today _shared/contracts/shared-types.ts uses a relative path instead, because Deno reads this map and `node --test` does not — a CURRENT toolchain limitation to revisit when pnpm install is healthy and node_modules links exist, NOT a permanent design choice.",
-  "imports": {},
+  "// imports": "Import map. @supabase/supabase-js is pinned HERE, once (P2 #7, 2026-11-05): it used to be written as jsr:@supabase/supabase-js@2.58.0 in 7 files, so a bump had 7 places to drift. Every file imports the bare name. Node never resolves it: the files node --test loads use `import type` only, which Node's type stripping erases, and the value importers (_shared/db/client.ts, rls-proof) are Deno-only. Note Node's worker pins supabase-js 2.50.0 separately (worker/package.json): the two runtimes still run different client versions. @applyy/shared-types stays a relative import (_shared/contracts/shared-types.ts) because node --test cannot read this map.",
+  "imports": {
+    "@supabase/supabase-js": "jsr:@supabase/supabase-js@2.58.0"
+  },
 
   "// compilerOptions": "Kept aligned with the repo's tsconfig.base.json. Deno does not read that file, so the strictness settings that matter for the anti-fabrication work are restated rather than assumed.",
   "compilerOptions": {

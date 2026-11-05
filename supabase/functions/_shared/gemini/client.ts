@@ -27,7 +27,7 @@
 //    Pure dependency seams for network (`fetch`), clock (`now`, `sleep`), and database (`db`),
 //    allowing 100% deterministic unit testing under Node and Deno without live network access.
 
-import type { SupabaseClient } from "jsr:@supabase/supabase-js@2.58.0";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   claimKey,
   reportResult,

@@ -29,7 +29,7 @@
 
 // The client type only — this module never creates one, so a caller cannot
 // accidentally get an unauthenticated pool.
-import type { SupabaseClient } from "jsr:@supabase/supabase-js@2.58.0";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 // The environment-variable prefix keys are discovered under.
 //

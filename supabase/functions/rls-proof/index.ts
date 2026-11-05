@@ -35,7 +35,7 @@
 // ------------------------------------------------------------------------------
 
 // The official client, pinned exactly as elsewhere in this stream.
-import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2.58.0";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 // The entry gate (W16 + W34): its own secret, and never the production project. Pure, node-tested.
 import { RLS_PROOF_SECRET_ENV_VAR, RLS_PROOF_SECRET_HEADER, RLS_PROOF_TARGET_REF_ENV_VAR, runGate } from "./guard.ts";
 

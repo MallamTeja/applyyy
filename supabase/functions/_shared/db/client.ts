@@ -29,7 +29,7 @@
 // The official client. Pinned to an exact version rather than a range: a floating
 // range re-resolves on a redeploy nobody triggered, so the build would change for
 // someone who edited nothing — the hardest kind of break to diagnose.
-import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2.58.0";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 // The machine-agent proof header, shared with the worker so the name cannot drift.
 import { AGENT_KEY_ENV_VAR, agentKeyHeaders } from "./agent-key.ts";
 // W15: the caller check that runs before the sign-in. Pure, so its tests run under node.

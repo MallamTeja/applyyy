@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 // Unit under test; extension-suffixed so this runs under Deno and node --test alike.
 import { REFERRAL_ELIGIBLE_STATUSES, selectReferralQueue } from "./eligible-queue.ts";
 // The client type the function takes; type-only, so node strips it.
-import type { SupabaseClient } from "jsr:@supabase/supabase-js@2.58.0";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 // One row per pipeline status, so any status that leaks into the result is visible.
 const ALL_STATUSES = [

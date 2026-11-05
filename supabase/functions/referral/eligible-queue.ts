@@ -7,7 +7,7 @@
 // so only rows he is about to approve or has approved are drafted.
 
 // Type-only, so node strips it and the test never resolves a jsr: specifier.
-import type { SupabaseClient } from "jsr:@supabase/supabase-js@2.58.0";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 // Closed list of statuses a draft may be written for. `as const` keeps it a literal tuple,
 // so a widening edit shows up in the diff and the named test, not only at runtime.

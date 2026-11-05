@@ -8,7 +8,7 @@
 // only logged), so the glue is what replay.test.ts exercises, against a supabase-js double.
 
 // Type only: erased under node --test, so the jsr specifier is never resolved there.
-import type { SupabaseClient } from "jsr:@supabase/supabase-js@2.58.0";
+import type { SupabaseClient } from "@supabase/supabase-js";
 // The pure decisions the sweep composes. Reused, never forked.
 import {
   // Statuses whose non-tracker entry makes older emails stale.
