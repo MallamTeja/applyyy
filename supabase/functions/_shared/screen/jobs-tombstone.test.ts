@@ -170,3 +170,22 @@ test("execute is granted to authenticated and revoked from anon", () => {
   // The workflow's app user can call it.
   assert.match(sql, /grant execute on function public\.tombstone_dropped_jobs\(integer, integer\) to authenticated;/);
 });
+
+// EDGE CASE 4: a pasted link of a tombstoned job revives it with the re-fetched text. The
+// jobs_keep_tombstone_slim trigger discards that text unless the SAME update clears the
+// marker, so job-link-intake's fill must carry `tombstoned_at: null` next to description_raw.
+// Read as source text because `makeStore` is a private adapter over a live client; the
+// assertion pins the exact spread, with comments stripped so prose cannot satisfy it.
+test("edge 4: job-link-intake's description fill also clears tombstoned_at", () => {
+  // The intake adapter, from this file's directory: _shared/screen -> job-link-intake.
+  const intake = readFileSync(join(HERE, "..", "..", "job-link-intake", "index.ts"), "utf8")
+    // Strip line comments, so only code can match.
+    .replace(/\/\/[^\n]*/g, " ")
+    // Collapse whitespace, so formatting does not matter.
+    .replace(/\s+/g, " ");
+  // The fill spread names both columns together: text back AND marker cleared.
+  assert.match(
+    intake,
+    /\.\.\.\(descriptionRaw !== null \? \{ description_raw: descriptionRaw, tombstoned_at: null \} : \{\}\)/,
+  );
+});

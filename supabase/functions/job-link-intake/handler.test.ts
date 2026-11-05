@@ -505,7 +505,8 @@ test("job-link-intake wiring: the store reads description_raw back and writes it
   // The read-back must carry the stored description, or every paste would look like a fill.
   assert.match(source, /\.select\("id, discovered_via, disappeared_at, description_raw"\)/);
   // The tag write sets description_raw only for a non-null fill; otherwise the column is not named.
-  assert.match(source, /\.\.\.\(descriptionRaw !== null \? \{ description_raw: descriptionRaw \} : \{\}\)/);
+  // A fill also clears tombstoned_at (jobs tombstone edge 4), or the trigger discards the text.
+  assert.match(source, /\.\.\.\(descriptionRaw !== null \? \{ description_raw: descriptionRaw, tombstoned_at: null \} : \{\}\)/);
 });
 
 // --- Read from the link alone (Teja, 2026-11-01): no robots on the pasted page, LinkedIn/X

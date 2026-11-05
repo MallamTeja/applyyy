@@ -137,7 +137,10 @@ function makeStore(db: SupabaseClient): IntakeStore {
     async tagManual(jobId, discoveredVia, descriptionRaw) {
       // One write. description_raw is named only for a fill (W3), so a plain tag can never
       // null out a scouted description; every other scouted column is left as it was.
-      const { error } = await db.from("jobs").update({ discovered_via: discoveredVia, disappeared_at: null, ...(descriptionRaw !== null ? { description_raw: descriptionRaw } : {}) }).eq("id", jobId);
+      // A fill also clears tombstoned_at (edge 4 of docs/db/2026-11-05-jobs-tombstone-policy.md):
+      // on a tombstoned row the jobs_keep_tombstone_slim trigger would otherwise discard the
+      // re-fetched text, and the revived job would fail at the matcher as missing_description.
+      const { error } = await db.from("jobs").update({ discovered_via: discoveredVia, disappeared_at: null, ...(descriptionRaw !== null ? { description_raw: descriptionRaw, tombstoned_at: null } : {}) }).eq("id", jobId);
       // Null means it landed.
       return error ? error.message : null;
     },
