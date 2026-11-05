@@ -25,7 +25,7 @@
 import type { AgentName, AnswerBankRow, AtsProvider, BlockReason, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 import { guardedAdvance, type StatusWriter } from './guarded-advance.ts';
 // isEeoQuestion: the planner's own EEO test, reused by the fill loop's optional-EEO degrade.
-import { isEeoQuestion, planFill, type FillBlocker } from './plan-fill.ts';
+import { isEeoQuestion, planFill, questionKey, type FillBlocker } from './plan-fill.ts';
 import { resolveSubmissionMode, type SubmissionEnv } from './submission-mode.ts';
 import type { FormField } from './extract-fields.ts';
 // Which file input receives the resume, or why none can. Pure and browser-free,
@@ -224,6 +224,10 @@ export interface ArtifactPaths {
 
 /** The database operations this module needs: advance, release, two uploads, one record. */
 export interface ApplierGateway extends StatusWriter {
+  // H2: report the planner's refused required fields (unanswered_questions). Best-effort: a report, never
+  // a decision. Optional on this port so test doubles need not grow it; REQUIRED on RunGateway, so the
+  // production gateway cannot ship without it.
+  recordUnansweredQuestions?(applicationId: string, blockers: readonly FillBlocker[]): Promise<void>;
   // Give the row back untouched, still `approved`. The dry-run path and only
   // the dry-run path uses this.
   releaseClaim(applicationId: string, reason: string): Promise<void>;
@@ -657,7 +661,8 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
         // Falls back to the id so the blocker is never blank even if the field vanished from the list.
         const label = field?.label ?? fill.id;
         // Pushed into the shared list so the park path and the dry-run report both see it.
-        blockers.push({ id: fill.id, label, reason: 'no_matching_option' });
+        // H2 fields too (key from the field's own label, its kind, its options when known), so the blocker has one shape.
+        blockers.push({ id: fill.id, label, reason: 'no_matching_option', key: questionKey(label), kind: fill.kind, ...(field?.options === undefined ? {} : { options: field.options }) });
         // Not viable any more: this gates the resume attach, the dry-run report and the park path.
         // Flipped last so the blocker is recorded before the viability gate changes.
         wouldSubmit = false;
@@ -818,6 +823,11 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
       detected ??
       // The W5 empty page, before the per-question default.
       (formShapeBlockers.length > 0 ? 'unsupported_form' : 'unanswerable_question');
+
+    // H2: report the refused fields first, so the Answer bank page asks Teja once. Best-effort: caught here,
+    // so a failed report can never skip the status write below. plan.blockers only: page-level and
+    // attachment blockers name no question.
+    await gateway.recordUnansweredQuestions?.(row.id, plan.blockers).catch((error: unknown) => console.warn('[unanswered]', error));
 
     await guardedAdvance(gateway, {
       applicationId: row.id,

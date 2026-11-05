@@ -124,6 +124,9 @@ export interface KitGateway {
   uploadResume(applicationId: string, bytes: Uint8Array): Promise<string>;
   // The one row the kit writes: an append-only note.
   appendApplicationNote(applicationId: string, detail: Record<string, unknown>): Promise<void>;
+  // H2: report the planner's refused required fields (unanswered_questions). Best-effort. Optional so test
+  // doubles need not grow it; createKitGateway's return type makes it required in production.
+  recordUnansweredQuestions?(applicationId: string, blockers: readonly FillBlocker[]): Promise<void>;
 }
 
 /** The page operations the kit may use: reading only. No fill, attachFile or submit exists here. */
@@ -388,6 +391,9 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
 
   // Every required refusal, with the planner's reason, and every resume-box problem.
   warnings.push(...plan.blockers.map(refusalWarning), ...attachment.blockers.map(refusalWarning));
+  // H2: report every refused required field, so the Answer bank page asks Teja once. Best-effort: caught,
+  // so a failed report never costs the kit. plan.blockers only: attachment blockers name no question.
+  await gateway.recordUnansweredQuestions?.(row.id, plan.blockers).catch((error: unknown) => console.warn('[unanswered]', error));
 
   // THE NOTE, in the v1 contract.
   const detail: ApplyKitDetail = {
@@ -414,7 +420,8 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
  */
 // The kill-switch read rides BESIDE KitGateway, not in it, as supabase-assist-gateway does:
 // buildApplyKit never reads it, so its test doubles need not grow a method it does not call.
-export function createKitGateway(client: SupabaseLike, config: GatewayConfig): KitGateway & { isSystemEnabled(): Promise<boolean> } {
+// H2: recordUnansweredQuestions is REQUIRED on this return type, so the production kit cannot ship without it.
+export function createKitGateway(client: SupabaseLike, config: GatewayConfig): KitGateway & { isSystemEnabled(): Promise<boolean>; recordUnansweredQuestions(applicationId: string, blockers: readonly FillBlocker[]): Promise<void> } {
   // The production gateway; only the methods below are exposed, never its status writes.
   const production = createSupabaseGateway(client, config);
   return {
@@ -452,5 +459,7 @@ export function createKitGateway(client: SupabaseLike, config: GatewayConfig): K
     uploadResume: (applicationId, bytes) => production.uploadResume(applicationId, bytes),
     // Delegated: the same append-only insert the unknown-outcome note uses.
     appendApplicationNote: (applicationId, detail) => production.appendApplicationNote(applicationId, detail),
+    // H2: the production report, so the kit and the applier send the same items.
+    recordUnansweredQuestions: (applicationId, blockers) => production.recordUnansweredQuestions(applicationId, blockers),
   };
 }

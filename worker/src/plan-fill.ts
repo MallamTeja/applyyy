@@ -20,6 +20,12 @@ import { normaliseKey, resolveProfileAnswer } from './profile-answers.ts';
 // Re-exported so existing and future callers can reach the normaliser from the planner.
 export { normaliseKey };
 
+/** The key the planner looks a label up by; the unanswered-questions report (H2) sends exactly this. */
+export function questionKey(label: string): string {
+  // Accents folded first, then normalised: one definition, so a saved answer always meets its label.
+  return normaliseKey(foldAccents(label));
+}
+
 // Questions only Teja may ever answer himself, matched against the normalised label.
 // Checked FIRST, before eligibility, the bank or the profile, so no stored answer, attested
 // or not, can reach them. Over-matching sends more questions to the human, which is the safe
@@ -174,7 +180,7 @@ const COMPANY_SUFFIXES: ReadonlySet<string> = new Set([
 // never drift from the planner's: the same fold, the same normaliser, the same fragments.
 export function isEeoQuestion(label: string): boolean {
   // Normalised exactly as planFill normalises a label before its EEO branch.
-  const key = normaliseKey(foldAccents(label));
+  const key = questionKey(label);
   // Substring fragments, like the planner: over-matching only widens a "leave blank" that is
   // itself gated on the field being optional, so it can never turn into an answer.
   return EEO_FRAGMENTS.some((fragment) => key.includes(fragment));
@@ -219,6 +225,14 @@ export interface FillBlocker {
     | 'ambiguous_answer_key'
     // A select/radio answer that matches none of the field's option labels exactly.
     | 'no_matching_option';
+  // H2: the planner's lookup key for the UNDECORATED label (questionKey(formField.label)). The Answer bank
+  // page saves Teja's answer under it, so it must be this key, never one rebuilt from `label` (which the
+  // ambiguous_answer_key refusal decorates).
+  readonly key: string;
+  // H2: the extracted control kind, so the page renders the right input and knows a checkbox is unfillable.
+  readonly kind: FormField['kind'];
+  // H2: the form's options when extracted; absent means unknown.
+  readonly options?: readonly string[];
 }
 
 /** The complete decision for one application form. */
@@ -421,7 +435,8 @@ export function planFill(
       if (!formField.required) return;
       // A required gap stops the application. This is the constraint #4 branch, and the
       // deliberate absence of any fallback here IS the guarantee.
-      blockers.push({ id: formField.id, label, reason });
+      // H2: with the undecorated lookup key, the kind and (when known) the options, for the unanswered report.
+      blockers.push({ id: formField.id, label, reason, key: questionKey(formField.label), kind: formField.kind, ...(formField.options === undefined ? {} : { options: formField.options }) });
     };
 
     // Look the question up by its human label, which is the only stable identifier on
@@ -429,7 +444,7 @@ export function planFill(
     // Accents are folded first (NFKD, then the combining marks dropped), so "Consént" still
     // hits 'consent' instead of normalising to "cons_nt". A bank key with accents then fails
     // to meet the label and refuses as no_answer: the safe direction.
-    const key = normaliseKey(foldAccents(formField.label));
+    const key = questionKey(formField.label);
 
     // NEVER FIRST: EEO, criminal, pay-history and consent questions are only ever answered
     // by Teja himself, so nothing below (attested or not) may reach them.

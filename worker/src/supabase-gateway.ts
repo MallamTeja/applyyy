@@ -91,7 +91,9 @@ function unwrap<T>(result: { data: T; error: { message: string } | null }, opera
   return result.data;
 }
 
-export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfig): RunGateway {
+// H2: recordUnansweredQuestions is REQUIRED on this return type (optional on the ports for test doubles), so
+// the production gateway cannot ship without it.
+export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfig): RunGateway & Required<Pick<RunGateway, 'recordUnansweredQuestions'>> {
   // Cached expiry, refreshed whenever we sign in. Held here rather than read
   // from the client on every check so the hot path is synchronous.
   let expiresAtEpochSeconds = 0;
@@ -137,6 +139,22 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
     // The port's two run methods ARE the locals, so the loop and the sweep share one write path.
     openRun,
     closeRun,
+    // H2: the planner's refused required fields, upserted into unanswered_questions (migration 20261105230000).
+    async recordUnansweredQuestions(applicationId, blockers) {
+      // Only blockers with a usable key: an all-symbol label normalises to '', which the RPC refuses, and a
+      // malformed item refuses the WHOLE call (22023).
+      const items = blockers
+        // Dropped, not sent.
+        .filter((blocker) => blocker.key !== '')
+        // The RPC's item shape; the label capped at the column's 2000 characters; unknown options as null.
+        .map((blocker) => ({ key: blocker.key, label: blocker.label.slice(0, 2000), reason: blocker.reason, kind: blocker.kind, options: blocker.options ?? null }));
+      // Nothing refused: no call.
+      if (items.length === 0) return;
+      // supabase-js returns { error }; it does not throw on a 4xx.
+      const { error } = await client.rpc('record_unanswered_questions', { p_application_id: applicationId, p_items: items });
+      // Logged, never thrown: the report must not change the application's outcome.
+      if (error) console.warn(`[unanswered] ${applicationId}: ${error.message}`);
+    },
 
     async appendApplicationNote(applicationId, detail) {
       // A plain INSERT: application_events is append-only (a trigger forbids update and delete), and its

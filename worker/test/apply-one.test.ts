@@ -861,6 +861,36 @@ describe('applyToOne — a fill the page rejects', () => {
     expect(advances[0]?.detail).toMatchObject({ block_reason: 'unanswerable_question', unanswered: ['Country'] });
   });
 
+  // H2 (2026-11-06): the refused fields are reported to unanswered_questions before the park, and the
+  // report is best-effort: a failed report must never skip the status write.
+  it('reports the refused fields, and a rejected report still parks the row at blocked_needs_human', async () => {
+    // One required question nothing can answer.
+    const { page, submit } = fakePage({ extractFields: async () => [{ id: 'q9', label: 'Notice period?', kind: 'text', required: true }] });
+    // The recording gateway for the park.
+    const { gateway, advances } = detailGateway();
+    // What was reported, before the report fails.
+    const reported: Array<{ id: string; keys: string[] }> = [];
+    // The report rejects, as an unreachable RPC would.
+    const failing: ApplierGateway = {
+      ...gateway,
+      recordUnansweredQuestions: async (id, blockers) => {
+        // Recorded first, so the test sees what would have been sent.
+        reported.push({ id, keys: blockers.map((blocker) => blocker.key) });
+        // Then rejected.
+        throw new Error('rpc down');
+      },
+    };
+    // A live run, so the park path runs.
+    const outcome = await applyToOne({ row, page, gateway: failing, answers: [], env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+    // Nothing sent.
+    expect(submit).not.toHaveBeenCalled();
+    // The report named the question by the planner's key.
+    expect(reported).toEqual([{ id: 'app-1', keys: ['notice_period'] }]);
+    // And the park still happened, in one write.
+    expect(advances.map((a) => a.to)).toEqual(['blocked_needs_human']);
+    expect(outcome.kind).toBe('blocked');
+  });
+
   it('rethrows any other error unchanged', async () => {
     // An unknown failure must not be relabelled as a form gap.
     const { page } = fakePage({

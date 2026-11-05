@@ -465,6 +465,36 @@ describe('buildApplyKit robots refusal (B2, K2)', () => {
     expect(notes[0]).toMatchObject({ kind: 'apply_kit', form_url: 'https://example.test/job', fields: [] });
   });
 
+  // H2 (2026-11-06): a kit reports the fields the planner refused, best-effort.
+  test('a kit reports its refused fields by planner key, and a rejected report still writes the kit', async () => {
+    // The writes and notes this case made.
+    const writes: string[] = [];
+    const notes: Array<Record<string, unknown>> = [];
+    // What was reported.
+    const reported: string[][] = [];
+    // The gateway, with a report that rejects.
+    const gateway: KitGateway = {
+      ...gatewayRecording(writes, notes),
+      recordUnansweredQuestions: async (_id, blockers) => { reported.push(blockers.map((blocker) => blocker.key)); throw new Error('rpc down'); },
+    };
+    // A readable form: an email (so it is not "closed") and one question nothing answers.
+    const formPage = {
+      goto: async () => {},
+      detectBlocker: async () => null,
+      extractFields: async () => [
+        { id: 'email', label: 'Email', kind: 'email', required: true },
+        { id: 'q9', label: 'Notice period?', kind: 'text', required: true },
+      ],
+    } as never;
+    // Allowed by robots.
+    const kit = await buildApplyKit({ applicationId: 'app-r', gateway, page: formPage, renderResume, checkRobots: async () => ({ kind: 'allow', reason: 'ok', crawlDelayMs: null }) as never, runId: null, now: () => new Date() });
+    // Reported by the planner's key.
+    expect(reported).toEqual([['notice_period']]);
+    // The kit was still written.
+    expect(writes).toContain('appendApplicationNote');
+    expect(kit.fields.length).toBe(2);
+  });
+
   test('robots "wait" is a plain error, writing nothing', async () => {
     // The writes this case made.
     const writes: string[] = [];

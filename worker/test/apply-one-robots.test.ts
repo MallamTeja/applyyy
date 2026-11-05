@@ -534,8 +534,9 @@ describe('runApplierBatch and robots', () => {
         kind: 'dry_run_complete',
         wouldSubmit: false,
         blockers: [
-          { id: 'q1', label: 'Visa status', reason: 'no_matching_option' },
-          { id: 'q2', label: 'Start date', reason: 'no_matching_option' },
+          // H2: blockers carry key and kind; the formatter reads neither.
+          { id: 'q1', label: 'Visa status', reason: 'no_matching_option', key: 'visa_status', kind: 'text' },
+          { id: 'q2', label: 'Start date', reason: 'no_matching_option', key: 'start_date', kind: 'text' },
         ],
         screenshotPath: 's.png',
         resumePath: null,
