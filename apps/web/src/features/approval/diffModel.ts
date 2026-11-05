@@ -160,6 +160,11 @@ export interface DiffLine {
    * path removes. Optional for the same reason as addedSkills; absent means the chat sends the old
    * flat line and offers no skill removal. */
   readonly printedSkills?: readonly PrintedSkill[];
+  /* Skills line only (2026-11-05): EVERY master skill with its master group, so the AI chat can offer
+   * the ones not printed. masterText carries only the joined names, so the chat could not say which
+   * group a master tool belongs to, and it never sent them at all: "add 2 tools from my master" got
+   * "check your Master profile page". Optional for the same reason as printedSkills. */
+  readonly masterSkills?: readonly { readonly name: string; readonly category: string }[];
   /* Bullet lines only (2026-11-01): the section and entry the bullet prints under, so the screen
    * can group it under its employer or project and a Move control knows its siblings. Optional
    * because summary and skills lines have no entry, and hand-built fixtures predate it. */

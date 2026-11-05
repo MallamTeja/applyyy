@@ -666,6 +666,9 @@ function skillsLine(resolved: ResolvedResume, master: MasterProfile, original: R
     /* Every printed skill with its group, for the AI chat (2026-11-04) and DiffView's grouped
        skills line (2026-11-05). The D4 branch carries it too, for the grouping only. */
     printedSkills: resolved.skills.map((skill) => ({ ref: skill.ref, name: skill.name, category: skill.category })),
+    /* Every master skill with its group (2026-11-05), for the AI chat's "add from my master". Not on the
+       D4 branch: the page never mounts the chat there. */
+    masterSkills: master.skills.map((skill) => ({ name: skill.name, category: skill.category })),
   };
 }
 

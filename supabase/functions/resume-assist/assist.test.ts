@@ -940,3 +940,72 @@ test("the reply never claims a change: claim sentences are dropped, and a no-op 
   // Only the non-claim sentence is left.
   assert.equal(mixed.ok ? mixed.note : null, "Kafka fits Tools best.");
 });
+
+// --- master skills not on the resume (2026-11-05, live row ce0d1730) -------------------------------
+
+// The live row's skills: the tailored resume printed only Git and GitHub under Tools; the master held
+// eight more tools the model never saw, so three asks in a row ended at "check your Master profile page".
+const LIVE_PRINTED = [{ name: "Git", category: "Tools" }, { name: "GitHub", category: "Tools" }];
+// Master skills NOT printed, each in its master group (a subset of the live eight, two groups).
+const LIVE_AVAILABLE = [{ name: "Postman", category: "Tools" }, { name: "Swagger/OpenAPI", category: "Tools" }, { name: "pytest", category: "Testing" }];
+// The owner's exact second prompt on that row, typos kept: the model must read it as written.
+const LIVE_PROMPT = "hey from my master resume add 2 more tool whcih are not there in this tail;ored resue";
+
+test("the prompt lists the master skills not on the resume, by master group, and tells the model to add from them", () => {
+  // The live row's body: printed Git/GitHub, available Postman, Swagger/OpenAPI, pytest.
+  const parsed = parseAssistRequest(body({ instruction: LIVE_PROMPT, printedSkills: LIVE_PRINTED, availableSkills: LIVE_AVAILABLE, categories: ["Tools", "Testing"] }));
+  // Valid, so the prompt can be built from it.
+  assert.ok(parsed.ok, parsed.ok ? "" : parsed.message);
+  // The prompt the model receives.
+  const prompt = buildAssistPrompt(parsed.request);
+  // The user content, line by line.
+  const lines = prompt.userContent.split("\n");
+  // The available skills, grouped exactly like SKILLS so a group name means one thing.
+  assert.ok(lines.includes("MASTER SKILLS NOT ON RESUME (by group): Tools: Postman, Swagger/OpenAPI | Testing: pytest"), lines.join("\n"));
+  // The printed ones stay on their own line, so the model can tell printed from addable.
+  assert.ok(lines.includes("SKILLS (by group): Tools: Git, GitHub"), lines.join("\n"));
+  // The rule that lets the model use them: they are the owner's, so adding one invents nothing.
+  assert.match(prompt.systemInstruction, /MASTER SKILLS NOT ON RESUME are the owner's own skills: when asked to add skills or tools, pick from it and use add_skill/);
+  // And it must not send the owner away for a skill that list holds (the live deflection).
+  assert.match(prompt.systemInstruction, /never send the owner to the Master profile page for a skill that list holds/);
+});
+
+test("a client that sends no availableSkills gets no MASTER SKILLS line (old body, same prompt shape)", () => {
+  // body() has no availableSkills.
+  const lines = buildAssistPrompt(request()).userContent.split("\n");
+  // No empty or "(none)" line: absent means the browser offered nothing, not that the master is empty.
+  assert.equal(lines.filter((line) => line.startsWith("MASTER SKILLS NOT ON RESUME")).length, 0);
+});
+
+test("parseAssistRequest validates availableSkills all-or-nothing, like printedSkills", () => {
+  // An empty list is "none to offer", not an error.
+  assert.equal(parseAssistRequest(body({ availableSkills: [] })).ok, true);
+  // Not an array.
+  assert.equal(parseAssistRequest(body({ availableSkills: "Postman, pytest" })).ok, false);
+  // A missing category: the model would not know which group to file it under.
+  assert.equal(parseAssistRequest(body({ availableSkills: [{ name: "Postman" }] })).ok, false);
+  // Over 80 items is refused, not sliced: the browser picks which skills matter.
+  assert.equal(parseAssistRequest(body({ availableSkills: Array.from({ length: 81 }, (_, i) => ({ name: `S${i}`, category: "Tools" })) })).ok, false);
+});
+
+test("the live ask, through the handler against a fake model: the prompt carries the master tools and two add_skill ops come back", async () => {
+  // The model answers as it should once it can see the list: two master tools, into Tools.
+  const d = deps({
+    answer: {
+      ok: true,
+      keyIndex: 1,
+      attempts: 1,
+      data: { candidates: [{ content: { parts: [{ text: JSON.stringify({ ops: [{ op: "add_skill", name: "Postman", category: "Tools" }, { op: "add_skill", name: "Swagger/OpenAPI", category: "Tools" }], note: "Postman and Swagger/OpenAPI are from your master." }) }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 300 } },
+    },
+  });
+  // The live row's body, posted as the browser does.
+  const res = await handleResumeAssist(post("good", body({ instruction: LIVE_PROMPT, printedSkills: LIVE_PRINTED, availableSkills: LIVE_AVAILABLE, categories: ["Tools", "Testing"] })), d);
+  // The answer.
+  const out = (await res.json()) as Record<string, unknown>;
+  // 200 ok.
+  assert.equal(res.status, 200);
+  // The model was shown the master tools: without this line it can only re-propose Git and GitHub.
+  assert.match(d.calls[0]!.prompt.userContent, /MASTER SKILLS NOT ON RESUME \(by group\): Tools: Postman, Swagger\/OpenAPI \| Testing: pytest/);
+  // Both adds survive the parser, filed under the existing Tools group.
+  assert.deepEqual(out.ops, [{ op: "add_skill", name: "Postman", category: "Tools" }, { op: "add_skill", name: "Swagger/OpenAPI", category: "Tools" }]);
+});

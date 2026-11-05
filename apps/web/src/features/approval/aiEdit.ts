@@ -80,6 +80,8 @@ export interface AssistBody {
   readonly categories: readonly string[];
   // Every printed skill with its group (2026-11-04); sent only when the skills line carries them.
   readonly printedSkills?: readonly { readonly name: string; readonly category: string }[];
+  // The owner's master skills NOT printed, each with its master group (2026-11-05); sent only when any.
+  readonly availableSkills?: readonly { readonly name: string; readonly category: string }[];
   // Earlier messages of the active chat, oldest first (chat memory, 2026-11-01).
   readonly history: readonly ChatTurn[];
   // STRUCTURE (2026-11-01); the three fields below are sent only when the page passed a structure.
@@ -357,6 +359,8 @@ export function buildAssistDraft(
   let skills = '';
   // Every printed skill with its ref and group, when the skills line carries them (2026-11-04).
   let printed: readonly PrintedSkill[] = [];
+  // Master skills not printed, with their groups (2026-11-05); empty until the skills line is read.
+  let availableSkills: readonly { readonly name: string; readonly category: string }[] = [];
   // Every line once, in print order.
   for (const line of diff.lines) {
     // A bullet that is still printed and can be edited: the only ones an op could target.
@@ -394,6 +398,11 @@ export function buildAssistDraft(
       /* Within the function's caps: a name it would refuse is left out rather than failing the
          whole ask over one odd master skill (it then simply cannot be removed by name). */
       printed = (line.printedSkills ?? []).filter((skill) => skill.name.trim() !== '' && skill.name.length <= MAX_SKILL_NAME && skill.category.trim() !== '' && skill.category.length <= MAX_ITEM).slice(0, MAX_PRINTED_SKILLS);
+      // Every printed name, uncapped and case-folded, so no printed skill is ever offered again.
+      const printedNames = new Set((line.printedSkills ?? []).map((skill) => skill.name.trim().toLowerCase()));
+      /* The master skills the resume does not print, in master order, within the same caps as printed
+         ones (the function refuses the whole ask otherwise): what "add 2 tools from my master" picks from. */
+      availableSkills = (line.masterSkills ?? []).filter((skill) => !printedNames.has(skill.name.trim().toLowerCase()) && skill.name.trim() !== '' && skill.name.length <= MAX_SKILL_NAME && skill.category.trim() !== '' && skill.category.length <= MAX_ITEM).slice(0, MAX_PRINTED_SKILLS);
     }
   }
   // The summary is editable under its reserved id.
@@ -446,6 +455,8 @@ export function buildAssistDraft(
     categories: shortList(categories),
     // Name and group only; the ref stays in the browser, like every other ref.
     ...(printed.length === 0 ? {} : { printedSkills: printed.map((skill) => ({ name: skill.name, category: skill.category })) }),
+    // Only when any, so a resume printing every master skill sends the pre-2026-11-05 body.
+    ...(availableSkills.length === 0 ? {} : { availableSkills }),
     // The caller (resumeChat.historyFor) already windowed and trimmed it to the function's caps.
     history,
     // The structure, only when the page passed one, so an old body stays byte-identical.

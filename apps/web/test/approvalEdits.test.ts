@@ -147,6 +147,15 @@ const diff = (resolved: unknown, opts: { original?: unknown; findings?: unknown[
     original: (opts.original === undefined ? original() : opts.original) as never,
   });
 
+describe('skills line carries every master skill with its group (2026-11-05)', () => {
+  it('lists the pinned master skills on the skills line, so the AI chat can offer the unprinted ones', () => {
+    // The adapter's skills line for the standard fixture.
+    const line = diff(original()).lines.find((candidate) => candidate.kind === 'skills');
+    // Name and master group, exactly as the master holds them; without this the chat sends no master skills.
+    assert.deepEqual(line?.masterSkills, [{ name: 'Node.js', category: 'Frameworks' }]);
+  });
+});
+
 // The line for one bullet ref, found by its master node so the id format is not assumed.
 const lineFor = (d: ReturnType<typeof diff>, ref: string) => {
   // Exactly one line per bullet ref.

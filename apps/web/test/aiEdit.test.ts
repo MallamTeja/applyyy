@@ -596,6 +596,25 @@ describe('buildAssistDraft reads the posting and the skill groups (2026-11-04)',
   });
 });
 
+describe('buildAssistDraft offers the master skills the resume does not print (2026-11-05, live row ce0d1730)', () => {
+  it('sends availableSkills: every master skill not printed, with its master group, matched case-insensitively', () => {
+    // The live shape: the master holds Postman and pytest beside the printed ones; "testing" is printed
+    // as "Testing", so a case difference must not offer it again.
+    const line = { ...skillsLine, masterSkills: [{ name: 'TypeScript', category: 'Languages' }, { name: 'Postman', category: 'Tools' }, { name: 'testing', category: 'Tools' }, { name: 'pytest', category: 'Testing' }] };
+    // Built as the page builds it.
+    const draft = ai.buildAssistDraft({ ...(jdiff as object), lines: [line] } as never, ['Languages', 'Tools', 'Testing'], 'hey from my master resume add 2 more tool whcih are not there in this tail;ored resue');
+    // Only the two the resume lacks, in master order, each in its master group.
+    assert.deepEqual(draft.body.availableSkills, [{ name: 'Postman', category: 'Tools' }, { name: 'pytest', category: 'Testing' }]);
+  });
+
+  it('leaves availableSkills out when the resume prints every master skill', () => {
+    // Every master skill is printed.
+    const line = { ...skillsLine, masterSkills: [{ name: 'TypeScript', category: 'Languages' }] };
+    // Absent, not an empty list: the body stays the pre-2026-11-05 one.
+    assert.equal('availableSkills' in ai.buildAssistDraft({ ...(jdiff as object), lines: [line] } as never, [], 'x').body, false);
+  });
+});
+
 describe('remove_skill and remove_entry (full write, 2026-11-04)', () => {
   // The draft the ops resolve against.
   const draft = () => ai.buildAssistDraft(jdiff, ['Tools'], 'remove testing', [], structure as never);
