@@ -57,7 +57,7 @@ import {
   planDisappearances,
   planReappearances,
   type DisappearedJob,
-  type StoredJob,
+  type LiveStoredJob,
 } from "../_shared/scout/liveness.ts";
 
 interface WatchlistRow {
@@ -446,13 +446,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
       // every old row was marked dead. Scoped to THIS board: same owner, provider and company,
       // and discovered through this adapter's source -- an aggregator-found job with the same
       // provider and slug may not be on this board, so its absence here says nothing.
-      // Deliberately NOT using last_seen_at age: it is untrustworthy on existing rows
-      // (2026-10-05 diagnosis); only a successful poll's fingerprint set is evidence.
+      // last_seen_at is NOT evidence of death (untrustworthy on existing rows, 2026-10-05
+      // diagnosis); only a successful poll's fingerprint set is. Since 2026-11-05 (leak 3) it is
+      // read for one narrower job: choosing which rows the drift/mass guards judge, the ones the
+      // previous poll saw. A wrong timestamp can only shrink that basis or fall back to the old
+      // whole-set rule (liveness.ts guardBasis), never mark a listed job.
       // ponytail: postgrest caps at 1000 rows; a truncated snapshot can only under-mark,
       // never over-mark. Page it if a board ever exceeds 1000 stored jobs.
       const { data: boardJobs, error: boardJobsError } = await db
         .from("jobs")
-        .select("id, fingerprint, disappeared_at, repost_count")
+        .select("id, fingerprint, disappeared_at, repost_count, last_seen_at")
         // Explicit owner scope, not only RLS: the update below must never cross users.
         .eq("user_id", clientResult.userId)
         // Provider + slug identify the board's company (core_tables.sql jobs columns).
@@ -461,11 +464,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
         // Only rows this board's adapter has ever reported can drop off this board.
         .contains("discovered_via", [adapter.discoverySource]);
       // The snapshot's row shape; postgrest hands back loosely typed rows.
-      type BoardJob = { id: string; fingerprint: string; disappeared_at: string | null; repost_count: number };
+      type BoardJob = { id: string; fingerprint: string; disappeared_at: string | null; repost_count: number; last_seen_at: string | null };
       // Typed once for both splits below.
       const snapshot = (boardJobs ?? []) as BoardJob[];
       // Live jobs: the candidates for marking.
-      const storedLive: StoredJob[] = snapshot.filter((j) => j.disappeared_at === null);
+      // lastSeenAt carried for the recent-basis rule (leak 3).
+      const storedLive: LiveStoredJob[] = snapshot.filter((j) => j.disappeared_at === null).map((j) => ({ id: j.id, fingerprint: j.fingerprint, lastSeenAt: j.last_seen_at }));
       // Disappeared jobs: the candidates for clearing.
       const storedDisappeared: DisappearedJob[] = snapshot.filter((j) => j.disappeared_at !== null);
 
@@ -676,7 +680,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
         // block. A board with any write error therefore never marks. Kept as inputs so the
         // pure planner still refuses if this call site is ever restructured to collect
         // errors instead of throwing.
-        const plan = planDisappearances({ storedLive, polledFingerprints, pollOk: true, batchErrors: 0 });
+        // previousPoll: the in-memory board row still holds the PREVIOUS poll's time and count
+        // (the watchlist update above wrote this poll's to the database, not to `board`).
+        const previousPoll = board.last_polled_at !== null && board.last_poll_job_count !== null ? { at: board.last_polled_at, jobCount: board.last_poll_job_count } : null;
+        // The plan, judged against the rows that previous poll saw (liveness.ts guardBasis).
+        const plan = planDisappearances({ storedLive, polledFingerprints, pollOk: true, batchErrors: 0, previousPoll });
         if (plan.kind === "refuse") {
           // Logged with its numbers so a drift or WAF page is diagnosable without a re-poll.
           console.warn(`[scout-ats] ${board.ats_provider}/${board.board_token} liveness refused: ${plan.reason} (${plan.detail})`);

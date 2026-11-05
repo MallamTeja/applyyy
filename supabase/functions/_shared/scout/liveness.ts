@@ -77,6 +77,24 @@ export const MAX_DISAPPEARANCE_SHARE = 0.25;
 // add a per-board history check if single-posting boards start to matter.
 export const MASS_DISAPPEARANCE_FLOOR = 1;
 
+// THE RECENT-BASIS RULE (leak 3, 2026-11-05). The two guards above judge a poll against the rows
+// the PREVIOUS poll saw, not against every stored live row. GitLab's board stored 505 live rows:
+// 242 re-sighted every poll and 249 not seen since September. Judged against all 505, a perfectly
+// healthy poll overlapped 0.48 < 0.5 and was refused as identity_drift on every one of 197 polls,
+// so the 249 dead postings (one of them approved) could never be marked and the backlog only grew.
+// The stale rows are not evidence about THIS poll: they were already absent from the last one.
+// Once the guards pass on the recent rows, every absent row is marked, the backlog included.
+//
+// A sighting this long before the recorded poll time still belongs to that poll: scout-ats writes
+// both from one clock, but the worker scout reads the clock separately for each.
+export const RECENT_SIGHTING_TOLERANCE_MS = 15 * 60_000;
+
+// The recent rows are trusted as the basis only when they account for at least this share of what
+// the previous poll listed (company_watchlist.last_poll_job_count). Without it, rows whose
+// last_seen_at is wrong (the 2026-10-05 diagnosis) could leave a tiny "recent" set, and a broken
+// poll listing exactly those few would pass both guards and mark the whole board dead.
+export const MIN_RECENT_SHARE_OF_PREVIOUS_POLL = 0.5;
+
 // One stored job that is currently live (disappeared_at IS NULL) on the polled board.
 export interface StoredJob {
   // The row to mark; the only thing the caller writes against.
@@ -107,18 +125,57 @@ export type DisappearancePlan =
       readonly detail: string;
     };
 
+// A live stored job plus when a poll last listed it, for the recent-basis rule.
+export interface LiveStoredJob extends StoredJob {
+  // jobs.last_seen_at; null or unparseable reads as "not seen recently" (it only narrows the basis).
+  readonly lastSeenAt: string | null;
+}
+
+// The previous successful poll of this board, as company_watchlist recorded it before this poll.
+export interface PreviousPoll {
+  // company_watchlist.last_polled_at.
+  readonly at: string;
+  // company_watchlist.last_poll_job_count: how many postings that poll listed.
+  readonly jobCount: number;
+}
+
 // The facts one board poll hands the planner.
 export interface DisappearanceInput {
   // The board's live jobs AS THEY STOOD BEFORE THIS POLL WROTE ANYTHING. Snapshot order
   // matters: read after the inserts, a fingerprint drift would add every posting as a new
   // row, the new rows would "overlap" 100%, and both guards below would pass vacuously.
-  readonly storedLive: readonly StoredJob[];
+  readonly storedLive: readonly LiveStoredJob[];
   // Every fingerprint this poll produced. Duplicates are tolerated.
   readonly polledFingerprints: readonly string[];
   // Did the fetch and the parse both succeed?
   readonly pollOk: boolean;
   // Write errors during this poll. Any at all means the poll's view is partial.
   readonly batchErrors: number;
+  // The previous poll, or null for a board never polled (or with no count): then the guards judge
+  // every stored live row, exactly as before 2026-11-05. Required, so no caller forgets it.
+  readonly previousPoll: PreviousPoll | null;
+}
+
+// The rows the drift and mass guards judge: those the previous poll saw, when their timestamps
+// can explain that poll; otherwise every stored live row (the pre-2026-11-05 rule, which refuses).
+function guardBasis(input: DisappearanceInput): readonly StoredJob[] {
+  // No previous poll (the ?? also covers a caller built before this field existed).
+  const previous = input.previousPoll ?? null;
+  // Its time, parsed once; NaN for anything that is not a date.
+  const at = previous === null ? Number.NaN : Date.parse(previous.at);
+  // Nothing trustworthy to compare against: the whole set, as before.
+  if (previous === null || !Number.isFinite(at) || !Number.isInteger(previous.jobCount) || previous.jobCount <= 0) return input.storedLive;
+  // The rows that poll listed: last seen at (or just before) its recorded time.
+  const recent = input.storedLive.filter((job) => {
+    // Unparseable or null is "not recent"; it can only shrink the basis.
+    const seen = job.lastSeenAt === null ? Number.NaN : Date.parse(job.lastSeenAt);
+    // Inside the tolerance window of the previous poll, or later.
+    return Number.isFinite(seen) && seen >= at - RECENT_SIGHTING_TOLERANCE_MS;
+  });
+  // Too few to explain the previous poll's count: the timestamps are not trusted. See the constant.
+  if (recent.length < previous.jobCount * MIN_RECENT_SHARE_OF_PREVIOUS_POLL) return input.storedLive;
+  // The recent rows are the basis.
+  return recent;
 }
 
 // Decide which stored-live jobs to mark disappeared, or refuse to mark any.
@@ -139,22 +196,26 @@ export function planDisappearances(input: DisappearanceInput): DisappearancePlan
     return { kind: "refuse", reason: "no_stored_jobs", detail: "no stored live jobs for this board" };
   }
 
-  // The stored jobs this poll did NOT list: the candidate set.
+  // The stored jobs this poll did NOT list: the candidate set, stale backlog included.
   const absent = input.storedLive.filter((job) => !polled.has(job.fingerprint));
-  // Share of what we knew that the poll recognised.
-  const overlapShare = (input.storedLive.length - absent.length) / input.storedLive.length;
-  // The numbers, formatted once for whichever refusal fires.
-  const counts = `stored=${input.storedLive.length} polled=${polled.size} absent=${absent.length}`;
+  // What the guards judge: the rows the previous poll saw, when trustworthy (see guardBasis).
+  const basis = guardBasis(input);
+  // The basis rows this poll did not list.
+  const absentInBasis = basis.filter((job) => !polled.has(job.fingerprint));
+  // Share of the basis the poll recognised.
+  const overlapShare = (basis.length - absentInBasis.length) / basis.length;
+  // The numbers, formatted once for whichever refusal fires; basis is the guards' denominator.
+  const counts = `stored=${input.storedLive.length} basis=${basis.length} polled=${polled.size} absent=${absent.length} absent_in_basis=${absentInBasis.length}`;
 
   // Identity drift: the poll does not recognise most of the board. See the constant.
   if (overlapShare < MIN_FINGERPRINT_OVERLAP_SHARE) {
     return { kind: "refuse", reason: "identity_drift", detail: `overlap ${overlapShare.toFixed(2)} < ${MIN_FINGERPRINT_OVERLAP_SHARE}; ${counts}` };
   }
   // Mass disappearance: recognised board, implausibly many closures at once.
-  if (absent.length > MASS_DISAPPEARANCE_FLOOR && absent.length / input.storedLive.length > MAX_DISAPPEARANCE_SHARE) {
+  if (absentInBasis.length > MASS_DISAPPEARANCE_FLOOR && absentInBasis.length / basis.length > MAX_DISAPPEARANCE_SHARE) {
     return { kind: "refuse", reason: "mass_disappearance", detail: `absent share > ${MAX_DISAPPEARANCE_SHARE}; ${counts}` };
   }
-  // Trusted poll, recognised board, plausible churn: mark exactly the absentees.
+  // Trusted poll, recognised board, plausible churn: mark every absentee, the stale backlog too.
   return { kind: "mark", ids: absent.map((job) => job.id) };
 }
 

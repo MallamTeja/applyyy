@@ -225,6 +225,18 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
   const wall = await page.detectBlocker();
   // The form's controls, read from the accessibility tree.
   const fields = await page.extractFields();
+  // THE CLOSED-POSTING BACKSTOP (leak 3, 2026-11-05). GitLab 267dcfcd closed in September; its link
+  // redirected to the careers index, and the kit listed "Search" and "Department" as the form. Every
+  // application form asks for an email, so a page without one is not a form. Matched by kind OR by
+  // label: Greenhouse renders its email box as type="text" (fixtures/greenhouse/*), so a kind-only
+  // check would refuse real Greenhouse forms. Thrown before any upload or note, so nothing is written.
+  // ponytail: a label heuristic; read the goto's final URL/status if a real form without email appears.
+  if (!fields.some((field) => field.kind === 'email' || /\be-?mail\b/i.test(field.label))) {
+    // The labels found, so the log shows what page was opened instead of a form.
+    const found = fields.map((field) => field.label).slice(0, 5).join(', ');
+    // Named posting_closed: the usual cause, stated with its evidence rather than asserted.
+    throw new Error(`apply kit: posting_closed: ${formUrl} shows no email field (${fields.length} field(s): ${found || 'none'}); a closed posting usually redirects to the careers index`);
+  }
 
   // THE SAME PLAN the bot would have typed: latest master for identity facts, the bank for
   // saved answers, the job's company for "previously worked at".

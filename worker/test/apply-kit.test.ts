@@ -239,6 +239,33 @@ describe('the manual apply kit on the real GitLab form', () => {
       await raw.close();
     }
   }, 60_000);
+
+  // Leak 3 (2026-11-05): GitLab 267dcfcd closed in September; its link redirected to the careers
+  // index, and the kit listed "Search" and "Department" as the form for Teja to fill by hand.
+  test('a page with no email field (a closed posting redirected to the careers index) is refused as posting_closed, writing nothing', async () => {
+    const { raw, page, forbidden } = await openKitPage();
+    // The row points at the index page, as GitLab's closed link did after its redirect.
+    const { gateway, calls } = recordingGateway({ ...application, applyUrl: `${server.url}/synthetic/careers-index-after-closed-posting.html` });
+    try {
+      await expect(
+        buildApplyKit({
+          applicationId: application.id,
+          gateway,
+          page,
+          renderResume: recordingRenderer().render as never,
+          checkRobots: async () => ({ kind: 'allow' }) as never,
+          runId: null,
+          now: () => new Date(),
+        }),
+      ).rejects.toThrow(/posting_closed/);
+      // No resume uploaded and no kit note written for a page that is not a form.
+      expect(calls.filter((call) => call === 'uploadResume' || call === 'appendApplicationNote')).toEqual([]);
+      // And nothing typed.
+      expect(forbidden).toEqual([]);
+    } finally {
+      await raw.close();
+    }
+  }, 60_000);
 });
 
 /**

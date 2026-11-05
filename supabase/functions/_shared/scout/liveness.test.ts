@@ -83,3 +83,77 @@ test("two postings sharing a fingerprint collapse to the first, in order", () =>
   // The first fp-a (atsId 1) survives; order of the rest is kept.
   assert.deepEqual(firstPerFingerprint(postings, (p) => p.fingerprint).map((p) => p.atsId), ["1", "2"]);
 });
+
+// --- Leak 3 (2026-11-05): a dead backlog blocked marking forever ---
+// GitLab's board stored 505 live rows: 242 re-sighted every poll, 249 never seen again since
+// September (posting 267dcfcd closed, still approved). Overlap 242/505 = 0.48 < 0.5, so every
+// poll refused as identity_drift, and the backlog only grew. The guards now judge the poll
+// against the rows the PREVIOUS poll saw; the stale backlog is marked once they pass.
+
+// The previous poll, as company_watchlist records it.
+const PREV_AT = "2026-11-05T06:56:24.653Z";
+// 10 minutes earlier than the previous poll: inside the sighting tolerance.
+const JUST_BEFORE_PREV = "2026-11-05T06:50:00.000Z";
+// A September sighting: long stale.
+const SEPTEMBER = "2026-09-12T14:36:59.282Z";
+
+// GitLab's shape: `live` rows seen at the previous poll, `stale` rows not seen since September.
+function gitlab(live: number, stale: number) {
+  // The re-sighted rows, ids live-i.
+  const recent = Array.from({ length: live }, (_, i) => ({ id: `live-${i}`, fingerprint: `fp-live-${i}`, lastSeenAt: PREV_AT }));
+  // The dead backlog, ids stale-i.
+  const old = Array.from({ length: stale }, (_, i) => ({ id: `stale-${i}`, fingerprint: `fp-stale-${i}`, lastSeenAt: SEPTEMBER }));
+  // Both, as the snapshot reads them.
+  return [...recent, ...old];
+}
+// Every live fingerprint, i.e. a healthy poll of GitLab today.
+const gitlabPoll = (live: number) => Array.from({ length: live }, (_, i) => `fp-live-${i}`);
+
+test("GitLab: 242 live + 249 stale, healthy poll: the stale backlog is marked, nothing live is", () => {
+  // The previous poll listed the same 242.
+  const plan = planDisappearances({ ...OK, storedLive: gitlab(242, 249), polledFingerprints: gitlabPoll(242), previousPoll: { at: PREV_AT, jobCount: 242 } });
+  // Marked, not refused as identity_drift.
+  assert.equal(plan.kind, "mark", JSON.stringify(plan));
+  // Exactly the 249 stale rows.
+  assert.deepEqual(plan.kind === "mark" && [...plan.ids].sort(), gitlab(0, 249).map((j) => j.id).sort());
+});
+
+test("GitLab today, before the fix's input exists (no previous poll): still refused as before", () => {
+  // No previous poll recorded: the old whole-set guards apply.
+  const plan = planDisappearances({ ...OK, storedLive: gitlab(242, 249), polledFingerprints: gitlabPoll(242), previousPoll: null });
+  // The old verdict.
+  assert.equal(plan.kind === "refuse" && plan.reason, "identity_drift");
+});
+
+test("a broken poll is still refused: it lists only 100 of the 242 the previous poll saw", () => {
+  // A truncated page that still parsed.
+  const plan = planDisappearances({ ...OK, storedLive: gitlab(242, 249), polledFingerprints: gitlabPoll(100), previousPoll: { at: PREV_AT, jobCount: 242 } });
+  // 142 of 242 recent rows absent: drift, judged on the recent rows.
+  assert.equal(plan.kind, "refuse");
+});
+
+test("a few absent recent rows plus the backlog: normal churn is marked with the backlog", () => {
+  // 240 of the 242 listed again.
+  const plan = planDisappearances({ ...OK, storedLive: gitlab(242, 249), polledFingerprints: gitlabPoll(240), previousPoll: { at: PREV_AT, jobCount: 242 } });
+  // Two closed since the last poll, plus the 249 stale.
+  assert.equal(plan.kind === "mark" && plan.ids.length, 251);
+});
+
+test("a sighting a few minutes before the recorded poll time still counts as that poll's", () => {
+  // The worker writes last_seen_at and last_polled_at with separate clocks reads.
+  const rows = gitlab(242, 249).map((j) => (j.lastSeenAt === PREV_AT ? { ...j, lastSeenAt: JUST_BEFORE_PREV } : j));
+  // Same healthy poll.
+  const plan = planDisappearances({ ...OK, storedLive: rows, polledFingerprints: gitlabPoll(242), previousPoll: { at: PREV_AT, jobCount: 242 } });
+  // Still the recent basis.
+  assert.equal(plan.kind === "mark" && plan.ids.length, 249);
+});
+
+test("timestamps that cannot explain the previous poll are not trusted: whole-set guards apply", () => {
+  // THE HOLE THIS CLOSES: only 5 rows look recent although the previous poll listed 242, and a
+  // broken poll lists exactly those 5. A 5-row basis would pass and mark 486 live jobs dead.
+  const rows = gitlab(5, 486);
+  // The broken poll.
+  const plan = planDisappearances({ ...OK, storedLive: rows, polledFingerprints: gitlabPoll(5), previousPoll: { at: PREV_AT, jobCount: 242 } });
+  // Refused, as it was before this change.
+  assert.equal(plan.kind, "refuse");
+});

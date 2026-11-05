@@ -1,0 +1,32 @@
+<!doctype html>
+<!-- Leak 3 (2026-11-05): what the apply kit opened for GitLab 267dcfcd, a posting closed since
+     September. The job URL redirected to the careers index, and the kit captured its "Search" and
+     "Department" controls as if they were the application form. Synthetic: the shape, not a copy. -->
+<html lang="en">
+<head>
+  <!-- Plain document; the kit only reads controls. -->
+  <meta charset="utf-8">
+  <!-- Names the page like a board index, not a posting. -->
+  <title>Careers - All open positions</title>
+</head>
+<body>
+  <!-- The index's filter bar: the only controls on the page. -->
+  <form role="search">
+    <!-- A labelled search box. -->
+    <label for="search">Search</label>
+    <!-- type=text, like a real filter box. -->
+    <input id="search" name="q" type="text">
+    <!-- A labelled department filter. -->
+    <label for="department">Department</label>
+    <!-- A native select, so the extractor reads it as one. -->
+    <select id="department" name="department">
+      <!-- The default option. -->
+      <option>All departments</option>
+      <!-- One department. -->
+      <option>Engineering</option>
+    </select>
+  </form>
+  <!-- A listing, not a form. -->
+  <ul><li><a href="#">Backend Engineer</a></li></ul>
+</body>
+</html>
