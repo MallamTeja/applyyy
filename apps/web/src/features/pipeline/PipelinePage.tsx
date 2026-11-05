@@ -31,9 +31,10 @@ import type { ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
 import { StatusBadge } from '../../app/StatusBadge';
-import { APPLICATION_STATUSES, isTerminal, nextStatuses } from '../../data/contract';
+import { APPLICATION_STATUSES, isTerminal } from '../../data/contract';
 import type { ApplicationStatus } from '../../data/contract';
-import { humanControlLocation, isHumanOnlyLane } from '../../data/humanLanes';
+// screenMoves (2026-11-05): the graph's human moves minus the RPC-only discovered -> applied.
+import { humanControlLocation, isHumanOnlyLane, screenMoves } from '../../data/humanLanes';
 import { useApplicationCounts } from '../../data/useApplicationCounts.ts';
 import { describeEmptyState } from '../../data/readState.ts';
 import type { ReadState } from '../../data/readState.ts';
@@ -112,7 +113,8 @@ function StatusColumn({
   readonly readState: ReadState<unknown>;
   readonly onOpenDrawer: (status: ApplicationStatus) => void;
 }): ReactElement {
-  const humanMoves = nextStatuses(status, 'human');
+  // The moves a screen may show: the graph's human edges minus the RPC-only discovered -> applied.
+  const humanMoves = screenMoves(status);
   const controlHome = humanControlLocation(status);
   // The Closed group's styling, by group rather than isTerminal, so Dropped keeps its look.
   const closed = groupOf(status) === 'closed';

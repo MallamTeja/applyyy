@@ -22,8 +22,6 @@
 import { useCallback, useEffect, useState } from 'react';
 // Type only: the status union, for the move filter.
 import type { ApplicationStatus } from '../../data/contract';
-// The graph: the human moves out of a card's status.
-import { nextStatuses } from '../../data/contract';
 // The component return type, as elsewhere.
 import type { ReactElement } from 'react';
 // In-app link to the Answer bank, without a full page reload.
@@ -35,7 +33,7 @@ import { safeHref } from '../../app/safeHref';
 // The shared client, for the signed resume URL.
 import { supabase } from '../../data/supabase';
 // The two manual-action lanes whose resolves this page offers, shared with System health and the badge.
-import { MANUAL_ACTION_STATUSES } from '../../data/humanLanes';
+import { MANUAL_ACTION_STATUSES, screenMoves } from '../../data/humanLanes';
 // The working resolve queues, reused whole, and their manual-action wording.
 import { RecoveryMoves, RecoveryNotes, RecoveryQueue, manualActionMeaning, manualActionVerb, useRecoveryMoves } from '../health/RecoveryQueue';
 // The kit's "Copy all" text.
@@ -158,7 +156,7 @@ export function kitResolveMoves(status: ApplicationStatus): readonly Application
   // A lane row's buttons live in its queue below (one lock owner per row); the card points there.
   if (MANUAL_ACTION_STATUSES.includes(status)) return [];
   // Graph first, then the narrowing; order follows the graph.
-  return nextStatuses(status, 'human').filter((to) => KIT_RESOLVES.includes(to));
+  return screenMoves(status).filter((to) => KIT_RESOLVES.includes(to));
 }
 
 /* What a card needs to resolve its row: the lock state and the confirmed write. The page owns both. */

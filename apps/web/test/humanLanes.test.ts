@@ -197,11 +197,13 @@ test('OPERABLE_HUMAN_CONTROLS is exactly the edges the approval and recovery que
     // 2026-11-05: Mark applied / Failed on every Manual apply kit card (migration 20261105121500).
     'approved->applied',
     'approved->failed',
+    // 2026-11-05: Add to Applied on the Emails page, through track_email_as_applied only (RPC_ONLY_HUMAN_EDGES).
+    'discovered->applied',
   ];
   // Sorted on both sides so order in the graph does not matter, only membership.
   assert.deepEqual(OPERABLE_HUMAN_CONTROLS.map(key).sort(), [...expected].sort());
   // Stated as a number too, because the panel shows the number.
-  assert.equal(OPERABLE_HUMAN_CONTROLS.length, 13);
+  assert.equal(OPERABLE_HUMAN_CONTROLS.length, 14);
 });
 
 test('passed_filters is operable for Reject only; its -> failed move is held, not claimed', () => {

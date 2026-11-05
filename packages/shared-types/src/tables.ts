@@ -1113,6 +1113,8 @@ export interface EmailEventRow {
   /** When classification finished. NULL means still queued — so a Gemini outage delays mail rather than losing it. */
   processed_at: string | null;
   created_at: string;
+  /** When Teja marked it read IN THE APP (2026-11-05, migration 20261105124600). NULL = unread. Never Gmail's read state. */
+  read_at: string | null;
 }
 /** Insert shape — what Apps Script posts (validated by the intake contract first). */
 export type EmailEventInsert = {
@@ -1136,9 +1138,9 @@ export type EmailEventInsert = {
   matched_application_id?: string | null;
   processed_at?: string | null;
 };
-/** Update shape — only the Tracker's verdict is writable after ingest. */
+/** Update shape — the Tracker's verdict, plus the in-app read mark the Emails page sets (2026-11-05). */
 export type EmailEventUpdate = Partial<
-  Pick<EmailEventRow, 'classification' | 'classification_confidence' | 'matched_application_id' | 'processed_at'>
+  Pick<EmailEventRow, 'classification' | 'classification_confidence' | 'matched_application_id' | 'processed_at' | 'read_at'>
 >;
 
 // ---------------------------------------------------------------------------

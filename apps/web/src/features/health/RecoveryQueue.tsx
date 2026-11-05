@@ -33,12 +33,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 // The page's shared client; null when the build has no Supabase config.
 import { supabase } from '../../data/supabase';
-// The graph: which moves a human may make out of a status.
-import { nextStatuses } from '../../data/contract';
 // The status union, so the props cannot name a status that does not exist.
 import type { ApplicationStatus } from '../../data/contract';
-// Which edges are deliberately off, and why.
-import { heldReason } from '../../data/humanLanes';
+// Which edges are deliberately off, and why; and the moves a screen may offer (RPC-only edges excluded).
+import { heldReason, screenMoves } from '../../data/humanLanes';
 // The write path, its outcome sentences and its confirm text.
 import { advanceRecovery, confirmText, describeRecovery } from './advanceRecovery';
 // The structural client type the engine takes, and the outcome kinds the strip colours by.
@@ -384,7 +382,7 @@ export function RecoveryQueue(props: {
   // Destructured once so the hooks below depend on the status, not the props object.
   const { status, source, verb, meaning } = props;
   // The moves out of this status a human may make, straight from the graph.
-  const moves = nextStatuses(status, 'human');
+  const moves = screenMoves(status);
   // The current read.
   const [read, setRead] = useState<QueueRead>({ kind: 'loading' });
   // Request sequence: only the newest read may land, so a slow early read cannot overwrite a fresh one.

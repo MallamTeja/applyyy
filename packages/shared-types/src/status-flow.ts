@@ -90,6 +90,11 @@ export const STATUS_TRANSITIONS: readonly StatusTransition[] = [
   // job-link-intake moves an existing row here as the human. Human-only, so no agent ever un-drops a row.
   // A scouted row still waiting for the normalizer skips dedupe and the screener.
   { from: 'discovered', to: 'passed_filters', allowedAgents: ['human'], note: "Human pasted this job's link: it skips dedupe and every filter." },
+  // ---- Add to Applied from an email (2026-11-05, migration 20261105124600) -------------
+  // A job applied to OUTSIDE the portal is born at discovered and moved here in ONE transaction by
+  // public.track_email_as_applied. No screen offers it on a scouted row (humanLanes.ts
+  // RPC_ONLY_HUMAN_EDGES). It leads away from applying: no submit path opens.
+  { from: 'discovered', to: 'applied', allowedAgents: ['human'], note: 'Human tracks a job applied to outside the portal, from its email (Emails page, Add to Applied).' },
   // A dropped row comes back: the human overrules the filter for this one job. Makes dropped_filter non-terminal.
   { from: 'dropped_filter', to: 'passed_filters', allowedAgents: ['human'], note: "Human pasted this job's link: a human overrules the filter that dropped it." },
 

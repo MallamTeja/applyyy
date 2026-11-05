@@ -1,0 +1,93 @@
+/* Add to Applied (2026-11-05): the slug the web sends to track_email_as_applied, and the guard that no
+ * screen ever offers discovered -> applied on a scouted row (the orchestrator's condition 2).
+ *
+ * WHY THE GUARD: migration 20261105124600 adds discovered -> applied for ONE database function. Offered
+ * as a button on a scouted discovered row, it would mark a never-applied posting as applied in one click.
+ * Every screen builds its moves through humanLanes.ts screenMoves(), which drops RPC-only edges; the
+ * source scan below goes red if any screen calls nextStatuses(..., 'human') directly again. */
+
+// The .tsx loader, for ManualApplyPage's kitResolveMoves.
+import './support/registerTsxHooks.ts';
+// Strict asserts.
+import assert from 'node:assert/strict';
+// File walk for the source scan.
+import { readdirSync, readFileSync } from 'node:fs';
+// Paths.
+import { join } from 'node:path';
+// node:test.
+import { describe, it, before } from 'node:test';
+// Plain .ts modules under test.
+import { companySlugOf } from '../src/features/emails/emailView.ts';
+import { RPC_ONLY_HUMAN_EDGES, screenMoves } from '../src/data/humanLanes.ts';
+import { APPLICATION_STATUSES, nextStatuses } from '../src/data/contract.ts';
+
+// The Manual apply page, for its card move filter.
+let page: typeof import('../src/features/manual-apply/ManualApplyPage.tsx');
+
+before(async () => {
+  // Transpiled by the hook.
+  page = await import('../src/features/manual-apply/ManualApplyPage.tsx');
+});
+
+describe('companySlugOf: the one slug rule (scout-web slugFromToken: lowercase, non-alphanumerics to "-", trimmed)', () => {
+  it('matches the shape the RPC accepts, across awkward names', () => {
+    // [input, expected]: spaces, &, Inc./Ltd, accents, unicode, punctuation runs, digits, edges.
+    const cases: [string, string][] = [
+      ['Acme', 'acme'],
+      ['Johnson & Johnson', 'johnson-johnson'],
+      ['Acme Inc.', 'acme-inc'],
+      ['Tata Consultancy Services Ltd', 'tata-consultancy-services-ltd'],
+      ['Zoë Labs', 'zo-labs'],
+      ['  --Stripe--  ', 'stripe'],
+      ['3M', '3m'],
+      ['日本', ''],
+      ['AT&T / Bell Labs', 'at-t-bell-labs'],
+    ];
+    // Each one, named on failure.
+    for (const [input, expected] of cases) assert.equal(companySlugOf(input), expected, input);
+    // Every non-empty result satisfies the SQL check in track_email_as_applied.
+    for (const [input] of cases) {
+      // The slug.
+      const slug = companySlugOf(input);
+      // Empty is refused by the page before any call; anything else must pass the SQL regex.
+      if (slug !== '') assert.match(slug, /^[a-z0-9]+(-[a-z0-9]+)*$/, input);
+    }
+  });
+});
+
+describe('no screen offers discovered -> applied', () => {
+  it('the graph has the edge, and it is RPC-only', () => {
+    // Present: the migration and the mirror agree (enum-parity checks the SQL side).
+    assert.ok(nextStatuses('discovered', 'human').includes('applied'));
+    // Listed as RPC-only.
+    assert.ok(RPC_ONLY_HUMAN_EDGES.some((e) => e.from === 'discovered' && e.to === 'applied'));
+  });
+
+  it('screenMoves never returns an RPC-only edge, for any status', () => {
+    // Every status the console can draw.
+    for (const status of APPLICATION_STATUSES) {
+      // The moves a screen may draw.
+      const moves = screenMoves(status);
+      // None of them is RPC-only.
+      for (const edge of RPC_ONLY_HUMAN_EDGES) if (edge.from === status) assert.ok(!moves.includes(edge.to), `${status} -> ${edge.to} offered`);
+    }
+  });
+
+  it('the Manual apply card offers no applied move on a discovered row', () => {
+    // The card filter is the one with "applied" in its target set.
+    assert.ok(!page.kitResolveMoves('discovered').includes('applied'));
+  });
+
+  it('no screen builds moves from nextStatuses(..., "human") directly (they must go through screenMoves)', () => {
+    // Every source file under src/.
+    const root = new URL('../src', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
+    // Recursive listing, .ts/.tsx only.
+    const files = readdirSync(root, { recursive: true, withFileTypes: true }).filter((e) => e.isFile() && /\.tsx?$/.test(e.name)).map((e) => join(e.parentPath, e.name));
+    // Non-vacuous: the walk found the app.
+    assert.ok(files.length > 50, `only ${files.length} files found`);
+    // Code calls, comments stripped first so a doc mention is not a hit.
+    const offenders = files.filter((f) => !f.endsWith('humanLanes.ts') && /nextStatuses\([^)]*'human'\)/.test(readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '').replace(/<span[^>]*>nextStatuses\([^<]*<\/span>/g, '')));
+    // None outside humanLanes.ts.
+    assert.deepEqual(offenders, []);
+  });
+});

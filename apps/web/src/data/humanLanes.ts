@@ -46,7 +46,7 @@
  * had a dozen. `allowImportingTsExtensions` in tsconfig is what lets the same
  * specifier satisfy both tsc and Node. */
 import type { ApplicationStatus, StatusTransition } from './contract.ts';
-import { STATUS_TRANSITIONS } from './contract.ts';
+import { STATUS_TRANSITIONS, nextStatuses } from './contract.ts';
 
 /* Edges only a human may traverse. `allowedAgents` is exactly `['human']`. */
 export const HUMAN_ONLY_LANES: readonly StatusTransition[] =
@@ -305,6 +305,35 @@ export function heldReason(
   return HELD_HUMAN_EDGES.find((edge) => edge.from === from && edge.to === to)?.reason ?? null;
 }
 
+/* Human edges that ONE database function takes and no screen ever offers as a move (2026-11-05).
+ *
+ * discovered -> applied exists for public.track_email_as_applied alone (migration 20261105124600):
+ * it creates a job from an email at discovered and moves it to applied in one transaction. Offered on
+ * a SCOUTED discovered row it would let one click mark a never-applied posting as applied, so every
+ * screen builds its moves through screenMoves() below, which drops these. Counted operable: the
+ * Emails page performs it. apps/web/test/emailsTrack.test.ts goes red if a screen bypasses this. */
+export const RPC_ONLY_HUMAN_EDGES: ReadonlyArray<{
+  // The source status.
+  readonly from: ApplicationStatus;
+  // The target status.
+  readonly to: ApplicationStatus;
+  // The one place that performs it, in the navigation's words.
+  readonly via: string;
+}> = [{ from: 'discovered', to: 'applied', via: 'Emails, Add to Applied (one database call per email)' }];
+
+/* Is from -> to taken only by a database function? */
+export function isRpcOnlyEdge(from: ApplicationStatus, to: ApplicationStatus): boolean {
+  // Exact edge match.
+  return RPC_ONLY_HUMAN_EDGES.some((edge) => edge.from === from && edge.to === to);
+}
+
+/* The human moves a SCREEN may offer out of `status`: the graph's human edges minus the RPC-only ones.
+ * Every screen that draws move buttons calls this, never nextStatuses(status, 'human') directly. */
+export function screenMoves(status: ApplicationStatus): ApplicationStatus[] {
+  // From the graph, so new edges still appear with no edit, except the ones a function owns.
+  return nextStatuses(status, 'human').filter((to) => !isRpcOnlyEdge(status, to));
+}
+
 /* Human-reachable edges whose source status no screen claims.
  *
  * Non-empty means there is a status rows can enter and never leave by hand.
@@ -345,8 +374,9 @@ export const UNBUILT_HUMAN_CONTROLS: readonly StatusTransition[] =
 export const INOPERABLE_HUMAN_CONTROLS: readonly StatusTransition[] =
   HUMAN_REACHABLE_LANES.filter(
     (transition) =>
-      SCREENS_BY_SOURCE_STATUS[transition.from]?.readiness ===
-        'affordance_only' ||
+      // An RPC-only edge is performed by its function's screen, never by the status's own screen.
+      (!isRpcOnlyEdge(transition.from, transition.to) &&
+        SCREENS_BY_SOURCE_STATUS[transition.from]?.readiness === 'affordance_only') ||
       /* A held edge on an operable screen is shown and disabled, which is
          exactly this bucket's definition - so it is counted here, never as
          operable. */
@@ -364,9 +394,11 @@ export const INOPERABLE_HUMAN_CONTROLS: readonly StatusTransition[] =
 export const OPERABLE_HUMAN_CONTROLS: readonly StatusTransition[] =
   HUMAN_REACHABLE_LANES.filter(
     (transition) =>
-      SCREENS_BY_SOURCE_STATUS[transition.from]?.readiness === 'operable' &&
-      // A held edge is shown but cannot fire, so it is not operable.
-      heldReason(transition.from, transition.to) === null,
+      // Performed by its database function's screen (RPC_ONLY_HUMAN_EDGES), whatever the status's own claim.
+      isRpcOnlyEdge(transition.from, transition.to) ||
+      (SCREENS_BY_SOURCE_STATUS[transition.from]?.readiness === 'operable' &&
+        // A held edge is shown but cannot fire, so it is not operable.
+        heldReason(transition.from, transition.to) === null),
   );
 
 /* Where the operator performs the human transitions out of a status, for

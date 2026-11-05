@@ -296,3 +296,128 @@
   font-size: var(--size-sm);
 }
 
+
+/* ---- 2026-11-05: filters, read mark, Add to Applied. Semantic tokens only (theming-convention.md). ---- */
+
+/* The right-hand group in a card's top row (was an inline style). */
+.email-card__top-actions {
+  /* One row of link, badge and time. */
+  display: flex;
+  /* Wraps on a phone instead of pushing past the card. */
+  flex-wrap: wrap;
+  /* The spacing the inline style had. */
+  gap: var(--gap-2);
+  /* Text baselines line up. */
+  align-items: center;
+}
+
+/* An unread card: an accent stripe, so unread reads at a glance in both themes. */
+.email-card--unread {
+  /* The marker; read cards keep the default border. */
+  border-left: 3px solid var(--accent);
+}
+
+/* The "Last checked" line under the Monitoring Mode value (was an inline style). */
+.email-monitor__last-checked {
+  /* Secondary size. */
+  font-size: var(--size-xs);
+  /* Secondary colour, readable in both themes. */
+  color: var(--ink-muted);
+}
+
+/* The filter row: wraps on a phone, never scrolls sideways. */
+.email-monitor__filters {
+  /* Controls side by side. */
+  display: flex;
+  /* Wrapping at 390px. */
+  flex-wrap: wrap;
+  /* Space between controls. */
+  gap: var(--gap-2);
+  /* Labels of different heights still align their controls. */
+  align-items: flex-end;
+  /* Space before the list. */
+  margin-block-end: var(--gap-3);
+}
+
+/* One labelled control: label text above the control. */
+.email-monitor__filter {
+  /* A column. */
+  display: flex;
+  /* Label on top. */
+  flex-direction: column;
+  /* A small gap between label and control. */
+  gap: var(--gap-1);
+  /* Label text size. */
+  font-size: var(--size-sm);
+  /* Label text colour. */
+  color: var(--ink-muted);
+}
+
+/* The bulk read mark sits at the end of the row. */
+.email-monitor__mark-all {
+  /* Pushed right when there is room; wraps under on a phone. */
+  margin-inline-start: auto;
+}
+
+/* A row action: Mark read, Add to Applied, Cancel. */
+.email-card__action {
+  /* Compact, like the Gmail button. */
+  padding: var(--gap-1) var(--gap-2);
+  /* Same size as the card's meta text. */
+  font-size: var(--size-sm);
+}
+
+/* The tracked marker, in the accent colour the old "Matched to Job" used. */
+.email-card__tracked {
+  /* Accent. */
+  color: var(--accent);
+}
+
+/* The Add to Applied form: two fields and two buttons, wrapping. */
+.email-track {
+  /* A row. */
+  display: flex;
+  /* Wrapping on a phone. */
+  flex-wrap: wrap;
+  /* Space between fields. */
+  gap: var(--gap-2);
+  /* Buttons align with the inputs, not the labels. */
+  align-items: flex-end;
+  /* Separated from the meta row. */
+  margin-block-start: var(--gap-2);
+}
+
+/* One form field: label above input. */
+.email-track__field {
+  /* A column. */
+  display: flex;
+  /* Label on top. */
+  flex-direction: column;
+  /* Small gap. */
+  gap: var(--gap-1);
+  /* Label size. */
+  font-size: var(--size-sm);
+  /* Room for a company or a title. */
+  min-inline-size: 12rem;
+  /* Grows to share the row; shrinks on a phone. */
+  flex: 1 1 12rem;
+}
+
+/* The form's buttons stay together. */
+.email-track__buttons {
+  /* Side by side. */
+  display: flex;
+  /* Space between them. */
+  gap: var(--gap-2);
+}
+
+/* The no-slug hint and a row's outcome line. */
+.email-track__hint,
+.email-card__note {
+  /* Secondary size. */
+  font-size: var(--size-sm);
+  /* Secondary colour. */
+  color: var(--ink-muted);
+  /* A little space above, none around. */
+  margin: var(--gap-1) 0 0 0;
+}

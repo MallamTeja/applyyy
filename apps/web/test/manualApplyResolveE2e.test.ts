@@ -15,79 +15,14 @@
 
 // Strict asserts, like the other browser tests.
 import assert from 'node:assert/strict';
-// File reads and stats for the static server and the dist guard; stdlib, no new dependency.
-import { readdir, readFile, stat } from 'node:fs/promises';
-// A static server for dist/, so the SPA's own routing serves /manual-apply.
-import { createServer, type Server } from 'node:http';
-// Path helpers for the server and the guard.
-import { extname, join } from 'node:path';
+// The server type.
+import type { Server } from 'node:http';
 // node:test, like every other web test (package.json "test").
 import { describe, it, before, beforeEach, after } from 'node:test';
-// File URLs to paths, so the paths resolve from this file whatever the cwd.
-import { fileURLToPath } from 'node:url';
 // Real Chromium; the same Playwright the e2e suite uses (apps/web/node_modules).
 import { chromium, type Browser, type BrowserContext, type Dialog, type Page } from 'playwright';
-
-// The bundle under test.
-const DIST = fileURLToPath(new URL('../dist', import.meta.url));
-// The source the bundle must be newer than.
-const SRC = fileURLToPath(new URL('../src', import.meta.url));
-// Build inputs outside src/ that also change the bundle.
-const ROOT_INPUTS = ['../index.html', '../vite.config.ts', '../.env.e2e'].map((p) => fileURLToPath(new URL(p, import.meta.url)));
-// The live project ref: the seeded session key embeds it, so a bundle without it cannot sign in.
-const PROJECT_REF = 'xynqxekcqizwhtskzqrq';
-// The one fix for every guard failure, named in each message.
-const FIX = 'cd apps/web && ./node_modules/.bin/vite build --mode e2e';
-// Content types the static server needs for a Vite bundle.
-const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json' };
-
-/* Newest file mtime under a directory; throws on an empty walk so the staleness check cannot pass vacuously. */
-async function newestMtime(dir: string): Promise<{ path: string; ms: number }> {
-  // Below any real file.
-  let newest = { path: '(none)', ms: -Infinity };
-  // Recursive listing is stdlib.
-  for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
-    // Files only: a directory's mtime moves when a peer adds a file.
-    if (!entry.isFile()) continue;
-    // The entry's full path.
-    const full = join(entry.parentPath, entry.name);
-    // Its modification time.
-    const { mtimeMs } = await stat(full);
-    // Keep the newest, so the message can name it.
-    if (mtimeMs > newest.ms) newest = { path: full, ms: mtimeMs };
-  }
-  // An empty walk proves nothing.
-  if (newest.ms === -Infinity) throw new Error(`manual-apply e2e guard: no files under ${dir}`);
-  return newest;
-}
-
-/* Refuses a dist/ that cannot prove anything: missing, older than its source, or built without the
-   project URL. Each used to surface as selector timeouts.
-   ponytail: the third copy (e2eSuite.test.ts, appliedE2e.test.ts, this file). appliedE2e's note says to
-   move them into test/support/ at the third; that touches files this change does not own, so it is queued. */
-async function assertDistIsTestable(): Promise<void> {
-  // (a) The entry page must exist.
-  const index = await stat(join(DIST, 'index.html')).catch(() => null);
-  // Missing: name the build command.
-  if (!index) throw new Error(`E2E_DIST_MISSING: no dist/index.html. Build it: ${FIX}`);
-  // (b) The newest source file, then any newer root input.
-  let newest = await newestMtime(SRC);
-  // Root inputs one by one; an absent one cannot have changed the bundle.
-  for (const input of ROOT_INPUTS) {
-    // stat-or-null so an absent file is skipped, not thrown.
-    const s = await stat(input).catch(() => null);
-    // Newer wins.
-    if (s && s.mtimeMs > newest.ms) newest = { path: input, ms: s.mtimeMs };
-  }
-  // A source touched after the build may not be in the bundle (a 2-day-stale dist once went green).
-  if (newest.ms > index.mtimeMs) throw new Error(`E2E_DIST_STALE: dist/index.html is older than ${newest.path}. Rebuild: ${FIX}`);
-  // (c) The bundle must carry the project URL, or every page stops at sign-in.
-  const js = (await readdir(join(DIST, 'assets')).catch(() => [] as string[])).filter((f) => f.endsWith('.js'));
-  // One chunk with the ref is enough.
-  for (const f of js) if ((await readFile(join(DIST, 'assets', f), 'utf8')).includes(PROJECT_REF)) return;
-  // Zero chunks lands here too, so an empty assets dir cannot pass.
-  throw new Error(`E2E_DIST_UNCONFIGURED: none of ${js.length} JS files carry "${PROJECT_REF}". Rebuild: ${FIX}`);
-}
+// The shared harness (test/support/e2eDist.ts): dist guard, static SPA server, fake session.
+import { assertDistIsTestable, seedSession, startDistServer } from './support/e2eDist.ts';
 
 // The operator the fake session and the auth answers name.
 const USER_ID = '0f4b24da-e85b-40bb-8606-c81824493b45';
@@ -162,26 +97,8 @@ describe('Manual apply kit card resolves in a browser (fake session, every Supab
     guardError = await assertDistIsTestable().then(() => undefined, (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
     // Nothing to start for a refused dist.
     if (guardError) return;
-    // dist/ as an SPA: unknown paths get index.html so the client router serves /manual-apply.
-    server = createServer(async (req, res) => {
-      try {
-        // The request path without the leading slash.
-        const rel = new URL(req.url ?? '/', 'http://localhost').pathname.replace(/^\//, '');
-        // The file it names, if any.
-        let file = join(DIST, rel === '' ? 'index.html' : rel);
-        // Not a file: the SPA entry.
-        if (!(await stat(file).catch(() => null))?.isFile()) file = join(DIST, 'index.html');
-        // Served with its type.
-        res.writeHead(200, { 'Content-Type': MIME[extname(file).toLowerCase()] ?? 'text/html' }).end(await readFile(file));
-      } catch (err) {
-        // A server fault is visible, never an empty 200.
-        res.writeHead(500).end(String(err));
-      }
-    });
-    // Port 0: any free port, so this file can run beside the other browser tests.
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-    // The address the page loads from.
-    base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    // dist/ as an SPA on a free port (shared harness).
+    ({ server, base } = await startDistServer());
     // Headless Chromium.
     browser = await chromium.launch({ headless: true });
     // A fresh context per file.
@@ -212,24 +129,8 @@ describe('Manual apply kit card resolves in a browser (fake session, every Supab
       // Every other read the shell makes: an empty list.
       return json(200, []);
     });
-    // The fake session supabase-js reads on boot; far-future expiry, so no refresh POST.
-    await context.addInitScript((userId: string) => {
-      // The key supabase-js derives from the project URL.
-      window.localStorage.setItem('sb-xynqxekcqizwhtskzqrq-auth-token', JSON.stringify({
-        // Any string: every request is answered locally.
-        access_token: 'e2e-test-token',
-        // The scheme.
-        token_type: 'bearer',
-        // Two hours.
-        expires_in: 7200,
-        // Two hours from now.
-        expires_at: Math.floor(Date.now() / 1000) + 7200,
-        // Present, so the session shape is complete.
-        refresh_token: 'e2e-test-refresh',
-        // What isSessionValid checks.
-        user: { id: userId, aud: 'authenticated', role: 'authenticated', email: 'operator@example.test' },
-      }));
-    }, USER_ID);
+    // The fake session (shared harness).
+    await seedSession(context, USER_ID);
     // The tab.
     page = await context.newPage();
     // Counts AND dismisses, so a restored window.confirm fails by name instead of hanging the test.
