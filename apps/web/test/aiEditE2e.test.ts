@@ -24,30 +24,18 @@
 
 // Strict asserts.
 import assert from 'node:assert/strict';
-// The static server's file reads and the freshness guard's stats.
-import { readFile, stat } from 'node:fs/promises';
-// A stdlib static server: no new dependency.
-import { createServer, type Server } from 'node:http';
-// Path joins and extension lookups for the server.
-import { extname, join } from 'node:path';
+// The Server type only: the shared harness starts it, after() closes it.
+import type { Server } from 'node:http';
 // The runner; beforeEach turns a guard failure into a FAILED test rather than a cancelled one.
 import { after, before, beforeEach, describe, it } from 'node:test';
-// File URLs to paths, so the guard works from any cwd.
-import { fileURLToPath } from 'node:url';
 // The browser, already a dependency of this package.
 import { chromium, type Browser, type BrowserContext, type Dialog, type FrameLocator, type Locator, type Page } from 'playwright';
 // The live row's three jsonb values, anonymised.
 import { MASTER_V2, STORED_TAILORED_PROFILE, TAILOR_REFS } from './fixtures/gitlab-row-anonymised.ts';
+/* The shared browser-test harness. Its guard walks all of src/ plus the root build inputs, a superset of the
+   per-file source list this test kept until 2026-11-05, and also refuses a bundle built without the project URL. */
+import { assertDistIsTestable, seedSession, startDistServer } from './support/e2eDist.ts';
 
-// The built bundle under test.
-const distDir = fileURLToPath(new URL('../dist', import.meta.url));
-/* The sources this test is about: a bundle older than any of them cannot contain the change. */
-const sourcesUnderTest = ['aiEdit.ts', 'AiEditPanel.tsx', 'ApprovalQueuePage.tsx', 'DiffView.tsx', 'saveTailoredEdit.ts', 'resumeChat.ts', 'approveCheck.ts'].map((name) =>
-  // Resolved from this file.
-  fileURLToPath(new URL(`../src/features/approval/${name}`, import.meta.url)),
-);
-// Content types for the few file kinds a Vite build emits.
-const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 // The operator the fake session signs in as.
 const USER = { id: '0f4b24da-e85b-40bb-8606-c81824493b45', aud: 'authenticated', role: 'authenticated', email: 'operator@example.test' };
 // The row's stamp at load; every accepted PATCH moves it on.
@@ -201,42 +189,12 @@ describe('AI resume chat, end to end (2026-11-05)', () => {
   });
 
   before(async () => {
-    // The bundle's build time, or a named refusal when there is none.
-    const built = await stat(join(distDir, 'index.html')).catch(() => null);
-    // No bundle at all.
-    if (built === null) {
-      // Recorded, not thrown.
-      guardError = new Error('E2E_DIST_MISSING: build it with cd apps/web && ./node_modules/.bin/vite build --mode e2e');
-      // Nothing to serve.
-      return;
-    }
-    // Each source this test is about must be older than the build.
-    for (const source of sourcesUnderTest) {
-      // Newer than the bundle: the bundle may not contain it.
-      if ((await stat(source)).mtimeMs > built.mtimeMs) {
-        // Names the file.
-        guardError = new Error(`E2E_DIST_STALE: ${source} is newer than dist/index.html. Rebuild: cd apps/web && ./node_modules/.bin/vite build --mode e2e`);
-        // Nothing worth serving.
-        return;
-      }
-    }
-    // The SPA server: a file when it exists, else index.html, as Vercel serves it.
-    server = createServer(async (request, response) => {
-      // The path without its leading slash.
-      const relative = new URL(request.url ?? '/', 'http://localhost').pathname.replace(/^\//, '');
-      // The asked-for file, or the app shell.
-      let file = join(distDir, relative === '' ? 'index.html' : relative);
-      // A route like /approvals is not a file: serve the shell.
-      if (!(await stat(file).catch(() => null))?.isFile()) file = join(distDir, 'index.html');
-      // Typed by extension.
-      response.writeHead(200, { 'Content-Type': MIME[extname(file).toLowerCase()] ?? 'text/html' });
-      // The bytes.
-      response.end(await readFile(file));
-    });
-    // Any free port on loopback.
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-    // Its address.
-    baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    // Missing, stale or unconfigured dist: recorded, not thrown, so beforeEach fails each test by name.
+    guardError = await assertDistIsTestable().then(() => undefined, (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+    // Nothing worth serving.
+    if (guardError) return;
+    // The shared SPA server on a free loopback port: a file when it exists, else index.html, as Vercel serves it.
+    ({ server, base: baseUrl } = await startDistServer());
     // Headless, as CI runs it.
     browser = await chromium.launch({ headless: true });
     // A fresh context per run.
@@ -350,11 +308,8 @@ describe('AI resume chat, end to end (2026-11-05)', () => {
       // Every other read (counts, health): empty.
       return json(200, []);
     });
-    // The stored session supabase-js reads on boot; the key embeds the project ref.
-    await context.addInitScript((user) => {
-      // A session that does not expire during the run.
-      window.localStorage.setItem('sb-xynqxekcqizwhtskzqrq-auth-token', JSON.stringify({ access_token: 'e2e-test-token', token_type: 'bearer', expires_in: 7200, expires_at: Math.floor(Date.now() / 1000) + 7200, refresh_token: 'e2e-test-refresh', user }));
-    }, USER);
+    // The stored session supabase-js reads on boot, signed in as USER (the shared helper's user shape matches it).
+    await seedSession(context, USER.id);
     // The one page.
     page = await context.newPage();
     // Counted AND dismissed, so a native confirm fails by name instead of hanging the run.

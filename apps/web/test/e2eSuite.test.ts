@@ -19,50 +19,16 @@
  */
 
 import assert from 'node:assert/strict';
-// readFile and stat for the static server and the public/ check; stdlib, no new dependency.
-import { readFile, stat } from 'node:fs/promises';
-import { createServer, type Server } from 'node:http';
-import { extname, join } from 'node:path';
+// The Server type only: the shared harness starts it, this file closes it in after().
+import type { Server } from 'node:http';
 // beforeEach carries the dist guard's error into each test so it counts as a failure.
 import { describe, it, before, beforeEach, after } from 'node:test';
-import { fileURLToPath } from 'node:url';
 // Request: test 12 records the browser's own requests to prove which writes it made.
 import { chromium, type Browser, type BrowserContext, type Page, type Request } from 'playwright';
-// The shared harness (test/support/e2eDist.ts): the dist guard, its newest-file walk, the bundle path and
-// the fake session. This file carried its own copies until 2026-11-05; its server stays local (see MIME_TYPES).
-import { DIST, assertDistIsTestable as assertSharedDistIsTestable, newestMtime, seedSession } from './support/e2eDist.ts';
-
-// Kept local, not the shared server's table: it also types .png and .ico and gives JSON a charset, so this
-// server is NOT a duplicate of support/e2eDist.ts startDistServer (no such file is in dist/ today, 2026-11-05).
-const MIME_TYPES: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'application/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.json': 'application/json; charset=utf-8',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon',
-};
-
-// public/ is copied into dist verbatim; it doesn't exist today, so it is walked only if present.
-// The shared guard (support/e2eDist.ts) does not walk it, so this file keeps that one extra input.
-const webPublicDir = fileURLToPath(new URL('../public', import.meta.url));
-
-/* Refuses to run the suite against a dist/ that can't prove anything. Each failure used
- * to surface as 8 selector timeouts plus a vacuous test-9 pass; now it is one named error.
- * Missing, stale-vs-src/root-inputs and unconfigured are the shared guard's; only public/ is checked here. */
-async function assertDistIsTestable(): Promise<void> {
-  // (a)-(c) from the shared harness, so a fix to the guard lands in every browser test file at once.
-  await assertSharedDistIsTestable();
-  // public/ only if it exists; an absent public/ is normal, not a vacuous walk.
-  if (!(await stat(webPublicDir).catch(() => null))) return;
-  // Same newest-file walk the shared guard runs over src/.
-  const pub = await newestMtime(webPublicDir);
-  // The build's own time; the shared guard just proved index.html exists.
-  const built = (await stat(join(DIST, 'index.html'))).mtimeMs;
-  // Strictly newer: a public/ file touched after the build may not be in dist/. Same code as the shared guard.
-  if (pub.ms > built) throw new Error(`E2E_DIST_STALE: dist/index.html is older than ${pub.path}. Rebuild: cd apps/web && ./node_modules/.bin/vite build --mode e2e`);
-}
+/* The shared harness (test/support/e2eDist.ts): the dist guard, the static SPA server and the fake session.
+   This file carried its own copies until 2026-11-05; its wider MIME table moved into the shared one, and its
+   public/ walk was dropped because apps/web has no public/ (re-add it to the shared guard if one appears). */
+import { assertDistIsTestable, seedSession, startDistServer } from './support/e2eDist.ts';
 
 describe('Playwright E2E Operator Console Suite', () => {
   let server: Server;
@@ -92,31 +58,8 @@ describe('Playwright E2E Operator Console Suite', () => {
     // No server or browser for a dist we refuse; after() already tolerates their absence.
     if (distGuardError) return;
 
-    // 2. Start ephemeral static server for SPA testing
-    server = createServer(async (req, res) => {
-      try {
-        const urlPath = new URL(req.url ?? '/', 'http://localhost').pathname;
-        const relPath = urlPath.replace(/^\//, '');
-        let filePath = join(DIST, relPath === '' ? 'index.html' : relPath);
-        const fileStat = await stat(filePath).catch(() => null);
-
-        if (!fileStat || !fileStat.isFile()) {
-          filePath = join(DIST, 'index.html');
-        }
-
-        const ext = extname(filePath).toLowerCase();
-        const contentType = MIME_TYPES[ext] ?? 'text/html';
-        const content = await readFile(filePath);
-        res.writeHead(200, { 'Content-Type': contentType });
-        res.end(content);
-      } catch (err) {
-        res.writeHead(500).end(String(err));
-      }
-    });
-
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-    const address = server.address() as { port: number };
-    serverUrl = `http://127.0.0.1:${address.port}`;
+    // 2. The shared static SPA server on a free port, so this file runs beside the other browser tests.
+    ({ server, base: serverUrl } = await startDistServer());
 
     // 3. Launch headless Chromium
     browser = await chromium.launch({ headless: true });

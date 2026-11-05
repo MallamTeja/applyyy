@@ -1,7 +1,9 @@
 /* The browser tests' shared harness (2026-11-05): the dist guard, the static SPA server and the fake
  * session. It was copied into each browser test file; appliedE2e.test.ts said to move it here at the third
- * copy. manualApplyResolveE2e, emailsE2e and appliedE2e use all of it. e2eSuite uses the guard and the session
- * but keeps its own server (its MIME table also types .png/.ico) and adds a public/ walk on top of the guard.
+ * copy. manualApplyResolveE2e, emailsE2e, appliedE2e, e2eSuite, approveRecheckE2e and aiEditE2e use all of it.
+ * The last three kept local copies until 2026-11-05 (a wider MIME table, a public/ walk, a per-file source
+ * list); the MIME types moved here, the public/ walk went (apps/web has no public/), and the shared whole-src
+ * guard covers every per-file source list.
  *
  * Every helper here only READS dist/ and serves it locally: no request leaves the machine. */
 
@@ -26,12 +28,12 @@ const ROOT_INPUTS = ['../../index.html', '../../vite.config.ts', '../../.env.e2e
 export const PROJECT_REF = 'xynqxekcqizwhtskzqrq';
 // The one fix for every guard failure, named in each message.
 const FIX = 'cd apps/web && ./node_modules/.bin/vite build --mode e2e';
-// Content types the static server needs for a Vite bundle.
-const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json' };
+/* Content types the static server needs for a Vite bundle. .png/.ico came from e2eSuite's old local table, so
+   an icon added to the bundle is typed right; JSON carries a charset like the other text types. */
+const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json; charset=utf-8', '.png': 'image/png', '.ico': 'image/x-icon' };
 
-/* Newest file mtime under a directory; throws on an empty walk so the staleness check cannot pass vacuously.
-   Exported for e2eSuite.test.ts, which also walks public/. */
-export async function newestMtime(dir: string): Promise<{ path: string; ms: number }> {
+/* Newest file mtime under a directory; throws on an empty walk so the staleness check cannot pass vacuously. */
+async function newestMtime(dir: string): Promise<{ path: string; ms: number }> {
   // Below any real file.
   let newest = { path: '(none)', ms: -Infinity };
   // Recursive listing is stdlib.
