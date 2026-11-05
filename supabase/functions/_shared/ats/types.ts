@@ -273,6 +273,40 @@ export function classifyWorkArrangement(locationText: string | null, explicitRem
   return "unknown";
 }
 
+// The named entities these APIs use, and what each stands for. A closed list: an unknown name
+// ("&mdash;") is left as written rather than guessed at.
+const NAMED_ENTITIES: Readonly<Record<string, string>> = {
+  // The escaped ampersand itself.
+  amp: "&",
+  // Angle brackets, so escaped markup becomes markup and the tag step below removes it.
+  lt: "<",
+  // Same.
+  gt: ">",
+  // Double quote.
+  quot: '"',
+  // Single quote, the HTML5 name for &#39;.
+  apos: "'",
+  // A non-breaking space reads as an ordinary space.
+  nbsp: " ",
+};
+
+// One entity: a known name, a decimal reference or a hex reference, ending in ";". Without the
+// semicolon ("&#43") it is not matched and stays as written.
+const ENTITY = /&(?:([a-z]+)|#(\d{1,7})|#x([0-9a-f]{1,6}));/gi;
+
+// The text one entity stands for, or the entity unchanged when it is not a real character.
+function decodeEntity(whole: string, name?: string, decimal?: string, hex?: string): string {
+  // A named entity: only the closed list above; anything else stays.
+  if (name !== undefined) return NAMED_ENTITIES[name.toLowerCase()] ?? whole;
+  // The code point the numeric reference names.
+  const point = decimal !== undefined ? Number(decimal) : parseInt(hex ?? "", 16);
+  // Only a real Unicode scalar value is a character: not 0, not past 0x10FFFF, not a lone
+  // surrogate (0xD800-0xDFFF). fromCodePoint would throw past 0x10FFFF; this check comes first.
+  const valid = point > 0 && point <= 0x10ffff && (point < 0xd800 || point > 0xdfff);
+  // An invalid reference is left exactly as written, never thrown on.
+  return valid ? String.fromCodePoint(point) : whole;
+}
+
 // Strip HTML to readable text.
 //
 // WHY ADAPTERS DO THIS AT ALL rather than storing the markup: `description_raw` feeds
@@ -286,14 +320,12 @@ export function stripHtml(html: string | null): string | null {
   if (html === null) return null;
   // Decode the entities these APIs escape with, before tag removal — otherwise a
   // `&lt;script&gt;` becomes visible markup in the output rather than plain text.
-  const decoded = html
-    // Ampersand LAST when encoding, FIRST when decoding, or "&amp;lt;" double-decodes.
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, " ");
+  // ONE PASS (2026-11-06, P1 #7). A chain of .replace calls decoded "&amp;" first and fed the
+  // result to the next step, so "&amp;lt;" (the literal text "&lt;") came out as "<". One
+  // regex reads each entity exactly once, so an escaped ampersand stays literal.
+  // NUMERIC TOO: Workday sends "+" as "&#43;" (492 live rows), and the experience parser read
+  // "7&#43; years" as no requirement, so senior roles reached Ready to tailor.
+  const decoded = html.replace(ENTITY, decodeEntity);
   // Replace block-level boundaries with newlines BEFORE dropping tags, so paragraph
   // and list structure survives as line breaks instead of running together into one
   // wall of text that the model then has to guess the shape of.

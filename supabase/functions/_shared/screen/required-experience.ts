@@ -146,6 +146,23 @@ export function requiredExperienceYears(title: string, description: string | nul
   const titleRange = title.match(TITLE_RANGE);
   // The lower bound is the minimum.
   if (titleRange !== null) take(Number(titleRange[1]));
+  // A range written into the title WITHOUT brackets (2026-11-06, P1 #7): "Cloud Engineer -  4 to
+  // 8yrs - Java", "... Cloud- 4+ Years", "... | 8 - 10 years" all reached Ready to tailor because
+  // TITLE_RANGE needs "(". A title has no requirement wording around it, so no context check:
+  // years in a role's NAME are its level. The same three refusals as the body still apply.
+  // ponytail: a contract length in years ("2 Years Fixed Term") would drop; none seen live.
+  const cleanTitle = title.replace(ZERO_WIDTH, "");
+  // Every "N years" in the title.
+  for (const match of cleanTitle.matchAll(YEARS)) {
+    // Where the match starts; matchAll always sets it.
+    const at = match.index ?? 0;
+    // "(up to 2 years)" is a ceiling on the candidate, not a floor.
+    if (UPPER_BOUND_BEFORE.test(cleanTitle.slice(Math.max(0, at - 40), at))) continue;
+    // "4 year degree" is a degree's length.
+    if (DEGREE_AFTER.test(cleanTitle.slice(at + match[0].length))) continue;
+    // A hard minimum, plausibility-checked by take.
+    take(toYears(match[1]!));
+  }
 
   // The body as plain text, entities decoded, zero-width characters gone.
   const text = (stripHtml(description) ?? "").replace(ZERO_WIDTH, "");

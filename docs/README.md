@@ -41,6 +41,6 @@ No row here carries a count: each living doc names the command that regenerates 
 | [ops/](ops/) | Operations designs and runbooks. Latest: [2026-11-05-self-hosted-runner.md](ops/2026-11-05-self-hosted-runner.md) (pending two proofs) |
 | [harvest/briefs/](harvest/briefs/) | Self-contained work packets from 2026-09-16 — your recon overrides them |
 | [robots/](robots/) | Design and first-caller record of the robots.txt gate |
-| [screener/](screener/) | How the filter cascade got wired into scouting |
+| [screener/](screener/) | How the filter cascade got wired into scouting. Runbook: [2026-11-06-bulk-revive-needs-pregate-sweep.md](screener/2026-11-06-bulk-revive-needs-pregate-sweep.md) (sweep after any bulk revive) |
 | [watchlist/](watchlist/) | Company board-token verification by live probes |
 | `ui/audit-*.md` | Dated UI audits carrying stable finding IDs (`K*`, `A*`, `L*`, `C*`) |

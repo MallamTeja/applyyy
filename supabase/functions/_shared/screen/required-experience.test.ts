@@ -223,3 +223,43 @@ describe("screenRequiredExperience: the matcher's twin of cascade experienceCeil
     assert.ok("warning" in verdict);
   });
 });
+
+// P1 #7 (2026-11-06): senior roles reached Ready to tailor. Every case is a live title or JD.
+describe("requiredExperienceYears: P1 #7 leaks", () => {
+  // Cisco's JD: Workday encodes "+" as "&#43;", which the parser could not see.
+  it("Cisco JD 'BS ... with 7&#43; years of relevant experience' is 7", () => {
+    assert.equal(requiredExperienceYears(SWE, "Qualifications:\nBS in Computer Science, Engineering, or a related field with 7&#43; years of relevant experience"), 7);
+  });
+  // A title range without brackets: "4 to 8yrs" between dashes.
+  it("title 'Cloud Engineer -  4 to 8yrs - Java, Python' is 4", () => {
+    assert.equal(requiredExperienceYears("Cloud Engineer -  4 to 8yrs - Java, Python, AI Tools, Distributed Systems", null), 4);
+  });
+  // A bare plus form at the end of a title.
+  it("title '... Distributed Systems, Cloud- 4+ Years' is 4", () => {
+    assert.equal(requiredExperienceYears("Software Engineer - Backend, Python/Go, Distributed Systems, Cloud- 4+ Years", null), 4);
+  });
+  // A range after a pipe.
+  it("title '... | L0/L1 Optical Testing 8 - 10 years' is 8", () => {
+    assert.equal(requiredExperienceYears("Software Test Engineer – IOS XR | Python Automation | L0/L1 Optical Testing 8 - 10 years", null), 8);
+  });
+  // Keep: a year number is not a duration.
+  it("title 'Software Engineer - 2026 Grad' is null", () => {
+    assert.equal(requiredExperienceYears("Software Engineer - 2026 Grad", null), null);
+  });
+  // Keep: months are not years.
+  it("title 'Backend Engineer (3-6 months contract)' is null", () => {
+    assert.equal(requiredExperienceYears("Backend Engineer (3-6 months contract)", null), null);
+  });
+  // Keep: a fresher-friendly upper bound in the title is not a minimum.
+  it("title 'Software Engineer (up to 2 years)' is null", () => {
+    assert.equal(requiredExperienceYears("Software Engineer (up to 2 years)", null), null);
+  });
+  // Keep: a degree's length in the title.
+  it("title 'Software Engineer - 4 year degree required' is null", () => {
+    assert.equal(requiredExperienceYears("Software Engineer - 4 year degree required", null), null);
+  });
+  // Keep: an entry-level title stays exempt whatever its years say.
+  it("title 'Graduate Engineer (2 year programme)' is null", () => {
+    assert.equal(requiredExperienceYears("Graduate Engineer (2 year programme)", null), null);
+  });
+});

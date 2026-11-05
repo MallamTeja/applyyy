@@ -812,6 +812,45 @@ test("stripHtml returns null for markup that contains no text", () => {
   assert.equal(stripHtml(null), null);
 });
 
+// NUMERIC ENTITIES (2026-11-06, P1 #7). Workday sends "+" as "&#43;" (492 stored live, e.g.
+// "C&#43;&#43; programming", "7&#43; years"), and the experience parser read "7&#43; years" as no
+// requirement at all: senior roles reached Ready to tailor. Live also: &#64; 126, &#34; 35, hex 11.
+test("stripHtml decodes a decimal entity: '7&#43; years' is '7+ years'", () => {
+  // The exact live Cisco wording.
+  assert.equal(stripHtml("BS with 7&#43; years of relevant experience"), "BS with 7+ years of relevant experience");
+});
+
+// The hex form of the same thing, seen on 11 live Workday rows.
+test("stripHtml decodes a hex entity: '&#x2B;' is '+'", () => {
+  // Upper- and lower-case hex digits both occur.
+  assert.equal(stripHtml("5&#x2B; years and 3&#x2b; years"), "5+ years and 3+ years");
+});
+
+// ONE PASS, NEVER TWO. An escaped entity is literal text: "&amp;#43;" means the six characters
+// "&#43;". Decoding "&amp;" first and then the result again would turn it into "+".
+test("stripHtml keeps '&amp;#43;' as the literal '&#43;' (no double decode)", () => {
+  // The same rule for a named entity behind an escaped ampersand.
+  assert.equal(stripHtml("a &amp;#43; b &amp;lt; c"), "a &#43; b &lt; c");
+});
+
+// An invalid code point is not a character: left exactly as written, never thrown on.
+test("stripHtml leaves '&#0;' and '&#x110000;' as written", () => {
+  // Zero is not a valid character; 0x110000 is past the last Unicode code point.
+  assert.equal(stripHtml("a &#0; b &#x110000; c"), "a &#0; b &#x110000; c");
+});
+
+// A lone surrogate cannot stand alone in text, so it is invalid too.
+test("stripHtml leaves a surrogate '&#55296;' as written", () => {
+  // 55296 is 0xD800, the first high surrogate.
+  assert.equal(stripHtml("a &#55296; b"), "a &#55296; b");
+});
+
+// Without its semicolon the reference is not an entity this decoder recognises.
+test("stripHtml leaves an unterminated '&#43' as written", () => {
+  // No semicolon after the digits.
+  assert.equal(stripHtml("5&#43 years"), "5&#43 years");
+});
+
 // THE CONTRACT scout-ats relies on to keep a re-sighted job's dates write-once (2026-10-04).
 // scout-ats used to pass `firstSeenAt: now` for EVERY posting, so an undated job's
 // `posted_at` and its source_refs `first_seen_at` were reset to "now" on every poll and the
