@@ -160,6 +160,10 @@ export const AGENT_CADENCE: Readonly<Partial<Record<AgentName, Cadence>>> = {
      before it is called dead - far tighter than the 60-day deadline it guards,
      which is the point: the warning has to arrive with weeks to spare. */
   keepalive: { expected: 'weekly', staleAfterHours: 204 },
+  /* The weekly jobs tombstone run (2026-11-05, migration 20261105201000; Sundays 06:45 UTC). It keeps
+     the database under the 500 MB Free quota, so its silence is news: same weekly shape and the same
+     204 h (a full missed week plus slack) as the keepalive above. */
+  jobs_tombstone: { expected: 'weekly', staleAfterHours: 204 },
   /* `human` is deliberately absent, here AND from HEALTH_ROSTER below. It is
      an identity for attributing events, not a scheduled job, so "the human has
      not run in 9 days" is a meaningless sentence and a threshold for it would

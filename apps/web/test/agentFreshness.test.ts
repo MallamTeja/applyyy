@@ -600,3 +600,10 @@ test('describeRunErrors: no run -> no label', () => {
   // The never-run agent has lastRun null; it must not throw.
   assert.equal(describeRunErrors(null), null);
 });
+
+// R2 (2026-11-05): the weekly tombstone run (migration 20261105201000, Sundays 06:45 UTC) has a cadence,
+// so Health judges its silence like the keepalive's instead of showing an age with no verdict.
+test('AGENT_CADENCE: jobs_tombstone is weekly with the keepalive threshold (204 h)', () => {
+  // Exact shape: a weekly run plus a full missed week of slack, the same reasoning as the keepalive.
+  assert.deepEqual(AGENT_CADENCE.jobs_tombstone, { expected: 'weekly', staleAfterHours: 204 });
+});
