@@ -618,6 +618,20 @@ export function ApprovalQueuePage(): ReactElement {
   const settlingRef = useRef<Set<string>>(new Set());
   // The same set as state, so DiffView re-renders with its controls locked.
   const [settling, setSettling] = useState<ReadonlySet<string>>(() => new Set());
+  /* Whether THIS page instance is still mounted (2026-11-05, AI chat bug b). A remount mid-ask left the old
+     page's auto-apply landing late and writing the row, so the new page held a stale stamp and its next
+     Apply hit 0 rows. A ref, so an async continuation reads the current value, not a render closure's. */
+  const mountedRef = useRef(true);
+  // Set true in the body too: StrictMode's dev double-mount runs the cleanup once, then the effect again.
+  useEffect(() => {
+    // (Re)mounted: this instance may write.
+    mountedRef.current = true;
+    // Unmounted: any late call into editRow from this instance is refused.
+    return () => {
+      // Read by editRow's first guard.
+      mountedRef.current = false;
+    };
+  }, []);
 
   /* Bucket A rows the operator has opened, for the diff and for the preview
      separately. Added 2026-10-06: Bucket A used to be a count and a batch button
@@ -1642,6 +1656,9 @@ export function ApprovalQueuePage(): ReactElement {
   /* editSource (2026-11-04): who decided the edit, written to the history note; required, so no path
      is logged as the operator by omission. Named editSource because `source` below is the RowSource. */
   async function editRow(applicationId: string, action: PageEditAction, editSource: EditSource): Promise<EditResult> {
+    /* A page that is gone never writes: its refs hold a stamp the mounted page no longer trusts. In the
+       page, never the panel: a Bucket A->B move remounts the panel while this page stays current. */
+    if (!mountedRef.current) return notSaved('the page was reloaded before this edit could be saved; apply it again.');
     // Editing IS reviewing the latest version, which is what the stale notice asked for, so it retires.
     clearStale(applicationId);
     // What this row's diff was built from, as last published (never the render closure's copy).

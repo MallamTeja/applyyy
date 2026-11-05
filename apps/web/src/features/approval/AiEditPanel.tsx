@@ -676,8 +676,9 @@ export function AiEditPanel({
                             {state?.status === 'applying' ? 'Applying…' : state?.status === 'failed' ? 'Retry' : 'Apply'}
                           </button>
                         )}
-                        {/* The save path's refusal, verbatim. */}
-                        {state?.status === 'failed' ? <p className="ai-chat__error">{state.reason}</p> : null}
+                        {/* The save path's refusal, verbatim; never on an applied card (2026-11-05): a late write from a
+                            remounted page left a stale refusal beside "Applied", and the resume is the truth. */}
+                        {!applied && state?.status === 'failed' ? <p className="ai-chat__error">{state.reason}</p> : null}
                         {/* Why a card that is not applied waits for a click (2026-11-04, audit-gated), so "not applied yet" is never unexplained. */}
                         {!applied && state === undefined && holdReason(op) !== null ? <p className="ai-chat__meta ai-chat__hold">{holdReason(op)}</p> : null}
                       </li>
