@@ -881,7 +881,9 @@ function StatusGraphCyclePanel(): ReactElement {
           <tbody>
             <tr className="table__row--attention">
               <th scope="row" className="table__id">
-                oa_pending &harr; interview
+                {/* ASCII "<->", not the HTML left-right arrow entity: it decodes to U+2194, an
+                    Extended_Pictographic character some systems paint as a colour emoji (test/noEmoji.test.ts). */}
+                {'oa_pending <-> interview'}
               </th>
               <td>
                 <span className="identifier">tracker</span>
