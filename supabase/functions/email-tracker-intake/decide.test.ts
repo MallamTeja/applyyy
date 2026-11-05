@@ -974,3 +974,31 @@ test("receipt control: a receipt that ALSO invites to the assessment stays oa_in
   // The invitation wins.
   assert.equal(decision.classification, "oa_invite");
 });
+
+// ---- Careers-suffix sender domains (2026-11-05) ---------------------------------------------------
+// Live: HackerRank mails from hackerrankcareers.com; the domain rule wanted the label to EQUAL the slug,
+// so it never matched. A label now also matches when it is the slug plus one word from a CLOSED list
+// (careers, jobs, talent, hr, recruiting, mail, team). Never a bare prefix.
+
+test("careers suffix: hackerrankcareers.com matches the hackerrank row by domain", () => {
+  // Domain alone: an empty subject and a display name that names nothing.
+  const id = matchApplication({ from: "Talent Team <no-reply@hackerrankcareers.com>", subject: "Update", snippet: "" }, "hackerrankcareers.com", [app("hr", "hackerrank")]);
+  // Matched.
+  assert.equal(id, "hr");
+});
+
+test("careers suffix: a word outside the closed list does not match (hackerrankx, stripeintern)", () => {
+  // Not a listed suffix.
+  assert.equal(matchApplication({ from: "x@hackerrankx.com", subject: "Update", snippet: "" }, "hackerrankx.com", [app("hr", "hackerrank")]), null);
+  // An intern program domain is not the company's careers mail.
+  assert.equal(matchApplication({ from: "x@stripeintern.com", subject: "Update", snippet: "" }, "stripeintern.com", [app("st", "stripe")]), null);
+  // And a bare prefix never: 'hack' is not HackerRank.
+  assert.equal(matchApplication({ from: "x@hackerrank.com", subject: "Update", snippet: "" }, "hackerrank.com", [app("h", "hack")]), null);
+});
+
+test("careers suffix: two companies the label could name is ambiguous, so no match", () => {
+  // 'acmecareers' is acme + careers, and also a company literally slugged acmecareers.
+  const id = matchApplication({ from: "x@acmecareers.com", subject: "Update", snippet: "" }, "acmecareers.com", [app("a1", "acme"), app("a2", "acmecareers")]);
+  // Never a guess.
+  assert.equal(id, null);
+});

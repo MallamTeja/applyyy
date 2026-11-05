@@ -290,8 +290,18 @@ function domainMatches(senderDomain: string, slug: string): boolean {
   // Hyphenated slugs (`scale-ai`) appear unhyphenated in domains (`scaleai.com`).
   const compact = slug.replace(/-/g, "");
   // Exact label equality with either form.
-  return label === slug || label === compact;
+  if (label === slug || label === compact) return true;
+  // CAREERS-SUFFIX DOMAINS (2026-11-05): the company's slug followed by ONE word from a closed list
+  // (hackerrankcareers.com). Live, HackerRank's receipt matched nothing because the label had to EQUAL
+  // the slug. Never a bare prefix: 'hack' is not 'hackerrank', and 'stripeintern' is not Stripe, because
+  // the remainder must be a listed word. A label two rows could claim stays ambiguous in the matcher.
+  return CAREERS_SUFFIXES.some((suffix) => label === slug + suffix || label === compact + suffix);
 }
+
+// The closed list of words a company appends to its own name for a hiring-mail domain. Measured on
+// 2026-11-05: the only live sender of this shape is hackerrankcareers.com. A word is added here on
+// evidence, never guessed: each one widens what a registered look-alike domain can claim.
+const CAREERS_SUFFIXES: readonly string[] = ["careers", "jobs", "talent", "hr", "recruiting", "mail", "team"];
 
 // The From header's DISPLAY NAME only: `Stripe Recruiting <no-reply@hire.lever.co>` -> `Stripe Recruiting `.
 // WHY (2026-10-06): the address part is exactly what the domain rule already judged. Letting the text
