@@ -203,37 +203,52 @@ describe('AddJobLinkView', () => {
   });
 });
 
-// Leak 2 (2026-11-05): a pasted link used to revive a screener-dropped row silently. Scale AI
-// 461f9f6b (dropped work_auth: "San Francisco, CA") reached the approved list that way. The
-// function now answers 409 confirm_revive with the reason, and only a confirm re-sends the link
-// with confirm_revive: true.
-describe('confirm before reviving a dropped job', () => {
-  // The function's refusal, as handler.ts words it for Scale's row.
-  const scaleRefusal = { status: 'confirm_revive', drop_reason: 'work_auth', message: 'This job was dropped earlier (work_auth). Location: "San Francisco, CA". Add it anyway?' };
+// Confirms before adding (2026-11-05). Leak 2: a pasted link used to revive a screener-dropped row
+// silently (Scale AI 461f9f6b, dropped work_auth "San Francisco, CA", approved 11-05). Teja's ruling
+// (14:12 IST, "Warn, let me confirm"): a NEW pasted job outside the work-authorised countries asks
+// too (xAI 0c9fdc58, "Palo Alto, CA"). The function answers 409 needs_confirm with a reason from a
+// closed union; only an inline Confirm re-sends the link with confirm: [answers so far].
+describe('confirm before adding', () => {
+  // The function's question for xAI's paste, as handler.ts words it.
+  const paloAlto = { status: 'needs_confirm', reason: 'work_auth', drop_reason: 'work_auth', message: 'Location "Palo Alto, CA" is on-site/hybrid outside the work-authorised countries. Add it anyway?' };
 
-  it('maps a 409 confirm_revive to its own state, carrying the reason and the link', async () => {
-    // The first paste, no confirm.
-    const state = await panel.runJobLinkIntake(clientAnswering(409, scaleRefusal), ' https://x.example/j ');
+  it('maps a 409 needs_confirm to its own state, carrying the reason, the link and the answers so far', async () => {
+    // The first paste, nothing confirmed yet.
+    const state = await panel.runJobLinkIntake(clientAnswering(409, paloAlto), ' https://x.example/j ');
     // Neither an error nor "added": a question for the human.
-    assert.deepEqual(state, { kind: 'confirm_revive', message: scaleRefusal.message, url: 'https://x.example/j' });
+    assert.deepEqual(state, { kind: 'needs_confirm', reason: 'work_auth', message: paloAlto.message, url: 'https://x.example/j', confirmed: [] });
   });
 
-  it('sends confirm_revive: true only when asked, and nothing extra otherwise', async () => {
+  it('a second question keeps the first answer, so the re-send carries both', async () => {
+    // Already confirmed work_auth; now the row turns out to be a dropped one.
+    const state = await panel.runJobLinkIntake(clientAnswering(409, { status: 'needs_confirm', reason: 'revive_dropped', message: 'This job was dropped earlier (tech_gate). Add it anyway?' }), 'https://x.example/j', ['work_auth']);
+    // The earlier answer travels with the new question.
+    assert.deepEqual(state.kind === 'needs_confirm' && [state.reason, state.confirmed], ['revive_dropped', ['work_auth']]);
+  });
+
+  it('a reason outside the union is not a question this panel can answer: it is an error with the words', async () => {
+    // A future server asking about something this build does not know.
+    const state = await panel.runJobLinkIntake(clientAnswering(409, { status: 'needs_confirm', reason: 'tech', message: 'Not a tech role. Add it anyway?' }), 'https://x.example/j');
+    // Shown, never confirmable.
+    assert.deepEqual(state, { kind: 'error', message: 'Not a tech role. Add it anyway?' });
+  });
+
+  it('sends confirm only when there are answers, and nothing extra otherwise', async () => {
     // Every body the fake client received.
     const sent: Array<{ body: Record<string, unknown> }> = [];
     // The ordinary paste.
     await panel.runJobLinkIntake(clientAnswering(200, okBody(), sent), 'https://x.example/j');
     // The confirmed re-send.
-    await panel.runJobLinkIntake(clientAnswering(200, okBody(), sent), 'https://x.example/j', true);
-    // The first is the old contract exactly; the second adds the flag.
-    assert.deepEqual(sent.map((s) => s.body), [{ url: 'https://x.example/j' }, { url: 'https://x.example/j', confirm_revive: true }]);
+    await panel.runJobLinkIntake(clientAnswering(200, okBody(), sent), 'https://x.example/j', ['work_auth', 'revive_dropped']);
+    // The first is the old contract exactly; the second adds the answers.
+    assert.deepEqual(sent.map((s) => s.body), [{ url: 'https://x.example/j' }, { url: 'https://x.example/j', confirm: ['work_auth', 'revive_dropped'] }]);
   });
 
   it('the view shows the reason inside the inline confirm slot, never as an alert', () => {
     // The state the wrapper arms the confirm for.
-    const html = view({ kind: 'confirm_revive', message: scaleRefusal.message, url: 'https://x.example/j' });
-    // The words reach the page (quotes are escaped by React).
-    assert.match(html, /dropped earlier \(work_auth\)/);
+    const html = view({ kind: 'needs_confirm', reason: 'work_auth', message: paloAlto.message, url: 'https://x.example/j', confirmed: [] });
+    // The words reach the page (React escapes the quotes).
+    assert.match(html, /Palo Alto, CA/);
     // Inside InlineConfirm's grid cell, so the armed question replaces it in place.
     assert.match(html, /class="inline-confirm/);
     // A question, not a failure.

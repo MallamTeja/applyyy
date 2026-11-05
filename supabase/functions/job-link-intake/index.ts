@@ -25,6 +25,8 @@ import { fetchPinnedHop } from "./pinned-get.ts";
 import { makeFetchBoard } from "../scout-web/fetch-board.ts";
 // The decisions and the seam types.
 import { handleJobLinkIntake, type IntakeStore } from "./handler.ts";
+// The screener's shape checks for the work-auth list and the remote policy (the work-auth gate's config).
+import { countryList, remoteLocationPolicy } from "../_shared/screen/context.ts";
 // Row and status types for the narrow casts below.
 import type { ApplicationStatus } from "../_shared/contracts/shared-types.ts";
 // The engine behind the web's "Send through pipeline", reused so the server run and a manual
@@ -153,6 +155,22 @@ function makeStore(db: SupabaseClient): IntakeStore {
       if (!data) return { ok: false, reason: "applications_read: row missing after upsert" };
       // created is true only when the upsert returned the row.
       return { ok: true, application: { id: data.id as string, status: data.status as ApplicationStatus, created: (inserted?.length ?? 0) > 0, dropReason: (data.drop_reason as string | null) ?? null } };
+    },
+    // The work-auth config, through the screener's own shape checks (same reads as the matcher).
+    async workAuthConfig() {
+      // RLS scopes it to this user's one row; none is a normal (unset) config.
+      const { data, error } = await db.from("search_preferences").select("work_authorized_countries, remote_location_policy").maybeSingle();
+      // Reported, so the handler refuses the paste rather than skip the gate.
+      if (error) return { ok: false, reason: error.message };
+      // null list = never set (gate open); the policy falls back to 'any' exactly as the screener's does.
+      return { ok: true, countries: countryList(data?.work_authorized_countries), policy: remoteLocationPolicy(data?.remote_location_policy) };
+    },
+    // The override record: a 'note' by 'human', the shape the web's own notes use (saveTailoredEdit.ts).
+    async recordOverrideNote(applicationId, detail) {
+      // user_id defaults to auth.uid(), so the row lands in the caller's RLS tenant.
+      const { error } = await db.from("application_events").insert({ application_id: applicationId, event_type: "note", agent: "human", detail });
+      // Null means it landed.
+      return error ? error.message : null;
     },
     // The guarded move, as the human: the human pasted the link.
     async moveToPassedFilters(applicationId, detail) {

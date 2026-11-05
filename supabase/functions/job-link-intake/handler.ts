@@ -31,6 +31,8 @@ import { extractUrls, parseJobUrl, type ParsedJobUrl } from "../scout-web/urls.t
 import { companyFor, slugFromToken, type FetchBoardFn, type WatchlistName } from "../scout-web/core.ts";
 // The URL rule shared by the pasted link and every redirect hop (SSRF guard).
 import { checkPublicUrl } from "./fetch-page.ts";
+// The screener's work-auth gate, run on a NEW pasted job before any write (Teja, 2026-11-05 14:12).
+import { screenWorkAuth, type RemoteLocationPolicy } from "../_shared/screen/work-auth-gate.ts";
 // Page-to-text, the prompt, and the shape check on the model's answer.
 import { buildExtractPrompt, MAX_SOURCE_CHARS, MIN_JOB_TEXT_CHARS, pageText, parseExtraction } from "./extract.ts";
 // The readers past a plain fetch: LinkedIn's and X's public endpoints, and the browser render.
@@ -100,8 +102,21 @@ export interface StoredApplication {
   readonly dropReason: string | null;
 }
 
+// What the human may confirm before a paste is added: a CLOSED union, so the browser can only say
+// yes to a question this function asked. revive_dropped (leak 2): bring back a row the screener or
+// matcher dropped. work_auth (Teja, 2026-11-05 14:12): add a job outside the work-authorised countries.
+export type ConfirmReason = "revive_dropped" | "work_auth";
+// Every member, for the body check.
+const CONFIRM_REASONS: readonly ConfirmReason[] = ["revive_dropped", "work_auth"];
+
 // Every DB effect, implemented in index.ts over the signed-in client. Values, never throws.
 export interface IntakeStore {
+  // search_preferences.work_authorized_countries + remote_location_policy, mapped by the screener's
+  // own shape checks. A failed read is { ok: false }: the paste is refused, never left ungated.
+  workAuthConfig(): Promise<{ ok: true; countries: readonly string[] | null; policy: RemoteLocationPolicy } | { ok: false; reason: string }>;
+  // One application_events 'note' row by agent 'human': the record of a confirmed override on a
+  // row that was not moved by an RPC (a NEW job has no status event of its own). Null on success.
+  recordOverrideNote(applicationId: string, detail: Record<string, unknown>): Promise<string | null>;
   // The user's own name for a tracked board, so fingerprints match scout-ats rows.
   watchlistName(provider: string, token: string): Promise<{ ok: true; name: WatchlistName | null } | { ok: false; reason: string }>;
   // Insert-if-absent on (user_id, fingerprint), then read the row back either way.
@@ -165,8 +180,8 @@ interface IntakeRequest {
   readonly url: URL;
   // The pasted job text, trimmed; null when absent or blank.
   readonly text: string | null;
-  // True only when the human saw why the row was dropped and chose "add anyway" (leak 2).
-  readonly confirmRevive: boolean;
+  // The questions the human already answered "add anyway" to; empty on a first paste.
+  readonly confirmed: ReadonlySet<ConfirmReason>;
 }
 
 // Shape-check the body. Returns the message the UI shows verbatim on a refusal.
@@ -195,9 +210,13 @@ export function parseIntakeBody(raw: unknown): { ok: true; value: IntakeRequest 
   if (refused !== null) return { ok: false, message: refused };
   // Blank text is absence.
   const text = typeof b["text"] === "string" && b["text"].trim() !== "" ? b["text"].trim() : null;
-  // Validated. The confirm is the boolean true and nothing else: "true" or 1 is not a human's
-  // decision to override a screener drop (CLAUDE.md §6).
-  return { ok: true, value: { url, text, confirmRevive: b["confirm_revive"] === true } };
+  // confirm: absent, or an array of union members and nothing else. A string, a stray value or an
+  // unknown reason is a 400, never ignored: an override must be exactly what was asked (CLAUDE.md §6).
+  const confirm = b["confirm"];
+  // Absent is the first paste.
+  if (confirm !== undefined && (!Array.isArray(confirm) || !confirm.every((c) => CONFIRM_REASONS.includes(c as ConfirmReason)))) return { ok: false, message: `confirm must be a list of: ${CONFIRM_REASONS.join(", ")}` };
+  // Validated.
+  return { ok: true, value: { url, text, confirmed: new Set((confirm ?? []) as ConfirmReason[]) } };
 }
 
 // The ATS posting this request points at: the link itself, else exactly ONE ATS posting link in
@@ -429,8 +448,8 @@ function richerDescription(stored: string | null, pasted: string | null): string
 }
 
 // Persist the row and make sure its application sits where the pipeline can carry it.
-// confirmRevive is REQUIRED, so no caller can revive a dropped row by forgetting to ask.
-export async function persistManualJob(store: IntakeStore, row: JobInsert, pastedUrl: string, confirmRevive: boolean): Promise<
+// confirmed is REQUIRED, so no caller can revive a dropped row by forgetting to ask.
+export async function persistManualJob(store: IntakeStore, row: JobInsert, pastedUrl: string, confirmed: ReadonlySet<ConfirmReason>): Promise<
   | { ok: true; application: StoredApplication; revivedFrom: ApplicationStatus | null }
   | { ok: false; reason: string }
   // A row the screener or matcher dropped, pasted without the human's confirm: nothing moved.
@@ -468,7 +487,11 @@ export async function persistManualJob(store: IntakeStore, row: JobInsert, paste
   // silently (Scale AI 461f9f6b, dropped work_auth 10-25, revived 11-01, approved 11-05). Ask
   // first. The manual tag above is already written by now; harmless at dropped_filter, and
   // moving it after this read would let a running matcher gate a NEW row before it is tagged.
-  if (app.application.status === "dropped_filter" && !confirmRevive) return { ok: false, confirmNeeded: true, dropReason: app.application.dropReason ?? null };
+  // One question per cause: a row dropped FOR work_auth was already asked about by the work-auth
+  // confirm (the handler runs that gate first), so that answer covers its revive too.
+  const reviveConfirmed = confirmed.has("revive_dropped") || (confirmed.has("work_auth") && (app.application.dropReason ?? "").startsWith("work_auth"));
+  // Not confirmed: nothing moves; the handler turns this into the question.
+  if (app.application.status === "dropped_filter" && !reviveConfirmed) return { ok: false, confirmNeeded: true, dropReason: app.application.dropReason ?? null };
   // Upstream or dropped: the human pulls it into passed_filters through the guarded RPC.
   const moveError = await store.moveToPassedFilters(app.application.id, {
     // Why it moved.
@@ -542,14 +565,28 @@ export async function handleJobLinkIntake(req: Request, deps: IntakeDeps): Promi
   // Refusals carry their own status.
   if ("httpStatus" in built) return json(built.httpStatus, built.body);
   // Write it.
-  const saved = await persistManualJob(conn.store, built.row, parsed.value.url.toString(), parsed.value.confirmRevive);
+  // THE WORK-AUTH GATE, before any write (Teja, 2026-11-05 14:12: "Warn, let me confirm"). A pasted
+  // job skipped every filter, so xAI's "Palo Alto, CA" reached the queue. Only work-auth asks; the
+  // tech and experience gates stay skipped for a pasted link, as Teja ruled.
+  const authConfig = await conn.store.workAuthConfig();
+  // Unreadable: refuse rather than add ungated.
+  if (!authConfig.ok) return json(503, { status: "error", message: `Reading your work-authorised countries failed: ${authConfig.reason}` });
+  // The screener's verdict on the pasted job's location and JD.
+  const authVerdict = screenWorkAuth({ title: built.row.title, locationRaw: built.row.location_raw ?? null, description: built.row.description_raw ?? null }, authConfig.countries, authConfig.policy);
+  // Outside the countries and not yet confirmed: ask, write nothing.
+  if (authVerdict.drop && !parsed.value.confirmed.has("work_auth")) {
+    // The gate's own words, capitalised, then the question.
+    return json(409, { status: "needs_confirm", reason: "work_auth", drop_reason: authVerdict.code, message: `${authVerdict.reason.charAt(0).toUpperCase()}${authVerdict.reason.slice(1)}. Add it anyway?` });
+  }
+  // Write it.
+  const saved = await persistManualJob(conn.store, built.row, parsed.value.url.toString(), parsed.value.confirmed);
   // A dropped row pasted without the confirm: 409 with the reason, so the web asks "add anyway?".
   // The message says it in words too, so a browser that does not know this status still shows why.
   if (!saved.ok && "confirmNeeded" in saved) {
     // The posting's location, the usual cause of a work_auth drop; omitted when unknown.
     const where = built.row.location_raw ? ` Location: "${built.row.location_raw}".` : "";
     // Machine-readable reason beside the words; nothing was moved and no pipeline runs.
-    return json(409, { status: "confirm_revive", drop_reason: saved.dropReason, message: `This job was dropped earlier (${saved.dropReason ?? "no reason stored"}).${where} Add it anyway?` });
+    return json(409, { status: "needs_confirm", reason: "revive_dropped", drop_reason: saved.dropReason, message: `This job was dropped earlier (${saved.dropReason ?? "no reason stored"}).${where} Add it anyway?` });
   }
   // A failed job the paste may not restart: 409, the refusal in words, no pipeline run.
   if (!saved.ok && "restartRefused" in saved) return json(409, { status: "cannot_restart", message: saved.reason });
@@ -559,6 +596,14 @@ export async function handleJobLinkIntake(req: Request, deps: IntakeDeps): Promi
   const pipelineStarted = needsChain(saved.application.status);
   // Started only after the row is saved, so the agents never race the write they read.
   if (pipelineStarted) conn.runPipeline(saved.application.id);
+  // A confirmed work-auth override that created or revived a row goes on the record. Logged, not
+  // fatal: the job is already added, and failing now would hide that from the human.
+  if (authVerdict.drop && (saved.application.created || saved.revivedFrom !== null)) {
+    // Which gate was overridden, its code and its words, and the link.
+    const noteError = await conn.store.recordOverrideNote(saved.application.id, { kind: "pasted_link_override", overrode: "work_auth", code: authVerdict.code, reason: authVerdict.reason, url: parsed.value.url.toString() });
+    // Visible in the function log.
+    if (noteError !== null) console.warn(`[job-link-intake] override note not recorded for ${saved.application.id}: ${noteError}`);
+  }
   // What the browser needs to follow the run and show the human what was added.
   return json(200, {
     // Envelope.

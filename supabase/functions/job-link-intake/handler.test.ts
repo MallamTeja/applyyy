@@ -37,12 +37,22 @@ interface Spy {
   // The description each tagManual call wrote (null = left untouched). Optional so the
   // existing Spy literals stay valid; created on the first tag write.
   fills?: Array<string | null>;
+  // Every override note the handler recorded (work_auth confirms), created on the first write.
+  notes?: Array<{ applicationId: string; detail: Record<string, unknown> }>;
 }
 
 // A fake store honouring the real contract: values, never throws.
-function fakeStore(spy: Spy, opts: { existing?: { discoveredVia: string[]; disappearedAt?: string | null; descriptionRaw?: string | null }; application?: StoredApplication; moveError?: string | null } = {}): IntakeStore {
+function fakeStore(spy: Spy, opts: { existing?: { discoveredVia: string[]; disappearedAt?: string | null; descriptionRaw?: string | null }; application?: StoredApplication; moveError?: string | null; workAuth?: { countries: string[] | null; policy: "any" | "unlocked_or_authorized" | "authorized_only" } | { fail: string } } = {}): IntakeStore {
   // Mirrors the real store's read-back.
   return {
+    // Default: the gate is OPEN (no countries set), so tests written before 2026-11-05 keep their meaning.
+    workAuthConfig: () => Promise.resolve(opts.workAuth !== undefined && "fail" in opts.workAuth ? { ok: false as const, reason: opts.workAuth.fail } : { ok: true as const, countries: opts.workAuth?.countries ?? null, policy: opts.workAuth?.policy ?? "any" }),
+    // Records the override note.
+    recordOverrideNote: (applicationId, detail) => {
+      // Kept for the assertions.
+      (spy.notes ??= []).push({ applicationId, detail });
+      return Promise.resolve(null);
+    },
     watchlistName: () => Promise.resolve({ ok: true as const, name: null }),
     upsertJob: (row) => {
       // Records the row the handler built.
@@ -310,7 +320,7 @@ test("persistManualJob: a row that failed before approval is moved back to passe
   // A failed row; the fake advance succeeds, as the database does for a pre-approval failure.
   const store = fakeStore(spy, { existing: { discoveredVia: ["manual"] }, application: { id: "app-9", status: "failed", created: false } });
   // The paste.
-  const saved = await persistManualJob(store, pastedRow(null), "https://x.example/j");
+  const saved = await persistManualJob(store, pastedRow(null), "https://x.example/j", new Set());
   // Revived, from failed.
   assert.ok(saved.ok);
   // Named, so the browser can say "restarted".
@@ -377,7 +387,7 @@ test("handler: a failed row refused for another reason (restart edge not live ye
 test("persistManualJob: a scouted row a filter dropped is tagged manual, then moved back as the human", async () => {
   const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
   const store = fakeStore(spy, { existing: { discoveredVia: ["greenhouse"] }, application: { id: "app-9", status: "dropped_filter", created: false } });
-  const saved = await persistManualJob(store, { fingerprint: "fp", title: "t", company_name: "c", company_slug: "c", apply_url: "https://x.example/j", posted_at: "2026-10-31T00:00:00Z", discovered_via: ["manual"] }, "https://x.example/j", true);
+  const saved = await persistManualJob(store, { fingerprint: "fp", title: "t", company_name: "c", company_slug: "c", apply_url: "https://x.example/j", posted_at: "2026-10-31T00:00:00Z", discovered_via: ["manual"] }, "https://x.example/j", new Set(["revive_dropped"]));
   assert.ok(saved.ok);
   assert.equal(saved.revivedFrom, "dropped_filter");
   assert.equal(saved.application.status, "passed_filters");
@@ -388,7 +398,7 @@ test("persistManualJob: a scouted row a filter dropped is tagged manual, then mo
 test("persistManualJob: a row already at the approval queue is left exactly where it is", async () => {
   const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
   const store = fakeStore(spy, { existing: { discoveredVia: ["manual"] }, application: { id: "app-9", status: "awaiting_approval", created: false } });
-  const saved = await persistManualJob(store, { fingerprint: "fp", title: "t", company_name: "c", company_slug: "c", apply_url: "https://x.example/j", posted_at: "2026-10-31T00:00:00Z" }, "https://x.example/j");
+  const saved = await persistManualJob(store, { fingerprint: "fp", title: "t", company_name: "c", company_slug: "c", apply_url: "https://x.example/j", posted_at: "2026-10-31T00:00:00Z" }, "https://x.example/j", new Set());
   assert.ok(saved.ok);
   assert.equal(saved.revivedFrom, null);
   assert.equal(spy.moves.length, 0);
@@ -398,7 +408,7 @@ test("persistManualJob: a row already at the approval queue is left exactly wher
 test("persistManualJob: a refused move is reported, never claimed as moved", async () => {
   const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
   const store = fakeStore(spy, { existing: { discoveredVia: ["manual"] }, application: { id: "app-9", status: "dropped_filter", created: false }, moveError: "illegal transition" });
-  const saved = await persistManualJob(store, { fingerprint: "fp", title: "t", company_name: "c", company_slug: "c", apply_url: "https://x.example/j", posted_at: "2026-10-31T00:00:00Z" }, "https://x.example/j", true);
+  const saved = await persistManualJob(store, { fingerprint: "fp", title: "t", company_name: "c", company_slug: "c", apply_url: "https://x.example/j", posted_at: "2026-10-31T00:00:00Z" }, "https://x.example/j", new Set(["revive_dropped"]));
   assert.equal(saved.ok, false);
 });
 
@@ -419,7 +429,7 @@ test("persistManualJob: a scouted row with no description takes the pasted descr
   // The live SR case: scouted, no description, still at passed_filters.
   const store = fakeStore(spy, { existing: { discoveredVia: ["smartrecruiters"], descriptionRaw: null }, application: { id: "app-9", status: "passed_filters", created: false } });
   // The paste carries a real description.
-  const saved = await persistManualJob(store, pastedRow(POST_TEXT.trim()), "https://x.example/j");
+  const saved = await persistManualJob(store, pastedRow(POST_TEXT.trim()), "https://x.example/j", new Set());
   // Saved, so the server pipeline can run on it.
   assert.ok(saved.ok);
   // THE PROPERTY: the tag write carries the pasted description, so the matcher and tailor read it.
@@ -433,7 +443,7 @@ test("persistManualJob: a shorter stored description is replaced, even on a row 
   // Already manual and live: the fill is the only reason to write.
   const store = fakeStore(spy, { existing: { discoveredVia: ["manual"], descriptionRaw: "Short JD." }, application: { id: "app-9", status: "passed_filters", created: false } });
   // Longer than the stored text.
-  const saved = await persistManualJob(store, pastedRow(POST_TEXT.trim()), "https://x.example/j");
+  const saved = await persistManualJob(store, pastedRow(POST_TEXT.trim()), "https://x.example/j", new Set());
   // Saved.
   assert.ok(saved.ok);
   // The fill alone triggered the write (before W3 this row was never written).
@@ -445,7 +455,7 @@ test("persistManualJob: a richer stored description is left untouched", async ()
   // The scouted board text is longer than what was pasted: the employer's own words win.
   const store = fakeStore(spy, { existing: { discoveredVia: ["greenhouse"], descriptionRaw: POST_TEXT.repeat(2) }, application: { id: "app-9", status: "passed_filters", created: false } });
   // Shorter than the stored text.
-  const saved = await persistManualJob(store, pastedRow(POST_TEXT.trim()), "https://x.example/j");
+  const saved = await persistManualJob(store, pastedRow(POST_TEXT.trim()), "https://x.example/j", new Set());
   // Saved.
   assert.ok(saved.ok);
   // Tagged manual (it was scouted), but the description is not touched.
@@ -458,7 +468,7 @@ test("persistManualJob: a blank pasted description never replaces anything", asy
   // Already manual and live with no description; the paste has none either.
   const store = fakeStore(spy, { existing: { discoveredVia: ["manual"], descriptionRaw: null }, application: { id: "app-9", status: "passed_filters", created: false } });
   // Whitespace only: absence, which must never wipe or fill anything.
-  const saved = await persistManualJob(store, pastedRow("   "), "https://x.example/j");
+  const saved = await persistManualJob(store, pastedRow("   "), "https://x.example/j", new Set());
   // Saved.
   assert.ok(saved.ok);
   // Nothing to fill and nothing to tag: no write at all.
@@ -698,79 +708,125 @@ test("ATS link whose board cannot be read: falls through to the page ladder inst
   assert.equal(spy.jobs[0]?.ats_provider, "unknown");
 });
 
-// --- Leak 2 (2026-11-05): a pasted link silently revived a row the screener had dropped ---
-// Scale AI 461f9f6b ("San Francisco, CA", dropped work_auth on 10-25) was revived on 11-01 by a
-// paste and reached Teja's approved list with nobody told why it had been dropped. A revive from
-// dropped_filter now needs an explicit confirm_revive: true, sent only after the web showed the
-// reason and Teja said "add anyway".
+// --- Confirms before adding (2026-11-05): leak 2, then Teja's ruling of 14:12 IST ---
+// A pasted link used to (a) silently revive a row the screener had dropped (Scale AI 461f9f6b,
+// dropped work_auth "San Francisco, CA", revived 11-01, approved 11-05) and (b) skip every filter
+// for a NEW job (xAI 0c9fdc58, "Palo Alto, CA", reached the queue). Teja ruled "Warn, let me
+// confirm": both now answer 409 needs_confirm with a reason from a closed union, nothing is
+// written, and the browser re-sends with confirm: [reasons] only after an inline "Add anyway?".
 
-test("parseIntakeBody: confirm_revive is true only for the boolean true", () => {
-  // The flag the web sends after the inline confirm.
-  const yes = parseIntakeBody({ url: "https://job-boards.greenhouse.io/acme/jobs/111", confirm_revive: true });
-  // Accepted.
-  assert.ok(yes.ok && yes.value.confirmRevive === true);
-  // A string is not a confirm (CLAUDE.md §6: no lenient truthiness).
-  const text = parseIntakeBody({ url: "https://job-boards.greenhouse.io/acme/jobs/111", confirm_revive: "true" });
-  // Read as no confirm.
-  assert.ok(text.ok && text.value.confirmRevive === false);
-  // Absent, the normal first paste.
-  const absent = parseIntakeBody({ url: "https://job-boards.greenhouse.io/acme/jobs/111" });
-  // No confirm.
-  assert.ok(absent.ok && absent.value.confirmRevive === false);
+// Teja's live work-auth config.
+const TEJA_WORK_AUTH = { countries: ["India", "Nepal", "Bhutan"], policy: "unlocked_or_authorized" as const };
+// A board whose one posting is xAI's internship in Palo Alto.
+const PALO_ALTO_BOARD = { jobs: [{ ...GH_BOARD.jobs[0], title: "Summer 2027 Software Engineering Internship", location: { name: "Palo Alto, CA" } }] };
+
+test("parseIntakeBody: confirm is a list from the closed union, and anything else is refused", () => {
+  // Both reasons.
+  const both = parseIntakeBody({ url: "https://job-boards.greenhouse.io/acme/jobs/111", confirm: ["work_auth", "revive_dropped"] });
+  // Accepted as a set.
+  assert.ok(both.ok && both.value.confirmed.has("work_auth") && both.value.confirmed.has("revive_dropped"));
+  // Absent: the normal first paste, nothing confirmed.
+  const none = parseIntakeBody({ url: "https://job-boards.greenhouse.io/acme/jobs/111" });
+  // Empty.
+  assert.ok(none.ok && none.value.confirmed.size === 0);
+  // A reason outside the union, a string instead of a list, or a non-string entry: 400, never ignored.
+  for (const confirm of [["tech"], "work_auth", [true]]) assert.equal(parseIntakeBody({ url: "https://job-boards.greenhouse.io/acme/jobs/111", confirm }).ok, false, JSON.stringify(confirm));
+});
+
+test("handler: a NEW Palo Alto paste answers 409 needs_confirm work_auth and writes nothing", async () => {
+  // xAI's posting, Teja's config.
+  const { deps, runs, spy } = makeDeps({ board: PALO_ALTO_BOARD, store: { workAuth: TEJA_WORK_AUTH } });
+  // The first paste.
+  const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111" }), deps);
+  // The envelope.
+  const body = await res.json();
+  // A question, not a failure.
+  assert.deepEqual([res.status, body.status, body.reason], [409, "needs_confirm", "work_auth"]);
+  // The gate's own words, then the question.
+  assert.match(body.message, /Palo Alto, CA.*outside the work-authorised countries.*Add it anyway\?/s);
+  // Nothing was written: no job row, no application, no run.
+  assert.deepEqual([spy.jobs.length, runs.length], [0, 0]);
+});
+
+test("handler: the same paste confirmed adds the job and records the override as a human note", async () => {
+  // Same posting and config.
+  const { deps, runs, spy } = makeDeps({ board: PALO_ALTO_BOARD, store: { workAuth: TEJA_WORK_AUTH } });
+  // Confirmed.
+  const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111", confirm: ["work_auth"] }), deps);
+  // The envelope.
+  const body = await res.json();
+  // Added and running.
+  assert.deepEqual([res.status, body.status, runs.length], [200, "ok", 1]);
+  // The override is on the record: which gate, its code and its words.
+  assert.equal(spy.notes?.[0]?.detail["overrode"], "work_auth");
+  // The gate's code.
+  assert.match(String(spy.notes?.[0]?.detail["code"]), /^work_auth/);
+});
+
+test("handler: an India location asks nothing", async () => {
+  // The default board's posting is in Bengaluru.
+  const { deps, spy } = makeDeps({ store: { workAuth: TEJA_WORK_AUTH } });
+  // The paste.
+  const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111" }), deps);
+  // Added straight away.
+  assert.equal((await res.json()).status, "ok");
+  // And no override was recorded, because none happened.
+  assert.equal(spy.notes, undefined);
+});
+
+test("handler: an unreadable work-auth config refuses the paste (503) rather than skipping the gate", async () => {
+  // The read fails.
+  const { deps, spy } = makeDeps({ board: PALO_ALTO_BOARD, store: { workAuth: { fail: "db down" } } });
+  // The paste.
+  const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111" }), deps);
+  // Refused, nothing written.
+  assert.deepEqual([res.status, spy.jobs.length], [503, 0]);
 });
 
 test("persistManualJob: Scale's dropped row is NOT revived without a confirm, and says why it was dropped", async () => {
   const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
   // Scale's shape: scouted by greenhouse, dropped for work_auth.
   const store = fakeStore(spy, { existing: { discoveredVia: ["greenhouse"] }, application: { id: "461f9f6b-7102-4723-bac5-d3df17ac80c5", status: "dropped_filter", created: false, dropReason: "work_auth" } });
-  // No confirm yet.
-  const saved = await persistManualJob(store, { fingerprint: "fp", title: "Software Engineering Intern (Summer 2027)", company_name: "Scale AI", company_slug: "scaleai", apply_url: "https://x.example/j", location_raw: "San Francisco, CA", posted_at: "2026-10-31T00:00:00Z", discovered_via: ["manual"] }, "https://x.example/j", false);
-  // Not saved as a revive: the caller must ask.
+  // Nothing confirmed.
+  const saved = await persistManualJob(store, { fingerprint: "fp", title: "t", company_name: "Scale AI", company_slug: "scaleai", apply_url: "https://x.example/j", location_raw: "San Francisco, CA", posted_at: "2026-10-31T00:00:00Z", discovered_via: ["manual"] }, "https://x.example/j", new Set());
+  // Not revived: the caller must ask.
   assert.deepEqual(saved, { ok: false, confirmNeeded: true, dropReason: "work_auth" });
   // The status never moved.
   assert.deepEqual(spy.moves, []);
 });
 
-test("persistManualJob: with the confirm, the dropped row is revived and the event records the overridden reason", async () => {
+test("persistManualJob: with revive_dropped confirmed, the row is revived and the event records the overridden reason", async () => {
   const spy: Spy = { jobs: [], tags: [], moves: [], pageFetches: 0, boardFetches: 0, extracts: 0 };
   // Same row.
   const store = fakeStore(spy, { existing: { discoveredVia: ["greenhouse"] }, application: { id: "461f9f6b-7102-4723-bac5-d3df17ac80c5", status: "dropped_filter", created: false, dropReason: "work_auth" } });
   // Confirmed.
-  const saved = await persistManualJob(store, { fingerprint: "fp", title: "t", company_name: "c", company_slug: "c", apply_url: "https://x.example/j", posted_at: "2026-10-31T00:00:00Z", discovered_via: ["manual"] }, "https://x.example/j", true);
+  const saved = await persistManualJob(store, { fingerprint: "fp", title: "t", company_name: "c", company_slug: "c", apply_url: "https://x.example/j", posted_at: "2026-10-31T00:00:00Z", discovered_via: ["manual"] }, "https://x.example/j", new Set(["revive_dropped"]));
   // Moved.
   assert.ok(saved.ok && saved.revivedFrom === "dropped_filter");
-  // The human's override is on the record, beside the reason it overrode.
+  // The override is on the record, beside the reason it overrode.
   assert.equal(spy.moves[0]?.detail["overrode_drop_reason"], "work_auth");
 });
 
-test("handler: pasting Scale's dropped link answers 409 confirm_revive with the reason and location, and runs nothing", async () => {
-  // The dropped row behind the paste.
+test("handler: pasting Scale's dropped link answers 409 needs_confirm revive_dropped with the reason, and runs nothing", async () => {
+  // The dropped row behind the paste (the board's location is India, so the work-auth gate passes).
   const { deps, runs, spy } = makeDeps({ store: { existing: { discoveredVia: ["greenhouse"] }, application: { id: "461f9f6b-7102-4723-bac5-d3df17ac80c5", status: "dropped_filter", created: false, dropReason: "work_auth" } } });
-  // The paste, without the confirm.
+  // No confirm.
   const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111" }), deps);
   // The envelope.
   const body = await res.json();
-  // A refusal the browser turns into an inline confirm.
-  assert.equal(res.status, 409);
-  // Its own status.
-  assert.equal(body.status, "confirm_revive");
-  // The stored reason, machine-readable.
-  assert.equal(body.drop_reason, "work_auth");
-  // And in words, so even a browser that does not know the status shows why.
-  assert.match(body.message, /work_auth/);
+  // Its own reason.
+  assert.deepEqual([res.status, body.status, body.reason, body.drop_reason], [409, "needs_confirm", "revive_dropped", "work_auth"]);
+  // In words too.
+  assert.match(body.message, /dropped earlier \(work_auth\)/);
   // Nothing moved and nothing runs.
   assert.deepEqual([spy.moves, runs], [[], []]);
 });
 
-test("handler: the same paste with confirm_revive: true revives the row and starts the pipeline", async () => {
-  // Same row.
-  const { deps, runs } = makeDeps({ store: { existing: { discoveredVia: ["greenhouse"] }, application: { id: "461f9f6b-7102-4723-bac5-d3df17ac80c5", status: "dropped_filter", created: false, dropReason: "work_auth" } } });
-  // Confirmed.
-  const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111", confirm_revive: true }), deps);
-  // The envelope.
-  const body = await res.json();
-  // Revived.
-  assert.deepEqual([res.status, body.status, body.revived_from], [200, "ok", "dropped_filter"]);
-  // And the server run started on it.
-  assert.deepEqual(runs, ["461f9f6b-7102-4723-bac5-d3df17ac80c5"]);
+test("handler: a row dropped FOR work_auth asks once: confirming work_auth also confirms its revive", async () => {
+  // Scale's real shape: San Francisco, dropped work_auth, Teja's config.
+  const { deps, runs } = makeDeps({ board: { jobs: [{ ...GH_BOARD.jobs[0], location: { name: "San Francisco, CA" } }] }, store: { workAuth: TEJA_WORK_AUTH, existing: { discoveredVia: ["greenhouse"] }, application: { id: "461f9f6b-7102-4723-bac5-d3df17ac80c5", status: "dropped_filter", created: false, dropReason: "work_auth" } } });
+  // Confirmed once, for the gate's question.
+  const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111", confirm: ["work_auth"] }), deps);
+  // Revived without a second question.
+  assert.deepEqual([res.status, (await res.json()).revived_from, runs.length], [200, "dropped_filter", 1]);
 });

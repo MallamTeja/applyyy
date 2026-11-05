@@ -69,12 +69,17 @@ export type IntakeState =
   | { readonly kind: 'notice'; readonly message: string }
   // Something failed; the message says what.
   | { readonly kind: 'error'; readonly message: string }
-  // The link points at a job the screener or matcher dropped (leak 2, 2026-11-05): the server's
-  // reason, and the link to re-send with confirm_revive only if the human says "add anyway".
-  | { readonly kind: 'confirm_revive'; readonly message: string; readonly url: string };
+  // The function asked before adding (2026-11-05): a dropped job (leak 2) or a location outside the
+  // work-authorised countries (Teja, 14:12 IST). The server's words, which question it is, the link,
+  // and the questions already answered, so a second question re-sends both answers.
+  | { readonly kind: 'needs_confirm'; readonly reason: ConfirmReason; readonly message: string; readonly url: string; readonly confirmed: readonly ConfirmReason[] };
 
-// The InlineConfirm instance id for the revive question; one dialog, so one fixed id.
-const REVIVE_CONFIRM_ID = 'add-job-link-revive';
+// What the human may confirm: job-link-intake's closed union (handler.ts ConfirmReason). An unknown
+// reason from the server is not a question this panel can answer, so it shows as an error.
+export type ConfirmReason = 'revive_dropped' | 'work_auth';
+
+// The InlineConfirm instance id for the question; one dialog, so one fixed id.
+const ADD_CONFIRM_ID = 'add-job-link-confirm';
 
 // Body statuses that are not failures, only "not now" or "not this link". needs_text (the page
 // could not be read) is one since 2026-11-01: with no text box left there is no remedy to point at,
@@ -128,15 +133,15 @@ export function parseIntakeOk(body: unknown): IntakeOk | null {
 }
 
 // Send one link and map every outcome to a state. Never throws.
-// confirmRevive: true only after the human confirmed reviving a dropped job; false is the safe side.
-export async function runJobLinkIntake(client: WebScoutClient, url: string, confirmRevive = false): Promise<IntakeState> {
+// confirmed: the questions the human answered "add anyway" to; empty (the default) is the safe side.
+export async function runJobLinkIntake(client: WebScoutClient, url: string, confirmed: readonly ConfirmReason[] = []): Promise<IntakeState> {
   // Trimmed so stray spaces are not part of the link.
   const trimmedUrl = url.trim();
   // Refused here so an empty box costs no request.
   if (trimmedUrl === '') return { kind: 'error', message: 'Paste a job link first.' };
   // The url alone: the function always reads the page itself, so no job text is ever sent.
   // The flag is added only when confirmed, so an ordinary paste sends exactly { url } as before.
-  const body: Record<string, unknown> = confirmRevive ? { url: trimmedUrl, confirm_revive: true } : { url: trimmedUrl };
+  const body: Record<string, unknown> = confirmed.length > 0 ? { url: trimmedUrl, confirm: [...confirmed] } : { url: trimmedUrl };
   // A rejected promise (network down) becomes an error state.
   try {
     // Contract: invoke('job-link-intake', { body }).
@@ -148,7 +153,7 @@ export async function runJobLinkIntake(client: WebScoutClient, url: string, conf
       // Only a well-formed envelope is trusted.
       if (isRecord(errBody) && typeof errBody.message === 'string') {
         // A dropped job: ask before reviving it, with the server's own words (they name the reason).
-        if (errBody.status === 'confirm_revive') return { kind: 'confirm_revive', message: errBody.message, url: trimmedUrl };
+        if (errBody.status === 'needs_confirm' && (errBody.reason === 'revive_dropped' || errBody.reason === 'work_auth')) return { kind: 'needs_confirm', reason: errBody.reason, message: errBody.message, url: trimmedUrl, confirmed };
         // Not a failure, just not now / not this link (needs_text included).
         if (typeof errBody.status === 'string' && NOTICE_STATUSES.has(errBody.status)) return { kind: 'notice', message: errBody.message };
         // Everything else, verbatim.
@@ -397,8 +402,8 @@ export function AddJobLinkView(props: {
         {state.kind === 'notice' && <p className="web-scout__notice">{state.message}</p>}
       </div>
       {/* A dropped job: the reason sits in the confirm slot; the wrapper arms Confirm/Cancel over it. */}
-      {state.kind === 'confirm_revive' && (
-        <InlineConfirm id={REVIVE_CONFIRM_ID}>
+      {state.kind === 'needs_confirm' && (
+        <InlineConfirm id={ADD_CONFIRM_ID}>
           {/* Shown when the question is not armed (after Cancel), so the reason stays readable. */}
           <p className="web-scout__notice">{state.message}</p>
         </InlineConfirm>
@@ -477,6 +482,34 @@ export function AddJobLinkPanel(props: {
   const dialogRef = useRef<HTMLDialogElement>(null);
   // The link box, focused on open so the human can paste at once.
   const inputRef = useRef<HTMLInputElement>(null);
+  // One paste, with the questions already answered. A needs_confirm answer arms the inline question,
+  // and Confirm calls this again with that reason added, so a second question (a dropped job outside
+  // the countries) is asked in turn and the re-send carries both answers.
+  const send = (link: string, confirmed: readonly ConfirmReason[]): void => {
+    // Synchronous flip so the button disables before the await.
+    setState({ kind: 'running' });
+    // runJobLinkIntake never throws.
+    void runJobLinkIntake(props.client, link, confirmed).then((next) => {
+      // Commit the outcome (an ok mounts the watch on the server's run).
+      setState(next);
+      // A question: ask in place. One at a time, app-wide; Cancel writes nothing and refocuses the box.
+      if (next.kind === 'needs_confirm') {
+        // The question, armed over the reason shown in the view.
+        armConfirm(ADD_CONFIRM_ID, {
+          // The server's sentence: the reason and, when known, the location.
+          message: next.message,
+          // Names the buttons ("Confirm: add anyway (work_auth) https://...").
+          action: `add anyway (${next.reason}) ${next.url}`,
+          // The guarded write: the same link, with this answer added to the earlier ones.
+          onConfirm: () => send(next.url, [...next.confirmed, next.reason]),
+          // Focus returns to the link box on Cancel.
+          trigger: inputRef.current,
+        });
+      }
+      // A new or revived row: the page reloads its lists.
+      if (next.kind === 'ok') props.onAdded?.();
+    });
+  };
   // The dialog stays mounted while closed, so a request (and its run watch) outlives a close.
   return (
     <>
@@ -529,41 +562,7 @@ export function AddJobLinkPanel(props: {
           // The row has moved on: the page reloads, so it leaves the Ready to tailor list.
           onRunSettled={props.onAdded}
           // Closes over the current input.
-          onSubmit={() => {
-            // Synchronous flip so the button disables before the await.
-            setState({ kind: 'running' });
-            // runJobLinkIntake never throws.
-            void runJobLinkIntake(props.client, url).then((next) => {
-              // Commit the outcome (an ok mounts the watch on the server's run).
-              setState(next);
-              // A dropped job: ask in place. Confirm re-sends the same link with the flag.
-              if (next.kind === 'confirm_revive') {
-                // One question at a time, app-wide; Cancel writes nothing and refocuses the link box.
-                armConfirm(REVIVE_CONFIRM_ID, {
-                  // The server's sentence: the stored reason and, when known, the location.
-                  message: next.message,
-                  // Names the buttons ("Confirm: add the dropped job ...").
-                  action: `add the dropped job ${next.url}`,
-                  // The guarded write: the confirmed paste.
-                  onConfirm: () => {
-                    // Busy again while the confirmed paste runs.
-                    setState({ kind: 'running' });
-                    // Same never-throwing call, now with the human's confirm.
-                    void runJobLinkIntake(props.client, next.url, true).then((confirmed) => {
-                      // Its outcome, exactly like a first paste's.
-                      setState(confirmed);
-                      // A revived row: the page reloads its lists.
-                      if (confirmed.kind === 'ok') props.onAdded?.();
-                    });
-                  },
-                  // Focus returns to the link box on Cancel.
-                  trigger: inputRef.current,
-                });
-              }
-              // A new or revived row: the page reloads its lists.
-              if (next.kind === 'ok') props.onAdded?.();
-            });
-          }}
+          onSubmit={() => send(url, [])}
         />
       </dialog>
     </>

@@ -115,10 +115,14 @@ jobs:
           // An application_id is printed only after it proves to be a UUID.
           const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
           // Every refusal status job-link-intake sends (handler.ts); any other status is an unknown shape.
-          // cannot_restart was missing (a failed-after-approval row); confirm_revive (2026-11-05) is a
-          // row the screener or matcher dropped: this batch has no human to say "add anyway", so it
-          // is logged as refused and left dropped. Re-paste it in the web to override the drop.
-          const REFUSALS = new Set(['needs_text', 'not_a_job', 'posting_closed', 'quota', 'upstream_unavailable', 'disabled', 'unauthorized', 'error', 'cannot_restart', 'confirm_revive']);
+          // cannot_restart was missing (a failed-after-approval row). needs_confirm (2026-11-05): the
+          // function asks before adding a dropped job or one outside the work-authorised countries;
+          // this batch has no human to say "add anyway", so it is logged as refused and nothing is
+          // written, unless the entry carries an explicit confirm list (below). confirm_revive is the
+          // same refusal from the job-link-intake built at ea85dc9; drop it once that is redeployed.
+          const REFUSALS = new Set(['needs_text', 'not_a_job', 'posting_closed', 'quota', 'upstream_unavailable', 'disabled', 'unauthorized', 'error', 'cannot_restart', 'needs_confirm', 'confirm_revive']);
+          // The questions an entry may pre-answer: job-link-intake's closed ConfirmReason union.
+          const CONFIRM_REASONS = new Set(['revive_dropped', 'work_auth']);
           // Where a saved job's fields came from (handler.ts Built["source"]).
           const SOURCES = new Set(['ats_board', 'page', 'pasted_text']);
 
@@ -170,10 +174,12 @@ jobs:
             const n = i + 1;
             // A plain object, not null, an array or a scalar.
             if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) abort(`entry ${n} is not an object`);
-            // Exactly these keys: a typo like "URL" must not silently become "no url".
+            // Exactly these keys, plus an optional confirm: a typo like "URL" must not silently become "no url".
             const keys = Object.keys(entry).sort().join(',');
             // Sorted, so key order in the file does not matter.
-            if (keys !== 'company,role,url') abort(`entry ${n} keys must be exactly url, company, role; got: ${keys}`);
+            if (keys !== 'company,role,url' && keys !== 'company,confirm,role,url') abort(`entry ${n} keys must be exactly url, company, role (and optionally confirm); got: ${keys}`);
+            // An explicit override (Teja, 2026-11-05): a non-empty list of known reasons, nothing looser.
+            if ('confirm' in entry && (!Array.isArray(entry.confirm) || entry.confirm.length === 0 || !entry.confirm.every((c) => CONFIRM_REASONS.has(c)))) abort(`entry ${n} confirm must be a non-empty list of: ${[...CONFIRM_REASONS].join(', ')}`);
             // All three are needed for the log line; blank is as bad as absent.
             for (const key of ['url', 'company', 'role']) {
               // A non-empty string after trimming, or abort.
@@ -198,7 +204,7 @@ jobs:
             // Remembered for the entries after this one.
             seen.set(key, n);
             // The validated link.
-            return { n, url, key, company: entry.company.trim(), role: entry.role.trim() };
+            return { n, url, key, company: entry.company.trim(), role: entry.role.trim(), confirm: 'confirm' in entry ? [...entry.confirm] : null };
           });
 
           // ---- 2. Optional pasted descriptions: <name>.text.json beside the list. ----
@@ -325,7 +331,8 @@ jobs:
                 // App-user JWT plus anon key; the token is masked and these headers are never logged.
                 headers: { authorization: `Bearer ${token}`, apikey: anonKey, 'content-type': 'application/json' },
                 // text only when the text file had an ok description for this link.
-                body: JSON.stringify(texts.has(link.key) ? { url: link.url, text: texts.get(link.key) } : { url: link.url }),
+                // confirm only when the entry pre-answered the function's questions; otherwise the old body exactly.
+                body: JSON.stringify({ url: link.url, ...(texts.has(link.key) ? { text: texts.get(link.key) } : {}), ...(link.confirm !== null ? { confirm: link.confirm } : {}) }),
                 // A hung request rejects and is recorded, instead of stalling the list.
                 signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
               });
