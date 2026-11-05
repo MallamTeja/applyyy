@@ -8,10 +8,20 @@
 # 2026-10-04 also nearly passed vacuously (deno over zero files, `tests 0`), which
 # is why the guards below assert the work HAPPENED, not just that nothing failed.
 #
-# Needs NO secrets: every job is static analysis or hermetic tests (the browser
+# Needs NO secrets: every step is static analysis or hermetic tests (the browser
 # tests run against local fixtures/servers, never a live site or database). That is a
 # requirement, not an accident — a PR from a fork gets no secrets, and a check
 # that only works with credentials is a check that silently skips.
+#
+# WHY ONE JOB, NOT SIX (P1-7, 2026-11-05): this private repo is on the Free plan's 2,000
+# Actions minutes and went over in October (2,032). Measured over 2026-10-22..11-05, ci.yml
+# was 961 of 1,803 billed minutes (128 runs). GitHub bills each JOB rounded UP to a whole
+# minute, and the six jobs cost 9 billed minutes a run: four of them ran 8-21 s yet billed a
+# minute each, and web and worker each repeated checkout, pnpm install and Chromium's apt
+# dependencies (~20 s). One job does setup once: ~215 s of steps, 4 billed minutes. The cost
+# is wall clock (~3.6 min instead of ~2.2) and one combined check in the PR list. Every check
+# step runs even after another check fails (see `if:` below), so one red run still reports
+# every failure, as six jobs did.
 # =============================================================================
 # Shown as the workflow name in the Actions tab and in required-check settings.
 name: ci
@@ -22,10 +32,27 @@ on:
   push:
     # Only main; feature branches are covered by their pull request.
     branches: [main]
+    # Docs-only pushes skip CI: 22 of the 128 runs above (152 min) changed only docs/ or
+    # *.md. GitHub skips a run only when EVERY changed path matches, so a push that mixes a
+    # doc with code still runs (worker/test/ci-workflow.test.ts proves both cases). No test
+    # or code reads a .md outside docs/ (checked 2026-11-05); one that starts to must narrow
+    # this. A docs-only commit therefore has NO ci run: read the verdict of the newest code
+    # commit at or before it (CLAUDE.md §4 reads CI by full SHA).
+    paths-ignore:
+      # Handoffs, audits, plans: prose only.
+      - 'docs/**'
+      # READMEs, CLAUDE.md, SCHEMA_CONTRACT.md and the rest, at any depth including the root.
+      - '**/*.md'
   # Catches the change before it lands, when one goes through review.
   pull_request:
     # PRs into main are the ones that would deploy.
     branches: [main]
+    # Same list as push; the test asserts the two stay identical.
+    paths-ignore:
+      # Same as push.
+      - 'docs/**'
+      # Same as push.
+      - '**/*.md'
 
 # Read-only token: CI reads the repo and writes nothing back.
 permissions:
@@ -47,9 +74,9 @@ concurrency:
   # Only PR runs dedupe; still saves the Actions minutes PROJECT_PLAN §2 budgets.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Defaults applied to every `run:` step in every job.
+# Defaults applied to every `run:` step.
 defaults:
-  # Bash everywhere, so pipefail below means the same thing in each job.
+  # Bash everywhere, so pipefail below means the same thing in each step.
   run:
     # `-o pipefail` makes a piped checker's failure fail the step, instead of
     # the step reporting the exit code of `grep`/`tail` (CLAUDE.md §4 trap).
@@ -57,40 +84,104 @@ defaults:
 
 # No repo-wide PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD. The first run of this file set
 # it globally on the belief that "no job launches a browser" — wrong: the web
-# e2e suite and several worker tests launch real Chromium, and both jobs failed
+# e2e suite and several worker tests launch real Chromium, and both failed
 # with "Executable doesn't exist". That same run settled the CLAUDE.md §8
 # question: `pnpm install` does NOT download browsers (they were absent after
 # a full install), so the skip flag was never saving anything at install time.
-# The two jobs that need Chromium install it explicitly, from a cache, below.
+# Chromium is installed explicitly, from a cache, below.
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # (a) Deno typecheck of the Edge Functions. `pnpm run typecheck` does NOT reach
-  # this tree (it is a separate Deno project with no package.json), which is how
-  # four type errors survived six days in September.
-  # ---------------------------------------------------------------------------
-  deno-check:
+  # The one job. Setup steps first; every check after them carries the same `if:`.
+  ci:
     # A readable name in the PR checks list.
-    name: deno check (edge functions)
+    name: ci (deno, edge, packages, web, worker)
     # Linux runner: cheapest per minute and matches the deploy target's OS.
     runs-on: ubuntu-latest
-    # A hung type check should fail fast rather than burn the budget.
-    timeout-minutes: 10
+    # The six old caps were 10/10/10/15/20/20 for parallel jobs; serial, the steps take ~4
+    # min warm. 30 leaves room for a cold pnpm store and a Chromium download, and still
+    # stops a hang before it burns the month.
+    timeout-minutes: 30
     steps:
-      # The source to check.
+      # ---------------------------------------------------------------------
+      # Setup. Default `if: success()`: a setup failure skips the rest of setup,
+      # so the LAST setup step succeeding means every setup step did.
+      # ---------------------------------------------------------------------
+      # The source to check, test and build.
       - name: Checkout
-        # Same major as the existing workflows, so all four move together.
+        # Same pin as every other workflow.
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      # The Deno toolchain the functions are written for.
+      # The Deno toolchain the Edge Functions are written for.
       - name: Install Deno
-        # Official action, pinned to a major like the others.
+        # Official action, pinned by SHA like the others.
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         # Pinned to the version the repo was last verified with locally.
         with:
           # deno 2.9.6 is what produced the clean local runs on 2026-10-04.
           deno-version: v2.9.6
-      # The check itself, plus the guard that it actually checked something.
+      # pnpm must exist before setup-node, whose pnpm cache shells out to pnpm.
+      - name: Install pnpm
+        # Same action and pin as apply.yml.
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        # The exact version package.json's packageManager field pins.
+        with:
+          # Matches "packageManager": "pnpm@11.25.0".
+          version: 11.25.0
+      # Node plus the pnpm store cache.
+      - name: Install Node
+        # Same pin as apply.yml.
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        # Runtime and cache settings.
+        with:
+          # Node 24 strips TypeScript natively, which is how every node --test suite runs.
+          node-version: '24'
+          # Restores the pnpm store between runs; install is most of the setup.
+          cache: 'pnpm'
+      # Exactly the locked dependency set — never a resolve. Also creates the workspace
+      # links that packages/* tests need to import @applyy/shared-types by its bare name.
+      - name: pnpm install --frozen-lockfile
+        # Frozen: CI must fail on a lockfile drift, not quietly repair it.
+        run: pnpm install --frozen-lockfile
+      # The web e2e suite and several worker tests (extract-fields, no-spurious-blockers,
+      # render-resume-pdf) drive real Chromium. ~130MB, so cached.
+      - name: Restore the Playwright browser cache
+        # Referenced by the conditional install below.
+        id: playwright-cache
+        # Same action and pin as apply.yml.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        # Same path and key scheme as apply.yml, so the two share one cache.
+        with:
+          # Where Playwright keeps downloaded browsers on Linux.
+          path: ~/.cache/ms-playwright
+          # Keyed on the lockfile: a playwright bump changes it and misses the cache.
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+      # Downloads the browser only on a cache miss.
+      - name: Install Chromium (cache miss)
+        # Skipped on a hit; the system libraries step below still runs.
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        # The worker's playwright. CLAUDE.md §8: worker and web declare playwright and are bumped
+        # together, so both resolve the same browser revision from this one download.
+        run: pnpm --filter '@applyy/worker' exec playwright install chromium
+      # System libraries every run: the cache restores the binary, not apt packages. Once per
+      # run now; the old web and worker jobs each paid this ~20 s.
+      - name: Install Chromium system dependencies
+        # Read by every check's `if:` below: success here means all of setup succeeded.
+        id: setup-done
+        # Same reasoning as apply.yml's unconditional install-deps step.
+        run: pnpm --filter '@applyy/worker' exec playwright install-deps chromium
+
+      # ---------------------------------------------------------------------
+      # Checks. Each one runs `if: ${{ !cancelled() && steps.setup-done.outcome == 'success' }}`:
+      # it runs even when an EARLIER CHECK failed (six jobs used to report independently, and
+      # a red tsc must not hide a red test), but not after a setup failure, where every check
+      # would fail for the same unrelated reason. A cancelled run stops at once.
+      # ---------------------------------------------------------------------
+
+      # (a) Deno typecheck of the Edge Functions. `pnpm run typecheck` does NOT reach
+      # this tree (it is a separate Deno project with no package.json), which is how
+      # four type errors survived six days in September.
       - name: deno check --reload, and assert it checked files
+        # Runs after another check fails; skipped only after a setup failure or a cancel.
+        if: ${{ !cancelled() && steps.setup-done.outcome == 'success' }}
         # The Deno project root; deno.json lives here.
         working-directory: supabase/functions
         run: |
@@ -115,33 +206,12 @@ jobs:
           # partial check is as silent as an empty one. Measured 83 == 83 locally.
           [ "$checks" -eq "${#files[@]}" ] || { echo "checked $checks of ${#files[@]} files"; exit 1; }
 
-  # ---------------------------------------------------------------------------
-  # (b) Edge Function unit tests. They run under Node (Node 24 strips types),
-  # not `deno test`, because they import node:test — see package.json's note on
-  # test:functions. They import no npm packages, so no install is needed.
-  # ---------------------------------------------------------------------------
-  edge-tests:
-    # A readable name in the PR checks list.
-    name: node --test (edge functions)
-    # Linux runner, as above.
-    runs-on: ubuntu-latest
-    # These run in seconds locally; ten minutes is a hang, not a slow test.
-    timeout-minutes: 10
-    steps:
-      # The source to test.
-      - name: Checkout
-        # Same pin as every other job.
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      # Node 24 is required: it is the version that strips TypeScript natively.
-      - name: Install Node
-        # Same major as apply.yml.
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        # The runtime the tests are written against.
-        with:
-          # Must match apply.yml and the machine the counts were measured on.
-          node-version: '24'
-      # Run the suite and refuse a vacuous pass.
-      - name: node --test, and assert tests ran
+      # (b) Edge Function unit tests. They run under Node (Node 24 strips types),
+      # not `deno test`, because they import node:test — see package.json's note on
+      # test:functions. They import no npm packages.
+      - name: edge function tests (node --test), and assert tests ran
+        # Same gate as every check.
+        if: ${{ !cancelled() && steps.setup-done.outcome == 'success' }}
         run: |
           # From the repo root, because the glob is root-relative; run from the
           # wrong cwd it matches nothing and prints `tests 0` / `fail 0` (CLAUDE.md §4).
@@ -164,35 +234,13 @@ jobs:
           # Red even when node exited 0: a failure marker is a failure.
           [ "$failed" -eq 0 ] || { echo "$failed ✖ lines: a test or suite failed (W35)"; exit 1; }
 
-  # ---------------------------------------------------------------------------
-  # (b2) packages/shared-types tests (added 2026-11-01). They hold the contract's
-  # parity checks, e.g. "every table in the migrations has a Row type". No job ran
-  # them, so 4f53c25 landed a table without a Row type on a green main (fixed in
-  # 7c182f6). Same shape as (b): Node 24 strips types, and the tests import only
-  # node builtins and ../src, so no install and no lockfile write.
-  # ---------------------------------------------------------------------------
-  shared-types-tests:
-    # A readable name in the PR checks list.
-    name: node --test (shared-types)
-    # Linux runner, as above.
-    runs-on: ubuntu-latest
-    # A few dozen tests that run in under a second; ten minutes is a hang.
-    timeout-minutes: 10
-    steps:
-      # The source to test.
-      - name: Checkout
-        # Same pin as every other job.
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      # Node 24 is required: it is the version that strips TypeScript natively.
-      - name: Install Node
-        # Same pin as the edge-tests job.
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        # The runtime the tests are written against.
-        with:
-          # Same major as every other Node job here.
-          node-version: '24'
-      # Run the suite and refuse a vacuous or partial pass.
-      - name: node --test, and assert tests ran
+      # (b2) packages/shared-types tests (added 2026-11-01). They hold the contract's
+      # parity checks, e.g. "every table in the migrations has a Row type". No job ran
+      # them, so 4f53c25 landed a table without a Row type on a green main (fixed in
+      # 7c182f6). They import only node builtins and ../src.
+      - name: shared-types tests (node --test), and assert tests ran
+        # Same gate as every check.
+        if: ${{ !cancelled() && steps.setup-done.outcome == 'success' }}
         run: |
           # From the repo root, because the glob is root-relative (CLAUDE.md §5).
           # Actions' bash runs with pipefail, so a failing test fails this line despite tee.
@@ -202,7 +250,7 @@ jobs:
           # A before() hook that cannot import CANCELS tests: neither passed nor failed (CLAUDE.md §5).
           cancelled=$(grep -E 'ℹ cancelled [0-9]+$' shared-types-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
           # Audit W35: a describe() body that throws first leaves fail 0, cancelled 0, exit 0;
-          # only a line starting with ✖ shows it (see the edge-tests job).
+          # only a line starting with ✖ shows it (see the edge tests step).
           failed=$(grep -cE '^[[:space:]]*✖' shared-types-tests.log || true)
           # Printed so all three counts are visible in the job log.
           echo "shared-types tests: $total, cancelled: $cancelled, ✖ lines: $failed"
@@ -213,51 +261,15 @@ jobs:
           # Red even when node exited 0: a failure marker is a failure.
           [ "$failed" -eq 0 ] || { echo "$failed ✖ lines: a test or suite failed (W35)"; exit 1; }
 
-  # ---------------------------------------------------------------------------
-  # (b3) The other workspace packages' tests (added 2026-11-02, audit W13). No job
-  # ran them, including master-robots: the robots.txt gate that scout-ats, scout-web,
-  # job-link-intake, _shared/http/transport.ts and worker/src/apply-one.ts import.
-  # A gate regression would have landed on a green main. Unlike (b2), three of the
-  # four import @applyy/shared-types by its bare name, which resolves only through
-  # pnpm's workspace links, so this job installs (frozen) like the web and worker
-  # jobs. No browser: none of these suites launches Chromium.
-  # ---------------------------------------------------------------------------
-  package-tests:
-    # A readable name in the PR checks list.
-    name: node --test (packages)
-    # Linux runner, as above.
-    runs-on: ubuntu-latest
-    # Install dominates; the suites themselves run in seconds.
-    timeout-minutes: 15
-    steps:
-      # The source to test.
-      - name: Checkout
-        # Same pin as every other job.
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      # pnpm before setup-node, for the same cache reason as the web job.
-      - name: Install pnpm
-        # Same action and pin as the web job.
-        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
-        # The pinned pnpm version.
-        with:
-          # Matches "packageManager": "pnpm@11.25.0".
-          version: 11.25.0
-      # Node plus the pnpm store cache.
-      - name: Install Node
-        # Same pin as the web job.
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        # Runtime and cache settings.
-        with:
-          # Node 24 strips TypeScript natively, which is how these suites run.
-          node-version: '24'
-          # Restores the pnpm store between runs.
-          cache: 'pnpm'
-      # Exactly the locked dependency set; it also creates the workspace links.
-      - name: pnpm install --frozen-lockfile
-        # Frozen, for the same reason as the web job.
-        run: pnpm install --frozen-lockfile
-      # One suite per package, each held to the same three guards as (b2).
-      - name: node --test per package, and assert each ran
+      # (b3) The other workspace packages' tests (added 2026-11-02, audit W13). No job
+      # ran them, including master-robots: the robots.txt gate that scout-ats, scout-web,
+      # job-link-intake, _shared/http/transport.ts and worker/src/apply-one.ts import.
+      # A gate regression would have landed on a green main. Three of the four import
+      # @applyy/shared-types by its bare name, which resolves only through the workspace
+      # links pnpm install created above. No browser: none of these suites launches Chromium.
+      - name: package tests (node --test per package), and assert each ran
+        # Same gate as every check.
+        if: ${{ !cancelled() && steps.setup-done.outcome == 'success' }}
         run: |
           # An unmatched glob expands to nothing rather than to its own literal text.
           shopt -s nullglob
@@ -268,7 +280,7 @@ jobs:
           for dir in packages/*/test; do
             # The package folder name, e.g. master-robots.
             pkg=$(basename "$(dirname "$dir")")
-            # (b2) already runs shared-types, without an install.
+            # (b2) above already runs shared-types.
             if [ "$pkg" = shared-types ]; then continue; fi
             # Root-relative glob; pipefail makes a failing test fail this line despite tee.
             node --test "packages/$pkg/test/**/*.test.ts" 2>&1 | tee "$pkg-tests.log"
@@ -294,74 +306,20 @@ jobs:
           # No package matched at all: the loop above never ran a single check.
           [ "$ran" -gt 0 ] || { echo "no package test dirs matched"; exit 1; }
 
-  # ---------------------------------------------------------------------------
-  # (c) Web app: typecheck, production build, tests. The build matters on its own:
-  # Vercel deploys whatever this builds, and nothing else in CI builds apps/web.
-  # ---------------------------------------------------------------------------
-  web:
-    # A readable name in the PR checks list.
-    name: web (tsc, vite build, tests)
-    # Linux runner, as above.
-    runs-on: ubuntu-latest
-    # Install dominates; twenty minutes leaves room for a cold pnpm store.
-    timeout-minutes: 20
-    steps:
-      # The source to build.
-      - name: Checkout
-        # Same pin as every other job.
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      # pnpm must exist before setup-node, whose pnpm cache shells out to pnpm.
-      - name: Install pnpm
-        # Same action and pin as apply.yml.
-        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
-        # The exact version package.json's packageManager field pins.
-        with:
-          # Matches "packageManager": "pnpm@11.25.0".
-          version: 11.25.0
-      # Node plus the pnpm store cache.
-      - name: Install Node
-        # Same major as apply.yml.
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        # Runtime and cache settings.
-        with:
-          # Same Node as every other job.
-          node-version: '24'
-          # Restores the pnpm store between runs; install is most of this job.
-          cache: 'pnpm'
-      # Exactly the locked dependency set — never a resolve.
-      - name: pnpm install --frozen-lockfile
-        # Frozen: CI must fail on a lockfile drift, not quietly repair it.
-        run: pnpm install --frozen-lockfile
-      # test/e2eSuite.test.ts drives real Chromium. ~130MB, so cached.
-      - name: Restore the Playwright browser cache
-        # Referenced by the conditional install below.
-        id: playwright-cache
-        # Same action and pin as apply.yml.
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        # Same path and key scheme as apply.yml, so the two share one cache.
-        with:
-          # Where Playwright keeps downloaded browsers on Linux.
-          path: ~/.cache/ms-playwright
-          # Keyed on the lockfile: a playwright bump changes it and misses the cache.
-          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-      # Downloads the browser only on a cache miss.
-      - name: Install Chromium (cache miss)
-        # Skipped on a hit; the system libraries step below still runs.
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        # The web package's own playwright, so the browser revision matches it.
-        run: pnpm --filter '@applyy/web' exec playwright install chromium
-      # System libraries every run: the cache restores the binary, not apt packages.
-      - name: Install Chromium system dependencies
-        # Same reasoning as apply.yml's unconditional install-deps step.
-        run: pnpm --filter '@applyy/web' exec playwright install-deps chromium
+      # (c) Web app: typecheck, production build, tests. The build matters on its own:
+      # Vercel deploys whatever this builds, and nothing else in CI builds apps/web.
       # Type errors the Vite build would otherwise strip and ship.
-      - name: tsc --noEmit
+      - name: web tsc --noEmit
+        # Same gate as every check.
+        if: ${{ !cancelled() && steps.setup-done.outcome == 'success' }}
         # The web package's own tsconfig.
         working-directory: apps/web
         # The package-local binary, as CLAUDE.md §4 documents.
         run: ./node_modules/.bin/tsc --noEmit
       # The exact artifact Vercel would deploy; a failure here is a failed deploy.
-      - name: vite build
+      - name: web vite build
+        # Same gate as every check.
+        if: ${{ !cancelled() && steps.setup-done.outcome == 'success' }}
         # Same package.
         working-directory: apps/web
         # No env on purpose: the runner has no .env.local, so this builds "unconfigured",
@@ -373,23 +331,27 @@ jobs:
       # .env.local, so CI and every machine test the same bundle. Without it the shell
       # stops at sign-in and the suite fails with E2E_DIST_UNCONFIGURED (run 37333298262
       # was the 8-timeout version of that). Runs second so dist/ is the e2e bundle.
-      - name: vite build (e2e mode)
+      - name: web vite build (e2e mode)
+        # Same gate as every check.
+        if: ${{ !cancelled() && steps.setup-done.outcome == 'success' }}
         # Same package.
         working-directory: apps/web
         # --mode e2e selects .env.e2e; overwrites the plain build's dist/.
         run: ./node_modules/.bin/vite build --mode e2e
-      # The web test suite, with the same vacuous-pass guard as edge-tests.
+      # The web test suite, with the same vacuous-pass guard as the edge tests.
       - name: web tests, and assert tests ran
+        # Same gate as every check.
+        if: ${{ !cancelled() && steps.setup-done.outcome == 'success' }}
         run: |
           # `@applyy/web`, NOT `web`: `--filter web` matches no package and exits 0
           # having run nothing (CLAUDE.md §4).
           pnpm --filter @applyy/web test 2>&1 | tee web-tests.log
-          # Same anchored summary-line match as edge-tests, for the same reason.
+          # Same anchored summary-line match as the edge tests, for the same reason.
           total=$(grep -E 'ℹ tests [0-9]+$' web-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
           # A before() hook that cannot import CANCELS tests: neither passed nor failed (CLAUDE.md §5).
           cancelled=$(grep -E 'ℹ cancelled [0-9]+$' web-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
           # Audit W35: a describe() body that throws first leaves fail 0, cancelled 0, exit 0;
-          # only a line starting with ✖ shows it (see the edge-tests job).
+          # only a line starting with ✖ shows it (see the edge tests step).
           failed=$(grep -cE '^[[:space:]]*✖' web-tests.log || true)
           # Printed so all three counts are visible in the job log.
           echo "web tests: $total, cancelled: $cancelled, ✖ lines: $failed"
@@ -401,9 +363,11 @@ jobs:
           [ "$failed" -eq 0 ] || { echo "$failed ✖ lines: a test or suite failed (W35)"; exit 1; }
       # The Vercel render function (api/render-job-page.ts, 2026-11-01) runs a headless
       # browser on URLs from strangers' posts; its SSRF and auth guards live in these tests.
-      # In THIS job because they import playwright-core and @sparticuz/chromium, which only
-      # the install above provides; Vercel deploys api/ on the same push as the web build.
+      # They import playwright-core and @sparticuz/chromium, which only the install above
+      # provides; Vercel deploys api/ on the same push as the web build.
       - name: render function (tsc, tests), and assert tests ran
+        # Same gate as every check.
+        if: ${{ !cancelled() && steps.setup-done.outcome == 'success' }}
         run: |
           # The web package's tsc binary over the function's own typecheck-only tsconfig.
           apps/web/node_modules/.bin/tsc -p api/tsconfig.json
@@ -414,7 +378,7 @@ jobs:
           # A before() hook that cannot import CANCELS tests: neither passed nor failed (CLAUDE.md §5).
           cancelled=$(grep -E 'ℹ cancelled [0-9]+$' api-tests.log | tail -1 | grep -oE '[0-9]+$' || echo 0)
           # Audit W35: a describe() body that throws first leaves fail 0, cancelled 0, exit 0;
-          # only a line starting with ✖ shows it (see the edge-tests job).
+          # only a line starting with ✖ shows it (see the edge tests step).
           failed=$(grep -cE '^[[:space:]]*✖' api-tests.log || true)
           # Printed so all three counts are visible in the job log.
           echo "render function tests: $total, cancelled: $cancelled, ✖ lines: $failed"
@@ -425,76 +389,21 @@ jobs:
           # Red even when node exited 0: a failure marker is a failure.
           [ "$failed" -eq 0 ] || { echo "$failed ✖ lines: a test or suite failed (W35)"; exit 1; }
 
-  # ---------------------------------------------------------------------------
-  # (d) Worker: typecheck and vitest. This is the component that types into real
-  # employer forms, so it is the last place a type error should reach unnoticed.
-  # ---------------------------------------------------------------------------
-  worker:
-    # A readable name in the PR checks list.
-    name: worker (tsc, vitest)
-    # Linux runner, as above.
-    runs-on: ubuntu-latest
-    # Install dominates, as in the web job.
-    timeout-minutes: 20
-    steps:
-      # The source to test.
-      - name: Checkout
-        # Same pin as every other job.
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      # pnpm before setup-node, for the same cache reason as the web job.
-      - name: Install pnpm
-        # Same action and pin as apply.yml.
-        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
-        # The pinned pnpm version.
-        with:
-          # Matches "packageManager": "pnpm@11.25.0".
-          version: 11.25.0
-      # Node plus the pnpm store cache.
-      - name: Install Node
-        # Same major as apply.yml.
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        # Runtime and cache settings.
-        with:
-          # Same Node as every other job.
-          node-version: '24'
-          # Restores the pnpm store between runs.
-          cache: 'pnpm'
-      # Exactly the locked dependency set.
-      - name: pnpm install --frozen-lockfile
-        # Frozen, for the same reason as the web job.
-        run: pnpm install --frozen-lockfile
-      # Several worker tests (extract-fields, no-spurious-blockers, render-resume-pdf)
-      # launch real Chromium against captured fixtures. Same cache as the web job.
-      - name: Restore the Playwright browser cache
-        # Referenced by the conditional install below.
-        id: playwright-cache
-        # Same action and pin as apply.yml.
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        # Shared key with the web job and apply.yml.
-        with:
-          # Where Playwright keeps downloaded browsers on Linux.
-          path: ~/.cache/ms-playwright
-          # Keyed on the lockfile, as everywhere else.
-          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-      # Downloads the browser only on a cache miss.
-      - name: Install Chromium (cache miss)
-        # Skipped on a hit.
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        # The worker's own playwright, matching apply.yml's install command.
-        run: pnpm --filter '@applyy/worker' exec playwright install chromium
-      # System libraries every run, as in the web job.
-      - name: Install Chromium system dependencies
-        # The cache restores only the binary.
-        run: pnpm --filter '@applyy/worker' exec playwright install-deps chromium
+      # (d) Worker: typecheck and vitest. This is the component that types into real
+      # employer forms, so it is the last place a type error should reach unnoticed.
       # Covers src/** and test/** (worker/tsconfig.json); scripts/** is outside it.
-      - name: tsc --noEmit
+      - name: worker tsc --noEmit
+        # Same gate as every check.
+        if: ${{ !cancelled() && steps.setup-done.outcome == 'success' }}
         # The worker's own tsconfig.
         working-directory: worker
         # The package-local binary.
         run: ./node_modules/.bin/tsc --noEmit
       # vitest exits non-zero on failure AND on "no test files found", so its own
       # exit code is already a non-vacuous guard here.
-      - name: vitest run
+      - name: worker vitest run
+        # Same gate as every check.
+        if: ${{ !cancelled() && steps.setup-done.outcome == 'success' }}
         # The worker package.
         working-directory: worker
         # Runs the suite once, no watch mode.
