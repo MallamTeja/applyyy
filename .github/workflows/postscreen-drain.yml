@@ -1,4 +1,4 @@
-# Drains the post-screen queues on demand: pages the whole `passed_filters` queue through the
+# Drains the post-screen queues after every scheduled scout run and on demand: pages the whole `passed_filters` queue through the
 # matcher (?limit=10), then the whole `scored` queue through the tailor (?limit=3), then the
 # whole `tailored` queue through the auditor (?limit=5), pausing between pages for Gemini's RPM. The sibling of prescreen-drain.yml,
 # which drains the two stages BEFORE this one (normalizer, screener).
@@ -10,11 +10,27 @@
 # Same credential story as prescreen-drain.yml: the app-user secrets live only in this repo's
 # Actions secrets. The matcher DROPS rows below the score threshold and drops are one-way, so
 # every abort below fails CLOSED: any response we cannot read exactly stops the run.
+#
+# AUTOMATIC AFTER EVERY SCAN since 2026-11-05 (P1-4, Teja 00:40 IST: "run the post-screen drain
+# automatically after every scan"). That ruling supersedes the 2026-10-09 manual-only ruling for
+# THIS workflow; pregate-sweep and prescreen-drain stay manual. Measured 12:05 IST: 8 rows at
+# passed_filters and 15 at scored were waiting, because nothing drained them on a schedule.
 name: applyy post-screen drain
 
-# Manual trigger ONLY, same ruling as pregate-sweep and prescreen-drain (Teja 2026-10-09): a
-# run that drops rows and spends Gemini quota must happen while someone watches the log.
 on:
+  # Fires when either scheduled scout finishes, whatever its conclusion: a scout that failed or
+  # hit its budget may still have queued rows, and the count gate below skips a run with none.
+  # Picked over a drain step INSIDE scout.yml: that job already ends on its 12-minute budget
+  # (~740-747 s), and a separate run keeps its own concurrency group and 180-minute cap.
+  # Manual "Scan" passes from the web (scout-ats edge function, discoveryService.ts) run no
+  # workflow, so their rows are drained by the NEXT scheduled scan's run, at most ~12 h later.
+  workflow_run:
+    # Matched by each workflow's `name:`, so a rename there must be made here too
+    # (worker/test/postscreen-drain-workflow.test.ts checks both names exist).
+    workflows: ['applyy scout (ats discovery)', 'applyy scout (remote feeds)']
+    # Only finished runs; `requested` would race the scout's own inserts.
+    types: [completed]
+  # The manual drain, for re-runs (from_stage) and rehearsals (dry_count_only).
   workflow_dispatch:
     # The one input: rehearse without touching anything.
     inputs:
@@ -88,13 +104,16 @@ jobs:
           // (candidates plus retries); the auditor 5. Each page stays near 10 Gemini calls.
           // pageCap: hard ceiling well above the live backlog (~170 passed_filters / 10 = 17
           // pages; ~100 to tailor / 3 = 34 pages) so a queue that never shrinks stops red.
+          // reads: the statuses each agent's own query selects, for the count gate below. A
+          // superset is safe (the run just goes ahead); a missing status would skip real work.
           const STAGES = [
-            // Stage 1: passed_filters -> scored | dropped_filter | failed.
-            { name: 'matcher', limit: 10, pageCap: 40 },
-            // Stage 2: scored -> tailored | failed.
-            { name: 'tailor', limit: 3, pageCap: 90 },
-            // Stage 3: tailored -> audit_clean | audit_flagged -> awaiting_approval.
-            { name: 'auditor', limit: 5, pageCap: 60 },
+            // Stage 1: passed_filters -> scored | dropped_filter | failed (matcher/index.ts:392).
+            { name: 'matcher', limit: 10, pageCap: 40, reads: ['passed_filters'] },
+            // Stage 2: scored -> tailored | failed (tailor/index.ts:217).
+            { name: 'tailor', limit: 3, pageCap: 90, reads: ['scored'] },
+            // Stage 3: tailored -> audit_clean | audit_flagged -> awaiting_approval; it also
+            // resumes rows stranded at audit_clean/audit_flagged (auditor/index.ts:217).
+            { name: 'auditor', limit: 5, pageCap: 60, reads: ['tailored', 'audit_clean', 'audit_flagged'] },
           ];
           // Pause after every page that read rows. The second live run (41305575499) sent ~10
           // calls every ~20 s, and by page 5 every key answered 429 RESOURCE_EXHAUSTED. A single
@@ -157,6 +176,8 @@ jobs:
           console.log(`plan: ${GAP_MS / 1000}s pause after each page, ${QUOTA_BACKOFF_MS / 1000}s after a page with errors (Gemini ~15 RPM free tier)`);
           // The abort rules, likewise.
           console.log('plan: abort on non-2xx, non-JSON, missing/ill-typed fields, or a kill-switch halt (skipped_disabled)');
+          // The skip rule, so an automatic run that did nothing says why in its log.
+          console.log(`plan: skip green, calling no agent, when 0 applications are at ${RUN_STAGES.flatMap((s) => s.reads).join(', ')}`);
           // The rehearsal ends here, before sign-in.
           if (dryCountOnly) {
             // Says plainly that nothing was called, so a green dry run is not mistaken for a drain.
@@ -231,6 +252,37 @@ jobs:
             signedInAt = Date.now();
             // One line, so the log shows the run crossed a token boundary on purpose.
             console.log('auth: signed in again before the access token expired');
+          }
+
+          // The count gate: one PostgREST HEAD with count=exact, under the app user's RLS, before
+          // any agent runs. Every scan now triggers this workflow, and most find nothing new to
+          // drain; calling three agents on an empty queue would only add agent_runs noise.
+          const reads = RUN_STAGES.flatMap((stage) => stage.reads);
+          // HEAD returns the count in Content-Range without sending any row.
+          const countRes = await fetch(`${base}/rest/v1/applications?select=id&status=in.(${reads.join(',')})`, {
+            // No body wanted, only the header.
+            method: 'HEAD',
+            // count=exact fills Content-Range's total; the token scopes it to the app user's rows.
+            headers: { authorization: `Bearer ${token}`, apikey: anonKey, prefer: 'count=exact' },
+            // A hung count rejects instead of holding the job to timeout-minutes.
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          });
+          // Any non-2xx is not a count: fail closed rather than guess 0 and skip real rows.
+          if (countRes.status < 200 || countRes.status > 299) abort(`count gate: HTTP ${countRes.status}`);
+          // "0-9/23" or "*/0": only the total after the slash matters (CLAUDE.md §6: exact shape).
+          const range = /^(?:\*|\d+-\d+)\/(\d+)$/.exec(countRes.headers.get('content-range') ?? '');
+          // A missing or unparseable header is not a zero.
+          if (!range) abort(`count gate: unreadable Content-Range "${countRes.headers.get('content-range')}"`);
+          // The eligible rows across every stage this run drains.
+          const eligible = Number(range[1]);
+          // Logged either way, so the run states what it found.
+          console.log(`count gate: ${eligible} application(s) at ${reads.join(', ')}`);
+          // Nothing to drain: green, and no agent was called.
+          if (eligible === 0) {
+            // Says plainly that the empty queue is why nothing ran.
+            console.log('SKIP: nothing eligible; no agent called.');
+            // Green: an empty queue is the expected state after most scans.
+            process.exit(0);
           }
 
           // Requires a field to be a non-negative integer, named in the abort so the
