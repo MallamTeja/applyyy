@@ -202,3 +202,41 @@ describe('AddJobLinkView', () => {
     assert.doesNotMatch(view({ kind: 'notice', message: 'x' }), /role="alert"/);
   });
 });
+
+// Leak 2 (2026-11-05): a pasted link used to revive a screener-dropped row silently. Scale AI
+// 461f9f6b (dropped work_auth: "San Francisco, CA") reached the approved list that way. The
+// function now answers 409 confirm_revive with the reason, and only a confirm re-sends the link
+// with confirm_revive: true.
+describe('confirm before reviving a dropped job', () => {
+  // The function's refusal, as handler.ts words it for Scale's row.
+  const scaleRefusal = { status: 'confirm_revive', drop_reason: 'work_auth', message: 'This job was dropped earlier (work_auth). Location: "San Francisco, CA". Add it anyway?' };
+
+  it('maps a 409 confirm_revive to its own state, carrying the reason and the link', async () => {
+    // The first paste, no confirm.
+    const state = await panel.runJobLinkIntake(clientAnswering(409, scaleRefusal), ' https://x.example/j ');
+    // Neither an error nor "added": a question for the human.
+    assert.deepEqual(state, { kind: 'confirm_revive', message: scaleRefusal.message, url: 'https://x.example/j' });
+  });
+
+  it('sends confirm_revive: true only when asked, and nothing extra otherwise', async () => {
+    // Every body the fake client received.
+    const sent: Array<{ body: Record<string, unknown> }> = [];
+    // The ordinary paste.
+    await panel.runJobLinkIntake(clientAnswering(200, okBody(), sent), 'https://x.example/j');
+    // The confirmed re-send.
+    await panel.runJobLinkIntake(clientAnswering(200, okBody(), sent), 'https://x.example/j', true);
+    // The first is the old contract exactly; the second adds the flag.
+    assert.deepEqual(sent.map((s) => s.body), [{ url: 'https://x.example/j' }, { url: 'https://x.example/j', confirm_revive: true }]);
+  });
+
+  it('the view shows the reason inside the inline confirm slot, never as an alert', () => {
+    // The state the wrapper arms the confirm for.
+    const html = view({ kind: 'confirm_revive', message: scaleRefusal.message, url: 'https://x.example/j' });
+    // The words reach the page (quotes are escaped by React).
+    assert.match(html, /dropped earlier \(work_auth\)/);
+    // Inside InlineConfirm's grid cell, so the armed question replaces it in place.
+    assert.match(html, /class="inline-confirm/);
+    // A question, not a failure.
+    assert.doesNotMatch(html, /role="alert"/);
+  });
+});

@@ -95,6 +95,9 @@ export interface StoredApplication {
   readonly status: ApplicationStatus;
   // True only when this request created it.
   readonly created: boolean;
+  // applications.drop_reason: the screener's or matcher's code for a dropped row, else null.
+  // Read so a paste can say WHY a row was dropped before reviving it (leak 2, 2026-11-05).
+  readonly dropReason: string | null;
 }
 
 // Every DB effect, implemented in index.ts over the signed-in client. Values, never throws.
@@ -162,6 +165,8 @@ interface IntakeRequest {
   readonly url: URL;
   // The pasted job text, trimmed; null when absent or blank.
   readonly text: string | null;
+  // True only when the human saw why the row was dropped and chose "add anyway" (leak 2).
+  readonly confirmRevive: boolean;
 }
 
 // Shape-check the body. Returns the message the UI shows verbatim on a refusal.
@@ -190,8 +195,9 @@ export function parseIntakeBody(raw: unknown): { ok: true; value: IntakeRequest 
   if (refused !== null) return { ok: false, message: refused };
   // Blank text is absence.
   const text = typeof b["text"] === "string" && b["text"].trim() !== "" ? b["text"].trim() : null;
-  // Validated.
-  return { ok: true, value: { url, text } };
+  // Validated. The confirm is the boolean true and nothing else: "true" or 1 is not a human's
+  // decision to override a screener drop (CLAUDE.md §6).
+  return { ok: true, value: { url, text, confirmRevive: b["confirm_revive"] === true } };
 }
 
 // The ATS posting this request points at: the link itself, else exactly ONE ATS posting link in
@@ -423,9 +429,14 @@ function richerDescription(stored: string | null, pasted: string | null): string
 }
 
 // Persist the row and make sure its application sits where the pipeline can carry it.
-export async function persistManualJob(store: IntakeStore, row: JobInsert, pastedUrl: string): Promise<
+// confirmRevive is REQUIRED, so no caller can revive a dropped row by forgetting to ask.
+export async function persistManualJob(store: IntakeStore, row: JobInsert, pastedUrl: string, confirmRevive: boolean): Promise<
   | { ok: true; application: StoredApplication; revivedFrom: ApplicationStatus | null }
   | { ok: false; reason: string }
+  // A row the screener or matcher dropped, pasted without the human's confirm: nothing moved.
+  // dropReason is the stored code, or null when none was stored (still asked: no reason stored
+  // is not evidence the drop was harmless).
+  | { ok: false; confirmNeeded: true; dropReason: string | null }
   // A failed row the database would not move: a refusal to report as such, not a failed write.
   // The job row (and any description it gained) is already saved by then.
   | { ok: false; reason: string; restartRefused: true }
@@ -453,8 +464,22 @@ export async function persistManualJob(store: IntakeStore, row: JobInsert, paste
   if (!app.ok) return app;
   // Already moving forward, or past the queue: leave it exactly where it is.
   if (!REVIVE_FROM.includes(app.application.status)) return { ok: true, application: app.application, revivedFrom: null };
+  // LEAK 2 (2026-11-05): a screener/matcher drop is a verdict, and a paste used to overturn it
+  // silently (Scale AI 461f9f6b, dropped work_auth 10-25, revived 11-01, approved 11-05). Ask
+  // first. The manual tag above is already written by now; harmless at dropped_filter, and
+  // moving it after this read would let a running matcher gate a NEW row before it is tagged.
+  if (app.application.status === "dropped_filter" && !confirmRevive) return { ok: false, confirmNeeded: true, dropReason: app.application.dropReason ?? null };
   // Upstream or dropped: the human pulls it into passed_filters through the guarded RPC.
-  const moveError = await store.moveToPassedFilters(app.application.id, { reason: "pasted_link", url: pastedUrl, from: app.application.status });
+  const moveError = await store.moveToPassedFilters(app.application.id, {
+    // Why it moved.
+    reason: "pasted_link",
+    // What was pasted.
+    url: pastedUrl,
+    // Where it came from.
+    from: app.application.status,
+    // The verdict the human overrode, on the event record; only for a confirmed drop revive.
+    ...(app.application.status === "dropped_filter" ? { overrode_drop_reason: app.application.dropReason ?? null } : {}),
+  });
   // A failed row the database refused (failed after approval, or the edge not live yet): reported
   // as a refusal the human can read. The tag and description write above already happened.
   if (moveError !== null && app.application.status === "failed") return { ok: false, reason: restartRefusal(moveError), restartRefused: true };
@@ -517,7 +542,15 @@ export async function handleJobLinkIntake(req: Request, deps: IntakeDeps): Promi
   // Refusals carry their own status.
   if ("httpStatus" in built) return json(built.httpStatus, built.body);
   // Write it.
-  const saved = await persistManualJob(conn.store, built.row, parsed.value.url.toString());
+  const saved = await persistManualJob(conn.store, built.row, parsed.value.url.toString(), parsed.value.confirmRevive);
+  // A dropped row pasted without the confirm: 409 with the reason, so the web asks "add anyway?".
+  // The message says it in words too, so a browser that does not know this status still shows why.
+  if (!saved.ok && "confirmNeeded" in saved) {
+    // The posting's location, the usual cause of a work_auth drop; omitted when unknown.
+    const where = built.row.location_raw ? ` Location: "${built.row.location_raw}".` : "";
+    // Machine-readable reason beside the words; nothing was moved and no pipeline runs.
+    return json(409, { status: "confirm_revive", drop_reason: saved.dropReason, message: `This job was dropped earlier (${saved.dropReason ?? "no reason stored"}).${where} Add it anyway?` });
+  }
   // A failed job the paste may not restart: 409, the refusal in words, no pipeline run.
   if (!saved.ok && "restartRefused" in saved) return json(409, { status: "cannot_restart", message: saved.reason });
   // A failed write is reported, never a quiet success.

@@ -27,6 +27,8 @@ import { isRecord, readErrorBody, type WebScoutClient } from './WebScoutPanel.ts
 import './WebScoutPanel.css';
 // Only the modal's placement, scrim and header row; the card look stays WebScoutPanel.css's.
 import './AddJobLinkPanel.css';
+// The app's in-place confirm (no browser dialogs, CLAUDE.md §8), for "add a dropped job anyway?".
+import { InlineConfirm, armConfirm } from '../../app/InlineConfirm.tsx';
 
 // Where the job's fields came from, as the function reports it.
 export type IntakeSource = 'ats_board' | 'page' | 'pasted_text';
@@ -66,7 +68,13 @@ export type IntakeState =
   // Nothing broken (kill switch, quota, Gemini busy, closed posting, not a job, unreadable page): a polite notice.
   | { readonly kind: 'notice'; readonly message: string }
   // Something failed; the message says what.
-  | { readonly kind: 'error'; readonly message: string };
+  | { readonly kind: 'error'; readonly message: string }
+  // The link points at a job the screener or matcher dropped (leak 2, 2026-11-05): the server's
+  // reason, and the link to re-send with confirm_revive only if the human says "add anyway".
+  | { readonly kind: 'confirm_revive'; readonly message: string; readonly url: string };
+
+// The InlineConfirm instance id for the revive question; one dialog, so one fixed id.
+const REVIVE_CONFIRM_ID = 'add-job-link-revive';
 
 // Body statuses that are not failures, only "not now" or "not this link". needs_text (the page
 // could not be read) is one since 2026-11-01: with no text box left there is no remedy to point at,
@@ -120,13 +128,15 @@ export function parseIntakeOk(body: unknown): IntakeOk | null {
 }
 
 // Send one link and map every outcome to a state. Never throws.
-export async function runJobLinkIntake(client: WebScoutClient, url: string): Promise<IntakeState> {
+// confirmRevive: true only after the human confirmed reviving a dropped job; false is the safe side.
+export async function runJobLinkIntake(client: WebScoutClient, url: string, confirmRevive = false): Promise<IntakeState> {
   // Trimmed so stray spaces are not part of the link.
   const trimmedUrl = url.trim();
   // Refused here so an empty box costs no request.
   if (trimmedUrl === '') return { kind: 'error', message: 'Paste a job link first.' };
   // The url alone: the function always reads the page itself, so no job text is ever sent.
-  const body: Record<string, unknown> = { url: trimmedUrl };
+  // The flag is added only when confirmed, so an ordinary paste sends exactly { url } as before.
+  const body: Record<string, unknown> = confirmRevive ? { url: trimmedUrl, confirm_revive: true } : { url: trimmedUrl };
   // A rejected promise (network down) becomes an error state.
   try {
     // Contract: invoke('job-link-intake', { body }).
@@ -137,6 +147,8 @@ export async function runJobLinkIntake(client: WebScoutClient, url: string): Pro
       const errBody = (await readErrorBody(error)) ?? data;
       // Only a well-formed envelope is trusted.
       if (isRecord(errBody) && typeof errBody.message === 'string') {
+        // A dropped job: ask before reviving it, with the server's own words (they name the reason).
+        if (errBody.status === 'confirm_revive') return { kind: 'confirm_revive', message: errBody.message, url: trimmedUrl };
         // Not a failure, just not now / not this link (needs_text included).
         if (typeof errBody.status === 'string' && NOTICE_STATUSES.has(errBody.status)) return { kind: 'notice', message: errBody.message };
         // Everything else, verbatim.
@@ -384,6 +396,13 @@ export function AddJobLinkView(props: {
         {/* Not-now notices (an unreadable page too), the server's words verbatim: polite, never alerts. */}
         {state.kind === 'notice' && <p className="web-scout__notice">{state.message}</p>}
       </div>
+      {/* A dropped job: the reason sits in the confirm slot; the wrapper arms Confirm/Cancel over it. */}
+      {state.kind === 'confirm_revive' && (
+        <InlineConfirm id={REVIVE_CONFIRM_ID}>
+          {/* Shown when the question is not armed (after Cancel), so the reason stays readable. */}
+          <p className="web-scout__notice">{state.message}</p>
+        </InlineConfirm>
+      )}
       {/* Failures interrupt. */}
       {state.kind === 'error' && <p className="web-scout__error" role="alert">{state.message}</p>}
       {/* The added job, then the agent run. */}
@@ -517,6 +536,30 @@ export function AddJobLinkPanel(props: {
             void runJobLinkIntake(props.client, url).then((next) => {
               // Commit the outcome (an ok mounts the watch on the server's run).
               setState(next);
+              // A dropped job: ask in place. Confirm re-sends the same link with the flag.
+              if (next.kind === 'confirm_revive') {
+                // One question at a time, app-wide; Cancel writes nothing and refocuses the link box.
+                armConfirm(REVIVE_CONFIRM_ID, {
+                  // The server's sentence: the stored reason and, when known, the location.
+                  message: next.message,
+                  // Names the buttons ("Confirm: add the dropped job ...").
+                  action: `add the dropped job ${next.url}`,
+                  // The guarded write: the confirmed paste.
+                  onConfirm: () => {
+                    // Busy again while the confirmed paste runs.
+                    setState({ kind: 'running' });
+                    // Same never-throwing call, now with the human's confirm.
+                    void runJobLinkIntake(props.client, next.url, true).then((confirmed) => {
+                      // Its outcome, exactly like a first paste's.
+                      setState(confirmed);
+                      // A revived row: the page reloads its lists.
+                      if (confirmed.kind === 'ok') props.onAdded?.();
+                    });
+                  },
+                  // Focus returns to the link box on Cancel.
+                  trigger: inputRef.current,
+                });
+              }
               // A new or revived row: the page reloads its lists.
               if (next.kind === 'ok') props.onAdded?.();
             });

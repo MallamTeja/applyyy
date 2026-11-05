@@ -115,7 +115,10 @@ jobs:
           // An application_id is printed only after it proves to be a UUID.
           const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
           // Every refusal status job-link-intake sends (handler.ts); any other status is an unknown shape.
-          const REFUSALS = new Set(['needs_text', 'not_a_job', 'posting_closed', 'quota', 'upstream_unavailable', 'disabled', 'unauthorized', 'error']);
+          // cannot_restart was missing (a failed-after-approval row); confirm_revive (2026-11-05) is a
+          // row the screener or matcher dropped: this batch has no human to say "add anyway", so it
+          // is logged as refused and left dropped. Re-paste it in the web to override the drop.
+          const REFUSALS = new Set(['needs_text', 'not_a_job', 'posting_closed', 'quota', 'upstream_unavailable', 'disabled', 'unauthorized', 'error', 'cannot_restart', 'confirm_revive']);
           // Where a saved job's fields came from (handler.ts Built["source"]).
           const SOURCES = new Set(['ats_board', 'page', 'pasted_text']);
 

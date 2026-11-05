@@ -146,13 +146,13 @@ function makeStore(db: SupabaseClient): IntakeStore {
       // Stop: nothing to run.
       if (error) return { ok: false, reason: `applications_upsert: ${error.message}` };
       // The row as it stands, new or old.
-      const { data, error: readError } = await db.from("applications").select("id, status").eq("job_id", jobId).maybeSingle();
+      const { data, error: readError } = await db.from("applications").select("id, status, drop_reason").eq("job_id", jobId).maybeSingle();
       // Reported, never "not found".
       if (readError) return { ok: false, reason: `applications_read: ${readError.message}` };
       // Absent right after the upsert means it was refused.
       if (!data) return { ok: false, reason: "applications_read: row missing after upsert" };
       // created is true only when the upsert returned the row.
-      return { ok: true, application: { id: data.id as string, status: data.status as ApplicationStatus, created: (inserted?.length ?? 0) > 0 } };
+      return { ok: true, application: { id: data.id as string, status: data.status as ApplicationStatus, created: (inserted?.length ?? 0) > 0, dropReason: (data.drop_reason as string | null) ?? null } };
     },
     // The guarded move, as the human: the human pasted the link.
     async moveToPassedFilters(applicationId, detail) {
