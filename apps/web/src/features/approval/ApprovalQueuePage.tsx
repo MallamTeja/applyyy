@@ -35,7 +35,6 @@ import { SourceBadge } from '../../app/SourceBadge';
 // nothing, which was the honest state then and is not the state now.
 import { useToast } from '../../app/Toast';
 import type {
-  ApplicationRow,
   DiscoverySource,
   JobRow,
   MasterProfile,
@@ -48,6 +47,8 @@ import { DiffView } from './DiffView';
 // EditAction/EditResult are the save contract between the diff's controls and this page.
 import type { ClaimDecision, EditAction, EditResult } from './DiffView';
 import { buildResumeDiff } from './diffAdapter';
+// The adapter's own row shape, so the page holds exactly the fields the diff is built from.
+import type { DiffAdapterInput } from './diffAdapter';
 // coveragePercent (2026-11-04): the row's "ATS score" chip, the same honest figure as the badge and the 'ats' sort.
 import { coveragePercent, deriveBucket } from './diffModel';
 import type { ResumeDiff } from './diffModel';
@@ -157,7 +158,7 @@ const REFUSAL: Readonly<Record<RefusalReason, { readonly label: string; readonly
    has to re-read the database (and so can never diff against a different master than the load). */
 interface RowSource {
   // The queue row as loaded; its audit findings and keywords do not change on an edit.
-  readonly application: ApplicationRow;
+  readonly application: DiffAdapterInput['application'];
   // The job, for the header and the posting.
   readonly job: JobRow;
   // The PINNED master, at the version the resume was tailored from.
@@ -482,8 +483,6 @@ const QUEUE_ARRANGEMENTS = Object.keys(QUEUE_ARRANGEMENT_LABELS) as QueueArrange
 interface RowChipFacts {
   // applications.match_score: the matcher's fit of the MASTER profile to the JD, 0..100.
   readonly fit: unknown;
-  // jobs.raw_payload->>application_deadline: the board's own deadline text, when it sent one.
-  readonly deadline: unknown;
   // applications.status_changed_at: when the row reached awaiting_approval.
   readonly queuedAt: unknown;
 }
@@ -515,15 +514,6 @@ function atsChip(diff: ResumeDiff): string {
   return measure.kind === 'measured' ? `ATS score ${measure.percent}% · tailored vs JD` : 'ATS score —';
 }
 
-/* The posting's deadline, shown only when it is a real date. Live 2026-11-04: 0 of 112 queued rows
-   carry one, so every row reads "No deadline listed" today. */
-function deadlineChip(value: unknown): string {
-  // Shape-checked and round-tripped; anything else is "not listed", never a guessed date.
-  const day = isoDay(value);
-  // The ISO day verbatim: unambiguous, and no locale or time zone can move it.
-  return day === null ? 'No deadline listed' : `Deadline ${day}`;
-}
-
 /* "Added to queue 3 days ago", from when the row reached awaiting_approval. */
 function queuedChip(value: unknown, nowMs: number): string {
   // postedAgo only refuses NaN, and Date.parse reads "-5" as a real year, so the ISO shape comes first.
@@ -532,21 +522,19 @@ function queuedChip(value: unknown, nowMs: number): string {
   return ago === null ? 'Added to queue —' : `Added to queue ${ago}`;
 }
 
-/* The four chips under a queue row's line, in both buckets. One component, so Bucket A and Bucket B
+/* The three chips under a queue row's line, in both buckets. One component, so Bucket A and Bucket B
    can never show different facts or different words for the same fact. */
 function QueueRowChips({ diff, facts }: { readonly diff: ResumeDiff; readonly facts: RowChipFacts | undefined }): ReactElement {
   // Read once per render; an age on a review screen need not tick while it is open.
   const now = Date.now();
   return (
-    /* A wrapping flex row (ApprovalQueuePage.css), so four chips fold onto two lines at phone width
+    /* A wrapping flex row (ApprovalQueuePage.css), so the chips fold onto two lines at phone width
        instead of pushing the page sideways. */
     <div className="queue__row-chips">
       {/* tag-pill is DiffView's pill (DiffView.css), reused so the chips match the card's own tags. */}
       <span className="tag-pill">{fitChip(facts?.fit)}</span>
       {/* The tailored resume's coverage, beside the master's fit, so the two scores read as a pair. */}
       <span className="tag-pill">{atsChip(diff)}</span>
-      {/* When the posting closes, if the board said. */}
-      <span className="tag-pill">{deadlineChip(facts?.deadline)}</span>
       {/* How long this row has waited for a verdict. */}
       <span className="tag-pill">{queuedChip(facts?.queuedAt, now)}</span>
     </div>
@@ -659,7 +647,7 @@ export function ApprovalQueuePage(): ReactElement {
   /* The toolbar's choices: sort, work type and search (2026-11-04). Page state, never stored:
      Teja asked for a view, not a preference, so a reload starts from the default again. */
   const [view, setView] = useState<QueueView>(DEFAULT_QUEUE_VIEW);
-  /* Each row's chip facts (fit, deadline, queued-at), from the same load pass as the queue. State,
+  /* Each row's chip facts (fit, queued-at), from the same load pass as the queue. State,
      not a ref: only the render reads it, and no async path ever writes it after the load. */
   const [chipFacts, setChipFacts] = useState<ReadonlyMap<string, RowChipFacts>>(() => new Map());
 
@@ -720,9 +708,14 @@ export function ApprovalQueuePage(): ReactElement {
              query never asked for it. Everything here is an explicit column
              list rather than jobs:job_id(*) so that adding a column to the
              jobs table does not silently start shipping it to the browser. */
-          /* application_deadline (2026-11-04): ONE key out of raw_payload for the deadline chip, never
-             the whole board JSON - discoveredList.ts measured raw_payload at ~37% of a job's bytes. */
-          .select('*, jobs:job_id(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, description_raw, application_deadline:raw_payload->>application_deadline)')
+          /* No raw_payload key any more (2026-11-05). raw_payload->>application_deadline made Postgres
+             de-TOAST every job's whole board JSON (~387 KB for 39 rows, ~95% of the query's executor
+             time) for a deadline that was null on all 39. The deadline chip went with it. */
+          /* The applications columns are explicit too, for the same reason as the jobs list: `*` also
+             shipped match_reasoning, claim and failure fields this page never reads. These are the
+             fields read here, by queueOrder.ts and by diffAdapter.ts. tailor_refs stays: original
+             and attest are rebuilt from it. */
+          .select('id, status, status_changed_at, created_at, updated_at, master_version, tailored_profile, tailor_refs, selected_jd_keywords, match_score, audit_findings, cover_letter, jobs:job_id(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, description_raw)')
           .eq('status', 'awaiting_approval')
           /* Newest entry into review first (2026-10-24): status_changed_at is when the row reached
              awaiting_approval, served by the (user_id, status, status_changed_at desc) index. Not
@@ -899,8 +892,16 @@ export function ApprovalQueuePage(): ReactElement {
 
           // The tailor's own version, so "edited" can be DERIVED rather than stored. Null = D4.
           const original = rebuildOriginal(app.tailor_refs, master, version);
-          // The row as loaded, with the keyword list made safe for the adapter; master_version left as stored.
-          const application = { ...app, selected_jd_keywords: app.selected_jd_keywords || [] } as ApplicationRow;
+          /* Only the three fields the adapter reads, with the keyword list made safe for it. Built field
+             by field, not cast: the select no longer returns a whole ApplicationRow (latency fix 2a). */
+          const application: DiffAdapterInput['application'] = {
+            // The row's id, which keys everything on the page.
+            id: app.id,
+            // The auditor's findings, located on the diff by the adapter.
+            audit_findings: app.audit_findings,
+            // A null keyword list reads as none, never as a crash.
+            selected_jd_keywords: app.selected_jd_keywords || [],
+          };
 
           // FULL at the same pin: every master node as a tailoring would render it, for add-backs. Null = edits off.
           const full = resolveFullMaster(master, version);
@@ -915,13 +916,10 @@ export function ApprovalQueuePage(): ReactElement {
           /* Only a real string: String(undefined) would be the stamp "undefined", sent as if it were
              a timestamp. Without one the row has no stamp, so it can never be approved (unverifiable). */
           if (typeof app.updated_at === 'string') stamps.set(app.id, app.updated_at);
-          /* The chips' raw inputs, as loaded; the formatters shape-check them at render. The deadline
-             is read off the embed: it is the one jobs field JobRow does not declare. */
+          // The chips' raw inputs, as loaded; the formatters shape-check them at render.
           facts.set(app.id, {
-            // The matcher's 0..100 fit of the master, already in the `*`.
+            // The matcher's 0..100 fit of the master, in the select's column list.
             fit: app.match_score,
-            // The select's single raw_payload key; null when the board sent none (every row, 2026-11-04).
-            deadline: (job as JobRow & { readonly application_deadline?: unknown }).application_deadline,
             // When the row entered review; the same stamp the queue is ordered by.
             queuedAt: app.status_changed_at,
           });
@@ -2111,7 +2109,7 @@ export function ApprovalQueuePage(): ReactElement {
                       {isFolded ? 'Review' : 'Hide review'}
                     </button>
                   </div>
-                  {/* Fit, ATS score, deadline and queued-at (2026-11-04), shown folded or open: DiffView
+                  {/* Fit, ATS score and queued-at (2026-11-04; deadline dropped 2026-11-05), shown folded or open: DiffView
                       shows only the ATS badge, so the other three would vanish when a row opens. */}
                   <QueueRowChips diff={diff} facts={chipFacts.get(diff.applicationId)} />
                   {/* `hidden`, NOT a conditional mount: unmounting would drop the AI chat, a
@@ -2263,8 +2261,8 @@ export function ApprovalQueuePage(): ReactElement {
                       </button>
                     </span>
                   </div>
-                  {/* The same four chips as Bucket B (2026-11-04), on their own wrapping line: the badge
-                      row above does not wrap, and four more pills there would overflow a phone. */}
+                  {/* The same chips as Bucket B (2026-11-04), on their own wrapping line: the badge
+                      row above does not wrap, and three more pills there would overflow a phone. */}
                   <QueueRowChips diff={diff} facts={chipFacts.get(diff.applicationId)} />
 
                   {/* The full comparison, identical to Bucket B's, approving through

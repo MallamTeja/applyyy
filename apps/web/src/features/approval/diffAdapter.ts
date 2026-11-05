@@ -69,8 +69,10 @@ import { addableFromMaster, entryLabel } from './tailoredEdits.ts';
  * positional parameters, because five positional strings and objects at a call
  * site is how the master and the tailored resume end up swapped. */
 export interface DiffAdapterInput {
-  /* The queue row: carries the findings, the coverage figure and the version. */
-  readonly application: ApplicationRow;
+  /* The queue row: carries the findings and the JD keywords. Only the three fields read below
+   * (2026-11-05): the queue now selects an explicit column list, so a wider type would let a
+   * later read of an unselected column compile and then see undefined. */
+  readonly application: Pick<ApplicationRow, 'id' | 'audit_findings' | 'selected_jd_keywords'>;
   /* The job, for the title and company shown in the header. Both are UNTRUSTED
    * (they came from an ATS board), so both are rendered as React text children
    * and nothing else. */
