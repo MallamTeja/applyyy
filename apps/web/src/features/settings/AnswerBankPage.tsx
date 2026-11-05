@@ -24,6 +24,8 @@ import { useToast } from '../../app/Toast';
 import { AddQuestionModal } from './AddQuestionModal';
 // Own file so this page's table stays readable; it shares the page's loaded bank.
 import { EligibilityAnswers } from './EligibilityAnswers';
+// The required form questions the worker refused, answered once each (2026-11-05).
+import { UnansweredQuestions } from './UnansweredQuestions';
 import {
   deleteCustomBankQuestion,
   formatAnswerPreview,
@@ -201,6 +203,18 @@ export function AnswerBankPage(): ReactElement {
   return (
     <div className="page">
       <PageHeader path="answer-bank" />
+
+      {/* Unanswered questions FIRST: it is the work that blocks applications now; the table below is reference. */}
+      <UnansweredQuestions
+        /* The same loaded bank, so a key answered anywhere on this page leaves this list. */
+        questions={questions}
+        /* While the bank loads, every question would look unanswered. */
+        loading={loading}
+        /* A failed bank read blocks saves; the section disables its buttons to match. */
+        loadError={loadError}
+        /* Re-read after a save, so the card leaves because the DB holds the answer. */
+        onSaved={() => void fetchBank()}
+      />
 
       <section className="settings-group">
         <h2 className="settings-group__title">Standing Answers & Screening Questions</h2>

@@ -1084,6 +1084,49 @@ export type AnswerBankInsert = {
 export type AnswerBankUpdate = Partial<Pick<AnswerBankRow, 'question_text' | 'answer_type' | 'answer_value' | 'needs_human'>>;
 
 // ---------------------------------------------------------------------------
+// unanswered_questions — the planner's refused required fields (20261105230000)
+// ---------------------------------------------------------------------------
+
+/** Why the worker planner refused a field; mirrors FillBlocker['reason'] and the column CHECK. */
+export type UnansweredReason =
+  | 'no_answer'
+  | 'awaiting_human_answer'
+  | 'human_only'
+  | 'invalid_answer'
+  | 'ambiguous_answer_key'
+  | 'no_matching_option';
+
+/** The extracted control kind; mirrors FormField['kind'] (worker/src/extract-fields.ts) and the column CHECK. */
+export type UnansweredFieldKind =
+  | 'text' | 'email' | 'tel' | 'file' | 'textarea'
+  | 'combobox' | 'native_select' | 'radio_group' | 'checkbox';
+
+/**
+ * One required form question the planner refused, per user and normalised key. A REPORT for
+ * the Answer bank page, never an answer source: the planner reads only answer_bank. Written by
+ * the worker through `record_unanswered_questions(p_application_id, p_items)`; read and
+ * dismissed by the page.
+ */
+export interface UnansweredQuestionRow {
+  /** Defaulted to auth.uid(); RLS refuses any other value. Part of the primary key. */
+  user_id: string;
+  /** normaliseKey(label), the exact key the planner looks answer_bank up by. Part of the primary key. */
+  question_key: string;
+  /** UNTRUSTED — the label as scraped from the ATS page DOM. Display escaped; never interpolate. */
+  question_text: Untrusted;
+  /** The latest refusal reason seen for this key. */
+  reason: UnansweredReason;
+  /** The latest control kind seen for this key. */
+  field_kind: UnansweredFieldKind;
+  /** The form's option labels when read; NULL = unknown (react-select), not "no options". */
+  options: string[] | null;
+  /** Every application this question has blocked; consumers count only the still-open ones. */
+  blocked_application_ids: string[];
+  /** When a form last asked it. */
+  last_seen_at: string;
+}
+
+// ---------------------------------------------------------------------------
 // email_events — the Gmail tracker's raw feed
 // ---------------------------------------------------------------------------
 
