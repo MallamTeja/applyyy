@@ -820,8 +820,8 @@ function Run({ run }: { readonly run: TailoredRun }): ReactElement {
  * showed the operator a layout the PDF never prints. That grouping is MIRRORED here, not imported:
  * renderSkills is private to its module and returns an HTML string, and this file renders React
  * nodes with no raw-HTML hatch. skillsGroupedDiff.test.ts compares the two outputs, so they cannot
- * drift silently. Only a line carrying printedSkills (the editable branch) can be grouped; a D4 line
- * has no categories, so it keeps its flat runs. */
+ * drift silently. Only a line carrying printedSkills can be grouped; since 2026-11-05 diffAdapter emits
+ * it on the D4 branch too (every D4 skill traced, as before), so only a non-skills line stays flat. */
 function TailoredText({ line }: { readonly line: DiffLine }): ReactElement {
   // No groups to show: the runs exactly as before, marking (R1) untouched.
   if (line.kind !== 'skills' || line.printedSkills === undefined) {

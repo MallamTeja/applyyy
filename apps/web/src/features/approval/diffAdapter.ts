@@ -587,6 +587,10 @@ function skillsLine(resolved: ResolvedResume, master: MasterProfile, original: R
       ...NOT_EDITABLE,
       /* Nothing can be told apart as added. */
       addedSkills: [],
+      /* Every printed skill with its group, so DiffView prints this line GROUPED like the PDF too
+         (2026-11-05). With addedSkills empty, every skill renders traced, the same marking as the run
+         above. Safe for the AI chat, the other reader: the page never mounts it on a D4 row. */
+      printedSkills: resolved.skills.map((skill) => ({ ref: skill.ref, name: skill.name, category: skill.category })),
     };
   }
 
@@ -657,8 +661,8 @@ function skillsLine(resolved: ResolvedResume, master: MasterProfile, original: R
     supersededClaims: [],
     /* What the UI renders as "added by you", each with its own Remove. */
     addedSkills: added.map((skill) => ({ ref: skill.ref, name: skill.name })),
-    /* Every printed skill with its group, for the AI chat (2026-11-04): only on this editable
-       branch, because the chat mounts only where a save can land. */
+    /* Every printed skill with its group, for the AI chat (2026-11-04) and DiffView's grouped
+       skills line (2026-11-05). The D4 branch carries it too, for the grouping only. */
     printedSkills: resolved.skills.map((skill) => ({ ref: skill.ref, name: skill.name, category: skill.category })),
   };
 }

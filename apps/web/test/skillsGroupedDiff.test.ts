@@ -124,8 +124,9 @@ const withDocker = (): Resume => {
   return current as unknown as Resume;
 };
 
-// The diff the page would build, with editing on (an original exists).
-const diffOf = (resolved: Resume): Diff =>
+/* The diff the page would build. Editing is on when an original exists (the default); pass null for a
+   D4 row, which has no tailor version to compare against. */
+const diffOf = (resolved: Resume, tailorVersion: Resume | null = original()): Diff =>
   adapter.buildResumeDiff({
     // Minimal row: id, pin, no findings, no JD keywords.
     application: { id: 'app-1', master_version: VERSION, audit_findings: [], selected_jd_keywords: [] } as never,
@@ -135,8 +136,8 @@ const diffOf = (resolved: Resume): Diff =>
     resolved,
     // The pinned master.
     master: MASTER,
-    // The tailor's version, so the skills line carries printedSkills.
-    original: original(),
+    // The tailor's version (null = D4); the skills line carries printedSkills either way.
+    original: tailorVersion,
   } as never);
 
 // The full DiffView (split view, the default), with a save path so the skills line is editable.
@@ -229,5 +230,25 @@ describe('skills line: grouped like the PDF', () => {
     assert.match(html, /<button\b[^>]*aria-label="Remove Docker, added by you"/);
     // Reset still names the skills line.
     assert.match(html, /Reset to tailor(?:&#x27;|’)s version<span class="visually-hidden"> \(skills\)<\/span>/);
+  });
+
+  it('a D4 row (no original) groups its skills too, every skill traced as the D4 line always was', () => {
+    // A D4 row: the stored resume with no tailor version to compare it to.
+    const html = page(diffOf(original(), null));
+    /* A D4 line is read-only, so its <p> has no tabindex for skillsParagraph to key on. The tailored
+       side is the skills <p> holding run spans; the master side is plain text. */
+    const fragment = [...html.matchAll(/<p class="line__text line__text--skills"[^>]*>([\s\S]*?)<\/p>/g)].map((m) => m[1]!).find((inner) => inner.includes('class="run run--'));
+    // Missing is a failure in itself, named.
+    assert.ok(fragment !== undefined, 'expected the tailored skills paragraph of the D4 row');
+    // What the PDF prints for the same resume.
+    const pdf = pdfGroupsOf(original());
+    // Positive control: the PDF really prints two rows, so the equality below is not vacuous.
+    assert.deepEqual(pdf, ['Frameworks: Node.js, Express', 'Databases: PostgreSQL']);
+    // Same rows, same order: a D4 row no longer shows a layout the PDF never prints.
+    assert.deepEqual(groupsOf(fragment), pdf);
+    // D4 marking kept: every skill is a traced run, as the D4 line's one run always was.
+    for (const name of ['Node.js', 'PostgreSQL', 'Express']) assert.ok(fragment.includes(`<span class="run run--traced">${name}<`), `${name} must be traced`);
+    // Paired absence: nothing on a D4 line reads as edited, since no edit can be told apart there.
+    assert.doesNotMatch(fragment, /run--edited/);
   });
 });
