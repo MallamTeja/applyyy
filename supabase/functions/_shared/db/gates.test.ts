@@ -272,8 +272,13 @@ test("W15: a signed-in id that differs from the verified caller's id is a 403", 
   assert.deepEqual(result, { ok: false, kind: "refused", status: 403, error: "caller_is_not_app_user" });
 });
 
+// Scope (rewritten 2026-11-05): this pins W15's ORIGINAL four, the verify_jwt=false functions whose
+// code even a TOKENLESS request reaches. Since 009f216 every app-user function (16, dispatch-apply
+// included) verifies the caller BEFORE any sign-in the same way; the full set is pinned in
+// w15-sign-in-order.test.ts. authorizeCaller alone (sign in first, then check) is no longer how any
+// app-user entry point gates its callers.
 test("W15: the four verify_jwt=false entry points take their client only from createAuthorizedAppUserClient", () => {
-  // The functions the gateway does not shield: a tokenless request reaches their code.
+  // The functions the gateway does not shield at all: a tokenless request reaches their code.
   for (const fn of ["normalizer", "screener", "auditor", "scout-ats"]) {
     // Resolved from this file, so the test passes from any cwd.
     const source = readFileSync(new URL(`../../${fn}/index.ts`, import.meta.url), "utf8");
