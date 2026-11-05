@@ -1,4 +1,4 @@
-/* The typed confirmation in front of "✨ Run pipeline (all eligible rows)…" (Teja's ruling,
+/* The typed confirmation in front of "Run pipeline (all eligible rows)…" (Teja's ruling,
  * 2026-10-09). The bulk run invokes every agent over its waiting rows and spends Gemini calls, so it
  * fires only when the operator types CONFIRM_PHRASE exactly.
  *

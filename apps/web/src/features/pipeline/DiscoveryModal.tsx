@@ -69,9 +69,6 @@ export function DiscoveryModal({
       <div className="discovery-modal" onClick={(e) => e.stopPropagation()}>
         <header className="discovery-modal__header">
           <div className="discovery-modal__title-group">
-            <span className="discovery-modal__icon">
-              {isRemote ? '🌍' : '🏢'}
-            </span>
             <div>
               <h2 className="discovery-modal__title">
                 {/* "Daily" in the title, so nobody waits for a scan that will not start. */}
@@ -125,7 +122,7 @@ export function DiscoveryModal({
                 </div>
               </div>
               <p className="discovery-results__note">
-                ✓ New positions have been queued into the <strong>Discovered</strong> column in your Pipeline.
+                New positions have been queued into the <strong>Discovered</strong> column in your Pipeline.
               </p>
             </div>
           )}

@@ -145,7 +145,7 @@ export function AddQuestionModal({ isOpen, onClose, onAdd }: AddQuestionModalPro
         <header className="suggestions-header">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <h2 id="add-question-title" className="suggestions-header__title">
-              ➕ Add Standing Question
+              Add Standing Question
             </h2>
             <button
               type="button"
@@ -251,14 +251,14 @@ export function AddQuestionModal({ isOpen, onClose, onAdd }: AddQuestionModalPro
                     className={`answer-bank__bool-btn ${value === true ? 'answer-bank__bool-btn--active-yes' : ''}`}
                     onClick={() => setValue(true)}
                   >
-                    ✓ Yes (True)
+                    Yes (True)
                   </button>
                   <button
                     type="button"
                     className={`answer-bank__bool-btn ${value === false ? 'answer-bank__bool-btn--active-no' : ''}`}
                     onClick={() => setValue(false)}
                   >
-                    ✕ No (False)
+                    No (False)
                   </button>
                 </div>
               ) : type === 'number' ? (

@@ -64,8 +64,8 @@ import type { LoadOutcome } from './masterStore';
 /* Label per save state; a Record so adding a state is a compile error until labelled.
  * Plain words for a non-technical reader: "attested" was jargon (2026-10-09 render check). */
 const STATE_LABEL: Record<AttestationState, string> = {
-  // The only state the worker acts on; the tick is decoration, the words carry the meaning.
-  attested: 'Saved by you ✓',
+  // The only state the worker acts on; the words carry the meaning, so no decorative tick.
+  attested: 'Saved by you',
   // A row exists but was not saved from this browser, so the worker will not use it until Teja saves.
   unattested: 'Needs your save',
   // No row: the field shows a suggestion at most.

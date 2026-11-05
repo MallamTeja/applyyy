@@ -291,7 +291,7 @@ export function FiltersPage(): ReactElement {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 'var(--gap-3)' }}>
           <div>
             <h2 className="settings-group__title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span>🎯</span> Tech & Software Engineering Constraint
+              Tech & Software Engineering Constraint
             </h2>
             <p className="settings-group__note">
               Strictly restrict job discovery and automated pipeline to Software Engineering, Developer, AI/ML, Data, DevOps, and Technical roles.
@@ -306,7 +306,7 @@ export function FiltersPage(): ReactElement {
               onClick={applyEarlyCareerSdePreset}
               title="Auto-fill 0-2 yrs exp, early-career software engineering filters"
             >
-              ⚙️ Apply SDE / Fresher Preset
+              Apply SDE / Fresher Preset
             </button>
 
             <button
@@ -315,7 +315,7 @@ export function FiltersPage(): ReactElement {
               onClick={handleTechOnlyToggle}
               style={{ minWidth: '130px' }}
             >
-              {techOnly ? '✓ Tech Only (ON)' : '✕ All Roles (OFF)'}
+              {techOnly ? 'Tech Only (ON)' : 'All Roles (OFF)'}
             </button>
           </div>
         </div>
@@ -338,7 +338,7 @@ export function FiltersPage(): ReactElement {
             // The store would refuse anyway after a failed read; disabling makes the banner's claim visible.
             disabled={saving || readError !== null}
           >
-            {saving ? 'Saving...' : '💾 Save Filter Cascade'}
+            {saving ? 'Saving...' : 'Save Filter Cascade'}
           </button>
         </div>
 
@@ -453,7 +453,7 @@ export function FiltersPage(): ReactElement {
             // The store would refuse anyway after a failed read; disabling makes the banner's claim visible.
             disabled={saving || readError !== null}
           >
-            {saving ? 'Saving...' : '💾 Save Filter Cascade'}
+            {saving ? 'Saving...' : 'Save Filter Cascade'}
           </button>
         </div>
       </section>

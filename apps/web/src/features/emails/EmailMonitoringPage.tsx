@@ -24,6 +24,8 @@ import type { ReactElement } from 'react';
 
 import { supabase } from '../../data/supabase.ts';
 import { PageHeader } from '../../app/PageHeader.tsx';
+// The shared "opens in a new tab" marker for the Open in Gmail link.
+import { NewTabCue } from '../../app/SourceBadge.tsx';
 import {
   formatSyncTime,
   isInterviewEmail,
@@ -218,7 +220,7 @@ export function EmailMonitoringPage(): ReactElement {
           <span className="email-stat-card__label">Monitoring Mode</span>
           {/* One mode since the edge-function transport: the page itself triggers the sync. */}
           <span className="email-stat-card__value" style={{ fontSize: 'var(--size-base)', fontWeight: 600 }}>
-            ⚡ On-Demand (Page Open)
+            On-Demand (Page Open)
           </span>
           <span style={{ fontSize: 'var(--size-xs)', color: 'var(--ink-muted)' }}>
             Last checked: {formatSyncTime(lastSyncedAt)}
@@ -293,7 +295,8 @@ export function EmailMonitoringPage(): ReactElement {
                       className="email-card__gmail-button"
                       title="Open email thread in Gmail"
                     >
-                      Open in Gmail ↗
+                      {/* Gmail opens in a new tab; the cue announces that. */}
+                      Open in Gmail<NewTabCue />
                     </a>
                     <span className="email-badge email-badge--interview">Interview Invite</span>
                     <span className="email-card__time">{formattedDate}</span>

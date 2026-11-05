@@ -298,7 +298,7 @@ export function PipelineDrawer({
             onClick={onClose}
             aria-label="Close drawer"
           >
-            ✕ Close
+            Close
           </button>
         </header>
 
@@ -365,11 +365,10 @@ export function PipelineDrawer({
             >
               {/* NOT SIGNALLING BY COLOUR — which this branch could not do anyway:
                   PipelineDrawer.css is outside this parcel's write partition and
-                  carries no failure treatment to reach for. The glyph, the wording
-                  and the ARIA role carry it instead. A `drawer__failed` style
+                  carries no failure treatment to reach for. The wording and the ARIA
+                  role carry it instead (the emoji glyph went 2026-11-05: OS-painted, off-palette). A `drawer__failed` style
                   matching ApprovalQueuePage's is the obvious follow-up for whoever
                   owns that stylesheet. */}
-              <span className="drawer__empty-icon">{state.kind === 'empty' ? '📭' : '⚠️'}</span>
               <span>{unreadable}</span>
             </div>
           ) : (
@@ -435,7 +434,7 @@ export function PipelineDrawer({
             <header className="drawer__resume-header">
               <h2 className="drawer__title">{viewing.role} · {viewing.company}</h2>
               <button ref={closeResumeRef} type="button" className="drawer__close-btn" onClick={() => setViewing(null)} aria-label="Close resume">
-                ✕ Close
+                Close
               </button>
             </header>
             <ResumePreview

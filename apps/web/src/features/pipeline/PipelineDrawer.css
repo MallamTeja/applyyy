@@ -154,11 +154,6 @@
   gap: var(--gap-2);
 }
 
-.drawer__empty-icon {
-  font-size: 1.5rem;
-  opacity: 0.5;
-}
-
 /* Make Status Column headers clickable in pipeline board */
 .column__head--interactive {
   cursor: pointer;

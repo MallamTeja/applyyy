@@ -166,7 +166,6 @@ export function CommandPalette({
     >
       <div className="palette-modal" onKeyDown={handleKeyDown}>
         <div className="palette-input-wrap">
-          <span className="palette-search-icon" aria-hidden="true">🔍</span>
           <input
             ref={inputRef}
             type="text"

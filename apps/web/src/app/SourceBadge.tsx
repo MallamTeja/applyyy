@@ -50,7 +50,7 @@ interface BadgeInfo {
   tooltip: string;
 }
 
-/* The tier glyphs, as inline SVG rather than the 🏢 / 💬 / 🌐 emoji this used
+/* The tier glyphs, as inline SVG rather than the office / speech-bubble / globe emoji this used
    to render.
    WHY THE SWAP: emoji are painted by the operating system in their own fixed
    colours, so they ignored the badge's palette entirely — three saturated
@@ -198,5 +198,28 @@ export function SourceBadge({
         </span>
       ))}
     </span>
+  );
+}
+
+/* NewTabCue: the visible + spoken "opens in a new tab" marker for a link or button that opens
+   another tab. It replaces the old north-east arrow glyph, which noEmoji.test.ts forbids (U+2197 is
+   Extended_Pictographic and some platforms paint it as a colour emoji).
+   It lives here because this file already holds the app's inline-SVG icons and their rationale
+   (TIER_ICONS above): same 16-unit viewBox, currentColor stroke and 1.75 width, so it takes the
+   text colour of whatever control it sits in. */
+export function NewTabCue(): ReactElement {
+  return (
+    <>
+      {/* aria-hidden: the arrow is decoration for sighted users; the hidden words below carry the meaning. */}
+      <svg aria-hidden="true" focusable="false" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+           strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round"
+           /* Inline size, so the cue needs no stylesheet; 0.85em matches the badge glyphs; the offset sits it on the text baseline. */
+           style={{ width: '0.85em', height: '0.85em', marginInlineStart: '0.3em', verticalAlign: '-0.1em' }}>
+        {/* The box-and-arrow "external link" shape: an open square with an arrow leaving its corner. */}
+        <path d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5M11.5 9.5v3.3a.7.7 0 0 1-.7.7H3.2a.7.7 0 0 1-.7-.7V5.2a.7.7 0 0 1 .7-.7h3.3" />
+      </svg>
+      {/* Spoken with the control's name, so a screen reader announces "…, opens in a new tab". */}
+      <span className="visually-hidden"> (opens in a new tab)</span>
+    </>
   );
 }

@@ -49,7 +49,8 @@ export function ToastProvider({ children }: { readonly children: ReactNode }): R
           <div key={toast.id} className={`toast toast--${toast.kind}`}>
             <div className="toast__body">
               <span className="toast__icon" aria-hidden="true">
-                {toast.kind === 'success' ? '✓' : toast.kind === 'error' ? '!' : 'ℹ'}
+                {/* Plain marks, never emoji: they take the toast's text colour (noEmoji.test.ts). */}
+                {toast.kind === 'success' ? '✓' : toast.kind === 'error' ? '!' : 'i'}
               </span>
               <span className="toast__message">{toast.message}</span>
             </div>

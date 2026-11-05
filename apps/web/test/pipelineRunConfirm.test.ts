@@ -1,4 +1,4 @@
-/* "✨ Run pipeline (all eligible rows)…" fires only after a typed confirmation (Teja's ruling,
+/* "Run pipeline (all eligible rows)…" fires only after a typed confirmation (Teja's ruling,
  * 2026-10-09, via the orchestrator).
  *
  * The gate is a pure function (pipelineRunConfirm.ts) so it can be called here with a spy standing in

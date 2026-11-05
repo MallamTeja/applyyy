@@ -43,12 +43,11 @@ export interface CompanySuggestionsModalProps {
 const CATEGORY_DEFINITIONS: readonly {
   readonly id: CompanyCategory;
   readonly label: string;
-  readonly icon: string;
 }[] = [
-  { id: 'GCC', label: 'Global Capability Centers (GCCs)', icon: '🏢' },
-  { id: 'Mid-Scale MNC', label: 'Mid-Scale Product MNCs', icon: '🌐' },
-  { id: 'Startup / Unicorn', label: 'High-Growth Startups & Unicorns', icon: '🚀' },
-  { id: 'Service-Based', label: 'Service-Based & Consulting Leaders', icon: '🛠️' },
+  { id: 'GCC', label: 'Global Capability Centers (GCCs)' },
+  { id: 'Mid-Scale MNC', label: 'Mid-Scale Product MNCs' },
+  { id: 'Startup / Unicorn', label: 'High-Growth Startups & Unicorns' },
+  { id: 'Service-Based', label: 'Service-Based & Consulting Leaders' },
 ];
 
 export function CompanySuggestionsModal({
@@ -170,7 +169,7 @@ export function CompanySuggestionsModal({
       const success = await onAddCompany(company);
       if (success) {
         setLocalAddedKeys((prev) => new Set(prev).add(key));
-        setToastMessage(`✓ Added ${company.name} to Watchlist`);
+        setToastMessage(`Added ${company.name} to Watchlist`);
       }
     } finally {
       setAddingKey(null);
@@ -228,7 +227,7 @@ export function CompanySuggestionsModal({
             >
               {AVAILABLE_LOCATIONS.map((loc) => (
                 <option key={loc} value={loc}>
-                  {loc === 'All Locations' ? '📍 All Locations' : loc}
+                  {loc}
                 </option>
               ))}
             </select>
@@ -267,7 +266,7 @@ export function CompanySuggestionsModal({
             onClick={handleRefreshBatch}
             title="Load a new set of companies"
           >
-            🔄 Refresh Companies
+            Refresh Companies
           </button>
         </section>
 
@@ -349,7 +348,6 @@ export function CompanySuggestionsModal({
                 return (
                   <section key={catDef.id} className="suggestions-group-section">
                     <div className="suggestions-group-header">
-                      <span className="suggestions-group-icon">{catDef.icon}</span>
                       <h3 className="suggestions-group-title">{catDef.label}</h3>
                       <span className="suggestions-group-count">
                         ({groupCompanies.length})
@@ -435,7 +433,7 @@ function CompanyCard({ company, isAdded, isAdding, onAdd }: CompanyCardProps): R
             <h3 className="company-card__name">{company.name}</h3>
             {company.location && (
               <span className="badge-location" title={`Tech Hub: ${company.location}`}>
-                📍 {company.location}
+                {company.location}
               </span>
             )}
           </div>
@@ -460,12 +458,10 @@ function CompanyCard({ company, isAdded, isAdding, onAdd }: CompanyCardProps): R
       {/* Cooldown Section */}
       <div className="company-card__cooldown">
         <div className="cooldown-item">
-          <span className="cooldown-icon" aria-hidden="true">⏱️</span>
           <span className="cooldown-label">Interview Cooldown:</span>
           <span className="cooldown-val">{company.cooldown.interview}</span>
         </div>
         <div className="cooldown-item">
-          <span className="cooldown-icon" aria-hidden="true">🛡️</span>
           <span className="cooldown-label">Screening Cooldown:</span>
           <span className="cooldown-val">{company.cooldown.screening}</span>
         </div>
@@ -488,7 +484,6 @@ function CompanyCard({ company, isAdded, isAdding, onAdd }: CompanyCardProps): R
             disabled
             title="Already added to your Scout watchlist"
           >
-            <span className="btn-added-check" aria-hidden="true">✓</span>
             <span>Added</span>
           </button>
         ) : (

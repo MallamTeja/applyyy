@@ -916,7 +916,7 @@ export function SearchPreferencesPage(): ReactElement {
               title="Save search preferences; remote feeds are scouted automatically every day at 07:00 IST"
             >
               {/* No "Now": the scan runs on its daily schedule, not on this click. */}
-              🌐 Save & See Remote Scouting
+              Save & See Remote Scouting
             </button>
             <button
               type="submit"

@@ -211,14 +211,14 @@ export function PipelinePage(): ReactElement {
             onClick={() => setDiscoveryMode('remote')}
           >
             {/* Opens the daily-schedule explanation; the browser no longer scans the feeds itself. */}
-            🌍 Remote Jobs (daily scout)
+            Remote Jobs (daily scout)
           </button>
           <button
             type="button"
             className="btn-dispatch btn-dispatch--watchlist"
             onClick={() => setDiscoveryMode('watchlist')}
           >
-            🏢 Scan Watchlist Boards
+            Scan Watchlist Boards
           </button>
           <button
             type="button"
@@ -226,7 +226,7 @@ export function PipelinePage(): ReactElement {
             onClick={refetch}
             title="Reload pipeline counts from database"
           >
-            ↻ Refresh
+            Refresh
           </button>
         </div>
       </div>

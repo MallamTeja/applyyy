@@ -221,14 +221,14 @@ export function AnswerBankPage(): ReactElement {
         <div className="answer-bank__top-bar">
           <div className="answer-bank__stats-bar">
             <span className="answer-bank__stat-pill">
-              📋 <strong>{totalQuestions}</strong> Standard Questions
+              <strong>{totalQuestions}</strong> Standard Questions
             </span>
             <span className="answer-bank__stat-pill">
-              ⚡ <strong>{totalTimesUsed}</strong> Answers Injected
+              <strong>{totalTimesUsed}</strong> Answers Injected
             </span>
             {needsAttentionCount > 0 && (
               <span className="answer-bank__stat-pill answer-bank__stat-pill--alert">
-                ⚠️ <strong>{needsAttentionCount}</strong> Needs Human Answer
+                <strong>{needsAttentionCount}</strong> Needs Human Answer
               </span>
             )}
           </div>
@@ -240,7 +240,7 @@ export function AnswerBankPage(): ReactElement {
               onClick={() => void fetchBank()}
               title="Reload from Supabase"
             >
-              ↻ Refresh
+              Refresh
             </button>
             <button
               type="button"
@@ -248,7 +248,7 @@ export function AnswerBankPage(): ReactElement {
               onClick={() => setAddModalOpen(true)}
               style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
             >
-              <span>➕</span> Add Question
+              Add Question
             </button>
           </div>
         </div>
@@ -256,7 +256,6 @@ export function AnswerBankPage(): ReactElement {
         {/* Search & Category Filter Toolbar */}
         <div className="answer-bank__toolbar">
           <div className="answer-bank__search-wrap">
-            <span aria-hidden="true">🔍</span>
             <input
               type="text"
               className="answer-bank__search-input"
@@ -297,7 +296,7 @@ export function AnswerBankPage(): ReactElement {
                 onClick={() => setActiveCategory('needs_attention')}
                 style={{ /* Warning token: #b45309 was the light-mode amber and too dark on a dark chip. */ color: 'var(--signal)', borderColor: 'var(--signal)' }}
               >
-                ⚠️ Needs Attention ({needsAttentionCount})
+                Needs Attention ({needsAttentionCount})
               </button>
             )}
           </div>
@@ -335,7 +334,7 @@ export function AnswerBankPage(): ReactElement {
                         {question.needsHuman && (
                           <div>
                             <span className="answer-bank__badge-needs-human">
-                              ⚠️ Needs Human Answer
+                              Needs Human Answer
                             </span>
                           </div>
                         )}
@@ -428,14 +427,14 @@ export function AnswerBankPage(): ReactElement {
                                   className={`answer-bank__bool-btn ${draftValue === true || draftValue === 'true' ? 'answer-bank__bool-btn--active-yes' : ''}`}
                                   onClick={() => setDraftValue(true)}
                                 >
-                                  ✓ Yes (True)
+                                  Yes (True)
                                 </button>
                                 <button
                                   type="button"
                                   className={`answer-bank__bool-btn ${draftValue === false || draftValue === 'false' ? 'answer-bank__bool-btn--active-no' : ''}`}
                                   onClick={() => setDraftValue(false)}
                                 >
-                                  ✕ No (False)
+                                  No (False)
                                 </button>
                               </div>
                             )}
@@ -538,7 +537,7 @@ export function AnswerBankPage(): ReactElement {
                                 onClick={() => void handleSaveEdit(question)}
                                 disabled={isSaving}
                               >
-                                {isSaving ? 'Saving...' : '💾 Save Answer'}
+                                {isSaving ? 'Saving...' : 'Save Answer'}
                               </button>
                               <button
                                 type="button"
@@ -554,7 +553,7 @@ export function AnswerBankPage(): ReactElement {
                                 onClick={() => handleResetToDefault(question)}
                                 title="Reset to standard default"
                               >
-                                ↺ Reset to default
+                                Reset to default
                               </button>
                             </div>
                           </div>
@@ -569,7 +568,7 @@ export function AnswerBankPage(): ReactElement {
                                 className="answer-bank__action-btn answer-bank__action-btn--edit"
                                 onClick={() => startEditing(question)}
                               >
-                                ✏️ Edit Answer
+                                Edit Answer
                               </button>
                             </div>
                           </div>
@@ -674,8 +673,8 @@ export function AnswerBankRowActions(props: {
           /* Unchanged hover hint. */
           title="Copy answer value to clipboard"
         >
-          {/* Unchanged label. */}
-          📋 Copy
+          {/* The word alone; the clipboard emoji went 2026-11-05 (noEmoji.test.ts). */}
+          Copy
         </button>
         {/* Only custom questions can be deleted; the seeded ones are the worker's fixed set. */}
         {question.isCustom && (
@@ -684,8 +683,8 @@ export function AnswerBankRowActions(props: {
             type="button"
             /* Unchanged danger look. */
             className="answer-bank__action-btn answer-bank__action-btn--delete"
-            /* The emoji alone names nothing useful ("wastebasket"), and every row has one, so the
-               question is in the name. */
+            /* The visible "Delete" is the same on every row, so the question is in the name, which
+               still starts with the visible word (WCAG 2.5.3). */
             aria-label={action}
             /* Opens the inline confirm; nothing is deleted until its Confirm. The button comes from the
                click event so Cancel can refocus it (Safari skips focus on click). */
@@ -702,8 +701,8 @@ export function AnswerBankRowActions(props: {
             /* Unchanged hover hint. */
             title="Delete custom question"
           >
-            {/* Unchanged icon. */}
-            🗑️
+            {/* A word, not the wastebasket emoji the OS paints off-palette (noEmoji.test.ts). */}
+            Delete
           </button>
         )}
       </div>

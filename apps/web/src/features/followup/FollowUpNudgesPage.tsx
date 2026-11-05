@@ -14,6 +14,8 @@ import type { ReactElement } from 'react';
 import { PageHeader } from '../../app/PageHeader';
 // Write failures must be visible; the app's toast is the existing channel for that.
 import { useToast } from '../../app/Toast';
+// The shared "opens in a new tab" marker for the Copy & Open Gmail button.
+import { NewTabCue } from '../../app/SourceBadge';
 import { supabase } from '../../data/supabase.ts';
 import './followup.css';
 
@@ -164,7 +166,7 @@ export function FollowUpNudgesPage(): ReactElement {
       {/* Header banner */}
       <section className="followup-page__banner" aria-label="Follow-Up Nudges Overview">
         <div>
-          <h2>📬 Day-7 Follow-Up Nudges Queue</h2>
+          <h2>Day-7 Follow-Up Nudges Queue</h2>
           <p>
             Review polite follow-up email drafts generated for applications sitting for ≥ 7 days without a recruiter response.
           </p>
@@ -204,7 +206,7 @@ export function FollowUpNudgesPage(): ReactElement {
               <header className="followup-card__header">
                 <div className="followup-card__top">
                   <span className="followup-card__company">{nudge.companyName}</span>
-                  <span className="followup-card__badge">⏳ 7 Days Post-Apply</span>
+                  <span className="followup-card__badge">7 Days Post-Apply</span>
                 </div>
                 <h3 className="followup-card__title">{nudge.jobTitle}</h3>
               </header>
@@ -223,7 +225,9 @@ export function FollowUpNudgesPage(): ReactElement {
                     className="button button--primary button--small"
                     onClick={() => void handleOpenGmail(nudge)}
                   >
-                    {copiedId === nudge.id ? '✓ Copied & Gmail Opened!' : '✉️ Copy & Open Gmail ↗'}
+                    {copiedId === nudge.id ? 'Copied & Gmail Opened!' : 'Copy & Open Gmail'}
+                    {/* handleOpenGmail calls window.open(_blank) in either state, so the cue always shows. */}
+                    <NewTabCue />
                   </button>
 
                   <button
@@ -231,7 +235,7 @@ export function FollowUpNudgesPage(): ReactElement {
                     className="button button--secondary button--small"
                     onClick={() => void handleMarkSent(nudge.id)}
                   >
-                    ✅ Mark as Sent
+                    Mark as Sent
                   </button>
 
                   <button
@@ -239,7 +243,7 @@ export function FollowUpNudgesPage(): ReactElement {
                     className="button button--ghost button--small"
                     onClick={() => void handleDismiss(nudge.id)}
                   >
-                    🗑️ Dismiss
+                    Dismiss
                   </button>
                 </div>
               </footer>

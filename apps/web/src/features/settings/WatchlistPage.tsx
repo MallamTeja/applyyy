@@ -391,7 +391,7 @@ export function WatchlistPage(): ReactElement {
             disabled={rows.length === 0}
             title="Scan active company ATS boards directly from browser"
           >
-            ⚡ Scan Watchlist Boards Now
+            Scan Watchlist Boards Now
           </button>
         </div>
 
@@ -438,7 +438,7 @@ export function WatchlistPage(): ReactElement {
                             : 'badge-status badge-status--paused'
                         }
                       >
-                        {row.enabled ? '● Polling' : '○ Paused'}
+                        {row.enabled ? 'Polling' : 'Paused'}
                       </span>
                     </td>
                     <td>

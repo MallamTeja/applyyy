@@ -119,7 +119,7 @@ export function PipelineRunModal({ onClose, onRefresh }: PipelineRunModalProps):
       >
         <header className="pipeline-modal__header">
           <div>
-            <h2 id="pipeline-modal-title" className="pipeline-modal__title">✨ Tailor & Process Discovered Jobs</h2>
+            <h2 id="pipeline-modal-title" className="pipeline-modal__title">Tailor & Process Discovered Jobs</h2>
             <p className="pipeline-modal__subtitle">
               Runs your deployed agents on Supabase in sequence to advance discovered jobs into your Approval Queue.
             </p>
@@ -259,7 +259,7 @@ export function PipelineRunModal({ onClose, onRefresh }: PipelineRunModalProps):
                   navigate('/approvals');
                 }}
               >
-                Go to Approval Queue ↗
+                Go to Approval Queue
               </button>
             </>
           ) : result !== null ? (
@@ -306,7 +306,7 @@ export function PipelineRunModal({ onClose, onRefresh }: PipelineRunModalProps):
                 /* Counts must be loaded too: the operator sees what will be sent before it can be sent. */
                 disabled={running || !canStartRun(typed, counts !== null)}
               >
-                {running ? 'Processing Pipeline...' : '⚡ Run Pipeline Now'}
+                {running ? 'Processing Pipeline...' : 'Run Pipeline Now'}
               </button>
             </>
           )}

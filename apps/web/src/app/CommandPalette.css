@@ -54,12 +54,6 @@
   border-bottom: 1px solid var(--rule);
 }
 
-.palette-search-icon {
-  color: var(--text-muted);
-  font-size: var(--size-base);
-  user-select: none;
-}
-
 .palette-input {
   flex: 1;
   background: transparent;

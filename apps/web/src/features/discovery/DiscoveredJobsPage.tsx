@@ -44,7 +44,8 @@ import type { ReactElement } from 'react';
 import { Link } from 'react-router-dom';
 
 import { PageHeader } from '../../app/PageHeader';
-import { SourceBadge } from '../../app/SourceBadge';
+// NewTabCue marks the two links below that open the employer's page in a new tab.
+import { NewTabCue, SourceBadge } from '../../app/SourceBadge';
 // apply_url is board-supplied: every href built from it goes through the http(s) gate.
 import { safeHref } from '../../app/safeHref.ts';
 import type { DiscoverySource } from '../../data/contract.ts';
@@ -569,7 +570,7 @@ export function DiscoveredJobsPage(): ReactElement {
                   children each got a 6px gap: "( 0 )". One span keeps the count a single
                   flex item; all three tabs use this exact shape so they match. The count is over
                   the LOADED rows only, and says so. */}
-              🎯 Matched Tech Jobs <span>(<strong>{matchedCount}</strong> of {items.length} loaded)</span>
+              Matched Tech Jobs <span>(<strong>{matchedCount}</strong> of {items.length} loaded)</span>
             </button>
           )}
           <button
@@ -582,7 +583,7 @@ export function DiscoveredJobsPage(): ReactElement {
             title={loadedText}
           >
             {/* The exact total from the count query; "?" when it failed, never the loaded length. */}
-            📋 All {laneSpec.label} <span>(<strong>{laneTotal ?? '?'}</strong>)</span>
+            All {laneSpec.label} <span>(<strong>{laneTotal ?? '?'}</strong>)</span>
           </button>
           {/* Same lane rule as the Matched tab. */}
           {lane === 'discovered' && (
@@ -601,7 +602,7 @@ export function DiscoveredJobsPage(): ReactElement {
               title="Jobs dropped due to non-tech title, senior experience, or location mismatch"
             >
               {/* Same single-span count shape as the other two tabs, over the loaded rows. */}
-              🚫 Filtered Out <span>(<strong>{droppedCount}</strong> of {items.length} loaded)</span>
+              Filtered Out <span>(<strong>{droppedCount}</strong> of {items.length} loaded)</span>
             </button>
           )}
         </div>
@@ -616,7 +617,8 @@ export function DiscoveredJobsPage(): ReactElement {
             onClick={handleToggleTechOnly}
             title="When active, filters out Sales, Marketing, HR, Finance, Operations"
           >
-            {techOnly ? '✓ Tech Only' : '✕ Tech Only (Off)'}
+            {/* The words carry the state ("(On)"/"(Off)"); colour alone would fail anyone who can't see it. */}
+            {techOnly ? 'Tech Only (On)' : 'Tech Only (Off)'}
           </button>
 
           <button
@@ -625,7 +627,7 @@ export function DiscoveredJobsPage(): ReactElement {
             onClick={() => setEnforceCascade(!enforceCascade)}
             title="Enforce Experience Ceiling, Title Blocklist (Senior/Staff), and Locations"
           >
-            {enforceCascade ? '⚡ Cascade Active' : '✕ Cascade (Off)'}
+            {enforceCascade ? 'Cascade Active' : 'Cascade (Off)'}
           </button>
           </>)}
 
@@ -635,7 +637,7 @@ export function DiscoveredJobsPage(): ReactElement {
             style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
             title="Configure filter rules and thresholds"
           >
-            ⚙️ Rules
+            Rules
           </Link>
 
           {/* One button, first of the discovery sources: a link the human already chose outranks
@@ -662,7 +664,7 @@ export function DiscoveredJobsPage(): ReactElement {
             onClick={() => setDiscoveryModalMode('watchlist')}
             title="Scan Greenhouse, Lever, and Ashby boards on your Company Watchlist"
           >
-            ⚡ Scout Watchlist
+            Scout Watchlist
           </button>
 
           <button
@@ -674,7 +676,7 @@ export function DiscoveredJobsPage(): ReactElement {
             title="Remote feeds are scouted automatically every day at 07:00 IST"
           >
             {/* "(daily)" so the label no longer promises a scan on click. */}
-            🌐 Remote Feeds (daily)
+            Remote Feeds (daily)
           </button>
 
           <button
@@ -685,7 +687,7 @@ export function DiscoveredJobsPage(): ReactElement {
             title="Run the deployed agent pipeline (Normalizer -> Screener -> Matcher -> Tailor -> Auditor) to tailor and queue jobs"
           >
             {/* Page-level on purpose: the modal runs every eligible row, not one job. */}
-            ✨ Run pipeline (all eligible rows)…
+            Run pipeline (all eligible rows)…
           </button>
         </div>
       </section>
@@ -926,7 +928,6 @@ export function DiscoveredJobsPage(): ReactElement {
               {/* If dropped, display clear reason banner */}
               {!passed && dropReason && (
                 <div className="job-card__drop-banner" title={dropReason}>
-                  <span aria-hidden="true">🚫</span>
                   <div>
                     <strong>Filtered:</strong> {dropReason}
                   </div>
@@ -972,13 +973,13 @@ export function DiscoveredJobsPage(): ReactElement {
                 })()}
                 {job.location_raw && (
                   <span className="job-pill" title={job.location_raw}>
-                    📍 {job.location_raw.length > 28 ? `${job.location_raw.slice(0, 26)}…` : job.location_raw}
+                    {job.location_raw.length > 28 ? `${job.location_raw.slice(0, 26)}…` : job.location_raw}
                   </span>
                 )}
                 {((job.salary_min !== null && job.salary_min !== undefined) ||
                   (job.salary_max !== null && job.salary_max !== undefined)) && (
                   <span className="job-pill job-pill--salary">
-                    💰 {job.salary_currency ?? 'INR'}{' '}
+                    {job.salary_currency ?? 'INR'}{' '}
                     {job.salary_min ? Number(job.salary_min).toLocaleString() : '0'}
                     {job.salary_max ? ` – ${Number(job.salary_max).toLocaleString()}` : '+'}
                   </span>
@@ -995,7 +996,7 @@ export function DiscoveredJobsPage(): ReactElement {
                           cool-off, and the old "int." abbreviation made readers decode it */}
                       {/* toLowerCase folds the catalog's "6 Months" into the sentence so the
                           pill reads as one phrase, not two capitalised fragments */}
-                      ⏳ Interview cooldown: {cooldown.interview.toLowerCase()}
+                      Interview cooldown: {cooldown.interview.toLowerCase()}
                     </span>
                   );
                 })()}
@@ -1023,7 +1024,8 @@ export function DiscoveredJobsPage(): ReactElement {
                   className="job-card__link"
                   title="Open original job posting on career page"
                 >
-                  <span>Apply Link ↗</span>
+                  {/* target="_blank": the cue says so visibly and to a screen reader. */}
+                  <span>Apply Link<NewTabCue /></span>
                 </a>
 
                 {/* Reject (Teja's ruling, 2026-11-01): one click, passed_filters -> dropped_filter as
@@ -1145,7 +1147,7 @@ export function DiscoveredJobsPage(): ReactElement {
                 className="button button--ghost"
                 onClick={() => setActiveJdModal(null)}
               >
-                ✕ Close
+                Close
               </button>
             </header>
 
@@ -1164,7 +1166,8 @@ export function DiscoveredJobsPage(): ReactElement {
                 rel="noopener noreferrer"
                 className="button button--secondary"
               >
-                Open Career Page ↗
+                {/* Opens the employer's page in a new tab; the cue announces that. */}
+                Open Career Page<NewTabCue />
               </a>
               <button
                 type="button"

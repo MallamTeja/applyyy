@@ -1383,10 +1383,6 @@
   border-bottom: 1.5px solid var(--rule);
 }
 
-.suggestions-group-icon {
-  font-size: 1rem;
-}
-
 .suggestions-group-title {
   font-size: var(--size-sm);
   font-weight: 600;
@@ -1726,12 +1722,6 @@
   font-size: var(--size-xs);
 }
 
-.cooldown-icon {
-  font-size: 0.8rem;
-  display: inline-flex;
-  align-items: center;
-}
-
 .cooldown-label {
   color: var(--ink-muted);
   font-weight: 500;
@@ -1890,12 +1880,6 @@
 /* Icons and Spinners */
 .btn-add-plus {
   font-size: 0.95rem;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.btn-added-check {
-  font-size: 0.85rem;
   font-weight: 700;
   line-height: 1;
 }

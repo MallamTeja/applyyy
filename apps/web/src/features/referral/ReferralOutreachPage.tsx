@@ -15,6 +15,8 @@ import type { ReactElement } from 'react';
 import { PageHeader } from '../../app/PageHeader';
 // Write failures must be visible; the app's toast is the existing channel for that.
 import { useToast } from '../../app/Toast';
+// The shared "opens in a new tab" marker for the Find Alumni on LinkedIn button.
+import { NewTabCue } from '../../app/SourceBadge';
 import { supabase } from '../../data/supabase.ts';
 import './referral.css';
 
@@ -239,7 +241,7 @@ export function ReferralOutreachPage(): ReactElement {
       {/* Header orientation banner */}
       <section className="referral-page__banner" aria-label="Referral Outreach Overview">
         <div>
-          <h2>🤝 Referral Outreach Queue</h2>
+          <h2>Referral Outreach Queue</h2>
           <p>
             Review AI-generated cold referral request message drafts. Use the one-click action buttons to copy text, find company alumni on LinkedIn, and record sent outreach.
           </p>
@@ -286,12 +288,12 @@ export function ReferralOutreachPage(): ReactElement {
                   <div className="referral-card__top">
                     <span className="referral-card__company">{item.companyName}</span>
                     <span className="referral-card__role-pill">
-                      🎯 Target: {item.draft.recipientRole || 'Peer Engineer / Recruiter'}
+                      Target: {item.draft.recipientRole || 'Peer Engineer / Recruiter'}
                     </span>
                   </div>
                   <h3 className="referral-card__title">{item.jobTitle}</h3>
                   {item.locationRaw && (
-                    <span className="referral-card__location">📍 {item.locationRaw}</span>
+                    <span className="referral-card__location">{item.locationRaw}</span>
                   )}
                 </header>
 
@@ -304,7 +306,7 @@ export function ReferralOutreachPage(): ReactElement {
 
                 {item.draft.notes && (
                   <div className="referral-card__notes">
-                    <strong>💡 Networking Strategy:</strong> {item.draft.notes}
+                    <strong>Networking Strategy:</strong> {item.draft.notes}
                   </div>
                 )}
 
@@ -315,7 +317,7 @@ export function ReferralOutreachPage(): ReactElement {
                       className="button button--primary button--small"
                       onClick={() => void handleCopyDraft(item)}
                     >
-                      {copiedId === item.id ? '✓ Copied Subject & Body!' : '📋 Copy Message'}
+                      {copiedId === item.id ? 'Copied Subject & Body!' : 'Copy Message'}
                     </button>
 
                     <button
@@ -324,7 +326,8 @@ export function ReferralOutreachPage(): ReactElement {
                       onClick={() => handleSearchLinkedInAlumni(item.companyName)}
                       title="Search LinkedIn for company contacts and alumni"
                     >
-                      🔗 Find Alumni on LinkedIn ↗
+                      {/* handleSearchLinkedInAlumni opens LinkedIn with window.open(_blank); the cue says so. */}
+                      Find Alumni on LinkedIn<NewTabCue />
                     </button>
 
                     <button
@@ -333,7 +336,7 @@ export function ReferralOutreachPage(): ReactElement {
                       onClick={() => void handleMarkSent(item)}
                       disabled={isSent || isSaving}
                     >
-                      {isSent ? '✓ Sent Recorded' : isSaving ? 'Recording…' : '✅ Mark as Sent'}
+                      {isSent ? 'Sent Recorded' : isSaving ? 'Recording…' : 'Mark as Sent'}
                     </button>
                   </div>
                 </footer>

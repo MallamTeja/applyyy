@@ -61,11 +61,6 @@
   gap: var(--gap-3);
 }
 
-.discovery-modal__icon {
-  font-size: 1.8rem;
-  line-height: 1;
-}
-
 .discovery-modal__title {
   font-size: var(--size-md);
   font-weight: 650;
