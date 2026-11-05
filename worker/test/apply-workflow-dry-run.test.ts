@@ -126,21 +126,21 @@ describe('apply.yml "Run the applier" decides DRY_RUN by exact comparison (W30)'
 });
 
 // P1-6 (2026-11-05): apply on approve. dispatch-apply starts a LIVE manual run with drain_approved
-// "true": the whole approved queue, no per-run cap (the breaker and the settings daily cap still stop
-// it). Everything else keeps Guard 1's one-application rule.
+// "true": the approved queue in batches of 25 per run (the breaker and the settings daily cap still stop
+// it; leftovers go to the next dispatch). Everything else keeps Guard 1's one-application rule.
 describe('apply.yml drain_approved (P1-6)', () => {
   // The cap the workflow's step env always sets; a drain replaces it.
   const STEP_ENV = { APPLY_MAX_SUBMITS: '3' };
 
-  test('a live manual drain runs the whole queue with APPLY_MAX_SUBMITS=unlimited', () => {
+  test('a live manual drain runs the queue with a finite batch, APPLY_MAX_SUBMITS=25', () => {
     // Exactly what dispatch-apply sends.
     const out = runStep({ ...STEP_ENV, EVENT_NAME: 'workflow_dispatch', DRY_RUN_INPUT: 'false', DRAIN_INPUT: 'true' });
     // Ran, live, over the whole queue.
     expect(out.code).toBe(0);
     // No single-row filter.
     expect(out.worker).toBe('WORKER DRY_RUN=false APPLY_ONLY_ID=unset');
-    // No per-run cap.
-    expect(out.cap).toBe('APPLY_MAX_SUBMITS=unlimited');
+    // A finite batch, so a run cannot outlast its timeout mid-submit.
+    expect(out.cap).toBe('APPLY_MAX_SUBMITS=25');
   });
 
   test('anything but the exact "true" is not a drain: a live manual run is refused as before', () => {

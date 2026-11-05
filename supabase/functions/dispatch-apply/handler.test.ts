@@ -10,9 +10,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 // The handler under test and its seam types.
 import { DISPATCH_URL, handleDispatchApply, type DispatchDeps } from "./handler.ts";
+// The pre-sign-in caller check index.ts composes (via createAuthorizedAppUserClient), used for real here.
+import { authorizeBeforeSignIn } from "../_shared/db/gates.ts";
+// Source reads for the two wiring pins below (index.ts and config.toml are not reachable from the handler).
+import { readFileSync } from "node:fs";
 
 // The app user the fake session signs in as.
 const USER_ID = "0f4b24da-e85b-40bb-8606-c81824493b45";
+// The app user's address, which the pre-sign-in check compares the caller's session to.
+const APP_EMAIL = "operator@example.test";
 
 /* One recorded GitHub call. */
 type Call = { url: string; init: RequestInit };
@@ -25,14 +31,21 @@ function deps(opts: {
   countError?: boolean;
   token?: string | undefined;
   github?: () => Promise<Response>;
-  caller?: "ok" | "anon";
-} = {}): { deps: DispatchDeps; calls: Call[] } {
+  caller?: "ok" | "anon" | "stranger";
+  unavailable?: boolean;
+} = {}): { deps: DispatchDeps; calls: Call[]; signIns: () => number } {
   // GitHub calls, in order.
   const calls: Call[] = [];
+  // Password grants spent; a refused caller must cost none (W15).
+  let signIns = 0;
+  // The caller's session as the auth server reports it.
+  const sessionUser = opts.caller === "anon" ? null : { id: opts.caller === "stranger" ? "someone-else" : USER_ID, email: opts.caller === "stranger" ? "stranger@example.test" : APP_EMAIL };
+  // The anon-key verifier: asks only about the caller's token.
+  const verifier = { auth: { getUser: async () => ({ data: { user: sessionUser }, error: null }) } };
   // The fake client: auth for the caller gate, two table reads for the handler.
   const db = {
     // authorizeCaller's one call: the bearer token's user.
-    auth: { getUser: async () => ({ data: { user: opts.caller === "anon" ? null : { id: USER_ID } }, error: null }) },
+    auth: { getUser: async () => ({ data: { user: sessionUser }, error: null }) },
     // The two reads, by table.
     from: (table: string) => {
       // The switch row.
@@ -46,8 +59,8 @@ function deps(opts: {
   };
   // The three seams.
   const d: DispatchDeps = {
-    // Signed in.
-    connect: async () => ({ ok: true, db, userId: USER_ID }),
+    // Exactly what index.ts wires: verify the caller FIRST, then sign in (counted).
+    connect: (req) => opts.unavailable ? Promise.resolve({ ok: false, kind: "unavailable", reason: "env missing" }) : authorizeBeforeSignIn(req, verifier, APP_EMAIL, async () => { signIns += 1; return { ok: true, db, userId: USER_ID }; }),
     // The secret, or none.
     token: () => ("token" in opts ? opts.token : "github_pat_test"),
     // GitHub, recorded.
@@ -59,7 +72,7 @@ function deps(opts: {
     },
   };
   // Both, so a test reads what it needs.
-  return { deps: d, calls };
+  return { deps: d, calls, signIns: () => signIns };
 }
 
 // A POST with a bearer token, as functions.invoke sends it.
@@ -173,15 +186,35 @@ test("a GitHub refusal or a network failure is a 502 with the status, never the 
   assert.equal(res.status, 502);
 });
 
-test("a caller who is not the app user is refused before anything is read or sent", async () => {
-  // The anon key's JWT, or a stranger's.
-  const { deps: d, calls } = deps({ caller: "anon" });
+test("a caller who is not the app user is refused BEFORE any sign-in (W15), and before anything is read or sent", async () => {
+  // The anon key's JWT (no user) and a stranger's valid session.
+  for (const [caller, status] of [["anon", 401], ["stranger", 403]] as const) {
+    // Each fresh.
+    const { deps: d, calls, signIns } = deps({ caller });
+    // Asked.
+    const res = await handleDispatchApply(post(), d);
+    // The pre-sign-in verdict's own status.
+    assert.equal(res.status, status, caller);
+    // NO password grant was spent on them.
+    assert.equal(signIns(), 0, caller);
+    // Nothing sent.
+    assert.equal(calls.length, 0, caller);
+  }
+});
+
+test("the app user signs in exactly once; an unavailable sign-in is a 503", async () => {
+  // The real caller.
+  const ok = deps({ switchOn: false });
   // Asked.
-  const res = await handleDispatchApply(post(), d);
-  // 401: the gate's own verdict.
-  assert.equal(res.status, 401);
-  // Nothing sent.
-  assert.equal(calls.length, 0);
+  await handleDispatchApply(post(), ok.deps);
+  // One grant.
+  assert.equal(ok.signIns(), 1);
+  // The platform env is missing.
+  const down = deps({ unavailable: true });
+  // Asked.
+  const res = await handleDispatchApply(post(), down.deps);
+  // Our fault, retryable.
+  assert.equal(res.status, 503);
 });
 
 test("switch on + approved rows + token: exactly one dispatch of the drain, with the right inputs", async () => {
@@ -226,4 +259,33 @@ test("OPTIONS answers the preflight without signing in; other methods are 405", 
   assert.equal(get.status, 405);
   // Nothing sent either way.
   assert.equal(calls.length, 0);
+});
+
+// Fix 1 (2026-11-05 review, W15): the handler tests above fake `connect`, so they cannot see which
+// builder index.ts really hands in. Re-importing the bare createAppUserClient would spend a password
+// grant before the caller check and every test above would stay green; this pin is what goes red.
+test("index.ts wires connect to createAuthorizedAppUserClient, never the bare sign-in (W15)", () => {
+  // The entry point's source, resolved from this file.
+  const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  // The import from client.ts.
+  const imports = /import\s*\{([^}]*)\}\s*from\s*"\.\.\/_shared\/db\/client\.ts"/.exec(source);
+  // Present.
+  assert.ok(imports, "dispatch-apply/index.ts must import from _shared/db/client.ts");
+  // Exactly the gated builder: adding createAppUserClient back changes this line.
+  assert.equal(imports[1]?.trim(), "createAuthorizedAppUserClient");
+  // And it is the seam handed to the handler (the handler passes it the request).
+  assert.match(source, /connect:\s*createAuthorizedAppUserClient\b/);
+});
+
+// Fix 5 (2026-11-05 review): the gateway's verify_jwt is the outer layer that stops TOKENLESS calls.
+// A deploy reads it from config.toml, so a flipped or deleted line would ship silently; pin it.
+test("config.toml pins [functions.dispatch-apply] verify_jwt = true", () => {
+  // The project config, two levels up from this file.
+  const toml = readFileSync(new URL("../../config.toml", import.meta.url), "utf8");
+  // Only this function's section: from its header to the next header (or the end).
+  const section = /^\[functions\.dispatch-apply\]\s*$([\s\S]*?)(?=^\[|$(?![\s\S]))/m.exec(toml)?.[1];
+  // The section exists.
+  assert.ok(section !== undefined, "config.toml has no [functions.dispatch-apply] section");
+  // An uncommented `verify_jwt = true` line, exactly; false, absent or commented out fails.
+  assert.match(section, /^verify_jwt\s*=\s*true\s*$/m);
 });

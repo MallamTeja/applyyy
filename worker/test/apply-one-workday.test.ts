@@ -15,7 +15,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   // The function under test, and the pure host predicate the guard uses.
-  applyToOne,
+  applyToOne as applyToOneRaw,
   isWorkdayApplyUrl,
   type ApplicationPage,
   type ApplierGateway,
@@ -24,6 +24,10 @@ import {
   type RobotsCheck,
   type SubmitResult,
 } from '../src/apply-one.ts';
+// Every live test hands in an open re-check config (B2 fails closed without one).
+import { OPEN_RECHECK, loadOpenPreGatePreferences } from './open-pregate.ts';
+// applyToOne with an open re-check config by default; a test can still pass its own.
+const applyToOne = (input: Parameters<typeof applyToOneRaw>[0]) => applyToOneRaw({ recheck: OPEN_RECHECK, ...input });
 // The loop, for the counting test.
 import { runApplierBatch, type RunGateway } from '../src/claim-loop.ts';
 // The planner reads the answer bank; only the row type is needed here.
@@ -248,6 +252,8 @@ describe('runApplierBatch and the workday guard', () => {
       appendApplicationNote: async () => {},
       // Required since W10 (the Settings daily cap); no cap, so the Workday park is all that is tested.
       fetchDailyCap: async () => ({ maxPerDay: null, sentSince: 0 }),
+      // B2: a live run needs the re-check config; open gates here.
+      loadPreGatePreferences: loadOpenPreGatePreferences,
       // The kill switch is not under test.
       isSystemEnabled: async () => true,
       // Not under test.

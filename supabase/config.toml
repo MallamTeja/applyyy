@@ -256,8 +256,8 @@ verify_jwt = true
 # New function (2026-11-05, P1-6 apply on approve): the approval page calls it once after an
 # approve, with the signed-in user's JWT; it starts apply.yml as a live drain via a repo-scoped PAT.
 [functions.dispatch-apply]
-# True: the gateway rejects TOKENLESS calls; authorizeCaller() inside is the real gate (the anon
-# key is a signed JWT and passes verify_jwt), so no anonymous caller can start the applier.
+# True: the gateway rejects TOKENLESS calls. The anon key is a signed JWT and passes it, so the
+# real gate is inside: createAuthorizedAppUserClient checks the caller BEFORE any password grant (W15).
 verify_jwt = true
 
 # New function (2026-10-31), not yet deployed, so there is no live value to match.

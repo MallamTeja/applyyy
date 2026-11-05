@@ -54,6 +54,11 @@ describe('Search Preferences: apply on approve (P1-6)', () => {
     assert.match(box, /disabled=""/);
     // The honest expectation is next to the switch (0 of 7 CI live submits landed).
     assert.match(box, /no automatic live submit has\s+landed/);
+    // Fix 4 (2026-11-05 review): dispatch-apply drains the WHOLE approved queue, so the copy must say the
+    // next approve sends every already-approved job, not only the one just clicked.
+    assert.match(box, /next approve sends\s+EVERY job already approved/);
+    // And that it goes in batches, so nobody expects 40 submits from one click.
+    assert.match(box, /25 per run/);
   });
 
   it('renders "No daily limit" unchecked (the column default 35 applies) and locked', () => {

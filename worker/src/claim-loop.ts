@@ -70,8 +70,8 @@ export interface RunGateway extends ApplierGateway {
   // the run (fail CLOSED), because "unknown" must never read as "no cap".
   fetchDailyCap(sinceIso: string): Promise<DailyCap>;
   // B2 (P1-6, 2026-11-05): today's pre-gate config for the re-check before every live submit. The
-  // Supabase gateway always has it (a shape test pins that); optional only so the test gateways that
-  // predate B2 still compile. A FAILED read stops a live run (fail closed); see the loop.
+  // Supabase gateway always has it (a shape test pins that); optional only so dry-run test gateways
+  // need not grow it. A LIVE run refuses to start without it, or when the read fails (fail closed).
   loadPreGatePreferences?(): Promise<LoadedPreGatePreferences>;
   // Optional so older gateways keep working; absent means no profile fills, the safe direction.
   // Declared on the loop's gateway type so the loop can fetch the profile without a cast.
@@ -202,8 +202,7 @@ export function parseOnlyApplicationId(raw: string | undefined): string | undefi
 export const DEFAULT_MAX_SUBMITS = 3;
 
 /**
- * APPLY_MAX_SUBMITS, validated by SHAPE: a positive integer in plain digits, or exactly
- * 'unlimited' (Infinity: the drain-on-approve run), or the run stops.
+ * APPLY_MAX_SUBMITS, validated by SHAPE: a positive integer in plain digits, or the run stops.
  *
  * Only ABSENT means the default. A SET value that is blank, zero, negative, fractional or
  * not a number throws, because the lenient readers turn it into a cap nobody chose:
@@ -214,14 +213,9 @@ export function parseMaxSubmits(raw: string | undefined): number {
   if (raw === undefined) return DEFAULT_MAX_SUBMITS;
   // Trimmed, so a stray space from a shell does not fail an otherwise valid number.
   const text = raw.trim();
-  /* The one spelled-out value (P1-6, 2026-11-05: Teja, "no daily job apply limits at all"): the
-     drain-on-approve run sets it. No per-run cap; the circuit breaker and the settings daily cap
-     (max_applications_per_day, NULL = none) still stop the run. Exactly this word, lower-case:
-     'none', 'Unlimited' or 'inf' are typos and refuse below, never a guessed "no cap". */
-  if (text === 'unlimited') return Number.POSITIVE_INFINITY;
   // Digits only, no leading zero: rules out '', '0', '-1', '1.5', '1e3' and '0x10' in one test.
   if (!/^[1-9][0-9]*$/.test(text)) {
-    throw new Error(`APPLY_MAX_SUBMITS must be a positive integer or 'unlimited'; got ${JSON.stringify(raw)}. Refusing to run.`);
+    throw new Error(`APPLY_MAX_SUBMITS must be a positive integer; got ${JSON.stringify(raw)}. Refusing to run.`);
   }
   // Safe now: a short digit string with no sign, exponent or fraction.
   const value = Number(text);
@@ -460,22 +454,20 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
     if (live) daily = await gateway.fetchDailyCap(new Date((clock() - 24 * 60 * 60) * 1000).toISOString());
 
     /* B2 (P1-6, 2026-11-05): today's gate config, read once before anything is claimed, for the
-       re-check before every live submit. A failed read THROWS into the run-level catch, like the daily
-       cap: a drain must never submit rows it could not re-judge. A gateway without the method (a test
-       double) runs without the re-check and says so. */
+       re-check before every live submit. A failed read, or a gateway with no loader at all, THROWS into
+       the run-level catch before anything is claimed (2026-11-05 review: fail closed, CLAUDE.md §6): a live
+       run must never submit rows it could not re-judge. A dry run submits nothing and needs no config. */
     let recheck: SubmitRecheck | undefined;
     // Live runs only: a dry run submits nothing, so it re-checks nothing.
     if (live) {
-      // The one production gateway always has it.
-      if (gateway.loadPreGatePreferences === undefined) console.warn('[claim-loop] gateway has no loadPreGatePreferences; the pre-submit re-check is off');
-      else {
-        // Both config reads, or why they failed.
-        const loaded = await gateway.loadPreGatePreferences();
-        // Unreadable config is never "no config" (CLAUDE.md §6).
-        if (loaded.kind === 'error') throw new Error(`pre-submit re-check config unreadable (${loaded.code}): ${loaded.message}`);
-        // Handed to every applyToOne this run.
-        recheck = { preferences: loaded.preferences };
-      }
+      // No loader: the re-check cannot run, so neither may a live submit.
+      if (gateway.loadPreGatePreferences === undefined) throw new Error('pre-submit re-check unavailable: the gateway has no loadPreGatePreferences; refusing a live run');
+      // Both config reads, or why they failed.
+      const loaded = await gateway.loadPreGatePreferences();
+      // Unreadable config is never "no config" (CLAUDE.md §6).
+      if (loaded.kind === 'error') throw new Error(`pre-submit re-check config unreadable (${loaded.code}): ${loaded.message}`);
+      // Handed to every applyToOne this run.
+      recheck = { preferences: loaded.preferences };
     }
 
     // Fetched once per run rather than per application: the bank changes only

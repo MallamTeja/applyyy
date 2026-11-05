@@ -8,6 +8,8 @@
 // and fits. Splitting this loop into a matrix of parallel jobs is the obvious
 // speed-up and it multiplies the billed minutes by 35.
 import { describe, expect, it, vi } from 'vitest';
+// B2's open re-check config for the default fake gateway.
+import { loadOpenPreGatePreferences } from './open-pregate.ts';
 import {
   // The cap parser, tested directly below.
   parseMaxSubmits,
@@ -103,6 +105,9 @@ function fakeGateway(overrides: Partial<RunGateway> = {}) {
       return batches.shift() ?? [];
     },
     fetchAnswers: async () => answers,
+    // B2's port (P1-6): open gates by default, so a live run is not refused by the fail-closed rule
+    // and every older test keeps its meaning. The B2 tests below override it.
+    loadPreGatePreferences: loadOpenPreGatePreferences,
     // W10's port. Default: no Settings cap and nothing sent, so only the per-run cap
     // applies and every older test keeps its meaning. Recorded so a dry run's skip shows.
     fetchDailyCap: async () => {
@@ -780,17 +785,6 @@ describe('submit cap and circuit breaker', () => {
     expect(parseMaxSubmits(' 4 ')).toBe(4);
   });
 
-  it("APPLY_MAX_SUBMITS='unlimited' lifts the per-run cap; every other word still refuses (P1-6, 2026-11-05)", () => {
-    // The drain-on-approve run (apply.yml drain_approved): no per-run cap; the breaker and the daily cap still stop it.
-    expect(parseMaxSubmits('unlimited')).toBe(Number.POSITIVE_INFINITY);
-    // Shell whitespace around the word is fine, like around a number.
-    expect(parseMaxSubmits(' unlimited ')).toBe(Number.POSITIVE_INFINITY);
-    // Only that exact word: a near-miss is a typo, never a guess at "no cap".
-    for (const raw of ['Unlimited', 'UNLIMITED', 'none', 'infinite', 'inf', 'Infinity', '-1']) {
-      // Each refuses with the shape error.
-      expect(() => parseMaxSubmits(raw), raw).toThrow(/APPLY_MAX_SUBMITS must be a positive integer or 'unlimited'/);
-    }
-  });
 
   it('the first unknown outcome stops further claims', async () => {
     // An unconfirmed submit is the outcome a low reCAPTCHA score produces on EVERY
@@ -1302,5 +1296,32 @@ describe('B2: pre-submit re-check config', () => {
     expect(calls).toContain('advance:blocked_needs_human');
     // Nothing sent.
     expect(calls).not.toContain('advance:applying');
+  });
+});
+
+describe('B2: a live run without the re-check loader is refused (2026-11-05 review, fail closed)', () => {
+  it('no loadPreGatePreferences on the gateway: nothing claimed, run closed failed', async () => {
+    // The default fake, with the loader removed.
+    const { gateway, calls, closed } = fakeGateway({ fetchDailyCap: async () => ({ maxPerDay: null, sentSince: 0 }) });
+    // Removed, as a gateway that predates B2 would be.
+    delete (gateway as { loadPreGatePreferences?: unknown }).loadPreGatePreferences;
+    // Refused before anything is claimed.
+    await expect(
+      // The live run.
+      runApplierBatch({ gateway, openPage: async () => stubPage(), env: { DRY_RUN: 'false' }, clock: frozenClock, renderResume }),
+    ).rejects.toThrow(/pre-submit re-check unavailable/);
+    // Nothing claimed.
+    expect(calls).not.toContain('claim');
+    // Closed failed, naming the cause.
+    expect(closed[0]).toMatchObject({ status: 'failed', error_detail: expect.stringMatching(/re-check unavailable/) });
+  });
+
+  it('a DRY run without the loader still runs (it submits nothing)', async () => {
+    // Same gateway, no loader.
+    const { gateway } = fakeGateway();
+    // Removed.
+    delete (gateway as { loadPreGatePreferences?: unknown }).loadPreGatePreferences;
+    // A dry run resolves normally.
+    await expect(runApplierBatch({ gateway, openPage: async () => stubPage(), env: { DRY_RUN: 'true' }, clock: frozenClock, renderResume })).resolves.toBeDefined();
   });
 });

@@ -6,7 +6,8 @@
 // apply.yml as a live drain of the approved queue (drain_approved "true"), which GitHub runs.
 //
 // WHAT CAN STOP IT, in order, each answering WITHOUT touching GitHub:
-//   1. a caller who is not the app user (authorizeCaller: 401/403);
+//   1. a caller who is not the app user: refused BEFORE any sign-in (W15, createAuthorizedAppUserClient
+//      in index.ts), so a visitor holding the public anon key cannot make it spend a password grant;
 //   2. the switch system_settings.auto_apply_on_approve is off, or its row is missing (200, said why);
 //   3. no approved row whose job is still live (200, said why);
 //   4. no GITHUB_APPLY_DISPATCH_TOKEN secret (503, named: never a silent 200).
@@ -23,7 +24,8 @@
 // The shared CORS headers every browser-called function answers with.
 import { corsHeaders } from "../_shared/cors.ts";
 // Gate 1: the bearer JWT must be the app user's own session.
-import { authorizeCaller, type CallerAuthClient } from "../_shared/db/gates.ts";
+// authorizeCaller is the SECOND check now; AuthorizedSignIn is the verdict of the first (W15, below).
+import { authorizeCaller, type AuthorizedSignIn, type CallerAuthClient } from "../_shared/db/gates.ts";
 
 // The workflow dispatch endpoint for apply.yml on this repo (GitHub REST "Create a workflow dispatch
 // event"). Pinned by a test, so a typo in the owner, repo or file name fails there, not as a 404 live.
@@ -41,8 +43,9 @@ export type DispatchDb = CallerAuthClient & { from(table: string): any };
 
 /* What the handler needs from the outside world: three seams, each faked by the tests. */
 export interface DispatchDeps {
-  // Sign in as the app user, so every read runs under that user's RLS.
-  readonly connect: () => Promise<{ ok: true; db: DispatchDb; userId: string } | { ok: false; reason: string }>;
+  // Verify the caller, THEN sign in as the app user (every read then runs under that user's RLS).
+  // Takes the request because the caller check needs its bearer token (W15).
+  readonly connect: (req: Request) => Promise<AuthorizedSignIn<DispatchDb>>;
   // The PAT, or nothing.
   readonly token: () => string | undefined;
   // The HTTP call to GitHub.
@@ -61,16 +64,18 @@ export async function handleDispatchApply(req: Request, deps: DispatchDeps): Pro
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   // Only the POST functions.invoke sends.
   if (req.method !== "POST") return json(405, { status: "error", message: "POST only" });
-  // Sign in as the app user.
-  const conn = await deps.connect();
-  // No session: a configuration fault; the reason stays in the log (it may name env vars).
+  // GATE 1 (W15, 2026-11-05 security review): the caller is verified BEFORE the password grant.
+  const conn = await deps.connect(req);
+  // Refused: 401 or 403, as the verdict says; no grant was spent on them.
+  if (!conn.ok && conn.kind === "refused") return json(conn.status, { status: "error", message: conn.error });
+  // The caller was fine but the sign-in failed: a configuration fault; the reason stays in the log.
   if (!conn.ok) {
     // Logged for the operator.
     console.error("[dispatch-apply] database connection failed:", conn.reason);
     // Retryable once fixed.
     return json(503, { status: "error", message: "database_unavailable" });
   }
-  // GATE 1: only the app user's own session may start his applier.
+  // A second check, by user id under the signed-in client (cheap: no grant left to save).
   const caller = await authorizeCaller(req, conn.db, conn.userId);
   // 401 or 403, as the verdict says.
   if (!caller.ok) return json(caller.status, { status: "error", message: caller.error });

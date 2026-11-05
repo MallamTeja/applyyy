@@ -17,7 +17,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   // The function under test, with its REQUIRED checkRobots port.
-  applyToOne,
+  applyToOne as applyToOneRaw,
   // The applier's product token; asserted below so a rename cannot silently change identity.
   APPLIER_ROBOTS_TOKEN,
   type ApplicationPage,
@@ -27,6 +27,10 @@ import {
   type RobotsCheck,
   type SubmitResult,
 } from '../src/apply-one.ts';
+// Every live test hands in an open re-check config (B2 fails closed without one).
+import { OPEN_RECHECK, loadOpenPreGatePreferences } from './open-pregate.ts';
+// applyToOne with an open re-check config by default; a test can still pass its own.
+const applyToOne = (input: Parameters<typeof applyToOneRaw>[0]) => applyToOneRaw({ recheck: OPEN_RECHECK, ...input });
 // The loop, for the counting and breaker tests, plus the pure dry-run line formatter.
 import { formatDryRunLine, runApplierBatch, type RunGateway } from '../src/claim-loop.ts';
 // The REAL gate, by relative path exactly as apply-one.ts imports it, so no install is needed.
@@ -447,6 +451,8 @@ function fakeRunGateway(batches: ClaimedApplication[][]) {
     appendApplicationNote: async () => {},
     // Required since W10 (the Settings daily cap); no cap here, so only the per-run cap applies.
     fetchDailyCap: async () => ({ maxPerDay: null, sentSince: 0 }),
+      // B2: a live run needs the re-check config; open gates here.
+      loadPreGatePreferences: loadOpenPreGatePreferences,
     // Enabled: the kill switch is not under test.
     isSystemEnabled: async () => true,
     sweepStaleClaims: async () => {},

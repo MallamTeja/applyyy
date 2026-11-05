@@ -78,10 +78,6 @@ const base = (r: ClaimedApplication, p: ApplicationPage, g: ApplierGateway, live
 });
 
 describe('recheckBeforeSubmit', () => {
-  it('no re-check configured: nothing to say', async () => {
-    // A dropping job, but no preferences handed in.
-    expect(await recheckBeforeSubmit(row(SENIOR_JOB), page().page, undefined)).toBeNull();
-  });
 
   it("a job today's gates drop: pre_gate, with the gate's own code and reason", async () => {
     // The experience ceiling.
@@ -144,6 +140,19 @@ describe('applyToOne runs the re-check before a LIVE submit', () => {
     await applyToOne({ ...base(row(KEPT_JOB), p, g, true), recheck: { preferences: OPEN } });
     // Sent.
     expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  it('a LIVE applyToOne without the re-check config throws before any status write (fail closed)', async () => {
+    // A live run, no config handed in.
+    const { page: p, submit } = page(null);
+    // Recorded writes.
+    const { gateway: g, writes } = gateway();
+    // Refused.
+    await expect(applyToOne(base(row(KEPT_JOB), p, g, true))).rejects.toThrow(/pre-submit re-check missing/);
+    // No status written, nothing sent.
+    expect(writes).toEqual([]);
+    // Nothing sent.
+    expect(submit).not.toHaveBeenCalled();
   });
 
   it('a DRY run never parks for the re-check (a dry run writes no status)', async () => {

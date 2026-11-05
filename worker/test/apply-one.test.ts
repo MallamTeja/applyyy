@@ -31,7 +31,8 @@ import {
 // Robots behaviour itself is tested in apply-one-robots.test.ts.
 const applyToOne = (input: Omit<ApplyToOneInput, 'checkRobots'> & Partial<Pick<ApplyToOneInput, 'checkRobots'>>) =>
   // Spread last, so an explicit checkRobots in a test wins over the default.
-  applyToOneRequired({ checkRobots: async () => ({ kind: 'allow', reason: 'test default', crawlDelayMs: null }), ...input });
+  // recheck: an open config, so live tests are not refused by B2's fail-closed rule (their subject is elsewhere).
+  applyToOneRequired({ checkRobots: async () => ({ kind: 'allow', reason: 'test default', crawlDelayMs: null }), recheck: OPEN_RECHECK, ...input });
 import type { FormField } from '../src/extract-fields.ts';
 // MasterProfile for the employer-wiring tests, which hand the planner a work history.
 import type { AnswerBankRow, MasterProfile, ResolvedResume } from '@applyy/shared-types';
@@ -39,6 +40,9 @@ import type { AnswerBankRow, MasterProfile, ResolvedResume } from '@applyy/share
 // than a stub, so a renderer that actually reads it behaves as it will in
 // production.
 import { syntheticResume } from './resolved-resume-fixture.ts';
+// Every live test hands in an open re-check config (B2 fails closed without one).
+import { OPEN_RECHECK, loadOpenPreGatePreferences } from './open-pregate.ts';
+
 
 /** A form the answer bank can fully satisfy, so nothing blocks by accident. */
 const answerableForm: FormField[] = [

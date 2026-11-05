@@ -917,8 +917,9 @@ export function SearchPreferencesPage(): ReactElement {
               <span className="field__label">Apply automatically when I approve</span>
               {/* The honest expectation and the one-time setup, next to the switch that depends on them. */}
               <span className="field__help">
-                Approving a job starts the applier at once (GitHub Actions, usually within a minute), for every
-                approved job. Needs the GITHUB_APPLY_DISPATCH_TOKEN secret. So far no automatic live submit has
+                Approving a job starts the applier at once (GitHub Actions, usually within a minute). Your
+                next approve sends EVERY job already approved, not only the one you clicked, 25 per run (the rest
+                go with the following run). Needs the GITHUB_APPLY_DISPATCH_TOKEN secret. So far no automatic live submit has
                 landed (CAPTCHAs and unsupported forms), so expect most jobs to land in Manual apply for you to finish.
               </span>
               {/* Locked until the real value loads, like the kill switch. */}

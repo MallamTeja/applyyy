@@ -289,11 +289,9 @@ export interface RecheckRefusal {
 }
 
 /* B2, the re-check before a LIVE submit (P1-6, 2026-11-05). Today's pre-gate first (no network), then
-   the opened page. Null means "still fine to send". No re-check handed in means none was configured
-   (a caller that predates B2); the claim loop always hands one to a live run. */
-export async function recheckBeforeSubmit(row: ClaimedApplication, page: ApplicationPage, recheck: SubmitRecheck | undefined): Promise<RecheckRefusal | null> {
-  // Nothing configured: nothing to say.
-  if (recheck === undefined) return null;
+   the opened page. Null means "still fine to send". The config is REQUIRED here: applyToOne refuses a
+   live submit without it (2026-11-05 review, fail closed), so there is no "no re-check" path. */
+export async function recheckBeforeSubmit(row: ClaimedApplication, page: ApplicationPage, recheck: SubmitRecheck): Promise<RecheckRefusal | null> {
   // The gateway set the key: judge it. (Absent = a pre-B2 fake; see preGateJob.)
   if (row.preGateJob !== undefined) {
     // No job came back: refuse rather than pass an unjudged row (CLAUDE.md §6).
@@ -366,7 +364,8 @@ export interface ApplyToOneInput {
   // `| undefined` because claim-loop forwards its own optional field as-is (exactOptionalPropertyTypes).
   readonly resolveFormUrl?: FormUrlResolver | undefined;
   // B2 (P1-6): today's gate config for the re-check before a live submit. The claim loop always
-  // passes it; absent only in tests that predate B2 (then no re-check runs).
+  // passes it to a live run; a LIVE call without it throws before any status write (fail closed).
+  // Optional only because dry runs, which submit nothing, need no config.
   readonly recheck?: SubmitRecheck | undefined;
 }
 
@@ -777,6 +776,10 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
      apply-on-approve drains the whole queue, so the applier must never be what ships it. One write,
      straight to the human queue, with the reason; nothing is sent. Live runs only: a dry run returned
      above and writes no status. */
+  // No config: refuse the submit, never skip the check (fail closed). The claim loop always passes it
+  // to a live run, so this throw marks a wiring fault; the loop's per-row catch records it.
+  if (input.recheck === undefined) throw new Error('pre-submit re-check missing: applyToOne refuses a live submit without the current gate config');
+  // The re-check, with today's config.
   const refused = await recheckBeforeSubmit(row, page, input.recheck);
   // A refusal parks the row.
   if (refused !== null) {

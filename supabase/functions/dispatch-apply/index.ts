@@ -7,13 +7,13 @@
 
 // The shared CORS headers and the uncaught-throw boundary every function uses.
 import { withErrorBoundary } from "../_shared/cors.ts";
-// The app-user client: every read in the handler runs under RLS as that user.
-import { createAppUserClient } from "../_shared/db/client.ts";
+// Verify the caller FIRST, then sign in as the app user (W15): a refused caller costs no password grant.
+import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 // The request logic and the secret's name.
 import { DISPATCH_TOKEN_ENV_VAR, handleDispatchApply } from "./handler.ts";
 
 // Entry point: the real seams into the tested handler.
 Deno.serve(withErrorBoundary("dispatch-apply", (req: Request) =>
-  // The three seams: sign-in, the PAT from the function's secrets, and the global fetch.
-  handleDispatchApply(req, { connect: createAppUserClient, token: () => Deno.env.get(DISPATCH_TOKEN_ENV_VAR), fetch: (url, init) => fetch(url, init) })
+  // The three seams: the caller-checked sign-in, the PAT from the function's secrets, and the global fetch.
+  handleDispatchApply(req, { connect: createAuthorizedAppUserClient, token: () => Deno.env.get(DISPATCH_TOKEN_ENV_VAR), fetch: (url, init) => fetch(url, init) })
 ));

@@ -65,10 +65,7 @@ async function main(): Promise<void> {
   console.log(`[applyy] scope: ${onlyApplicationId === undefined ? 'whole approved queue' : `ONLY application ${onlyApplicationId}`}`);
   // The third fact about a run: how many real attempts it may make. Parsed here as well as in
   // the loop so a bad value stops the run before sign-in, with the reason in the first lines.
-  // 'unlimited' parses to Infinity; printed as the word, so the log never says "Infinity attempts".
-  const submitCap = parseMaxSubmits(process.env['APPLY_MAX_SUBMITS']);
-  // One line either way; the daily cap and the breaker still apply when it is unlimited.
-  console.log(`[applyy] submit cap: ${Number.isFinite(submitCap) ? `${submitCap} attempts per run` : 'unlimited per run (breaker and daily cap still apply)'} (APPLY_MAX_SUBMITS)`);
+  console.log(`[applyy] submit cap: ${parseMaxSubmits(process.env['APPLY_MAX_SUBMITS'])} attempts per run (APPLY_MAX_SUBMITS)`);
 
   // HEADED=1 shows the browser window. Exact string, like DRY_RUN, so no
   // truthiness rule widens it. For runs on Teja's machine, where a visible

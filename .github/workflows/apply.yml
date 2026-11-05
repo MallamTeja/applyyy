@@ -43,10 +43,10 @@ on:
         default: ''
       # APPLY ON APPROVE (P1-6, 2026-11-05): dispatch-apply sends "true" with dry_run "false" when Teja
       # approves and his auto_apply_on_approve switch is on. The ONE way a live manual run may take the
-      # whole approved queue, with no per-run cap (the circuit breaker and the settings daily cap still
-      # stop it). Exact "true" only; never combined with apply_only_id.
+      # approved queue, up to 25 submit attempts per run (leftovers go to the next dispatch; the circuit
+      # breaker and the settings daily cap still stop it). Exact "true" only; never combined with apply_only_id.
       drain_approved:
-        description: 'Set to "true" (with dry_run "false") to submit every approved row. Sent by dispatch-apply.'
+        description: 'Set to "true" (with dry_run "false") to submit approved rows, 25 per run. Sent by dispatch-apply.'
         required: false
         # Off unless asked for by name.
         default: 'false'
@@ -193,9 +193,10 @@ jobs:
             # Non-zero, so the run is red rather than a silent no-op.
             exit 1
           fi
-          # A drain has no per-run cap: the worker reads exactly 'unlimited' (claim-loop.ts parseMaxSubmits);
-          # the circuit breaker and max_applications_per_day still stop it. Every other run keeps the env's '3'.
-          if [ "$DRAIN" = "true" ]; then export APPLY_MAX_SUBMITS=unlimited; fi
+          # A drain gets a FINITE batch of 25 (2026-11-05 review): an unbounded drain with no daily cap could
+          # outlast timeout-minutes and be killed mid-submit, stranding a row at `applying`. Leftovers wait for
+          # the next dispatch; the breaker and max_applications_per_day still apply. Other runs keep the env's '3'.
+          if [ "$DRAIN" = "true" ]; then export APPLY_MAX_SUBMITS=25; fi
           # Guard 2: set the filter only when there is one.
           if [ -n "$ONLY_ID" ]; then export APPLY_ONLY_ID="$ONLY_ID"; fi
           # The applier itself, unchanged.
