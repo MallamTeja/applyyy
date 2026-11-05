@@ -122,3 +122,8 @@ reference/
 # steps locally drops eight of these at the repo root; they are throwaway output, never source.
 # Added 2026-11-04 after eight stale copies from 2026-11-02 sat untracked for two days.
 *-tests.log
+# clasp (Apps Script CLI) files. .clasprc.json holds the Google OAuth token, so it must never be
+# committed; .clasp.json is per-run config that scripts/push-apps-script.sh writes only inside a
+# temp dir. Added 2026-11-05 as defence in depth if anyone runs clasp from the repo itself.
+.clasprc.json
+.clasp.json

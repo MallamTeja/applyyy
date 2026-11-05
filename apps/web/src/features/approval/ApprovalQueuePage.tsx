@@ -1014,8 +1014,9 @@ export function ApprovalQueuePage(): ReactElement {
      is a batch to the operator, not to the database: if the ninth of thirty
      fails, the eight that succeeded must stay succeeded, and the failure has to
      name which row. A bulk RPC would give us one error for thirty rows. */
-  /* Ask dispatch-apply to start the runs (apply-kit always, the applier when the switch is on), and say what happened. Silent when it skipped on purpose
-     (Teja's switch is off, or nothing live is approved): that is the expected state, not news. */
+  /* Ask dispatch-apply to start the runs (apply-kit always, the applier when the switch is on), and say what happened.
+     Since 5c3ce87: with Teja's switch OFF the kit is still dispatched and only the applier is skipped (200,
+     silent: the expected state, not news). ANY dispatch error, the kit's included, is a 502 and a toast.error. */
   async function dispatchAfterApprove(): Promise<void> {
     // No client means no connection; the approve toast already said what happened.
     if (supabase === null) return;
