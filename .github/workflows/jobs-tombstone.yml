@@ -1,0 +1,79 @@
+# applyy — weekly jobs TOMBSTONE run (Teja, 2026-11-05 15:31: "scheduled, weekly or so").
+#
+# WHY IT EXISTS: the Free Plan database quota is 500 MB and on 2026-11-05 it hit 514 MB,
+# almost all of it the text of jobs the screener had already rejected. This purges the
+# heavy payload (description_raw, raw_payload) of dropped_filter jobs older than
+# MIN_AGE_DAYS, in small batches, and logs the count to agent_runs as 'jobs_tombstone'.
+# The rows stay (their fingerprints dedupe the next scan); only the payload goes. Plain
+# autovacuum then reuses the freed space, so the reported size stops growing without a
+# VACUUM FULL. Design and runbook: docs/db/2026-11-05-jobs-tombstone-policy.md.
+#
+# CADENCE: weekly. About 500-1,000 jobs are dropped a day (~9 KB each), so a week of
+# backlog is well under the quota headroom the one-time back-fill leaves (~300 MB).
+name: applyy jobs tombstone
+
+on:
+  # Sundays 06:45 UTC. Offset from keepalive (06:15) and the applier so a broken shared
+  # step shows up as one failure, not two at once.
+  schedule:
+    - cron: '45 6 * * 0'
+  # Manual run, e.g. to prove it works or to drain a backlog with a larger cap.
+  workflow_dispatch:
+    inputs:
+      # Grace window: drops younger than this keep their text.
+      min_age_days:
+        description: 'Tombstone dropped_filter jobs whose verdict is older than this many days'
+        required: false
+        default: '7'
+      # Rows per RPC call; small, because the API role's statement_timeout is short.
+      batch_size:
+        description: 'Rows per tombstone_dropped_jobs call (1-5000)'
+        required: false
+        default: '1000'
+      # Calls per run; the hard stop on a runaway loop.
+      max_batches:
+        description: 'Maximum calls this run'
+        required: false
+        default: '50'
+
+# Read-only: the job talks to Supabase over HTTPS and never writes to the repository.
+permissions:
+  contents: read
+
+jobs:
+  tombstone:
+    runs-on: ubuntu-latest
+    # Fifty short RPCs take a minute or two; a hang should fail, not hold a runner for 6 h.
+    timeout-minutes: 10
+
+    steps:
+      # The script lives in the repo; nothing else is needed from it.
+      - name: Check out the repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 1
+
+      # Node 24 ships fetch, which is all the script uses, so there is no pnpm install step.
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      - name: Tombstone old dropped jobs
+        run: node scripts/jobs-tombstone.mjs
+        # Step-scoped, like keepalive.yml: only this step can read the app-user password.
+        env:
+          # Where to call.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          # Public anon key; RLS does the scoping, never a service-role key.
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # The app user the run signs in as.
+          APPLYY_APP_USER_EMAIL: ${{ secrets.APPLYY_APP_USER_EMAIL }}
+          # Its password.
+          APPLYY_APP_USER_PASSWORD: ${{ secrets.APPLYY_APP_USER_PASSWORD }}
+          # Empty on a scheduled run, so the script's defaults (7 / 1000 / 50) apply.
+          MIN_AGE_DAYS: ${{ inputs.min_age_days }}
+          # Same: empty means the default.
+          BATCH_SIZE: ${{ inputs.batch_size }}
+          # Same: empty means the default.
+          MAX_BATCHES: ${{ inputs.max_batches }}

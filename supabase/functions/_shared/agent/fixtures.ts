@@ -120,6 +120,8 @@ export function makeJobRow(overrides: Partial<JobRow> = {}): JobRow {
     // Never vanished, so no repost signal.
     disappeared_at: null,
     repost_count: 0,
+    // Not a tombstone: the payload is present, as on any freshly scouted row.
+    tombstoned_at: null,
     // Junior-friendly, so the experience ceiling passes.
     min_experience_years: 0,
     max_experience_years: 1,

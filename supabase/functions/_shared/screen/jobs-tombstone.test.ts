@@ -189,3 +189,63 @@ test("edge 4: job-link-intake's description fill also clears tombstoned_at", () 
     /\.\.\.\(descriptionRaw !== null \? \{ description_raw: descriptionRaw, tombstoned_at: null \} : \{\}\)/,
   );
 });
+
+// --- The weekly runner, scripts/jobs-tombstone.mjs (driven with fakes; no network) -------
+
+// The loop and the input parser, imported from the script the workflow runs.
+import { runBatches, positiveInt } from "../../../../scripts/jobs-tombstone.mjs";
+// The identity list the Health page derives its roster from.
+import { AGENT_NAMES } from "../../../../packages/shared-types/src/enums.ts";
+
+// The loop stops on 0 only: under SKIP LOCKED a short batch does not mean "drained".
+test("runner: keeps calling after a short batch and stops only on 0", async () => {
+  // Batches as the database might return them: full, short (locked rows skipped), empty.
+  const answers = [1000, 37, 0];
+  // Each call takes the next answer.
+  const result = await runBatches(async () => answers.shift(), 50);
+  // All three calls made, every row counted, and the run reports it drained the backlog.
+  assert.deepEqual(result, { total: 1037, calls: 3, drained: true });
+});
+
+// The cap is a hard stop, reported as "not drained" rather than as a clean finish.
+test("runner: stops at the batch cap and reports more may remain", async () => {
+  // A backlog that never empties within the cap.
+  const result = await runBatches(async () => 1000, 3);
+  // Exactly the cap, and the run says it did not finish.
+  assert.deepEqual(result, { total: 3000, calls: 3, drained: false });
+});
+
+// A malformed RPC answer is a broken contract, never a "0 rows, done" (CLAUDE.md §6).
+test("runner: a non-integer RPC answer throws instead of ending the run as drained", async () => {
+  // null is what a lenient reader would turn into 0.
+  await assert.rejects(runBatches(async () => null, 5), /not a row count/);
+  // A string that looks numeric is still not the integer the function returns.
+  await assert.rejects(runBatches(async () => "5", 5), /not a row count/);
+});
+
+// Workflow inputs: blank uses the default; anything that is not plain digits >= 1 is refused.
+test("runner: positiveInt defaults on blank and refuses what Number() would accept", () => {
+  // A scheduled run passes empty inputs: the default applies.
+  assert.equal(positiveInt("MIN_AGE_DAYS", "", 7), 7);
+  // Unset behaves the same.
+  assert.equal(positiveInt("MIN_AGE_DAYS", undefined, 7), 7);
+  // A real value is read.
+  assert.equal(positiveInt("BATCH_SIZE", "500", 1000), 500);
+  // Number(" 7 ") is 7 and Number("1e3") is 1000; both are refused here.
+  assert.throws(() => positiveInt("MIN_AGE_DAYS", " 7 ", 7), /positive integer/);
+  // Exponent notation is refused too.
+  assert.throws(() => positiveInt("BATCH_SIZE", "1e3", 1000), /positive integer/);
+  // Zero would tombstone nothing (or, for days, everything just dropped): refused.
+  assert.throws(() => positiveInt("MIN_AGE_DAYS", "0", 7), />= 1/);
+});
+
+// The script logs under its own identity, which must exist in the shared enum (and so, via
+// enum-parity.test.ts, in migration 20261105201000), or every run's agent_runs insert fails.
+test("runner: logs as 'jobs_tombstone', a declared agent identity", () => {
+  // The script's source, to read the identity it actually sends.
+  const script = readFileSync(join(HERE, "..", "..", "..", "..", "scripts", "jobs-tombstone.mjs"), "utf8");
+  // The insert names this identity.
+  assert.match(script, /agent: "jobs_tombstone", status: "running"/);
+  // And the identity is declared.
+  assert.ok((AGENT_NAMES as readonly string[]).includes("jobs_tombstone"));
+});

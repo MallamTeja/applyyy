@@ -54,7 +54,7 @@ One trigger covers all three, and any future writer, without editing any of them
 | 4 | Pasted link of a tombstoned job | job-link-intake re-fetches the page (`handler.ts:472`), but its write does not clear the marker. The trigger therefore discards the text and the revived row fails closed at the matcher. **Fix: the one-line diff below** | — |
 | 5 | Readers of the payload | Recon found no reader of `dropped_filter` rows that breaks on NULL. ApprovalQueuePage reads only `awaiting_approval`; `discoveredList` reads only the discovered and passed lanes | — |
 | 6 | Liveness / disappeared marking | Uses fingerprint, ids and `last_seen_at` only (`_shared/scout/liveness.ts`). The trigger leaves those columns alone | — |
-| 7 | Prevention at insert | Rows are inserted before screening, so the insert cannot know the verdict. The weekly schedule bounds growth instead (commit 2) | — |
+| 7 | Prevention at insert | Rows are inserted before screening, so the insert cannot know the verdict. The weekly schedule below bounds growth instead | `runner: …` ×5 |
 | 8 | Delete old tombstones | Not done: the row delete is ruled out (Teja 15:27). A slim row is about 1 KB of heap | — |
 | 9 | lz4 TOAST compression | Skipped: it applies to new writes only, and tombstones hold no TOAST | — |
 
@@ -69,6 +69,22 @@ One trigger covers all three, and any future writer, without editing any of them
 
 **Deploy order:** this function ships AFTER the migration. Sent earlier, PostgREST rejects the unknown
 column and every paste fails.
+
+## Weekly schedule
+
+- **When:** `.github/workflows/jobs-tombstone.yml` runs Sundays at 06:45 UTC, and can be dispatched by
+  hand.
+- **What:** it runs `node scripts/jobs-tombstone.mjs`, which needs no install because it uses native
+  `fetch`.
+- **Who:** the script signs in as the app user, the same identity and secrets as keepalive.yml.
+- **How:** it calls `tombstone_dropped_jobs(7, 1000)` until the function returns 0, capped at 50 calls.
+- **Logging:** each run writes an `agent_runs` row as agent `jobs_tombstone` (migration
+  `20261105201000`). A capped run is still `succeeded`, with `error_detail` saying more rows remain.
+- **Health page:** `apps/web/src/data/agentFreshness.ts` has no `AGENT_CADENCE` entry for
+  `jobs_tombstone` yet, so the page shows the agent's age with no stale threshold. Suggested entry:
+  `jobs_tombstone: { expected: 'weekly', staleAfterHours: 204 }`.
+- **Deploy order:** push `20261105201000` before the first scheduled run. Without it, the
+  `agent_runs` insert is refused and the run fails red.
 
 ## Apply runbook (orchestrator only, with Teja's yes)
 

@@ -263,6 +263,13 @@ export const AGENT_NAMES = [
   'referral',
   /** Writes applications.cover_letter. */
   'cover_letter',
+  /**
+   * The weekly jobs TOMBSTONE run (.github/workflows/jobs-tombstone.yml), which purges the
+   * heavy payload of old dropped_filter jobs to keep the DB under the Free quota. Its own
+   * identity so its runs never mask another agent's silence. Appended last, matching
+   * migration 20261105201000.
+   */
+  'jobs_tombstone',
 ] as const;
 /** Union of every legal agent identity. */
 export type AgentName = (typeof AGENT_NAMES)[number];

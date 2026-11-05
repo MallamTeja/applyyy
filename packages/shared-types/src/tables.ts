@@ -309,10 +309,8 @@ export interface JobRow {
    * TOMBSTONE marker (migration 20261105200000). Non-null = the payload was purged to
    * save space: `description_raw` and `raw_payload` are NULL and the row is in the
    * needs_refetch state. Treat the text as ABSENT, never as an empty JD.
-   * Optional only because full-row fixtures (e.g. _shared/agent/fixtures.ts) predate the
-   * column; the database always returns it when selected. Make it required once they do.
    */
-  tombstoned_at?: string | null;
+  tombstoned_at: string | null;
   /** Years of experience the JD demands, parsed. Feeds the experience-ceiling filter. */
   min_experience_years: number | null;
   max_experience_years: number | null;

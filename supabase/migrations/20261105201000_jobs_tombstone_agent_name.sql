@@ -1,0 +1,16 @@
+-- 20261105201000_jobs_tombstone_agent_name.sql — an agent identity for the weekly tombstone run.
+--
+-- WHY THIS EXISTS. Teja ruled (2026-11-05 15:31) that the jobs tombstone cleanup runs on a
+-- schedule and logs its counts to agent_runs. agent_runs.agent is the enum agent_name, and
+-- the Health page reads agent_runs to detect a job that STOPPED running. Borrowing an
+-- existing identity (e.g. 'sweeper', the lease reclaimer) would make one name mean two
+-- jobs, and a running tombstone would mask a dead sweeper. Identities stay one-to-one with
+-- real agents (see the 'keepalive' comment in packages/shared-types/src/enums.ts).
+--
+-- A SEPARATE FILE from 20261105200000, which was already handed to the orchestrator to
+-- apply; an applied migration is never edited.
+--
+-- APPENDED LAST (no BEFORE/AFTER): Postgres sorts an enum by declaration order, and
+-- AGENT_NAMES in enums.ts must match that order (enum-parity.test.ts compares sequences).
+-- `if not exists` makes a re-run a no-op.
+alter type public.agent_name add value if not exists 'jobs_tombstone';
