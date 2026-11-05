@@ -158,7 +158,10 @@ export function SourceBadge({
   if (!discoveredVia || discoveredVia.length === 0) return null;
 
   const refs: readonly JobSourceRef[] = sourceRefs ?? [];
-  const badges: BadgeInfo[] = discoveredVia.map((src) => toBadgeInfo(src, refs));
+  // One chip per distinct label+url. A source with no ref of its own borrows refs[0] in toBadgeInfo, so
+  // xAI's {greenhouse, manual} (a pasted Greenhouse link, 2026-11-05 A3) drew "Greenhouse career page" twice:
+  // the same chip, same link. Identical chips say nothing new; a Map keeps the first one's position.
+  const badges: BadgeInfo[] = [...new Map(discoveredVia.map((src) => toBadgeInfo(src, refs)).map((b) => [`${b.label}\n${b.url ?? ''}`, b] as const)).values()];
 
   return (
     <span className={`source-badge-group ${className}`.trim()}>
