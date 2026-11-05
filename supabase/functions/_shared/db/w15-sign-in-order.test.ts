@@ -90,8 +90,10 @@ for (const [name, handle] of HANDLERS) {
 }
 
 test("W15: every app-user entry point builds its client with createAuthorizedAppUserClient(req), never the bare sign-in", () => {
-  // The 15 functions that sign in as the app user (dispatch-apply is fixed separately by its owner;
-  // email-tracker-intake checks its shared secret before signing in and is not in this set).
+  // 15 of the 16 functions that sign in as the app user. The 16th, dispatch-apply, wires the builder as
+  // a seam (connect: createAuthorizedAppUserClient) and is pinned by its own test in
+  // dispatch-apply/handler.test.ts. email-tracker-intake checks its shared secret before signing in
+  // and is not in this set.
   const functions = [
     // W15's original four (verify_jwt=false).
     "normalizer", "screener", "auditor", "scout-ats",

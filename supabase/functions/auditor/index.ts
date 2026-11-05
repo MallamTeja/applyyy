@@ -242,7 +242,7 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
   const pins = collectPins((rows ?? []).filter((row) => row.status === "tailored").map((row) => ({ master_version: pinOf(row) })));
 
   // Exactly the pinned versions, one query. RLS scopes master_profiles to the signed-in
-  // owner (createAppUserClient), and versions are immutable (forbid_update/forbid_delete).
+  // owner (createAuthorizedAppUserClient, W15), and versions are immutable (forbid_update/forbid_delete).
   const mastersByVersion = new Map<number, MasterProfile>();
   // Skip the round trip when nothing is pinned; `.in()` with an empty list is pointless.
   if (pins.length > 0) {

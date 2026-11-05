@@ -1,5 +1,5 @@
 // RESUME-ASSIST entry point: wires the real seams into the pure handler in assist.ts.
-// Kept to wiring only, because `createAppUserClient` imports jsr:@supabase/supabase-js,
+// Kept to wiring only, because `createAuthorizedAppUserClient` (client.ts) imports jsr:@supabase/supabase-js,
 // which node --test cannot load; every decision lives in assist.ts, where tests reach it.
 
 // Preflight headers, and the wrapper that turns an uncaught throw into JSON with CORS.

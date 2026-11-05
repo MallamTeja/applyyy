@@ -9,7 +9,8 @@
 //
 // 1. STATELESS DENO EDGE RUNTIME:
 //    This edge function executes inside Deno isolates on Supabase Edge Functions. It signs in as
-//    the ordinary authenticated application user via `createAppUserClient()`, enforcing RLS
+//    the ordinary authenticated application user via `createAuthorizedAppUserClient(req)` (W15:
+//    the caller is verified before that sign-in), enforcing RLS
 //    policies on every database query.
 //
 // 2. PAYLOAD BEFORE STATUS TRANSITION ORDERING RULE:

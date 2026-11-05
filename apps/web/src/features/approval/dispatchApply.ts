@@ -1,9 +1,15 @@
 /* Apply on approve, browser side (P1-6, 2026-11-05).
  *
  * After an approve moves at least one row, the approval page asks the dispatch-apply edge function to
- * start the applier. The function decides everything (Teja's switch, live approved rows, the GitHub
- * token); this file only asks once and reads the answer into a closed union, so the page can say what
- * happened. A malformed answer is an error, never "dispatched" (CLAUDE.md §6).
+ * start the runs. Since 5c3ce87 the function starts the KIT builder (apply-kit.yml) on every approve, and
+ * the applier's live drain only when Teja's switch is on. It decides everything (the switch, live approved
+ * rows, the GitHub token); this file only asks once and reads the answer into a closed union, so the page
+ * can say what happened. A malformed answer is an error, never "dispatched" (CLAUDE.md §6).
+ *
+ * What stays silent and what is surfaced: 'skipped' with auto_apply_off means the kits WERE started and
+ * only the applier was skipped (the expected state); 'skipped' with nothing_approved means nothing ran.
+ * ANY dispatch failure, the kit's included, is a non-2xx naming the workflow, so it reads as 'error' and
+ * is shown, whatever the switch says.
  */
 
 // The shared error-body reader and record check, already exported for the discovery panels.
@@ -19,7 +25,7 @@ export interface DispatchClient {
 export type DispatchResult =
   // A run was started for this many approved rows.
   | { readonly kind: 'dispatched'; readonly approved: number }
-  // Nothing was started, on purpose (the switch is off, or nothing is approved).
+  // The applier was not started, on purpose: the switch is off (kits were still started) or nothing is approved.
   | { readonly kind: 'skipped'; readonly reason: string }
   // Something failed; the message is the function's own, or a plain sentence.
   | { readonly kind: 'error'; readonly message: string };
