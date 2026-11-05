@@ -69,7 +69,7 @@ export function AppShell(): ReactElement {
     // Guards against a slow earlier read landing after a newer one.
     let live = true;
     // The page's own reads; a reported error or a throw both become null (unknown), never an empty list.
-    void loadManualApply().then((r) => { if (live) setPageRows('error' in r ? null : r.rows); }).catch(() => { if (live) setPageRows(null); });
+    void loadManualApply('badge').then((r) => { if (live) setPageRows('error' in r ? null : r.rows); }).catch(() => { if (live) setPageRows(null); });
     // A newer navigation supersedes this read.
     return () => { live = false; };
   }, [pathname, auth.user?.id, refetchCounts]);

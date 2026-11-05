@@ -57,6 +57,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // (the transition trigger sets it only when the status changes, so later edits do not move it).
 // tailored_profile is the resume the card previews and prints (P1, 2026-11-05). Exported for the test that pins it.
 export const ROW_SELECT = 'id, status, updated_at, status_changed_at, tailored_profile, jobs:job_id(title, company_name, apply_url)';
+// The rail badge only counts rows, so it skips the tailored_profile jsonb (every cold load pays for this read, 420dc2d).
+export const BADGE_ROW_SELECT = 'id, status, updated_at, status_changed_at, jobs:job_id(title, company_name, apply_url)';
 // Bounds every read; far above any real manual queue, so it only stops a pathological table.
 const READ_CAP = 200;
 
@@ -99,14 +101,14 @@ async function readKitEvents(): Promise<{ readonly states: ReadonlyMap<string, K
   return { states: newestKitStates(data) };
 }
 
-/* Applications by status (the two lanes) or by id (kit rows), with the same select. */
-async function readRows(filter: { readonly statuses: readonly ApplicationStatus[] } | { readonly ids: readonly string[] }): Promise<{ readonly rows: readonly ManualApplyRow[] } | { readonly error: string }> {
+/* Applications by status (the two lanes) or by id (kit rows), with the caller's column list (page or badge). */
+async function readRows(select: string, filter: { readonly statuses: readonly ApplicationStatus[] } | { readonly ids: readonly string[] }): Promise<{ readonly rows: readonly ManualApplyRow[] } | { readonly error: string }> {
   // No client: reported.
   if (supabase === null) return { error: 'Not connected to the database.' };
   // An empty id list asks for nothing; skip the round trip.
   if ('ids' in filter && filter.ids.length === 0) return { rows: [] };
   // The base read.
-  const base = supabase.from('applications').select(ROW_SELECT);
+  const base = supabase.from('applications').select(select);
   // Lanes by status, kit rows by exact id.
   const { data, error } = await ('statuses' in filter ? base.in('status', [...filter.statuses]) : base.in('id', [...filter.ids]))
     // Longest-waiting first, as on System health.
@@ -143,16 +145,20 @@ export function mergeManualApplyRows(reads: {
 
 /* Everything the page shows: the rows (see mergeManualApplyRows) and each one's kit state. The rail
  * badge (AppShell) calls this same loader and counts its rows, so badge and page cannot drift. */
-export async function loadManualApply(): Promise<{ readonly rows: readonly ManualApplyRow[]; readonly kits: ReadonlyMap<string, KitState> } | { readonly error: string }> {
+/* `purpose` is required, so no caller gets the cheap badge read by accident: the page needs the resumes,
+ * the badge needs only the count (a badge row's resume is null). */
+export async function loadManualApply(purpose: 'page' | 'badge'): Promise<{ readonly rows: readonly ManualApplyRow[]; readonly kits: ReadonlyMap<string, KitState> } | { readonly error: string }> {
   // The kits first: their ids decide which extra rows to read.
   const kits = await readKitEvents();
   // A failed kit read fails the page: showing rows without kits would read as "no kits generated".
   if ('error' in kits) return kits;
   // Kit ids that are real application ids.
   const kitIds = [...kits.states.keys()].filter((id) => UUID.test(id));
+  // The column list for this caller.
+  const select = purpose === 'page' ? ROW_SELECT : BADGE_ROW_SELECT;
   // The three row reads in parallel; they are independent. Approved rows are read by status, so one
   // whose kit has not landed yet is still listed (as "Kit pending").
-  const [lanes, approved, kitRows] = await Promise.all([readRows({ statuses: MANUAL_ACTION_STATUSES }), readRows({ statuses: ['approved'] }), readRows({ ids: kitIds })]);
+  const [lanes, approved, kitRows] = await Promise.all([readRows(select, { statuses: MANUAL_ACTION_STATUSES }), readRows(select, { statuses: ['approved'] }), readRows(select, { ids: kitIds })]);
   // Either failing is said.
   if ('error' in lanes) return lanes;
   // Same for the approved rows: a failed read must not look like "no approved jobs".

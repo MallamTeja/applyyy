@@ -334,7 +334,7 @@ export function ManualApplyPage(): ReactElement {
   const load = useCallback(async () => {
     try {
       // Rows and kits together.
-      const result = await loadManualApply();
+      const result = await loadManualApply('page');
       // Shown either way.
       setRead('error' in result ? { kind: 'error', message: result.error } : { kind: 'ready', rows: result.rows, kits: result.kits });
     } catch {

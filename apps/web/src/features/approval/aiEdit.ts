@@ -1185,6 +1185,9 @@ export function outcomeNote(ops: readonly StoredOp[], diff: ResumeDiff, structur
   return groups.length === 0 ? '' : `[${groups.join(' | ')}]`;
 }
 
+// The chat's words for a 503 from resume-assist (Gemini overloaded). Exported for the test that pins it.
+export const AI_BUSY_MESSAGE = 'The AI is busy right now; try again in a minute.';
+
 /* supabase-js hides a non-2xx body behind error.context (a fetch Response); read it defensively.
    ponytail: same reader as WebScoutPanel's private one; export a shared one if a third caller appears. */
 async function readErrorBody(error: unknown): Promise<unknown> {
@@ -1214,6 +1217,15 @@ export async function requestAssist(client: AssistClient | null, body: AssistBod
     if (error) {
       // The JSON body behind the error, if readable.
       const errBody = (await readErrorBody(error)) ?? data;
+      // 503 {status:'upstream_unavailable'}: Gemini overloaded. Its message is the operator line
+      // "upstream_unavailable status=503 …" (describeGeminiFailure), which the chat showed raw as if the AI
+      // had said it (A1, 2026-11-05). The user gets plain words; the raw line goes to the console for debugging.
+      if (isRecord(errBody) && errBody.status === 'upstream_unavailable') {
+        // Kept for whoever debugs it, never on screen.
+        console.warn('resume-assist upstream_unavailable:', errBody.message);
+        // What the user can act on.
+        return { kind: 'error', message: AI_BUSY_MESSAGE };
+      }
       // The function's message, verbatim, when it has the expected shape.
       if (isRecord(errBody) && typeof errBody.message === 'string') return { kind: 'error', message: errBody.message };
       // Otherwise a plain sentence; the gateway's 404 for an undeployed function lands here.

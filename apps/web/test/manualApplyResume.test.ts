@@ -14,6 +14,10 @@ import './support/registerTsxHooks.ts';
 import assert from 'node:assert/strict';
 // The runner; before() loads the modules once.
 import { describe, it, before } from 'node:test';
+// Read AppShell's source for the one shape assertion on its badge call.
+import { readFileSync } from 'node:fs';
+// Resolve that source relative to this test, so cwd does not matter.
+import { fileURLToPath } from 'node:url';
 // A real ResolvedResume (schema_version 1, master_version 3), the resume-template's own fixture.
 import { zomatoBackendIntern } from '../../../packages/resume-template/test/fixtures/zomato-backend-intern.ts';
 
@@ -69,6 +73,13 @@ describe('the row read carries the tailored resume', () => {
   it('selects tailored_profile with the job embed (the exact column list)', () => {
     // Positive full shape: a dropped column fails here, not silently at runtime.
     assert.equal(data.ROW_SELECT, 'id, status, updated_at, status_changed_at, tailored_profile, jobs:job_id(title, company_name, apply_url)');
+  });
+
+  it('the rail badge reads without tailored_profile (it only counts rows; every cold load pays for it)', () => {
+    // Positive full shape of the badge's column list: the page's list minus the resume jsonb.
+    assert.equal(data.BADGE_ROW_SELECT, 'id, status, updated_at, status_changed_at, jobs:job_id(title, company_name, apply_url)');
+    // AppShell asks for the badge read by name (a code form, not prose), so it cannot silently take the page's.
+    assert.match(readFileSync(fileURLToPath(new URL('../src/app/AppShell.tsx', import.meta.url)), 'utf8'), /void loadManualApply\('badge'\)\.then\(/);
   });
 
   it('maps a valid tailored_profile to resume, with the job title and company apart', () => {

@@ -148,6 +148,19 @@ describe('requestAssist', () => {
     assert.deepEqual(result, { kind: 'error', message: 'The AI quota is used up for now.' });
   });
 
+  it('a 503 upstream_unavailable shows plain words, never the raw "upstream_unavailable status=503" line (A1)', async () => {
+    // The body resume-assist sends when Gemini is overloaded (assist.ts, describeGeminiFailure).
+    const error = { context: { json: async () => ({ status: 'upstream_unavailable', message: 'upstream_unavailable status=503 model overloaded' }) } };
+    // The raw line goes to the console; silenced here so the test output stays clean.
+    const warn = console.warn;
+    // Swallowed for this call only.
+    console.warn = () => undefined;
+    // The ask.
+    const result = await ai.requestAssist(client(async () => ({ data: null, error })), body).finally(() => { console.warn = warn; });
+    // Exactly the friendly sentence.
+    assert.deepEqual(result, { kind: 'error', message: 'The AI is busy right now; try again in a minute.' });
+  });
+
   it('refuses an answer with an unknown op shape rather than showing part of it', async () => {
     // One good op, one with no id.
     const result = await ai.requestAssist(client(async () => ({ data: { status: 'ok', ops: [{ op: 'remove', id: 'b0' }, { op: 'remove' }], usage: {} }, error: null })), body);
