@@ -201,6 +201,32 @@ test("greenhouse content is entity-decoded before tags are stripped", () => {
   assert.equal(description.includes("&lt;"), false);
 });
 
+// GREENHOUSE ESCAPES TWICE (2026-11-06, P3 #15). `content` is HTML-escaped HTML, so an entity in
+// the original markup arrives escaped again: "&amp;" as "&amp;amp;", "&mdash;" as "&amp;mdash;".
+// One decode left 4,742 "&amp;" and 1,325 "&mdash;" in 3,414 stored live descriptions ("AI &amp;
+// Compute"). The adapter now unescapes the outer layer, then stripHtml decodes the markup's own.
+test("greenhouse double-escaped content: '&amp;amp;' is '&', '&amp;mdash;' is an em dash, '&amp;#43;' is '+'", () => {
+  // The live shape, one posting.
+  const result = greenhouseAdapter.parse({ jobs: [{ ...GREENHOUSE_PAYLOAD.jobs[0]!,
+    content: "&lt;p&gt;AI &amp;amp; Compute &amp;mdash; 5&amp;#43; years&lt;/p&gt;" }], meta: { total: 1 } });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  // Every layer decoded, markup gone.
+  assert.equal(result.postings[0]?.descriptionRaw, "AI & Compute — 5+ years");
+});
+
+// The outer unescape is ONE layer: a literal "&lt;" the author typed arrives as "&amp;amp;lt;"
+// and must come out as the text "&lt;", never as markup.
+test("greenhouse keeps an author's literal '&lt;' as text", () => {
+  // Three layers of escaping for one literal.
+  const result = greenhouseAdapter.parse({ jobs: [{ ...GREENHOUSE_PAYLOAD.jobs[0]!,
+    content: "&lt;p&gt;Use a &amp;amp;lt;div&amp;amp;gt; tag&lt;/p&gt;" }], meta: { total: 1 } });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  // Decoded twice, not three times.
+  assert.equal(result.postings[0]?.descriptionRaw, "Use a &lt;div&gt; tag");
+});
+
 // Ashby exposes postings the company has taken off its public board. Applying to one
 // is at best noise. No other board has this concept — which is exactly why one
 // universal scraper could not express it (constraint #12).

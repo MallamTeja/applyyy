@@ -29,6 +29,8 @@ import {
   readHttpUrl,
   readString,
   stripHtml,
+  // Greenhouse's outer escaping layer, removed once before stripHtml.
+  decodeEntities,
   type AtsAdapter,
   type AtsParseResult,
   type ParsedPosting,
@@ -159,9 +161,11 @@ export const greenhouseAdapter: AtsAdapter = {
         title,
         locationRaw,
         // `content` is HTML-ESCAPED HTML — Greenhouse escapes the markup, so it
-        // arrives as `&lt;p&gt;`. `stripHtml` decodes entities BEFORE removing tags
-        // precisely for this: decoding second would leave visible `<p>` in the output.
-        descriptionRaw: stripHtml(readString(entry, "content")),
+        // arrives as `&lt;p&gt;`, and an entity inside the markup arrives escaped twice
+        // ("&amp;amp;", "&amp;mdash;"). decodeEntities removes Greenhouse's outer layer
+        // (2026-11-06: one decode left 4,742 "&amp;" and 1,325 "&mdash;" in stored text);
+        // stripHtml then decodes the markup's own entities and drops the tags.
+        descriptionRaw: stripHtml(decodeEntities(readString(entry, "content"))),
         applyUrl,
         // Inferred from the title, the only field that carries the signal here.
         employmentType: classifyEmploymentType(readGreenhouseEmploymentType(entry)),

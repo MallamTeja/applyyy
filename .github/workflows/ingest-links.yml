@@ -118,9 +118,10 @@ jobs:
           // cannot_restart was missing (a failed-after-approval row). needs_confirm (2026-11-05): the
           // function asks before adding a dropped job or one outside the work-authorised countries;
           // this batch has no human to say "add anyway", so it is logged as refused and nothing is
-          // written, unless the entry carries an explicit confirm list (below). confirm_revive is the
-          // same refusal from the job-link-intake built at ea85dc9; drop it once that is redeployed.
-          const REFUSALS = new Set(['needs_text', 'not_a_job', 'posting_closed', 'quota', 'upstream_unavailable', 'disabled', 'unauthorized', 'error', 'cannot_restart', 'needs_confirm', 'confirm_revive']);
+          // written, unless the entry carries an explicit confirm list (below). confirm_revive (the
+          // ea85dc9 build's name for it) was dropped 2026-11-06: job-link-intake is deployed from
+          // acfe111. job-link-intake/handler.test.ts pins this list to the handler's statuses.
+          const REFUSALS = new Set(['needs_text', 'not_a_job', 'posting_closed', 'quota', 'upstream_unavailable', 'disabled', 'unauthorized', 'error', 'cannot_restart', 'needs_confirm']);
           // The questions an entry may pre-answer: job-link-intake's closed ConfirmReason union.
           const CONFIRM_REASONS = new Set(['revive_dropped', 'work_auth']);
           // Where a saved job's fields came from (handler.ts Built["source"]).

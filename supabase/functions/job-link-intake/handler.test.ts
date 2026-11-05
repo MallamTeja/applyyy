@@ -831,3 +831,31 @@ test("handler: a row dropped FOR work_auth asks once: confirming work_auth also 
   // Revived without a second question.
   assert.deepEqual([res.status, (await res.json()).revived_from, runs.length], [200, "dropped_filter", 1]);
 });
+
+// THE BATCH CALLER'S REFUSAL LIST MATCHES THIS HANDLER (2026-11-06, P3 #6). ingest-links.yml
+// classifies a 4xx answer as a refusal only when its status is in REFUSALS; an unknown status
+// aborts the batch as an "unknown shape". So its list must hold exactly the refusal statuses this
+// handler sends: one missing aborts a real run, one extra is a dead entry (confirm_revive outlived
+// the ea85dc9 build it was for). Read from both sources, never restated by hand.
+test("ingest-links.yml REFUSALS equals the refusal statuses handler.ts can send", async () => {
+  // Plain file reads; the workflow is not a module.
+  const { readFileSync } = await import("node:fs");
+  // The handler's source.
+  const handler = readFileSync(new URL("./handler.ts", import.meta.url), "utf8");
+  // The workflow, three directories up from supabase/functions/job-link-intake/.
+  const workflow = readFileSync(new URL("../../../.github/workflows/ingest-links.yml", import.meta.url), "utf8");
+  // Every literal response status in the handler, minus the success answer and the
+  // application status it reports on a revive (line `status: "passed_filters"`).
+  const sent = new Set([...handler.matchAll(/status: "([a-z_]+)"/g)].map((m) => m[1]!));
+  sent.delete("ok");
+  sent.delete("passed_filters");
+  // The workflow's set literal, by its exact shape: one line, single-quoted names.
+  const line = workflow.match(/const REFUSALS = new Set\(\[([^\]]*)\]\)/);
+  // The shape must be found, or the comparison below would pass vacuously.
+  assert.ok(line, "REFUSALS set literal not found in ingest-links.yml");
+  const listed = new Set([...line[1]!.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]!));
+  // Guard against an empty parse on either side.
+  assert.ok(sent.size >= 5 && listed.size >= 5, `parsed too few statuses: handler ${sent.size}, workflow ${listed.size}`);
+  // Exactly equal, sorted so a failure shows the difference.
+  assert.deepEqual([...listed].sort(), [...sent].sort());
+});

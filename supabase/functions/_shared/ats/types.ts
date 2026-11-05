@@ -288,6 +288,11 @@ const NAMED_ENTITIES: Readonly<Record<string, string>> = {
   apos: "'",
   // A non-breaking space reads as an ordinary space.
   nbsp: " ",
+  // Typography measured live (2026-11-06): 1,325 "&mdash;" in Greenhouse text, 240 "&hellip;" in
+  // other boards' text.
+  mdash: "—",
+  // Same.
+  hellip: "…",
 };
 
 // One entity: a known name, a decimal reference or a hex reference, ending in ";". Without the
@@ -305,6 +310,13 @@ function decodeEntity(whole: string, name?: string, decimal?: string, hex?: stri
   const valid = point > 0 && point <= 0x10ffff && (point < 0xd800 || point > 0xdfff);
   // An invalid reference is left exactly as written, never thrown on.
   return valid ? String.fromCodePoint(point) : whole;
+}
+
+// Decode one layer of entities, in one pass, and touch nothing else. stripHtml uses it on markup;
+// the Greenhouse adapter uses it once more first, because Greenhouse escapes its HTML a second time.
+export function decodeEntities(text: string | null): string | null {
+  // Absence stays absence.
+  return text === null ? null : text.replace(ENTITY, decodeEntity);
 }
 
 // Strip HTML to readable text.
@@ -325,7 +337,7 @@ export function stripHtml(html: string | null): string | null {
   // regex reads each entity exactly once, so an escaped ampersand stays literal.
   // NUMERIC TOO: Workday sends "+" as "&#43;" (492 live rows), and the experience parser read
   // "7&#43; years" as no requirement, so senior roles reached Ready to tailor.
-  const decoded = html.replace(ENTITY, decodeEntity);
+  const decoded = decodeEntities(html) ?? "";
   // Replace block-level boundaries with newlines BEFORE dropping tags, so paragraph
   // and list structure survives as line breaks instead of running together into one
   // wall of text that the model then has to guess the shape of.
