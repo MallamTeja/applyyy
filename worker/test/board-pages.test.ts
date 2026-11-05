@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 // The typed refusal the gate throws; the same class scout-ats's transport throws.
 import { RobotsDisallowedError } from '../../supabase/functions/_shared/http/errors.ts';
 // The unit under test.
-import { readBoardPages } from '../src/scout/board-pages.ts';
+import { readBoardPages, robotsGatedGet } from '../src/scout/board-pages.ts';
 // Types only: the fake adapter below is shaped against the real contract.
 import type { AtsAdapter, ParsedPosting } from '../../supabase/functions/_shared/ats/types.ts';
 
@@ -197,5 +197,33 @@ describe('readBoardPages robots gate (scouting policy)', () => {
     await readBoardPages(FAKE_ADAPTER, 'acme', impl, cache);
     // One robots.txt GET for four page requests.
     expect(requested.filter((u) => u.endsWith('/robots.txt'))).toHaveLength(1);
+  });
+});
+
+// The worker's Workday detail read (2026-11-05, P1-3) goes through this one GET, so it must keep
+// the board poll's robots gate: a Disallow is a throw before the target is contacted, which the
+// fill (workday-detail.ts) counts as "no description", never as a failed board.
+describe('robotsGatedGet', () => {
+  // A detail URL on the fake origin.
+  const DETAIL = 'https://fake.test/wday/cxs/acme/Careers/job/X/SDE_R-1';
+
+  it('returns the Response for an allowed URL, after one robots.txt read', async () => {
+    // No robots file: allowed.
+    const { impl, requested } = fakeFetch();
+    // A fresh verdict cache.
+    const res = await robotsGatedGet(DETAIL, impl, new Map());
+    // A Response, not parsed JSON: the fill reads text and refuses a soft-200 itself.
+    expect(res).toBeInstanceOf(Response);
+    // robots.txt first, then the target, nothing else.
+    expect(requested).toEqual(['https://fake.test/robots.txt', DETAIL]);
+  });
+
+  it('refuses a Disallowed URL without ever contacting it', async () => {
+    // The host disallows everything for every agent.
+    const { impl, requested } = fakeFetch(200, { status: 200, body: 'User-agent: *\nDisallow: /\n' });
+    // The refusal is the gate's own error type.
+    await expect(robotsGatedGet(DETAIL, impl, new Map())).rejects.toBeInstanceOf(RobotsDisallowedError);
+    // Only robots.txt was read; the posting never was.
+    expect(requested).toEqual(['https://fake.test/robots.txt']);
   });
 });

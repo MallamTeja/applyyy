@@ -93,3 +93,83 @@ describe('watchlistPollUpdate', () => {
     expect(watchlistPollUpdate(board, [], 10, new Date()).consecutive_failures).toBe(0);
   });
 });
+
+// The Workday detail read (2026-11-05, P1-3): persistJobBatch fills a NEW title-passing Workday
+// row before inserting it, and never reads a re-sighted one (that would re-fetch every Workday
+// posting on every run). The fill's own rules are unit-tested in workday-detail.test.ts; this
+// pins WHERE the worker calls it.
+describe('persistJobBatch: Workday detail read', () => {
+  // A Workday posting with the apply-link shape workdayDetailUrl accepts, saved without text.
+  function workdayJob(fingerprint: string, slug: string): PreparedJob {
+    // Only the fields the fill and the persist read; the cast stands in for the full JobInsert.
+    const row = {
+      fingerprint, ats_job_id: slug, posted_at: '2026-11-01T00:00:00Z', first_seen_at: 'NOW',
+      ats_provider: 'workday', title: 'Software Engineer', description_raw: null,
+      apply_url: `https://mastercard.wd1.myworkdayjobs.com/CorporateCareers/job/Pune-India/SDE_${slug}`,
+    } as never;
+    // Same rebuild contract as job() above.
+    return { row, rebuild: async (d: Date) => ({ ...(row as object), first_seen_at: d.toISOString() }) as never };
+  }
+
+  // A run whose GET answers every detail URL with a real description and records what it read.
+  async function recordingRun() {
+    // The run factory, from the same module the worker uses.
+    const { newWorkdayDetailRun } = await import('../../supabase/functions/_shared/scout/workday-detail.ts');
+    // Every URL the fill asked for.
+    const reads: string[] = [];
+    // The run: every title passes, a deadline that never runs out, and no real sleep.
+    const run = newWorkdayDetailRun({
+      // Answers with the detail endpoint's envelope.
+      get: async (url: string) => {
+        // Recorded so the test can say which postings were read.
+        reads.push(url);
+        // The one field parseWorkdayDescription reads.
+        return new Response(JSON.stringify({ jobPostingInfo: { jobDescription: '<p>Build services in Go.</p>' } }));
+      },
+      // Title gate out of scope here.
+      passesTitleGate: () => true,
+      // Always plenty of time left.
+      deadline: { remainingMs: () => 60_000 } as never,
+      // Tests never sleep.
+      pause: async () => {},
+    }, 40);
+    // Both, so a test can assert on the reads and the counters.
+    return { run, reads };
+  }
+
+  it('fills a new Workday row before it is inserted', async () => {
+    // Nothing stored: the row is new.
+    const { db, upserts } = fakeDb([]);
+    // A run that records its reads.
+    const { run, reads } = await recordingRun();
+    // One new Workday posting.
+    await persistJobBatch(db, [workdayJob('wf1', 'R-1')], new Date(), run);
+    // Read once.
+    expect(reads).toHaveLength(1);
+    // And the INSERTED payload carries the text, so jobs.description_raw is not stored blank.
+    expect(upserts[0]!.rows[0]!.description_raw).toBe('Build services in Go.');
+    // Counted for the run summary.
+    expect(run.filled).toBe(1);
+  });
+
+  it('never reads a re-sighted Workday row', async () => {
+    // wf1 is already stored; wf2 is new.
+    const { db } = fakeDb([{ id: 'id-1', fingerprint: 'wf1', first_seen_at: '2026-10-01T00:00:00Z', seen_count: 3 }]);
+    // A run that records its reads.
+    const { run, reads } = await recordingRun();
+    // One known posting, one new one.
+    await persistJobBatch(db, [workdayJob('wf1', 'R-1'), workdayJob('wf2', 'R-2')], new Date(), run);
+    // Only the new posting was read.
+    expect(reads).toEqual(['https://mastercard.wd1.myworkdayjobs.com/wday/cxs/mastercard/CorporateCareers/job/Pune-India/SDE_R-2']);
+  });
+
+  it('reads nothing without a run (unscreened scout, or a caller that passes none)', async () => {
+    // Nothing stored.
+    const { db, upserts } = fakeDb([]);
+    // No run argument at all.
+    await persistJobBatch(db, [workdayJob('wf1', 'R-1')], new Date());
+    // The row is inserted with no text. The upsert planner's blanking guard omits a null
+    // description_raw key (upsert-plan.ts), so "absent" and "null" are both "no text" here.
+    expect(upserts[0]!.rows[0]!.description_raw ?? null).toBeNull();
+  });
+});

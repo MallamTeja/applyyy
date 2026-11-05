@@ -38,6 +38,8 @@ import {
   classifyWorkArrangement,
   isRecord,
   readString,
+  // The shared HTML-to-text step every adapter's description goes through.
+  stripHtml,
   type AtsAdapter,
   type AtsParseResult,
   type ParsedPosting,
@@ -106,6 +108,38 @@ function originOf(board: WorkdayBoard): string {
 function endpointOf(board: WorkdayBoard): string {
   // The same path a real careers page POSTs to.
   return `${originOf(board)}/wday/cxs/${board.tenant}/${board.site}/jobs`;
+}
+
+// A posting's apply link exactly as parse() builds it (origin + site + externalPath), anchored
+// at both ends. Groups: 1 tenant, 2 wd number, 3 site, 4 the `/job/` path. The parts follow
+// TOKEN_SHAPE and EXTERNAL_PATH; dot segments are refused separately, as in parse().
+const APPLY_URL =
+  /^https:\/\/([a-z0-9][a-z0-9_-]{0,62})\.wd([1-9][0-9]{0,2})\.myworkdayjobs\.com\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(\/job\/[^\s?#\\]+)$/;
+
+// The detail endpoint for one posting, built from its apply link, or null for any other shape.
+//
+// WHY THE DETAIL READ EXISTS (2026-11-05): the list endpoint carries no description, so 5612 of
+// 5612 Workday jobs were saved without one and the screener judged them on the title alone.
+// The detail endpoint returns `jobPostingInfo.jobDescription`. WHY FROM THE APPLY LINK: the
+// scouts have it on every row and the back-fill has it in `jobs.apply_url`, where the board
+// token is not stored. The link is untrusted on that path, so it is matched, never repaired.
+export function workdayDetailUrl(applyUrl: string): string | null {
+  // One anchored match; no trimming, so a stray space is a refusal.
+  const m = APPLY_URL.exec(applyUrl);
+  // Any other shape, or a dot segment that could climb out of the site after resolution.
+  if (m === null || DOT_SEGMENT.test(m[4]!)) return null;
+  // Same host, then `/wday/cxs/{tenant}` before the site and posting path, all from the match.
+  return `https://${m[1]}.wd${m[2]}.myworkdayjobs.com/wday/cxs/${m[1]}/${m[3]}${m[4]}`;
+}
+
+// The posting's description as text, from a detail response, or null when there is none.
+// Only an object holding `jobPostingInfo.jobDescription` as non-empty text counts (CLAUDE.md
+// §6); a soft-200 page, a missing field or markup with no text is null, never "".
+export function parseWorkdayDescription(payload: unknown): string | null {
+  // The envelope and its one field must both be objects.
+  if (!isRecord(payload) || !isRecord(payload.jobPostingInfo)) return null;
+  // readString keeps only non-empty text; stripHtml returns null when no text is left.
+  return stripHtml(readString(payload.jobPostingInfo, "jobDescription"));
 }
 
 // A readable page position: where this page starts, and page one's total once known.

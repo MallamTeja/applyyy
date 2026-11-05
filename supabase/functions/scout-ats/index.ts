@@ -43,6 +43,13 @@ import { supabaseScreenQueries } from "../_shared/screen/supabase-queries.ts";
 // Persists the cascade's "rule skipped" warnings into the run row (B1, 2026-10-08).
 import { withRuleWarnings } from "../_shared/screen/run-summary.ts";
 import type { AtsProvider, JobInsert } from "../_shared/contracts/shared-types.ts";
+// The Workday detail read (2026-11-05): the list endpoint carries no description, so new
+// title-passing Workday rows get theirs from the detail endpoint before they are stored.
+import { fillWorkdayDescriptions, newWorkdayDetailRun, WORKDAY_DETAIL_CAP, type WorkdayDetailRun } from "../_shared/scout/workday-detail.ts";
+// The title-only verdict decides which Workday postings are worth a detail read.
+import { screenTechRole } from "../_shared/screen/tech-gate.ts";
+// The countdown that stops detail reads before the function's own wall clock does.
+import { createDeadline } from "../_shared/agent/deadline.ts";
 // The liveness guards and the fingerprint dedupe. Pure, so the rules that stop a bad poll
 // wiping the inventory are tested in liveness.test.ts rather than trusted from here.
 import {
@@ -97,6 +104,10 @@ const corsHeaders = {
 const DEFAULT_BOARD_LIMIT = 10;
 // Each board is a network fetch plus several writes; this bounds wall-clock time.
 const MAX_BOARD_LIMIT = 50;
+// The run's budget for Workday detail reads, counted from handler entry. Under the platform's
+// 150 s wall clock with room for the boards and writes after the last read; reads stop once
+// fewer than WORKDAY_DETAIL_MIN_REMAINING_MS (20 s) are left.
+const SCOUT_ATS_BUDGET_MS = 100_000;
 
 // Parses `?limit` the same way the pipeline agents parse their batch size.
 function resolveBoardLimit(raw: string | null): number {
@@ -125,6 +136,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return new Response("ok", { headers: corsHeaders });
   }
 
+  // Started at entry so auth, the kill switch and the watchlist read count against the budget.
+  const deadline = createDeadline({ budgetMs: SCOUT_ATS_BUDGET_MS });
   const url = new URL(req.url);
   // Manual-run marker. Since 2026-10-23 it does NOT bypass the kill switch (gate.ts), and
   // scout-ats has no force-gated scheduling constraint left, so today it changes nothing;
@@ -301,6 +314,22 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Warn, not error: the run continues and keeps its rows.
     console.warn(`[scout-ats] screener context unavailable, inserting unscreened: ${screenContext.reason}`);
   }
+
+  // One Workday detail run for the whole request, so the cap spans every board. Only when the
+  // context loaded: the title gate needs its preferences, and an unscreened run (rows at
+  // 'discovered') has no gate to spend reads on. null means no detail reads this run.
+  const workdayRun: WorkdayDetailRun | null = screenContext.ok
+    ? newWorkdayDetailRun({
+      // The same robots-gated GET the board poll uses ('scouting' policy).
+      get: (detailUrl) => fetchBoard(detailUrl),
+      // Title only (description null): the description is what this read is for.
+      passesTitleGate: (title) => !screenTechRole(title, null, screenContext.value.preferences).drop,
+      // The handler-entry countdown.
+      deadline,
+      // A real pause between reads; tests inject their own in workday-detail.test.ts.
+      pause: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    }, WORKDAY_DETAIL_CAP)
+    : null;
 
   // Warnings accumulated across every board, de-duplicated by the planner. Surfaced in
   // the response because an unconfigured rule is invisible otherwise — it passes jobs
@@ -488,6 +517,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
         // lookup and this write (a concurrent run) is left alone rather than overwritten
         // with a fresh first sighting. `first_seen_at` takes its column default.
         const newRows = slice.filter((p) => !storedByFingerprint.has(p.row.fingerprint)).map((p) => p.row);
+        // NEW Workday rows get their description here: after "which rows are new" (a re-sighted
+        // posting is never re-read) and before the insert, so the text is stored and the screener
+        // below reads the same row objects. Every other row is left untouched by the fill.
+        if (workdayRun !== null) await fillWorkdayDescriptions(newRows, workdayRun);
         // ONE UPSERT PER DISTINCT KEY-SET, not one per batch. postgrest-js sends the
         // UNION of keys across the whole array as `columns=`, so a single request cannot
         // express "this row omits description_raw but that one sets it". See
@@ -791,6 +824,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
     identity_mismatch: totalIdentityMismatch,
     // Boards whose marking was refused, with why. Empty means every ok board was evaluated.
     disappearance_refused_reason: livenessRefusals,
+    // Workday detail reads: made, that produced text, and title-passing postings left unread by
+    // the cap or the deadline (those are stored blank and dropped as missing_description).
+    // Zeros when the run made none, including an unscreened run.
+    workday_detail: { fetched: workdayRun?.fetched ?? 0, filled: workdayRun?.filled ?? 0, skipped: workdayRun?.skipped ?? 0 },
     // Per-board detail.
     results: summaries,
   };

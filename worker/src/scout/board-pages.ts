@@ -52,25 +52,8 @@ export function readBoardPages(
 ): Promise<BoardPagesResult> {
   // The shared loop owns pagination, the cursor-stall check and the page cap.
   return collectBoardPages(adapter, boardToken, async (pageUrl, body) => {
-    // THE ROBOTS GATE, before every page request (Teja, 2026-11-01: "Honor robots").
-    // Per page, not per board, because robots rules match path AND query, and a later
-    // page's URL can differ; the cache keeps it to one robots.txt GET per origin.
-    // Method is irrelevant (Workday POSTs): robots governs the path either way.
-    // A null token FAILS CLOSED (CLAUDE.md §6), mirroring transport.ts: guessing one
-    // would silently select the "*" group.
-    if (SCOUT_ROBOTS_TOKEN === null) {
-      throw new RobotsDisallowedError(pageUrl, 'refuse', 'cannot derive a robots product token from the scout User-Agent', null);
-    }
-    // 'scouting' is the board-read policy scout-ats also passes: a 401 robots.txt counts as
-    // no rules (Ashby), while 403 and a published Disallow (SmartRecruiters) still refuse.
-    // The robots.txt GET goes through the same fetch seam, so tests script it.
-    const verdict = await checkRobots(pageUrl, SCOUT_ROBOTS_TOKEN, { cache: robotsCache, fetcher: fetchImpl, policy: 'scouting' });
-    // Anything but an explicit allow refuses, 'wait' included, exactly as transport.ts
-    // does. A THROW, so scout.ts's catch records the board with failureMark like any
-    // failed poll: a refused board must never read as "0 jobs found" (CLAUDE.md §6).
-    if (verdict.kind !== 'allow') {
-      throw new RobotsDisallowedError(pageUrl, verdict.kind, verdict.reason, verdict.kind === 'refuse' ? verdict.source : null);
-    }
+    // The shared robots gate (gateRobots below): a throw unless robots.txt allows this page.
+    await gateRobots(pageUrl, fetchImpl, robotsCache);
     // One request per page, same headers as page one. A body (Workday, 2026-11-01)
     // makes it a JSON POST, because Workday's list endpoint answers GET with 400; no
     // body keeps the exact GET every other board has always had. scout-ats's
@@ -89,4 +72,55 @@ export function readBoardPages(
     // Decoded JSON for the adapter's pure parser.
     return await res.json();
   });
+}
+
+// THE ROBOTS GATE, shared by every request this scout makes to a board's origin: the board
+// pages above and the Workday detail read below. Resolves only on an explicit allow.
+async function gateRobots(
+  // The exact URL about to be requested.
+  url: string,
+  // The HTTP seam, also used for the robots.txt GET.
+  fetchImpl: typeof fetch,
+  // The verdict cache.
+  robotsCache: RobotsCache,
+): Promise<void> {
+  // THE ROBOTS GATE, before every board-page request and every detail read (Teja, 2026-11-01: "Honor robots").
+  // Per page, not per board, because robots rules match path AND query, and a later
+  // page's URL can differ; the cache keeps it to one robots.txt GET per origin.
+  // Method is irrelevant (Workday POSTs): robots governs the path either way.
+  // A null token FAILS CLOSED (CLAUDE.md §6), mirroring transport.ts: guessing one
+  // would silently select the "*" group.
+  if (SCOUT_ROBOTS_TOKEN === null) {
+    throw new RobotsDisallowedError(url, 'refuse', 'cannot derive a robots product token from the scout User-Agent', null);
+  }
+  // 'scouting' is the board-read policy scout-ats also passes: a 401 robots.txt counts as
+  // no rules (Ashby), while 403 and a published Disallow (SmartRecruiters) still refuse.
+  // The robots.txt GET goes through the same fetch seam, so tests script it.
+  const verdict = await checkRobots(url, SCOUT_ROBOTS_TOKEN, { cache: robotsCache, fetcher: fetchImpl, policy: 'scouting' });
+  // Anything but an explicit allow refuses, 'wait' included, exactly as transport.ts
+  // does. A THROW, so scout.ts's catch records the board with failureMark like any
+  // failed poll: a refused board must never read as "0 jobs found" (CLAUDE.md §6).
+  if (verdict.kind !== 'allow') {
+    throw new RobotsDisallowedError(url, verdict.kind, verdict.reason, verdict.kind === 'refuse' ? verdict.source : null);
+  }
+}
+
+// One robots-gated GET, for the Workday detail read (2026-11-05, workday-detail.ts). Same gate,
+// headers and policy as a board page, but the raw Response comes back: the fill reads the text
+// itself and refuses a non-ok or non-JSON answer as "no description", where a board page throws.
+// A robots refusal still THROWS (RobotsDisallowedError), which the fill also counts as no text.
+export async function robotsGatedGet(
+  // The detail URL.
+  url: string,
+  // The HTTP seam, defaulting to the real network.
+  fetchImpl: typeof fetch = fetch,
+  // The robots verdict cache, defaulting to the one this run shares.
+  robotsCache: RobotsCache = RUN_ROBOTS_CACHE,
+): Promise<Response> {
+  // Refused before the target origin is contacted.
+  await gateRobots(url, fetchImpl, robotsCache);
+  // The plain GET every board page without a body gets.
+  // 15 s, the transport's per-attempt timeout scout-ats gets from httpFetch: without it a hung
+  // socket could run past the scout's deadline, which WORKDAY_DETAIL_MIN_REMAINING_MS assumes cannot happen.
+  return await fetchImpl(url, { headers: REQUEST_HEADERS, signal: AbortSignal.timeout(15_000) });
 }

@@ -24,8 +24,13 @@ import { evaluateBoardIdentity } from '../../../supabase/functions/_shared/ats/i
 // so the two pollers cannot disagree about which board is failing. Pure and tested in
 // _shared/ats/adapters.test.ts, since this file runs main() on import and cannot be.
 import { boardRefusal, failureMark } from '../../../supabase/functions/_shared/ats/registry.ts';
-// Every page of a board through plain HTTP, kept in its own module so it can be tested.
-import { readBoardPages } from '../scout/board-pages.ts';
+// Every page of a board through plain HTTP, kept in its own module so it can be tested; and the
+// same module's robots-gated single GET, for the Workday detail read.
+import { readBoardPages, robotsGatedGet } from '../scout/board-pages.ts';
+// The Workday detail read (2026-11-05): one run per scout run, so its read cap spans every board.
+import { newWorkdayDetailRun, WORKDAY_DETAIL_CAP, type WorkdayDetailRun } from '../../../supabase/functions/_shared/scout/workday-detail.ts';
+// The title-only verdict decides which Workday postings are worth a detail read.
+import { screenTechRole } from '../../../supabase/functions/_shared/screen/tech-gate.ts';
 // The shared countdown, so this run's budget is measured the way the matcher's is.
 import { createDeadline } from '../../../supabase/functions/_shared/agent/deadline.ts';
 // How this run ends (W40 budget gate, W12 loud screener fallback), kept pure and tested
@@ -244,6 +249,24 @@ async function main(): Promise<void> {
     console.log('[applyy-scout] screener active: deterministic cascade will run before any job is queued.');
   }
 
+  // WORKDAY DETAIL READS (2026-11-05): new title-passing Workday rows get the description the
+  // list endpoint never carries, inside persistJobBatch. Only when the context loaded: the title
+  // gate needs its preferences, and an unscreened run has no gate to spend reads on. The run
+  // shares the scout's own deadline, so reads take board-polling time, never extra minutes.
+  const workdayRun: WorkdayDetailRun | undefined = screenContext.ok
+    ? newWorkdayDetailRun({
+      // The board poll's robots gate ('scouting' policy), returning the raw Response.
+      get: (url) => robotsGatedGet(url),
+      // Title only (description null): the description is what this read is for.
+      passesTitleGate: (title) => !screenTechRole(title, null, screenContext.value.preferences).drop,
+      // The run's 12-min countdown; reads stop with 20 s left (WORKDAY_DETAIL_MIN_REMAINING_MS).
+      deadline,
+      // A real pause between reads.
+      pause: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      // ponytail: a fixed per-run cap shared with scout-ats; raise it if `skipped` is often > 0.
+    }, WORKDAY_DETAIL_CAP)
+    : undefined;
+
   // Warnings across the whole run, de-duplicated. An unconfigured rule is otherwise
   // invisible: it passes jobs and says nothing, which reads exactly like a working rule.
   const screenWarnings = new Set<string>();
@@ -362,7 +385,8 @@ async function main(): Promise<void> {
 
         // Insert-new / refresh-existing split; first_seen_at is never overwritten.
         // One call owns every jobs write, so the batch cannot be half-handled by this file.
-        const persisted = await persistJobBatch(client, slice, now);
+        // The run's Workday detail reads ride along; persistJobBatch spends them on new rows only.
+        const persisted = await persistJobBatch(client, slice, now, workdayRun);
         // Recorded on the run AND kept per board, so the board is marked failed too.
         for (const message of persisted.errors) {
           // Reuses the run-level error list so the run row closes failed.
@@ -464,6 +488,9 @@ async function main(): Promise<void> {
     // An unconfigured rule announces itself here. Silence means the rules are configured
     // and nothing matched; a list means the filters are not actually protecting anything.
     for (const warning of screenWarnings) console.log(`[applyy-scout] ⚠️ screener warning: ${warning}`);
+    // Always printed when the run existed, so "0 fetched" reads as "no new Workday rows", not "never ran".
+    // `skipped` > 0 means the cap or the deadline left title-passing postings blank (missing_description).
+    if (workdayRun !== undefined) console.log(`[applyy-scout] workday detail: ${workdayRun.fetched} fetched, ${workdayRun.filled} filled, ${workdayRun.skipped} skipped.`);
   } else {
     // console.error, not log: since W12 this run closes `failed` and exits 1 for it.
     console.error('[applyy-scout] screener: NOT RUN — rows were created unscreened at status discovered; the run is closed failed (screener_not_run).');

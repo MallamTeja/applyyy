@@ -19,6 +19,9 @@ import { planJobUpsertGroups } from '../../../supabase/functions/_shared/screen/
 // The failed-poll update every scout path writes; shared so a job-write failure and a
 // refused board can never mark a board two different ways.
 import { failureMark } from '../../../supabase/functions/_shared/ats/registry.ts';
+// The Workday detail read (2026-11-05): new title-passing Workday rows get the description the
+// list endpoint never carries, from the same module scout-ats uses, so both scouts fill alike.
+import { fillWorkdayDescriptions, type WorkdayDetailRun } from '../../../supabase/functions/_shared/scout/workday-detail.ts';
 
 // A posting paired with how to rebuild its row against a STORED first sighting.
 // Exported because the CLI builds these and the tests build fakes of them.
@@ -88,6 +91,8 @@ export async function persistJobBatch(
   db: SupabaseClient,
   batch: readonly PreparedJob[],
   now: Date,
+  // The scout run's Workday detail reads; absent means none (an unscreened run has no title gate).
+  workdayRun?: WorkdayDetailRun,
 ): Promise<PersistResult> {
   // Result accumulators, returned even on failure so the caller can still log.
   const idByFingerprint = new Map<string, string>();
@@ -115,6 +120,10 @@ export async function persistJobBatch(
   // NEW fingerprints: insert-only, so a row a concurrent run just created is left alone.
   // Only genuinely new fingerprints may take the insert path, or first_seen_at would be rewritten.
   const fresh = batch.filter((j) => !storedByFingerprint.has(j.row.fingerprint)).map((j) => j.row);
+  // NEW Workday rows get their description here, after the stored lookup (a re-sighted posting is
+  // never re-read) and before the insert, so the text is stored. In place: cli/scout.ts screens
+  // these same row objects after this call returns.
+  if (workdayRun !== undefined) await fillWorkdayDescriptions(fresh, workdayRun);
   // One request per key-set, as the blanking guard requires.
   // Per group, because the guard can split a batch by key-set.
   for (const group of planJobUpsertGroups(fresh)) {

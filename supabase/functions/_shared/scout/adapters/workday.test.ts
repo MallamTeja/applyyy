@@ -14,7 +14,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 // The unit under test, plus its token parser (exported so the seed snippet's tokens can
 // be held to the same closed shape the adapter polls with).
-import { parseWorkdayToken, workdayAdapter } from "./workday.ts";
+import { parseWorkdayDescription, parseWorkdayToken, workdayAdapter, workdayDetailUrl } from "./workday.ts";
 // The shared page loop the Workday adapter is driven by in both scouts.
 import { collectBoardPages, MAX_BOARD_PAGES } from "../../ats/registry.ts";
 // Types only: the fake adapter in the loop tests is shaped against the real contract.
@@ -397,4 +397,85 @@ test("the page loop sends no body for a GET board", async () => {
   await collectBoardPages(getAdapter, "acme", async (_url, body) => { bodies.push(body); return {}; });
   // Exactly one request, with no body: the GET path is unchanged.
   assert.deepEqual(bodies, [undefined]);
+});
+
+// --- detail: the description the list endpoint never carries (2026-11-05) -----------------
+
+// 5612 of 5612 Workday jobs were saved with no description, because the list endpoint has
+// none (raw_payload keys: title, externalPath, locationsText, postedOn, bulletFields, ...).
+// The per-posting detail endpoint has it (probed 2026-11-05: jobPostingInfo.jobDescription,
+// 5252 chars of HTML). Its URL is the apply link with `/wday/cxs/{tenant}` put before the path.
+test("workday detail url is built from a posting's apply link", () => {
+  // The apply link the adapter itself builds (see the parse test above).
+  const url = workdayDetailUrl("https://mastercard.wd1.myworkdayjobs.com/CorporateCareers/job/Pune-India/Senior-Software-Engineer_R-123");
+  // Same host, cxs prefix, tenant, then the site and the posting path unchanged.
+  assert.equal(url, "https://mastercard.wd1.myworkdayjobs.com/wday/cxs/mastercard/CorporateCareers/job/Pune-India/Senior-Software-Engineer_R-123");
+});
+
+// The link comes from the database on the back-fill path, so it is untrusted: anything but
+// the exact shape is refused rather than repaired, so no request can reach another host.
+test("workday detail url refuses every other shape", () => {
+  // Each one must come back null.
+  const refused = [
+    // Not https.
+    "http://mastercard.wd1.myworkdayjobs.com/CorporateCareers/job/Pune-India/X_R-1",
+    // Another host entirely.
+    "https://evil.example/CorporateCareers/job/Pune-India/X_R-1",
+    // The Workday host as a prefix of another host.
+    "https://mastercard.wd1.myworkdayjobs.com.evil.example/CorporateCareers/job/X_R-1",
+    // A port.
+    "https://mastercard.wd1.myworkdayjobs.com:8443/CorporateCareers/job/X_R-1",
+    // A query string.
+    "https://mastercard.wd1.myworkdayjobs.com/CorporateCareers/job/X_R-1?source=a",
+    // A fragment.
+    "https://mastercard.wd1.myworkdayjobs.com/CorporateCareers/job/X_R-1#top",
+    // A dot segment that would climb out of the site.
+    "https://mastercard.wd1.myworkdayjobs.com/CorporateCareers/job/../../wday/X_R-1",
+    // No /job/ path.
+    "https://mastercard.wd1.myworkdayjobs.com/CorporateCareers/X_R-1",
+    // Whitespace inside.
+    "https://mastercard.wd1.myworkdayjobs.com/CorporateCareers/job/X R-1",
+    // Leading whitespace: refused, not trimmed.
+    " https://mastercard.wd1.myworkdayjobs.com/CorporateCareers/job/X_R-1",
+    // Empty.
+    "",
+  ];
+  // Every shape maps to null.
+  assert.deepEqual(refused.map(workdayDetailUrl), refused.map(() => null));
+});
+
+// The description is stored as text, like every other adapter's (stripHtml, types.ts:284).
+test("workday detail description is the posting's jobDescription as text", () => {
+  // The shape the detail endpoint answers with, trimmed to the field that matters.
+  const text = parseWorkdayDescription({ jobPostingInfo: { title: "SDE", jobDescription: "<p><b>Meet the Team</b></p><p>Build APIs &amp; services.</p>" } });
+  // Tags gone, entities decoded, paragraphs kept as line breaks.
+  assert.equal(text, "Meet the Team\nBuild APIs & services.");
+});
+
+// CLAUDE.md §6: a missing or malformed field is null, never "" and never a coerced value,
+// so the screener's missing_description stage sees exactly "no description".
+test("workday detail description is null for anything but a non-empty jobDescription string", () => {
+  // Each payload must come back null.
+  const payloads: unknown[] = [
+    // No body.
+    null,
+    // A soft-200 HTML page that was handed over as text.
+    "<html><body>Sign in</body></html>",
+    // An array.
+    [],
+    // No jobPostingInfo.
+    {},
+    // jobPostingInfo null.
+    { jobPostingInfo: null },
+    // No jobDescription.
+    { jobPostingInfo: { title: "SDE" } },
+    // An empty description.
+    { jobPostingInfo: { jobDescription: "" } },
+    // Markup with no text in it.
+    { jobPostingInfo: { jobDescription: "<p> </p><br/>" } },
+    // A number where text belongs.
+    { jobPostingInfo: { jobDescription: 42 } },
+  ];
+  // Every payload maps to null.
+  assert.deepEqual(payloads.map(parseWorkdayDescription), payloads.map(() => null));
 });
