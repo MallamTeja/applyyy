@@ -468,16 +468,26 @@ test("an unsupported provider returns null rather than throwing", () => {
   assert.equal(getAdapter("greenhouse"), greenhouseAdapter);
   assert.equal(getAdapter("lever"), leverAdapter);
   assert.equal(getAdapter("ashby"), ashbyAdapter);
-  assert.equal(getAdapter("smartrecruiters"), smartrecruitersAdapter);
   // Workday is registered (2026-11-01); checked by provider so no new import is needed.
   assert.equal(getAdapter("workday")?.provider, "workday");
 });
 
+// SMARTRECRUITERS IS OFF (robots ruling 2026-11-01: its robots.txt is Disallow: /). Unadding it
+// from the add-board forms (8299ca5) left existing SR watchlist rows POLLED, because the registry
+// still held the adapter (found by peer 2, 2026-11-06). No adapter means getAdapter is null and
+// supportedProviders omits it, so both scouts never select an SR row.
+test("smartrecruiters is not registered: no adapter, never polled", () => {
+  // The lookup every scout and the pasted-link path use.
+  assert.equal(getAdapter("smartrecruiters"), null);
+  // The list both scouts select watchlist rows by.
+  assert.equal(supportedProviders().includes("smartrecruiters" as never), false);
+});
+
 // The Scout selects watchlist rows by this list, so a board it cannot handle is never
 // claimed in the first place.
-test("supportedProviders reports exactly the five shipped adapters", () => {
+test("supportedProviders reports exactly the four shipped adapters", () => {
   // Sorted so the assertion does not depend on map insertion order.
-  assert.deepEqual([...supportedProviders()].sort(), ["ashby", "greenhouse", "lever", "smartrecruiters", "workday"]);
+  assert.deepEqual([...supportedProviders()].sort(), ["ashby", "greenhouse", "lever", "workday"]);
 });
 
 // --- pagination: SmartRecruiters caps one response at 100 postings -------------------

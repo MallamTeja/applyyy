@@ -19,10 +19,9 @@
 import { ashbyAdapter } from "./ashby.ts";
 import { greenhouseAdapter } from "./greenhouse.ts";
 import { leverAdapter } from "./lever.ts";
-// SmartRecruiters satisfies the same contract but lives beside the aggregators in
-// scout/adapters/; moving it here is a separate parcel, so it is imported in place.
-import { smartrecruitersAdapter } from "../scout/adapters/smartrecruiters.ts";
-// Workday lives beside SmartRecruiters for the same reason; discovery only, POST paging.
+// Workday satisfies the same contract but lives beside the aggregators in scout/adapters/;
+// moving it here is a separate parcel, so it is imported in place. Discovery only, POST paging.
+// SmartRecruiters is NOT imported: it is off (robots ruling 2026-11-01, see ADAPTERS below).
 import { workdayAdapter } from "../scout/adapters/workday.ts";
 // The adapter contract.
 import type { AtsAdapter, ParsedPosting } from "./types.ts";
@@ -38,7 +37,7 @@ import type { AtsProvider, Json, JobInsert, JobSourceRef } from "../contracts/sh
 
 // Every adapter this build knows about, keyed by the provider it submits to.
 //
-// PHASE 2 IS ONE LINE HERE. Adding Workable or SmartRecruiters means writing one file
+// PHASE 2 IS ONE LINE HERE. Adding Workable (or re-adding SmartRecruiters) means writing one file
 // that satisfies `AtsAdapter` and adding one entry below — the Scout does not change,
 // `toJobInsert` does not change, and no existing adapter is touched. That is the
 // extensibility the interface was designed for, stated as a fact about this table
@@ -50,10 +49,12 @@ const ADAPTERS: ReadonlyMap<AtsProvider, AtsAdapter> = new Map([
   ["lever" as AtsProvider, leverAdapter],
   // Ashby: genuine publication date, and the only board exposing unlisted postings.
   ["ashby" as AtsProvider, ashbyAdapter],
-  // SmartRecruiters: the first PAGED board (100 postings per response), so it is also
-  // the first adapter with `nextPageUrl`. Registered 2026-10-24 for Canva, Nagarro and
-  // PhonePe. Workable is written too but stays unregistered until it has a parcel.
-  ["smartrecruiters" as AtsProvider, smartrecruitersAdapter],
+  // SmartRecruiters is DELIBERATELY ABSENT (2026-11-06). Its robots.txt is Disallow: / and Teja
+  // ruled it fully off on 2026-11-01. Taking it off the add-board forms (8299ca5) still left the
+  // existing SR watchlist rows polled, because this entry stayed. Absent here, getAdapter returns
+  // null and supportedProviders omits it, so neither scout selects an SR row. The adapter file
+  // (scout/adapters/smartrecruiters.ts) is now imported only by tests. Workable is written too but
+  // stays unregistered until it has a parcel.
   // Workday: the first POST board (the list endpoint answers GET with 400), 20 postings
   // a page, total on page one only. Registered 2026-11-01 for the 17 tenants verified
   // that day (docs/harvest/2026-11-01-workday-coverage.md). Discovery only: applying
