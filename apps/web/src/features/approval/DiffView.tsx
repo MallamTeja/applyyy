@@ -29,7 +29,8 @@
  */
 
 // useId (2026-11-01): ties each new-bullet label to its textarea, unique per entry.
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+// Fragment (2026-11-05): a keyed wrapper-free row for each skill group (TailoredText).
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import type {
@@ -41,6 +42,8 @@ import type {
   DiffSection,
   EditTarget,
   FlaggedClaim,
+  // One printed skill with its group, which the grouped skills line is built from (2026-11-05).
+  PrintedSkill,
   ResumeDiff,
   SkillEditAction,
   TailoredRun,
@@ -810,6 +813,55 @@ function Run({ run }: { readonly run: TailoredRun }): ReactElement {
   );
 }
 
+/* A tailored line's text: its runs, or (R4, 2026-11-05) the skills line GROUPED as the PDF prints it.
+ *
+ * The PDF prints one "Category: a, b" row per group, groups in first-appearance order
+ * (renderSkills in packages/resume-template/src/render-resume-html.ts). A flat list in resume order
+ * showed the operator a layout the PDF never prints. That grouping is MIRRORED here, not imported:
+ * renderSkills is private to its module and returns an HTML string, and this file renders React
+ * nodes with no raw-HTML hatch. skillsGroupedDiff.test.ts compares the two outputs, so they cannot
+ * drift silently. Only a line carrying printedSkills (the editable branch) can be grouped; a D4 line
+ * has no categories, so it keeps its flat runs. */
+function TailoredText({ line }: { readonly line: DiffLine }): ReactElement {
+  // No groups to show: the runs exactly as before, marking (R1) untouched.
+  if (line.kind !== 'skills' || line.printedSkills === undefined) {
+    // Fragment, so the caller's <p> stays the only wrapper.
+    return <>{line.tailoredRuns.map((run, index) => <Run key={line.id + '-run-' + index} run={run} />)}</>;
+  }
+  // The operator's additions, by ref: the only skills that are not traced (same split as the adapter).
+  const added = new Set((line.addedSkills ?? []).map((skill) => skill.ref));
+  // A Map keeps insertion order, so groups appear where their first skill does, like renderSkills.
+  const groups = new Map<string, PrintedSkill[]>();
+  // One pass in print order; members keep their relative order within a group.
+  for (const skill of line.printedSkills) groups.set(skill.category, [...(groups.get(skill.category) ?? []), skill]);
+  // One row per group.
+  return (
+    <>
+      {[...groups].map(([category, skills], groupIndex) => (
+        // Category names are unique keys: the Map merged repeats.
+        <Fragment key={category}>
+          {/* A line break between rows, not before the first: plain HTML inside the caller's <p>, no new CSS. */}
+          {groupIndex > 0 ? <br /> : null}
+          {/* One row: the label, then the group's skills. */}
+          <span className="line__skill-group">
+            {/* The group's label, printed with the same colon the PDF prints. */}
+            <strong>{category}:</strong>{' '}
+            {skills.map((skill, index) => (
+              // Keyed by master ref, unique on a resume.
+              <Fragment key={skill.ref}>
+                {/* The comma is unmarked text, as in the flat line: highlighting it would be noise. */}
+                {index > 0 ? ', ' : null}
+                {/* Each skill its own run, so traced vs "edited by you" stays per skill (R1). */}
+                <Run run={added.has(skill.ref) ? { text: skill.name, verdict: 'edited', tracesTo: null } : { text: skill.name, verdict: 'traced', tracesTo: 'skills' }} />
+              </Fragment>
+            ))}
+          </span>
+        </Fragment>
+      ))}
+    </>
+  );
+}
+
 /* The footer under a tailored line: where it came from, and what the Auditor said about the
    version it replaced. Shared by both view modes so they cannot describe a line differently. */
 function Provenance({ line }: { readonly line: DiffLine }): ReactElement {
@@ -1189,9 +1241,8 @@ function Line({
             // focus (Remove, Reset); a read-only screen has no such control, so no attribute there.
             tabIndex={target !== null ? -1 : undefined}
           >
-            {line.tailoredRuns.map((run, index) => (
-              <Run key={line.id + '-run-' + index} run={run} />
-            ))}
+            {/* The runs, or the skills grouped as the PDF prints them (R4). */}
+            <TailoredText line={line} />
           </p>
         )}
 
@@ -2036,9 +2087,8 @@ export function DiffView({
                 </p>
               ) : (
                 <p className={`line__text line__text--${line.kind}`}>
-                  {line.tailoredRuns.map((run, idx) => (
-                    <Run key={`${line.id}-unified-${idx}`} run={run} />
-                  ))}
+                  {/* Same text as the split view, so the two modes cannot show the skills differently. */}
+                  <TailoredText line={line} />
                 </p>
               )}
               <Provenance line={line} />

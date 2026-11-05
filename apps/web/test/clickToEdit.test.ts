@@ -181,7 +181,9 @@ describe('click-to-edit: source shape', () => {
     // The slice under test.
     const unified = source.slice(start, end);
     // Positive shape: it does render runs (so this is the right block).
-    assert.match(unified, /<Run key=/);
+    // Since R4 (2026-11-05) the runs come through TailoredText, which draws the same runs (or the
+    // skills grouped as the PDF prints them) and holds no button, shared with the split view.
+    assert.match(unified, /<TailoredText line=\{line\} \/>/);
     // And no clickable text.
     assert.doesNotMatch(unified, /line__text-button/);
   });
