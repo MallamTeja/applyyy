@@ -264,3 +264,36 @@ describe('certification and achievement links (optional since d50775a)', () => {
   });
 });
 
+
+// 2026-11-05: master v11 and v14 each held a second/third "Testing" (live master_profiles), because a
+// writer appended a skill the master already had. Adding a skill the master already holds under any
+// casing or spacing is now a refusal that names the existing one, and no version is built.
+describe('addToMaster refuses a skill the master already has (duplicate "Testing", v11/v14)', () => {
+  it('same name in another case, spacing or group: refused, naming the existing skill and its group', () => {
+    // TypeScript is already in the base master, under Languages.
+    for (const name of ['TypeScript', 'typescript', '  TYPESCRIPT ', 'Type Script'.replace(' ', '')]) {
+      // A different group must not make it a different skill.
+      const result = add.addToMaster(base(), 'skill', { name, category: 'Other' }, counterMint());
+      // Refused.
+      assert.equal(result.ok, false, name);
+      // Said in words that name what is already there.
+      assert.match(result.ok ? '' : result.message, /already in your master profile as "TypeScript" \(Languages\)/, name);
+    }
+  });
+
+  it('inner whitespace runs collapse ("Machine  learning" = "Machine learning"); a genuinely new skill still adds', () => {
+    // A master holding a two-word skill.
+    const master = { ...base(), skills: [...base().skills, { id: 'skill-ml', name: 'Machine learning', category: 'AI' }] };
+    // Two spaces, other case: the same skill.
+    assert.equal(add.addToMaster(master, 'skill', { name: 'machine   Learning', category: 'AI' }, counterMint()).ok, false);
+    // A new one is untouched by the rule.
+    assert.equal(add.addToMaster(master, 'skill', { name: 'Kubernetes', category: 'DevOps & Cloud' }, counterMint()).ok, true);
+  });
+
+  it('masterSkillNamed finds the existing node by the same rule, or undefined', () => {
+    // Found, whatever the case and spacing.
+    assert.deepEqual(add.masterSkillNamed(base(), ' typeSCRIPT '), { id: 'skill-0', name: 'TypeScript', category: 'Languages' });
+    // Absent.
+    assert.equal(add.masterSkillNamed(base(), 'Rust'), undefined);
+  });
+});

@@ -228,6 +228,26 @@ export type AddResult =
   // Why not, in words the page shows verbatim.
   | { readonly ok: false; readonly message: string };
 
+/* A skill name in comparison form: NFKC, trimmed, lower-cased, inner whitespace runs collapsed. So
+ * "Testing", " testing " and "TESTING" are one skill, while "Node.js" and "NodeJS" stay distinct (a
+ * spelling choice is Teja's, not a guess). */
+function skillKey(name: string): string {
+  // NFKC first, so a full-width or compatibility character compares as its plain form.
+  return name.normalize('NFKC').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+/* The master's existing skill with this name under skillKey, or undefined (2026-11-05). Exported so
+ * every writer that appends a skill (this page and the approval page's attest) uses ONE rule: live
+ * master v11 and v14 held two and three "Testing" nodes because a writer appended one that existed. */
+export function masterSkillNamed(master: MasterProfile, name: string): MasterProfile['skills'][number] | undefined {
+  // The typed name's key, once.
+  const wanted = skillKey(name);
+  // Blank never matches (the required-field check refuses it first anyway).
+  if (wanted === '') return undefined;
+  // First in master order: the one the resume would already print.
+  return master.skills.find((skill) => skillKey(skill.name) === wanted);
+}
+
 /* Append one node of `kind` to `base`. Pure: no network, no clock; ids come from mintId.
  * Appended LAST because array order is document order and every existing id stays valid. */
 export function addToMaster(base: MasterProfile, kind: AddKind, values: AddValues, mintId: MintId): AddResult {
@@ -267,10 +287,15 @@ export function addToMaster(base: MasterProfile, kind: AddKind, values: AddValue
       // A node with an id, so tailored summaries can reference it.
       next = { ...base, summary: { id: mintId('summary'), text: read(values, 'text') } };
       break;
-    case 'skill':
+    case 'skill': {
+      // Already held under any casing or spacing, in ANY group: a no-op, said with what is there.
+      const existing = masterSkillNamed(base, read(values, 'name'));
+      // Refused before a version is built, so a second click cannot make a duplicate.
+      if (existing !== undefined) return { ok: false, message: `${read(values, 'name')} is already in your master profile as "${existing.name}" (${existing.category}); nothing was added.` };
       // Name and group, exactly as typed.
       next = { ...base, skills: [...base.skills, { id: mintId('skill'), name: read(values, 'name'), category: read(values, 'category') }] };
       break;
+    }
     case 'experience':
       // ISO dates stay null: they are for sorting only and the form does not ask for them.
       next = {
