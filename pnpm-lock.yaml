@@ -51,7 +51,7 @@ importers:
         version: 18.3.1
       '@vitejs/plugin-react':
         specifier: 4.3.4
-        version: 4.3.4(vite@6.4.4(@types/node@24.0.1))
+        version: 4.3.4(vite@6.4.5(@types/node@24.0.1))
       playwright:
         specifier: 1.55.1
         version: 1.55.1
@@ -59,8 +59,8 @@ importers:
         specifier: 5.9.3
         version: 5.9.3
       vite:
-        specifier: 6.4.4
-        version: 6.4.4(@types/node@24.0.1)
+        specifier: 6.4.5
+        version: 6.4.5(@types/node@24.0.1)
 
   packages/master-ingest:
     dependencies:
@@ -148,7 +148,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: 4.1.12
-        version: 4.1.12(@types/node@24.0.1)(vite@6.4.4(@types/node@24.0.1))
+        version: 4.1.12(@types/node@24.0.1)(vite@6.4.5(@types/node@24.0.1))
 
 packages:
 
@@ -1056,8 +1056,8 @@ packages:
     peerDependencies:
       browserslist: '>= 4.21.0'
 
-  vite@6.4.4:
-    resolution: {integrity: sha512-xGjU/SyjeNyb0E4KxXBvYz/1C+3JXuujvf2hXNOtnlcE+58o5ajd9N2/n2VhkiJvpCP2qQasnUpx5PXNeI+p1Q==}
+  vite@6.4.5:
+    resolution: {integrity: sha512-4enwjFfi4IwtEh0w+jPzpLVOFQiPHmmzPxcHXQOyEur47o6u0jE573DmGpjA+7irXoMLYRZD5ZaFUEneS3abPg==}
     engines: {node: ^18.0.0 || ^20.0.0 || >=22.0.0}
     hasBin: true
     peerDependencies:
@@ -1608,14 +1608,14 @@ snapshots:
     dependencies:
       '@types/node': 24.0.1
 
-  '@vitejs/plugin-react@4.3.4(vite@6.4.4(@types/node@24.0.1))':
+  '@vitejs/plugin-react@4.3.4(vite@6.4.5(@types/node@24.0.1))':
     dependencies:
       '@babel/core': 7.29.7
       '@babel/plugin-transform-react-jsx-self': 7.29.7(@babel/core@7.29.7)
       '@babel/plugin-transform-react-jsx-source': 7.29.7(@babel/core@7.29.7)
       '@types/babel__core': 7.20.5
       react-refresh: 0.14.2
-      vite: 6.4.4(@types/node@24.0.1)
+      vite: 6.4.5(@types/node@24.0.1)
     transitivePeerDependencies:
       - supports-color
 
@@ -1628,13 +1628,13 @@ snapshots:
       chai: 6.3.0
       tinyrainbow: 3.2.0
 
-  '@vitest/mocker@4.1.12(vite@6.4.4(@types/node@24.0.1))':
+  '@vitest/mocker@4.1.12(vite@6.4.5(@types/node@24.0.1))':
     dependencies:
       '@vitest/spy': 4.1.12
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
-      vite: 6.4.4(@types/node@24.0.1)
+      vite: 6.4.5(@types/node@24.0.1)
 
   '@vitest/pretty-format@4.1.12':
     dependencies:
@@ -1987,7 +1987,7 @@ snapshots:
       escalade: 3.2.0
       picocolors: 1.1.1
 
-  vite@6.4.4(@types/node@24.0.1):
+  vite@6.4.5(@types/node@24.0.1):
     dependencies:
       esbuild: 0.25.12
       fdir: 6.5.0(picomatch@4.0.7)
@@ -1999,10 +1999,10 @@ snapshots:
       '@types/node': 24.0.1
       fsevents: 2.3.3
 
-  vitest@4.1.12(@types/node@24.0.1)(vite@6.4.4(@types/node@24.0.1)):
+  vitest@4.1.12(@types/node@24.0.1)(vite@6.4.5(@types/node@24.0.1)):
     dependencies:
       '@vitest/expect': 4.1.12
-      '@vitest/mocker': 4.1.12(vite@6.4.4(@types/node@24.0.1))
+      '@vitest/mocker': 4.1.12(vite@6.4.5(@types/node@24.0.1))
       '@vitest/pretty-format': 4.1.12
       '@vitest/runner': 4.1.12
       '@vitest/snapshot': 4.1.12
@@ -2019,7 +2019,7 @@ snapshots:
       tinyexec: 1.3.1
       tinyglobby: 0.2.17
       tinyrainbow: 3.2.0
-      vite: 6.4.4(@types/node@24.0.1)
+      vite: 6.4.5(@types/node@24.0.1)
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/node': 24.0.1
