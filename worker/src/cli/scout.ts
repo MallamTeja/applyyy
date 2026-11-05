@@ -27,6 +27,8 @@ import { boardRefusal, failureMark } from '../../../supabase/functions/_shared/a
 // Every page of a board through plain HTTP, kept in its own module so it can be tested; and the
 // same module's robots-gated single GET, for the Workday detail read.
 import { readBoardPages, robotsGatedGet } from '../scout/board-pages.ts';
+// Disappearance marking with the edge's own planner (2026-11-05): this cron scout never marked any.
+import { applyBoardLiveness, readLivenessSnapshot } from '../scout/liveness-marking.ts';
 // The Workday detail read (2026-11-05): one run per scout run, so its read cap spans every board.
 import { newWorkdayDetailRun, WORKDAY_DETAIL_CAP, type WorkdayDetailRun } from '../../../supabase/functions/_shared/scout/workday-detail.ts';
 // The title-only verdict decides which Workday postings are worth a detail read.
@@ -225,6 +227,13 @@ async function main(): Promise<void> {
   let totalIdentityMismatch = 0;
   // Boards that had postings last poll and none now; log-only for the same reason.
   let totalEmptiedBoards = 0;
+  // Liveness tallies (2026-11-05): rows marked disappeared, rows cleared on a repost, and boards
+  // whose plan refused or whose snapshot/write failed. Log-only, like the two counters above.
+  let totalMarkedDisappeared = 0;
+  // Disappeared rows this run's polls listed again.
+  let totalReappeared = 0;
+  // Boards where liveness wrote nothing for a reason (refusal or a failed read/write).
+  let totalLivenessRefused = 0;
   const now = new Date();
 
   // THE SCREENER'S CONTEXT, LOADED ONCE FOR THE WHOLE RUN. The rules, the blocklist, the
@@ -369,6 +378,11 @@ async function main(): Promise<void> {
         console.warn(`[applyy-scout] ⚠️ ${board.company_name}: ${collisions} posting(s) shared a fingerprint with another; kept one each.`);
       }
 
+      // LIVENESS SNAPSHOT, read BEFORE the first job write below: read after the inserts, a
+      // fingerprint drift would make every posting a new row that "overlaps" 100% and the guards
+      // would pass vacuously (liveness.ts). Scoped like scout-ats's snapshot.
+      const livenessSnapshot = await readLivenessSnapshot(client, userId, board, adapter.discoverySource);
+
       // Per-board tally for the closing log line.
       let boardNewJobs = 0;
       // Counts only rows the insert actually created, since ignored duplicates return nothing.
@@ -460,6 +474,35 @@ async function main(): Promise<void> {
       // Counted with the rest, so the run cannot close `succeeded` over a lost write.
       noteError(`${board.company_name}: record poll result`, pollMarkErr);
 
+      // LIVENESS, ONLY NOW (scout-ats's rule): every job write landed and the success record is
+      // written, so this poll is a complete view of the board. `board` still holds the PREVIOUS
+      // poll's last_polled_at and count, which the recent basis needs. Never a board failure.
+      if (boardErrors.length === 0 && pollMarkErr === null) {
+        // An unreadable snapshot skips liveness for this board; the next run asks again.
+        if (!livenessSnapshot.ok) {
+          // Named, so a persistent read failure is visible in the log.
+          console.warn(`[applyy-scout] ⚠️ ${board.company_name}: liveness skipped, snapshot unreadable: ${livenessSnapshot.message}`);
+          // Counted with the refusals.
+          totalLivenessRefused += 1;
+        } else {
+          // Every fingerprint this poll produced (deduped), against the snapshot.
+          const liveness = await applyBoardLiveness(client, userId, livenessSnapshot, prepared.map((j) => j.row.fingerprint), board, now);
+          // Run totals.
+          totalMarkedDisappeared += liveness.marked;
+          // Same.
+          totalReappeared += liveness.reappeared;
+          // A refusal is board state, logged with its reason; not a run error.
+          if (liveness.refused !== null) {
+            // The planner's reason (identity_drift, mass_disappearance, ...) or the failed write.
+            console.warn(`[applyy-scout] ⚠️ ${board.company_name}: liveness refused: ${liveness.refused}`);
+            // Counted.
+            totalLivenessRefused += 1;
+          }
+          // Only boards where something changed get a line, to keep the log readable.
+          if (liveness.marked > 0 || liveness.reappeared > 0) console.log(`[applyy-scout] ✓ ${board.company_name}: ${liveness.marked} marked disappeared, ${liveness.reappeared} reappeared.`);
+        }
+      }
+
       console.log(`[applyy-scout] ✓ ${board.company_name}: processed ${boardNewJobs} jobs (${boardNewApps} new applications created).`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -478,6 +521,8 @@ async function main(): Promise<void> {
   console.log(`[applyy-scout] boards skipped for identity mismatch: ${totalIdentityMismatch}`);
   // Same always-print rule: "0 emptied" must not look like "gate never ran".
   console.log(`[applyy-scout] boards failed for going empty: ${totalEmptiedBoards}`);
+  // Always printed, zero included: "0 marked" and "liveness never ran" must not look alike.
+  console.log(`[applyy-scout] liveness: ${totalMarkedDisappeared} marked disappeared, ${totalReappeared} reappeared, ${totalLivenessRefused} board(s) refused or skipped.`);
   // THE SCREENER'S OWN COUNTERS, reported separately from the discovery counters because
   // they answer a different question. The discovery numbers say the poll worked; these
   // say the CASCADE worked. (Corrected 2026-10-23: this said "filter_rules currently
