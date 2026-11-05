@@ -157,3 +157,18 @@ test("timestamps that cannot explain the previous poll are not trusted: whole-se
   // Refused, as it was before this change.
   assert.equal(plan.kind, "refuse");
 });
+
+test("a persistently truncated board cannot wipe itself on its second poll (security review, 2026-11-05)", () => {
+  // Poll N listed only 30 of 240 and was refused, but scout-ats still recorded last_poll_job_count
+  // 30 and re-sighted those 30 at PREV_AT. The other 210 were last seen at the poll before, 12 h earlier.
+  const twelveHoursBefore = "2026-11-04T18:56:24.653Z";
+  // The 30 the truncated poll listed, then the 210 it dropped.
+  const rows = [
+    ...Array.from({ length: 30 }, (_, i) => ({ id: `kept-${i}`, fingerprint: `fp-kept-${i}`, lastSeenAt: PREV_AT })),
+    ...Array.from({ length: 210 }, (_, i) => ({ id: `lost-${i}`, fingerprint: `fp-lost-${i}`, lastSeenAt: twelveHoursBefore })),
+  ];
+  // Poll N+1 truncates the same way.
+  const plan = planDisappearances({ ...OK, storedLive: rows, polledFingerprints: rows.slice(0, 30).map((j) => j.fingerprint), previousPoll: { at: PREV_AT, jobCount: 30 } });
+  // The 210 live jobs were seen half a day ago: not a dead backlog, so none is marked.
+  assert.deepEqual(plan.kind === "mark" ? plan.ids : [], []);
+});

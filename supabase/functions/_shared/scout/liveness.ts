@@ -95,6 +95,15 @@ export const RECENT_SIGHTING_TOLERANCE_MS = 15 * 60_000;
 // poll listing exactly those few would pass both guards and mark the whole board dead.
 export const MIN_RECENT_SHARE_OF_PREVIOUS_POLL = 0.5;
 
+// Outside the recent basis, a row is marked only when its last sighting is at least this much older
+// than the previous poll: a dead BACKLOG, not a row one bad poll lost. Found by the commit-time
+// security review (2026-11-05): last_polled_at and last_poll_job_count are written even when liveness
+// refuses, so a board that PERSISTENTLY truncates (lists 30 of 240) makes its next poll's basis those
+// 30; without this bar the other 210, seen hours earlier, would be marked dead on that second poll.
+// 14 days: GitLab's 267-row backlog still clears 182 at once (last seen 2026-09/10, measured
+// 2026-11-05) and the rest as they age; a breakage has two weeks of refusals in the log first.
+export const STALE_BACKLOG_MIN_AGE_MS = 14 * 24 * 60 * 60_000;
+
 // One stored job that is currently live (disappeared_at IS NULL) on the polled board.
 export interface StoredJob {
   // The row to mark; the only thing the caller writes against.
@@ -156,15 +165,16 @@ export interface DisappearanceInput {
   readonly previousPoll: PreviousPoll | null;
 }
 
-// The rows the drift and mass guards judge: those the previous poll saw, when their timestamps
-// can explain that poll; otherwise every stored live row (the pre-2026-11-05 rule, which refuses).
-function guardBasis(input: DisappearanceInput): readonly StoredJob[] {
+// The rows the drift and mass guards judge, and the cut-off for marking a row outside them: the
+// rows the previous poll saw, when their timestamps can explain that poll; otherwise every stored
+// live row (the pre-2026-11-05 rule) with no cut-off, because then every row is in the basis.
+function guardBasis(input: DisappearanceInput): { readonly rows: readonly LiveStoredJob[]; readonly staleBefore: number | null } {
   // No previous poll (the ?? also covers a caller built before this field existed).
   const previous = input.previousPoll ?? null;
   // Its time, parsed once; NaN for anything that is not a date.
   const at = previous === null ? Number.NaN : Date.parse(previous.at);
   // Nothing trustworthy to compare against: the whole set, as before.
-  if (previous === null || !Number.isFinite(at) || !Number.isInteger(previous.jobCount) || previous.jobCount <= 0) return input.storedLive;
+  if (previous === null || !Number.isFinite(at) || !Number.isInteger(previous.jobCount) || previous.jobCount <= 0) return { rows: input.storedLive, staleBefore: null };
   // The rows that poll listed: last seen at (or just before) its recorded time.
   const recent = input.storedLive.filter((job) => {
     // Unparseable or null is "not recent"; it can only shrink the basis.
@@ -173,9 +183,9 @@ function guardBasis(input: DisappearanceInput): readonly StoredJob[] {
     return Number.isFinite(seen) && seen >= at - RECENT_SIGHTING_TOLERANCE_MS;
   });
   // Too few to explain the previous poll's count: the timestamps are not trusted. See the constant.
-  if (recent.length < previous.jobCount * MIN_RECENT_SHARE_OF_PREVIOUS_POLL) return input.storedLive;
-  // The recent rows are the basis.
-  return recent;
+  if (recent.length < previous.jobCount * MIN_RECENT_SHARE_OF_PREVIOUS_POLL) return { rows: input.storedLive, staleBefore: null };
+  // The recent rows are the basis; a row outside it is marked only if not seen for 14 days.
+  return { rows: recent, staleBefore: at - STALE_BACKLOG_MIN_AGE_MS };
 }
 
 // Decide which stored-live jobs to mark disappeared, or refuse to mark any.
@@ -199,7 +209,7 @@ export function planDisappearances(input: DisappearanceInput): DisappearancePlan
   // The stored jobs this poll did NOT list: the candidate set, stale backlog included.
   const absent = input.storedLive.filter((job) => !polled.has(job.fingerprint));
   // What the guards judge: the rows the previous poll saw, when trustworthy (see guardBasis).
-  const basis = guardBasis(input);
+  const { rows: basis, staleBefore } = guardBasis(input);
   // The basis rows this poll did not list.
   const absentInBasis = basis.filter((job) => !polled.has(job.fingerprint));
   // Share of the basis the poll recognised.
@@ -215,8 +225,20 @@ export function planDisappearances(input: DisappearanceInput): DisappearancePlan
   if (absentInBasis.length > MASS_DISAPPEARANCE_FLOOR && absentInBasis.length / basis.length > MAX_DISAPPEARANCE_SHARE) {
     return { kind: "refuse", reason: "mass_disappearance", detail: `absent share > ${MAX_DISAPPEARANCE_SHARE}; ${counts}` };
   }
-  // Trusted poll, recognised board, plausible churn: mark every absentee, the stale backlog too.
-  return { kind: "mark", ids: absent.map((job) => job.id) };
+  // The basis rows, by id, for the split below.
+  const inBasis = new Set(basis.map((job) => job.id));
+  // Trusted poll, recognised board, plausible churn: mark the basis absentees, plus only the OLD
+  // stale backlog outside it (see STALE_BACKLOG_MIN_AGE_MS). With no cut-off every row is in the basis.
+  const marked = absent.filter((job) => {
+    // Absent from a poll the guards just trusted: normal churn, as before.
+    if (inBasis.has(job.id)) return true;
+    // Outside the basis: only a sighting older than the cut-off; null or unparseable never marks.
+    const seen = job.lastSeenAt === null ? Number.NaN : Date.parse(job.lastSeenAt);
+    // A cut-off exists whenever a row can be outside the basis.
+    return staleBefore !== null && Number.isFinite(seen) && seen < staleBefore;
+  });
+  // The ids to write.
+  return { kind: "mark", ids: marked.map((job) => job.id) };
 }
 
 // Keep the FIRST item per fingerprint, preserving order.
