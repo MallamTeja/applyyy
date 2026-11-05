@@ -60,6 +60,10 @@ export function AppShell(): ReactElement {
      until read and null on a failed read, so the badge falls back to the lane counts instead of a 0. */
   const [pageRows, setPageRows] = useState<readonly ManualApplyRow[] | null>(null);
   useEffect(() => {
+    /* No operator yet (the stored session is still being read, or signed out): nothing to count,
+       and the shell shows its gate, not the badge. Until 2026-11-05 this ran once here AND again
+       when the session arrived, so every cold load paid the Manual apply reads twice. */
+    if (auth.user?.id === undefined) return;
     // A fresh count for the page the operator just opened.
     refetchCounts();
     // Guards against a slow earlier read landing after a newer one.

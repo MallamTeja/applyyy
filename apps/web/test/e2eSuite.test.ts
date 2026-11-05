@@ -673,6 +673,37 @@ describe('Playwright E2E Operator Console Suite', () => {
     }
   });
 
+  /* Latency 5 (2026-11-05): the badge effect ran on mount BEFORE the stored session was read
+     (auth.user undefined) and again when it arrived, so every cold load paid the Manual apply reads
+     twice. Counted on the network: loadManualApply's first read is the apply_kit notes. */
+  it('11b. a cold load reads the Manual apply badge rows once, not again when the session arrives', async () => {
+    // The kit-notes reads seen on the wire.
+    let kitReads = 0;
+    // Only loadManualApply asks for apply_kit notes, so this counts badge loads and nothing else.
+    const count = (request: Request): void => {
+      // Parsed so the filter is read as a parameter, not a substring.
+      const url = new URL(request.url());
+      // The kit-notes read: application_events filtered to detail->>kind = apply_kit.
+      if (url.pathname.endsWith('/rest/v1/application_events') && url.searchParams.get('detail->>kind') === 'eq.apply_kit') kitReads += 1;
+    };
+    // Network-level, so a read is counted whichever render made it.
+    page.on('request', count);
+    // try/finally: the listener must not outlive this test.
+    try {
+      // A full load remounts AppShell: the cold path under test.
+      await page.goto(`${serverUrl}/pipeline`, { waitUntil: 'domcontentloaded' });
+      // The shell is past its auth gate, so the session has arrived.
+      await page.waitForSelector('.page__title');
+      // Every read the mount and the sign-in could start has finished.
+      await page.waitForLoadState('networkidle');
+      // Exactly one: zero would mean the badge never loaded (a vacuous pass), two is the bug.
+      assert.equal(kitReads, 1, 'the Manual apply badge must load once per cold page load');
+    } finally {
+      // Later tests are not counted.
+      page.off('request', count);
+    }
+  });
+
   // W8 (2026-11-01 wiring audit). On ANY scout-ats failure except 401/403 the browser used to scan
   // Ashby itself and upsert `jobs` with ON CONFLICT DO UPDATE, stamping posted_at = now over real
   // scout rows, polling disabled boards, and skipping the kill switch. The mocks below give that
