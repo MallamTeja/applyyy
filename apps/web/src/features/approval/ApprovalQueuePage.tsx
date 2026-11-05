@@ -108,12 +108,17 @@ const chatStore = supabase === null ? undefined : createChatStore(supabase);
 import { newestInReviewFirst } from './queueOrder';
 /* The toolbar's sort, work-type filter and search (Teja asked 2026-11-04). Pure, so every rule has a
    named test and the chip counts read the same normalisation as the filter. Client-side only. */
-import { DEFAULT_QUEUE_VIEW, QUEUE_ARRANGEMENT_LABELS, QUEUE_SORT_LABELS, applyQueueView, countByArrangement } from './queueView';
+import { DEFAULT_QUEUE_VIEW, QUEUE_ARRANGEMENT_LABELS, QUEUE_SORT_LABELS, applyQueueView, countByArrangement, fitChip } from './queueView';
 // The view's types: the state the toolbar edits, and the closed unions its controls choose from.
 import type { QueueArrangement, QueueSort, QueueView } from './queueView';
 /* "3 days ago" for the queued-at chip (2026-11-04): the discovery page's own phrase builder, reused
    so both pages say an age the same way. Pure (no supabase, no JSX), so importing it costs nothing. */
 import { postedAgo } from '../discovery/discoveredList';
+/* The auditor's own check, re-run on Approve of an EDITED row (Teja, 2026-11-05: "Check on Approve,
+   hold for a 2nd click"). Pure and fail-closed: anything but a clean verdict holds the row. */
+import { checkBeforeApprove } from './approveCheck';
+// What a held card shows: the findings, or why the check could not run.
+import type { ApproveHold } from './approveCheck';
 
 import './ApprovalQueuePage.css';
 
@@ -356,6 +361,11 @@ function cardId(applicationId: string): string {
    (buildSettleArgs omits p_expected_updated_at for dropped_filter), so they are never refused as stale. */
 const STALE_CLICK_MESSAGE = 'This application changed since you opened it. Review the latest version, then click Approve again.';
 
+/* The card-level words for an Approve held by the re-check (2026-11-05): the edited resume has claims
+   the audit could not trace to the master, or the check could not run. Said at the top of the card,
+   with focus, like a stale refusal: a held click must never read as "did nothing". */
+const HELD_FOR_CHECK_MESSAGE = 'Not approved yet: your edits were re-checked against your master profile. Read the result above the Approve button, then approve again or change the edits.';
+
 /* The batch skipped a row because the operator's OWN edit to it is still saving. Nothing changed
    elsewhere, so STALE_CLICK_MESSAGE ("this application changed") would be untrue here; the truthful
    next step is to wait for the save, review, then approve individually. */
@@ -494,18 +504,6 @@ function isoDay(value: unknown): string | null {
   return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 10) === day ? day : null;
 }
 
-/* "Fit 72 · master vs JD": how well the MASTER profile fits the JD (the matcher's score). Never
-   labelled "ATS": that name belongs to the tailored resume's coverage, so one thing has one name. */
-function fitChip(score: unknown): string {
-  // A finite number on the matcher's 0..100 scale; null, NaN, a string or out-of-range is unknown.
-  if (typeof score === 'number' && Number.isFinite(score) && score >= 0 && score <= 100) {
-    // Rounded: the column is numeric(5,2), and a chip is no place for decimals.
-    return `Fit ${Math.round(score)} · master vs JD`;
-  }
-  // Unknown reads as a dash, never as 0.
-  return 'Fit —';
-}
-
 /* "ATS score 85% · tailored vs JD": honest keyword coverage of the TAILORED resume, the same figure
    as DiffView's "ATS Match Score" badge and the toolbar's 'ats' sort. */
 function atsChip(diff: ResumeDiff): string {
@@ -639,6 +637,9 @@ export function ApprovalQueuePage(): ReactElement {
      Page state (not DiffView state) so it survives the remount an adoption that moves the row
      between buckets causes, and stays on the card until the operator acts on that row again. */
   const [staleNotices, setStaleNotices] = useState<ReadonlyMap<string, string>>(new Map());
+  /* Per-row held re-checks (2026-11-05), each tied to the stamp of the stored version it checked, so a
+     second click acknowledges exactly those words. Page state for the same remount reason as above. */
+  const [approveHolds, setApproveHolds] = useState<ReadonlyMap<string, { readonly stamp: string; readonly hold: ApproveHold }>>(new Map());
   /* The toolbar's choices: sort, work type and search (2026-11-04). Page state, never stored:
      Teja asked for a view, not a preference, so a reload starts from the default again. */
   const [view, setView] = useState<QueueView>(DEFAULT_QUEUE_VIEW);
@@ -1003,6 +1004,9 @@ export function ApprovalQueuePage(): ReactElement {
     detail: Readonly<Record<string, unknown>> = {},
     // The batch button's promise: only rows that are STILL Bucket A when their turn comes.
     requireBucketA = false,
+    /* The stamp of the stored version whose held re-check the operator just approved past (the
+       "Approve with these" click, 2026-11-05). Undefined on every first click. */
+    acknowledgedStamp: string | undefined = undefined,
   ): Promise<void> {
     /* A new Approve/Reject on these rows retires their old stale notice FIRST, before any await, so
        a second stale refusal is a fresh change to the status region and is announced again. */
@@ -1103,6 +1107,35 @@ export function ApprovalQueuePage(): ReactElement {
           }
           // Next row.
           continue;
+        }
+        /* THE RE-CHECK (Teja, 2026-11-05: "Check on Approve, hold for a 2nd click"). The auditor ran
+           once, at tailoring; an edit made since was never re-checked, and the worker submits an
+           approved row by itself. So an EDITED row is audited again here, after confirmFresh proved
+           this tab's resume is the stored one, by the auditor's own function against the row's
+           CURRENT pinned master (an attest replaced latestSources with the re-pinned one). Anything
+           but a clean verdict holds the row: the card lists the findings, or why the check could not
+           run, and only a second click naming THIS stored version (its stamp) sends it. A newer save
+           changes the stamp, so an acknowledgement never carries over to words nobody saw checked.
+           Unedited rows skip it, the Bucket A batch included (R2 keeps edited rows out of it): the
+           auditor's verdict still describes every word of those. */
+        if (to === 'approved' && latest !== undefined && latest.editCount > 0 && (acknowledgedStamp === undefined || acknowledgedStamp !== stamp)) {
+          // The row's inputs as they are now, re-pin included.
+          const source = latestSources.current.get(id);
+          // The auditor's verdict on what is stored; fail-closed by construction (approveCheck.ts).
+          const verdict = checkBeforeApprove(source?.master, latestResumes.current.get(id), source?.tailorRefs);
+          // A pass sends on this click, as before; anything else holds.
+          if (verdict.kind !== 'clean') {
+            // The result, tied to the version it describes; a missing stamp was refused above, so '' never matches one.
+            const held = { stamp: stamp ?? '', hold: verdict };
+            // Copied, never mutated, as every per-row map here.
+            setApproveHolds((previous) => new Map(previous).set(id, held));
+            // Said at the top of the card, with focus once per settle, like every refused click.
+            noteStale(id, HELD_FOR_CHECK_MESSAGE, { focus: !focusedOne });
+            // Later refusals in this settle keep focus here.
+            focusedOne = true;
+            // Not sent: the row stays in the queue, unlocked by the finally below.
+            continue;
+          }
         }
         /* `human` is not decoration: the guard reads it to decide whether this
            edge is legal at all, and no other agent value opens this one. */
@@ -1282,14 +1315,24 @@ export function ApprovalQueuePage(): ReactElement {
     decisions: ReadonlyMap<string, ClaimDecision>,
     // Which screen path produced this approval, for the audit trail.
     reviewPath: 'bucket_b_review' | 'bucket_a_review',
+    // True on the held card's "Approve with these" click (2026-11-05): the operator read the re-check.
+    acknowledged = false,
   ): void {
     // Fire and forget: settle() reports success and failure through toasts itself.
-    void settle([applicationId], 'approved', {
-      // What was decided, claim by claim.
-      claim_decisions: Object.fromEntries(decisions),
-      // Distinguishes an opened-and-read Bucket A row from the batch button.
-      review_path: reviewPath,
-    });
+    void settle(
+      [applicationId],
+      'approved',
+      {
+        // What was decided, claim by claim.
+        claim_decisions: Object.fromEntries(decisions),
+        // Distinguishes an opened-and-read Bucket A row from the batch button.
+        review_path: reviewPath,
+      },
+      // Never a batch: one row, opened and read.
+      false,
+      // The stamp of the version whose re-check was shown; settle sends only if it is still the stored one.
+      acknowledged ? approveHolds.get(applicationId)?.stamp : undefined,
+    );
   }
 
   /* A rejection is a modelled edge, not an ad-hoc state write:
@@ -1332,6 +1375,17 @@ export function ApprovalQueuePage(): ReactElement {
     latestDiffs.current.set(applicationId, next);
     // The stamp the next edit must present.
     latestStamps.current.set(applicationId, updatedAt);
+    // A new stored version: a held re-check described the old words, so it goes (the next Approve re-checks).
+    setApproveHolds((previous) => {
+      // Nothing held for this row: the same map, so React skips the render.
+      if (!previous.has(applicationId)) return previous;
+      // A copy without this row's hold.
+      const next = new Map(previous);
+      // The removal itself, on the copy.
+      next.delete(applicationId);
+      // Handed back as the new state.
+      return next;
+    });
     // The diff on screen now describes what is stored; an edited row moves to Bucket B by derivation.
     setQueue((previous) => previous.map((diff) => (diff.applicationId === applicationId ? next : diff)));
     // The preview and Download render the snapshot, so they follow too.
@@ -2014,7 +2068,9 @@ export function ApprovalQueuePage(): ReactElement {
                     diff={diff}
                     /* The shared approval path; see approveReviewed for why the
                        decisions are forwarded and how they are serialised. */
-                    onApprove={(decisions) => approveReviewed(diff.applicationId, decisions, 'bucket_b_review')}
+                    onApprove={(decisions, acknowledged) => approveReviewed(diff.applicationId, decisions, 'bucket_b_review', acknowledged)}
+                    /* The held re-check for this row (2026-11-05), shown above Approve; undefined when nothing is held. */
+                    approveHold={approveHolds.get(diff.applicationId)?.hold}
                     /* The shared rejection path; see rejectReviewed. */
                     onReject={(reason) => rejectReviewed(diff.applicationId, reason)}
                     /* Saves for real; see editRow. */
@@ -2166,7 +2222,9 @@ export function ApprovalQueuePage(): ReactElement {
                         diff={diff}
                         /* Same path as Bucket B, tagged so the audit log shows this
                            clean row was opened and read, not batch-approved. */
-                        onApprove={(decisions) => approveReviewed(diff.applicationId, decisions, 'bucket_a_review')}
+                        onApprove={(decisions, acknowledged) => approveReviewed(diff.applicationId, decisions, 'bucket_a_review', acknowledged)}
+                        /* Same hold slot as Bucket B; a Bucket A row is unedited, so it stays empty unless an edit moves it. */
+                        approveHold={approveHolds.get(diff.applicationId)?.hold}
                         /* Same rejection edge as Bucket B. */
                         onReject={(reason) => rejectReviewed(diff.applicationId, reason)}
                         /* Same save path as Bucket B; an edit moves the row there (R2). */

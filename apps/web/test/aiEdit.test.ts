@@ -245,19 +245,40 @@ describe('shouldAutoApply (the AI performs the actions, 2026-11-01)', () => {
     assert.equal(ai.shouldAutoApply({ op: 'remove', ref: 'r', before: null }, 'x'), true);
   });
 
-  it('adds a master-less skill only when the operator named it, by whole words', () => {
-    // The 2026-11-01 message: each named skill auto-applies.
+  /* 2026-11-05: a NAMED skill the master lacks no longer applies by itself. Naming vouches for the
+     skill, not for the group the AI filed it under, and Apply writes that group into the master
+     (master v14 got "Testing" and "Code review" under "AI" this way). Same rule as a new bullet. */
+  it('never adds a master-less skill by itself, even one the operator named; its card waits for the group check', () => {
+    // The 2026-11-01 message that used to auto-apply all four.
     const said = 'hey i wanan add dbms , os , cn , oops skills to';
-    // Named, so applied.
-    assert.deepEqual(['DBMS', 'OS', 'CN', 'OOPS'].map((n) => ai.shouldAutoApply(skill(n), said)), [true, true, true, true]);
-    // "os" inside "cost" is not naming OS.
-    assert.equal(ai.shouldAutoApply(skill('OS'), 'cut the cost line'), false);
-    // A skill the AI chose on its own waits for a click.
+    // Named, but new to the master: every one waits for a click.
+    assert.deepEqual(['DBMS', 'OS', 'CN', 'OOPS'].map((n) => ai.shouldAutoApply(skill(n), said)), [false, false, false, false]);
+    // A skill the AI chose on its own waits too, as before.
     assert.equal(ai.shouldAutoApply(skill('Kubernetes'), said), false);
-    // Every word of a multi-word name must be typed: "reviewing" is not "review".
-    assert.equal(ai.shouldAutoApply(skill('Code review'), 'add the code reviewing skill'), false);
-    // Already in the master: printing it claims nothing new.
+    // The held card says why it waits, so a named skill that did not land never reads as "did nothing".
+    assert.match(ai.holdReason(skill('DBMS')) ?? '', /group/);
+  });
+
+  // The positive shape: the master's own skill still applies by itself, named or not.
+  it('still adds a skill the master already has by itself, since attest reuses the master node and its own group', () => {
+    // Named and already a master claim.
+    assert.equal(ai.shouldAutoApply({ ...skill('DBMS'), inMaster: true }, 'add dbms'), true);
+    // Not named, still a master claim: printing it claims nothing new.
     assert.equal(ai.shouldAutoApply({ ...skill('Kubernetes'), inMaster: true }, 'anything'), true);
+    // Nothing to hold, so no hold line under its card.
+    assert.equal(ai.holdReason({ ...skill('DBMS'), inMaster: true }), null);
+  });
+
+  // The naming rule now gates only a skill OFF; its whole-word cases moved here so they keep a test.
+  it('removes a skill by itself only when the operator named it, by whole words', () => {
+    // A printed skill to take off.
+    const off = (name: string) => ({ op: 'remove_skill', ref: 'sk', name }) as const;
+    // Named, so applied.
+    assert.equal(ai.shouldAutoApply(off('OS'), 'remove os'), true);
+    // "os" inside "cost" is not naming OS.
+    assert.equal(ai.shouldAutoApply(off('OS'), 'cut the cost line'), false);
+    // Every word of a multi-word name must be typed: "reviewing" is not "review".
+    assert.equal(ai.shouldAutoApply(off('Code review'), 'remove the code reviewing skill'), false);
   });
 });
 
@@ -609,7 +630,7 @@ describe('remove_skill and remove_entry (full write, 2026-11-04)', () => {
       { kind: 'remove_entry', section: 'projects', ref: 'p' },
     ]);
     /* Review finding (2026-11-04): the JD is untrusted text in the prompt, so a posting could induce
-       removals. A skill auto-applies only when the operator named it (the add_skill rule); a whole
+       removals. A skill auto-applies only when the operator named it (the whole-word naming rule); a whole
        entry, the biggest removal, always waits for a click. */
     assert.deepEqual([ai.shouldAutoApply(skill, 'remove the duplicate testing'), ai.shouldAutoApply(skill, 'trim my skills'), ai.shouldAutoApply(entry, 'remove the F1 project')], [true, false, false]);
     // Testing still prints: not applied.

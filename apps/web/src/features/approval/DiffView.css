@@ -968,6 +968,16 @@ html:has(.diff__actions) {
   color: var(--accent);
 }
 
+/* The held re-check (2026-11-05): findings the operator must read before the second click. */
+.diff__approve-hold {
+  /* Room above the buttons, like the line before it. */
+  margin-bottom: var(--gap-2);
+  /* Same size as the gate note. */
+  font-size: var(--size-sm);
+  /* The gate note's colour: these are unsupported claims, the same verdict that note speaks. */
+  color: var(--fabricated-strong);
+}
+
 /* Coverage from the operator's edits: accent, dotted, never forest (never "verified"). */
 .coverage__fill--edited {
   /* Dotted pattern so it is distinct from both other segments in greyscale. */

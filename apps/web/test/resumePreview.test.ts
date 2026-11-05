@@ -134,9 +134,11 @@ describe('approval queue: Bucket A rows open', () => {
 
   it('approving an opened Bucket A row goes through the shared RPC path', () => {
     // The row's DiffView approves via the shared helper, tagged as an individual review.
-    assert.match(bucketA, /approveReviewed\(diff\.applicationId, decisions, 'bucket_a_review'\)/);
+    // Pins `acknowledged` too (2026-11-05, B1): without it a "held for findings" second click from this row would re-hold forever.
+    assert.match(bucketA, /approveReviewed\(diff\.applicationId, decisions, 'bucket_a_review', acknowledged\)/);
     // And that helper ends in settle(..., 'approved'), i.e. advance_application_status as 'human'.
-    assert.match(page, /function approveReviewed[\s\S]*?void settle\(\[applicationId\], 'approved'/);
+    // `\s*` because settle's arguments now sit one per line (B1 added the stamp arg); the call is unchanged.
+    assert.match(page, /function approveReviewed[\s\S]*?void settle\(\s*\[applicationId\],\s*'approved'/);
     /* The RPC still names the human agent. Since item 4 (2026-10-08) the arguments are built by
        buildSettleArgs in saveTailoredEdit.ts (unit-tested there, p_agent included), so this holds
        both halves: the page sends the builder's output, and the builder names 'human'. */

@@ -476,7 +476,7 @@ export function AiEditPanel({
     const reply = shown.find((m) => m.role === 'assistant');
     /* THE AI PERFORMS THE ACTIONS (2026-11-01): each op that shouldAutoApply allows is applied in
        order through the page's guarded save, exactly as a click would; the composer stays locked
-       until they land. A skill the operator did not name stays a card. First failure stops the run,
+       until they land. A skill new to the master stays a card (2026-11-05). First failure stops the run,
        since the row probably changed and later saves would fail the same way. */
     for (const [index, op] of (reply?.ops ?? []).entries()) {
       // Left as a card for a click (or a "Could not do" card, which has nothing to apply).

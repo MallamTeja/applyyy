@@ -532,6 +532,9 @@ export function holdReason(op: StoredOp): string | null {
   }
   // A whole entry off: always the operator's call.
   if (op.op === 'remove_entry') return 'Waiting for your click: removing a whole entry always needs your OK.';
+  /* A skill new to the master (2026-11-05): said, because a skill the operator named used to apply by
+     itself, and a card that now waits would otherwise read as "did nothing". */
+  if (op.op === 'add_skill' && !op.inMaster) return 'Waiting for your click: check its group first. A skill new to your master profile never applies by itself.';
   // Nothing to add.
   return null;
 }
@@ -740,11 +743,12 @@ function resolveOne(op: AssistOp, draft: AssistDraft, lists: string[][], section
 /* Whether the chat applies this op by itself, right after the answer (Teja, 2026-11-01: "my ai
    need to perform the actions"). Edits: only when rule 5 finds them grounded (2026-11-04, see the
    edit line below). Removals: yes; they change only this resume, the row
-   still needs Approve, and every edited line keeps its Reset in the diff. A skill: only when the
-   master already has it, or the operator NAMED it in this message. Otherwise applying writes a new
-   claim into the master profile, which every future resume inherits, and the AI must not invent
-   one; that card waits for a click. Matched by whole tokens, so "os" in "add os" counts but "os"
-   inside "cost" does not.
+   still needs Approve, and every edited line keeps its Reset in the diff. A skill ON: only when the
+   master already has it (2026-11-05). Otherwise applying writes a new claim, under the AI's chosen
+   group, into the master profile that every future resume inherits. Naming the skill vouches for the
+   skill, not for that group (master v14 got "Testing" and "Code review" filed under "AI"), so the card
+   waits for the operator to check the group and click. A skill OFF: only when the operator NAMED it,
+   matched by whole tokens, so "os" in "remove os" counts but "os" inside "cost" does not.
    STRUCTURE (2026-11-01): moves and add-backs apply by themselves, since they only reorder or reuse
    true master text. A new bullet never does: applying it writes a new claim into the master, the
    same reason as an unnamed skill, so its card always waits for a click. */
@@ -763,10 +767,11 @@ export function shouldAutoApply(op: StoredOp, instruction: string): boolean {
   /* Bullet removals, moves and add-backs insert no text that is not the master's own, and are
      resume-only and reversible: Reset on the line brings the tailor's version back. */
   if (op.op !== 'add_skill' && op.op !== 'remove_skill') return true;
-  // Already a master claim: printing it claims nothing new (a removal is never "in the master" this way).
-  if (op.op === 'add_skill' && op.inMaster) return true;
-  /* A skill the master lacks (add), or any skill off (remove, 2026-11-04, same JD reason): only when
-     the operator named it; "remove the duplicate testing" names Testing, "trim my skills" names none. */
+  /* A skill on: only a master claim, which attest reuses with the master's own group. A new one
+     waits even when named (2026-11-05): the group it would land under is the AI's pick. */
+  if (op.op === 'add_skill') return op.inMaster;
+  /* A skill off (2026-11-04, the JD reason above): only when the operator named it; "remove the
+     duplicate testing" names Testing, "trim my skills" names none. */
   // The operator's words, as the auditor tokenises text.
   const said = new Set(tokenizeText(instruction));
   // Every word of the skill's name must have been typed ("CN" needs "cn"; "Code review" needs both).

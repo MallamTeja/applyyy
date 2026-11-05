@@ -17,6 +17,8 @@ import {
   QUEUE_SORT_LABELS,
   applyQueueView,
   countByArrangement,
+  // The fit chip's one formatter, shared with the pipeline drawer since 2026-11-05.
+  fitChip,
 } from '../src/features/approval/queueView.ts';
 
 // A test row: the view's fields plus an id, so results read as a list of names.
@@ -264,5 +266,20 @@ describe('approval queue view', () => {
     assert.deepEqual(countByArrangement(rows), { all: 7, onsite: 1, hybrid: 1, remote: 2 });
     // An empty queue counts zero everywhere, never undefined.
     assert.deepEqual(countByArrangement([]), { all: 0, onsite: 0, hybrid: 0, remote: 0 });
+  });
+});
+
+// One formatter for the matcher's fit (2026-11-05): the queue chip and the pipeline drawer both call it.
+describe('fitChip', () => {
+  it('rounds a real 0..100 fit and names its scope', () => {
+    // A numeric(5,2) value as PostgREST returns it.
+    assert.equal(fitChip(72.5), 'Fit 73 · master vs JD');
+    // Both ends of the scale are real scores.
+    assert.deepEqual([fitChip(0), fitChip(100)], ['Fit 0 · master vs JD', 'Fit 100 · master vs JD']);
+  });
+
+  it('reads anything that is not a real 0..100 number as a dash, never as a score', () => {
+    // Null, NaN, a numeric string, and both sides out of range: none of them is a fit.
+    assert.deepEqual([null, Number.NaN, '72', -1, 150].map((value) => fitChip(value)), ['Fit —', 'Fit —', 'Fit —', 'Fit —', 'Fit —']);
   });
 });

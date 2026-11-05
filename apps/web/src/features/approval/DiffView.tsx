@@ -69,6 +69,8 @@ import type { AssistBody, AssistResult } from './aiEdit';
 import { structureFromDiff } from './aiEdit';
 /* Type only: the AI chat's store, passed through to the panel. */
 import type { ChatStore } from './resumeChat';
+/* Type only: a held re-check of an edited row (2026-11-05), shown above Approve. */
+import type { ApproveHold } from './approveCheck';
 
 import './DiffView.css';
 
@@ -116,7 +118,9 @@ export type EditResult = { readonly ok: true; readonly skillRef?: string | undef
 /* Pure presentation component - no data access, no Supabase. */
 export interface DiffViewProps {
   readonly diff: ResumeDiff;
-  readonly onApprove: (decisions: ReadonlyMap<string, ClaimDecision>) => void;
+  /* `acknowledged` (2026-11-05) is true only on the held card's second click, which approves past a
+     re-check the operator has just read; every first click passes false. */
+  readonly onApprove: (decisions: ReadonlyMap<string, ClaimDecision>, acknowledged: boolean) => void;
   readonly onReject: (reason: string) => void;
   /* Async because it is a real write. Absent means "this screen offers no editing", which keeps
      any render-only caller (and the tests) working without stubbing a save path. */
@@ -138,6 +142,9 @@ export interface DiffViewProps {
   readonly onAssist?: ((body: AssistBody) => Promise<AssistResult>) | undefined;
   /* Where the AI chat keeps its chats (2026-11-01). Absent means a session-only chat. */
   readonly chat?: ChatStore | undefined;
+  /* The page's held re-check of this edited row (2026-11-05): its findings, or why it could not
+     run. Present turns Approve into the second click; absent is every row nothing holds. */
+  readonly approveHold?: ApproveHold | undefined;
 }
 
 /* --- The job being approved against ------------------------------------- */
@@ -474,7 +481,8 @@ export function CoverageBar({
         ))}
         {distinct(diff.coverage.matchedByFabrication).map((kw) => (
           <span key={kw} className="kw-chip kw-chip--flagged" title="Flagged untraced claim">
-            ⚠ {kw}
+            {/* A plain "!", not the old warning emoji: the frontend is emoji-free (2026-11-05) and noEmoji.test.ts scans this file. */}
+            ! {kw}
           </span>
         ))}
         {missingKeywords.map((kw) => {
@@ -1756,6 +1764,8 @@ export function DiffView({
   onAssist,
   // The AI chat's store; passed straight through.
   chat,
+  // The held re-check, shown above Approve; undefined when nothing is held.
+  approveHold,
 }: DiffViewProps): ReactElement {
   // Every claim still in the resume; claims on edited or removed lines are already gone.
   const claims = useMemo(() => collectFlaggedClaims(diff), [diff]);
@@ -2038,12 +2048,40 @@ export function DiffView({
       )}
 
       <footer className="diff__actions">
-        {/* R6: said where the approval happens, because the Auditor never saw these words. */}
+        {/* R6: said where the approval happens, because the Auditor saw only the tailor's words. Since
+            2026-11-05 Approve re-checks an edited resume first, so the line says that instead of
+            "not re-audited", which stopped being true. */}
         {diff.editCount > 0 ? (
           <p className="diff__own-wording">
-            Edits are not re-audited. You are approving your own wording.
+            Approve re-checks your edits against your master profile first.
           </p>
         ) : null}
+        {/* The held re-check (2026-11-05): what the audit found, or why it could not check, right
+            above the button that now approves past it. Inline only; never a browser dialog. */}
+        {approveHold === undefined ? null : (
+          <div className="diff__approve-hold">
+            {approveHold.kind === 'flagged' ? (
+              <>
+                {/* The count first, so the size of the problem is read before the list. */}
+                <p>
+                  The re-check found {approveHold.findings.length}{' '}
+                  {approveHold.findings.length === 1 ? 'claim' : 'claims'} your master profile does not support:
+                </p>
+                {/* Each finding: the quoted words, then the auditor's reason in its own words. */}
+                <ul>
+                  {approveHold.findings.map((finding, index) => (
+                    <li key={`${finding.path}-${index}`}>
+                      <q>{finding.claim}</q> ({finding.reason})
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : (
+              /* Could not run: said as such, so a hold here never reads as "found nothing". */
+              <p>Your edits could not be re-checked: {approveHold.why}</p>
+            )}
+          </div>
+        )}
         {/* The letter was written from the tailor's version and is not regenerated. */}
         {hasCoverLetter === true && diff.editCount > 0 ? (
           <p className="diff__edit-note">Cover letter was generated before your edits.</p>
@@ -2054,10 +2092,12 @@ export function DiffView({
             type="button"
             className="button button--approve"
             disabled={!canApprove}
-            // Only decisions about claims that are still in the resume.
-            onClick={() => onApprove(new Map([...decisions].filter(([key]) => liveKeys.has(key))))}
+            /* Only decisions about claims that are still in the resume. A held card's click is the
+               acknowledgement, so it says so; the page sends only if the stored version is unchanged. */
+            onClick={() => onApprove(new Map([...decisions].filter(([key]) => liveKeys.has(key))), approveHold !== undefined)}
           >
-            Approve and queue for submission
+            {/* The second click names what it approves past; a hold that could not check says that. */}
+            {approveHold === undefined ? 'Approve and queue for submission' : approveHold.kind === 'flagged' ? 'Approve with these' : 'Approve unchecked'}
           </button>
 
           <button

@@ -86,10 +86,11 @@ describe('approval queue row chips', () => {
   });
 
   it('labels the master fit "Fit" and the tailored coverage "ATS score", with dashes for unknown', () => {
-    // The matcher's fit of the master, rounded, with its own scope named.
-    assert.match(page, /`Fit \$\{Math\.round\(score\)\} · master vs JD`/);
-    // Unknown fit is a dash, never 0.
-    assert.match(page, /return 'Fit —';/);
+    /* The matcher's fit, through the one shared formatter (queueView fitChip, 2026-11-05); its
+       rounding and its dash for unknown are tested by behaviour in approvalQueueView.test.ts. */
+    assert.match(page, /import \{[^}]*\bfitChip\b[^}]*\} from '\.\/queueView';/);
+    // The chip calls it on the row's fit.
+    assert.match(page, /\{fitChip\(facts\?\.fit\)\}/);
     // The tailored resume's honest coverage, the badge's own figure...
     assert.match(page, /coveragePercent\(diff\.coverage, 'honest'\)/);
     // ...named "ATS score", with a dash when nothing was measured.

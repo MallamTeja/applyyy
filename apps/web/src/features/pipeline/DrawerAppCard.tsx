@@ -19,6 +19,9 @@ import type { ResolvedResume } from '../../data/contract';
 /* Same badge the drawer rendered inline before the split. With its extension, because
    node --test resolves imports itself and cannot find an extensionless .tsx path. */
 import { SourceBadge } from '../../app/SourceBadge.tsx';
+/* The approval queue's own fit chip (2026-11-05), so one number keeps one wording and one range check.
+   From the pure view module, not the page, which imports supabase. With its extension, like above. */
+import { fitChip } from '../approval/queueView.ts';
 /* The pure per-row engine (another worker's file; imported, never edited). The browser only
    INVOKES agents through its deps; every status change is the deployed agent's own write.
    With its extension, like SourceBadge above: other tests' load hooks only try .tsx. */
@@ -593,10 +596,10 @@ export function DrawerAppCard({
         <span className="identifier">{app.id.slice(0, 8)}</span>
         {/* Local date: the operator thinks in their own timezone. */}
         <span>{new Date(app.createdAt).toLocaleDateString()}</span>
-        {/* Omitted before scoring, so an unscored row never reads as 0. Worded like the approval
-            queue's fit chip (ApprovalQueuePage fitChip): match_score is the master-vs-JD FIT, and
-            "Match" names the tailored resume's ATS coverage, so one number keeps one name. */}
-        {app.score !== null && app.score !== undefined && <span>{`Fit ${Math.round(app.score)} · master vs JD`}</span>}
+        {/* Omitted before scoring, so an unscored row never reads as 0. The approval queue's own fit
+            chip (queueView fitChip): match_score is the master-vs-JD FIT, and "Match" names the
+            tailored resume's ATS coverage, so one number keeps one name. */}
+        {app.score !== null && app.score !== undefined && <span>{fitChip(app.score)}</span>}
         {/* ABSENT, NOT DISABLED, when there is no snapshot: a disabled "View resume"
             invites the question "why not?" and the next fix is a fallback to the master,
             which would show a resume this row was never tailored with. In ANY status,

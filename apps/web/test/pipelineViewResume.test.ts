@@ -109,6 +109,17 @@ describe('DrawerAppCard', () => {
     // And not the old, borrowed name.
     assert.doesNotMatch(html, /Match:/);
   });
+
+  /* 2026-11-05: the drawer used to copy the chip's template, so it printed any number it got. It now
+     calls the queue's own fitChip, which reads an off-scale value as unknown. */
+  it('formats the fit with the queue chip itself, so an off-scale score reads as a dash', () => {
+    // Above the matcher's 0..100 scale: not a fit.
+    const html = render(h(card.DrawerAppCard, { app: { ...row(null), score: 150 } as never, onViewResume: () => {} }));
+    // The chip's unknown wording.
+    assert.match(html, /Fit —/);
+    // Non-vacuity: the card really rendered.
+    assert.match(html, /<h3[^>]*class="drawer__app-role"/);
+  });
 });
 
 describe('readResumeSnapshot', () => {

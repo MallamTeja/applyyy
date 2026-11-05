@@ -158,3 +158,18 @@ export function countByArrangement(rows: readonly QueueViewRow[]): Readonly<Reco
   }
   return counts;
 }
+
+/* "Fit 72 · master vs JD": how well the MASTER profile fits the JD (the matcher's score). Never
+   labelled "ATS": that name belongs to the tailored resume's coverage, so one thing has one name.
+   Exported (2026-11-05) so the pipeline drawer prints the same chip instead of a copy of its template:
+   the copy printed any number it got, while this reads an off-scale value as unknown. Lives in this
+   pure module, not the page, because the page imports supabase and no test can import it. */
+export function fitChip(score: unknown): string {
+  // A finite number on the matcher's 0..100 scale; null, NaN, a string or out-of-range is unknown.
+  if (typeof score === 'number' && Number.isFinite(score) && score >= 0 && score <= 100) {
+    // Rounded: the column is numeric(5,2), and a chip is no place for decimals.
+    return `Fit ${Math.round(score)} · master vs JD`;
+  }
+  // Unknown reads as a dash, never as 0.
+  return 'Fit —';
+}
