@@ -41,6 +41,9 @@ import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 // The shared `?application_id=` parser, so all five pipeline agents refuse a bad id identically
 import { parseApplicationIdParam } from "../_shared/http/application-id.ts";
 
+// The matcher's pre-gate, re-run as the last check before a human sees the row (leak 1, 2026-11-05)
+import { auditorPreGateDrop, loadPreGatePreferences, type AuditorJobEmbed, type ConfigReader } from "./pregate.ts";
+
 // Default batch processing limit size for Auditor invocation
 const DEFAULT_BATCH_SIZE = 10;
 
@@ -212,7 +215,10 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
     // `status` is selected so the loop can tell a fresh row from a stranded one
     // `applications.master_version` is deliberately NOT selected: nothing writes it (null on every
     // live row, 2026-10-08), so the pin is read from `tailored_profile.master_version` instead.
-    .select("id, status, tailored_profile, tailor_refs")
+    // The job's four gate inputs plus discovered_via, for the pre-gate re-check below. A plain
+    // (left) embed, not `!inner`: a row whose job is missing must surface as a per-row failure,
+    // not vanish from the queue (auditorPreGateDrop throws on a null embed).
+    .select("id, status, tailored_profile, tailor_refs, jobs(title, description_raw, location_raw, min_experience_years, discovered_via)")
     // `audit_clean`/`audit_flagged` are only ever left behind by a failed second hop
     .in("status", ["tailored", "audit_clean", "audit_flagged"])
     // Narrow to the one requested row; the status filter stays, so a wrong-status id yields
@@ -247,6 +253,16 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
     // Index by version so each row resolves its own pin with an exact lookup.
     for (const m of masterRows ?? []) mastersByVersion.set(m.version as number, m.profile as MasterProfile);
   }
+
+  // Today's gate config, read once per run and only when a fresh `tailored` row needs it
+  // (stranded rows are past the audit and have no auditor edge except awaiting_approval).
+  const needsGate = (rows ?? []).some((row) => row.status === "tailored");
+  // Loaded before the loop so a failed read stops the run before any row moves, as in the matcher.
+  // The cast: checking supabase-js's deeply generic builder against ConfigReader's self-chaining
+  // `eq` overflows the compiler (TS2589); the reads it makes are exactly the matcher's.
+  const gateConfig = needsGate ? await loadPreGatePreferences(db as unknown as ConfigReader) : null;
+  // A failed read is a run failure, never "no config" (which would pass every row).
+  if (gateConfig?.kind === "error") return await failRun(503, gateConfig.code, gateConfig.message);
 
   // Initialize total audited counter
   let auditedCount = 0;
@@ -296,6 +312,31 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
         else resumedCount += 1;
 
         // Nothing else to do for an already-audited row
+        continue;
+      }
+
+      // THE LAST GATE (leak 1, 2026-11-05): re-judge the job with today's pre-gate before any
+      // audit work, so a row that passed the matcher under an older gate never reaches a human.
+      // gateConfig is non-null here: this row is `tailored`, so needsGate was true above.
+      const drop = gateConfig?.kind === "ok" ? auditorPreGateDrop(row.jobs as unknown as AuditorJobEmbed | null, gateConfig.preferences) : null;
+      // An objection: off the queue with the gate's code, through the auditor's one exit.
+      if (drop !== null) {
+        // `tailored -> failed` is the auditor's only non-audit edge (live graph, 2026-11-05).
+        const gateMove = await db.rpc("advance_application_status", {
+          // Application ID
+          p_application_id: row.id,
+          // Off the queue; a human can send it back (failed -> passed_filters)
+          p_to_status: "failed",
+          // Acting agent identity
+          p_agent: "auditor",
+          // The gate's code and words, in the matcher's detail shape, with this stage named
+          p_detail: { reason: drop.code, stage: "auditor_pre_gate", detail: drop.reason },
+        });
+        // A refused move leaves the row in place; report it rather than count it
+        if (gateMove.error) failures.push({ applicationId: row.id, error: gateMove.error.message });
+        // Counted with the other permanent failures; the drain reads `failed` as advanced
+        else failedCount += 1;
+        // Never audited, never shown to Teja
         continue;
       }
 
