@@ -51,8 +51,8 @@ const script = drainScript(drain);
 const EMPTY_PAGES = {
   // matcher/index.ts: rows_in plus the four advance counters and failures.
   matcher: { status: 'succeeded', rows_in: 0, scored: 0, dropped: 0, tech_gate_dropped: 0, failed: 0, failures: [] },
-  // tailor/index.ts: tailored, refused, skipped and failures.
-  tailor: { status: 'succeeded', tailored: 0, refused: 0, skipped: [], failures: [] },
+  // tailor/index.ts: tailored, refused, skipped, failures and (since 2026-11-05) deferred.
+  tailor: { status: 'succeeded', tailored: 0, refused: 0, skipped: [], failures: [], deferred: 0 },
   // auditor/index.ts: audited, resumed, failed and failures.
   auditor: { status: 'succeeded', audited: 0, resumed: 0, failed: 0, failures: [] },
 };
@@ -296,15 +296,72 @@ describe('postscreen-drain.yml page loop', () => {
     expect(run.stdout).not.toContain('CLEAN:');
   });
 
-  test('the short-page rule is the matcher\'s only: a short tailor page still re-reads', () => {
-    // 1 tailored row against a limit of 3. The tailor's count is a bucket sum that can miss
-    // deadline-unreached rows, so a short tailor page must not end the stage.
+  test('a tailor page MISSING deferred (an old tailor) is short but still re-reads', () => {
+    // 1 tailored row against a limit of 3, from a tailor deployed before `deferred` existed.
+    // Unknown is not 0: the drain cannot tell a deadline cut from a dry queue, so it fails
+    // closed to the old rule (only an empty page ends the stage) instead of aborting.
     const run = runDrain(ELIGIBLE, 'tailor', { tailor: [okPage({ status: 'succeeded', tailored: 1, refused: 0, skipped: [], failures: [] })] });
-    // Green.
+    // Green: an old tailor still drains, it just takes the extra read.
     expect(run.code, run.stdout).toBe(0);
     // The tailor read again; only the empty page ended it.
     expect(agentNames(run.stdout)).toEqual(['tailor', 'tailor', 'auditor']);
     // Paced before that re-read, as before this change.
     expect(sleeps(run.stdout)).toEqual([45_000]);
+  });
+
+  test('a short clean tailor page with deferred 0 ends the stage with no pause and no extra read', () => {
+    // 1 tailored row against a limit of 3, and the tailor says its deadline cut nothing.
+    const run = runDrain(ELIGIBLE, 'tailor', { tailor: [okPage({ status: 'succeeded', tailored: 1, refused: 0, skipped: [], failures: [], deferred: 0 })] });
+    // Green.
+    expect(run.code, run.stdout).toBe(0);
+    // One tailor read: the short page was the queue's tail.
+    expect(agentNames(run.stdout)).toEqual(['tailor', 'auditor']);
+    // No pause anywhere.
+    expect(sleeps(run.stdout)).toEqual([]);
+  });
+
+  test('a FULL tailor page cut by its deadline (deferred > 0) does not end the stage', () => {
+    // 3 rows read (the limit): 1 tailored, 2 never started. The finished buckets alone sum to 1,
+    // which looks short; the deadline, not the queue, ended this page, so the drain must re-read.
+    // Red if the drain drops the `deferred` term from processed OR the `dry` condition from the break.
+    const run = runDrain(ELIGIBLE, 'tailor', { tailor: [okPage({ status: 'succeeded', tailored: 1, refused: 0, skipped: [], failures: [], deferred: 2 })] });
+    // Green once the re-read comes back empty.
+    expect(run.code, run.stdout).toBe(0);
+    // The tailor read again for the 2 deferred rows.
+    expect(agentNames(run.stdout)).toEqual(['tailor', 'tailor', 'auditor']);
+    // The normal RPM gap before that read.
+    expect(sleeps(run.stdout)).toEqual([45_000]);
+    // The deferred rows are counted as read, so the per-page log is honest.
+    expect(run.stdout).toContain('tailor page 1: processed=3 advanced=1');
+  });
+
+  test('a short deadline-cut tailor page (deferred > 0, sum under the limit) still re-reads', () => {
+    // 1 tailored + 1 deferred = 2 of 3: short even WITH deferred counted, so only the `dry`
+    // condition keeps the stage open. Red if the break loses `page.dry`.
+    const run = runDrain(ELIGIBLE, 'tailor', { tailor: [okPage({ status: 'succeeded', tailored: 1, refused: 0, skipped: [], failures: [], deferred: 1 })] });
+    // Green once the re-read comes back empty.
+    expect(run.code, run.stdout).toBe(0);
+    // Re-read for the deferred row.
+    expect(agentNames(run.stdout)).toEqual(['tailor', 'tailor', 'auditor']);
+  });
+
+  test('a tailor page with an ill-typed deferred stops the run red', () => {
+    // Present but not a non-negative integer is a changed shape, never "unknown".
+    const run = runDrain(ELIGIBLE, 'tailor', { tailor: [okPage({ status: 'succeeded', tailored: 1, refused: 0, skipped: [], failures: [], deferred: '2' })] });
+    // Red.
+    expect(run.code).toBe(1);
+    // Named.
+    expect(run.stdout).toContain('::error::ABORT: tailor: deferred is missing or not a non-negative integer');
+  });
+
+  test('a short clean auditor page ends the stage with no pause and no extra read', () => {
+    // 2 audited rows against a limit of 5: the queue's tail.
+    const run = runDrain(ELIGIBLE, 'auditor', { auditor: [okPage({ status: 'succeeded', audited: 2, resumed: 0, failed: 0, failures: [] })] });
+    // Green.
+    expect(run.code, run.stdout).toBe(0);
+    // One auditor read.
+    expect(agentNames(run.stdout)).toEqual(['auditor']);
+    // No pause.
+    expect(sleeps(run.stdout)).toEqual([]);
   });
 });

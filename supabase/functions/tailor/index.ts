@@ -46,6 +46,8 @@ import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 import { parseApplicationIdParam } from "../_shared/http/application-id.ts";
 // Per-invocation deadline: plans each Gemini call from the time left and stops between rows.
 import { createDeadline, deadlineNote, runBatchWithDeadline, shortenedBudgetNote, type CallOptions } from "../_shared/agent/deadline.ts";
+// The response's counter block, pure so tailor/page-counts.test.ts can pin `deferred` (the drain reads it).
+import { tailorPageCounts } from "./page-counts.ts";
 
 // How many rows one invocation will attempt. Bounded because each row is a Gemini call
 // against a shared key pool, and an unbounded batch would drain the quota that every
@@ -298,6 +300,10 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
     // reason rides in the event so the dashboard can say what was missing.
     const failed = await failTailorApplication(db, skip.applicationId, "tailor_input_unusable", { skip_reason: skip.reason });
     // A refused write or move leaves the row at `scored`; recorded so it is not invisible.
+    // KNOWN DOUBLE COUNT (2026-11-05, left on purpose): this row is also in `skipped`, so a
+    // per-bucket sum over-reads it by one. No one-line fix keeps it visible: dropping the push
+    // hides a stuck row from error_count/error_detail, and `skipped` is the planner's readonly list.
+    // The drain over-counting `processed` here can only delay its short-page stop, never cause one.
     if (!failed.ok) failures.push({ applicationId: skip.applicationId, error: failed.message });
   }
 
@@ -305,7 +311,8 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
   // would race every one of them into the same 429 the pacer exists to avoid.
   // The deadline check lives in runBatchWithDeadline and runs only BETWEEN rows, so a row is
   // never stopped between persist's payload write and its status write. Unreached rows stay
-  // at `scored` and the next run picks them up; they are not failures.
+  // at `scored` and the next run picks them up; they are not failures. They ARE reported, as
+  // `deferred` in the response, so a deadline-cut page never reads as a short (dry) one.
   const batch = await runBatchWithDeadline(plan.tailorable, async (job, call) => {
     // Hand this row's planned timeout/retries to callLlm through the closure above.
     callBudget = call;
@@ -397,16 +404,15 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
     // Only present on a targeted run, so the untargeted response shape is unchanged. `found: 0`
     // says "that id is not at this agent's input status", which an empty queue never could.
     ...(applicationId !== null ? { targeted: true, found: (rows ?? []).length } : {}),
-    // Reached the model and produced a persisted resume.
-    tailored,
-    // Reached the model and were honestly refused by the validator. NOT an error —
+    // The counters, one bucket per row read (page-counts.ts):
+    // tailored: reached the model and produced a persisted resume.
+    // refused: reached the model and were honestly refused by the validator. NOT an error —
     // this number being zero forever is the suspicious reading, not a high one.
-    refused,
-    // Never reached the model, with the reason each was skipped. Each one with an id has
+    // skipped: never reached the model, with the reason each was skipped. Each one with an id has
     // now been moved to `failed` (unless listed in `failures`), except liveness_unknown
     // and posting_disappeared, which stay at `scored` by design.
-    skipped: plan.skipped,
-    // Transport, quota or write failures. These rows are still at `scored`.
-    failures,
+    // failures: transport, quota or write failures. These rows are still at `scored`.
+    // deferred: tailorable rows the deadline left unstarted, still at `scored` for the next run.
+    ...tailorPageCounts({ tailored, refused, skipped: plan.skipped, failures, batch }),
   });
 }));

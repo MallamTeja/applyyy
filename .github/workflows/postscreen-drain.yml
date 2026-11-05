@@ -99,20 +99,23 @@ jobs:
           // shortPageEnds: a clean page that read fewer rows than `limit` ends the stage at once,
           // with no 45 s pause and no extra empty read (2026-11-05). Only safe where `processed`
           // IS the number of rows the agent selected. The matcher reports that as rows_in
-          // (matcher/index.ts:815, the select's length). The tailor's `processed` is a sum of
-          // outcome buckets, and rows its deadline left unreached sit in none of them
-          // (tailor/index.ts:307-309, runBatchWithDeadline), so a FULL page cut by the deadline
-          // would look short and end the stage with rows still waiting: fail-open (CLAUDE.md §6).
-          // The tailor and auditor keep the old rule: only an empty page ends them.
+          // (matcher/index.ts:815, the select's length). The tailor's and auditor's `processed`
+          // is a sum of outcome buckets; each covers every row it selects (auditor: every loop
+          // path lands in resumed, failed, audited or failures; tailor: since 2026-11-05 rows its
+          // deadline left unreached are reported as `deferred`, tailor/page-counts.ts).
+          // A short page must ALSO mean "the queue ran dry": readPage() returns `dry` per page,
+          // false for a tailor page cut by its deadline (deferred > 0), whose short count says
+          // only that time ran out, never that the queue is empty (fail-open, CLAUDE.md §6).
           const STAGES = [
             // Stage 1: passed_filters -> scored | dropped_filter | failed (matcher/index.ts:392).
             { name: 'matcher', limit: 10, pageCap: 40, reads: ['passed_filters'], shortPageEnds: true },
             // Stage 2: scored -> tailored | failed (tailor/index.ts:217).
-            { name: 'tailor', limit: 3, pageCap: 90, reads: ['scored'], shortPageEnds: false },
+            { name: 'tailor', limit: 3, pageCap: 90, reads: ['scored'], shortPageEnds: true },
             // Stage 3: tailored -> audit_clean | audit_flagged -> awaiting_approval; it also
             // resumes rows stranded at audit_clean/audit_flagged (auditor/index.ts:217).
-            // Off until its buckets are proven to cover every row it selects, as the tailor's are not.
-            { name: 'auditor', limit: 5, pageCap: 60, reads: ['tailored', 'audit_clean', 'audit_flagged'], shortPageEnds: false },
+            // On since 2026-11-05: its buckets were traced to cover every row it selects, and it
+            // has no deadline runner, so no row it reads can go unreported.
+            { name: 'auditor', limit: 5, pageCap: 60, reads: ['tailored', 'audit_clean', 'audit_flagged'], shortPageEnds: true },
           ];
           // Pause after every page that read rows. The second live run (41305575499) sent ~10
           // calls every ~20 s, and by page 5 every key answered 429 RESOURCE_EXHAUSTED. A single
@@ -170,7 +173,7 @@ jobs:
             console.log(`plan: POST ${base || '<SUPABASE_URL>'}/functions/v1/${stage.name}?limit=${stage.limit}, page cap ${stage.pageCap}`);
           }
           // The stop rules, verbatim, so a reader of the log can check the run against them.
-          console.log(`plan: a stage ends when a page reads 0 rows (${RUN_STAGES.filter((s) => s.shortPageEnds).map((s) => s.name).join(', ') || 'no stage'} also on a clean page shorter than its limit); ${STALL_CAP} consecutive pages that read rows but advance none abort the run`);
+          console.log(`plan: a stage ends when a page reads 0 rows (${RUN_STAGES.filter((s) => s.shortPageEnds).map((s) => s.name).join(', ') || 'no stage'} also on a clean page shorter than its limit that no deadline cut); ${STALL_CAP} consecutive pages that read rows but advance none abort the run`);
           // The pacing, likewise, so the run's length in the log is explained by its rules.
           console.log(`plan: ${GAP_MS / 1000}s pause after each page, ${QUOTA_BACKOFF_MS / 1000}s after a page with errors (Gemini ~15 RPM free tier)`);
           // The abort rules, likewise.
@@ -304,9 +307,11 @@ jobs:
             return body[key].length;
           }
 
-          // Strict shape check of one page. Returns {processed, advanced, errored, summary}
+          // Strict shape check of one page. Returns {processed, advanced, errored, dry, summary}
           // or aborts. advanced = rows that LEFT the stage's input status this page; a page
           // where processed > 0 but advanced === 0 re-reads the same rows next time.
+          // dry = "if this page is short, that is because the queue ran out", the condition the
+          // short-page stop needs on top of a clean short count.
           function readPage(stage, httpStatus, text) {
             // Any non-2xx stops the run: 400 bad params, 401/403 auth, 409 no master, 500, 503.
             if (httpStatus < 200 || httpStatus > 299) abort(`${stage}: HTTP ${httpStatus}: ${text.slice(0, 200)}`);
@@ -330,10 +335,10 @@ jobs:
               // is neither moved nor an error, so it counts toward processed only.
               const advanced = requireCount(body, 'scored', stage) + requireCount(body, 'dropped', stage)
                 + requireCount(body, 'tech_gate_dropped', stage) + requireCount(body, 'failed', stage);
-              // The rows the matcher read this page.
-              return { processed: requireCount(body, 'rows_in', stage), advanced, errored, summary: body.status ?? 'ok' };
+              // The rows the matcher read this page. dry: rows_in is the select's own length.
+              return { processed: requireCount(body, 'rows_in', stage), advanced, errored, dry: true, summary: body.status ?? 'ok' };
             }
-            // Tailor page (tailor/index.ts:388-412). No rows_in field: the read is the sum.
+            // Tailor page (tailor/index.ts final jsonResponse(200), counters from tailor/page-counts.ts). No rows_in field: the read is the sum.
             if (stage === 'tailor') {
               // Persisted resumes (-> tailored) and honest validator refusals (-> failed).
               const tailored = requireCount(body, 'tailored', stage);
@@ -344,15 +349,26 @@ jobs:
               // would let a stuck queue head look like progress. A false stall abort is safe
               // (rerun); a false "progress" would spin to the page cap.
               const skipped = requireListLength(body, 'skipped', stage);
-              // Read = every row the batch planned plus every row that errored.
-              return { processed: tailored + refused + skipped + errored, advanced: tailored + refused, errored, summary: body.status ?? 'ok' };
+              // Rows read but never started because the tailor's deadline stopped the batch; they
+              // stay at scored. ABSENT (a tailor deployed before 2026-11-05) is NOT read as 0: it
+              // is null, which only turns the short-page stop off for this page (fail closed), so
+              // an old tailor drains exactly as before, ending on an empty page. Not an abort: the
+              // workflow and the function ship separately, and aborting would turn every drain
+              // red in the window between the two. PRESENT but ill-typed still aborts, as any count.
+              const deferred = 'deferred' in body ? requireCount(body, 'deferred', stage) : null;
+              // Read = every row the batch planned plus every row that errored plus every row the
+              // deadline cut (0 when unknown: the old sum, never an over-read).
+              const processed = tailored + refused + skipped + errored + (deferred ?? 0);
+              // Dry only when the tailor PROVED no row was cut: a deferred row is still waiting.
+              return { processed, advanced: tailored + refused, errored, dry: deferred === 0, summary: body.status ?? 'ok' };
             }
             // Auditor page (auditor/index.ts:489-513). No rows_in field either.
             // audited: rows that reached awaiting_approval (clean + flagged break it down);
             // resumed: rows stranded between the two RPCs, moved on; failed: permanent failures.
             const advanced = requireCount(body, 'audited', stage) + requireCount(body, 'resumed', stage) + requireCount(body, 'failed', stage);
-            // Read = every row that moved plus every row that errored.
-            return { processed: advanced + errored, advanced, errored, summary: body.status ?? 'ok' };
+            // Read = every row that moved plus every row that errored. dry: the auditor has no
+            // deadline runner, so every row it selected is in one of those buckets.
+            return { processed: advanced + errored, advanced, errored, dry: true, summary: body.status ?? 'ok' };
           }
 
           // Grand totals for the final summary line.
@@ -403,7 +419,8 @@ jobs:
               // Only on a CLEAN page: errored rows stay at the input status and must get the 90 s
               // backoff and a re-read below, never be left behind as "done". readPage() already
               // aborted on any error read, and requireCount() proved `processed` an integer >= 0.
-              if (stage.shortPageEnds && page.processed < stage.limit && page.errored === 0) break;
+              // And only on a DRY page: a tailor page its deadline cut is short for lack of time.
+              if (stage.shortPageEnds && page.dry && page.processed < stage.limit && page.errored === 0) break;
               // Progress check: a page that read rows but moved none would re-read the
               // same head next time (no cursor exists). Count it toward the stall cap.
               if (page.advanced === 0) {
