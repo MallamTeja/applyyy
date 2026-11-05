@@ -40,7 +40,7 @@
 // CORS headers, so the browser can read a refusal as well as a success.
 import { corsHeaders } from "../_shared/cors.ts";
 // Gate 1 (who is calling) and gate 2 (the kill switch), shared with every agent.
-import { authorizeCaller, readKillSwitch, type CallerAuthClient, type KillSwitchClient } from "../_shared/db/gates.ts";
+import { authorizeCaller, readKillSwitch, type CallerAuthClient, type CallerRefused, type KillSwitchClient } from "../_shared/db/gates.ts";
 // Types only: the call options and outcome of the one Gemini client.
 import type { GeminiCallOutcome, GeminiResponseBody, GenerateGeminiOptions } from "../_shared/gemini/client.ts";
 // The operator-readable sentence for a failed Gemini call.
@@ -1146,6 +1146,8 @@ export interface AssistDeps {
         readonly generate: (options: GenerateGeminiOptions) => Promise<GeminiCallOutcome<GeminiResponseBody>>;
       }
     | { readonly ok: false; readonly reason: string }
+    // The caller was refused BEFORE the sign-in (W15, 2026-11-05): answered 401/403, no grant spent.
+    | CallerRefused
   >;
 }
 
@@ -1161,8 +1163,10 @@ export async function handleResumeAssist(req: Request, deps: AssistDeps): Promis
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   // Only POST carries a body.
   if (req.method !== "POST") return json(405, { status: "error", message: "method_not_allowed" });
-  // Sign in as the app user.
+  // Verify the caller, then sign in as the app user (W15: the order lives in connect()).
   const conn = await deps.connect();
+  // A refused caller, answered before any password grant was spent; same body as gate 1 below.
+  if (!conn.ok && "status" in conn) return json(conn.status, { status: "unauthorized", message: conn.error });
   // The reason is log-only: it can distinguish "no such user" from "wrong password".
   if (!conn.ok) {
     // For the function logs.

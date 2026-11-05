@@ -15,7 +15,7 @@
 // or config.toml); it is safe to deploy and inert until something does.
 
 // Signs in as the app user, so every query runs under RLS.
-import { createAppUserClient } from "../_shared/db/client.ts";
+import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 // Gemini key-pool transport with 429 rotation.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
 // The shared failure description (reason, status, short redacted detail), without its prefix.
@@ -68,7 +68,10 @@ Deno.serve(withErrorBoundary("applyy-cover-letter", async (req: Request): Promis
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   // Sign in; a missing credential is an operational 503, not a bug.
-  const connection = await createAppUserClient();
+  const connection = await createAuthorizedAppUserClient(req);
+  // W15 (2026-11-05): a refused caller (no token, the public anon key, another user) is answered HERE,
+  // before any password grant was spent on Teja's account; same status and body as the caller check below.
+  if (!connection.ok && connection.kind === "refused") return jsonResponse(connection.status, { success: false, error: connection.error });
   // Without a session nothing below is safe.
   if (!connection.ok) {
     // `reason` stays in the log — it distinguishes "no user" from "wrong password".
@@ -79,8 +82,9 @@ Deno.serve(withErrorBoundary("applyy-cover-letter", async (req: Request): Promis
   // Unpacked once for readability.
   const db = connection.db;
 
-  // Refuse anyone but the app user BEFORE any write or Gemini spend: the sign-in above
-  // never looks at the caller, so the public anon key alone would otherwise suffice.
+  // Kept as a second check (defense in depth, 2026-11-05): the caller was already verified BEFORE
+  // the sign-in (createAuthorizedAppUserClient, W15). This re-checks the session against the signed-in
+  // user's id with one token lookup, never a password grant.
   const caller = await authorizeCaller(req, db, connection.userId);
   // 401 or 403, as the verdict says.
   if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });

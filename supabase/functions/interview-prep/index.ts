@@ -22,7 +22,7 @@
 // never blocks pack generation.
 
 // Authenticated database client. WHY: every query runs under RLS as the app user.
-import { createAppUserClient } from "../_shared/db/client.ts";
+import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 // Caller auth and the fail-closed kill switch. WHY: shared with every agent that spends quota.
 import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 // Gemini transport with key-pool failover. WHY: handles 429 rotation for us.
@@ -91,7 +91,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   // WHY: grants database access bound by tenant security policies.
-  const connection = await createAppUserClient();
+  const connection = await createAuthorizedAppUserClient(req);
+  // W15 (2026-11-05): a refused caller (no token, the public anon key, another user) is answered HERE,
+  // before any password grant was spent on Teja's account; same status and body as the caller check below.
+  if (!connection.ok && connection.kind === "refused") return jsonResponse(connection.status, { success: false, error: connection.error });
 
   // WHY: without a session no query is safe.
   if (!connection.ok) {
@@ -104,8 +107,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // WHY: the handle every query below uses.
   const db = connection.db;
 
-  // WHY: refuse anyone but the app user BEFORE any write or Gemini spend. The sign-in
-  // above never looks at the caller, so the public anon key alone used to suffice.
+  // Kept as a second check (defense in depth, 2026-11-05): the caller was already verified BEFORE
+  // the sign-in (createAuthorizedAppUserClient, W15). This re-checks the session against the signed-in
+  // user's id with one token lookup, never a password grant.
   const caller = await authorizeCaller(req, db, connection.userId);
   // WHY: 401 for no/invalid session, 403 for someone else's; a refused call is not a run.
   if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });

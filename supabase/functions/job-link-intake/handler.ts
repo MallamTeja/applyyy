@@ -12,7 +12,7 @@
 // import; every decision lives here behind injected seams.
 
 // Gate 1 (the caller is the app user) and gate 2 (the kill switch), shared with every agent.
-import { authorizeCaller, readKillSwitch, type CallerAuthClient, type KillSwitchClient } from "../_shared/db/gates.ts";
+import { authorizeCaller, readKillSwitch, type CallerAuthClient, type KillSwitchClient, type CallerRefused } from "../_shared/db/gates.ts";
 // CORS on every exit path, so the browser can read refusals too.
 import { corsHeaders } from "../_shared/cors.ts";
 // Board adapters: the ATS path builds rows from the board's own data, never the model's.
@@ -148,7 +148,9 @@ export type Connection =
       readonly runPipeline: (applicationId: string) => void;
     }
   // Sign-in failed; the reason is logged, never returned.
-  | { readonly ok: false; readonly reason: string };
+  | { readonly ok: false; readonly reason: string }
+  // The caller was refused BEFORE the sign-in (W15, 2026-11-05): answered 401/403, no grant spent.
+  | CallerRefused;
 
 // Everything impure, injected.
 export interface IntakeDeps {
@@ -518,8 +520,10 @@ export async function handleJobLinkIntake(req: Request, deps: IntakeDeps): Promi
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   // POST only: a GET must never spend a fetch or a Gemini call.
   if (req.method !== "POST") return json(405, { status: "error", message: "method_not_allowed" });
-  // Sign in as the app user.
+  // Verify the caller, then sign in as the app user (W15: the order lives in connect()).
   const conn = await deps.connect();
+  // A refused caller, answered before any password grant was spent; same body as gate 1 below.
+  if (!conn.ok && "status" in conn) return json(conn.status, { status: "unauthorized", message: conn.error });
   // Without a client nothing can run; the reason goes to the log only.
   if (!conn.ok) {
     // Distinguishes "no such user" from "wrong password" for the operator, not the caller.

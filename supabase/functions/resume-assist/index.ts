@@ -4,8 +4,8 @@
 
 // Preflight headers, and the wrapper that turns an uncaught throw into JSON with CORS.
 import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
-// The same app-user sign-in every agent uses; queries run under that user's RLS.
-import { createAppUserClient } from "../_shared/db/client.ts";
+// The app-user sign-in, run only after the caller is verified (W15); queries run under that user's RLS.
+import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 // The one Gemini client: key pool, pacing, failover, and now the cost controls.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
 // The gated, validated lifecycle.
@@ -19,10 +19,10 @@ Deno.serve(withErrorBoundary("resume-assist", async (req: Request): Promise<Resp
   return await handleResumeAssist(req, {
     // Signs in per request, since isolates keep no state between calls.
     connect: async () => {
-      // The app user's client.
-      const client = await createAppUserClient();
-      // The log-only reason travels up; the handler never returns it.
-      if (!client.ok) return { ok: false, reason: client.reason };
+      // The caller first, then the app user's client: a refused caller costs no password grant (W15, 2026-11-05).
+      const client = await createAuthorizedAppUserClient(req);
+      // Refused: handed up as is, so the handler answers 401/403. Unavailable: the log-only reason.
+      if (!client.ok) return client.kind === "refused" ? client : { ok: false, reason: client.reason };
       // The gates read through `db`; Gemini claims its key through the same client.
       return { ok: true, db: client.db, userId: client.userId, generate: (options) => generateGeminiContent(client.db, options) };
     },

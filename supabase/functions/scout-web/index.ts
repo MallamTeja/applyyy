@@ -6,7 +6,7 @@
 // This file is only the wiring of real seams (database, Gemini, robots-gated fetch).
 
 // The same sign-in every other agent uses, so RLS confines every query to the app user.
-import { createAppUserClient } from "../_shared/db/client.ts";
+import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 // Shared CORS headers and the wrapper that keeps an uncaught throw visible to the browser.
 import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 // Gemini with key failover; the model name is deliberately left to the client's default.
@@ -98,10 +98,10 @@ Deno.serve(withErrorBoundary("scout-web", async (req: Request): Promise<Response
     resolveRedirect: (url) => resolveGroundingRedirect(url, fetch),
     // Lazily signs in per request, since isolates are stateless.
     connect: async () => {
-      // Same sign-in every other agent uses.
-      const client = await createAppUserClient();
-      // Carry the log-only reason up to the handler.
-      if (!client.ok) return { ok: false, reason: client.reason };
+      // The caller first, then the sign-in: a refused caller costs no password grant (W15, 2026-11-05).
+      const client = await createAuthorizedAppUserClient(req);
+      // Refused: handed up for the handler's 401/403. Unavailable: the log-only reason.
+      if (!client.ok) return client.kind === "refused" ? client : { ok: false, reason: client.reason };
       // The RLS-bound client.
       const { db } = client;
       // The real Store over the signed-in client.

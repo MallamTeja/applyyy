@@ -18,7 +18,7 @@
 // is logged and never blocks drafting.
 
 // Signs in as the app user, so every query runs under RLS.
-import { createAppUserClient } from "../_shared/db/client.ts";
+import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 // Caller auth and the fail-closed kill switch, shared with the pipeline agents.
 import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
 // Shared CORS headers, plus the boundary that keeps them on an uncaught 500.
@@ -48,7 +48,10 @@ Deno.serve(withErrorBoundary("applyy-follow-up", async (req: Request): Promise<R
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   // Sign in; a missing credential is an operational 503, not a bug.
-  const connection = await createAppUserClient();
+  const connection = await createAuthorizedAppUserClient(req);
+  // W15 (2026-11-05): a refused caller (no token, the public anon key, another user) is answered HERE,
+  // before any password grant was spent on Teja's account; same status and body as the caller check below.
+  if (!connection.ok && connection.kind === "refused") return jsonResponse(connection.status, { success: false, error: connection.error });
   if (!connection.ok) {
     // `reason` stays in the log — it distinguishes "no user" from "wrong password".
     console.error("[applyy-follow-up] could not sign in:", connection.reason);
@@ -57,7 +60,9 @@ Deno.serve(withErrorBoundary("applyy-follow-up", async (req: Request): Promise<R
   // Unpacked once for readability.
   const db = connection.db;
 
-  // Only the app user may trigger drafting under the app user's session.
+  // Kept as a second check (defense in depth, 2026-11-05): the caller was already verified BEFORE
+  // the sign-in (createAuthorizedAppUserClient, W15). This re-checks the session against the signed-in
+  // user's id with one token lookup, never a password grant.
   const caller = await authorizeCaller(req, db, connection.userId);
   // 401 or 403, as the verdict says.
   if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });

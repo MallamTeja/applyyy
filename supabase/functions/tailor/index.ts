@@ -22,7 +22,7 @@
 
 // Signs in as the ordinary app user, so every query below runs under normal RLS. There
 // is no service-role key in this stream — see _shared/db/client.ts for the argument.
-import { createAppUserClient } from "../_shared/db/client.ts";
+import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 // The model transport, with key-pool claiming, 429 failover and pacing already handled.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
 // One failure line for every Gemini caller: reason, HTTP status, short redacted detail.
@@ -87,7 +87,10 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
 
   // Sign in. A missing environment variable is an operational condition with its own
   // status code, not a 500 — the client returns it as data for exactly that reason.
-  const connection = await createAppUserClient();
+  const connection = await createAuthorizedAppUserClient(req);
+  // W15 (2026-11-05): a refused caller (no token, the public anon key, another user) is answered HERE,
+  // before any password grant was spent on Teja's account; same status and body as the caller check below.
+  if (!connection.ok && connection.kind === "refused") return jsonResponse(connection.status, { success: false, error: connection.error });
   if (!connection.ok) {
     // `reason` distinguishes "no such user" from "wrong password" and so stays in the
     // log, never in the body.
@@ -100,8 +103,9 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
   // threading the result union through every call.
   const db = connection.db;
 
-  // Refuse anyone but the app user BEFORE any write or Gemini spend. The sign-in above
-  // never looks at the caller, so the public anon key alone used to suffice.
+  // Kept as a second check (defense in depth, 2026-11-05): the caller was already verified BEFORE
+  // the sign-in (createAuthorizedAppUserClient, W15). This re-checks the session against the signed-in
+  // user's id with one token lookup, never a password grant.
   const caller = await authorizeCaller(req, db, connection.userId);
   // 401 for no/invalid session, 403 for someone else's — the verdict carries which.
   if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });

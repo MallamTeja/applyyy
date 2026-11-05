@@ -11,7 +11,7 @@
 // "no need of me pressing that button"). The browser only watches the row's status.
 
 // Signs in as the app user; every query below runs under that user's RLS.
-import { createAppUserClient } from "../_shared/db/client.ts";
+import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 // A crash still answers JSON with CORS.
 import { withErrorBoundary } from "../_shared/cors.ts";
 // The shared Gemini client: key pool, pacing, failover.
@@ -233,10 +233,10 @@ Deno.serve(withErrorBoundary("job-link-intake", (req) =>
     extract: (db, prompt) => generateGeminiContent(db as SupabaseClient, { prompt, timeoutMs: 20_000, maxRetries: 2 }),
     // Lazy sign-in per request.
     async connect() {
-      // Same sign-in every agent uses.
-      const client = await createAppUserClient();
-      // The reason stays in the log.
-      if (!client.ok) return { ok: false, reason: client.reason };
+      // The caller first, then the sign-in: a refused caller costs no password grant (W15, 2026-11-05).
+      const client = await createAuthorizedAppUserClient(req);
+      // Refused: handed up for the handler's 401/403. Unavailable: the reason stays in the log.
+      if (!client.ok) return client.kind === "refused" ? client : { ok: false, reason: client.reason };
       // Client for the gates and Gemini, store for the writes, and the server pipeline run.
       return { ok: true, userId: client.userId, db: client.db, store: makeStore(client.db), runPipeline: (id) => startServerPipeline(client.db, id) };
     },

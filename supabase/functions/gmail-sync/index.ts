@@ -9,7 +9,7 @@
 //   -> { ok: boolean, cooldown?: boolean, details?: unknown, error?: string }
 
 // The RLS-authenticated client; also yields the app user's id for the caller gate.
-import { createAppUserClient } from "../_shared/db/client.ts";
+import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 // Gate 1: only the app user's own session may trigger a sync (the anon key is public).
 import { authorizeCaller } from "../_shared/db/gates.ts";
 // Pure response shaping, node-tested in respond.test.ts.
@@ -38,7 +38,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (req.method !== "POST") return json(405, { ok: false, error: "method not allowed" });
 
   // The app-user client; its userId anchors the caller gate.
-  const client = await createAppUserClient();
+  const client = await createAuthorizedAppUserClient(req);
+  // W15 (2026-11-05): a refused caller (no token, the public anon key, another user) is answered HERE,
+  // before any password grant was spent on Teja's account; same status and body as the caller check below.
+  if (!client.ok && client.kind === "refused") return json(client.status, { ok: false, error: client.error });
   // No client means no way to verify the caller: refuse.
   if (!client.ok) {
     // Reason can name env vars; it belongs in the log, not the response.
@@ -46,8 +49,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return json(500, { ok: false, error: "storage unavailable" });
   }
 
-  // GATE: a real session belonging to the app user (same pattern as every pipeline
-  // agent) — without it anyone holding the public anon key could drain the sync quota.
+  // Kept as a second check (defense in depth, 2026-11-05): the caller was already verified BEFORE
+  // the sign-in (createAuthorizedAppUserClient, W15). This re-checks the session against the signed-in
+  // user's id with one token lookup, never a password grant.
   const caller = await authorizeCaller(req, client.db, client.userId);
   // 401 or 403, stated by the verdict.
   if (!caller.ok) return json(caller.status, { ok: false, error: caller.error });

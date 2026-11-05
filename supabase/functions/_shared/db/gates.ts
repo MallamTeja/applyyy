@@ -100,6 +100,10 @@ export type AuthorizedSignIn<Db> =
   // The caller was fine, but the sign-in failed.
   | { readonly ok: false; readonly kind: "unavailable"; readonly reason: string };
 
+// The refused case alone (2026-11-05), for handler seams whose connect() now runs this gate: the
+// handler answers it with its own 401/403 body, and no password grant was spent on the caller.
+export type CallerRefused = Extract<AuthorizedSignIn<never>, { readonly kind: "refused" }>;
+
 // W15 (wiring audit 2026-11-01). Gate 1, run BEFORE the password sign-in.
 //
 // WHY THE ORDER MATTERS: the sign-in is a GoTrue password grant, rate-limited per IP.

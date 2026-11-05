@@ -45,7 +45,7 @@
 
 // Import database client factory for authenticated app user credentials.
 // Ensures that all queries run under row level security (RLS) policies.
-import { createAppUserClient } from "../_shared/db/client.ts";
+import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 // Import Gemini API transport middleware with key pool failover and token pacer.
 // Manages 429 retries, least-recently-used key rotation, and rate limiting.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
@@ -158,7 +158,10 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
 
   // Authenticate database connection using application user credentials from environment.
   // Signs in as ordinary Supabase auth user so RLS filters every query.
-  const connection = await createAppUserClient();
+  const connection = await createAuthorizedAppUserClient(req);
+  // W15 (2026-11-05): a refused caller (no token, the public anon key, another user) is answered HERE,
+  // before any password grant was spent on Teja's account; same status and body as the caller check below.
+  if (!connection.ok && connection.kind === "refused") return jsonResponse(connection.status, { success: false, error: connection.error });
   // Check if database client initialization or sign-in failed.
   // Handles missing env vars or authentication failures gracefully.
   if (!connection.ok) {
@@ -173,8 +176,9 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // Ready to perform queries under active user session.
   const db = connection.db;
 
-  // Refuse anyone but the app user BEFORE any write or any Gemini spend: the sign-in
-  // above never looks at the caller, so the public anon key alone used to suffice.
+  // Kept as a second check (defense in depth, 2026-11-05): the caller was already verified BEFORE
+  // the sign-in (createAuthorizedAppUserClient, W15). This re-checks the session against the signed-in
+  // user's id with one token lookup, never a password grant.
   const caller = await authorizeCaller(req, db, connection.userId);
   // 401 for no/invalid session, 403 for someone else's — the verdict carries which.
   if (!caller.ok) return jsonResponse(caller.status, { success: false, error: caller.error });

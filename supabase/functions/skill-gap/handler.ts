@@ -23,7 +23,7 @@ import type { DbClientResult } from "../_shared/db/client.ts";
 // Caller auth (W14) plus the kill switch, both read through the shared helpers, so this
 // function refuses and fails closed the same way every pipeline agent does instead of
 // with its own `.single()` variant.
-import { authorizeCaller, readKillSwitch } from "../_shared/db/gates.ts";
+import { authorizeCaller, readKillSwitch, type CallerRefused } from "../_shared/db/gates.ts";
 // Finds the skills a job description asks for.
 import { extractRequiredSkills } from "../_shared/analytics/skill-extractor.ts";
 // Diffs those skills against the candidate's profile.
@@ -60,15 +60,18 @@ function descriptionOf(embedded: unknown): string | null {
 
 // The whole request. Errors inside are caught below so the caller always gets JSON.
 // `connect` signs in as the app user; injected so a test can hand in a fake client.
-export async function handleSkillGap(req: Request, connect: () => Promise<DbClientResult>): Promise<Response> {
+// `connect` verifies the caller BEFORE signing in (W15, 2026-11-05) and may answer CallerRefused.
+export async function handleSkillGap(req: Request, connect: () => Promise<DbClientResult | CallerRefused>): Promise<Response> {
   // Preflight: answer before touching the database.
   if (req.method === "OPTIONS") {
     // 204 with CORS headers lets the browser send the real request.
     return new Response(null, { headers: corsHeaders, status: 204 });
   }
 
-  // Sign in as the app user so RLS scopes every row to them.
+  // Verify the caller, then sign in as the app user so RLS scopes every row to them.
   const connection = await connect();
+  // A refused caller, answered before any password grant was spent; same body as gate 1 below.
+  if (!connection.ok && "status" in connection) return jsonResponse(connection.status, { success: false, error: connection.error });
   // Without a session there is nothing safe to do.
   if (!connection.ok) {
     // The reason stays in the server log; it may name env vars.

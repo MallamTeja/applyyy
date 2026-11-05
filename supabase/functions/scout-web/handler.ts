@@ -5,7 +5,7 @@
 // Same CORS headers every other function sends, so the browser can read our errors too.
 import { corsHeaders } from "../_shared/cors.ts";
 // The two mandatory gates; imported, never re-implemented, so a fix there reaches us.
-import { authorizeCaller, readKillSwitch, type CallerAuthClient, type KillSwitchClient } from "../_shared/db/gates.ts";
+import { authorizeCaller, readKillSwitch, type CallerAuthClient, type KillSwitchClient, type CallerRefused } from "../_shared/db/gates.ts";
 // The shared row builder, so fingerprints match what scout-ats would have produced.
 import { toJobInsert } from "../_shared/ats/registry.ts";
 // The guard's lenient comparator, shared with scout-ats and the CLI so all three scouts
@@ -94,7 +94,8 @@ export interface Connection {
 // Everything the handler needs from the outside world.
 export interface HandlerDeps {
   // Sign in and build a Connection; a union so a failure carries its log-only reason.
-  readonly connect: () => Promise<({ ok: true } & Connection) | { ok: false; reason: string }>;
+  // A refused caller (W15, 2026-11-05) comes back as CallerRefused: verified BEFORE any password grant.
+  readonly connect: () => Promise<({ ok: true } & Connection) | { ok: false; reason: string } | CallerRefused>;
   // The robots-gated board fetch.
   readonly fetchBoard: FetchBoardFn;
   // The grounding-redirect resolver, injected so tests never touch the network.
@@ -150,8 +151,10 @@ export async function handleScoutWeb(req: Request, deps: HandlerDeps): Promise<R
   // The contract is POST-only; a GET must not trigger a paid Gemini call.
   if (req.method !== "POST") return json(405, { status: "error", message: "method_not_allowed" });
 
-  // Sign in as the app user.
+  // Verify the caller, then sign in as the app user (W15: the order lives in connect()).
   const conn = await deps.connect();
+  // A refused caller, answered before any password grant was spent; same body as gate 1 below.
+  if (!conn.ok && "status" in conn) return json(conn.status, { status: "unauthorized", message: conn.error });
   // Without a client nothing else can run.
   if (!conn.ok) {
     // The reason goes to the log only: it distinguishes "no such user" from "wrong password".
