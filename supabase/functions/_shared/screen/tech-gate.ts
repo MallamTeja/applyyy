@@ -64,10 +64,10 @@ export type TechGateVerdict =
   // outcomes so a caller cannot invent a third spelling; `reason` is the prose for logs.
   | { readonly drop: true; readonly code: TechGateDropCode; readonly reason: string };
 
-// The two ways stage 0 rejects. Distinct codes, so a drop for an excluded term and a drop
-// for matching nothing configured can be counted apart, and the second can be recovered
-// wholesale if the config was what was wrong.
-export type TechGateDropCode = "tech_gate" | "tech_gate_unclassified";
+// The ways stage 0 rejects. Distinct codes, so a drop for an excluded term, a drop for
+// matching nothing configured, and a campus-only programme can be counted apart, and each
+// set recovered wholesale if the rule behind it turns out wrong.
+export type TechGateDropCode = "tech_gate" | "tech_gate_unclassified" | "campus_restricted";
 
 // Map a `search_preferences` row (or its absence) to the gate's config. Exported so every
 // caller maps it the same way; `?? []` treats a missing row and a null column alike, as
@@ -155,6 +155,63 @@ function firstMatch(terms: readonly string[], text: string): string | undefined 
     .find((term) => termPattern(collapseWhitespace(term).trim()).test(normalisedText));
 }
 
+// LEVEL WORDS say how senior a role is, never WHAT it is (2026-11-05, P3 #6). Configured as
+// title terms they matched any discipline: the term "Intern" passed "Intern, Company
+// Secretary" (PhonePe, scored 8/100) because a title term matches the title alone. So a
+// level word recognises a posting only when its title also carries a TECH_TITLE_SIGNAL.
+// Compared normalised and lower-cased, so "New  Grad" and "new grad" are the same entry.
+//
+// WHY A BUILT-IN TECH VOCABULARY AND NOT "ALSO NEED A CONFIGURED TERM": measured live on
+// 2026-11-05 that stricter rule newly dropped 32 of 393 open rows, most of them real tech
+// roles ("Software Engineering Intern", "Machine Learning Intern", 3 already approved),
+// because "Software Engineer" does not match "Software Engineering". The configured list is
+// what the user hunts; this vocabulary only answers "is this intern role technical at all".
+const LEVEL_ONLY_TERMS: ReadonlySet<string> = new Set([
+  // The two spellings Teja configured on 2026-11-05.
+  "intern",
+  "internship",
+  // Seniority, not discipline.
+  "junior",
+  // Graduate schemes span finance, legal and ops as often as engineering.
+  "graduate",
+  // The US spelling of the same thing.
+  "new grad",
+  // Common Indian-board spellings of an entry-level role.
+  "trainee",
+  // Same.
+  "fresher",
+  // Same.
+  "apprentice",
+  // Same.
+  "entry level",
+]);
+
+// Words that make a TITLE technical. Word-bounded, case-insensitive. Deliberately broad: a
+// miss here wrongly drops a tech intern, while an extra word only lets a borderline title on
+// to the matcher, which scores it. Bare "IT" is left out because /i would match the pronoun.
+const TECH_TITLE_SIGNAL =
+  /\b(engineer|engineers|engineering|eng|software|developer|development|sde|data|ai|artificial intelligence|ml|machine learning|deep learning|llm|research|researcher|scientist|cloud|devops|sre|security|cyber|qa|test|testing|automation|backend|back-end|frontend|front-end|full[- ]?stack|web|mobile|platform|infrastructure|system|systems|technology|technical|tech|computer|programming|programmer|analytics|analyst|network|networking|embedded|firmware|hardware|silicon|fpga|robotics|quantitative)\b/i;
+
+// Is this configured title term a level word rather than a discipline?
+function isLevelOnly(term: string): boolean {
+  // Normalised the same way firstMatch normalises before compiling, then lower-cased.
+  return LEVEL_ONLY_TERMS.has(collapseWhitespace(term).trim().toLowerCase());
+}
+
+// A CAMPUS-ONLY PROGRAMME: "2027 Software Engineer - Campus Graduate Program - IIT BHU"
+// (Point72, 2026-11-05). Such a programme recruits only that institute's students. The rule
+// needs BOTH signals in the TITLE: the word "campus" and an institute acronym, so "Campus
+// Operations Manager" or "Campus Fabric" (no institute) is untouched.
+// CANDIDATE-INDEPENDENT BY DESIGN, with a stated assumption: the gate's callers (scouts,
+// screener, matcher and auditor pre-gates) carry no education data, and Teja's master
+// profile (v15, 2026-11-05) lists MLR Institute of Technology and TKR College of
+// Engineering and Technology, neither of which is one of these institutes. If that ever
+// changes, this rule must learn the candidate's institutions before it drops anything.
+const CAMPUS_WORD = /\bcampus\b/i;
+// The institute acronyms that run named-campus hiring. CASE-SENSITIVE on purpose: they are
+// always written in capitals, and /i would let ordinary words collide ("nit" in prose).
+const NAMED_INSTITUTE = /\b(IIT|IIIT|NIT|BITS|IIM|IISc)\b/;
+
 // Decide whether one posting is worth screening further.
 //
 // The description is truncated rather than matched whole: a keyword buried in the
@@ -193,9 +250,37 @@ export function screenTechRole(
   // amending the 09-17 rule that treated both alike): measured live, 111 rows passed only
   // because a title term like "Developer" or "Software Engineer" sat in the body — "work
   // with our developers" — 74 of them sales, finance or business roles.
-  const matched = firstMatch(preferences.titles, title) ?? firstMatch(preferences.keywords, haystack);
+  // A campus-only programme at a named institute is closed to the candidate, however well its
+  // role matches. Checked before the positive match, which it would otherwise pass.
+  if (CAMPUS_WORD.test(title) && NAMED_INSTITUTE.test(title)) {
+    // Names the institute, so a wrong drop says which campus the rule saw.
+    const institute = NAMED_INSTITUTE.exec(title)?.[1] ?? "";
+    // Its own code, so these drops are countable and revertible as a set.
+    return { drop: true, code: "campus_restricted", reason: `"${title}" is a campus programme restricted to ${institute}` };
+  }
+
+  // Discipline title terms and level words, split once (see LEVEL_ONLY_TERMS).
+  const disciplineTitles = preferences.titles.filter((term) => !isLevelOnly(term));
+  // The level words the user configured.
+  const levelTitles = preferences.titles.filter(isLevelOnly);
+  // Recognised by a discipline title or a keyword: a real match.
+  const matched = firstMatch(disciplineTitles, title) ?? firstMatch(preferences.keywords, haystack);
   // Recognised. No warning, so the warning below keeps meaning something.
   if (matched !== undefined) return { drop: false };
+
+  // Only a level word matched. It recognises the posting when the title is technical, and
+  // the drop below names the level term when it is not ("Intern, Company Secretary").
+  const levelOnly = firstMatch(levelTitles, title);
+  // A technical title at the configured level: recognised, as before this change.
+  if (levelOnly !== undefined && TECH_TITLE_SIGNAL.test(title)) return { drop: false };
+  // A level word on a non-technical title: say exactly why it did not count.
+  if (levelOnly !== undefined) {
+    return {
+      drop: true,
+      code: "tech_gate_unclassified",
+      reason: `"${title}" matched only the level term "${levelOnly}" and no technical word`,
+    };
+  }
 
   // Nothing matched. What that MEANS depends on whether anything was configured to match.
   // A user with titles or keywords has stated what they hunt for, so a posting matching

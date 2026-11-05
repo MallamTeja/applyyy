@@ -331,3 +331,68 @@ test("toTechGatePreferences maps null columns to [] and renames excluded_keyword
     excludedKeywords: ["b"],
   });
 });
+
+// --- P3 #6 (2026-11-05): level words and campus-only programmes --------------------------
+
+// The shape of Teja's live config that let the leak through: a bare level word ("Intern")
+// beside discipline titles and keywords. Titles match the TITLE only.
+const LIVE_LIKE: TechGatePreferences = {
+  // A discipline title, and the two level words that matched any discipline.
+  titles: ["Software Engineer", "Intern", "Graduate"],
+  // Keywords read title + description head.
+  keywords: ["Python"],
+  // Nothing excluded, so only the new rules can drop.
+  excludedKeywords: [],
+};
+
+// THE LEAK: "Intern" alone recognised a legal role, which then reached awaiting_approval.
+test("level word: 'Intern, Company Secretary' is dropped as tech_gate_unclassified", () => {
+  // The live title, with a non-technical description head.
+  const verdict = screenTechRole("Intern, Company Secretary", "Department Name: Legal", LIVE_LIKE);
+  // Dropped with the existing closed code, and the reason names the level term.
+  assert.deepEqual(verdict, {
+    drop: true,
+    code: "tech_gate_unclassified",
+    reason: `"Intern, Company Secretary" matched only the level term "Intern" and no technical word`,
+  });
+});
+
+// The guard against over-dropping, measured live: the stricter first draft dropped these.
+test("level word: technical intern titles still pass on the level term", () => {
+  // "Software Engineering" does not match the title term "Software Engineer"; "Intern" carries it.
+  assert.deepEqual(screenTechRole("2027 - Software Engineering Intern, AMER", null, LIVE_LIKE), { drop: false });
+  // Same: a discipline the config does not spell out.
+  assert.deepEqual(screenTechRole("Machine Learning Intern", null, LIVE_LIKE), { drop: false });
+  // The approved row the vocabulary first missed.
+  assert.deepEqual(screenTechRole("Artificial Intelligence Intern", null, LIVE_LIKE), { drop: false });
+  // A level word other than Intern behaves the same way.
+  assert.deepEqual(screenTechRole("Graduate Engineering Trainee", null, LIVE_LIKE), { drop: false });
+});
+
+// A keyword in the description head still recognises a level-word title, as before.
+test("level word: a configured keyword still recognises a non-technical-looking title", () => {
+  // "Intern" alone would drop; the keyword in the body head is a real match.
+  assert.deepEqual(screenTechRole("Summer Intern", "You will build Python services.", LIVE_LIKE), { drop: false });
+});
+
+// Point72: a role that matches perfectly but recruits only from one institute.
+test("campus: 'Campus Graduate Program - IIT BHU' is dropped as campus_restricted", () => {
+  // The live title; it matches the "Software Engineer" title term.
+  const verdict = screenTechRole("2027 Software Engineer - Campus Graduate Program - IIT BHU", null, LIVE_LIKE);
+  // Its own closed code, naming the institute.
+  assert.deepEqual(verdict, {
+    drop: true,
+    code: "campus_restricted",
+    reason: `"2027 Software Engineer - Campus Graduate Program - IIT BHU" is a campus programme restricted to IIT`,
+  });
+});
+
+// Both signals are required: "campus" alone, or an acronym alone, is not a restriction.
+test("campus: 'campus' without an institute, or an institute without 'campus', is untouched", () => {
+  // A campus-networking role with no institute: whatever the usual rules decide, never this code.
+  assert.notEqual((screenTechRole("Software Engineer, Campus Fabric", null, LIVE_LIKE) as { code?: string }).code, "campus_restricted");
+  // An institute named without a campus programme (e.g. a lab collaboration): not this rule.
+  assert.deepEqual(screenTechRole("Software Engineer - IIT Madras Research Park", null, LIVE_LIKE), { drop: false });
+  // An ordinary word spelled like an acronym ("Bits") is not the institute: case matters.
+  assert.deepEqual(screenTechRole("Software Engineer, Campus Bits Team", null, LIVE_LIKE), { drop: false });
+});
