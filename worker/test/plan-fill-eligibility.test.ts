@@ -62,14 +62,8 @@ const india = row('located_in_country', 'India');
 const noSponsor = row('visa_sponsorship_required', false);
 
 describe('NEVER categories are refused even with an attested answer keyed to the label', () => {
-  test('an EEO wording with no template is refused even with an attested row keyed to it', () => {
-    // Keyed EXACTLY to the label, attested by Teja: the strongest possible plain-bank match.
-    const r = one(yesNo('What is your gender?', true, ['Male', 'Female']), [row('what_is_your_gender', 'Male')]);
-    // EEO is answered only through its 4 templates from eeo_* rows (2026-10-09); this
-    // wording matches none, so the system doesn't assert it.
-    expect(r).toMatchObject({ fill: null, reason: 'human_only' });
-  });
-
+  // (The EEO-wording-with-no-template case moved to "H1" at the end of this file: Teja ruled on
+  // 2026-11-05 23:19 that an attested row keyed to the EXACT label answers it.)
   // One case per NEVER family, so removing any family from the denylist turns one row red.
   test.each([
     // conviction/criminal family.
@@ -261,6 +255,8 @@ describe('cross-cutting eligibility rules', () => {
   });
 
   // Eligibility questions with no stored-answer type, each with an attested row keyed to the label.
+  // H1 (Teja, 2026-11-05 23:19): Teja's own attested answer to that EXACT question now answers it;
+  // before, these were always refused. Paraphrases and unattested rows still refuse (H1 block below).
   test.each([
     // work_authori.
     'Are you authorized to work in India?',
@@ -280,13 +276,13 @@ describe('cross-cutting eligibility rules', () => {
     'What is your nationality?',
     // visa WITHOUT sponsor: no stored-answer type covers it.
     'What type of visa do you hold?',
-  ])('%s is always refused', (label) => {
-    // The label's own key, so a plain bank lookup WOULD match if the planner fell through to it.
+  ])('%s is answered from the attested row keyed to that exact label (H1)', (label) => {
+    // The label's own key: Teja's answer to this very question.
     const key = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-    // Free text, so the option check cannot be what refuses it.
+    // Free text, so the option check is not in play.
     const r = one({ id: 'q', label, kind: 'text', required: true }, [row(key, 'Yes')]);
-    // Refused by category.
-    expect(r).toMatchObject({ fill: null, reason: 'human_only' });
+    // Copied verbatim from the bank.
+    expect(r).toMatchObject({ fill: { value: 'Yes', source: 'answer_bank' }, reason: null });
   });
 
   test('an unattested row keyed exactly to an eligibility label never fills it', () => {
@@ -394,8 +390,8 @@ describe('NEVER additions: ethnic, birth, whole-token dob/sex, accent folding', 
     'Birth date',
     // Whole-token "sex".
     'Sex',
-    // Substring "ethnic".
-    'Ethnic origin',
+    // ("Ethnic origin" left this list with H1, 2026-11-05: "ethnic" is an EEO fragment, not a NEVER one, so
+    // Teja's attested row keyed to that exact label now answers it; see the H1 block.)
     // Accent folded first: "consént" becomes "consent".
     'Consént to background verification',
   ])('%s is refused even with an attested row', (label) => {
@@ -525,7 +521,8 @@ describe('EEO answers from attested eeo_* rows only', () => {
     expect(r).toMatchObject({ fill: null, reason: 'awaiting_human_answer' });
   });
 
-  // EEO wording with no template: refused even with an attested row keyed to the label itself.
+  // EEO wording with no template, with an attested row keyed to the label itself. H1 (Teja, 2026-11-05
+  // 23:19): answered from that row; before, always refused.
   test.each([
     // "gender identity" is not the ^gender$ template.
     'What is your gender identity?',
@@ -535,20 +532,21 @@ describe('EEO answers from attested eeo_* rows only', () => {
     'Marital status',
     // "race" inside "embrace": over-refusal, the safe direction (Teja just answers it).
     'Do you embrace remote work?',
-  ])('%s is refused without a template', (label) => {
-    // The plain bank lookup WOULD match this key if the planner fell through.
+  ])('%s is answered without a template from the exact-label attested row (H1)', (label) => {
+    // Teja's answer to this very label.
     const key = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-    // Required text field, so the refusal is visible and the option check cannot cause it.
+    // Required text field, so the option check is not in play.
     const r = one(eeoField(label, true, 'text'), [row(key, 'Yes')]);
-    // Refused.
-    expect(r).toMatchObject({ fill: null, reason: 'human_only' });
+    // Copied verbatim.
+    expect(r).toMatchObject({ fill: { value: 'Yes', source: 'answer_bank' }, reason: null });
   });
 
-  test('the plain key "gender" never answers EEO', () => {
-    // Attested row keyed to the label, but no eeo_gender row: only eeo_* keys may answer.
+  test('the exact-label key "gender" answers the "Gender" field even without an eeo_gender row (H1)', () => {
+    // The key H2 records for this field is the label's own; Teja answering it must fill it, or the
+    // Unanswered list would ask him the same question forever.
     const r = one(eeoField('Gender', true, 'radio_group', genderOptions), [row('gender', 'Male')]);
-    // Refused.
-    expect(r).toMatchObject({ fill: null, reason: 'human_only' });
+    // Answered.
+    expect(r).toMatchObject({ fill: { value: 'Male', source: 'answer_bank' }, reason: null });
   });
 
   test('a checkbox-kind EEO field is refused even with an attested answer', () => {
@@ -572,5 +570,54 @@ describe('EEO answers from attested eeo_* rows only', () => {
     const r = one(eeoField(label, true, 'text'), rows);
     // Refused.
     expect(r).toMatchObject({ fill: null, reason: 'human_only' });
+  });
+});
+
+// H1 (Teja, 2026-11-05 23:19): an answer_bank row attested by Teja and keyed to the EXACT normalised label
+// may answer an EEO, eligibility or opinion question of that label. Never a paraphrase, never an unattested
+// row, and a consent checkbox is NEVER answered.
+describe('H1: the exact-label attested row', () => {
+  test('a consent checkbox stays blocked even with an attested row keyed to its exact label', () => {
+    // The label's own key, attested: the strongest possible match.
+    const label = 'I consent to the processing of my personal data';
+    // Teja's "Yes" for that very label.
+    const r = one({ id: 'q', label, kind: 'checkbox', required: true }, [row('i_consent_to_the_processing_of_my_personal_data', 'Yes')]);
+    // Never answered.
+    expect(r).toMatchObject({ fill: null, reason: 'human_only' });
+  });
+
+  test('an exact-label EEO question is answered from the attested row', () => {
+    // A wording no EEO template covers, with its options.
+    const r = one(yesNo('How do you identify your gender?', true, ['Man', 'Woman', 'Non-binary']), [row('how_do_you_identify_your_gender', 'Man')]);
+    // Answered verbatim.
+    expect(r).toMatchObject({ fill: { value: 'Man', source: 'answer_bank' }, reason: null });
+  });
+
+  test('a near-miss label ("Gender identity" against the bank row "gender") stays blocked', () => {
+    // The row answers "Gender", not "Gender identity": a paraphrase never answers.
+    const r = one(yesNo('Gender identity', true, ['Male', 'Female']), [row('gender', 'Male')]);
+    // Teja answers it.
+    expect(r).toMatchObject({ fill: null, reason: 'human_only' });
+  });
+
+  test('an eligibility paraphrase ("authorised" against a bank row for "authorized") stays blocked', () => {
+    // One letter apart: a different label.
+    const r = one({ id: 'q', label: 'Are you authorized to work in India?', kind: 'text', required: true }, [row('are_you_authorised_to_work_in_india', 'Yes')]);
+    // Refused.
+    expect(r).toMatchObject({ fill: null, reason: 'human_only' });
+  });
+
+  test('an unattested exact-label row never answers an EEO question', () => {
+    // A machine-written row keyed to the exact label.
+    const r = one(yesNo('How do you identify your gender?', true, ['Man', 'Woman']), [row('how_do_you_identify_your_gender', 'Man', false)]);
+    // Refused.
+    expect(r).toMatchObject({ fill: null, reason: 'human_only' });
+  });
+
+  test('an exact-label answer that is not one of the form options is refused, never approximated', () => {
+    // "man" is not "Man".
+    const r = one(yesNo('How do you identify your gender?', true, ['Man', 'Woman']), [row('how_do_you_identify_your_gender', 'man')]);
+    // Named.
+    expect(r).toMatchObject({ fill: null, reason: 'no_matching_option' });
   });
 });

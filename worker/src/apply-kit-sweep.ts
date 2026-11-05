@@ -13,8 +13,8 @@
 // Two rules on top (wiring audit 2026-11-01):
 // - W28: the kill switch. With system_settings.system_enabled off, the sweep reads no row
 //   and opens no employer page; an unreadable switch throws (fail closed).
-// - W29: a row parked because its form cannot be opened (robots_refused, no_apply_url) is
-//   never due. The kit hits the same robots gate or the same missing URL, so it threw on
+// - W29: a row parked because no kit can be built (no_apply_url, posting_closed) is never due.
+//   (robots_refused was here until K2, 2026-11-06; it now gets a resume-only kit.) The kit hit the same robots gate or the same missing URL, so it threw on
 //   every run, stayed un-stamped, was retried oldest-first and kept the workflow red.
 //   SKIPPED rather than stamped with a failure note: skipping writes nothing and leaves the
 //   v1 note contract alone, while a failure stamp would also silence TRANSIENT failures
@@ -124,8 +124,8 @@ export interface RunKitSweepInput {
 // Date.parse, which reads "-5" as the year -5 (CLAUDE.md §6).
 const TIMESTAMP_SHAPE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
 
-// W29: the park causes under which a kit cannot open the form, so building one fails every run.
-const UNOPENABLE_REASONS: readonly BlockReason[] = ['robots_refused'];
+// W29: the park causes under which no kit can be built, so trying fails every run. ('robots_refused' left
+// this set with K2, 2026-11-06: such a row now gets a resume-only kit that never opens the page.)
 // The applier's W4 cause for a job with no form URL (claim-loop.ts UnusableClaim).
 const UNOPENABLE_UNUSABLE: readonly string[] = ['no_apply_url'];
 // B2: the applier's pre-submit re-check parks a closed posting with block_detail.code 'posting_closed'.
@@ -136,7 +136,7 @@ function cannotOpenForm(row: SweepRow): boolean {
   // Only while parked: a re-approved row keeps its old block facts as history.
   if (row.status !== 'blocked_needs_human') return false;
   // Either cause is enough.
-  return (row.blockReason !== null && UNOPENABLE_REASONS.includes(row.blockReason)) || (row.blockUnusable !== null && UNOPENABLE_UNUSABLE.includes(row.blockUnusable)) || (row.blockCode !== null && UNOPENABLE_CODES.includes(row.blockCode));
+  return (row.blockUnusable !== null && UNOPENABLE_UNUSABLE.includes(row.blockUnusable)) || (row.blockCode !== null && UNOPENABLE_CODES.includes(row.blockCode));
 }
 
 /** Milliseconds for a well-shaped timestamp, or null for anything else. */
@@ -232,7 +232,7 @@ export async function runKitSweep(input: RunKitSweepInput): Promise<SweepSummary
   // An empty sweep says so; a silent pass would look like a broken one.
   if (eligible.length === 0) {
     // The exact phrase a log search for "0 eligible" finds.
-    input.log('[apply-kit sweep] 0 eligible: every row waiting on Teja has a current kit or a form no kit can open (robots_refused, no_apply_url)');
+    input.log('[apply-kit sweep] 0 eligible: every row waiting on Teja has a current kit or a park no kit can get past (no_apply_url, posting_closed)');
     // Nothing tried, nothing failed.
     return { eligible: 0, attempted: 0, remaining: 0, built: 0, skipped: [], failed: [] };
   }

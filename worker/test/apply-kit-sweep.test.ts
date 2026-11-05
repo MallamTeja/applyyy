@@ -74,17 +74,18 @@ describe('selectKitCandidates', () => {
     expect([...picked.selected].sort()).toEqual(['junk-kit', 'junk-row']);
   });
 
-  test('W29: a row parked because its form cannot be opened (robots_refused, no_apply_url) is never selected', () => {
+  test('W29: a row parked with no form URL is never selected; a robots_refused park IS (K2 resume-only kit)', () => {
     // The same moment for all three, so only the park cause differs.
     const at = '2026-10-24T10:00:00Z';
-    // robots.txt refused the form: the kit asks the same gate and would throw every run.
+    // robots.txt refused the form: since K2 (2026-11-06) the kit is resume-only and never opens the page,
+    // so it no longer throws every run, and Teja gets a resume instead of nothing.
     const robots = row('robots', 'blocked_needs_human', at, { blockReason: 'robots_refused' });
     // The applier's W4 park for a job with no form URL: fetchApplication would throw every run.
     const noUrl = row('no-url', 'blocked_needs_human', at, { blockReason: 'other', blockUnusable: 'no_apply_url' });
     // A login wall: the form opens, so a kit is still worth building.
     const login = row('login', 'blocked_needs_human', at, { blockReason: 'login_required' });
-    // Only the openable one is due; the other two are not even counted as eligible.
-    expect(selectKitCandidates([robots, noUrl, login], [], 5)).toEqual({ eligible: ['login'], selected: ['login'] });
+    // The robots and login rows are due; the no-URL row is not even counted as eligible.
+    expect(selectKitCandidates([robots, noUrl, login], [], 5)).toEqual({ eligible: ['robots', 'login'], selected: ['robots', 'login'] });
   });
 
   test('W29: a row that LEFT the human lane keeps its old block_reason but is kitted again', () => {

@@ -451,6 +451,35 @@ export function planFill(
       continue;
     }
 
+    // H1 (Teja, 2026-11-05 23:19): THE EXACT-LABEL ATTESTED ROW. In EEO, eligibility and opinion territory,
+    // a row Teja attested under this field's EXACT normalised label is his answer to this very question,
+    // so it answers it, ahead of the templates below. Checked first so the key the Unanswered list records
+    // (the label's own) always fills the field once Teja answers it, even where a template owns the label
+    // ("Gender" with no eeo_gender row). Never a paraphrase (exact key equality), never an unattested row
+    // (attestedRow is strict), and never a NEVER question or a checkbox (both refused above).
+    const gated = [EEO_FRAGMENTS, ELIGIBILITY_FRAGMENTS, OPINION_FRAGMENTS].some((list) => list.some((fragment) => key.includes(fragment)));
+    // The attested row, or why there isn't a usable one (none, placeholder, unattested, ambiguous).
+    const exact = gated ? attestedRow(byKey, collisions, key) : 'human_only';
+    // Usable: Teja's own answer to this exact label.
+    if (typeof exact !== 'string') {
+      // Only non-empty text (or a number) is an answer.
+      const text = answerText(exact.answer_value);
+      // A blank or non-text attested row is still not an answer.
+      if (text === null) {
+        refuse('invalid_answer');
+        continue;
+      }
+      // A select or radio must offer it verbatim.
+      if (formField.options !== undefined && !formField.options.includes(text)) {
+        // Never the nearest option: a statement must be made exactly as Teja wrote it.
+        refuse('no_matching_option');
+        continue;
+      }
+      // Copied exactly as Teja saved and attested it.
+      fills.push({ id: formField.id, value: text, kind: formField.kind, source: 'answer_bank' });
+      continue;
+    }
+
     // EEO NEXT: answered only from Teja's attested eeo_* row via one whole-label template.
     if (EEO_FRAGMENTS.some((fragment) => key.includes(fragment))) {
       // The templates that match the WHOLE label.
@@ -519,29 +548,10 @@ export function planFill(
 
     // OPINIONS NEXT: answered only from Teja's attested row keyed to this exact label, so
     // neither the profile nor a machine-written row can state a preference for him.
+    // The usable row was already taken by the exact-label step above, so only the reason is left; it goes
+    // to Teja (silently dropped on an optional field).
     if (OPINION_FRAGMENTS.some((fragment) => key.includes(fragment))) {
-      // The attested row, or why there isn't a usable one (none, placeholder, unattested, ambiguous).
-      const row = attestedRow(byKey, collisions, key);
-      // No usable row: the reason goes to Teja (silently dropped on an optional field).
-      if (typeof row === 'string') {
-        refuse(row);
-        continue;
-      }
-      // Only non-empty text (or a number) is an answer.
-      const text = answerText(row.answer_value);
-      // A blank or non-text attested row is still not an answer.
-      if (text === null) {
-        refuse('invalid_answer');
-        continue;
-      }
-      // A select or radio must offer it verbatim.
-      if (formField.options !== undefined && !formField.options.includes(text)) {
-        // Never the nearest option: a preference must be stated exactly as Teja wrote it.
-        refuse('no_matching_option');
-        continue;
-      }
-      // Copied exactly as Teja saved and attested it.
-      fills.push({ id: formField.id, value: text, kind: formField.kind, source: 'answer_bank' });
+      refuse(exact);
       continue;
     }
 
