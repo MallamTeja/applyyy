@@ -169,7 +169,9 @@ async function linkUnmatchedEmails(db: SupabaseClient, apps: readonly ActiveAppl
   // One guarded write per link.
   for (const link of links) {
     // `is null` again on the write: a row matched meanwhile (by an ingest) is never re-pointed.
-    const { error: linkError } = await db.from("email_events").update({ matched_application_id: link.applicationId }).eq("id", link.eventId).is("matched_application_id", null);
+    // The verdict rides in the SAME write (Q3), the two columns the ingest row stores, so a link never lands
+    // with a stale verdict the replay could move on, and a refused write leaves both as they were.
+    const { error: linkError } = await db.from("email_events").update(link.verdict === null ? { matched_application_id: link.applicationId } : { matched_application_id: link.applicationId, classification: link.verdict.classification, classification_confidence: link.verdict.confidence }).eq("id", link.eventId).is("matched_application_id", null);
     // A refused write is a run error; the email stays unmatched and is retried next run.
     if (linkError !== null) errors.push(`rematch: link ${link.eventId} -> ${link.applicationId} failed: ${linkError.message}`);
     // Operational trace.

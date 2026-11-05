@@ -822,8 +822,9 @@ const BJAK_RECEIPT = { id: "e-bjak", matched_application_id: null, from_address:
 test("re-match: the live Bjak receipt links to the Bjak row approved before it arrived", () => {
   // Approved 2026-10-24 13:44 IST, five days before the receipt.
   const plan = receipt.rematchUnmatched([BJAK_RECEIPT], [BJAK_APP], new Map([["bjak-1", "2026-10-24T08:14:13+00:00"]]));
-  // One link, to that row.
-  assert.deepEqual(plan, [{ eventId: "e-bjak", applicationId: "bjak-1" }]);
+  // One link, to that row, carrying the receipt verdict re-read from the stored subject (Q3).
+  // Linked; its stored body is empty (redacted), so no re-read verdict: the stored one stands (§6).
+  assert.deepEqual(plan, [{ eventId: "e-bjak", applicationId: "bjak-1", verdict: null }]);
 });
 
 test("re-match: an email received BEFORE the row was approved never attaches to it", () => {
@@ -936,7 +937,9 @@ test("match-only: the replay's re-match links a stored email to an approved row 
   // The approved HackerRank row, first approved the day before.
   const links = receipt.rematchUnmatched(stored, [poolApp("hr-1", "approved", "hackerrank", "AI Researcher Intern")], new Map([["hr-1", "2026-11-03T10:00:00.000Z"]]));
   // Linked; the move is a separate question statusMoveFor refuses.
-  assert.deepEqual(links, [{ eventId: "ev-hr", applicationId: "hr-1" }]);
+  // The re-read verdict (Q3) is the receipt, so the link carries no move either.
+  // Linked; an empty stored body is never re-classified from the subject alone, so the verdict is null.
+  assert.deepEqual(links, [{ eventId: "ev-hr", applicationId: "hr-1", verdict: null }]);
 });
 
 // ---- A receipt that DESCRIBES the process is not an assessment invite (2026-11-05) ---------------

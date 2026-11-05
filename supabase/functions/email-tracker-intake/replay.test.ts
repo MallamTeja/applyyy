@@ -331,9 +331,33 @@ test("links a stored unmatched email once its company's row enters a tracked sta
   assert.deepEqual(result, { moved: 0, errors: [] });
   // Exactly one write: the link, guarded so a row matched meanwhile is never re-pointed.
   const writes = calls.queries.filter((query) => query.filters.update !== undefined);
-  // One update, on the stored receipt, only while it is still unmatched.
+  // One update, on the stored receipt, only while it is still unmatched; link only, since its stored body is empty (redacted) and the stored verdict stands (Q3).
   assert.deepEqual(writes.map((w) => [w.table, w.filters.update, w.filters["eq:id"], w.filters["is:matched_application_id"]]), [["email_events", { matched_application_id: "bjak-1" }, "e-bjak", null]]);
   // A receipt maps to no status: Bjak is linked as application_received with NO status move.
+  assert.equal(calls.rpc.length, 0);
+});
+
+// Q3 (2026-11-05): the live HackerRank receipt (f34b7156) was stored as oa_invite by the classifier of
+// its day; the classifier now reads it as application_received. Linked with the old verdict, the replay
+// would drive applied -> oa_pending from a receipt, so the re-match writes TODAY's verdict with the link.
+const HACKERRANK_ROW = { id: "hr-1", status: "applied", jobs: { company_name: "HackerRank", company_slug: "hackerrank", title: "AI Researcher Intern" } };
+// Its first approval, the day before the email arrived.
+const HACKERRANK_APPROVED = { application_id: "hr-1", created_at: "2026-11-03T10:00:00+00:00" };
+// The stored row: text kept (it was classified, so W33 never redacted it), verdict stale.
+const HACKERRANK_STALE = { id: "e-hr", provider_message_id: "f34b7156", matched_application_id: null, from_address: "no-reply@hackerrankcareers.com", subject: "Exciting News: We have received your Application || AI Researcher Intern || HackerRank", snippet: "Hi Teja, We greatly appreciate your interest in AI Researcher Intern role at HackerRank. Your application has been received. If you are shortlisted, you will receive a take-home assignment as the next step in the process.", classification: "oa_invite", classification_confidence: 1, received_at: "2026-11-04T19:19:00+00:00" };
+
+test("a re-match re-runs the classifier on the re-linked email", async () => {
+  // Only the unmatched read sees the stale row, as with Bjak above.
+  const { db, calls } = fakeDb({ apps: { data: [HACKERRANK_ROW], error: null }, approvals: { data: [HACKERRANK_APPROVED], error: null }, emails: (filters) => ({ data: filters["is:matched_application_id"] === null ? [HACKERRANK_STALE] : [], error: null }) });
+  // Switch on.
+  const result = await replayStoredMoves(db, true, NO_LIVE);
+  // Linked cleanly.
+  assert.deepEqual(result, { moved: 0, errors: [] });
+  // The one write.
+  const writes = calls.queries.filter((query) => query.filters.update !== undefined);
+  // The link carries the fresh verdict, not the stored oa_invite (the classifier fixed on 11-05).
+  assert.deepEqual(writes.map((w) => (w.filters.update as Record<string, unknown>).classification), ["application_received"]);
+  // A receipt maps to no status: nothing moves.
   assert.equal(calls.rpc.length, 0);
 });
 

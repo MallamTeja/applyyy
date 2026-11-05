@@ -372,6 +372,13 @@ export interface RematchLink {
   readonly eventId: string;
   // The application it now matches.
   readonly applicationId: string;
+  // Q3 (2026-11-05): today's classifier verdict on the stored text, written with the link. The stored one
+  // is the verdict of the classifier on the INGEST day; a fix since then (the HackerRank receipt read as
+  // oa_invite) would otherwise ride the link into the replay and move the row on a stale reading.
+  // NULL when the stored body is empty (a W33-redacted row): the subject alone is LESS evidence than the
+  // ingest read, so a re-read would turn missing data into a verdict the replay moves on (CLAUDE.md §6).
+  // The stored verdict then stands untouched.
+  readonly verdict: { readonly classification: EmailClassification; readonly confidence: number } | null;
 }
 
 /**
@@ -418,8 +425,12 @@ export function rematchUnmatched(
     // The same matcher the ingest path runs, with the same sender-domain parse.
     // Tracked rows first, match-only rows only for companies no tracked row holds (2026-11-05).
     const applicationId = matchTrackedFirst(message, extractCompanyDomain(email.from_address), candidates);
-    // Exactly one owner, or nothing.
-    if (applicationId !== null) links.push({ eventId: email.id, applicationId });
+    // No owner (or several): nothing to link, so nothing to re-classify either.
+    if (applicationId === null) continue;
+    // The same classifier the ingest path runs, on the same three fields it read (as stored now); never on a blanked body.
+    const decision = email.snippet === "" ? null : classifyMessage(message);
+    // Exactly one owner, with the verdict to store beside the link (or none: the stored one stands).
+    links.push({ eventId: email.id, applicationId, verdict: decision === null ? null : { classification: decision.classification, confidence: decision.confidence } });
   }
   // Everything to write.
   return links;
