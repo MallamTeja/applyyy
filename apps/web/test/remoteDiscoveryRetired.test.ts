@@ -21,7 +21,7 @@ describe('browser remote discovery is retired', () => {
     // Every runtime export (functions and consts) of the service.
     const exports = [...read('../src/data/discoveryService.ts').matchAll(/^export (?:async )?(?:function|const) (\w+)/gm)].map((m) => m[1]).sort();
     // The closed set: a revived runRemoteDiscovery (or any new writer) changes it and fails here.
-    assert.deepEqual(exports, ['REMOTE_FEEDS_SCHEDULE_NOTE', 'parseScoutAtsResponse', 'runWatchlistScan']);
+    assert.deepEqual(exports, ['REMOTE_FEEDS_SCHEDULE_NOTE', 'parseScoutAtsResponse', 'runWatchlistScan', 'topDropReasons']);
   });
 
   // W8 (2026-11-01 wiring audit): the browser "Scout Watchlist" fallback read company_watchlist and
@@ -45,7 +45,7 @@ describe('browser remote discovery is retired', () => {
     // Non-vacuity: the import line exists in this exact form.
     assert.ok(match, 'DiscoveryModal no longer imports discoveryService in the expected form; this test would be vacuous');
     // The closed set of names: no remote scan can be called from the modal.
-    assert.deepEqual(match[1]!.split(',').map((s) => s.trim()).sort(), ['REMOTE_FEEDS_SCHEDULE_NOTE', 'runWatchlistScan']);
+    assert.deepEqual(match[1]!.split(',').map((s) => s.trim()).sort(), ['REMOTE_FEEDS_SCHEDULE_NOTE', 'runWatchlistScan', 'topDropReasons']);
   });
 
   it('the CSP connects only to the hosts the app still fetches (the three feed hosts are gone)', () => {

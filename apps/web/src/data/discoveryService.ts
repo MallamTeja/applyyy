@@ -25,13 +25,67 @@ import { supabase } from './supabase';
 export const REMOTE_FEEDS_SCHEDULE_NOTE =
   'Remote feeds (RemoteOK, Jobicy, Arbeitnow) are scouted automatically every day at 07:00 IST and screened as they arrive: jobs that pass appear in "Ready to tailor" on the Discovered page.';
 
+/* How the scan's NEW rows were born (P1-5, 2026-11-05): the popup used to call every inserted row a
+   "new application", and Teja's 39 were all dropped. Mirrors scout-ats's new_applications. */
+export interface ScanBreakdown {
+  // Born passed_filters: the "Ready to tailor" lane.
+  readonly passed: number;
+  // Born dropped_filter.
+  readonly dropped: number;
+  // Born discovered: the screener could not run.
+  readonly unscreened: number;
+  // Every drop reason with its count, most first.
+  readonly dropReasons: readonly { readonly reason: string; readonly count: number }[];
+}
+
 export interface WatchlistScanResult {
   readonly ok: boolean;
   readonly message: string;
   readonly boardsScanned: number;
   readonly jobsInserted: number;
   readonly appsCreated: number;
+  // Set on a full run only: the breakdown, or null when the function is older than P1-5 and sent none.
+  readonly breakdown?: ScanBreakdown | null;
   readonly error?: string;
+}
+
+/* new_applications, validated exactly: counts, reasons that sum to the drops, parts that sum to the
+   rows inserted. Undefined when the field is absent (an older function); null when present but
+   malformed, which makes the whole body unrecognised (CLAUDE.md section 6: never show a guess). */
+function parseBreakdown(value: unknown, appsCreated: number): ScanBreakdown | null | undefined {
+  // An older function: no claim either way.
+  if (value === undefined) return undefined;
+  // Must be a plain object.
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  // Indexed without widening to any.
+  const v = value as Record<string, unknown>;
+  // The three counts.
+  const { passed, dropped, unscreened } = v;
+  // Each a real count.
+  if (!isCount(passed) || !isCount(dropped) || !isCount(unscreened)) return null;
+  // The parts must account for every inserted row, no more and no less.
+  if (passed + dropped + unscreened !== appsCreated) return null;
+  // The reasons list.
+  const reasons = v['drop_reasons'];
+  // An array of { reason: non-empty string, count: positive count }.
+  if (!Array.isArray(reasons) || !reasons.every((r: unknown) => typeof r === 'object' && r !== null && typeof (r as { reason?: unknown }).reason === 'string' && (r as { reason: string }).reason !== '' && isCount((r as { count?: unknown }).count) && (r as { count: number }).count > 0)) return null;
+  // Copied field by field, so nothing unvalidated reaches the page.
+  const dropReasons = (reasons as { reason: string; count: number }[]).map((r) => ({ reason: r.reason, count: r.count }));
+  // The reasons must account for every drop.
+  if (dropReasons.reduce((sum, r) => sum + r.count, 0) !== dropped) return null;
+  // Validated.
+  return { passed, dropped, unscreened, dropReasons };
+}
+
+/* "tech_gate 26, unclassified 12, work_auth 1": the top three, then how many more. Shared by the
+   message and the modal so both say the same thing. */
+export function topDropReasons(reasons: ScanBreakdown['dropReasons']): string {
+  // The three largest (the list arrives sorted, most first).
+  const top = reasons.slice(0, 3).map((r) => `${r.reason} ${r.count}`);
+  // The rest, counted by reason, not by row.
+  const rest = reasons.length - 3;
+  // Joined, with the tail when there is one.
+  return rest > 0 ? `${top.join(', ')}, ${rest} more reason${rest === 1 ? '' : 's'}` : top.join(', ');
 }
 
 /* HTTP status of a functions.invoke error, or null. FunctionsHttpError carries the
@@ -98,6 +152,10 @@ export function parseScoutAtsResponse(body: unknown): WatchlistScanResult | null
     // Anything else is unrecognised.
     return null;
   }
+  // The screening breakdown of the new rows: undefined (older function), null (malformed) or valid.
+  const breakdown = parseBreakdown(b['new_applications'], apps);
+  // Present but wrong is an unrecognised body, never shown.
+  if (breakdown === null) return null;
   // Boards whose own poll failed, so a run with failures is not reported as clean.
   const failedBoards = results.filter(
     // Each summary carries status "ok" | "skipped" | "failed".
@@ -106,9 +164,16 @@ export function parseScoutAtsResponse(body: unknown): WatchlistScanResult | null
   return {
     // Every board failing is a failed scan; some failing is reported in the message.
     ok: !(failedBoards > 0 && failedBoards === results.length),
-    // States the numbers, and failed boards when there were any.
+    // States the numbers, and failed boards when there were any. A dropped row is never called a new
+    // application (P1-5); an older function's rows are only "new rows", with no claim about screening.
     message:
-      `Scanned ${boards} company boards: ${jobs} jobs discovered, ${apps} new applications.` +
+      `Scanned ${boards} company boards: ${jobs} jobs discovered, ` +
+      (breakdown === undefined
+        ? `${apps} new rows (this server did not report how many passed screening).`
+        : `${breakdown.passed} passed screening → Ready to tailor, ${breakdown.dropped} dropped` +
+          (breakdown.dropped > 0 ? ` (${topDropReasons(breakdown.dropReasons)})` : '') +
+          (breakdown.unscreened > 0 ? `, ${breakdown.unscreened} not screened (the screener was unavailable)` : '') +
+          '.') +
       (failedBoards > 0 ? ` ${failedBoards} board(s) failed to poll.` : ''),
     // Real field boards_polled, not the never-sent `summaries`.
     boardsScanned: boards,
@@ -116,6 +181,8 @@ export function parseScoutAtsResponse(body: unknown): WatchlistScanResult | null
     jobsInserted: jobs,
     // Real field applications_created, not `total_applications_created`.
     appsCreated: apps,
+    // The breakdown, or null for a function that sent none.
+    breakdown: breakdown ?? null,
   };
 }
 
@@ -140,7 +207,7 @@ async function responseTextOf(error: unknown): Promise<string> {
 
 /**
  * Asks the scout-ats Edge Function to scan the Watchlist ATS boards (Greenhouse, Lever,
- * Ashby, SmartRecruiters) and reports what it said. Never scans or writes from the browser.
+ * Ashby, Workday; SmartRecruiters is off since the 2026-11-01 robots ruling) and reports what it said. Never scans or writes from the browser.
  */
 export async function runWatchlistScan(
   onProgress?: (status: string) => void,

@@ -2,10 +2,78 @@ import { useState } from 'react';
 import type { ReactElement } from 'react';
 
 // The watchlist scan, and the sentence remote mode shows instead of a scan (2026-10-24).
-import { REMOTE_FEEDS_SCHEDULE_NOTE, runWatchlistScan } from '../../data/discoveryService';
+// topDropReasons too (P1-5), so the summary's reason line says exactly what the step sentence says.
+import { REMOTE_FEEDS_SCHEDULE_NOTE, runWatchlistScan, topDropReasons } from '../../data/discoveryService';
 import type { WatchlistScanResult } from '../../data/discoveryService';
 
 import './DiscoveryModal.css';
+
+/* The results grid of a scan that worked (P1-5, 2026-11-05). It replaced a "New Applications" box
+   that counted every inserted row: Teja's 39 "new applications" were all born dropped_filter.
+   Passed and dropped are now separate boxes, and a function older than P1-5 (no breakdown) gets
+   the raw row count with no claim about screening. Exported for test/scanBreakdown.test.ts. */
+export function ScanSummary({ result }: { readonly result: WatchlistScanResult }): ReactElement {
+  // undefined on a result that predates the field, null when the server sent none: both "unknown".
+  const breakdown = result.breakdown ?? null;
+  return (
+    <div className="discovery-results">
+      <h3 className="discovery-results__heading">Scan Summary</h3>
+      <div className="discovery-results__grid">
+        {/* Postings the scan upserted, screened or not. */}
+        <div className="metric-box">
+          {/* The count. */}
+          <span className="metric-box__num">{result.jobsInserted}</span>
+          {/* Its name. */}
+          <span className="metric-box__label">Jobs Processed</span>
+        </div>
+        {breakdown === null ? (
+          /* An older server: the rows are real, whether they passed is not known, so the label
+             names rows, never applications. */
+          <div className="metric-box">
+            {/* Every row inserted. */}
+            <span className="metric-box__num">{result.appsCreated}</span>
+            {/* A neutral name. */}
+            <span className="metric-box__label">New rows</span>
+          </div>
+        ) : (
+          <>
+            {/* The success lane, highlighted, and named after where the rows now are. */}
+            <div className="metric-box metric-box--highlight">
+              {/* Rows born passed_filters. */}
+              <span className="metric-box__num">{breakdown.passed}</span>
+              {/* One text node, so it reads as one phrase. */}
+              <span className="metric-box__label">Passed → Ready to tailor</span>
+            </div>
+            {/* Drops get their own box, so they can never be read as successes again. */}
+            <div className="metric-box">
+              {/* Rows born dropped_filter. */}
+              <span className="metric-box__num">{breakdown.dropped}</span>
+              {/* Its name. */}
+              <span className="metric-box__label">Dropped</span>
+            </div>
+            {/* Only when the screener was down: a third outcome that is neither pass nor drop. */}
+            {breakdown.unscreened > 0 && (
+              <div className="metric-box">
+                {/* Rows born discovered. */}
+                <span className="metric-box__num">{breakdown.unscreened}</span>
+                {/* Why they are unjudged. */}
+                <span className="metric-box__label">Not screened</span>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+      {/* The note under the grid says where the rows went, or what this server could not say. */}
+      <p className="discovery-results__note">
+        {breakdown === null
+          ? 'This server did not report how many passed screening. Check the Discovered page.'
+          : breakdown.dropped > 0
+            ? `Top drop reasons: ${topDropReasons(breakdown.dropReasons)}. Passed jobs wait in Ready to tailor on the Discovered page.`
+            : 'Passed jobs wait in Ready to tailor on the Discovered page.'}
+      </p>
+    </div>
+  );
+}
 
 export interface DiscoveryModalProps {
   readonly mode: 'remote' | 'watchlist';
@@ -62,7 +130,6 @@ export function DiscoveryModal({
   const hasResult = watchlistResult !== null;
   // 0 before any scan; the buttons below only read these after hasResult.
   const appsCreated = watchlistResult?.appsCreated ?? 0;
-  const jobsInserted = watchlistResult?.jobsInserted ?? 0;
 
   return (
     <div className="discovery-backdrop" onClick={running ? undefined : onClose}>
@@ -79,10 +146,12 @@ export function DiscoveryModal({
                     how much one click covers, because "is this running daily?" was asked twice
                     from this panel (2026-11-01). No clock times: scout.yml's cron is their one
                     source, and GitHub starts it hours late anyway. The 10 is scout-ats
-                    DEFAULT_BOARD_LIMIT, since discoveryService sends no ?limit. */}
+                    DEFAULT_BOARD_LIMIT, since discoveryService sends no ?limit. Providers (P1-5):
+                    SmartRecruiters is off since the 2026-11-01 robots ruling and Workday is polled,
+                    so the list names what the scan really reads. */}
                 {isRemote
                   ? 'Runs on a schedule in GitHub Actions, through the same apply-link check and screener as the company-board scout.'
-                  : 'Polls Greenhouse, Lever, Ashby and SmartRecruiters boards in your Company Watchlist. Every board is scanned automatically twice a day; this button scans the 10 least recently polled boards now.'}
+                  : 'Polls Greenhouse, Lever, Ashby and Workday boards in your Company Watchlist. Every board is scanned automatically three times a day; this button scans the 10 least recently polled boards now.'}
               </p>
             </div>
           </div>
@@ -108,24 +177,8 @@ export function DiscoveryModal({
           {/* Results Summary */}
           {/* Only for a scan that worked: its note says positions were queued, which a failed
               or timed-out scan cannot claim. The step box above carries the failure's sentence. */}
-          {watchlistResult?.ok === true && (
-            <div className="discovery-results">
-              <h3 className="discovery-results__heading">Scan Summary</h3>
-              <div className="discovery-results__grid">
-                <div className="metric-box">
-                  <span className="metric-box__num">{jobsInserted}</span>
-                  <span className="metric-box__label">Jobs Processed</span>
-                </div>
-                <div className="metric-box metric-box--highlight">
-                  <span className="metric-box__num">{appsCreated}</span>
-                  <span className="metric-box__label">New Applications</span>
-                </div>
-              </div>
-              <p className="discovery-results__note">
-                New positions have been queued into the <strong>Discovered</strong> column in your Pipeline.
-              </p>
-            </div>
-          )}
+          {/* ScanSummary (P1-5) replaced the old "New Applications" grid, which called dropped rows new. */}
+          {watchlistResult?.ok === true && <ScanSummary result={watchlistResult} />}
         </div>
 
         <footer className="discovery-modal__footer">
@@ -173,7 +226,8 @@ export function DiscoveryModal({
                       onOpenDiscovered();
                     }}
                   >
-                    View Discovered Applications ({appsCreated})
+                    {/* No count and no "Applications" (P1-5): appsCreated includes dropped rows. */}
+                    Open Discovered page
                   </button>
                 )}
                 {appsCreated === 0 && (

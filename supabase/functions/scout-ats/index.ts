@@ -42,6 +42,8 @@ import { loadScreenContext } from "../_shared/screen/context.ts";
 import { supabaseScreenQueries } from "../_shared/screen/supabase-queries.ts";
 // Persists the cascade's "rule skipped" warnings into the run row (B1, 2026-10-08).
 import { withRuleWarnings } from "../_shared/screen/run-summary.ts";
+// The inserted rows by status and drop reason, for the Scan popup's "X passed, Y dropped" (P1-5).
+import { addInsertedApplications, newApplicationsReport, newApplicationTally } from "./new-applications.ts";
 import type { AtsProvider, JobInsert } from "../_shared/contracts/shared-types.ts";
 // The Workday detail read (2026-11-05): the list endpoint carries no description, so new
 // title-passing Workday rows get theirs from the detail endpoint before they are stored.
@@ -291,6 +293,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const summaries: PollSummary[] = [];
   let totalJobsDiscovered = 0;
   let totalApplicationsCreated = 0;
+  // The same inserted rows, by status and drop reason (P1-5): applications_created alone made the
+  // popup call 39 dropped rows "new applications" on 2026-11-05.
+  const newApplications = newApplicationTally();
   const now = new Date();
 
   // THE SCREENER'S CONTEXT, LOADED ONCE FOR THE WHOLE RUN rather than per board. The
@@ -630,7 +635,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
               onConflict: "user_id,job_id",
               ignoreDuplicates: true,
             })
-            .select("id");
+            // status and drop_reason too, so the run can say how many of the NEW rows passed (P1-5).
+            .select("id, status, drop_reason");
 
           // A failed queue write means jobs exist with no application row; the board
           // failed, and the catch below records it so the next poll retries.
@@ -639,6 +645,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
           boardNewApps += (insertedApps ?? []).length;
           // Run-level total.
           totalApplicationsCreated += (insertedApps ?? []).length;
+          // The same rows by status and reason; a status the insert guard never admits throws to
+          // the board's catch, so the popup's numbers can never silently miss a row.
+          addInsertedApplications(newApplications, insertedApps ?? []);
         }
 
         boardInserted += entries.length;
@@ -811,6 +820,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Postings upserted across all boards.
     jobs_discovered: totalJobsDiscovered,
     applications_created: totalApplicationsCreated,
+    // The rows above by how they were born (P1-5, 2026-11-05): passed (Ready to tailor), dropped (with
+    // every drop reason, most first) and unscreened. The parts sum to applications_created; the web
+    // checks that and treats a mismatch as an unrecognised response. A new field the pre-P1-5 web
+    // ignores (it reads only the fields it names), so the web shipping first is safe either way.
+    new_applications: newApplicationsReport(newApplications),
     // THE SCREENER'S OWN COUNTERS, reported separately from the discovery counters
     // because they answer a different question. `jobs_discovered` says the poll worked;
     // these say the CASCADE worked. Without them a screener enforcing nothing is
