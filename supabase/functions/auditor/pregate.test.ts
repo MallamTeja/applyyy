@@ -7,8 +7,8 @@
 import { describe, test } from "node:test";
 // Strict deep equality, so a changed verdict shape fails here.
 import assert from "node:assert/strict";
-// The two pieces the auditor calls.
-import { auditorPreGateDrop, loadPreGatePreferences, type AuditorJobEmbed } from "./pregate.ts";
+// The verdict the auditor calls (its config loader is tested in _shared/pregate-config-loader.test.ts).
+import { auditorPreGateDrop, type AuditorJobEmbed } from "./pregate.ts";
 // The preference shape, so the fixture is checked against the real type.
 import type { PreGatePreferences } from "../matcher/tech-pregate.ts";
 
@@ -85,48 +85,3 @@ describe("auditorPreGateDrop", () => {
   });
 });
 
-/** A fake client answering the two config reads, in the matcher's order. */
-function fakeDb(answers: { prefs: { data: unknown; error: { message: string } | null }; ceiling: { data: unknown; error: { message: string } | null } }) {
-  // A builder whose every filter returns itself and whose maybeSingle() resolves the table's answer.
-  return {
-    // supabase-js's entry point.
-    from(table: string) {
-      // The answer for this table.
-      const answer = table === "search_preferences" ? answers.prefs : answers.ceiling;
-      // Chainable filters, then the terminal read.
-      const chain = { select: () => chain, eq: () => chain, maybeSingle: async () => answer };
-      // Returned for chaining.
-      return chain;
-    },
-  };
-}
-
-describe("loadPreGatePreferences", () => {
-  test("maps Teja's live rows to the gate's preferences", async () => {
-    // The live rows' shapes, column names as stored.
-    const result = await loadPreGatePreferences(fakeDb({
-      // search_preferences.
-      prefs: { data: { titles: ["Software Engineer"], keywords: ["React"], excluded_keywords: ["Senior"], work_authorized_countries: ["India", "Nepal", "Bhutan"], remote_location_policy: "unlocked_or_authorized" }, error: null },
-      // filter_rules experience_ceiling.
-      ceiling: { data: { config: { max_years: 1 } }, error: null },
-    }));
-    // Loaded, with every field the gate reads.
-    assert.equal(result.kind, "ok");
-    // The work-auth inputs arrive.
-    assert.deepEqual(result.kind === "ok" && [result.preferences.workAuthorizedCountries, result.preferences.remoteLocationPolicy, result.preferences.experienceMaxYears], [["India", "Nepal", "Bhutan"], "unlocked_or_authorized", 1]);
-  });
-
-  test("a failed preferences read is an error, never an empty (pass-everything) config", async () => {
-    // The read fails.
-    const result = await loadPreGatePreferences(fakeDb({ prefs: { data: null, error: { message: "boom" } }, ceiling: { data: null, error: null } }));
-    // Named, so the run can 503 with it.
-    assert.deepEqual(result, { kind: "error", code: "preferences_unreadable", message: "boom" });
-  });
-
-  test("a failed ceiling read is an error too", async () => {
-    // Preferences fine, ceiling fails.
-    const result = await loadPreGatePreferences(fakeDb({ prefs: { data: null, error: null }, ceiling: { data: null, error: { message: "nope" } } }));
-    // Named.
-    assert.deepEqual(result, { kind: "error", code: "filter_rules_unreadable", message: "nope" });
-  });
-});

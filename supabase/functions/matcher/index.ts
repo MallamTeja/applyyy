@@ -83,12 +83,8 @@ import { advanceScoredRow, writeMatchScore } from "./write-score.ts";
 import { settleModelFailures, withUsableJob, type MatcherFailureReason, type ModelAnswerFailure, type SettleClient } from "./fail-exit.ts";
 // Stage 0 re-applied before scoring, so a row the screener would now drop costs no Gemini call.
 import { nextSweepCursor, parseMatcherMode, PREGATE_ONLY_MAX_BATCH, selectScorer, withTechPreGate, type MatcherMode } from "./tech-pregate.ts";
-// The one mapper from a search_preferences row to the gate's config.
-import { toTechGatePreferences } from "../_shared/screen/tech-gate.ts";
-// The screener's own shape checks for the work-auth list and the remote policy (2026-11-04).
-import { countryList, remoteLocationPolicy } from "../_shared/screen/context.ts";
-// The shape check for filter_rules experience_ceiling config.max_years.
-import { experienceCeilingMaxYears } from "../_shared/screen/required-experience.ts";
+// The one loader of the gate config (search_preferences + experience_ceiling), shared with the auditor.
+import { loadPreGatePreferences, type ConfigReader } from "../_shared/pregate-config-loader.ts";
 
 // Default batch limit for one invocation to preserve key pool quota.
 // Controls how many application rows are processed per function call.
@@ -316,54 +312,19 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
   // Tracks master profile version used for scoring alignment.
   const masterVersion: number = masterRow.version;
 
-  // The user's CURRENT title/keyword config, for the pre-gate below (Teja, 2026-10-09).
-  // RLS scopes the read to this user's single row.
-  const { data: preferencesRow, error: preferencesError } = await db
-    // Where stage 0's config lives.
-    .from("search_preferences")
-    // The three tech lists, plus the work-auth list and remote policy (2026-11-04). The policy
-    // column needs migration 20261104193000 applied FIRST, or this read fails and the run 503s.
-    .select("titles, keywords, excluded_keywords, work_authorized_countries, remote_location_policy")
-    // One row per user; none is a normal state (an empty config).
-    .maybeSingle();
+  // The user's CURRENT gate config, for the pre-gate below (Teja, 2026-10-09): search_preferences
+  // plus the enabled experience_ceiling rule, through the ONE loader the auditor calls too, so the
+  // two stages cannot read the same config differently. RLS scopes both reads to this user.
+  // The cast: checking supabase-js's deeply generic builder against ConfigReader's self-chaining
+  // `eq` overflows the compiler (TS2589), as in the auditor.
+  const gateConfig = await loadPreGatePreferences(db as unknown as ConfigReader);
   // A FAILED read stops the run before any Gemini call. Reading it as "no config" would
-  // turn an error into an answer: an empty config passes everything to scoring.
-  if (preferencesError) {
-    // Same 503 shape as the master-profile read above.
-    return await failRun(503, "preferences_unreadable", preferencesError.message);
-  }
-  // The experience ceiling the cascade reads (filter_rules experience_ceiling config.max_years),
-  // for the pre-gate's re-check of re-run rows (Teja, 2026-11-04). RLS scopes it to this user.
-  const { data: ceilingRow, error: ceilingError } = await db
-    // Where the cascade's rules live.
-    .from("filter_rules")
-    // Only the config carries the threshold.
-    .select("config")
-    // The one rule this re-check mirrors.
-    .eq("rule_type", "experience_ceiling")
-    // A disabled rule does not run in the screener, so it must not run here either.
-    .eq("enabled", true)
-    // filter_rules is unique on (user_id, rule_type), so RLS returns at most one row.
-    .maybeSingle();
-  // A FAILED read stops the run, for the same reason as the preferences read above.
-  if (ceilingError) {
-    // Same 503 shape.
-    return await failRun(503, "filter_rules_unreadable", ceilingError.message);
-  }
-  // No row, or config {} without max_years, is null, which keeps every job, as the cascade does.
-  const experienceMaxYears = experienceCeilingMaxYears(ceilingRow?.config);
-  // A missing row and null columns map exactly as the screener maps them, through the screener's
-  // own shape checks, so the two stages read the same config the same way.
-  const preGatePreferences = {
-    // The three tech lists.
-    ...toTechGatePreferences(preferencesRow),
-    // null = never set, which keeps the work-auth gate open.
-    workAuthorizedCountries: countryList(preferencesRow?.work_authorized_countries),
-    // One of the two literals, or 'any' (fail-open).
-    remoteLocationPolicy: remoteLocationPolicy(preferencesRow?.remote_location_policy),
-    // The ceiling read above.
-    experienceMaxYears,
-  };
+  // turn an error into an answer: an empty config passes everything to scoring. Same 503 shape
+  // as the master-profile read above, with the loader's code (preferences_unreadable or
+  // filter_rules_unreadable).
+  if (gateConfig.kind === "error") return await failRun(503, gateConfig.code, gateConfig.message);
+  // Every field the three gates read, mapped by the screener's own shape checks.
+  const preGatePreferences = gateConfig.preferences;
 
   // Resolve batch size limit from URL search parameters limit parameter string.
   // Clamps batch size within safe operating bounds.

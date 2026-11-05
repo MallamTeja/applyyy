@@ -42,7 +42,10 @@ import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 import { parseApplicationIdParam } from "../_shared/http/application-id.ts";
 
 // The matcher's pre-gate, re-run as the last check before a human sees the row (leak 1, 2026-11-05)
-import { auditorPreGateDrop, loadPreGatePreferences, type AuditorJobEmbed, type ConfigReader } from "./pregate.ts";
+import { auditorPreGateDrop, type AuditorJobEmbed } from "./pregate.ts";
+
+// The one config loader the matcher calls too, so both stages read the gate config identically
+import { loadPreGatePreferences, type ConfigReader } from "../_shared/pregate-config-loader.ts";
 
 // Default batch processing limit size for Auditor invocation
 const DEFAULT_BATCH_SIZE = 10;
