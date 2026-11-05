@@ -16,7 +16,7 @@
  * the app already holds.
  */
 
-/* Storage key for the last successful sync instant (ms since epoch, as a string).
+/* Storage key for the instant the last sync call STARTED (ms since epoch, as a string); stamped at the call, not on success (P3 #3).
    localStorage rather than state so the once-a-minute cap survives route changes. */
 export const GMAIL_SYNC_LAST_MS_KEY = 'applyy_gmail_sync_last_ms';
 

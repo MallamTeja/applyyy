@@ -294,4 +294,44 @@ describe('Emails page in a browser (fake session, every Supabase call answered l
     // No browser dialog.
     assert.equal(dialogs, 0);
   });
+
+  /* P3 #3 (2026-11-06, Teja): opening the Email page syncs Gmail, at most once a minute. The cap's
+     stamp used to be written only after an "ok" answer, so when the server answered "cooldown" (this
+     mock's answer), failed, or the page was left mid-call, open -> leave -> open within 60 s called
+     gmail-sync again. Counted on the wire, across a real leave and return. */
+  it('6. open, leave and reopen the Email page within 60 s: ONE gmail-sync call', async () => {
+    // A clean cap, as on a first visit; earlier tests may have stamped it.
+    await page.evaluate(() => localStorage.removeItem('applyy_gmail_sync_last_ms'));
+    // The sync calls seen on the wire.
+    let syncCalls = 0;
+    // Only the gmail-sync function call is counted.
+    const count = (request: { url(): string }): void => {
+      // Parsed so a query string cannot vary the match.
+      if (new URL(request.url()).pathname === '/functions/v1/gmail-sync') syncCalls += 1;
+    };
+    // Network-level, so a call is counted whichever mount made it.
+    page.on('request', count);
+    // try/finally: the listener must not outlive this test.
+    try {
+      // First open: the mount-time sync runs.
+      await page.goto(`${base}/emails`, { waitUntil: 'domcontentloaded' });
+      // Every read and the sync have settled.
+      await page.waitForLoadState('networkidle');
+      // Non-vacuity: the first open DID sync, so "one" below is not "none".
+      assert.equal(syncCalls, 1, 'the first open must sync Gmail');
+      // Leave: a full navigation unmounts the page.
+      await page.goto(`${base}/pipeline`, { waitUntil: 'domcontentloaded' });
+      // Settled.
+      await page.waitForLoadState('networkidle');
+      // Return within the minute: a fresh mount.
+      await page.goto(`${base}/emails`, { waitUntil: 'domcontentloaded' });
+      // Settled.
+      await page.waitForLoadState('networkidle');
+      // Still one: the reopen inside 60 s was capped.
+      assert.equal(syncCalls, 1, 'a reopen within 60 s must not call gmail-sync again');
+    } finally {
+      // Later tests are not counted.
+      page.off('request', count);
+    }
+  });
 });

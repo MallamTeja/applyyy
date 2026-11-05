@@ -467,15 +467,16 @@ export function EmailMonitoringPage(): ReactElement {
       // The quiet line says so.
       setSyncState('syncing');
 
+      // The cross-visit cap is stamped when the call STARTS, whatever it answers (P3 #3, 2026-11-06).
+      // Stamped only on "ok", a server cooldown, a failure, or leaving mid-call let a reopen within
+      // 60 s call again. A manual click still always calls; it just restarts the auto-sync window.
+      writeLastGmailSyncMs(storage, Date.now());
+
       // syncGmailInbox never throws: every path lands in the closed outcome union.
       const outcome = await syncGmailInbox(supabase);
       if (outcome.kind === 'ok') {
-        // Record the instant in state (the card's "Last checked") and in storage (the cap).
-        const now = Date.now();
-        // This visit's time, for "Last checked".
-        setLastSyncedAt(now);
-        // The cross-visit cap.
-        writeLastGmailSyncMs(storage, now);
+        // This visit's time, for the card's "Last checked" (the cap was stamped above).
+        setLastSyncedAt(Date.now());
         // Surface whatever the sync just ingested.
         await fetchEvents();
         // Settled.
