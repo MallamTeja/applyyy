@@ -19,8 +19,8 @@
  */
 
 import assert from 'node:assert/strict';
-// readdir walks src/ and dist/assets for the build-freshness guard; no new dependency.
-import { readdir, readFile, stat } from 'node:fs/promises';
+// readFile and stat for the static server and the public/ check; stdlib, no new dependency.
+import { readFile, stat } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { extname, join } from 'node:path';
 // beforeEach carries the dist guard's error into each test so it counts as a failure.
@@ -28,7 +28,12 @@ import { describe, it, before, beforeEach, after } from 'node:test';
 import { fileURLToPath } from 'node:url';
 // Request: test 12 records the browser's own requests to prove which writes it made.
 import { chromium, type Browser, type BrowserContext, type Page, type Request } from 'playwright';
+// The shared harness (test/support/e2eDist.ts): the dist guard, its newest-file walk, the bundle path and
+// the fake session. This file carried its own copies until 2026-11-05; its server stays local (see MIME_TYPES).
+import { DIST, assertDistIsTestable as assertSharedDistIsTestable, newestMtime, seedSession } from './support/e2eDist.ts';
 
+// Kept local, not the shared server's table: it also types .png and .ico and gives JSON a charset, so this
+// server is NOT a duplicate of support/e2eDist.ts startDistServer (no such file is in dist/ today, 2026-11-05).
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -39,106 +44,24 @@ const MIME_TYPES: Record<string, string> = {
   '.ico': 'image/x-icon',
 };
 
-const webDistDir = fileURLToPath(new URL('../dist', import.meta.url));
-// The source tree dist/ was built from; anything newer than the build means dist is stale.
-const webSrcDir = fileURLToPath(new URL('../src', import.meta.url));
-// The build inputs outside src/: the HTML entry, the config, the e2e env, and static assets.
-// A change to any of them also changes the bundle, so each must be older than the build too.
-const webBuildInputs = ['../index.html', '../vite.config.ts', '../.env.e2e'].map((p) =>
-  // Resolved from this file so the guard works from any cwd.
-  fileURLToPath(new URL(p, import.meta.url)),
-);
 // public/ is copied into dist verbatim; it doesn't exist today, so it is walked only if present.
+// The shared guard (support/e2eDist.ts) does not walk it, so this file keeps that one extra input.
 const webPublicDir = fileURLToPath(new URL('../public', import.meta.url));
-// The live project ref. The seeded session key embeds it, so a bundle without it can't sign in.
-const PROJECT_REF = 'xynqxekcqizwhtskzqrq';
-// One fix for all three guards, named in every message so the reader never has to guess.
-const FIX_COMMAND = 'cd apps/web && ./node_modules/.bin/vite build --mode e2e';
-
-// Newest mtime under a directory. Recursive readdir is stdlib, so no glob dependency.
-async function newestMtime(dir: string): Promise<{ path: string; mtimeMs: number }> {
-  // Start below any real file, so an empty tree can never look "older than the build".
-  let newest = { path: '(no files)', mtimeMs: -Infinity };
-  // recursive: true returns every nested entry in one call.
-  for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
-    // Directories' mtimes move when peers add files; only file content matters to the build.
-    if (!entry.isFile()) continue;
-    // parentPath is the entry's own directory in a recursive listing.
-    const full = join(entry.parentPath, entry.name);
-    // stat per file is fine at this tree size (a few hundred files).
-    const { mtimeMs } = await stat(full);
-    // Keep the newest so the error can name the exact file that outdated the build.
-    if (mtimeMs > newest.mtimeMs) newest = { path: full, mtimeMs };
-  }
-  // A vacuous walk would make the staleness guard pass for free, so refuse it outright.
-  if (newest.mtimeMs === -Infinity) throw new Error(`e2e guard: found no files under ${dir}`);
-  // The caller compares this against dist/index.html.
-  return newest;
-}
 
 /* Refuses to run the suite against a dist/ that can't prove anything. Each failure used
- * to surface as 8 selector timeouts plus a vacuous test-9 pass; now it is one named error. */
+ * to surface as 8 selector timeouts plus a vacuous test-9 pass; now it is one named error.
+ * Missing, stale-vs-src/root-inputs and unconfigured are the shared guard's; only public/ is checked here. */
 async function assertDistIsTestable(): Promise<void> {
-  // (a) No build at all.
-  const distIndex = join(webDistDir, 'index.html');
-  // stat-or-null so a missing file becomes our message, not a raw ENOENT.
-  const indexStat = await stat(distIndex).catch(() => null);
-  // Missing index.html means the static server below would serve nothing.
-  if (!indexStat) {
-    // Named error (a): tells the reader exactly which command produces dist/.
-    throw new Error(`E2E_DIST_MISSING: ${distIndex} does not exist. Build it: ${FIX_COMMAND}`);
-  }
-
-  // (b) A build older than the source it claims to test. A 2-day-stale dist once went green.
-  // src/ must have files (newestMtime throws on an empty walk); the rest only compete for "newest".
-  let newestSrc = await newestMtime(webSrcDir);
-  // Root inputs one by one; a missing one is skipped here because guard (c) catches a config-less build.
-  for (const input of webBuildInputs) {
-    // stat-or-null keeps an absent optional file from becoming a raw ENOENT.
-    const s = await stat(input).catch(() => null);
-    // Newer wins, so the message names whichever input actually outdated the build.
-    if (s && s.mtimeMs > newestSrc.mtimeMs) newestSrc = { path: input, mtimeMs: s.mtimeMs };
-  }
+  // (a)-(c) from the shared harness, so a fix to the guard lands in every browser test file at once.
+  await assertSharedDistIsTestable();
   // public/ only if it exists; an absent public/ is normal, not a vacuous walk.
-  if (await stat(webPublicDir).catch(() => null)) {
-    // Same newest-file walk as src/.
-    const pub = await newestMtime(webPublicDir);
-    // Keep whichever of src/root/public is newest.
-    if (pub.mtimeMs > newestSrc.mtimeMs) newestSrc = pub;
-  }
-  // Strictly newer: an input touched after the build means the bundle may not contain it.
-  if (newestSrc.mtimeMs > indexStat.mtimeMs) {
-    // Named error (b): names the file and both times so a concurrent peer edit is obvious.
-    throw new Error(
-      `E2E_DIST_STALE: dist/index.html (${indexStat.mtime.toISOString()}) is older than ` +
-        `${newestSrc.path} (${new Date(newestSrc.mtimeMs).toISOString()}). Rebuild: ${FIX_COMMAND}`,
-    );
-  }
-
-  // (c) A build with no Supabase config. Without .env.local or .env.e2e, every page stops at sign-in.
-  const assetsDir = join(webDistDir, 'assets');
-  // Only .js carries import.meta.env values; maps and css would be noise.
-  const jsFiles = (await readdir(assetsDir).catch(() => [] as string[])).filter((f) => f.endsWith('.js'));
-  // Read each bundle chunk; the URL is inlined as a string literal in one of them.
-  let hasRef = false;
-  // A plain loop stops at the first hit; the bundle is a handful of files.
-  for (const f of jsFiles) {
-    // utf8 so includes() compares text, not bytes.
-    if ((await readFile(join(assetsDir, f), 'utf8')).includes(PROJECT_REF)) {
-      // One chunk with the ref is enough to prove the URL was baked in.
-      hasRef = true;
-      // No need to read the remaining chunks.
-      break;
-    }
-  }
-  // Zero .js files lands here too, so an empty assets dir can't pass vacuously.
-  if (!hasRef) {
-    // Named error (c): the build ran without VITE_SUPABASE_URL.
-    throw new Error(
-      `E2E_DIST_UNCONFIGURED: none of ${jsFiles.length} JS files in ${assetsDir} contain ` +
-        `"${PROJECT_REF}", so the build had no VITE_SUPABASE_URL. Rebuild: ${FIX_COMMAND}`,
-    );
-  }
+  if (!(await stat(webPublicDir).catch(() => null))) return;
+  // Same newest-file walk the shared guard runs over src/.
+  const pub = await newestMtime(webPublicDir);
+  // The build's own time; the shared guard just proved index.html exists.
+  const built = (await stat(join(DIST, 'index.html'))).mtimeMs;
+  // Strictly newer: a public/ file touched after the build may not be in dist/. Same code as the shared guard.
+  if (pub.ms > built) throw new Error(`E2E_DIST_STALE: dist/index.html is older than ${pub.path}. Rebuild: cd apps/web && ./node_modules/.bin/vite build --mode e2e`);
 }
 
 describe('Playwright E2E Operator Console Suite', () => {
@@ -174,11 +97,11 @@ describe('Playwright E2E Operator Console Suite', () => {
       try {
         const urlPath = new URL(req.url ?? '/', 'http://localhost').pathname;
         const relPath = urlPath.replace(/^\//, '');
-        let filePath = join(webDistDir, relPath === '' ? 'index.html' : relPath);
+        let filePath = join(DIST, relPath === '' ? 'index.html' : relPath);
         const fileStat = await stat(filePath).catch(() => null);
 
         if (!fileStat || !fileStat.isFile()) {
-          filePath = join(webDistDir, 'index.html');
+          filePath = join(DIST, 'index.html');
         }
 
         const ext = extname(filePath).toLowerCase();
@@ -299,25 +222,8 @@ describe('Playwright E2E Operator Console Suite', () => {
       });
     });
 
-    // Inject operator auth token into localStorage
-    await authContext.addInitScript(() => {
-      window.localStorage.setItem(
-        'sb-xynqxekcqizwhtskzqrq-auth-token',
-        JSON.stringify({
-          access_token: 'e2e-test-token',
-          token_type: 'bearer',
-          expires_in: 7200,
-          expires_at: Math.floor(Date.now() / 1000) + 7200,
-          refresh_token: 'e2e-test-refresh',
-          user: {
-            id: '0f4b24da-e85b-40bb-8606-c81824493b45',
-            aud: 'authenticated',
-            role: 'authenticated',
-            email: 'operator@example.test',
-          },
-        }),
-      );
-    });
+    // Inject operator auth token into localStorage: the shared fake session, same operator as the auth mocks above.
+    await seedSession(authContext, '0f4b24da-e85b-40bb-8606-c81824493b45');
 
     page = await authContext.newPage();
   });
