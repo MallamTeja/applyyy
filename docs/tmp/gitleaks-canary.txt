@@ -1,0 +1,3 @@
+THROWAWAY gitleaks canary (P2 #2 proof, 2026-11-05). A FAKE token generated at write time; it grants nothing.
+Delete this branch after CI goes red.
+token=ghp_bzsmT5oRUxCm1rlaAWWbWcqfOiOBjDRwZWeh
