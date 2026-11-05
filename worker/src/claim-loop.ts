@@ -38,7 +38,8 @@ import type { FormUrlResolver } from './form-url.ts';
 // B2 (P1-6): the re-check input and the auditor's config-read result.
 import type { SubmitRecheck } from './apply-one.ts';
 // The loader's closed result type, from the module the gateway reads it with.
-import type { LoadedPreGatePreferences } from '../../supabase/functions/auditor/pregate.ts';
+// Moved to _shared in 7a98b79 (the auditor and the worker both load the pre-gate config there).
+import type { LoadedPreGatePreferences } from '../../supabase/functions/_shared/pregate-config-loader.ts';
 
 // This worker's identity, used for both the run row and the claim marker.
 const ACTING_AGENT: AgentName = 'applier';

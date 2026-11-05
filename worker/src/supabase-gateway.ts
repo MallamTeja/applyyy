@@ -30,7 +30,10 @@ import type { AgentName, ApplicationStatus, AtsProvider, MasterProfile, Resolved
 import type { RunGateway, UnusableClaim } from './claim-loop.ts';
 import type { ClaimedApplication } from './apply-one.ts';
 // B2 (P1-6): the auditor's config loader and job shape, reused rather than re-implemented.
-import { loadPreGatePreferences, type AuditorJobEmbed, type ConfigReader } from '../../supabase/functions/auditor/pregate.ts';
+// The auditor's job-embed shape, which pregate.ts still owns.
+import type { AuditorJobEmbed } from '../../supabase/functions/auditor/pregate.ts';
+// The config loader, moved to _shared in 7a98b79.
+import { loadPreGatePreferences, type ConfigReader } from '../../supabase/functions/_shared/pregate-config-loader.ts';
 
 /** What a Supabase-shaped client must offer. Deliberately minimal. */
 export interface SupabaseLike {

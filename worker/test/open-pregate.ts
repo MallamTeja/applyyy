@@ -2,7 +2,8 @@
 // is not the re-check. A live applyToOne / claim loop refuses to run without a re-check config (fail
 // closed), so every live test hands one in; open gates keep each test's own subject unchanged.
 import type { PreGatePreferences } from '../../supabase/functions/matcher/tech-pregate.ts';
-import type { LoadedPreGatePreferences } from '../../supabase/functions/auditor/pregate.ts';
+// Moved to _shared in 7a98b79.
+import type { LoadedPreGatePreferences } from '../../supabase/functions/_shared/pregate-config-loader.ts';
 import type { SubmitRecheck } from '../src/apply-one.ts';
 
 // No title list, no countries, any remote, no experience ceiling: nothing is dropped.
