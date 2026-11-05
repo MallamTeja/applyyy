@@ -77,6 +77,22 @@ import './EmailMonitoringPage.css';
 // ISO timestamp shape as PostgREST writes timestamptz; Date.parse alone would accept '-5'.
 const ISO_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
 
+/* The exact message advance_application_status raises when a job matched by company + title (migration
+   20261105220000 links instead of inserting) sits at a status with no human edge to applied. Anchored on
+   both ends so a different 23514 (a check constraint) is never read as a pipeline status. */
+const ILLEGAL_TO_APPLIED = /^illegal status transition ([a-z_]+) -> applied$/;
+
+/* The row's text for a refused Add to Applied. Ruling 2026-11-05: the refusal stands, but it says what to
+   do. Only the transition-guard shape is rewritten; every other refusal keeps the database's own words. */
+export function addRefusalText(error: { code?: string; message: string }): string {
+  // 23514 AND the full message shape: a code alone or a substring alone could be another constraint.
+  const from = error.code === '23514' ? ILLEGAL_TO_APPLIED.exec(error.message)?.[1] : undefined;
+  // Not this refusal: today's text, unchanged.
+  if (from === undefined) return `Not added: ${error.message}`;
+  // The app has no status-label map; underscores as spaces is how StatusBadge shows a status.
+  return `Not added: this job is already in your pipeline at ${from.replace(/_/g, ' ')}; open it there.`;
+}
+
 /* The tracker's newest successful run, in ms, or null when there is none or it cannot be read. Advisory:
    a failed read leaves "Last checked" as it was and never touches the email list's error banner. */
 async function readTrackerLastRunMs(): Promise<number | null> {
@@ -640,7 +656,7 @@ export function EmailMonitoringPage(): ReactElement {
       });
       // A refusal carries a SQLSTATE and the database's own words. No code means the answer was lost: the call
       // may have committed, and a retry is safe because the function returns this email's own application.
-      if (rpcError) return noteOn([event.id], typeof rpcError.code === 'string' && rpcError.code !== '' ? `Not added: ${rpcError.message}` : 'Not confirmed: the answer was lost. Refresh to see whether it was added; trying again is safe.');
+      if (rpcError) return noteOn([event.id], typeof rpcError.code === 'string' && rpcError.code !== '' ? addRefusalText(rpcError) : 'Not confirmed: the answer was lost. Refresh to see whether it was added; trying again is safe.');
       // Done: the form closes and the row says so.
       setDrafts((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => id !== event.id)));
       noteOn([event.id], `Added to Applied: ${draft.title.trim()} at ${draft.company.trim()}.`);
