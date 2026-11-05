@@ -12,8 +12,11 @@
 
 // Type only: the status union the badge arithmetic takes.
 import type { ApplicationStatus } from '../../data/contract.ts';
-// The two lanes that always need a human, so the badge and the page count the same rows.
-import { MANUAL_ACTION_STATUSES, manualActionCount } from '../../data/humanLanes.ts';
+// The two-lane count from the status RPC: the badge's fallback when the page's own read is unavailable.
+import { manualActionCount } from '../../data/humanLanes.ts';
+// Type only: the page's row, so the badge counts the very list the page renders. A type-only import, so
+// the runtime cycle with manualApplyData.ts (which imports this module) does not exist.
+import type { ManualApplyRow } from './manualApplyData.ts';
 
 // Where each answer came from, so the operator knows how much to trust it before pasting.
 export type KitFieldSource = 'identity' | 'tailored' | 'answer_bank' | 'derived' | 'unanswered';
@@ -210,17 +213,25 @@ export function isOpenKitStatus(status: ApplicationStatus): boolean {
   return KIT_OPEN_STATUSES.includes(status);
 }
 
-/* The rail badge for Manual apply: rows in the two manual-action lanes, plus rows that have a kit and
- * sit at another submit stage (e.g. an approved row whose board is known to captcha). A kit row
- * already in a manual lane is counted once; a row past the submit is not waiting, so it is not counted. */
+/* The rail badge for Manual apply: the number of rows the Manual apply page lists (2026-11-05).
+ *
+ * WHY THE PAGE'S LIST, NOT ITS OWN ARITHMETIC. The badge used to add the lane counts to the statuses of
+ * rows with a kit. 6f91221 made the page also list approved rows with no kit yet ("Kit pending"), and the
+ * badge, counting from a different row set, read 0 over 5 listed jobs. Counting mergeManualApplyRows'
+ * output (the AppShell reads it through loadManualApply, the page's own loader) makes the two equal by
+ * construction instead of by keeping two formulas in step.
+ *
+ * A FAILURE IS NOT A ZERO (CLAUDE.md §6). pageRows is null while the page's read is pending or failed; the
+ * badge then shows the lane counts from the status RPC (an undercount the page corrects, never a made-up
+ * row). counts is null when that RPC has not succeeded either: with nothing known, the badge is hidden. */
 export function manualApplyCount(
-  counts: Readonly<Partial<Record<ApplicationStatus, number>>>,
-  kitRowStatuses: readonly ApplicationStatus[],
+  // Per-status counts from the status RPC, or null when that read has not succeeded.
+  counts: Readonly<Partial<Record<ApplicationStatus, number>>> | null,
+  // The page's row list (mergeManualApplyRows), or null when that read is pending or failed.
+  pageRows: readonly ManualApplyRow[] | null,
 ): number {
-  // The two lanes, from the server's GROUP BY.
-  const lanes = manualActionCount(counts);
-  // Kit rows the lanes did not already count, and only while they are still at a submit stage.
-  const extra = kitRowStatuses.filter((s) => !MANUAL_ACTION_STATUSES.includes(s) && isOpenKitStatus(s)).length;
-  // Distinct rows needing the operator.
-  return lanes + extra;
+  // The page's own list was read: it is the answer, exactly.
+  if (pageRows !== null) return pageRows.length;
+  // Otherwise the two lanes alone, when the RPC read succeeded; else nothing is known, so no badge.
+  return counts === null ? 0 : manualActionCount(counts);
 }

@@ -617,6 +617,27 @@ describe('Playwright E2E Operator Console Suite', () => {
       // Two blocked rows make the count non-zero, so AppShell renders its "needs you" badge from it.
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{ status: 'blocked_needs_human', row_count: 2 }]) });
     });
+    /* Since 2026-11-05 the badge counts the Manual apply page's own rows (loadManualApply), not the RPC
+       above; the RPC is only its fallback. So the page's reads are held behind the SAME gate and answered
+       with the same 2 blocked rows, and the badge sentence renders from them. */
+    // The two blocked rows, in the shape ROW_SELECT returns (id, status, updated_at, status_changed_at, jobs).
+    const blockedRow = (id: string) => ({ id, status: 'blocked_needs_human', updated_at: '2026-11-05T06:30:00+00:00', status_changed_at: '2026-11-05T06:30:00+00:00', jobs: { title: 'E2E Platform Engineer', company_name: 'Initech', apply_url: 'https://example.com/jobs/7' } });
+    // Page-level, so it outranks the context catch-all [] for the applications reads.
+    await page.route('**/rest/v1/applications?*', async (route) => {
+      // Held like the RPC, so both answers land together after the query is typed.
+      await gate;
+      // Only the lanes read (status=in.(needs_verification,blocked_needs_human)) gets the rows; the approved read gets none.
+      const body = route.request().url().includes('blocked_needs_human') ? [blockedRow('b1b2c3d4-0000-4000-8000-0000000000b1'), blockedRow('b1b2c3d4-0000-4000-8000-0000000000b2')] : [];
+      // The rows as PostgREST returns them.
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+    });
+    // The kit events read loadManualApply makes first; held too, so the page read cannot finish early.
+    await page.route('**/rest/v1/application_events?*', async (route) => {
+      // Same gate.
+      await gate;
+      // No kits: the blocked rows come from the lanes read alone.
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
+    });
     // try/finally: the held route must not outlive this test, even when an assertion fails.
     try {
       // A full load remounts AppShell, so its mount-time counts read is the one held above.
@@ -629,7 +650,7 @@ describe('Playwright E2E Operator Console Suite', () => {
       await page.locator('.palette-input:focus').waitFor();
       // The query whose survival is under test.
       await page.locator('.palette-input').fill('Answer Bank');
-      // Let the counts answer land: AppShell re-renders while the palette is open and typed into.
+      // Let the counts and page-row answers land: AppShell re-renders while the palette is open and typed into.
       release();
       // The badge's screen-reader sentence is rendered FROM that answer, so it proves the re-render committed.
       await page.getByText('2 jobs need you to apply or verify by hand').waitFor({ state: 'attached' });
@@ -643,6 +664,10 @@ describe('Playwright E2E Operator Console Suite', () => {
       release();
       // Later tests get the context's catch-all answer for this RPC again.
       await page.unroute('**/rest/v1/rpc/application_status_counts');
+      // And the page's applications reads.
+      await page.unroute('**/rest/v1/applications?*');
+      // And its kit events read.
+      await page.unroute('**/rest/v1/application_events?*');
       // Leave the palette closed for whatever runs next.
       await page.keyboard.press('Escape');
     }

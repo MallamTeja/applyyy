@@ -128,7 +128,8 @@ export function mergeManualApplyRows(reads: {
   return [...new Map([...reads.lanes, ...reads.approved, ...reads.kitRows.filter((k) => isOpenKitStatus(k.status))].map((r) => [r.id, r] as const)).values()];
 }
 
-/* Everything the page shows: the rows (see mergeManualApplyRows) and each one's kit state. */
+/* Everything the page shows: the rows (see mergeManualApplyRows) and each one's kit state. The rail
+ * badge (AppShell) calls this same loader and counts its rows, so badge and page cannot drift. */
 export async function loadManualApply(): Promise<{ readonly rows: readonly ManualApplyRow[]; readonly kits: ReadonlyMap<string, KitState> } | { readonly error: string }> {
   // The kits first: their ids decide which extra rows to read.
   const kits = await readKitEvents();
@@ -147,17 +148,4 @@ export async function loadManualApply(): Promise<{ readonly rows: readonly Manua
   if ('error' in kitRows) return kitRows;
   // One list, each row once, lanes first.
   return { rows: mergeManualApplyRows({ lanes: lanes.rows, approved: approved.rows, kitRows: kitRows.rows }), kits: kits.states };
-}
-
-/* The statuses of every application that has a kit, for the rail badge. A failure yields [] so the
- * badge falls back to the lane counts alone: an undercount the page itself corrects, never a made-up row. */
-export async function loadKitRowStatuses(): Promise<readonly ApplicationStatus[]> {
-  // The kits.
-  const kits = await readKitEvents();
-  // Unreadable: lanes only.
-  if ('error' in kits) return [];
-  // Their rows, by exact id.
-  const rows = await readRows({ ids: [...kits.states.keys()].filter((id) => UUID.test(id)) });
-  // Statuses only; a failed read counts nothing extra.
-  return 'error' in rows ? [] : rows.rows.map((r) => r.status);
 }

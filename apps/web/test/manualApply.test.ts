@@ -172,14 +172,15 @@ describe('links', () => {
 });
 
 describe('rail badge', () => {
-  it('counts the two manual lanes plus open kit rows outside them, each row once', () => {
-    // 1 unknown submit + 2 blocked; kits on one needs_verification row (already counted), one approved row
-    // (counted), and one applied row (finished, not counted).
-    assert.equal(kitMod.manualApplyCount({ needs_verification: 1, blocked_needs_human: 2, applying: 5 }, ['needs_verification', 'approved', 'applied']), 4);
+  /* Since 2026-11-05 the badge counts the page's own row list (test/manualApplyBadge.test.ts); these
+     pin the fallback when that list could not be read. */
+  it('without the page rows, counts the two manual lanes only (applying is not a lane)', () => {
+    // 1 unknown submit + 2 blocked; the 5 applying rows are the worker's, not the operator's.
+    assert.equal(kitMod.manualApplyCount({ needs_verification: 1, blocked_needs_human: 2, applying: 5 }, null), 3);
   });
 
-  it('is 0 with no lane rows and no open kit rows', () => {
-    // Absent lane keys, and only a finished kit row.
-    assert.equal(kitMod.manualApplyCount({ applying: 1 }, ['applied']), 0);
+  it('is 0 with no lane rows and an empty page list', () => {
+    // A read page with nothing on it is a real 0, unlike a failed read.
+    assert.equal(kitMod.manualApplyCount({ applying: 1 }, []), 0);
   });
 });

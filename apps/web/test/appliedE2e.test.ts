@@ -220,7 +220,10 @@ describe('Applied jobs page in a browser (fake session, every Supabase call answ
     // Both cards rendered from the read.
     await card('E2E Data Engineer').waitFor();
     // The rows read carried the page's filters: the six stages, and status_change events only.
-    const apps = appsReads.at(-1);
+    /* The PAGE's read, picked by its own embed filter, never "the last applications read": since 2026-11-05
+       the AppShell rail badge also reads applications (status=in.(approved), via loadManualApply), and that
+       read sometimes landed last, so this test failed ~2 runs in 3 on a read that was not the page's. */
+    const apps = appsReads.filter((url) => url.searchParams.has('application_events.event_type')).at(-1);
     // A read happened.
     assert.ok(apps, 'the page must read applications');
     // The six post-apply stages, in pipeline order.

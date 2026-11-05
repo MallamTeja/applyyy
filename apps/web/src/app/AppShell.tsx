@@ -25,12 +25,12 @@ import {
   MISSING_HUMAN_CONTROLS,
   UNBUILT_HUMAN_CONTROLS,
 } from '../data/humanLanes';
-// The badge arithmetic: the two manual lanes plus open rows that have a kit, each row once.
+// The badge arithmetic: the Manual apply page's row count, or the lane counts when that read is unavailable.
 import { manualApplyCount } from '../features/manual-apply/applyKit';
-// The statuses of rows that have a kit, for that arithmetic.
-import { loadKitRowStatuses } from '../features/manual-apply/manualApplyData';
-// Type only: a status, for the kit-row state.
-import type { ApplicationStatus } from '../data/contract';
+// The page's own loader, so the badge counts the very rows the page lists (no second formula to drift).
+import { loadManualApply } from '../features/manual-apply/manualApplyData';
+// Type only: the page's row, for the badge state.
+import type { ManualApplyRow } from '../features/manual-apply/manualApplyData';
 import { useAuth } from '../data/useAuth';
 // Per-status counts from the application_status_counts RPC, read once here for the rail badge.
 import { useApplicationCounts } from '../data/useApplicationCounts';
@@ -56,22 +56,22 @@ export function AppShell(): ReactElement {
   /* Re-read on every navigation and on sign-in: the hook's first read can land before the session
      exists (it then reports no_session), and a resolve on System health changes the count. The extra
      read on mount is one tiny aggregate, cheaper than code to skip it. */
-  /* Statuses of the rows that have an apply kit; [] until read, and [] on a failed read (the badge
-     then counts the lanes alone, an undercount the Manual apply page itself corrects). */
-  const [kitStatuses, setKitStatuses] = useState<readonly ApplicationStatus[]>([]);
+  /* The rows the Manual apply page lists (lanes + every approved row, kit or not + open kit rows); null
+     until read and null on a failed read, so the badge falls back to the lane counts instead of a 0. */
+  const [pageRows, setPageRows] = useState<readonly ManualApplyRow[] | null>(null);
   useEffect(() => {
     // A fresh count for the page the operator just opened.
     refetchCounts();
     // Guards against a slow earlier read landing after a newer one.
     let live = true;
-    // The kit rows' statuses; never throws past this catch.
-    void loadKitRowStatuses().then((s) => { if (live) setKitStatuses(s); }).catch(() => { if (live) setKitStatuses([]); });
+    // The page's own reads; a reported error or a throw both become null (unknown), never an empty list.
+    void loadManualApply().then((r) => { if (live) setPageRows('error' in r ? null : r.rows); }).catch(() => { if (live) setPageRows(null); });
     // A newer navigation supersedes this read.
     return () => { live = false; };
   }, [pathname, auth.user?.id, refetchCounts]);
-  /* Jobs to apply to or check by hand. Only a successful count read counts: a failed or pending read
-     shows no badge rather than a made-up zero or a stale number. */
-  const needsYou = countState.kind === 'rows' ? manualApplyCount(counts, kitStatuses) : 0;
+  /* Jobs to apply to or check by hand: the page's row count when it was read, else the RPC's lane counts
+     when THAT read succeeded, else no badge rather than a made-up zero or a stale number. */
+  const needsYou = manualApplyCount(countState.kind === 'rows' ? counts : null, pageRows);
 
   /* Per-route tab title. Applied here rather than in each page because the
      shell is the one component every route renders through, so no page can
