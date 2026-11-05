@@ -107,6 +107,8 @@ describe('runKitSweep', () => {
       isSystemEnabled: async () => true,
       listRows: async () => [row('a', 'applying', '2026-10-24T08:00:00Z'), row('b', 'applying', '2026-10-24T09:00:00Z'), row('c', 'applying', '2026-10-24T10:00:00Z')],
       listKits: async () => [],
+      // K1: no answer or master time, so only the status change decides (these cases predate K1).
+      listInputTimes: async () => [],
       buildOne: async (id) => {
         // The middle row's form is down.
         if (id === 'b') throw new Error('page load timed out');
@@ -135,6 +137,8 @@ describe('runKitSweep', () => {
       isSystemEnabled: async () => true,
       listRows: async () => [row('a', 'applying', '2026-10-24T08:00:00Z'), row('b', 'applying', '2026-10-24T09:00:00Z'), row('c', 'applying', '2026-10-24T10:00:00Z')],
       listKits: async () => [],
+      // K1: no answer or master time, so only the status change decides (these cases predate K1).
+      listInputTimes: async () => [],
       buildOne: async (id) => { built.push(id); },
       cap: 1,
       // The run budget is not under test here: never out of time.
@@ -156,6 +160,8 @@ describe('runKitSweep', () => {
       isSystemEnabled: async () => true,
       listRows: async () => [row('a', 'applying', '2026-10-24T08:00:00Z')],
       listKits: async () => [kit('a', '2026-10-24T09:00:00Z')],
+      // K1: no answer or master time, so only the status change decides (these cases predate K1).
+      listInputTimes: async () => [],
       buildOne: async () => { throw new Error('must not be called'); },
       cap: 5,
       // The run budget is not under test here: never out of time.
@@ -177,6 +183,8 @@ describe('runKitSweep', () => {
       isSystemEnabled: async () => true,
       listRows: async () => [row('a', 'applying', '2026-10-24T08:00:00Z'), row('sent', 'applied', '2026-10-24T08:00:00Z')],
       listKits: async (ids) => { askedFor = ids; return []; },
+      // K1: no answer or master time, so only the status change decides (these cases predate K1).
+      listInputTimes: async () => [],
       buildOne: async () => {},
       cap: 5,
       // The run budget is not under test here: never out of time.
@@ -200,6 +208,8 @@ describe('runKitSweep', () => {
       // A due row exists, so only the switch can explain an empty run.
       listRows: async () => { touched.push('listRows'); return [row('a', 'applying', '2026-10-24T08:00:00Z')]; },
       listKits: async () => { touched.push('listKits'); return []; },
+      // K1: no answer or master time, so only the status change decides (these cases predate K1).
+      listInputTimes: async () => [],
       // A build is a page load on an employer's site: exactly what "off" forbids.
       buildOne: async (id) => { touched.push(`build:${id}`); },
       cap: 5,
@@ -225,6 +235,8 @@ describe('runKitSweep', () => {
       isSystemEnabled: async () => { throw new Error('isSystemEnabled failed: timeout'); },
       listRows: async () => { touched.push('listRows'); return [row('a', 'applying', '2026-10-24T08:00:00Z')]; },
       listKits: async () => { touched.push('listKits'); return []; },
+      // K1: no answer or master time, so only the status change decides (these cases predate K1).
+      listInputTimes: async () => [],
       buildOne: async (id) => { touched.push(`build:${id}`); },
       cap: 5,
       // The run budget is not under test here: never out of time.
@@ -319,6 +331,8 @@ describe('apply-kit run budget and self re-dispatch', () => {
       isSystemEnabled: async () => true,
       listRows: async () => [row('a', 'applying', '2026-10-24T08:00:00Z'), row('b', 'applying', '2026-10-24T09:00:00Z'), row('c', 'applying', '2026-10-24T10:00:00Z')],
       listKits: async () => [],
+      // K1: no answer or master time, so only the status change decides (these cases predate K1).
+      listInputTimes: async () => [],
       // The first build spends the budget.
       buildOne: async (id) => { built.push(id); spent = true; },
       // A batch big enough that only the budget can stop it.
@@ -403,6 +417,8 @@ describe('kit skips (B2)', () => {
       listRows: async () => [row('a', 'approved', '2026-10-24T08:00:00Z'), row('b', 'approved', '2026-10-24T09:00:00Z')],
       // No kits yet.
       listKits: async () => [],
+      // K1: no answer or master time, so only the status change decides (these cases predate K1).
+      listInputTimes: async () => [],
       // The first is robots-refused.
       buildOne: async (id) => { if (id === 'a') throw new KitSkip('robots_refused', 'robots.txt refused (HTTP 403)'); built.push(id); },
       // A big batch.
@@ -430,6 +446,8 @@ describe('kit skips (B2)', () => {
       listRows: async () => [row('a', 'approved', '2026-10-24T08:00:00Z')],
       // No kits yet.
       listKits: async () => [],
+      // K1: no answer or master time, so only the status change decides (these cases predate K1).
+      listInputTimes: async () => [],
       // Closed posting.
       buildOne: async () => { throw new KitSkip('posting_closed', 'no email field'); },
       // A big batch.
@@ -472,5 +490,97 @@ describe('kit skips (B2)', () => {
     await createSweepReader({ from: () => chain } as unknown as SupabaseLike).listKits(['a']);
     // Both note kinds.
     expect(calls).toContainEqual(['in', ['detail->>kind', ['apply_kit', 'apply_kit_skipped']]]);
+  });
+});
+
+// K1 (2026-11-06, Teja 23:47 "fix the bugs of kits"): Enterpret e1456a47 was kitted at 09:44Z, Teja answered
+// its Bangalore question at 15:15Z, and the kit kept saying "needs your answer": a kit was due again only
+// when the row's STATUS moved. A kit is built from the answer bank and the master too, so a newer answer or
+// master version makes every older kit due again.
+describe('kit inputs changed (K1)', () => {
+  // The Enterpret timeline: approved 11-04 19:34Z, kitted 11-05 09:44Z.
+  const approved = row('ent', 'approved', '2026-11-04T19:34:02Z');
+  // Its one kit note.
+  const oldKit = kit('ent', '2026-11-05T09:44:17Z');
+
+  test('a kit older than the newest answer or master is due again', () => {
+    // The answer landed at 15:15Z, after the kit: the kit is stale.
+    expect(selectKitCandidates([approved], [oldKit], 25, Date.parse('2026-11-05T15:15:49Z')).selected).toEqual(['ent']);
+  });
+
+  test('a kit newer than every input stays fresh', () => {
+    // The inputs last changed before the kit: nothing to rebuild.
+    expect(selectKitCandidates([approved], [oldKit], 25, Date.parse('2026-11-05T09:00:00Z')).selected).toEqual([]);
+  });
+
+  test('the sweep reads the inputs time and rebuilds the stale kit', async () => {
+    // The rows it built.
+    const built: string[] = [];
+    // One run over the Enterpret row.
+    await runKitSweep({
+      // The kill switch ON: this case is about the inputs.
+      isSystemEnabled: async () => true,
+      listRows: async () => [approved],
+      listKits: async () => [oldKit],
+      // The answer bank's newest edit and the master's newest version, as PostgREST prints them.
+      listInputTimes: async () => ['2026-11-05 15:15:49.089326+00', '2026-11-01 10:00:00+00'],
+      buildOne: async (id) => { built.push(id); },
+      cap: 25,
+      // Not under test.
+      outOfTime: () => false,
+      recordSkip: async () => {},
+      log: () => {},
+    });
+    // Rebuilt.
+    expect(built).toEqual(['ent']);
+  });
+
+  test('an unreadable inputs time stops the sweep before any kit', async () => {
+    // Read as "no constraint" it would leave stale kits; read as "changed now" it would rebuild every kit
+    // forever (each rebuilt kit is still not newer than junk), and the self re-dispatch would chain endlessly.
+    const built: string[] = [];
+    // One run with a junk time.
+    const run = runKitSweep({
+      isSystemEnabled: async () => true,
+      listRows: async () => [approved],
+      listKits: async () => [oldKit],
+      // Junk where a timestamp belongs.
+      listInputTimes: async () => ['-5'],
+      buildOne: async (id) => { built.push(id); },
+      cap: 25,
+      outOfTime: () => false,
+      recordSkip: async () => {},
+      log: () => {},
+    });
+    // Loud, named.
+    await expect(run).rejects.toThrow(/inputs time/);
+    // And nothing was built.
+    expect(built).toEqual([]);
+  });
+
+  test('the reader returns the newest answer edit and the newest master version', async () => {
+    // Each table answers with its own newest row.
+    const answers: Record<string, unknown> = { answer_bank: [{ updated_at: '2026-11-05 15:15:49+00' }], master_profiles: [{ created_at: '2026-11-01 10:00:00+00' }] };
+    // A chain per table, thenable like the PostgREST builder.
+    const client = {
+      from: (table: string) => {
+        // select/order/limit chain.
+        const chain: Record<string, unknown> = {};
+        for (const method of ['select', 'order', 'limit']) chain[method] = () => chain;
+        chain['then'] = (resolve: (value: unknown) => unknown) => resolve({ data: answers[table], error: null });
+        return chain;
+      },
+    } as unknown as SupabaseLike;
+    // Both times, verbatim.
+    expect(await createSweepReader(client).listInputTimes()).toEqual(['2026-11-05 15:15:49+00', '2026-11-01 10:00:00+00']);
+  });
+
+  test('a refused inputs read throws instead of reading as "never changed"', async () => {
+    // Every read refused.
+    const chain: Record<string, unknown> = {};
+    for (const method of ['select', 'order', 'limit']) chain[method] = () => chain;
+    chain['then'] = (resolve: (value: unknown) => unknown) => resolve({ data: null, error: { message: 'permission denied' } });
+    // Named.
+    await expect(createSweepReader({ from: () => chain } as unknown as SupabaseLike).listInputTimes()).rejects.toThrow(/read kit inputs failed: permission denied/);
   });
 });

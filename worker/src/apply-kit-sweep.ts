@@ -3,7 +3,9 @@
 //
 // A kit is due when a row waits on Teja (KIT_STATUSES) and has no kit newer than its last
 // status change: the row parked, got re-claimed, or moved lanes since it was kitted, so the
-// old kit may describe a different situation. The sweep finds those rows, builds a capped
+// old kit may describe a different situation. K1 (2026-11-06): it is also due when an answer was
+// edited or a master version saved after its newest kit, since the kit was planned from both
+// (Enterpret kept "needs your answer" after Teja answered). The sweep finds those rows, builds a capped
 // few per run (one browser, rows in turn), and never lets one failure stop the others.
 // It runs after every applier run (workflow_run) plus a daily backstop, so a parked row
 // gets its kit minutes later without anyone dispatching anything.
@@ -100,6 +102,9 @@ export interface RunKitSweepInput {
   readonly listRows: () => Promise<readonly SweepRow[]>;
   // The kit notes for exactly these ids.
   readonly listKits: (applicationIds: readonly string[]) => Promise<readonly KitStamp[]>;
+  // K1: the newest answer_bank.updated_at and the newest master_profiles.created_at (absent tables give
+  // nothing). REQUIRED, so a sweep that ignores changed answers does not compile.
+  readonly listInputTimes: () => Promise<readonly string[]>;
   // Builds one kit; buildApplyKit re-checks the status and the robots gate per row.
   readonly buildOne: (applicationId: string) => Promise<void>;
   // The most kits one run builds (25 since 2026-11-05: a batch, not a throughput limit; the rest go to
@@ -150,7 +155,9 @@ function readTime(value: string): number | null {
  * its status change. An unreadable status stamp makes it due (a kit we cannot prove fresh
  * is treated as missing); an unreadable kit stamp is ignored for the same reason.
  */
-export function selectKitCandidates(rows: readonly SweepRow[], kits: readonly KitStamp[], cap: number): { eligible: string[]; selected: string[] } {
+// K1: inputsChangedAt is the newest answer-bank edit or master version (ms), or null when neither exists.
+// A kit not newer than it is due again: it was planned from answers or a master that have since changed.
+export function selectKitCandidates(rows: readonly SweepRow[], kits: readonly KitStamp[], cap: number, inputsChangedAt: number | null = null): { eligible: string[]; selected: string[] } {
   // The newest readable kit per application; older and unreadable ones cannot make a row fresh.
   const newestKit = new Map<string, number>();
   // Every note, because the server's order is not trusted to be newest-first.
@@ -176,8 +183,8 @@ export function selectKitCandidates(rows: readonly SweepRow[], kits: readonly Ki
     const changed = readTime(row.statusChangedAt);
     // Its newest kit, if any.
     const kitAt = newestKit.get(row.id);
-    // Fresh only when both are readable and the kit came after the change.
-    const fresh = changed !== null && kitAt !== undefined && kitAt > changed;
+    // Fresh only when both are readable, the kit came after the change, and (K1) after the inputs last changed.
+    const fresh = changed !== null && kitAt !== undefined && kitAt > changed && (inputsChangedAt === null || kitAt > inputsChangedAt);
     // Not provably fresh means due; an unreadable change time sorts as the longest wait.
     if (!fresh) due.push({ id: row.id, since: changed ?? Number.NEGATIVE_INFINITY });
   }
@@ -208,8 +215,20 @@ export async function runKitSweep(input: RunKitSweepInput): Promise<SweepSummary
   const candidateIds = rows.filter((row) => KIT_STATUSES.includes(row.status)).map((row) => row.id);
   // No candidate, no second read.
   const kits = candidateIds.length === 0 ? [] : await input.listKits(candidateIds);
+  // K1: when the kits' inputs last changed; null when there is no answer and no master yet.
+  let inputsChangedAt: number | null = null;
+  // Read only when some row could be due, like the kit notes.
+  for (const raw of candidateIds.length === 0 ? [] : await input.listInputTimes()) {
+    // Shape-checked, never a lenient parse.
+    const at = readTime(raw);
+    // Junk must stop the run: ignoring it leaves stale kits, and trusting it as "now" rebuilds every kit
+    // on every run (a rebuilt kit is never newer than junk), which the self re-dispatch would chain forever.
+    if (at === null) throw new Error(`apply kit sweep: unreadable kit inputs time ${JSON.stringify(raw)}`);
+    // The newest of the two.
+    if (inputsChangedAt === null || at > inputsChangedAt) inputsChangedAt = at;
+  }
   // The due rows and this run's share.
-  const { eligible, selected } = selectKitCandidates(rows, kits, input.cap);
+  const { eligible, selected } = selectKitCandidates(rows, kits, input.cap, inputsChangedAt);
   // An empty sweep says so; a silent pass would look like a broken one.
   if (eligible.length === 0) {
     // The exact phrase a log search for "0 eligible" finds.
@@ -297,7 +316,7 @@ export function shouldRedispatch(summary: SweepSummary | 'skipped_disabled'): bo
 }
 
 /** The sweep's two reads over a supabase-js client; errors throw, since supabase-js returns them. */
-export function createSweepReader(client: SupabaseLike): Pick<RunKitSweepInput, 'listRows' | 'listKits'> {
+export function createSweepReader(client: SupabaseLike): Pick<RunKitSweepInput, 'listRows' | 'listKits' | 'listInputTimes'> {
   // Two reads, both over the signed-in client, so RLS bounds them to Teja's rows.
   return {
     // Every row in a lane that waits on Teja.
@@ -339,6 +358,25 @@ export function createSweepReader(client: SupabaseLike): Pick<RunKitSweepInput, 
       if (result.error) throw new Error(`apply kit sweep: read kit notes failed: ${result.error.message}`);
       // Narrowed to the sweep's shape.
       return (result.data ?? []).map((r: { application_id: string; created_at: string }) => ({ applicationId: r.application_id, createdAt: r.created_at }));
+    },
+    // K1: the newest answer edit and the newest master version, the two inputs every kit is planned from.
+    async listInputTimes() {
+      // Each table, its own time column; RLS bounds both to Teja's rows.
+      const sources = [['answer_bank', 'updated_at'], ['master_profiles', 'created_at']] as const;
+      // The times found, in that order.
+      const times: string[] = [];
+      // One small read per table: newest row only.
+      for (const [table, column] of sources) {
+        // Ordered newest-first so limit(1) sends one row.
+        const result = await client.from(table).select(column).order(column, { ascending: false }).limit(1);
+        // A refused read must not read as "never changed" (that leaves every stale kit in place).
+        if (result.error) throw new Error(`apply kit sweep: read kit inputs failed: ${result.error.message}`);
+        // The one row, if the table has any; an empty table adds nothing.
+        const newest = (result.data as Array<Record<string, unknown>> | null)?.[0]?.[column];
+        // Present: passed on as text for the caller's shape check; a non-string is reported, never dropped.
+        if (newest !== undefined) times.push(typeof newest === 'string' ? newest : JSON.stringify(newest));
+      }
+      return times;
     },
   };
 }
