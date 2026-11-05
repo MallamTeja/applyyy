@@ -49,10 +49,11 @@ describe('browser remote discovery is retired', () => {
   });
 
   it('the CSP connects only to the hosts the app still fetches (the three feed hosts are gone)', () => {
-    // The exact connect-src host list the app needs: Supabase (https + realtime) and the email
-    // tracker's Apps Script. api.ashbyhq.com left with the watchlist scan's browser fallback (W8,
-    // 2026-11-01): nothing in the browser fetches it, so the CSP no longer allows it.
-    const expected = ['https://script.google.com', 'https://script.googleusercontent.com', 'https://xynqxekcqizwhtskzqrq.supabase.co', "'self'", 'wss://xynqxekcqizwhtskzqrq.supabase.co'].sort();
+    // The exact connect-src host list the app needs: Supabase (https + realtime), nothing else.
+    // api.ashbyhq.com left with the watchlist scan's browser fallback (W8, 2026-11-01), and the
+    // two Apps Script hosts left on 2026-11-05 (P2 #9): gmail-sync took over the browser's
+    // email-tracker call on 2026-10-23, so nothing in apps/web/src fetches script.google.com.
+    const expected = ['https://xynqxekcqizwhtskzqrq.supabase.co', "'self'", 'wss://xynqxekcqizwhtskzqrq.supabase.co'].sort();
     // The root config is the only one: Vercel builds from the repo root, and the inert
     // apps/web/vercel.json duplicate was deleted 2026-10-24 so a CSP edit can't land in a dead file.
     const path = '../../../vercel.json';
