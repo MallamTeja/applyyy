@@ -18,8 +18,9 @@
 //   4. The prompt puts the stable parts first and the instruction LAST, so a second ask on the
 //      same resume shares the longest possible prefix with the first one: the part Gemini's
 //      implicit cache can bill at a discount.
-//   5. One retry at most and a short timeout: this is an interactive click, and four slow
-//      attempts would cost four calls for an answer the operator stopped waiting for.
+//   5. Two retries at most and a short timeout: this is an interactive click, and four slow
+//      attempts would cost four calls for an answer the operator stopped waiting for. Two, not
+//      one, since 2026-11-05: both Gemini models 503'd in the same minute (13:17) and one retry gave up.
 //
 // REASONS, REMOVES AND THE JD (2026-11-04). Live evidence that day: the reply said "I have added C to
 // the Languages skill group" while that op was dropped, "I removed the duplicate testing skill" came
@@ -1208,8 +1209,8 @@ export async function handleResumeAssist(req: Request, deps: AssistDeps): Promis
     generation: { maxOutputTokens: MAX_OUTPUT_TOKENS, thinkingLevel: THINKING_LEVEL },
     // Interactive: give up after 20 s rather than the default 25 s x 4.
     timeoutMs: 20_000,
-    // One retry covers a blip; more would bill the operator for patience they no longer have.
-    maxRetries: 1,
+    // Two retries ride out a same-minute 503 on both models (13:17, 2026-11-05); more would bill patience the operator no longer has.
+    maxRetries: 2,
   });
   // Every key cooling or the daily budget spent.
   if (!outcome.ok && outcome.reason === "all_keys_cooling") return json(429, { status: "quota", message: "The AI quota is used up for now. Try again later." });

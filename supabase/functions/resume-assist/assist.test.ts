@@ -247,10 +247,10 @@ test("handler returns validated ops and usage, with every cost lever set", async
   assert.deepEqual(out.ops, [{ op: "remove", id: "b0" }]);
   // Usage carried through, unknowns as null.
   assert.deepEqual(out.usage, { input: 300, cached: null, output: null, thinking: null });
-  // Output and thinking capped, one retry, short timeout.
+  // Output and thinking capped, two retries, short timeout.
   assert.deepEqual(d.calls[0]?.generation, { maxOutputTokens: MAX_OUTPUT_TOKENS, thinkingLevel: "low" });
-  // One retry at most.
-  assert.equal(d.calls[0]?.maxRetries, 1);
+  // Two retries (2026-11-05): both Gemini models 503'd in the same minute at 13:17, and one retry gave up.
+  assert.equal(d.calls[0]?.maxRetries, 2);
 });
 
 test("handler names a truncated answer and a spent quota", async () => {
