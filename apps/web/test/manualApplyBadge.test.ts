@@ -38,6 +38,12 @@ const row = (over: Record<string, unknown> = {}) => ({
   stamp: '2026-11-05T09:10:00.123456+00:00',
   // The approve time an approved row carries.
   approvedAt: '2026-11-05T09:10:00.123456+00:00',
+  // No tailored resume: these cases are about the kit and the resolves, not the resume block.
+  resume: null,
+  // The job embed's title and company, apart.
+  jobTitle: 'Intermediate Backend Engineer, India',
+  // Same, the company.
+  company: 'GitLab',
   // Per-case overrides.
   ...over,
 });

@@ -683,8 +683,8 @@ describe('Playwright E2E Operator Console Suite', () => {
     const count = (request: Request): void => {
       // Parsed so the filter is read as a parameter, not a substring.
       const url = new URL(request.url());
-      // The kit-notes read: application_events filtered to detail->>kind = apply_kit.
-      if (url.pathname.endsWith('/rest/v1/application_events') && url.searchParams.get('detail->>kind') === 'eq.apply_kit') kitReads += 1;
+      // The kit-notes read: application_events filtered to detail->>kind in (apply_kit, apply_kit_skipped).
+      if (url.pathname.endsWith('/rest/v1/application_events') && url.searchParams.get('detail->>kind') === 'in.(apply_kit,apply_kit_skipped)') kitReads += 1;
     };
     // Network-level, so a read is counted whichever render made it.
     page.on('request', count);

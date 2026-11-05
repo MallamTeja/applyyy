@@ -38,8 +38,11 @@ import { MANUAL_ACTION_STATUSES, screenMoves } from '../../data/humanLanes';
 import { RecoveryMoves, RecoveryNotes, RecoveryQueue, manualActionMeaning, manualActionVerb, useRecoveryMoves } from '../health/RecoveryQueue';
 // The kit's "Copy all" text.
 import { copyAllText } from './applyKit';
-// Types only: a kit, a field and the per-application state.
-import type { ApplyKit, KitField, KitState } from './applyKit';
+// Types only: a kit, a field, the per-application state and a skip code.
+import type { ApplyKit, KitField, KitSkipCode, KitState } from './applyKit';
+// The Approval page's tailored-resume preview with its Download PDF, reused whole (never forked) so the
+// resume printed here is byte-for-byte the one approved.
+import { ResumePreview } from '../resume-preview/ResumePreview';
 // The page's reads.
 import { loadManualApply } from './manualApplyData';
 // Type only: one row.
@@ -182,6 +185,46 @@ function ApproveTime(props: { readonly at: string | null }): ReactElement {
   return <time dateTime={props.at}>{new Date(props.at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}</time>;
 }
 
+/* The card's sentence for each skip code. A Record over the closed union, so a new code fails tsc here
+   until it is given words. */
+const SKIP_WORDS: Readonly<Record<KitSkipCode, string>> = {
+  // The site's robots.txt refuses automated visits, so the worker never opened the form.
+  robots_refused: 'Site refuses bots: apply by hand.',
+  // The worker found the posting closed; it may have reopened, so the form link stays.
+  posting_closed: 'Posting closed: check the form, and mark it failed if it is gone.',
+};
+
+/* The row's own tailored resume, kit or no kit (Teja, 2026-11-05: "the tailored resume must be there in
+   the Manual apply section, kit or no kit"). Built in the browser from applications.tailored_profile and
+   its pinned master by the shared ResumePreview, whose Download PDF prints it. Open by default: it is the
+   one thing every manual application needs. */
+function TailoredResume(props: { readonly row: ManualApplyRow }): ReactElement {
+  // Destructured for readability.
+  const { row } = props;
+  // No valid snapshot: said, never a master shown under this job's name (resumeSnapshot.ts explains why).
+  if (row.resume === null) return <p className="panel__note" role="note">No tailored resume on this row, so there is nothing to download here.</p>;
+  return (
+    /* Native details: keyboard-operable, and collapsible once the PDF is saved. */
+    <details className="kit-card__resume" open>
+      {/* Names both things the block offers. */}
+      <summary>Tailored resume: preview and Download PDF</summary>
+      {/* The same props the Applied page and the pipeline drawer pass. */}
+      <ResumePreview
+        /* The row the preview belongs to, for unique element ids. */
+        applicationId={row.id}
+        /* The shape-checked snapshot. */
+        tailoredProfile={row.resume}
+        /* Its own pinned master version, so a later master edit cannot change what is printed. */
+        masterVersion={row.resume.master_version}
+        /* "—" for a missing job embed, never "null". */
+        jobTitle={row.jobTitle ?? '—'}
+        /* Same fallback as the title. */
+        companyName={row.company ?? '—'}
+      />
+    </details>
+  );
+}
+
 /* One job's card. Pure: everything arrives as props, so a static render tests exactly what is shown.
    `resolve` is required, so a card can never be drawn with its resolve buttons silently missing. */
 export function KitCard(props: { readonly row: ManualApplyRow; readonly kit: KitState; readonly resolve: KitResolve }): ReactElement {
@@ -214,6 +257,8 @@ export function KitCard(props: { readonly row: ManualApplyRow; readonly kit: Kit
         {/* Copy every answer at once, for pasting into notes or a long form. */}
         {kit.kind === 'kit' ? <CopyButton text={copyAllText(kit.kit)} what="all answers" /> : null}
       </div>
+      {/* The tailored resume, whatever the kit's state. */}
+      <TailoredResume row={row} />
       {/* After applying by hand: record it here. At applying the worker owns the row, which is said. */}
       {row.status === 'applying' ? (
         /* No button: a human move out of applying would race a live submit. */
@@ -228,8 +273,14 @@ export function KitCard(props: { readonly row: ManualApplyRow; readonly kit: Kit
           <RecoveryMoves confirmId={`kit:${row.status}:${row.id}`} status={row.status} row={row} moves={moves} verb={manualActionVerb} meaning={manualActionMeaning} locked={resolve.locked} frozen={resolve.frozen} lease={null} onMove={resolve.onMove} />
         </div>
       ) : null}
-      {/* The kit body: none, unreadable, or the full form. Never a partial form. */}
-      {kit.kind === 'none' && row.status === 'approved' ? (
+      {/* The kit body: skipped, none, unreadable, or the full form. Never a partial form. */}
+      {kit.kind === 'skipped' ? (
+        /* The worker refused the kit; without this the row read "Kit pending" forever. role=status so it is announced. */
+        <p className="panel__note" role="status">
+          {/* The code's sentence, then the worker's own detail when it gave one. */}
+          <strong>Kit skipped.</strong> {SKIP_WORDS[kit.code]}{kit.reason !== '' ? <span className="kit-card__skip-reason"> ({kit.reason})</span> : null}
+        </p>
+      ) : kit.kind === 'none' && row.status === 'approved' ? (
         /* Approved, kit on its way: dispatch-apply starts the kit workflow on approve (5c3ce87), so this is
            a wait, not a fault. role=status so the state is announced; the kit-only actions above are absent. */
         <p className="panel__note" role="status">

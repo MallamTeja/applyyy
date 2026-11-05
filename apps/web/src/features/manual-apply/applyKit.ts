@@ -55,14 +55,38 @@ export interface ApplyKit {
   readonly warnings: readonly string[];
 }
 
-/* What the page knows about one application's kit. Three states, never a partial kit. */
+/* What the page knows about one application's kit. Four states, never a partial kit. */
 export type KitState =
   // No kit event for this application yet.
   | { readonly kind: 'none' }
   // The newest kit event failed validation; `reason` says which part.
   | { readonly kind: 'unreadable'; readonly reason: string }
   // A fully valid kit.
-  | { readonly kind: 'kit'; readonly kit: ApplyKit };
+  | { readonly kind: 'kit'; readonly kit: ApplyKit }
+  // The worker refused to build a kit (worker/src/apply-kit.ts KitSkip); the row is applied to by hand.
+  | { readonly kind: 'skipped'; readonly code: KitSkipCode; readonly reason: string };
+
+/* Why the worker skipped a kit: a CLOSED list mirroring worker/src/apply-kit.ts KitSkip['code'], so a
+ * new worker code shows as "unreadable" (and gets noticed) instead of a guessed sentence. */
+export const KIT_SKIP_CODES = ['robots_refused', 'posting_closed'] as const;
+// The union of the closed list above.
+export type KitSkipCode = (typeof KIT_SKIP_CODES)[number];
+
+/* An `apply_kit_skipped` note (written by worker/src/cli/apply-kit.ts as { kind, code, reason }), proven,
+ * or the first reason it is not one. Shape-checked like a kit: a skip note with a blank or unknown code
+ * must not read as a known skip (§6: a lenient read of missing data becomes an answer). */
+export function parseKitSkip(detail: unknown): { readonly ok: true; readonly code: KitSkipCode; readonly reason: string } | { readonly ok: false; readonly reason: string } {
+  // The payload must be an object.
+  if (!isRecord(detail)) return { ok: false, reason: 'detail is not an object' };
+  // The discriminator; the read filters on it, but the parse does not trust the filter.
+  if (detail['kind'] !== 'apply_kit_skipped') return { ok: false, reason: 'not an apply_kit_skipped' };
+  // Only a code on the closed list is a known skip.
+  const code = detail['code'];
+  // Unknown or missing: said, with the raw value, so the gap is visible.
+  if (!(KIT_SKIP_CODES as readonly unknown[]).includes(code)) return { ok: false, reason: `unknown skip code ${JSON.stringify(code)}` };
+  // The worker's own sentence is optional detail; the code alone decides the card's wording.
+  return { ok: true, code: code as KitSkipCode, reason: typeof detail['reason'] === 'string' ? detail['reason'] : '' };
+}
 
 // The closed sets, as runtime lists for the membership checks.
 const SOURCES: ReadonlySet<string> = new Set(['identity', 'tailored', 'answer_bank', 'derived', 'unanswered']);
@@ -178,7 +202,16 @@ export function newestKitStates(events: unknown): ReadonlyMap<string, KitState> 
     if (prev === undefined || at > prev.at) newest.set(e.application_id, { at, detail: e.detail });
   }
   // Each application's newest event, parsed whole.
-  return new Map([...newest].map(([id, { detail }]) => {
+  return new Map([...newest].map(([id, { detail }]): readonly [string, KitState] => {
+    // A skip note is the newest word on this row: the kit was refused, so it is parsed as a skip.
+    if (isRecord(detail) && detail['kind'] === 'apply_kit_skipped') {
+      // Proven, or unreadable with the reason.
+      const skip = parseKitSkip(detail);
+      // Skipped with its code, or why the note could not be read.
+      const skipState: KitState = skip.ok ? { kind: 'skipped', code: skip.code, reason: skip.reason } : { kind: 'unreadable', reason: skip.reason };
+      // Keyed by application.
+      return [id, skipState] as const;
+    }
     // All-or-nothing.
     const parsed = parseApplyKit(detail);
     // A kit, or why not.

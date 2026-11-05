@@ -20,6 +20,10 @@ import { rowLabel } from '../health/RecoveryQueue';
 import { isOpenKitStatus, newestKitStates } from './applyKit';
 // Type only: the per-application kit state.
 import type { KitState } from './applyKit';
+// The tailored resume shape check the Applied page and pipeline drawer use, so every page agrees on "has a resume".
+import { readResumeSnapshot } from '../pipeline/resumeSnapshot';
+// Type only: the frozen render input ResumePreview takes.
+import type { ResolvedResume } from '../../data/contract';
 
 /* One job on the Manual apply page. */
 export interface ManualApplyRow {
@@ -36,6 +40,13 @@ export interface ManualApplyRow {
   // When the row was approved (applications.status_changed_at) for an `approved` row; null at any other
   // status. Raw, as returned: the card proves its shape before showing it ("Kit pending, approved <time>").
   readonly approvedAt: string | null;
+  // The row's own tailored resume (applications.tailored_profile), shape-checked; null when it has none.
+  // Read on the row, not from the kit, so the resume is on the card whether or not a kit exists (Teja, 2026-11-05).
+  readonly resume: ResolvedResume | null;
+  // The job's title and company, apart, for the resume preview's heading and its PDF filename; null when the job embed lacks them.
+  readonly jobTitle: string | null;
+  // Same, the company.
+  readonly company: string | null;
 }
 
 // A Set for the status membership test.
@@ -44,29 +55,30 @@ const KNOWN: ReadonlySet<string> = new Set(APPLICATION_STATUSES);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // The columns every application read needs; status_changed_at is the approve time of an approved row
 // (the transition trigger sets it only when the status changes, so later edits do not move it).
-const ROW_SELECT = 'id, status, updated_at, status_changed_at, jobs:job_id(title, company_name, apply_url)';
+// tailored_profile is the resume the card previews and prints (P1, 2026-11-05). Exported for the test that pins it.
+export const ROW_SELECT = 'id, status, updated_at, status_changed_at, tailored_profile, jobs:job_id(title, company_name, apply_url)';
 // Bounds every read; far above any real manual queue, so it only stops a pathological table.
 const READ_CAP = 200;
 
-/* One raw application row, validated, or null. */
-function parseRow(raw: unknown): ManualApplyRow | null {
+/* One raw application row, validated, or null. Exported so the test proves the resume and job fields map. */
+export function parseRow(raw: unknown): ManualApplyRow | null {
   // Loose read, then proven.
-  const r = raw as { id?: unknown; status?: unknown; updated_at?: unknown; status_changed_at?: unknown; jobs?: unknown } | null;
+  const r = raw as { id?: unknown; status?: unknown; updated_at?: unknown; status_changed_at?: unknown; tailored_profile?: unknown; jobs?: unknown } | null;
   // An id, a known status and the stamp are required; a row without them cannot be resolved safely.
   if (typeof r?.id !== 'string' || typeof r.status !== 'string' || !KNOWN.has(r.status) || typeof r.updated_at !== 'string') return null;
   // The joined job, tolerating the to-many array shape like rowLabel does.
-  const job = (Array.isArray(r.jobs) ? r.jobs[0] : r.jobs) as { apply_url?: unknown } | null | undefined;
+  const job = (Array.isArray(r.jobs) ? r.jobs[0] : r.jobs) as { apply_url?: unknown; title?: unknown; company_name?: unknown } | null | undefined;
   // The approve time: meaningful only while the row sits at approved (at other statuses it is when THAT status began).
   const approvedAt = r.status === 'approved' && typeof r.status_changed_at === 'string' ? r.status_changed_at : null;
   // Shaped for the card.
-  return { id: r.id, status: r.status as ApplicationStatus, label: rowLabel(r.id, r.jobs), applyUrl: typeof job?.apply_url === 'string' ? job.apply_url : null, stamp: r.updated_at, approvedAt };
+  return { id: r.id, status: r.status as ApplicationStatus, label: rowLabel(r.id, r.jobs), applyUrl: typeof job?.apply_url === 'string' ? job.apply_url : null, stamp: r.updated_at, approvedAt, resume: readResumeSnapshot(r.tailored_profile), jobTitle: typeof job?.title === 'string' ? job.title : null, company: typeof job?.company_name === 'string' ? job.company_name : null };
 }
 
 /* The kit events, newest first, as one exact-filtered read. */
 async function readKitEvents(): Promise<{ readonly states: ReadonlyMap<string, KitState> } | { readonly error: string }> {
   // No client: a reported failure, not an empty page.
   if (supabase === null) return { error: 'Not connected to the database.' };
-  // Notes of kind apply_kit only, newest first.
+  // Notes of kind apply_kit or apply_kit_skipped, newest first: the newest of the two decides the card.
   const { data, error } = await supabase
     // The append-only log, under RLS ("read own events").
     .from('application_events')
@@ -74,8 +86,9 @@ async function readKitEvents(): Promise<{ readonly states: ReadonlyMap<string, K
     .select('application_id, created_at, detail')
     // Kits are written as notes.
     .eq('event_type', 'note')
-    // Of this kind only (a JSON path filter, evaluated by PostgREST).
-    .eq('detail->>kind', 'apply_kit')
+    // Of these two kinds only (a JSON path filter, evaluated by PostgREST). The skip note is read so a
+    // row whose kit the worker refused says why, instead of "Kit pending" forever (2026-11-05).
+    .in('detail->>kind', ['apply_kit', 'apply_kit_skipped'])
     // Newest first, so the cap keeps the useful end.
     .order('created_at', { ascending: false })
     // Bounded.

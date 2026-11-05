@@ -48,6 +48,12 @@ const row = (over: Record<string, unknown> = {}) => ({
   applyUrl: 'https://job-boards.greenhouse.io/gitlab/jobs/8775507002',
   stamp: '2026-11-05T09:10:00.123456+00:00',
   approvedAt: APPROVED_AT,
+  // No tailored resume: these cases are about the kit and the resolves, not the resume block.
+  resume: null,
+  // The job embed's title and company, apart.
+  jobTitle: 'Intermediate Backend Engineer, India',
+  // Same, the company.
+  company: 'GitLab',
   ...over,
 });
 

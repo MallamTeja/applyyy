@@ -61,6 +61,12 @@ const row = (applyUrl: string | null = 'https://job-boards.greenhouse.io/gitlab/
   label: 'Intermediate Backend Engineer, India at GitLab',
   applyUrl,
   stamp: '2026-10-24T08:10:00.000000+00:00',
+  // No tailored resume: these cases are about the kit and the resolves, not the resume block.
+  resume: null,
+  // The job embed's title and company, apart.
+  jobTitle: 'Intermediate Backend Engineer, India',
+  // Same, the company.
+  company: 'GitLab',
 });
 
 // One card, rendered inside a router.
