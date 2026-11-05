@@ -938,3 +938,39 @@ test("match-only: the replay's re-match links a stored email to an approved row 
   // Linked; the move is a separate question statusMoveFor refuses.
   assert.deepEqual(links, [{ eventId: "ev-hr", applicationId: "hr-1" }]);
 });
+
+// ---- A receipt that DESCRIBES the process is not an assessment invite (2026-11-05) ---------------
+// Live: HackerRank's receipt (f34b7156) was stored as oa_invite at confidence 1.0. Its body says "If you
+// are shortlisted, you will receive a take-home assignment" (technical_assessment, 0.95) and the employer
+// IS HackerRank (assessment-platform boost +0.6). Once linked and marked applied, the replay would have
+// driven applied -> oa_pending from a receipt. In a receipt, screening now needs a direct invitation.
+
+// The stored row, verbatim (trimmed of its social links, which change nothing).
+const HACKERRANK_RECEIPT = {
+  from: "no-reply@hackerrankcareers.com",
+  subject: "Exciting News: We have received your Application || AI Researcher Intern || HackerRank",
+  snippet: "Hi Teja, We greatly appreciate your interest in AI Researcher Intern role at HackerRank. Your application has been received, and we're excited to move forward with our selection process. Our team will carefully review your application within 1 week. If you are shortlisted, you will receive a take-home assignment as the next step in the process. If you do not hear from us within this timeframe, it means we are unable to proceed with your application at this time. Also, don't miss \"What's new on HackerRank! ( https://www.hackerrank.com/whats-new/ )\" Thank you again for considering HackerRank, and we wish you the best of luck in your application process. Thank you, HackerRank Talent Team",
+};
+
+test("receipt: HackerRank's 'we have received your application' is application_received, not oa_invite", () => {
+  // The live email.
+  const decision = classifyMessage(HACKERRANK_RECEIPT);
+  // A receipt.
+  assert.equal(decision.classification, "application_received");
+  // Which moves nothing.
+  assert.equal(targetStatusFor(decision.classification), null);
+});
+
+test("receipt control: a real HackerRank test invitation stays oa_invite", () => {
+  // No receipt wording; a direct invitation with the test link.
+  const decision = classifyMessage({ from: "HackerRank <support@hackerrankforwork.com>", subject: "Acme has invited you to take a test", snippet: "Hi Teja, Acme has invited you to complete your HackerRank assessment for the Backend Engineer role. Start the test: https://www.hackerrank.com/tests/abc123/login" });
+  // Still an assessment invite.
+  assert.equal(decision.classification, "oa_invite");
+});
+
+test("receipt control: a receipt that ALSO invites to the assessment stays oa_invite", () => {
+  // Receipt wording plus a direct invitation: the invitation is the news.
+  const decision = classifyMessage({ from: "Acme Careers <careers@acme.com>", subject: "Thank you for applying to Acme", snippet: "Thank you for applying. As the next step, please complete your HackerRank assessment within 5 days: https://www.hackerrank.com/tests/xyz/login" });
+  // The invitation wins.
+  assert.equal(decision.classification, "oa_invite");
+});

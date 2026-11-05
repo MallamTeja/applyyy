@@ -447,11 +447,20 @@ export function classifyEmail(parsed: ParsedEmail): OutcomeClassification {
     structuralMatches.push(`detected_scheduling_url:${parsed.detectedSchedulingUrl}`);
   }
 
-  // Initialize boosted screening score with raw keyword match score.
-  let boostedScreeningScore = screening.score;
+  // A RECEIPT DESCRIBES THE PROCESS; IT DOES NOT INVITE (2026-11-05). HackerRank's own receipt ("Your
+  // application has been received ... If you are shortlisted, you will receive a take-home assignment")
+  // scored technical_assessment 0.95 plus the platform boost (the employer IS HackerRank) and was stored
+  // as oa_invite at 1.0; linked and marked applied, the replay would have moved it to oa_pending. So when
+  // the parser reads the email as a receipt (its own AUTO_REPLY_PATTERNS), screening counts only on a
+  // DIRECT invitation (assessment_platform_invite: "complete your HackerRank ...", "assessment
+  // invitation"), and a platform's name alone adds nothing.
+  const receiptWithoutInvite = parsed.isAutoReplyOrConfirmation && !screening.matches.includes("assessment_platform_invite");
 
-  // Check if a technical assessment platform (e.g. HackerRank, CodeSignal) was extracted by parser.
-  if (parsed.detectedAssessmentPlatform !== null) {
+  // Initialize boosted screening score with raw keyword match score; zero for a receipt that only describes the process.
+  let boostedScreeningScore = receiptWithoutInvite ? 0 : screening.score;
+
+  // Check if a technical assessment platform (e.g. HackerRank, CodeSignal) was extracted by parser; never for such a receipt.
+  if (parsed.detectedAssessmentPlatform !== null && !receiptWithoutInvite) {
     // Increase screening score by 0.6 boost factor, capped at 1.0 maximum limit.
     boostedScreeningScore = Math.min(1.0, boostedScreeningScore + 0.6);
     // Add assessment platform tag to structural matches list for auditability.
