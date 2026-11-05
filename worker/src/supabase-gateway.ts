@@ -29,6 +29,8 @@ import type { AgentName, ApplicationStatus, AtsProvider, MasterProfile, Resolved
 // UnusableClaim is the W4 shape for a claimed row with nowhere to go (lease kept, never opened).
 import type { RunGateway, UnusableClaim } from './claim-loop.ts';
 import type { ClaimedApplication } from './apply-one.ts';
+// B2 (P1-6): the auditor's config loader and job shape, reused rather than re-implemented.
+import { loadPreGatePreferences, type AuditorJobEmbed, type ConfigReader } from '../../supabase/functions/auditor/pregate.ts';
 
 /** What a Supabase-shaped client must offer. Deliberately minimal. */
 export interface SupabaseLike {
@@ -272,9 +274,11 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
         // <company>?", and a second round trip per batch would buy nothing.
         // ats_provider rides it too (2026-11-01): apply-one parks Workday jobs, and a tenant
         // fronted on careers.company.com is recognisable only by this column, not its URL.
-        await client.from('jobs').select('id, apply_url, disappeared_at, company_name, ats_provider').in('id', jobIds),
+        // B2 (P1-6, 2026-11-05): the four pre-gate fields and the human-picked marker ride it too, so the
+        // re-check before a live submit judges the job with no second read.
+        await client.from('jobs').select('id, apply_url, disappeared_at, company_name, ats_provider, title, description_raw, location_raw, min_experience_years, discovered_via').in('id', jobIds),
         'claimApplications: read jobs.apply_url',
-      ) as Array<{ id: string; apply_url: string | null; disappeared_at?: string | null; company_name?: string | null; ats_provider?: AtsProvider | null }> | null;
+      ) as Array<{ id: string; apply_url: string | null; disappeared_at?: string | null; company_name?: string | null; ats_provider?: AtsProvider | null } & Partial<AuditorJobEmbed>> | null;
       // Keyed by job id so each claimed row finds its URL in one lookup.
       const urlByJobId = new Map((jobs ?? []).map((job) => [job.id, job.apply_url]));
       // Keyed the same way, whole record kept so the loop can test key PRESENCE.
@@ -364,6 +368,8 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
             // The job's ATS, for the Workday guard. `??` so an absent key and SQL NULL both
             // read as null ("no provider"); the guard's host check still runs on null.
             atsProvider: jobById.get(row.job_id)?.ats_provider ?? null,
+            // B2: ALWAYS set (null when the job is missing), so the re-check can tell "no job" from a fake.
+            preGateJob: preGateJobOf(jobById.get(row.job_id)),
           };
         },
       );
@@ -423,6 +429,13 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
     // W10: the Settings daily cap and what already went out in the window. Every failure
     // THROWS, because the loop reads a throw as "submit nothing" and any quiet default here
     // would read as "no cap" (CLAUDE.md §6: validate the positive shape).
+    // B2 (P1-6): today's pre-gate config, read exactly as the auditor reads it (peer 3's loader). The
+    // cast: supabase-js's builder types are too deep for TS to match against ConfigReader (TS2589).
+    async loadPreGatePreferences() {
+      // RLS scopes both reads to the signed-in app user.
+      return loadPreGatePreferences(client as unknown as ConfigReader);
+    },
+
     async fetchDailyCap(sinceIso) {
       // This user's row only: two users share system_settings live.
       const settings = unwrap(
@@ -669,4 +682,13 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
       expiresAtEpochSeconds = data.session?.expires_at ?? 0;
     },
   };
+}
+
+/* B2 (P1-6): the claimed row's job as the re-check reads it, or null when the job row was missing.
+   Each field defaulted to null, never "", so an absent value stays "unknown" to the gates. */
+function preGateJobOf(job: (Partial<AuditorJobEmbed> & { id: string }) | undefined): AuditorJobEmbed | null {
+  // No job row: the re-check refuses the row (job_unreadable).
+  if (job === undefined) return null;
+  // The five fields the auditor's pre-gate reads.
+  return { title: job.title ?? null, description_raw: job.description_raw ?? null, location_raw: job.location_raw ?? null, min_experience_years: job.min_experience_years ?? null, discovered_via: job.discovered_via ?? null };
 }

@@ -253,6 +253,13 @@ verify_jwt = true
 # authorizeCaller() inside is what stops anonymous calls before any quota is spent.
 verify_jwt = true
 
+# New function (2026-11-05, P1-6 apply on approve): the approval page calls it once after an
+# approve, with the signed-in user's JWT; it starts apply.yml as a live drain via a repo-scoped PAT.
+[functions.dispatch-apply]
+# True: the gateway rejects TOKENLESS calls; authorizeCaller() inside is the real gate (the anon
+# key is a signed JWT and passes verify_jwt), so no anonymous caller can start the applier.
+verify_jwt = true
+
 # New function (2026-10-31), not yet deployed, so there is no live value to match.
 # The browser calls it through functions.invoke('job-link-intake') from AddJobLinkPanel with the
 # signed-in user's JWT; it fetches arbitrary pasted links and spends Gemini quota, so a

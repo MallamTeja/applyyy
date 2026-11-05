@@ -452,11 +452,30 @@ describe('createSupabaseGateway.claimApplications', () => {
     // The URL must come from the join; '' here is the bug.
     expect(claimed).toEqual([
       // employerName is the trimmed jobs.company_name, the planner's "previously worked at" input.
-      { id: 'app-1', status: 'approved', applyUrl: 'https://boards.example/apply/1', tailoredProfile: null, employerName: 'GitLab', atsProvider: null },
+      // preGateJob (B2, P1-6): always set; every field null here because this job read carried none of them.
+      { id: 'app-1', status: 'approved', applyUrl: 'https://boards.example/apply/1', tailoredProfile: null, employerName: 'GitLab', atsProvider: null, preGateJob: { title: null, description_raw: null, location_raw: null, min_experience_years: null, discovered_via: null } },
     ]);
     // Asked for by id, for exactly the claimed rows' jobs.
     // company_name rides the same read, so the employer costs no extra round trip.
-    expect(jobQueries).toEqual([{ columns: 'id, apply_url, disappeared_at, company_name, ats_provider', column: 'id', ids: ['job-1'] }]);
+    // The pre-gate fields ride it too (B2, P1-6), so the re-check before a live submit needs no second read.
+    expect(jobQueries).toEqual([{ columns: 'id, apply_url, disappeared_at, company_name, ats_provider, title, description_raw, location_raw, min_experience_years, discovered_via', column: 'id', ids: ['job-1'] }]);
+  });
+
+  // B2 (P1-6, 2026-11-05): the re-check judges the job with the values the database holds.
+  it("carries the job's pre-gate fields onto the claimed row as preGateJob", async () => {
+    // A job with every field the auditor's pre-gate reads.
+    const { client } = claimClient(
+      // The claimed row, real wire shape.
+      [{ id: 'app-1', job_id: 'job-1', tailored_profile: null }],
+      // The job row with its gate fields.
+      { data: [{ id: 'job-1', apply_url: 'https://boards.example/apply/1', disappeared_at: null, company_name: 'Acme', title: 'Software Engineer', description_raw: 'Requires 8+ years.', location_raw: 'Pune, India', min_experience_years: 8, discovered_via: ['scout-ats'] }], error: null },
+    );
+    // The gateway under test.
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+    // One claim.
+    const [row] = await gateway.claimApplications('applier:run-1', 5);
+    // Verbatim: the gate reads exactly these.
+    expect(row !== undefined && 'preGateJob' in row ? row.preGateJob : 'missing').toEqual({ title: 'Software Engineer', description_raw: 'Requires 8+ years.', location_raw: 'Pune, India', min_experience_years: 8, discovered_via: ['scout-ats'] });
   });
 
   // THE PROVIDER HALF OF THE WORKDAY GUARD (2026-11-01): apply-one parks a row whose job is

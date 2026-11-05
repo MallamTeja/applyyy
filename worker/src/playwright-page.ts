@@ -62,6 +62,10 @@ const BLOCKER_SELECTORS: ReadonlyArray<readonly [string, BlockReason]> = [
  * above: reCAPTCHA pre-renders its challenge frame hidden, and only showing it
  * means Google is actually asking.
  */
+/* B2 (P1-6, 2026-11-05): the sentences ATS boards print on a closed posting. Whole phrases, so a
+   job description that merely mentions "expired" or "filled" does not match. Case-insensitive. */
+export const CLOSED_POSTING = /no longer accepting applications|(?:this |the )?(?:position|role|job) has been filled|(?:this |the )?(?:job|position|posting)(?: posting)? is no longer (?:available|open|active)|this job (?:has )?(?:expired|closed)|job not found|(?:the )?page you(?:'re| are) looking for (?:could not|cannot|can't) be found/i;
+
 const VISIBLE_CHALLENGE_SELECTORS: readonly string[] = [
   // reCAPTCHA's challenge frame ("bframe"), standard and enterprise endpoints.
   'iframe[src*="recaptcha"][src*="/bframe"]',
@@ -421,13 +425,34 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
     // No challenge frame is showing.
     return false;
   }
+  // B2 (P1-6): the HTTP status of the last goto, for postingClosed. null before any goto, or when
+  // Playwright returned no response (a same-document navigation).
+  let lastStatus: number | null = null;
 
   return {
     async goto(url: string) {
       // `domcontentloaded` rather than `networkidle`: ATS boards keep analytics
       // sockets open indefinitely, so waiting for idle would burn the whole
       // per-application budget on pages that are already interactive.
-      await page.goto(url, { waitUntil: 'domcontentloaded' });
+      const response = await page.goto(url, { waitUntil: 'domcontentloaded' });
+      // Kept for postingClosed: a 404/410 form page is a closed posting, not a form to fill.
+      lastStatus = response?.status() ?? null;
+    },
+
+    /* B2 (P1-6, 2026-11-05): does the OPENED page say the posting is closed? The evidence string, or
+       null. Two signals only: an HTTP error status on the form page, and the closed-posting sentences
+       the ATS boards print. ponytail: no redirect heuristic (forms legitimately redirect job page ->
+       /apply on Greenhouse, Lever and Ashby, so "the URL changed" would park live postings); add one
+       per board if closed postings slip through as unsupported_form. */
+    async postingClosed(): Promise<string | null> {
+      // A 4xx/5xx form page: closed, moved or gone.
+      if (lastStatus !== null && lastStatus >= 400) return `the form page answered HTTP ${lastStatus}`;
+      // The visible text, bounded: closed notices sit at the top of the page.
+      const text = (await page.locator('body').innerText().catch(() => '')).slice(0, 20_000);
+      // The first closed-posting sentence the page shows, if any.
+      const match = CLOSED_POSTING.exec(text);
+      // Quoted back, so the human sees what the page said.
+      return match === null ? null : `the page says "${match[0]}"`;
     },
 
     async extractFields() {

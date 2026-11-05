@@ -780,6 +780,18 @@ describe('submit cap and circuit breaker', () => {
     expect(parseMaxSubmits(' 4 ')).toBe(4);
   });
 
+  it("APPLY_MAX_SUBMITS='unlimited' lifts the per-run cap; every other word still refuses (P1-6, 2026-11-05)", () => {
+    // The drain-on-approve run (apply.yml drain_approved): no per-run cap; the breaker and the daily cap still stop it.
+    expect(parseMaxSubmits('unlimited')).toBe(Number.POSITIVE_INFINITY);
+    // Shell whitespace around the word is fine, like around a number.
+    expect(parseMaxSubmits(' unlimited ')).toBe(Number.POSITIVE_INFINITY);
+    // Only that exact word: a near-miss is a typo, never a guess at "no cap".
+    for (const raw of ['Unlimited', 'UNLIMITED', 'none', 'infinite', 'inf', 'Infinity', '-1']) {
+      // Each refuses with the shape error.
+      expect(() => parseMaxSubmits(raw), raw).toThrow(/APPLY_MAX_SUBMITS must be a positive integer or 'unlimited'/);
+    }
+  });
+
   it('the first unknown outcome stops further claims', async () => {
     // An unconfirmed submit is the outcome a low reCAPTCHA score produces on EVERY
     // row; continuing would park the whole queue at needs_verification.
@@ -1241,5 +1253,54 @@ describe('runApplierBatch — the Settings daily cap (W10)', () => {
     expect(summary.dryRun).toBe(3);
     // And the cap was not read.
     expect(calls).not.toContain('dailyCap');
+  });
+});
+
+// B2 (P1-6, 2026-11-05): the re-check before every live submit, as the claim loop wires it.
+describe('B2: pre-submit re-check config', () => {
+  // A row whose job today's experience ceiling (2 years) drops.
+  const seniorRow = (id: string) => ({ id, status: 'approved' as const, applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null, atsProvider: null, preGateJob: { title: 'Software Engineer', description_raw: 'Requires 8+ years.', location_raw: null, min_experience_years: 8, discovered_via: null } });
+  // Every gate open except the ceiling.
+  const CEILING_2 = { titles: [], keywords: [], excludedKeywords: [], workAuthorizedCountries: null, remoteLocationPolicy: 'any' as const, experienceMaxYears: 2 };
+
+  it('an unreadable config fails CLOSED: nothing claimed, run closed failed naming the cause', async () => {
+    // The gateway's config read failed.
+    const { gateway, calls, closed } = fakeGateway({
+      // No daily cap, so only the re-check config can stop the run.
+      fetchDailyCap: async () => ({ maxPerDay: null, sentSince: 0 }),
+      // The read the drain depends on.
+      loadPreGatePreferences: async () => ({ kind: 'error', code: 'preferences_unreadable', message: 'boom' }),
+    });
+    // A live run must not submit rows it could not re-judge.
+    await expect(
+      // The run itself.
+      runApplierBatch({ gateway, openPage: async () => stubPage(), env: { DRY_RUN: 'false' }, clock: frozenClock, renderResume }),
+    ).rejects.toThrow(/pre-submit re-check config unreadable \(preferences_unreadable\)/);
+    // Nothing claimed.
+    expect(calls).not.toContain('claim');
+    // The run row says failed, with the cause.
+    expect(closed[0]).toMatchObject({ status: 'failed', error_detail: expect.stringMatching(/re-check config unreadable/) });
+  });
+
+  it("a live run hands the config to applyToOne: a row today's gates drop is parked, never submitted", async () => {
+    // One dropping row, then an empty page.
+    const batches = [[seniorRow('app-1')], []];
+    // The shared fake, with the claim, no daily cap and today's config.
+    const { gateway, calls } = fakeGateway({
+      // Serves the batches.
+      claimApplications: async () => batches.shift() ?? [],
+      // No daily cap.
+      fetchDailyCap: async () => ({ maxPerDay: null, sentSince: 0 }),
+      // The ceiling that drops the row.
+      loadPreGatePreferences: async () => ({ kind: 'ok', preferences: CEILING_2 }),
+    });
+    // The page's submit, spied.
+    const page = stubPage();
+    // Live.
+    await runApplierBatch({ gateway, openPage: async () => page, env: { DRY_RUN: 'false', APPLY_MAX_SUBMITS: '10' }, clock: frozenClock, renderResume });
+    // Parked for a human, never moved to applying.
+    expect(calls).toContain('advance:blocked_needs_human');
+    // Nothing sent.
+    expect(calls).not.toContain('advance:applying');
   });
 });

@@ -119,6 +119,8 @@ import { postedAgo } from '../discovery/discoveredList';
 import { checkBeforeApprove } from './approveCheck';
 // What a held card shows: the findings, or why the check could not run.
 import type { ApproveHold } from './approveCheck';
+// Apply on approve (P1-6): asks dispatch-apply to start the applier once per approve action.
+import { requestDispatch } from './dispatchApply';
 
 import './ApprovalQueuePage.css';
 
@@ -998,6 +1000,19 @@ export function ApprovalQueuePage(): ReactElement {
      is a batch to the operator, not to the database: if the ninth of thirty
      fails, the eight that succeeded must stay succeeded, and the failure has to
      name which row. A bulk RPC would give us one error for thirty rows. */
+  /* Ask dispatch-apply to start the applier, and say what happened. Silent when it skipped on purpose
+     (Teja's switch is off, or nothing live is approved): that is the expected state, not news. */
+  async function dispatchAfterApprove(): Promise<void> {
+    // No client means no connection; the approve toast already said what happened.
+    if (supabase === null) return;
+    // One call; never throws.
+    const result = await requestDispatch(supabase);
+    // Started: say so, with how many rows the run will try.
+    if (result.kind === 'dispatched') toast.info(`Applier started for ${result.approved} approved ${result.approved === 1 ? 'job' : 'jobs'}. Results show in Pipeline within a few minutes.`);
+    // Failed: the approve stands; only the automatic start did not happen.
+    else if (result.kind === 'error') toast.error(`Approved, but the applier did not start: ${result.message}`);
+  }
+
   async function settle(
     ids: readonly string[],
     to: 'approved' | 'dropped_filter',
@@ -1257,6 +1272,10 @@ export function ApprovalQueuePage(): ReactElement {
           : `Rejected ${moved.length} ${noun}.`,
       );
     }
+    /* APPLY ON APPROVE (P1-6, 2026-11-05): ONE dispatch per approve action, after the per-row loop,
+       so the Bucket A batch (N rows, one settle call) starts one workflow run, not N. Fire and forget:
+       dispatchAfterApprove reports through toasts itself, and the approve already stands either way. */
+    if (to === 'approved' && moved.length > 0) void dispatchAfterApprove();
     // Skipped rows changed under the batch; they wait for an individual review instead.
     if (skipped.length > 0) {
       toast.error(

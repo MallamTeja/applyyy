@@ -54,9 +54,10 @@ const workflow = readFileSync(new URL('../../.github/workflows/apply.yml', impor
 const script = stepScript(workflow, 'Run the applier');
 
 /** Runs the step as GitHub would, with only the given variables set, and reports what the worker would get. */
-function runStep(env: Record<string, string>): { code: number | null; worker: string | null; stdout: string; stderr: string } {
+function runStep(env: Record<string, string>): { code: number | null; worker: string | null; cap: string | null; stdout: string; stderr: string } {
   // `pnpm` becomes a function, which bash prefers over any PATH binary: it prints the worker's view.
-  const fakePnpm = 'pnpm() { echo "WORKER DRY_RUN=${DRY_RUN-unset} APPLY_ONLY_ID=${APPLY_ONLY_ID-unset}"; }';
+  // A second line carries the per-run cap (P1-6), so the existing exact WORKER-line asserts stay as they were.
+  const fakePnpm = 'pnpm() { echo "WORKER DRY_RUN=${DRY_RUN-unset} APPLY_ONLY_ID=${APPLY_ONLY_ID-unset}"; echo "WORKER_CAP APPLY_MAX_SUBMITS=${APPLY_MAX_SUBMITS-unset}"; }';
   // GitHub's bash invocation on ubuntu: errexit and pipefail on.
   const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', `${fakePnpm}\n${script}`], {
     // Captured as text.
@@ -66,8 +67,10 @@ function runStep(env: Record<string, string>): { code: number | null; worker: st
   });
   // The fake worker's one line, or null when the step stopped before starting it.
   const worker = result.stdout.split('\n').find((line) => line.startsWith('WORKER ')) ?? null;
+  // The cap the worker would get, or null when it never started.
+  const cap = result.stdout.split('\n').find((line) => line.startsWith('WORKER_CAP '))?.slice('WORKER_CAP '.length) ?? null;
   // Everything a failing case needs to explain itself.
-  return { code: result.status, worker, stdout: result.stdout, stderr: result.stderr };
+  return { code: result.status, worker, cap, stdout: result.stdout, stderr: result.stderr };
 }
 
 // A real-shaped application id for the manual live cases.
@@ -119,5 +122,61 @@ describe('apply.yml "Run the applier" decides DRY_RUN by exact comparison (W30)'
     expect(out.code).toBe(1);
     expect(out.stdout).toContain('::error::dry_run=false requires apply_only_id');
     expect(out.worker).toBeNull();
+  });
+});
+
+// P1-6 (2026-11-05): apply on approve. dispatch-apply starts a LIVE manual run with drain_approved
+// "true": the whole approved queue, no per-run cap (the breaker and the settings daily cap still stop
+// it). Everything else keeps Guard 1's one-application rule.
+describe('apply.yml drain_approved (P1-6)', () => {
+  // The cap the workflow's step env always sets; a drain replaces it.
+  const STEP_ENV = { APPLY_MAX_SUBMITS: '3' };
+
+  test('a live manual drain runs the whole queue with APPLY_MAX_SUBMITS=unlimited', () => {
+    // Exactly what dispatch-apply sends.
+    const out = runStep({ ...STEP_ENV, EVENT_NAME: 'workflow_dispatch', DRY_RUN_INPUT: 'false', DRAIN_INPUT: 'true' });
+    // Ran, live, over the whole queue.
+    expect(out.code).toBe(0);
+    // No single-row filter.
+    expect(out.worker).toBe('WORKER DRY_RUN=false APPLY_ONLY_ID=unset');
+    // No per-run cap.
+    expect(out.cap).toBe('APPLY_MAX_SUBMITS=unlimited');
+  });
+
+  test('anything but the exact "true" is not a drain: a live manual run is refused as before', () => {
+    // Case and typos compare unequal, like dry_run's "false" (W30).
+    for (const drain of ['TRUE', 'True', 'yes', '1', '']) {
+      // Live, no single id, a near-miss drain.
+      const out = runStep({ ...STEP_ENV, EVENT_NAME: 'workflow_dispatch', DRY_RUN_INPUT: 'false', DRAIN_INPUT: drain });
+      // Refused by Guard 1 before the worker starts.
+      expect(out.code, drain).toBe(1);
+      // The worker never ran.
+      expect(out.worker, drain).toBeNull();
+    }
+  });
+
+  test('a drain naming one application is refused as ambiguous', () => {
+    // Both scopes at once.
+    const out = runStep({ ...STEP_ENV, EVENT_NAME: 'workflow_dispatch', DRY_RUN_INPUT: 'false', DRAIN_INPUT: 'true', ONLY_ID: ID });
+    // Red, said why, worker never ran.
+    expect(out.code).toBe(1);
+    expect(out.stdout).toContain('::error::drain_approved and apply_only_id cannot both be set');
+    expect(out.worker).toBeNull();
+  });
+
+  test('a scheduled run never drains, and keeps the per-run cap', () => {
+    // Cron supplies no inputs; even a leaked value must not lift the cap.
+    const out = runStep({ ...STEP_ENV, EVENT_NAME: 'schedule', CRON_LIVE: 'true', DRAIN_INPUT: 'true' });
+    // The cron run, live under the variable, capped.
+    expect(out.cap).toBe('APPLY_MAX_SUBMITS=3');
+  });
+
+  test('a manual run with apply_only_id keeps the per-run cap', () => {
+    // The 1-job proof run.
+    const out = runStep({ ...STEP_ENV, EVENT_NAME: 'workflow_dispatch', DRY_RUN_INPUT: 'false', ONLY_ID: ID });
+    // One application, capped as before.
+    expect(out.worker).toBe(`WORKER DRY_RUN=false APPLY_ONLY_ID=${ID}`);
+    // Unchanged.
+    expect(out.cap).toBe('APPLY_MAX_SUBMITS=3');
   });
 });

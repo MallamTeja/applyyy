@@ -41,6 +41,15 @@ on:
         required: false
         # Empty means "whole queue", which only a DRY run may use.
         default: ''
+      # APPLY ON APPROVE (P1-6, 2026-11-05): dispatch-apply sends "true" with dry_run "false" when Teja
+      # approves and his auto_apply_on_approve switch is on. The ONE way a live manual run may take the
+      # whole approved queue, with no per-run cap (the circuit breaker and the settings daily cap still
+      # stop it). Exact "true" only; never combined with apply_only_id.
+      drain_approved:
+        description: 'Set to "true" (with dry_run "false") to submit every approved row. Sent by dispatch-apply.'
+        required: false
+        # Off unless asked for by name.
+        default: 'false'
 
 # Least privilege: the applier reads the repo and talks to Supabase over the
 # network. It never needs to write back here, so it gets no write token at all.
@@ -162,13 +171,31 @@ jobs:
           export DRY_RUN
           # Named in the log, so the run page says which mode ran and why.
           echo "DRY_RUN=$DRY_RUN (event $EVENT_NAME)"
-          # Guard 1: refuse a whole-queue live MANUAL submit, before anything is claimed.
-          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ] && [ -z "$ONLY_ID" ]; then
+          # The drain (P1-6): a manual run whose drain_approved input is the exact string "true".
+          # Cron supplies no inputs, so a scheduled run never drains whatever leaks into the env.
+          DRAIN=false
+          # Exact comparison in the shell, like dry_run's (W30): "TRUE" or a typo is not a drain.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRAIN_INPUT" = "true" ]; then DRAIN=true; fi
+          # Named in the log beside DRY_RUN, so the run page says which scope ran.
+          echo "DRAIN=$DRAIN"
+          # A drain names the whole queue; a single id names one row. Both at once is ambiguous: refuse.
+          if [ "$DRAIN" = "true" ] && [ -n "$ONLY_ID" ]; then
+            # Annotated, so the reason shows on the run page.
+            echo "::error::drain_approved and apply_only_id cannot both be set."
+            # Red, before anything is claimed.
+            exit 1
+          fi
+          # Guard 1: refuse a whole-queue live MANUAL submit, before anything is claimed, unless it is
+          # the drain dispatch-apply asked for by name.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ] && [ -z "$ONLY_ID" ] && [ "$DRAIN" != "true" ]; then
             # Annotated as an error so the reason shows on the run page, not only in the log.
-            echo "::error::dry_run=false requires apply_only_id (one application per live run)."
+            echo "::error::dry_run=false requires apply_only_id (one application per live run) or drain_approved=true."
             # Non-zero, so the run is red rather than a silent no-op.
             exit 1
           fi
+          # A drain has no per-run cap: the worker reads exactly 'unlimited' (claim-loop.ts parseMaxSubmits);
+          # the circuit breaker and max_applications_per_day still stop it. Every other run keeps the env's '3'.
+          if [ "$DRAIN" = "true" ]; then export APPLY_MAX_SUBMITS=unlimited; fi
           # Guard 2: set the filter only when there is one.
           if [ -n "$ONLY_ID" ]; then export APPLY_ONLY_ID="$ONLY_ID"; fi
           # The applier itself, unchanged.
@@ -184,6 +211,8 @@ jobs:
           CRON_LIVE: ${{ vars.APPLYY_CRON_LIVE }}
           # Which trigger started this run; read by both opt-ins and by Guard 1.
           EVENT_NAME: ${{ github.event_name }}
+          # The raw drain_approved input; only its exact "true" on a manual run drains the queue.
+          DRAIN_INPUT: ${{ inputs.drain_approved }}
           # The per-run cap on real submit attempts (submitted + outcome unknown),
           # parsed strictly by the worker (claim-loop.ts parseMaxSubmits). It bounds
           # a live cron run, which names no apply_only_id.

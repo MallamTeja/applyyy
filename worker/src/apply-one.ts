@@ -45,6 +45,11 @@ import type { RenderedResume } from './render-resume-pdf.ts';
 import { checkRobots, type RobotsCache, type RobotsVerdict } from '../../packages/master-robots/src/index.ts';
 // The embedded-form resolver port (form-url.ts): which URL is actually the form.
 import type { FormUrlResolver } from './form-url.ts';
+// B2 (P1-6, 2026-11-05): the auditor's re-run of the matcher's pre-gate, reused so the applier
+// judges a row exactly as the auditor and the matcher do (Node-safe by peer 3's design).
+import { auditorPreGateDrop, type AuditorJobEmbed } from '../../supabase/functions/auditor/pregate.ts';
+// The gate config's shape, loaded once per run by the claim loop.
+import type { PreGatePreferences } from '../../supabase/functions/matcher/tech-pregate.ts';
 
 // This worker's identity in the status graph. Named once so no call site can
 // quietly claim to be a different agent and slip through an edge it may not use.
@@ -128,6 +133,11 @@ export interface ApplicationPage {
   // `applying` as an unknown outcome although it provably never went out.
   // Required, not optional, so a page that forgets it does not compile.
   readonly submissionImplemented: boolean;
+  /* B2 (P1-6, 2026-11-05): what the OPENED page says about the posting, or null when it looks live.
+     A string is the evidence ("HTTP 404", the closed-posting sentence it showed). Optional only so the
+     dozens of test pages need not each grow it; the real page (playwright-page.ts) always has it, a
+     shape test pins that, and recheckBeforeSubmit runs it whenever it exists. */
+  postingClosed?(): Promise<string | null>;
 }
 
 /**
@@ -255,6 +265,50 @@ export interface ClaimedApplication {
   // provider half of the Workday guard off without a sound. Null means the job row
   // carried no provider; the host half of the guard still runs.
   readonly atsProvider: AtsProvider | null;
+  /* B2 (P1-6, 2026-11-05): the job's four pre-gate fields plus the human-picked marker, for the
+     re-check before a live submit. The Supabase gateway ALWAYS sets the key: null when the job row was
+     missing, which the re-check refuses (it never passes an unjudged row). Absent only in test fakes
+     that predate B2; a shape test pins the gateway setting it. */
+  readonly preGateJob?: AuditorJobEmbed | null;
+}
+
+/* B2: what the claim loop hands applyToOne for the re-check: today's gate config, loaded once per run. */
+export interface SubmitRecheck {
+  // The matcher's three gates' config (titles/keywords, work-auth countries, experience ceiling).
+  readonly preferences: PreGatePreferences;
+}
+
+/* B2: why a row may not go out after all. `recheck` names which half said no; `code` is machine-readable. */
+export interface RecheckRefusal {
+  // Today's pre-gate, or the opened page.
+  readonly recheck: 'pre_gate' | 'posting_closed';
+  // The gate's own drop code, 'job_unreadable', or 'posting_closed'.
+  readonly code: string;
+  // A sentence for the human who picks the row up.
+  readonly reason: string;
+}
+
+/* B2, the re-check before a LIVE submit (P1-6, 2026-11-05). Today's pre-gate first (no network), then
+   the opened page. Null means "still fine to send". No re-check handed in means none was configured
+   (a caller that predates B2); the claim loop always hands one to a live run. */
+export async function recheckBeforeSubmit(row: ClaimedApplication, page: ApplicationPage, recheck: SubmitRecheck | undefined): Promise<RecheckRefusal | null> {
+  // Nothing configured: nothing to say.
+  if (recheck === undefined) return null;
+  // The gateway set the key: judge it. (Absent = a pre-B2 fake; see preGateJob.)
+  if (row.preGateJob !== undefined) {
+    // No job came back: refuse rather than pass an unjudged row (CLAUDE.md §6).
+    if (row.preGateJob === null) return { recheck: 'pre_gate', code: 'job_unreadable', reason: "the job row could not be read, so today's gates could not run" };
+    // The auditor's verdict with today's config.
+    const drop = auditorPreGateDrop(row.preGateJob, recheck.preferences);
+    // A drop names its gate.
+    if (drop !== null) return { recheck: 'pre_gate', code: drop.code, reason: drop.reason };
+  }
+  // The opened page, when the page can say.
+  const closed = page.postingClosed === undefined ? null : await page.postingClosed();
+  // A closed posting, with the page's evidence.
+  if (closed !== null) return { recheck: 'posting_closed', code: 'posting_closed', reason: closed };
+  // Still fine.
+  return null;
 }
 
 // Workday's job hosts. A posting on either domain needs a Workday candidate account
@@ -311,6 +365,9 @@ export interface ApplyToOneInput {
   // human). An absent robots gate or renderer would instead fail OPEN or silently.
   // `| undefined` because claim-loop forwards its own optional field as-is (exactOptionalPropertyTypes).
   readonly resolveFormUrl?: FormUrlResolver | undefined;
+  // B2 (P1-6): today's gate config for the re-check before a live submit. The claim loop always
+  // passes it; absent only in tests that predate B2 (then no re-check runs).
+  readonly recheck?: SubmitRecheck | undefined;
 }
 
 /**
@@ -714,6 +771,26 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
   }
 
   // ---- Past here the run is authorised to submit ---------------------------
+
+  /* B2 (P1-6, 2026-11-05): today's gates and the page, one last time, before the first live status
+     write. A row approved yesterday may fail today's work-auth gate, or its posting may have closed;
+     apply-on-approve drains the whole queue, so the applier must never be what ships it. One write,
+     straight to the human queue, with the reason; nothing is sent. Live runs only: a dry run returned
+     above and writes no status. */
+  const refused = await recheckBeforeSubmit(row, page, input.recheck);
+  // A refusal parks the row.
+  if (refused !== null) {
+    // `other` + a machine key, as W4's `unusable` rows do, so no BlockReason enum change is needed.
+    await guardedAdvance(gateway, {
+      applicationId: row.id,
+      from: 'approved',
+      to: 'blocked_needs_human',
+      agent: ACTING_AGENT,
+      detail: { block_reason: 'other', recheck: refused.recheck, code: refused.code, reason: refused.reason, screenshot_storage_path: screenshotPath },
+    });
+    // Parked: the claim loop counts it as blocked (never trips the breaker; nothing was sent).
+    return { kind: 'blocked', reason: 'other', blockers };
+  }
 
   // A blocker found BEFORE any click goes straight to the human queue, in ONE
   // write: `approved -> blocked_needs_human` (status-flow.ts; migration

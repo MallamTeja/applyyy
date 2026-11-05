@@ -126,7 +126,10 @@ export function SearchPreferencesPage(): ReactElement {
   const [systemEnabled, setSystemEnabled] = useState<boolean>(false);
   // Mirrors max_applications_per_day's column default (35) so a user with no row yet
   // sees the number the database would actually apply.
-  const [dailyCap, setDailyCap] = useState<number>(35);
+  // null = "No daily limit" (P1-6, 2026-11-05: the column became nullable; the worker reads NULL as no cap).
+  const [dailyCap, setDailyCap] = useState<number | null>(35);
+  // P1-6: approving a job starts the applier. Off until the real value loads and Teja turns it on.
+  const [autoApply, setAutoApply] = useState<boolean>(false);
   // True only once the system_settings read SUCCEEDED (row or no row). A failed read
   // leaves the controls at placeholder values, and saving those would overwrite the
   // user's real kill switch — so the controls and their save stay locked until then.
@@ -147,8 +150,8 @@ export function SearchPreferencesPage(): ReactElement {
       // maybeSingle: zero rows is a legitimate "never configured" state, not an error.
       const { data: settings, error: settingsError } = await supabase
         .from('system_settings')
-        // Only the two columns this page edits; the rest belong to agents.
-        .select('system_enabled, max_applications_per_day')
+        // Only the three columns this page edits; the rest belong to agents.
+        .select('system_enabled, max_applications_per_day, auto_apply_on_approve')
         .maybeSingle();
       // A failed read must be visible and must keep the controls locked.
       if (settingsError) {
@@ -159,8 +162,10 @@ export function SearchPreferencesPage(): ReactElement {
         if (settings) {
           // Coerce strictly: only a literal true means "running".
           setSystemEnabled(settings.system_enabled === true);
-          // Keep the default when the column somehow comes back non-numeric.
-          if (typeof settings.max_applications_per_day === 'number') setDailyCap(settings.max_applications_per_day);
+          // A number is the cap; null is "No daily limit"; anything else keeps the default (never a guess).
+          if (typeof settings.max_applications_per_day === 'number' || settings.max_applications_per_day === null) setDailyCap(settings.max_applications_per_day);
+          // Strict, like the kill switch: only a literal true means "on".
+          setAutoApply(settings.auto_apply_on_approve === true);
         }
         // Read succeeded (with or without a row), so saving is now safe.
         setSettingsLoaded(true);
@@ -403,10 +408,10 @@ export function SearchPreferencesPage(): ReactElement {
       // their safe defaults (dry_run true, etc.) from the table.
       const { error: settingsError } = await supabase
         .from('system_settings')
-        // Only the two columns this page owns; agent-owned counters stay untouched.
+        // Only the three columns this page owns; agent-owned counters stay untouched.
         .upsert(
           // user_id is the primary key, which is also the conflict target.
-          { user_id: userId, system_enabled: systemEnabled, max_applications_per_day: dailyCap },
+          { user_id: userId, system_enabled: systemEnabled, max_applications_per_day: dailyCap, auto_apply_on_approve: autoApply },
           // Same conflict target as the table's primary key.
           { onConflict: 'user_id' },
         );
@@ -874,14 +879,53 @@ export function SearchPreferencesPage(): ReactElement {
               <span className="field__help">
                 Maximum applications per day (sized to the GitHub Actions minutes budget).
               </span>
-              {/* min 1 mirrors the column's CHECK (> 0) so the browser refuses what Postgres would. */}
+              {/* min 1 mirrors the column's CHECK (> 0) so the browser refuses what Postgres would.
+                  Disabled while "No daily limit" is checked: there is no number to edit then. */}
               <input
                 type="number"
                 className="field__control"
                 min={1}
                 max={100}
-                value={dailyCap}
+                value={dailyCap ?? ''}
                 onChange={(e) => setDailyCap(Number(e.target.value))}
+                disabled={!settingsLoaded || dailyCap === null}
+              />
+            </label>
+
+            {/* P1-6 (2026-11-05): NULL in max_applications_per_day, which the worker reads as no daily cap.
+                Unchecking restores the column's default of 35, a number the user then edits. */}
+            <label className="field">
+              {/* Says what checking it does. */}
+              <span className="field__label">No daily limit</span>
+              {/* What still stops a run, so "no limit" is not read as "nothing stops it". */}
+              <span className="field__help">
+                The per-run safety stop still halts a run on its first unconfirmed submit or CAPTCHA.
+              </span>
+              {/* Checked when the cap is null. */}
+              <input
+                type="checkbox"
+                checked={dailyCap === null}
+                onChange={(e) => setDailyCap(e.target.checked ? null : 35)}
+                disabled={!settingsLoaded}
+              />
+            </label>
+
+            {/* P1-6 (2026-11-05): system_settings.auto_apply_on_approve, read by dispatch-apply. Default off;
+                Teja turns it on only after one proven live submit. */}
+            <label className="field field--wide">
+              {/* The behaviour, in his words. */}
+              <span className="field__label">Apply automatically when I approve</span>
+              {/* The honest expectation and the one-time setup, next to the switch that depends on them. */}
+              <span className="field__help">
+                Approving a job starts the applier at once (GitHub Actions, usually within a minute), for every
+                approved job. Needs the GITHUB_APPLY_DISPATCH_TOKEN secret. So far no automatic live submit has
+                landed (CAPTCHAs and unsupported forms), so expect most jobs to land in Manual apply for you to finish.
+              </span>
+              {/* Locked until the real value loads, like the kill switch. */}
+              <input
+                type="checkbox"
+                checked={autoApply}
+                onChange={(e) => setAutoApply(e.target.checked)}
                 disabled={!settingsLoaded}
               />
             </label>

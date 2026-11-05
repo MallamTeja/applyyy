@@ -35,6 +35,10 @@ import type { AnswerBankRow, MasterProfile } from '@applyy/shared-types';
 import { resolveSubmissionMode, type SubmissionEnv } from './submission-mode.ts';
 // The resolver port, threaded to applyToOne.
 import type { FormUrlResolver } from './form-url.ts';
+// B2 (P1-6): the re-check input and the auditor's config-read result.
+import type { SubmitRecheck } from './apply-one.ts';
+// The loader's closed result type, from the module the gateway reads it with.
+import type { LoadedPreGatePreferences } from '../../supabase/functions/auditor/pregate.ts';
 
 // This worker's identity, used for both the run row and the claim marker.
 const ACTING_AGENT: AgentName = 'applier';
@@ -65,6 +69,10 @@ export interface RunGateway extends ApplierGateway {
   // Throws when either half cannot be read or has the wrong shape; the loop lets that end
   // the run (fail CLOSED), because "unknown" must never read as "no cap".
   fetchDailyCap(sinceIso: string): Promise<DailyCap>;
+  // B2 (P1-6, 2026-11-05): today's pre-gate config for the re-check before every live submit. The
+  // Supabase gateway always has it (a shape test pins that); optional only so the test gateways that
+  // predate B2 still compile. A FAILED read stops a live run (fail closed); see the loop.
+  loadPreGatePreferences?(): Promise<LoadedPreGatePreferences>;
   // Optional so older gateways keep working; absent means no profile fills, the safe direction.
   // Declared on the loop's gateway type so the loop can fetch the profile without a cast.
   fetchLatestProfile?(): Promise<MasterProfile | null>;
@@ -194,7 +202,8 @@ export function parseOnlyApplicationId(raw: string | undefined): string | undefi
 export const DEFAULT_MAX_SUBMITS = 3;
 
 /**
- * APPLY_MAX_SUBMITS, validated by SHAPE: a positive integer in plain digits, or the run stops.
+ * APPLY_MAX_SUBMITS, validated by SHAPE: a positive integer in plain digits, or exactly
+ * 'unlimited' (Infinity: the drain-on-approve run), or the run stops.
  *
  * Only ABSENT means the default. A SET value that is blank, zero, negative, fractional or
  * not a number throws, because the lenient readers turn it into a cap nobody chose:
@@ -205,9 +214,14 @@ export function parseMaxSubmits(raw: string | undefined): number {
   if (raw === undefined) return DEFAULT_MAX_SUBMITS;
   // Trimmed, so a stray space from a shell does not fail an otherwise valid number.
   const text = raw.trim();
+  /* The one spelled-out value (P1-6, 2026-11-05: Teja, "no daily job apply limits at all"): the
+     drain-on-approve run sets it. No per-run cap; the circuit breaker and the settings daily cap
+     (max_applications_per_day, NULL = none) still stop the run. Exactly this word, lower-case:
+     'none', 'Unlimited' or 'inf' are typos and refuse below, never a guessed "no cap". */
+  if (text === 'unlimited') return Number.POSITIVE_INFINITY;
   // Digits only, no leading zero: rules out '', '0', '-1', '1.5', '1e3' and '0x10' in one test.
   if (!/^[1-9][0-9]*$/.test(text)) {
-    throw new Error(`APPLY_MAX_SUBMITS must be a positive integer; got ${JSON.stringify(raw)}. Refusing to run.`);
+    throw new Error(`APPLY_MAX_SUBMITS must be a positive integer or 'unlimited'; got ${JSON.stringify(raw)}. Refusing to run.`);
   }
   // Safe now: a short digit string with no sign, exponent or fraction.
   const value = Number(text);
@@ -445,6 +459,25 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
     // is the fail-closed direction; falling back to "no cap" is the fail-open one.
     if (live) daily = await gateway.fetchDailyCap(new Date((clock() - 24 * 60 * 60) * 1000).toISOString());
 
+    /* B2 (P1-6, 2026-11-05): today's gate config, read once before anything is claimed, for the
+       re-check before every live submit. A failed read THROWS into the run-level catch, like the daily
+       cap: a drain must never submit rows it could not re-judge. A gateway without the method (a test
+       double) runs without the re-check and says so. */
+    let recheck: SubmitRecheck | undefined;
+    // Live runs only: a dry run submits nothing, so it re-checks nothing.
+    if (live) {
+      // The one production gateway always has it.
+      if (gateway.loadPreGatePreferences === undefined) console.warn('[claim-loop] gateway has no loadPreGatePreferences; the pre-submit re-check is off');
+      else {
+        // Both config reads, or why they failed.
+        const loaded = await gateway.loadPreGatePreferences();
+        // Unreadable config is never "no config" (CLAUDE.md §6).
+        if (loaded.kind === 'error') throw new Error(`pre-submit re-check config unreadable (${loaded.code}): ${loaded.message}`);
+        // Handed to every applyToOne this run.
+        recheck = { preferences: loaded.preferences };
+      }
+    }
+
     // Fetched once per run rather than per application: the bank changes only
     // when a human edits it, and 35 refetches would be 35 needless round trips.
     const answers = await gateway.fetchAnswers();
@@ -542,7 +575,8 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
         try {
           // The same profile object is reused for every row, which is the point of fetching it once.
           // resolveFormUrl rides along so an iframed Greenhouse posting is applied to on its real form.
-          const outcome = await applyToOne({ row, page, gateway, answers, profile, env, renderResume, checkRobots, resolveFormUrl });
+          // `recheck` (B2): today's gate config for the last look before a live submit; undefined in a dry run.
+          const outcome = await applyToOne({ row, page, gateway, answers, profile, env, renderResume, checkRobots, resolveFormUrl, recheck });
 
           // Counted separately rather than collapsed into a success/failure
           // pair, because these four mean genuinely different things to the

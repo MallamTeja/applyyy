@@ -153,8 +153,10 @@ export interface SystemSettingsRow {
   gemini_budget_date: string;
   /** Section 18.5 — at most this many applications to one company in a rolling week. */
   max_applications_per_company_per_week: number;
-  /** The Actions-minutes ceiling expressed as a number, ~35/day. */
-  max_applications_per_day: number;
+  /** The Actions-minutes ceiling expressed as a number, ~35/day. NULL = no daily limit (P1-6, 2026-11-05). */
+  max_applications_per_day: number | null;
+  /** P1-6 (2026-11-05): approving a job starts the applier (dispatch-apply). Default false. */
+  auto_apply_on_approve: boolean;
   /** The freshness window in days. A setting, not a constant, because supply trades directly against it. */
   freshness_window_days: number;
   /** How long a claim is held before the sweeper may reclaim it. */
