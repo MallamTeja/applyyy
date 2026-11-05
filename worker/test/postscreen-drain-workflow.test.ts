@@ -1,8 +1,8 @@
-// P1-4 (2026-11-05, Teja 00:40 IST: "run the post-screen drain automatically after every
-// scan"). postscreen-drain.yml now runs on `workflow_run` after both scouts, and skips green,
-// calling no agent, when nothing is eligible. These tests hold both halves:
-// - the trigger: both scout workflows, by the exact `name:` each one declares (a rename there
-//   would silently stop the drain, since workflow_run matches names, not files);
+// postscreen-drain.yml is MANUAL ONLY (Teja ruling 2026-11-05). The `workflow_run` trigger that
+// ran it after both scouts (P1-4, commit 10e4e63) was removed the same day. The workflow still
+// skips green, calling no agent, when nothing is eligible. These tests hold both halves:
+// - the trigger: the `on:` block holds workflow_dispatch and nothing else, so an automatic
+//   trigger (workflow_run, schedule) cannot come back unnoticed;
 // - the gate: 0 eligible rows means no agent call; any count it cannot read EXACTLY stops the
 //   run red instead of being taken as 0 (CLAUDE.md §6), because a wrong 0 skips real rows.
 //
@@ -85,7 +85,7 @@ function runDrain(count: { status: number; contentRange: string | null }, fromSt
     input: `${fakeFetch}\n${script}`,
     // Captured as text.
     encoding: 'utf8',
-    // The step's variables with harmless values; FROM_STAGE '' is what a workflow_run run gets.
+    // The step's variables with harmless values; FROM_STAGE '' is a dispatch with no input set.
     env: {
       PATH: process.env['PATH'] ?? '',
       DRY_COUNT_ONLY: '',
@@ -107,19 +107,21 @@ function agentCalls(stdout: string): string[] {
 }
 
 describe('postscreen-drain.yml trigger', () => {
-  test('runs on workflow_run completed after both scouts, by their exact names', () => {
-    // The trigger block, as written.
-    expect(drain).toContain("  workflow_run:\n");
-    // Only finished runs.
-    expect(drain).toContain('    types: [completed]\n');
-    // Both scouts, by name.
-    expect(drain).toContain("    workflows: ['applyy scout (ats discovery)', 'applyy scout (remote feeds)']\n");
-    // Each name must still be the `name:` of its workflow, or workflow_run never fires.
-    expect(workflowText('scout.yml')).toMatch(/^name: applyy scout \(ats discovery\)$/m);
-    // Same for the remote-feeds scout.
-    expect(workflowText('scout-remote.yml')).toMatch(/^name: applyy scout \(remote feeds\)$/m);
-    // Manual runs stay possible, for from_stage re-runs and rehearsals.
-    expect(drain).toContain('  workflow_dispatch:\n');
+  test('runs on workflow_dispatch only (manual-only ruling 2026-11-05, no workflow_run)', () => {
+    // Full-line comments dropped, so the ruling note that NAMES workflow_run is never read as a trigger.
+    const lines = drain.split('\n').filter((line) => !/^\s*#/.test(line));
+    // The anchor: the top-level `on:` key, asserted present so the check cannot pass over nothing.
+    const start = lines.indexOf('on:');
+    // A restructured file fails loudly (§6).
+    expect(start, 'no top-level `on:` line').toBeGreaterThanOrEqual(0);
+    // The block ends at the next top-level key.
+    const end = lines.findIndex((line, index) => index > start && /^\S/.test(line));
+    // Same rule: no end, no test.
+    expect(end, 'no top-level key after `on:`').toBeGreaterThan(start);
+    // Trigger names sit at exactly two spaces of indent; deeper lines are their settings.
+    const triggers = lines.slice(start + 1, end).flatMap((line) => /^ {2}([a-z_]+):/.exec(line)?.[1] ?? []);
+    // The exact allowed set: a positive shape, so ANY added trigger goes red.
+    expect(triggers).toEqual(['workflow_dispatch']);
   });
 });
 

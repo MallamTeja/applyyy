@@ -72,6 +72,23 @@ export const SELECTABLE_ATS_PROVIDERS = [
 /* Derived from the list, so the type and the dropdown cannot drift apart. */
 export type SupportedAtsProvider = (typeof SELECTABLE_ATS_PROVIDERS)[number];
 
+/* The providers a NEW board may be added under: every polled provider except SmartRecruiters.
+ * Robots ruling 2026-11-01: SmartRecruiters' robots.txt disallows us, so never seed an SR board.
+ * SR stays in SELECTABLE_ATS_PROVIDERS above because the scout registry still polls existing SR
+ * rows, and companyCatalog.test.ts holds that list equal to the registry. Derived by filter, not
+ * hand-typed, so a provider registered later is addable without a second edit here. */
+export const ADDABLE_ATS_PROVIDERS = SELECTABLE_ATS_PROVIDERS.filter(
+  // A type guard, so the result's element type drops 'smartrecruiters' too.
+  (p): p is Exclude<SupportedAtsProvider, 'smartrecruiters'> => p !== 'smartrecruiters',
+);
+
+/* One rule for "may this suggestion be added", shared by the suggestions modal (what it shows)
+ * and WatchlistPage (what the 1-click add accepts), so the two cannot disagree. */
+export function isAddableCompany(company: SuggestedCompany): boolean {
+  // Addable exactly when its provider is in the addable list above.
+  return (ADDABLE_ATS_PROVIDERS as readonly string[]).includes(company.atsProvider);
+}
+
 /* One date for the whole sweep, so a reader can tell at a glance that every
  * `probedOn` below came from the SAME run rather than from rows aged
  * independently. When the next sweep happens it gets its own constant; do not

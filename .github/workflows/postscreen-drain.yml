@@ -1,4 +1,4 @@
-# Drains the post-screen queues after every scheduled scout run and on demand: pages the whole `passed_filters` queue through the
+# Drains the post-screen queues on demand (manual dispatch only): pages the whole `passed_filters` queue through the
 # matcher (?limit=10), then the whole `scored` queue through the tailor (?limit=3), then the
 # whole `tailored` queue through the auditor (?limit=5), pausing between pages for Gemini's RPM. The sibling of prescreen-drain.yml,
 # which drains the two stages BEFORE this one (normalizer, screener).
@@ -11,26 +11,16 @@
 # Actions secrets. The matcher DROPS rows below the score threshold and drops are one-way, so
 # every abort below fails CLOSED: any response we cannot read exactly stops the run.
 #
-# AUTOMATIC AFTER EVERY SCAN since 2026-11-05 (P1-4, Teja 00:40 IST: "run the post-screen drain
-# automatically after every scan"). That ruling supersedes the 2026-10-09 manual-only ruling for
-# THIS workflow; pregate-sweep and prescreen-drain stay manual. Measured 12:05 IST: 8 rows at
-# passed_filters and 15 at scored were waiting, because nothing drained them on a schedule.
+# MANUAL ONLY (Teja ruling 2026-11-05). The `workflow_run` trigger that ran this drain after
+# every scout (P1-4, commit 10e4e63, Teja 00:40 IST) was REMOVED the same day: Teja ruled the
+# drain runs manually only, so a human starts every run. The trigger itself is gone rather
+# than disabled by a flag, because a flag is not a control. Do not re-add an automatic trigger
+# (workflow_run, schedule) without a new ruling; apps/web/test/postscreenDrainManualOnly.test.ts
+# holds `on:` to workflow_dispatch alone. pregate-sweep and prescreen-drain are manual too.
 name: applyy post-screen drain
 
 on:
-  # Fires when either scheduled scout finishes, whatever its conclusion: a scout that failed or
-  # hit its budget may still have queued rows, and the count gate below skips a run with none.
-  # Picked over a drain step INSIDE scout.yml: that job already ends on its 12-minute budget
-  # (~740-747 s), and a separate run keeps its own concurrency group and 180-minute cap.
-  # Manual "Scan" passes from the web (scout-ats edge function, discoveryService.ts) run no
-  # workflow, so their rows are drained by the NEXT scheduled scan's run, at most ~12 h later.
-  workflow_run:
-    # Matched by each workflow's `name:`, so a rename there must be made here too
-    # (worker/test/postscreen-drain-workflow.test.ts checks both names exist).
-    workflows: ['applyy scout (ats discovery)', 'applyy scout (remote feeds)']
-    # Only finished runs; `requested` would race the scout's own inserts.
-    types: [completed]
-  # The manual drain, for re-runs (from_stage) and rehearsals (dry_count_only).
+  # The only trigger: the manual drain, for full runs, re-runs (from_stage) and rehearsals (dry_count_only).
   workflow_dispatch:
     # The one input: rehearse without touching anything.
     inputs:
@@ -176,7 +166,7 @@ jobs:
           console.log(`plan: ${GAP_MS / 1000}s pause after each page, ${QUOTA_BACKOFF_MS / 1000}s after a page with errors (Gemini ~15 RPM free tier)`);
           // The abort rules, likewise.
           console.log('plan: abort on non-2xx, non-JSON, missing/ill-typed fields, or a kill-switch halt (skipped_disabled)');
-          // The skip rule, so an automatic run that did nothing says why in its log.
+          // The skip rule, so a run that did nothing says why in its log.
           console.log(`plan: skip green, calling no agent, when 0 applications are at ${RUN_STAGES.flatMap((s) => s.reads).join(', ')}`);
           // The rehearsal ends here, before sign-in.
           if (dryCountOnly) {
@@ -255,8 +245,8 @@ jobs:
           }
 
           // The count gate: one PostgREST HEAD with count=exact, under the app user's RLS, before
-          // any agent runs. Every scan now triggers this workflow, and most find nothing new to
-          // drain; calling three agents on an empty queue would only add agent_runs noise.
+          // any agent runs. Kept after the 2026-11-05 manual-only ruling: a dispatch on an empty
+          // queue should still call no agent, since that would only add agent_runs noise.
           const reads = RUN_STAGES.flatMap((stage) => stage.reads);
           // HEAD returns the count in Content-Range without sending any row.
           const countRes = await fetch(`${base}/rest/v1/applications?select=id&status=in.(${reads.join(',')})`, {

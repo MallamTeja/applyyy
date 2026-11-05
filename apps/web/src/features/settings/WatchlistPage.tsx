@@ -36,7 +36,8 @@ import { supabase } from '../../data/supabase';
 import { CompanySuggestionsModal } from './CompanySuggestionsModal';
 /* The dropdown offers only providers the Scout polls; the list and its registry parity
    test live in companyCatalog.ts, because node --test cannot import this .tsx (W24). */
-import { SELECTABLE_ATS_PROVIDERS, type SuggestedCompany } from './companyCatalog';
+// ADDABLE, not SELECTABLE: SmartRecruiters is still polled but never added (robots ruling 2026-11-01).
+import { ADDABLE_ATS_PROVIDERS, isAddableCompany, type SuggestedCompany } from './companyCatalog';
 import { DiscoveryModal } from '../pipeline/DiscoveryModal';
 
 import './settings.css';
@@ -63,10 +64,8 @@ const PROVIDER_HINTS: Readonly<Partial<Record<AtsProvider, ProviderHint>>> = {
   },
   // No `workable` hint: Workable is not selectable until its scout adapter is registered
   // (companyCatalog.ts SELECTABLE_ATS_PROVIDERS). Restore the hint when it is.
-  smartrecruiters: {
-    where: 'The company identifier in the SmartRecruiters careers URL.',
-    example: 'careers.smartrecruiters.com/ExampleCo -> token is ExampleCo',
-  },
+  // No `smartrecruiters` hint: SR boards are never added (robots ruling 2026-11-01), and this
+  // hint only served the add-board select. Existing SR rows render from their own row data.
   // Workday's token packs three URL parts (tenant, wd number, site); the scout parses
   // it with one strict shape, so the hint spells that shape out exactly. An optional
   // `?facet=id,id` narrows a big board, but it is not hand-entered here.
@@ -187,6 +186,15 @@ export function WatchlistPage(): ReactElement {
   const handleAddSuggestedCompany = async (company: SuggestedCompany): Promise<boolean> => {
     if (supabase === null) {
       setError('Supabase is not configured in this environment.');
+      return false;
+    }
+
+    // The control behind the modal's display filter: a non-addable (SmartRecruiters) suggestion
+    // is refused here even if one reaches this handler (robots ruling 2026-11-01).
+    if (!isAddableCompany(company)) {
+      // Says why, so the refusal is not mistaken for a network error.
+      setError(`${company.atsProvider} boards are not added: robots.txt disallows them.`);
+      // Nothing was written.
       return false;
     }
 
@@ -339,7 +347,8 @@ export function WatchlistPage(): ReactElement {
                 onChange={(e) => setAtsProvider(e.target.value as AtsProvider)}
                 disabled={submitting}
               >
-                {SELECTABLE_ATS_PROVIDERS.map((p) => (
+                {/* Addable providers only: SmartRecruiters is never offered for a new board (robots ruling 2026-11-01). */}
+                {ADDABLE_ATS_PROVIDERS.map((p) => (
                   <option key={p} value={p}>
                     {p}
                   </option>

@@ -20,9 +20,13 @@ import type { FormEvent, ReactElement } from 'react';
 
 import type { AtsProvider, CompanyWatchlistRow } from '../../data/contract';
 import {
+  // The addable providers drive the ATS filter, so SmartRecruiters is never offered (robots ruling 2026-11-01).
+  ADDABLE_ATS_PROVIDERS,
   AVAILABLE_LOCATIONS,
   CURATED_COMPANIES,
   filterCompanies,
+  // The shared "may this be added" rule, so the modal shows exactly what WatchlistPage accepts.
+  isAddableCompany,
   getRefreshedCompaniesBatch,
   searchOrDiscoverCompany,
 } from './companyCatalog';
@@ -145,12 +149,14 @@ export function CompanySuggestionsModal({
       category: selectedCategory,
       location: selectedLocation,
       atsProvider: selectedAts,
-    });
+      // Non-addable (SmartRecruiters) suggestions are hidden: SR boards are never added (robots ruling 2026-11-01).
+    }).filter(isAddableCompany);
   }, [currentPool, selectedCategory, selectedLocation, selectedAts]);
 
   // Category counts based on full curated dataset at the selected location
   const categoryCounts = useMemo(() => {
-    const locMatches = filterCompanies(CURATED_COMPANIES, { location: selectedLocation });
+    // Counted over addable companies only, so a tab never promises cards the list then hides.
+    const locMatches = filterCompanies(CURATED_COMPANIES, { location: selectedLocation }).filter(isAddableCompany);
     return {
       all: locMatches.length,
       gcc: locMatches.filter((c) => c.category === 'GCC').length,
@@ -318,11 +324,13 @@ export function CompanySuggestionsModal({
               aria-label="Filter by ATS Provider"
             >
               <option value="all">All ATS</option>
-              <option value="greenhouse">Greenhouse</option>
-              <option value="lever">Lever</option>
-              <option value="ashby">Ashby</option>
-              <option value="smartrecruiters">SmartRecruiters</option>
-              <option value="workable">Workable</option>
+              {/* Derived from ADDABLE_ATS_PROVIDERS: SmartRecruiters is never added (robots ruling 2026-11-01), workable has no registered scout adapter, and workday is now offered. */}
+              {ADDABLE_ATS_PROVIDERS.map((p) => (
+                // The raw provider id as the label, the same as the WatchlistPage add-board select.
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
             </select>
           </div>
         </div>
