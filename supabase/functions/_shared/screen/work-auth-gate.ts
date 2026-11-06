@@ -88,6 +88,14 @@ const REMOTE = /\b(?:remote|work from home|wfh|anywhere|worldwide|home[- ]?based
 // Words joined into one case-insensitive alternation, whole-word on both ends.
 const words = (list: readonly string[]): RegExp => new RegExp(`\\b(?:${list.join("|")})(?![a-z])`, "i");
 
+// Arabic-script aliases, matched as a plain alternation. `\b` cannot be used: in a JS regex without the
+// `u` flag it is ASCII-only, so it never fires between Arabic letters (2026-11-06: the first live Arabic
+// location, Dubai). A trailing "not another Arabic letter" check stands in for the word end, so "مصر"
+// (Egypt) does not match inside "مصرف" (bank). No leading check: Arabic glues prefixes onto words
+// ("بالكويت" = in Kuwait), and a leading check would miss exactly those. Bare "عمان" is left out on purpose:
+// it spells both Oman and Amman, and an unresolved part keeps the job, which is the safe direction.
+const arabic = (list: readonly string[]): RegExp => new RegExp(`(?:${list.join("|")})(?![ء-ي])`);
+
 // Every country the 469 distinct live location strings name (2026-10-24), by its own name, its
 // common abbreviations and the cities and regions boards write instead of it. Canonical name
 // first: it is what work_authorized_countries entries resolve to and what the reason quotes.
@@ -181,9 +189,29 @@ const COUNTRIES: readonly { readonly name: string; readonly patterns: readonly R
   { name: "Kosovo", patterns: [words(["kosovo", "pristina"])] },
   // The Middle East.
   { name: "Israel", patterns: [words(["israel", "tel aviv", "kfar saba"])] },
-  { name: "United Arab Emirates", patterns: [words(["uae", "united arab emirates", "dubai", "abu dhabi"])] },
-  { name: "Qatar", patterns: [words(["qatar", "doha"])] },
-  { name: "Saudi Arabia", patterns: [words(["saudi arabia", "ksa", "riyadh"])] },
+  // Arabic: Dubai, Abu Dhabi (two spellings), the Emirates (two spellings), Sharjah.
+  { name: "United Arab Emirates", patterns: [words(["uae", "united arab emirates", "dubai", "abu dhabi", "sharjah"]), arabic(["دبي", "أبوظبي", "ابوظبي", "الإمارات", "الامارات", "الشارقة"])] },
+  // Arabic: Qatar, Doha.
+  { name: "Qatar", patterns: [words(["qatar", "doha"]), arabic(["قطر", "الدوحة"])] },
+  // Arabic: Saudi Arabia (the Kingdom's own word), Riyadh, Jeddah.
+  { name: "Saudi Arabia", patterns: [words(["saudi arabia", "ksa", "riyadh", "jeddah"]), arabic(["السعودية", "الرياض", "جدة"])] },
+  // Added 2026-11-06 (live leak: Scale AI "Kuwait City, Kuwait" passed because Kuwait had no row). Each with
+  // its capital, in Latin and Arabic, so a board that writes only the city is still resolved.
+  { name: "Kuwait", patterns: [words(["kuwait", "kuwait city"]), arabic(["الكويت"])] },
+  // Bahrain.
+  { name: "Bahrain", patterns: [words(["bahrain", "manama"]), arabic(["البحرين", "المنامة"])] },
+  // Oman. "Roman" cannot match: words() puts \b before "oman".
+  { name: "Oman", patterns: [words(["oman", "muscat", "salalah"]), arabic(["سلطنة عمان", "مسقط"])] },
+  // Jordan: by its capital only. Bare "Jordan" is also a US surname and place name.
+  { name: "Jordan", patterns: [words(["amman", "hashemite kingdom of jordan"]), arabic(["الأردن", "الاردن"])] },
+  // Lebanon.
+  { name: "Lebanon", patterns: [words(["lebanon", "beirut"]), arabic(["لبنان", "بيروت"])] },
+  // Iraq.
+  { name: "Iraq", patterns: [words(["iraq", "baghdad"]), arabic(["العراق", "بغداد"])] },
+  // Egypt (MENA; EMEA boards list it).
+  { name: "Egypt", patterns: [words(["egypt", "cairo"]), arabic(["مصر", "القاهرة"])] },
+  // Turkey, in both spellings boards use ("türkiye" listed with and without the diacritic).
+  { name: "Turkey", patterns: [words(["turkey", "türkiye", "turkiye", "istanbul", "ankara"]), arabic(["تركيا"])] },
   // Asia-Pacific.
   { name: "Singapore", patterns: [words(["singapore"])] },
   { name: "Hong Kong", patterns: [words(["hong kong"])] },
@@ -246,7 +274,8 @@ const EUROPE = [
   "Lithuania", "Greece", "North Macedonia", "Kosovo",
 ];
 // The Middle East rows.
-const MIDDLE_EAST = ["Israel", "United Arab Emirates", "Qatar", "Saudi Arabia"];
+// 2026-11-06: every row added above joins, or "Remote, Middle East" would resolve to fewer countries than exist.
+const MIDDLE_EAST = ["Israel", "United Arab Emirates", "Qatar", "Saudi Arabia", "Kuwait", "Bahrain", "Oman", "Jordan", "Lebanon", "Iraq", "Egypt", "Turkey"];
 // North America.
 const NORTH_AMERICA = ["United States", "Canada", "Mexico"];
 // Latin America rows.

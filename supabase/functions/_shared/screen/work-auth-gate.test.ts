@@ -447,3 +447,108 @@ for (const location of ["Palo Alto, CA", "Stamford, CT", "London, UK", "Cambridg
     assert.equal(screenWorkAuth(job(location), TEJA, UNLOCKED).drop, true);
   });
 }
+
+// --- 2026-11-06: Gulf / Middle East rows the table lacked, and Arabic-script locations ---------
+
+// Live leak: Scale AI 6adaddce "Kuwait City, Kuwait" passed because Kuwait had no row, so the part named
+// no place and the unknown-place rule kept it. Each location below names a country the table now has,
+// and none is on Teja's list (India, Nepal, Bhutan), so each must drop with the gate's own code.
+for (const location of [
+  // The live leak itself.
+  "Kuwait City, Kuwait",
+  // Bahrain: country and capital.
+  "Manama, Bahrain",
+  // Oman: the capital alone, without the country word.
+  "Muscat",
+  // Oman by name; "Roman" must not interfere (tested in the keep list below).
+  "Salalah, Oman",
+  // Jordan by its capital (bare "Jordan" is ambiguous with a US surname and left out on purpose).
+  "Amman",
+  // Lebanon.
+  "Beirut, Lebanon",
+  // Iraq.
+  "Baghdad, Iraq",
+  // Egypt: MENA, and EMEA boards list it.
+  "Cairo, Egypt",
+  // Turkey, in both spellings boards use.
+  "Istanbul, Turkey",
+  "Ankara, Türkiye",
+]) {
+  // One named test per location.
+  test(`11-06 Gulf/ME row: "${location}" drops with code work_auth`, () => {
+    // The verdict under the live policy.
+    const verdict = screenWorkAuth(job(location), TEJA, UNLOCKED);
+    // Dropped under the gate's own code.
+    assert.equal(verdict.drop && verdict.code, "work_auth");
+  });
+}
+
+// The region words now cover the new rows too: a "Remote, Middle East" or "MENA" job is wholly outside the list.
+for (const location of ["Remote, Middle East", "MENA", "Kuwait or Bahrain"]) {
+  // One named test per shape.
+  test(`11-06 region: "${location}" drops with code work_auth`, () => {
+    // The verdict.
+    const verdict = screenWorkAuth(job(location), TEJA, UNLOCKED);
+    // Dropped.
+    assert.equal(verdict.drop && verdict.code, "work_auth");
+  });
+}
+
+// Clean Arabic script, as a board writes it when it serves the Arabic page. \b is ASCII-only in JS, so
+// these aliases are matched without it (a trailing "not another Arabic letter" check stands in).
+for (const location of [
+  // Dubai, the UAE: the first live Arabic row's clean form.
+  "دبي, دبي دبي الإمارات العربية المتحدة",
+  // Abu Dhabi.
+  "أبوظبي",
+  // Kuwait.
+  "الكويت",
+  // Riyadh, Saudi Arabia.
+  "الرياض, المملكة العربية السعودية",
+  // Doha, Qatar.
+  "الدوحة, قطر",
+  // Manama, Bahrain.
+  "المنامة, البحرين",
+  // Muscat, Oman.
+  "مسقط, سلطنة عمان",
+  // Cairo, Egypt.
+  "القاهرة, مصر",
+]) {
+  // One named test per location.
+  test(`11-06 Arabic: "${location}" drops with code work_auth`, () => {
+    // The verdict.
+    const verdict = screenWorkAuth(job(location), TEJA, UNLOCKED);
+    // Dropped.
+    assert.equal(verdict.drop && verdict.code, "work_auth");
+  });
+}
+
+// KNOWN GAP, pinned on purpose: live row 0cccc73a stores the Arabic as UTF-8 bytes re-read as Latin-1
+// (mojibake: "Ø¯Ø¨Ù, ..."). Peer 3 fixes the source (worker remote-feeds.ts); until then this
+// text names no place and the unknown-place rule KEEPS the job. This test asserts that CURRENT behaviour,
+// so when the source fix lands and nothing else changes, nobody mistakes "still kept" for a regression of
+// the aliases above. If an alias for the mojibake form is ever added, flip this assertion to a drop.
+test("11-06 KNOWN GAP: mojibake Arabic (UTF-8 read as Latin-1) is still kept as an unknown place", () => {
+  // Built from the clean text, byte for byte what the live row holds.
+  const mojibake = Buffer.from("دبي, دبي دبي الإمارات العربية المتحدة", "utf8").toString("latin1");
+  // Positive control: this really is the garbled form, not the clean one.
+  assert.notEqual(mojibake, "دبي, دبي دبي الإمارات العربية المتحدة");
+  // Kept today: it names no place the table knows.
+  assert.equal(screenWorkAuth(job(mojibake), TEJA, UNLOCKED).drop, false);
+});
+
+// Negative set: the new aliases must not eat words or places that are fine.
+for (const location of [
+  // "Roman" contains "oman" but not at a word start.
+  "Roman Forum Road, Bengaluru",
+  // A listed country alongside a new one is authorised by the list part.
+  "Bengaluru, India",
+  // Arabic letters inside a longer word: "مصرف" (bank) starts with the Egypt alias "مصر".
+  "مصرف الراجحي، بنغالور، الهند",
+]) {
+  // One named test per location.
+  test(`11-06 keeps "${location}" (new aliases do not over-match)`, () => {
+    // The verdict.
+    assert.equal(screenWorkAuth(job(location), TEJA, UNLOCKED).drop, false);
+  });
+}
