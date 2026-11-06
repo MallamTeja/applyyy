@@ -371,6 +371,12 @@ const TAILOR_POLICY = [
   "  Do not add adjectives or claims the master text does not make (robust, scalable, ensure, accurate,",
   // Continued.
   "  alongside); a word from another bullet or another job is not allowed either. Unknown words fail the check.",
+  // THE KEEP RULE (2026-11-07). Every rule above limits what may be ADDED; none limited what may be REMOVED.
+  // Live row 67b979b3 (GitLab, tailored 2026-11-02 by the first call, no retry): master "AI orchestration
+  // pipelines" came back as "orchestration pipelines", and "AI" was that posting's only keyword in the bullet.
+  "KEEP RULE: never remove a job-posting keyword that the master bullet already contains. Rewording may",
+  // Continued: rewording keeps its freedom to reorder, so the rule costs no flexibility; the example is the live case.
+  "  reorder or rephrase around it, but the keyword stays (master 'AI orchestration pipelines' keeps 'AI').",
 ]
   // Joined once at module load, so the value is fixed for the process lifetime.
   .join("\n");
@@ -408,6 +414,10 @@ const REWRITE_POLICY = [
   "(a, the, and, with, for, using, built, developed, designed). Drop every listed word. Keep numbers exactly",
   // Continued.
   "as the master text has them. Answer with one entry per bullet, using the same ref ids, and nothing else.",
+  // The keep rule (2026-11-07). This call never sees the posting, so it cannot tell a JD keyword from any
+  // other word: "reword using ONLY master words" alone lets it trim a keyword the first call kept, so the
+  // listed words are the only ones it may drop (the first call dropped "AI" from a live bullet, row 67b979b3).
+  "Drop only the listed words: keep every other keyword of the master text (for example 'AI'), even when you reorder.",
 ].join("\n");
 
 // The rewrite's response: one {ref, text} per bullet asked for.

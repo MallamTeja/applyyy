@@ -22,7 +22,7 @@ import { test } from "node:test";
 // Strict, because "byte-identical" is exactly the kind of claim loose equality ruins.
 import assert from "node:assert/strict";
 // Explicit .ts extension for Deno/Node convergence.
-import { buildTailorPrompt, UNTRUSTED_FENCE_OPEN, UNTRUSTED_FENCE_CLOSE } from "./prompt.ts";
+import { buildTailorPrompt, buildBulletRewritePrompt, UNTRUSTED_FENCE_OPEN, UNTRUSTED_FENCE_CLOSE } from "./prompt.ts";
 // The validator is property 3's enforcement.
 import { validateTailoredProfile } from "./validator.ts";
 // aa's contract, through this stream's single re-export module.
@@ -443,6 +443,25 @@ test("prompt enforces negative constraints with concrete near-miss few-shots", (
 
   // 4. Forced citation references
   assert.ok(instructions.includes("FORCED CITATION REFERENCES (ref_id)"));
+});
+
+// The keep rule: every other rule limits what the model may ADD. Live row 67b979b3 lost "AI" from
+// "AI orchestration pipelines" on the first call, because nothing told the model not to REMOVE a keyword.
+test("the tailoring prompt forbids removing a job-posting keyword the master bullet already contains", () => {
+  // The same clean input as the neighbouring policy tests, so only the policy text is under test.
+  const prompt = buildTailorPrompt({ master: MASTER, masterVersion: PINNED_VERSION, jobDescription: CLEAN_JD, jobTitle: "Backend Intern", company: "Zomato" });
+  // The rule sentence itself, asserted verbatim so a softened rewording shows up as a red test.
+  assert.ok(prompt.systemInstruction.includes("KEEP RULE: never remove a job-posting keyword that the master bullet already contains."));
+  // The live near-miss example, so the model sees the exact shape of the failure.
+  assert.ok(prompt.systemInstruction.includes("master 'AI orchestration pipelines' keeps 'AI'"));
+});
+
+// The retry prompt had no prompt-text test at all; this one pins its keep rule.
+test("the bullet rewrite prompt drops only the listed words and keeps every other master keyword", () => {
+  // One bullet in the live shape: the master text has "AI", the failed wording had an untraceable word.
+  const prompt = buildBulletRewritePrompt([{ ref: "bullet_aczen_backend", masterText: "Built AI orchestration pipelines using FastAPI.", firstText: "Built robust AI orchestration pipelines using FastAPI.", bannedTokens: ["robust"] }]);
+  // The rule sits in the trusted system region, never the fenced user region.
+  assert.ok(prompt.systemInstruction.includes("Drop only the listed words: keep every other keyword of the master text"));
 });
 
 // The schema now asks for award refs, so the model must be able to SEE them. Without
