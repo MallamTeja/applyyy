@@ -290,7 +290,7 @@ describe('skills line: added skills are the operator\'s, removable one by one', 
     return { ...diff, lines: [skills], editCount: 1 };
   };
 
-  it('renders a Remove button per added skill and Docker as an edited run, never traced', () => {
+  it('renders a Remove button per added skill; Docker, a master skill, as a traced run that says so', () => {
     // The full DiffView, split view by default.
     const html = page(skillsOnly());
     // The Remove control for Docker.
@@ -299,10 +299,12 @@ describe('skills line: added skills are the operator\'s, removable one by one', 
     assert.ok(remove, 'expected a button aria-label="Remove Docker, added by you"');
     // Non-submitting.
     assert.match(remove, /^<button\b[^>]*type="button"/);
-    // Positive: Docker sits in an edited run (the operator's choice, R1).
-    assert.match(html, /<span class="run run--edited[^"]*"[^>]*>[^<]*\bDocker\b/);
-    // Paired absence: never inside a traced run.
-    assert.doesNotMatch(html, /<span class="run run--traced[^"]*"[^>]*>[^<]*\bDocker\b/);
+    /* Bug d (Teja 2026-11-06): an added skill that is in the master is the owner's own skill, so it traces to
+       the master and says so; it used to read "edited by you, not checked against the master". The
+       not-in-master case, which stays edited, is pinned in skillsGroupedDiff.test.ts. */
+    assert.match(html, /<span class="run run--traced[^"]*"[^>]*>Docker<span class="visually-hidden"> — traced to your master skills<\/span>/);
+    // Paired absence: not an edited run.
+    assert.doesNotMatch(html, /<span class="run run--edited[^"]*"[^>]*>[^<]*\bDocker\b/);
     // Positive control for the traced check: the tailor's own skills ARE traced.
     assert.match(html, /<span class="run run--traced[^"]*"[^>]*>[^<]*Node\.js/);
   });

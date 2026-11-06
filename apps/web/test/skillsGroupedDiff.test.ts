@@ -212,15 +212,25 @@ describe('skills line: grouped like the PDF', () => {
     assert.deepEqual(screen, pdf);
   });
 
-  it('keeps the per-skill marking inside its group: tailor skills traced, the added one edited', () => {
-    // Docker added by the operator.
+  it('keeps the per-skill marking inside its group: tailor skills traced, a master skill the operator added traced to the master too', () => {
+    // Docker added by the operator; it IS a master skill (skill-docker in MASTER).
     const fragment = skillsParagraph(page(diffOf(withDocker())));
     // Express sits in a traced run inside the Frameworks group.
     assert.match(fragment, /<span class="line__skill-group"><strong>Frameworks:<\/strong> (?:(?!line__skill-group)[\s\S])*<span class="run run--traced">Express</);
-    // Docker sits in an edited run inside the Tools group.
-    assert.match(fragment, /<span class="line__skill-group"><strong>Tools:<\/strong> (?:(?!line__skill-group)[\s\S])*<span class="run run--edited">Docker</);
-    // Paired absence: Docker is never traced.
-    assert.doesNotMatch(fragment, /<span class="run run--traced">Docker</);
+    // Docker sits in a traced run inside the Tools group: it is in the master (Teja 2026-11-06: "should trace to the master").
+    assert.match(fragment, /<span class="line__skill-group"><strong>Tools:<\/strong> (?:(?!line__skill-group)[\s\S])*<span class="run run--traced">Docker<span class="visually-hidden"> — traced to your master skills<\/span>/);
+    // Paired absence: the false "not checked against the master" never appears for a master skill.
+    assert.doesNotMatch(fragment, /not checked against the master/);
+  });
+
+  it('a skill the master does not have stays "edited by you, not checked against the master"', () => {
+    // Zig added by the operator; the master has no such skill (a not-in-master add).
+    const current = JSON.parse(JSON.stringify(original())) as { skills: unknown[] };
+    current.skills.push({ ref: 'skill-zig', name: 'Zig', category: 'Tools' });
+    // The diff and its skills paragraph.
+    const fragment = skillsParagraph(page(diffOf(current as unknown as Resume)));
+    // Still the operator's own mark: nothing can vouch for it.
+    assert.match(fragment, /<span class="run run--edited">Zig<span class="visually-hidden"> — edited by you, not checked against the master<\/span>/);
   });
 
   it('leaves the per-skill Remove control and the Reset in place', () => {

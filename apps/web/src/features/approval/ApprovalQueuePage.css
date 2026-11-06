@@ -442,3 +442,49 @@
   /* The only tag-pill property overridden here. */
   text-transform: none;
 }
+
+/* SPLIT VIEW (2026-11-06). A plain block while no chat is open, so the page is unchanged until one is;
+   the queue column needs minmax(0, 1fr) or a wide diff would push the dock off screen. */
+.queue__split--docked {
+  display: grid;
+  /* The dock's width is the chat's reading measure; the queue keeps everything else. */
+  grid-template-columns: minmax(0, 1fr) 26rem;
+  /* Top-aligned, or the grid would stretch the dock to the queue's full height. */
+  align-items: start;
+  gap: var(--gap-5);
+}
+
+/* The dock follows the operator down a long queue, and scrolls inside itself when the chat is longer
+   than the screen, so the chat never leaves view while the resume beside it is read. */
+.queue__dock {
+  position: sticky;
+  top: var(--gap-3);
+  max-height: calc(100vh - 2 * var(--gap-3));
+  overflow-y: auto;
+  /* The same panel surface and rule as the chat's own box, so the dock reads as one thing. */
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md, 8px);
+  padding: var(--gap-3);
+}
+
+/* Names the job whose resume this chat edits. */
+.queue__dock-title {
+  font-size: var(--size-base);
+  font-weight: var(--font-weight-section-header);
+  color: var(--text-primary);
+  margin-bottom: var(--gap-2);
+}
+
+/* On a narrow screen there is no room beside the queue: the dock stacks above it instead. */
+@media (max-width: 60rem) {
+  .queue__split--docked {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .queue__dock {
+    position: static;
+    max-height: none;
+    /* First in reading order: the chat comes before the long queue it belongs to. */
+    order: -1;
+  }
+}

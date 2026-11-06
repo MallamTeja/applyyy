@@ -631,6 +631,13 @@ export function ApprovalQueuePage(): ReactElement {
      what is open, Bucket B tracks what is closed, so an empty set means every Bucket B row is
      open, which keeps the "a flagged row is read by default" rule. */
   const [foldedB, setFoldedB] = useState<ReadonlySet<string>>(() => new Set());
+  /* THE DOCKED AI CHAT (Teja 2026-11-06): the ONE row whose chat shows in the right-hand dock, or null.
+     Page state, not DiffView state, so a cross-bucket remount keeps the dock on the same row, and so
+     there can never be two chats open: the dock holds exactly this id's chat, and that chat's edits
+     are bound to the same id (DiffView builds onEdit from its own diff). */
+  const [dockId, setDockId] = useState<string | null>(null);
+  /* The dock element, as state (a callback ref), so rows re-render once it exists and can portal into it. */
+  const [dockNode, setDockNode] = useState<HTMLElement | null>(null);
   /* The page-level polite announcement. Page state, not DiffView state, so it survives the
      DiffView remount a cross-bucket save causes. */
   const [announcement, setAnnouncement] = useState<string>('');
@@ -1007,6 +1014,18 @@ export function ApprovalQueuePage(): ReactElement {
       arrangementCounts: countByArrangement(pending),
     };
   }, [queue, unreviewable, settled, view]);
+
+  /* The docked row's diff, if it is still in the page: a row that was approved, rejected or filtered
+     out of the view takes its chat with it, so the dock never describes a row that is not on screen.
+     Computed here, above the page's early returns, so the effect below keeps the hooks order stable. */
+  const dockDiff = dockId === null ? undefined : [...bucketA, ...bucketB].find((d) => d.applicationId === dockId);
+
+  /* A docked row that left the page forgets the dock: otherwise the same id coming back (filter cleared,
+     refetch) would silently re-open its chat. */
+  useEffect(() => {
+    // Only when a dock was set and its row is gone.
+    if (dockId !== null && dockDiff === undefined) setDockId(null);
+  }, [dockId, dockDiff]);
   // How many reviewable rows the view lets through, for "Showing X of Y" and the no-match state.
   const shownCount = bucketA.length + bucketBShownCount;
 
@@ -1782,6 +1801,33 @@ export function ApprovalQueuePage(): ReactElement {
   }
 
   // Flip one id in a set-valued state; used by every disclosure on the page (both buckets).
+  /* Opens this row's review, its live resume preview AND its chat in the dock, in one step: the chat is
+     only useful beside the resume it edits, and a Bucket A row mounts its DiffView (and so its chat)
+     only while its review is open. Opening another row's chat replaces the dock's: one thread at a time. */
+  function openDock(id: string): void {
+    // The dock now shows this row's chat.
+    setDockId(id);
+    // Bucket A: the review (and so the chat) must be mounted.
+    setReviewing((previous) => new Set(previous).add(id));
+    // Bucket B: unfold it, since a folded row is hidden.
+    setFoldedB((previous) => {
+      // Copy, then drop the id.
+      const next = new Set(previous);
+      next.delete(id);
+      return next;
+    });
+    // The resume the chat edits, rendered beside it so each applied edit is visible.
+    setPreviewing((previous) => new Set(previous).add(id));
+  }
+
+  /* The chat button: opens this row's chat, or closes the dock when it already shows this row's. */
+  function toggleDock(id: string): void {
+    // Already docked on this row: close it.
+    if (dockId === id) setDockId(null);
+    // Otherwise dock this row.
+    else openDock(id);
+  }
+
   function toggle(setter: typeof setReviewing, id: string): void {
     // A new Set each time, so React sees the change.
     setter((previous) => {
@@ -1851,6 +1897,11 @@ export function ApprovalQueuePage(): ReactElement {
        page measure would force the operator to scroll to compare them. */
     <div className="page page--wide">
       <PageHeader path="approvals" />
+
+      {/* SPLIT VIEW (Teja 2026-11-06): the queue on the left, the docked AI chat on the right while a row's
+          chat is open. A plain block otherwise, so the page is unchanged until a chat is opened. */}
+      <div className={dockDiff === undefined ? 'queue__split' : 'queue__split queue__split--docked'}>
+      <div className="queue__main">
 
       {/* THE PAGE'S ONE polite live region, mounted outside both buckets so a save that moves a
           card from A to B (or back) cannot unmount it mid-announcement. Always rendered, even
@@ -2103,10 +2154,26 @@ export function ApprovalQueuePage(): ReactElement {
                       /* Disclosure semantics, as in Bucket A: true while the review shows. */
                       aria-expanded={!isFolded}
                       aria-controls={reviewId}
-                      onClick={() => toggle(setFoldedB, diff.applicationId)}
+                      onClick={() => {
+                        // Pressing Review opens the review AND docks this row's chat beside it.
+                        if (isFolded) openDock(diff.applicationId);
+                        else {
+                          // Hiding the review of the docked row closes its chat too: nothing left to chat beside.
+                          toggle(setFoldedB, diff.applicationId);
+                          if (dockId === diff.applicationId) setDockId(null);
+                        }
+                      }}
                     >
                       {/* Same words as Bucket A, so the action reads the same everywhere. */}
                       {isFolded ? 'Review' : 'Hide review'}
+                    </button>
+                    {/* Bucket B rows start open, so Review is not pressed: this docks the chat without folding. */}
+                    <button
+                      type="button"
+                      className="button button--secondary button--small"
+                      onClick={() => toggleDock(diff.applicationId)}
+                    >
+                      {dockId === diff.applicationId ? 'Close chat' : 'Chat with AI'}
                     </button>
                   </div>
                   {/* Fit, ATS score and queued-at (2026-11-04; deadline dropped 2026-11-05), shown folded or open: DiffView
@@ -2139,6 +2206,8 @@ export function ApprovalQueuePage(): ReactElement {
                     onAssist={(body) => requestAssist(supabase, body)}
                     /* Where the chat keeps its chats; undefined when not connected. */
                     chat={chatStore}
+                    /* The chat renders in the right-hand dock, and only while it is THIS row's turn. */
+                    chatDock={{ node: dockNode, active: dockId === diff.applicationId }}
                   />
                   </div>
                   {/* The diff is open unless folded; the rendered document is an extra,
@@ -2243,10 +2312,25 @@ export function ApprovalQueuePage(): ReactElement {
                         /* aria-expanded is what tells a screen reader this is a disclosure. */
                         aria-expanded={isReviewing}
                         aria-controls={reviewId}
-                        onClick={() => toggle(setReviewing, diff.applicationId)}
+                        onClick={() => {
+                          // Pressing Review opens the review AND docks this row's chat beside it.
+                          if (!isReviewing) openDock(diff.applicationId);
+                          else {
+                            // Hiding the docked row's review closes its chat too: nothing left to chat beside.
+                            toggle(setReviewing, diff.applicationId);
+                            if (dockId === diff.applicationId) setDockId(null);
+                          }
+                        }}
                       >
                         {/* Says what opening does, and what closing does. */}
                         {isReviewing ? 'Hide review' : 'Review'}
+                      </button>
+                      <button
+                        type="button"
+                        className="button button--secondary button--small"
+                        onClick={() => toggleDock(diff.applicationId)}
+                      >
+                        {dockId === diff.applicationId ? 'Close chat' : 'Chat with AI'}
                       </button>
                       <button
                         type="button"
@@ -2293,6 +2377,8 @@ export function ApprovalQueuePage(): ReactElement {
                         onAssist={(body) => requestAssist(supabase, body)}
                         /* Where the chat keeps its chats; undefined when not connected. */
                         chat={chatStore}
+                        /* Same dock as Bucket B: this row's chat shows only while it is the docked one. */
+                        chatDock={{ node: dockNode, active: dockId === diff.applicationId }}
                       />
                     </div>
                   ) : null}
@@ -2351,6 +2437,18 @@ export function ApprovalQueuePage(): ReactElement {
           </button>
         </section>
       ) : null}
+      </div>
+      {/* THE DOCK. Rendered only for a row still on the page; it is the portal target of that row's chat. The
+          header names the job so the operator always sees which resume this chat edits. */}
+      {dockDiff !== undefined ? (
+        <aside className="queue__dock" aria-label="AI resume chat dock">
+          <h2 className="queue__dock-title">
+            {dockDiff.jobTitle} at {dockDiff.companyName}
+          </h2>
+          <div ref={setDockNode} className="queue__dock-body" />
+        </aside>
+      ) : null}
+      </div>
     </div>
   );
 }

@@ -32,6 +32,8 @@
 // Fragment (2026-11-05): a keyed wrapper-free row for each skill group (TailoredText).
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
+// Renders the AI chat into the page's right-hand dock while its state stays in this row's component.
+import { createPortal } from 'react-dom';
 
 import type {
   AddedSkill,
@@ -145,6 +147,10 @@ export interface DiffViewProps {
   readonly onAssist?: ((body: AssistBody) => Promise<AssistResult>) | undefined;
   /* Where the AI chat keeps its chats (2026-11-01). Absent means a session-only chat. */
   readonly chat?: ChatStore | undefined;
+  /* The page's docked chat (2026-11-06). Present: the AI chat renders into `node` (the page's right-hand
+     dock) and only while `active`, so one chat shows at a time and it is always this row's own.
+     Absent: the chat stays inline in the card, as before. */
+  readonly chatDock?: { readonly node: HTMLElement | null; readonly active: boolean } | undefined;
   /* The page's held re-check of this edited row (2026-11-05): its findings, or why it could not
      run. Present turns Approve into the second click; absent is every row nothing holds. */
   readonly approveHold?: ApproveHold | undefined;
@@ -830,6 +836,10 @@ function TailoredText({ line }: { readonly line: DiffLine }): ReactElement {
   }
   // The operator's additions, by ref: the only skills that are not traced (same split as the adapter).
   const added = new Set((line.addedSkills ?? []).map((skill) => skill.ref));
+  // The master's own skill names, lower-cased: an added skill that is one of them is the owner's real
+  // skill, so it traces to the master (2026-11-06: "Master skills the AI adds show 'not checked against
+  // the master'"). Display only: the coverage bar still counts it as "from your edits" (diffAdapter).
+  const inMaster = new Set((line.masterSkills ?? []).map((skill) => skill.name.toLowerCase()));
   // A Map keeps insertion order, so groups appear where their first skill does, like renderSkills.
   const groups = new Map<string, PrintedSkill[]>();
   // One pass in print order; members keep their relative order within a group.
@@ -852,7 +862,7 @@ function TailoredText({ line }: { readonly line: DiffLine }): ReactElement {
                 {/* The comma is unmarked text, as in the flat line: highlighting it would be noise. */}
                 {index > 0 ? ', ' : null}
                 {/* Each skill its own run, so traced vs "edited by you" stays per skill (R1). */}
-                <Run run={added.has(skill.ref) ? { text: skill.name, verdict: 'edited', tracesTo: null } : { text: skill.name, verdict: 'traced', tracesTo: 'skills' }} />
+                <Run run={added.has(skill.ref) && !inMaster.has(skill.name.toLowerCase()) ? { text: skill.name, verdict: 'edited', tracesTo: null } : { text: skill.name, verdict: 'traced', tracesTo: added.has(skill.ref) ? 'your master skills' : 'skills' }} />
               </Fragment>
             ))}
           </span>
@@ -1815,9 +1825,16 @@ export function DiffView({
   onAssist,
   // The AI chat's store; passed straight through.
   chat,
+  // Where the chat renders: the page's dock, or inline when absent.
+  chatDock,
   // The held re-check, shown above Approve; undefined when nothing is held.
   approveHold,
 }: DiffViewProps): ReactElement {
+  /* Whether this row's chat has ever been docked: from then on its panel stays mounted (hidden) while another
+     row holds the dock. State set during render, the supported pattern for state derived from a prop. */
+  const [everDocked, setEverDocked] = useState(false);
+  // First time docked: remember it.
+  if (chatDock?.active === true && !everDocked) setEverDocked(true);
   // Every claim still in the resume; claims on edited or removed lines are already gone.
   const claims = useMemo(() => collectFlaggedClaims(diff), [diff]);
   // A or B, derived; an edited row is always B (R2).
@@ -2015,9 +2032,23 @@ export function DiffView({
 
       {/* The AI box, only where an edit could honestly land: a save path, an ask, and editing on.
           Keyed by row so a new row never shows the previous row's proposals. */}
-      {runEdit !== null && onAssist !== undefined && !editDisabledReason ? (
-        <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} structure={assistStructure ?? undefined} />
-      ) : null}
+      {(() => {
+        // The panel itself: bound to THIS row's onEdit and id, so whatever it applies lands on this row only.
+        const panel =
+          runEdit !== null && onAssist !== undefined && !editDisabledReason ? (
+            <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} structure={assistStructure ?? undefined} />
+          ) : /* Docked and read-only: say why, instead of a dock that is silently empty. */ chatDock?.active === true && editDisabledReason ? (
+            <p className="diff__edit-note">AI chat is off for this resume: {editDisabledReason}</p>
+          ) : null;
+        // Not docked: inline in the card, exactly as before.
+        if (chatDock === undefined) return panel;
+        /* Docked: a row's panel is created the first time it is docked, then only HIDDEN when another row takes the
+           dock, never unmounted. Unmounting would drop a half-typed prompt and pending op cards, and a request
+           still in flight would finish against a chat nobody can see. */
+        if (!chatDock.active && !everDocked) return null;
+        // The dock element must exist to render into.
+        return chatDock.node !== null ? createPortal(<div hidden={!chatDock.active}>{panel}</div>, chatDock.node) : null;
+      })()}
 
       {/* Section order, only where a move could be saved and only with something to reorder. */}
       {structureEdit !== null && printedSections.length > 1 ? (

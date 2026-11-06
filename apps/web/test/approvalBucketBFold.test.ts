@@ -41,8 +41,11 @@ describe('Bucket B review can be folded, and is open by default', () => {
     assert.match(bucketB, /aria-expanded=\{!isFolded\}/);
     // It names the region it controls.
     assert.match(bucketB, /aria-controls=\{reviewId\}/);
-    // Clicking flips this row in the folded set through the page's shared toggle.
-    assert.match(bucketB, /onClick=\{\(\) => toggle\(setFoldedB, diff\.applicationId\)\}/);
+    /* Clicking flips this row in the folded set: unfolding goes through openDock (2026-11-06: Review also docks
+       the row's chat, and openDock removes the id from the folded set), folding through the page's shared toggle. */
+    assert.match(bucketB, /if \(isFolded\) openDock\(diff\.applicationId\);/);
+    // Folding still flips the set through the shared toggle.
+    assert.match(bucketB, /toggle\(setFoldedB, diff\.applicationId\);/);
     // The same words as Bucket A, open and closed.
     assert.match(bucketB, /\{isFolded \? 'Review' : 'Hide review'\}/);
   });

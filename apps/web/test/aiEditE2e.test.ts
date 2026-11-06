@@ -342,6 +342,10 @@ describe('AI resume chat, end to end (2026-11-05)', () => {
     const review = card.getByRole('button', { name: 'Review', exact: true });
     // Only when folded.
     if (await review.isVisible()) await review.click();
+    // The chat docks on the right (2026-11-06), outside the card: open this row's, if it is not already.
+    const dock = card.getByRole('button', { name: 'Chat with AI', exact: true });
+    // Only when closed: the button reads 'Close chat' while docked.
+    if (await dock.isVisible()) await dock.click();
     // The card, ready.
     return card;
   }
@@ -385,7 +389,7 @@ describe('AI resume chat, end to end (2026-11-05)', () => {
       // The panel inside the card (re-found each turn: the card can move buckets after an edit).
       card = await openCard();
       // The AI chat region.
-      const chat = card.getByRole('region', { name: 'AI resume chat' });
+      const chat = page.getByRole('region', { name: 'AI resume chat' });
       // The prompt box.
       const input = chat.getByLabel('Message to the AI');
       // Ready once the history has loaded.
@@ -464,7 +468,7 @@ describe('AI resume chat, end to end (2026-11-05)', () => {
     // The preview, from the reloaded row.
     await assertPreviewShowsAll(await openPreview(card), 'after reload');
     // The conversation reloaded from its table: the four answers are listed again.
-    const chat = card.getByRole('region', { name: 'AI resume chat' });
+    const chat = page.getByRole('region', { name: 'AI resume chat' });
     // The last answer, back.
     await chat.locator('li.ai-chat__msg--ai').filter({ hasText: `Done: ${TURNS[3]!.prompt}` }).waitFor({ timeout: 10_000 });
   });
@@ -474,7 +478,7 @@ describe('AI resume chat, end to end (2026-11-05)', () => {
     // The row, open.
     const card = await openCard();
     // The AI chat region.
-    const chat = card.getByRole('region', { name: 'AI resume chat' });
+    const chat = page.getByRole('region', { name: 'AI resume chat' });
     // "Redis" also occurs in bullet text, so the preview check counts it: one fewer after the removal.
     const frame = await openPreview(card);
     // How many times the preview prints the skill's name now.
