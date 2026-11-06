@@ -163,3 +163,41 @@ describe('a skipped kit says why', () => {
     assert.match(html, /<strong>Kit skipped\.<\/strong> Posting closed: check the form, and mark it failed if it is gone\.<span class="kit-card__skip-reason"> \(Lever says the posting is closed\)<\/span>/);
   });
 });
+
+describe('the card has a "Resume preview" button beside the download (Teja, 2026-11-06 23:07)', () => {
+  it('a row with a valid resume shows the button in the actions row, pointing at the preview block', () => {
+    // The approved row with a kit whose resume file exists, so the Download button is there too.
+    const kit = { kind: 'kit', kit: { formUrl: 'https://example.com/form', resume: { storagePath: 'u/r.pdf', fileName: 'Mallam Teja Resume.pdf' }, fields: [], warnings: [] } };
+    // The card.
+    const html = renderCard(data.parseRow(raw()), kit);
+    // The button names its target block, so a screen reader hears what it controls.
+    assert.match(html, new RegExp(`<button type="button" class="kit-resume__button kit-resume__preview" aria-controls="tailored-resume-${ID}">Resume preview</button>`));
+    // The block it opens carries that same id (a dangling aria-controls is a lie).
+    assert.match(html, new RegExp(`<details class="kit-card__resume" id="tailored-resume-${ID}" open="">`));
+    // Order: the preview button sits right after the download one, inside the actions row.
+    // Both indices are proven present first: indexOf returns -1 for a missing string, and -1 < n would pass vacuously.
+    const download = html.indexOf('Download resume (Mallam Teja Resume.pdf)');
+    // The preview button's position.
+    const preview = html.indexOf('Resume preview</button>');
+    // Both found.
+    assert.ok(download >= 0 && preview >= 0, 'both buttons must render');
+    // Then the order.
+    assert.ok(download < preview);
+  });
+
+  it('the button shows even with no kit (resume-only rows have the tailored resume, not a kit file)', () => {
+    // No kit at all.
+    const html = renderCard(data.parseRow(raw()), { kind: 'none' });
+    // The button is there: it needs only the row's own snapshot.
+    assert.match(html, />Resume preview<\/button>/);
+  });
+
+  it('a row with no valid resume has no button (it would open nothing)', () => {
+    // Never tailored.
+    const html = renderCard(data.parseRow(raw({ tailored_profile: null })), { kind: 'none' });
+    // Positive anchor first: the card did render its actions row, so the absence below is not an empty render.
+    assert.match(html, /<div class="kit-card__actions">/);
+    // Absent, not disabled-and-confusing.
+    assert.doesNotMatch(html, />Resume preview<\/button>/);
+  });
+});

@@ -117,6 +117,31 @@ function ResumeDownload(props: { readonly resume: NonNullable<ApplyKit['resume']
   );
 }
 
+/* The id of a row's tailored-resume block: the preview button's aria-controls and its open target, from one
+   function so the two can never drift apart. */
+const resumeBlockId = (rowId: string): string => `tailored-resume-${rowId}`;
+
+/* "Resume preview", beside the download (Teja, 2026-11-06). The preview already sits inline in the card's
+   <details> below; this opens it if it was collapsed and scrolls it into view, so the button is one click
+   from the file name it sits next to. Shown only when the row has a valid snapshot: otherwise it opens nothing. */
+function ResumePreviewButton(props: { readonly rowId: string }): ReactElement {
+  // One click: find the block by id, open it, bring it on screen.
+  const show = (): void => {
+    // The block this button controls; absent only if the card was re-rendered away.
+    const block = document.getElementById(resumeBlockId(props.rowId));
+    // Nothing to open: do nothing rather than throw.
+    if (!(block instanceof HTMLDetailsElement)) return;
+    // Expanded, in case the operator collapsed it after saving the PDF.
+    block.open = true;
+    // Smooth scroll is cosmetic; "nearest" avoids a jump when it is already visible.
+    block.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  };
+  return (
+    /* Same class as the download button so the two read as a pair; aria-controls names the block. */
+    <button type="button" className="kit-resume__button kit-resume__preview" aria-controls={resumeBlockId(props.rowId)} onClick={show}>Resume preview</button>
+  );
+}
+
 /* One field row: label, answer, provenance, and a Copy button where pasting makes sense. */
 function KitFieldRow(props: { readonly field: KitField; readonly index: number }): ReactElement {
   // Destructured for readability.
@@ -205,7 +230,7 @@ function TailoredResume(props: { readonly row: ManualApplyRow }): ReactElement {
   if (row.resume === null) return <p className="panel__note" role="note">No tailored resume on this row, so there is nothing to download here.</p>;
   return (
     /* Native details: keyboard-operable, and collapsible once the PDF is saved. */
-    <details className="kit-card__resume" open>
+    <details className="kit-card__resume" id={resumeBlockId(row.id)} open>
       {/* Names both things the block offers. */}
       <summary>Tailored resume: preview and Download PDF</summary>
       {/* The same props the Applied page and the pipeline drawer pass. */}
@@ -254,6 +279,8 @@ export function KitCard(props: { readonly row: ManualApplyRow; readonly kit: Kit
         )}
         {/* The resume, when the kit names one. */}
         {kit.kind === 'kit' && kit.kit.resume !== null ? <ResumeDownload resume={kit.kit.resume} /> : null}
+        {/* The tailored resume, opened inline: from the row's own snapshot, so it needs no kit. */}
+        {row.resume !== null ? <ResumePreviewButton rowId={row.id} /> : null}
         {/* Copy every answer at once, for pasting into notes or a long form. */}
         {kit.kind === 'kit' ? <CopyButton text={copyAllText(kit.kit)} what="all answers" /> : null}
       </div>
