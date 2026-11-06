@@ -184,3 +184,59 @@
   /* Separates the resolve from the start-the-application row above it. */
   margin-block-start: 0.75rem;
 }
+
+/* "Left your queue" (2026-11-07): the collapsed audit trail under the resolve section. */
+.left-queue {
+  /* Space from the section above it. */
+  margin-block-start: var(--gap-3);
+}
+
+/* The list of rows: no bullets, the rules do the separating. */
+.left-queue__list {
+  /* The row rules replace bullets. */
+  list-style: none;
+  /* Flush with the panel body. */
+  padding: 0;
+  /* Space under the note. */
+  margin: var(--gap-2) 0 0;
+}
+
+/* One job's audit line. */
+.left-queue__row {
+  /* A hairline between jobs. */
+  border-block-start: 1px solid var(--rule);
+  /* Breathing room inside the line. */
+  padding: var(--gap-2) 0;
+}
+
+/* Who moved it and when: quiet, it is context. */
+.left-queue__meta {
+  /* Small. */
+  font-size: var(--size-xs);
+  /* Tight to the label above. */
+  margin: var(--gap-1) 0 0;
+}
+
+/* Why it moved: the line to read. */
+.left-queue__reason {
+  /* Tight to the line above. */
+  margin: var(--gap-1) 0;
+  /* The reason may be one long sentence. */
+  overflow-wrap: anywhere;
+}
+
+/* A select's collapsed choice list (2026-11-07): one line until opened, so a 240-country list is not a wall of text. */
+.kit-field__choices {
+  /* Its own line within the wrapped field, like the other secondary lines. */
+  flex-basis: 100%;
+  /* Same small size as the choices it hides. */
+  font-size: var(--size-xs);
+  /* Quiet like the other secondary text. */
+  color: var(--text-secondary);
+}
+
+/* The "Show N choices" line is a control: show that it clicks. */
+.kit-field__choices > summary {
+  /* A pointer says "this opens". */
+  cursor: pointer;
+}

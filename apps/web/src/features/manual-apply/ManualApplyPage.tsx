@@ -45,7 +45,10 @@ import type { ApplyKit, KitField, KitSkipCode, KitState } from './applyKit';
 import { ResumePreview } from '../resume-preview/ResumePreview';
 // The page's reads.
 import { loadManualApply } from './manualApplyData';
-// Type only: one row.
+// The pure rules behind the preview toggle and the select-choices display.
+import { pressPreview } from './previewToggle';
+// Same, for the choices.
+import { choiceView } from './fieldChoices';// Type only: one row.
 import type { ManualApplyRow } from './manualApplyData';
 // The recovery queues' table styles, reused rather than copied.
 import '../health/health.css';
@@ -121,24 +124,59 @@ function ResumeDownload(props: { readonly resume: NonNullable<ApplyKit['resume']
    function so the two can never drift apart. */
 const resumeBlockId = (rowId: string): string => `tailored-resume-${rowId}`;
 
-/* "Resume preview", beside the download (Teja, 2026-11-06). The preview already sits inline in the card's
-   <details> below; this opens it if it was collapsed and scrolls it into view, so the button is one click
-   from the file name it sits next to. Shown only when the row has a valid snapshot: otherwise it opens nothing. */
+/* "Resume preview" / "Hide preview", beside the download (Teja, 2026-11-06; made a real toggle 2026-11-07
+   after pressing it a second time did nothing). The preview sits inline in the card's <details> below: a
+   press opens it (and scrolls to it) or closes it, and the label and aria-expanded follow the element, so
+   the button also stays right when the operator clicks the <details> summary directly. Shown only when the
+   row has a valid snapshot: otherwise it controls nothing. */
 function ResumePreviewButton(props: { readonly rowId: string }): ReactElement {
-  // One click: find the block by id, open it, bring it on screen.
-  const show = (): void => {
+  // Whether the block is open. Starts true because the card renders the block open; the effect below corrects it.
+  const [open, setOpen] = useState(true);
+  // Keep the label in step with the element, whoever toggles it (this button or the native summary).
+  useEffect(() => {
     // The block this button controls; absent only if the card was re-rendered away.
     const block = document.getElementById(resumeBlockId(props.rowId));
-    // Nothing to open: do nothing rather than throw.
-    if (!(block instanceof HTMLDetailsElement)) return;
-    // Expanded, in case the operator collapsed it after saving the PDF.
-    block.open = true;
-    // Smooth scroll is cosmetic; "nearest" avoids a jump when it is already visible.
-    block.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    // Not a <details>: nothing to follow.
+    if (!(block instanceof HTMLDetailsElement)) return undefined;
+    // Read the element's real state once (the operator may have collapsed it before this mounted).
+    setOpen(block.open);
+    // The browser fires "toggle" after every open/close, from the button, the summary or the keyboard.
+    const sync = (): void => setOpen(block.open);
+    // Listening on the element itself, not the document, so other cards' blocks cannot disturb this label.
+    block.addEventListener('toggle', sync);
+    // Removed on unmount so a re-rendered card does not leak listeners.
+    return () => block.removeEventListener('toggle', sync);
+  }, [props.rowId]);
+  // One press: toggle the element (pressPreview owns the rule and is unit tested), then show what it reports.
+  const press = (): void => {
+    // The block this button controls.
+    const block = document.getElementById(resumeBlockId(props.rowId));
+    // Only a real <details> is toggled; anything else is treated as "no block".
+    setOpen(pressPreview(block instanceof HTMLDetailsElement ? block : null));
   };
   return (
-    /* Same class as the download button so the two read as a pair; aria-controls names the block. */
-    <button type="button" className="kit-resume__button kit-resume__preview" aria-controls={resumeBlockId(props.rowId)} onClick={show}>Resume preview</button>
+    /* Same class as the download button so the two read as a pair; aria-controls names the block, aria-expanded its state. */
+    <button type="button" className="kit-resume__button kit-resume__preview" aria-controls={resumeBlockId(props.rowId)} aria-expanded={open} onClick={press}>{open ? 'Hide preview' : 'Resume preview'}</button>
+  );
+}
+
+/* A select/radio field's choices (Teja, 2026-11-07): a matched answer shows only its own option, no choices
+   read shows nothing, and everything else sits behind a native disclosure with its count, never a wall of text. */
+function FieldChoices(props: { readonly field: KitField }): ReactElement | null {
+  // What to show for this answer against these options (pure, unit tested).
+  const view = choiceView(props.field.value, props.field.options);
+  // No options were read.
+  if (view.kind === 'none') return null;
+  // The answer names its option: just that, the exact one to pick.
+  if (view.kind === 'matched') return <span className="kit-field__options">Choices: {view.picks.join(' | ')}</span>;
+  return (
+    /* Closed by default: the list is a lookup, not something to read. */
+    <details className="kit-field__choices">
+      {/* The count says how long the list is before it is opened. */}
+      <summary>Show {view.options.length} choices</summary>
+      {/* Every option, still reachable for a manual pick. */}
+      <span className="kit-field__options">{view.options.join(' | ')}</span>
+    </details>
   );
 }
 
@@ -163,7 +201,7 @@ function KitFieldRow(props: { readonly field: KitField; readonly index: number }
       {/* Where the answer came from, so trust can be judged before pasting. */}
       <span className="kit-field__source">{field.source.replace('_', ' ')}</span>
       {/* The choices of a select or radio, so a value can be matched to the option list. */}
-      {field.options !== null && field.options.length > 0 ? <span className="kit-field__options">Choices: {field.options.join(' | ')}</span> : null}
+      <FieldChoices field={field} />
       {/* Copy for typed answers; a file input takes the downloaded resume instead. */}
       {field.inputType !== 'file' && field.value !== null ? <CopyButton text={field.value} what={field.label} /> : null}
       {/* The file input's instruction. */}
