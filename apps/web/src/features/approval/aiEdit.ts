@@ -1161,6 +1161,23 @@ export function describeOp(op: StoredOp): string {
   }
 }
 
+/* A sentence that reports a change as done: a past-tense change verb, or the bare word "done". Deliberately
+   broad: hiding a true sentence is the safe error, because the status line and the op cards carry the truth. */
+const CLAIMS_A_CHANGE = /\b(?:added|removed|changed|moved|applied|updated|rewrote|rephrased|replaced|deleted|inserted|swapped|done)\b/i;
+
+/* The reply text the panel shows (bug a, Teja 2026-11-06, live Revature row: "Added GCP, MySQL, Redis, MongoDB"
+   with 0 ops applied). A reply whose ops could never land (none, or every one rejected) must not claim a
+   change: its words are hidden when they claim one, so the panel never shows a change that did not happen.
+   A reply with a landable op keeps its words; its cards and status line say what really changed. */
+export function replyNote(note: string, ops: readonly StoredOp[]): string {
+  // Whether anything in this reply could ever land (a rejected card never does; an empty list has none).
+  const somethingCanLand = ops.some((op) => op.op !== 'rejected');
+  // Landable: the cards beside the words prove or disprove them.
+  if (somethingCanLand) return note;
+  // Nothing can land: a claim is false by construction, a plain answer or question is fine.
+  return CLAIMS_A_CHANGE.test(note) ? '' : note;
+}
+
 /* What one reply's changes amount to NOW, read from the resume (2026-11-04): "[Applied: … |
    Not applied yet: … | Could not do: … (why)]", or '' for a reply with no ops. The chat sends this
    ahead of each earlier AI reply, so the model reads the outcome of its own turns instead of its own

@@ -823,6 +823,12 @@ function groupNamedIn(instruction: string, categories: readonly string[]): strin
    Node.js" for a skill already printed). The panel lists every op and its outcome instead. */
 const CHANGE_CLAIM = /\b(?:i|i've|i have|i'll|i will|i've now|we|we've|we have)\b[^.!?]*\b(?:add(?:ed)?|remov(?:ed|e)|chang(?:ed|e)|mov(?:ed|e)|appl(?:ied|y)|updat(?:ed|e)|rewr(?:ote|ite|itten)|rephras(?:ed|e)|replac(?:ed|e)|delet(?:ed|e)|includ(?:ed|e)|insert(?:ed)?|swap(?:ped)?|put)\b/i;
 
+/* A note sentence that reports a change with NO first-person subject (2026-11-06, live Revature row: "Added
+   GCP, MySQL, Redis, MongoDB" with 0 ops applied). Three shapes: it opens with a past-tense change verb
+   ("Added X", "Removed Y"), it says a change is done ("X is now on your resume", "has been added"), or it is
+   the bare word "Done". Dropping a true sentence is the safe error; the panel lists every op anyway. */
+const BARE_CLAIM = /^\s*(?:added|removed|changed|moved|applied|updated|rewrote|rephrased|replaced|deleted|inserted|swapped|done)\b|\b(?:is|are|was|were|has|have)\s+(?:now\s+|been\s+)+(?:added|removed|changed|moved|applied|updated|replaced|inserted|on\s+your\s+resume)\b|\bnow\s+(?:on|in)\s+your\s+resume\b/i;
+
 /* The reply the owner reads, derived from what survived (2026-11-05): every sentence that claims a
    change is dropped, and an answer whose ops ALL failed leads with what happened instead. Never a
    success sentence the outcome does not back. */
@@ -830,11 +836,16 @@ function honestNote(raw: unknown, ops: readonly AssistOp[], rejected: readonly R
   // The model's text, one line, or nothing.
   const text = typeof raw === "string" ? oneLine(raw) : "";
   // Sentences, each kept with its own end mark; a claim sentence is dropped whole.
-  const kept = (text.match(/[^.!?]+[.!?]*/g) ?? []).map((sentence) => sentence.trim()).filter((sentence) => sentence !== "" && !CHANGE_CLAIM.test(sentence));
+  const kept = (text.match(/[^.!?]+[.!?]*/g) ?? []).map((sentence) => sentence.trim()).filter((sentence) => sentence !== "" && !CHANGE_CLAIM.test(sentence) && !BARE_CLAIM.test(sentence));
   // Ops proposed but none survived: say so first, with the first reason.
   const lead = ops.length === 0 && rejected.length > 0 ? `Nothing was changed: ${rejected[0]!.why}` : "";
   // Lead, then what the model said that was not a claim; capped as before.
-  return [lead, ...kept].filter((part) => part !== "").join(" ").slice(0, NOTE_MAX);
+  const body = [lead, ...kept].filter((part) => part !== "").join(" ").slice(0, NOTE_MAX);
+  // Something to read: done.
+  if (body !== "") return body;
+  // Nothing to read (the model said nothing, or only claims): a count of what the list below holds, never a
+  // blank bubble above it (2026-11-06). No claim in it: "Proposed" is a fact about the answer, not the resume.
+  return ops.length > 0 ? `Proposed ${ops.length} change${ops.length === 1 ? "" : "s"}. See the list below.` : "No changes proposed.";
 }
 
 export function parseAssistOps(
@@ -971,7 +982,7 @@ export function parseAssistOps(
          is. Never a guess between several: an unresolved group is a named rejection. */
       const group = groups.get(skillKey(category)) ?? namedGroup ?? (request.categories.length === 1 ? request.categories[0] : undefined);
       // No group from the AI, none named by the owner, several to choose from.
-      if (group === undefined && category === "") return "The AI's answer did not say which skill group.";
+      if (group === undefined && category === "") return `The AI's answer did not say which skill group. Say which one: ${groupList}.`;
       // A group the master lacks, named with the ones it has.
       if (group === undefined) return `"${clip(category, 30)}" is not one of your skill groups (${groupList}).`;
       // The claim key, namespaced so a skill called "b0" cannot collide with a bullet id.
@@ -1123,7 +1134,7 @@ export function parseAssistOps(
     ops.push(result);
   }
   // The note is display text, never a made-up success: claim sentences dropped, and an all-failed answer
-  // led by what happened (honestNote). A missing note with nothing to report stays empty.
+  // led by what happened (honestNote). A note with nothing to read gets a one-line count (honestNote).
   const note = honestNote(parsed.note, ops, rejected);
   // The surviving ops, the drop count, the named drops and the note.
   return { ok: true, ops, dropped, rejected, note };

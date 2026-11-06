@@ -560,7 +560,7 @@ test("an add_skill under a group the master lacks names that group and lists at 
   // Capped list.
   assert.equal(rejectedFor({ op: "add_skill", name: "Rust", category: "Programming" }, six.request)?.why, '"Programming" is not one of your skill groups (A, B, C, D, E, …).');
   // No group at all is its own reason, not "is not one of your groups".
-  assert.equal(rejectedFor({ op: "add_skill", name: "Rust" })?.why, "The AI's answer did not say which skill group.");
+  assert.equal(rejectedFor({ op: "add_skill", name: "Rust" })?.why, "The AI's answer did not say which skill group. Say which one: Languages, Tools.");
   // Already printed: named in the resume's own spelling.
   assert.deepEqual(rejectedFor({ op: "add_skill", name: "postgres", category: "Tools" }), { what: 'Add skill "postgres"', why: '"Postgres" is already on the resume.' });
 });
@@ -1008,4 +1008,41 @@ test("the live ask, through the handler against a fake model: the prompt carries
   assert.match(d.calls[0]!.prompt.userContent, /MASTER SKILLS NOT ON RESUME \(by group\): Tools: Postman, Swagger\/OpenAPI \| Testing: pytest/);
   // Both adds survive the parser, filed under the existing Tools group.
   assert.deepEqual(out.ops, [{ op: "add_skill", name: "Postman", category: "Tools" }, { op: "add_skill", name: "Swagger/OpenAPI", category: "Tools" }]);
+});
+
+// 2026-11-06 live Revature row: the reply said "Added GCP, MySQL, Redis, MongoDB" and 0 ops landed. The
+// first-person filter missed it (no "I"), so a claim reached the owner with nothing applied behind it.
+test("a past-tense claim with no 'I' is dropped from the note, like a first-person one", () => {
+  // Three claim shapes the first-person filter let through, each next to a sentence that is not a claim.
+  for (const claim of ["Added GCP, MySQL, Redis, MongoDB to your Tools group.", "GCP is now on your resume.", "Done.", "Those skills have been added."]) {
+    // Ops all failed: the note must lead with what happened and carry no claim.
+    const parsed = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "GCP" }], note: claim + " Kafka fits Tools best." }), request());
+    // Valid answer shape.
+    assert.ok(parsed.ok);
+    // The claim is gone, the honest remainder stays, and the failure leads.
+    assert.equal(parsed.note, "Nothing was changed: The AI's answer did not say which skill group. Say which one: Languages, Tools. Kafka fits Tools best.");
+  }
+});
+
+// A reply the filter emptied (or the model left empty) must still say what the answer holds, or the panel
+// shows a blank chat bubble above its change list.
+test("an empty note gets a one-line summary of the surviving ops, or says nothing was proposed", () => {
+  // One surviving op, model note empty.
+  const one = parseAssistOps(JSON.stringify({ ops: [{ op: "edit", id: "b0", text: "Built a billing API serving 500 users with p95 under 80 ms." }], note: "" }), request());
+  // Valid.
+  assert.ok(one.ok);
+  // Counted in words, pointing at the list that carries the detail.
+  assert.equal(one.note, "Proposed 1 change. See the list below.");
+  // A claim-only note on two surviving ops reads the same way, plural.
+  const two = parseAssistOps(JSON.stringify({ ops: [{ op: "remove", id: "b0" }, { op: "add_skill", name: "Kafka", category: "Tools" }], note: "Added Kafka and removed b0." }), request());
+  // Valid.
+  assert.ok(two.ok);
+  // Plural, and the claim is not echoed.
+  assert.equal(two.note, "Proposed 2 changes. See the list below.");
+  // No ops, no failures, no text: said, not blank.
+  const none = parseAssistOps(JSON.stringify({ ops: [], note: "" }), request());
+  // Valid.
+  assert.ok(none.ok);
+  // Said in words.
+  assert.equal(none.note, "No changes proposed.");
 });

@@ -54,7 +54,7 @@ import type { EditSource } from './saveTailoredEdit';
    Narrower than EditSource, so this panel can never log an edit as a hand edit on the page. */
 type ChatSource = Extract<EditSource, 'ai_chat_auto' | 'ai_chat_click'>;
 // The pure halves: build the ask, resolve and apply ops, read applied state and outcomes, format the bill.
-import { buildAssistDraft, formatUsage, holdReason, isApplied, outcomeNote, resolveOps, sectionTitle, shouldAutoApply, toEditAction } from './aiEdit';
+import { buildAssistDraft, formatUsage, holdReason, isApplied, outcomeNote, replyNote, resolveOps, sectionTitle, shouldAutoApply, toEditAction } from './aiEdit';
 // Types for the ask and its parts.
 import type { ApplicableOp, AssistBody, AssistResult, AssistStructure, AuditAdvice, StoredOp } from './aiEdit';
 // The memory: grouping into chats and the window sent back as context.
@@ -630,7 +630,7 @@ export function AiEditPanel({
             // Same keying as the user bubble.
             <li key={`${message.createdAt}|assistant`} className="ai-chat__msg ai-chat__msg--ai">
               {/* The AI's reply, as it wrote it: its answer, never the record of what changed. */}
-              <p className="ai-chat__note">{message.content}</p>
+              {replyNote(message.content, ops) !== '' ? <p className="ai-chat__note">{replyNote(message.content, ops)}</p> : null}
               {/* The record, read from the resume right now: what is applied, what is not, what could not be done. */}
               <p className="ai-chat__summary">{replySummary(ops, diff, structure ?? null)}</p>
               {/* The proposals, each with its own Apply. */}

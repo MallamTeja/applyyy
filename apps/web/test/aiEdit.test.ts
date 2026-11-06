@@ -856,3 +856,30 @@ describe('audit-gated auto-apply (Teja, 2026-11-04: "Audit-gated")', () => {
     assert.equal(ai.shouldAutoApply(odd, 'x'), false);
   });
 });
+
+// Bug a (Teja 2026-11-06, live Revature row): the reply said "Added GCP, MySQL, Redis, MongoDB" and 0 ops applied.
+describe('replyNote (never a claimed change that has no op behind it)', () => {
+  // One op that could land, and one that never can.
+  const landable = { op: 'add_skill', name: 'Kafka', category: 'Tools', inMaster: true } as never;
+  const rejected = { op: 'rejected', what: 'Add GCP', why: 'not in your master' } as never;
+
+  it('hides a claim when the reply has no ops at all', () => {
+    // The exact live words: a claim, nothing behind it.
+    assert.equal(ai.replyNote('Added GCP, MySQL, Redis, MongoDB.', []), '');
+  });
+
+  it('hides a claim when every op was rejected (nothing could land)', () => {
+    // Rejected cards carry their own reason; the claim above them would contradict it.
+    assert.equal(ai.replyNote('Done. I have added those skills.', [rejected]), '');
+  });
+
+  it('keeps a plain answer that claims nothing, with or without ops', () => {
+    // A question back to the owner is not a claim.
+    assert.equal(ai.replyNote('Which skill group should Kafka go in?', []), 'Which skill group should Kafka go in?');
+  });
+
+  it('keeps the reply when an op could land (its card and status line carry the truth)', () => {
+    // A claim next to a landable op is shown: the op list below proves or disproves it.
+    assert.equal(ai.replyNote('Added Kafka.', [landable, rejected]), 'Added Kafka.');
+  });
+});
