@@ -533,18 +533,26 @@ test("11-06 KNOWN GAP: mojibake Arabic (UTF-8 read as Latin-1) is still kept as 
   const mojibake = Buffer.from("دبي, دبي دبي الإمارات العربية المتحدة", "utf8").toString("latin1");
   // Positive control: this really is the garbled form, not the clean one.
   assert.notEqual(mojibake, "دبي, دبي دبي الإمارات العربية المتحدة");
-  // Kept today: it names no place the table knows.
-  assert.equal(screenWorkAuth(job(mojibake), TEJA, UNLOCKED).drop, false);
+  // Kept today.
+  const verdict = screenWorkAuth(job(mojibake), TEJA, UNLOCKED);
+  assert.equal(verdict.drop, false);
+  // And kept for the RIGHT reason: the verdict is identical to that of a string naming no place at all
+  // (the unknown-place path), so this is "no place found", not an accidental authorised match.
+  assert.deepEqual(verdict, screenWorkAuth(job("Nowhere in particular"), TEJA, UNLOCKED));
 });
 
 // Negative set: the new aliases must not eat words or places that are fine.
 for (const location of [
-  // "Roman" contains "oman" but not at a word start.
-  "Roman Forum Road, Bengaluru",
+  // "Roman" contains "oman" but not at a word start. NO authorised place in the string: were "oman" to
+  // match, this would DROP (Oman is outside the list), so keeping proves the word boundary holds.
+  "Roman Forum Road",
   // A listed country alongside a new one is authorised by the list part.
   "Bengaluru, India",
-  // Arabic letters inside a longer word: "مصرف" (bank) starts with the Egypt alias "مصر".
-  "مصرف الراجحي، بنغالور، الهند",
+  // Arabic letters inside a longer word: "مصرف" (bank) starts with the Egypt alias "مصر". Again no authorised
+  // place: an over-match would drop it.
+  "مصرف الراجحي",
+  // The alias followed by a letter OUTSIDE U+0621-U+064A (alef wasla U+0671): still a longer word, not Egypt.
+  "مصرٱ الجديدة",
 ]) {
   // One named test per location.
   test(`11-06 keeps "${location}" (new aliases do not over-match)`, () => {

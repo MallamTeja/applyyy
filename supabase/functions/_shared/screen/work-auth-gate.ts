@@ -94,7 +94,9 @@ const words = (list: readonly string[]): RegExp => new RegExp(`\\b(?:${list.join
 // (Egypt) does not match inside "مصرف" (bank). No leading check: Arabic glues prefixes onto words
 // ("بالكويت" = in Kuwait), and a leading check would miss exactly those. Bare "عمان" is left out on purpose:
 // it spells both Oman and Amman, and an unresolved part keeps the job, which is the safe direction.
-const arabic = (list: readonly string[]): RegExp => new RegExp(`(?:${list.join("|")})(?![ء-ي])`);
+// The `u` flag makes \p{L} available: ANY letter after the alias (alef wasla U+0671, Persian yeh and keheh, Latin)
+// means the alias is only the front of a longer word, which the narrower range [ء-ي] missed (review, 2026-11-07).
+const arabic = (list: readonly string[]): RegExp => new RegExp(`(?:${list.join("|")})(?!\\p{L})`, "u");
 
 // Every country the 469 distinct live location strings name (2026-10-24), by its own name, its
 // common abbreviations and the cities and regions boards write instead of it. Canonical name
