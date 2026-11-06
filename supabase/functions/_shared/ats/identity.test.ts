@@ -16,9 +16,8 @@ import { companyIdentityMatches, evaluateBoardIdentity } from "./identity.ts";
 import { greenhouseAdapter } from "./greenhouse.ts";
 import { leverAdapter } from "./lever.ts";
 import { ashbyAdapter } from "./ashby.ts";
-// The two adapters that live beside the aggregators. Both declare a real identity
-// read, and until this file imported them neither read had a test (7501a95 said so).
-import { smartrecruitersAdapter } from "../scout/adapters/smartrecruiters.ts";
+// Workable lives beside the aggregators. It declares a real identity read, and until
+// this file imported it that read had no test (7501a95 said so).
 import { workableAdapter } from "../scout/adapters/workable.ts";
 
 // The real incident: the watchlist row says Tata, the board says Thornbury. The only
@@ -141,45 +140,16 @@ test("an empty greenhouse board yields no identity signal", () => {
   assert.equal(verdict.verdict, "no_signal");
 });
 
-// --- smartrecruiters and workable: identity arrives with the postings -----------------
+// --- workable: identity arrives with the postings ------------------------------------
 
-// A smartrecruiters page as the live API ships it (probed 2026-10-24): every posting
-// carries `company.name` (the display name) and `company.identifier` (the token echo).
-function smartrecruitersPayload(companyName: string) {
-  return {
-    offset: 0,
-    limit: 100,
-    totalFound: 1,
-    content: [
-      {
-        id: "744000146635269",
-        name: "Associate Staff Engineer",
-        company: { identifier: "PHONEPELIMITED", name: companyName },
-        releasedDate: "2026-10-23T12:13:23.023Z",
-      },
-    ],
-  };
-}
-
-// THE LIVE PAIR. The watchlist row seeded 2026-10-24 says "PhonePe"; SR reports the
-// legal entity "PHONEPE LIMITED". If this ever stops matching, the board fails as an
-// identity mismatch the moment SR is registered.
-test("the live PhonePe watchlist name matches the smartrecruiters legal-entity name", () => {
-  const verdict = evaluateBoardIdentity(smartrecruitersAdapter, smartrecruitersPayload("PHONEPE LIMITED"), "PhonePe");
-  assert.deepEqual(verdict, { verdict: "match", reported: "PHONEPE LIMITED" });
-});
-
-// The guard must still bite on smartrecruiters: a token pointing at another company.
-test("a smartrecruiters board reporting a different company is a mismatch", () => {
-  const verdict = evaluateBoardIdentity(smartrecruitersAdapter, smartrecruitersPayload("Ubisoft"), "Nagarro");
-  assert.deepEqual(verdict, { verdict: "mismatch", reported: "Ubisoft" });
-});
-
-// SR's soft-200 for a NONEXISTENT token: an empty board, so no company to read. The
-// verdict is no_signal; the emptied-board rule in the registry is what catches it.
-test("a smartrecruiters soft-200 for a nonexistent token yields no identity signal", () => {
-  const verdict = evaluateBoardIdentity(smartrecruitersAdapter, { offset: 0, limit: 100, totalFound: 0, content: [] }, "Nagarro");
-  assert.equal(verdict.verdict, "no_signal");
+// The SmartRecruiters adapter and its three identity tests were deleted on 2026-11-06 (SR
+// is fully off by the 2026-11-01 robots ruling). The one thing they pinned that no other
+// test does is the legal suffix "LIMITED" being presentation, not identity: the live
+// PhonePe watchlist row vs SR's "PHONEPE LIMITED". Indian boards on any provider report
+// that suffix, so the comparator rule stays pinned here without the adapter.
+test("an upper-case LIMITED legal-entity name matches the plain watchlist name", () => {
+  // The real pair seen 2026-10-24; a mismatch here would fail a healthy board.
+  assert.equal(companyIdentityMatches("PhonePe", "PHONEPE LIMITED"), true);
 });
 
 // Workable's widget endpoint names the account at the top level beside `jobs`

@@ -13,8 +13,6 @@ import assert from "node:assert/strict";
 import { greenhouseAdapter } from "./greenhouse.ts";
 import { leverAdapter } from "./lever.ts";
 import { ashbyAdapter } from "./ashby.ts";
-// The first paginated adapter; it lives beside the aggregators until the move parcel.
-import { smartrecruitersAdapter } from "../scout/adapters/smartrecruiters.ts";
 // Written but unregistered; held to the same apply-URL rule so registering it later
 // cannot reopen the hole.
 import { workableAdapter } from "../scout/adapters/workable.ts";
@@ -29,8 +27,9 @@ import {
   toJobInsert,
   type JobInsertContext,
 } from "./registry.ts";
-// Shared helpers with behaviour worth pinning in their own right.
-import { classifyEmploymentType, classifyWorkArrangement, stripHtml } from "./types.ts";
+// Shared helpers with behaviour worth pinning in their own right, plus the adapter
+// contract so the test-only paged adapter below is checked against it.
+import { classifyEmploymentType, classifyWorkArrangement, stripHtml, type AtsAdapter } from "./types.ts";
 
 // A fixed clock. Freshness is a function of "now", so injecting it is what keeps
 // these assertions from going flaky at midnight.
@@ -516,24 +515,53 @@ test("supportedProviders reports exactly the four shipped adapters", () => {
   assert.deepEqual([...supportedProviders()].sort(), ["ashby", "greenhouse", "lever", "workday"]);
 });
 
-// --- pagination: SmartRecruiters caps one response at 100 postings -------------------
+// --- pagination: collectBoardPages, the loop every paged board runs through -----------
 
-// One SmartRecruiters page as the live API ships it (probed 2026-10-24): an
-// offset/limit/totalFound envelope around `content`, each posting naming its company.
-function srPage(offset: number, limit: number, totalFound: number, ids: readonly string[]) {
-  return {
-    offset,
-    limit,
-    totalFound,
-    content: ids.map((id) => ({
-      id,
-      name: `Software Engineer ${id}`,
-      company: { identifier: "Nagarro1", name: "Nagarro" },
-      releasedDate: "2026-10-20T07:00:00.000Z",
-      location: { city: "Gurugram", country: "in", remote: false },
-    })),
-  };
+// WHY A TEST-ONLY ADAPTER: these loop tests used to borrow the SmartRecruiters adapter as
+// their paged board. That adapter was deleted on 2026-11-06 (SR is fully off by the
+// 2026-11-01 robots ruling), but the loop it exercised still serves Workday. A fake keeps
+// the loop's guarantees (all pages, page cap, stuck cursor, one bad page fails all)
+// pinned without tying them to any one provider's payload.
+// One page in the offset/limit/total envelope the fake adapter reads.
+function pagedPage(offset: number, limit: number, totalFound: number, ids: readonly string[]) {
+  // The envelope fields the fake's cursor is computed from, plus the page's postings.
+  return { offset, limit, totalFound, content: ids };
 }
+
+// The fake board's first-page URL; later pages add ?offset=&limit=.
+const PAGED_BASE = "https://paged.example.test/board";
+
+// A paged adapter built on greenhouse, so `parse` yields real ParsedPostings and the
+// test asserts the loop, not a hand-rolled posting shape.
+const pagedAdapter: AtsAdapter = {
+  // Provider, source and identity read come from greenhouse; only paging differs.
+  ...greenhouseAdapter,
+  // Every token maps to the one fixed fake URL, so fixtures can key on it.
+  buildRequestUrl: () => PAGED_BASE,
+  // Each page's ids become greenhouse jobs; a page with no `content` array fails the parse.
+  parse: (payload) => {
+    // The page as the fake envelope, or nothing usable.
+    const content = (payload as { content?: unknown } | null)?.content;
+    // A missing array is a malformed page, which must fail the whole board.
+    if (!Array.isArray(content)) return { ok: false, reason: "paged fake: no content array" };
+    // Greenhouse's own parser builds the postings from minimal valid jobs.
+    return greenhouseAdapter.parse({
+      // One greenhouse job per id, carrying the fields greenhouse requires.
+      jobs: content.map((id) => ({ id, title: `Engineer ${id}`, absolute_url: `https://paged.example.test/jobs/${id}`, updated_at: "2026-10-20T00:00:00Z" })),
+    });
+  },
+  // Next page while offset + limit has not yet covered the total; null on the last page.
+  nextPageUrl: (_token, payload) => {
+    // The envelope's numbers, read only when they are real numbers (CLAUDE.md §6).
+    const { offset, limit, totalFound } = payload as { offset: unknown; limit: unknown; totalFound: unknown };
+    // Anything else ends the board here rather than inventing a cursor.
+    if (typeof offset !== "number" || typeof limit !== "number" || typeof totalFound !== "number" || limit <= 0) return null;
+    // Covered the whole board: no next page.
+    if (offset + limit >= totalFound) return null;
+    // The next window.
+    return `${PAGED_BASE}?offset=${offset + limit}&limit=${limit}`;
+  },
+};
 
 // A fake transport that serves fixtures by exact URL and records every request, so a
 // test can assert both what was collected and which URLs were asked for.
@@ -549,33 +577,27 @@ function fixtureFetcher(byUrl: ReadonlyMap<string, unknown>) {
   return { requested, fetchJson };
 }
 
-// The SR endpoint, pinned like the other three.
-const SR_BASE = "https://api.smartrecruiters.com/v1/companies/Nagarro1/postings";
-
-test("smartrecruiters builds its documented public endpoint", () => {
-  assert.equal(smartrecruitersAdapter.buildRequestUrl("Nagarro1"), SR_BASE);
-});
-
-// THE BUG THIS PARCEL EXISTS FOR: Nagarro lists 585 postings and SR returns 100 per
-// response. A one-request poll would store 17% of the board and report success.
+// THE BUG PAGINATION EXISTS FOR (first seen on SmartRecruiters, 2026-10-24: Nagarro listed
+// 585 postings at 100 per response): a one-request poll would store part of the board and
+// report success.
 test("pagination pulls all pages of a paged board", async () => {
   // Three pages of two, five postings in all.
   const { requested, fetchJson } = fixtureFetcher(new Map<string, unknown>([
-    [SR_BASE, srPage(0, 2, 5, ["a", "b"])],
-    [`${SR_BASE}?offset=2&limit=2`, srPage(2, 2, 5, ["c", "d"])],
-    [`${SR_BASE}?offset=4&limit=2`, srPage(4, 2, 5, ["e"])],
+    [PAGED_BASE, pagedPage(0, 2, 5, ["a", "b"])],
+    [`${PAGED_BASE}?offset=2&limit=2`, pagedPage(2, 2, 5, ["c", "d"])],
+    [`${PAGED_BASE}?offset=4&limit=2`, pagedPage(4, 2, 5, ["e"])],
   ]));
-  const result = await collectBoardPages(smartrecruitersAdapter, "Nagarro1", fetchJson);
+  const result = await collectBoardPages(pagedAdapter, "board", fetchJson);
   assert.equal(result.ok, true);
   if (!result.ok) return;
   // Every posting from every page, in page order.
   assert.deepEqual(result.postings.map((p) => p.atsJobId), ["a", "b", "c", "d", "e"]);
   // Exactly the three page URLs, and no fourth request past the last page.
-  assert.deepEqual(requested, [SR_BASE, `${SR_BASE}?offset=2&limit=2`, `${SR_BASE}?offset=4&limit=2`]);
+  assert.deepEqual(requested, [PAGED_BASE, `${PAGED_BASE}?offset=2&limit=2`, `${PAGED_BASE}?offset=4&limit=2`]);
   // Five postings across the three pages, none dropped at a page boundary.
   assert.equal(result.postings.length, 5);
   // The identity guard reads the first page's payload.
-  assert.deepEqual(result.firstPayload, srPage(0, 2, 5, ["a", "b"]));
+  assert.deepEqual(result.firstPayload, pagedPage(0, 2, 5, ["a", "b"]));
 });
 
 // An adapter without `nextPageUrl` keeps its one-request behaviour exactly.
@@ -596,9 +618,9 @@ test("a page cap stops a runaway pagination loop", async () => {
   const fetchJson = async (url: string): Promise<unknown> => {
     calls += 1;
     const offset = Number(new URL(url).searchParams.get("offset") ?? "0");
-    return srPage(offset, 1, 1_000_000, [`p${offset}`]);
+    return pagedPage(offset, 1, 1_000_000, [`p${offset}`]);
   };
-  const result = await collectBoardPages(smartrecruitersAdapter, "Nagarro1", fetchJson, 3);
+  const result = await collectBoardPages(pagedAdapter, "board", fetchJson, 3);
   assert.equal(result.ok, false);
   if (result.ok) return;
   assert.match(result.reason, /page cap/);
@@ -610,9 +632,9 @@ test("a page cap stops a runaway pagination loop", async () => {
 // spin to the cap re-reading the same page.
 test("a pagination cursor that does not advance fails the board", async () => {
   // An adapter whose next page is always its first page.
-  const stuck = { ...smartrecruitersAdapter, nextPageUrl: () => SR_BASE };
-  const { fetchJson } = fixtureFetcher(new Map<string, unknown>([[SR_BASE, srPage(0, 2, 5, ["a", "b"])]]));
-  const result = await collectBoardPages(stuck, "Nagarro1", fetchJson);
+  const stuck = { ...pagedAdapter, nextPageUrl: () => PAGED_BASE };
+  const { fetchJson } = fixtureFetcher(new Map<string, unknown>([[PAGED_BASE, pagedPage(0, 2, 5, ["a", "b"])]]));
+  const result = await collectBoardPages(stuck, "board", fetchJson);
   assert.equal(result.ok, false);
   if (result.ok) return;
   assert.match(result.reason, /did not advance/);
@@ -621,10 +643,10 @@ test("a pagination cursor that does not advance fails the board", async () => {
 // One malformed page fails the whole board: a board read is all or nothing.
 test("an unparseable later page fails the whole board, keeping no partial postings", async () => {
   const { fetchJson } = fixtureFetcher(new Map<string, unknown>([
-    [SR_BASE, srPage(0, 2, 4, ["a", "b"])],
-    [`${SR_BASE}?offset=2&limit=2`, { offset: 2, limit: 2, totalFound: 4 }],
+    [PAGED_BASE, pagedPage(0, 2, 4, ["a", "b"])],
+    [`${PAGED_BASE}?offset=2&limit=2`, { offset: 2, limit: 2, totalFound: 4 }],
   ]));
-  const result = await collectBoardPages(smartrecruitersAdapter, "Nagarro1", fetchJson);
+  const result = await collectBoardPages(pagedAdapter, "board", fetchJson);
   assert.equal(result.ok, false);
 });
 
@@ -638,7 +660,6 @@ const UNSAFE_APPLY_PAYLOADS = [
   ["greenhouse", greenhouseAdapter, { jobs: [{ id: 1, title: "Engineer", absolute_url: "javascript:alert(1)", updated_at: "2026-10-20T00:00:00Z" }] }],
   ["lever", leverAdapter, [{ id: "l1", text: "Engineer", applyUrl: "javascript:alert(1)", hostedUrl: " JavaScript:alert(1)" }]],
   ["ashby", ashbyAdapter, { jobs: [{ id: "a1", title: "Engineer", isListed: true, applyUrl: "javascript:alert(1)", jobUrl: "data:text/html,<script>x</script>" }] }],
-  ["smartrecruiters", smartrecruitersAdapter, { content: [{ id: "s1", name: "Engineer", applyUrl: "javascript:alert(1)" }] }],
   ["workable", workableAdapter, { name: "W", jobs: [{ title: "Engineer", url: "javascript:alert(1)" }] }],
 ] as const;
 
@@ -661,51 +682,6 @@ test("an unsafe apply URL falls through to the adapter's next safe candidate", (
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.postings[0]?.applyUrl, "https://jobs.lever.co/zomato/l2");
-});
-
-// apply_url reaches the dashboard as an <a href>, and React 18 still renders a
-// `javascript:` href. A board-supplied URL that is not http(s) must never be stored.
-test("smartrecruiters skips a posting whose only apply URL is not http(s)", () => {
-  const result = smartrecruitersAdapter.parse({
-    content: [{ id: "x1", name: "Engineer", applyUrl: "javascript:alert(document.cookie)" }],
-  });
-  assert.equal(result.ok, true);
-  if (!result.ok) return;
-  // No company identifier to build the fallback from, so the posting is dropped.
-  assert.equal(result.postings.length, 0);
-  assert.equal(result.skipped.length, 1);
-});
-
-// A non-http(s) candidate is treated as absent, so the canonical fallback still applies,
-// and the payload's company/id segments are encoded rather than becoming path structure.
-test("smartrecruiters rejects a non-http(s) apply URL and encodes the fallback URL", () => {
-  const result = smartrecruitersAdapter.parse({
-    content: [{ id: "7/../x", name: "Engineer", applyUrl: "data:text/html,hi", company: { identifier: "a/b", name: "A" } }],
-  });
-  assert.equal(result.ok, true);
-  if (!result.ok) return;
-  assert.equal(result.postings[0]?.applyUrl, "https://jobs.smartrecruiters.com/a%2Fb/7%2F..%2Fx");
-});
-
-// A genuine https apply URL is kept verbatim.
-test("smartrecruiters keeps a genuine https apply URL", () => {
-  const url = "https://jobs.smartrecruiters.com/Nagarro1/744000146635269-engineer?oga=true";
-  const result = smartrecruitersAdapter.parse({ content: [{ id: "744000146635269", name: "Engineer", applyUrl: url }] });
-  assert.equal(result.ok, true);
-  if (!result.ok) return;
-  assert.equal(result.postings[0]?.applyUrl, url);
-});
-
-// The adapter's half of pagination, pinned directly.
-test("smartrecruiters stops paging at the last page and on a malformed envelope", () => {
-  // offset 4 + limit 2 covers totalFound 5: no next page.
-  assert.equal(smartrecruitersAdapter.nextPageUrl?.("Nagarro1", srPage(4, 2, 5, ["e"])), null);
-  // A zero limit can never advance, so it must not produce a next page.
-  assert.equal(smartrecruitersAdapter.nextPageUrl?.("Nagarro1", srPage(0, 0, 5, [])), null);
-  // A string where a count belongs is not a count (`Number("")` is 0, CLAUDE.md §6).
-  assert.equal(smartrecruitersAdapter.nextPageUrl?.("Nagarro1", { offset: "0", limit: 100, totalFound: 585, content: [] }), null);
-  // A legacy bare-array response carries no cursor at all.
-  assert.equal(smartrecruitersAdapter.nextPageUrl?.("Nagarro1", []), null);
 });
 
 // --- an emptied board: a soft-200 must not read as "0 postings, healthy" -------------

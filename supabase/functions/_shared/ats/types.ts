@@ -115,15 +115,16 @@ export interface AtsAdapter {
   // that page was the last. OPTIONAL, unlike `readReportedIdentity`, because omitting
   // it is a true statement rather than a skipped check: greenhouse, lever and ashby
   // return a whole board in one response, and an adapter without this method is
-  // fetched exactly once, as before it existed. SmartRecruiters needs it — one response
-  // carries at most 100 postings (live probe 2026-10-24: Nagarro lists 585), so a
-  // single fetch would store a sixth of the board and report success. Pure and
+  // fetched exactly once, as before it existed. SmartRecruiters needed it first (adapter
+  // deleted 2026-11-06): one response carried at most 100 postings (live probe 2026-10-24:
+  // Nagarro listed 585), so a single fetch would store a sixth of the board and report
+  // success. Workday needs it today. Pure and
   // synchronous like `parse`; the loop that follows it is `collectBoardPages`.
   //
   // `currentUrl` is the page just fetched (added 2026-11-01 for Workday, whose later
   // pages report `total: 0`, so the payload alone cannot say where the board ends and
   // the cursor must travel in the URL). Adapters that page from the payload alone
-  // (SmartRecruiters) simply ignore it. AN UNREADABLE CURSOR MUST RETURN `currentUrl`
+  // (as SmartRecruiters did) simply ignore it. AN UNREADABLE CURSOR MUST RETURN `currentUrl`
   // ITSELF, never null: the loop fails a cursor that does not advance, while null
   // would store the pages read so far as the whole board.
   nextPageUrl?(boardToken: string, payload: unknown, currentUrl: string): string | null;

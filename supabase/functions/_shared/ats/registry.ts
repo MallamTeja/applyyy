@@ -53,7 +53,7 @@ const ADAPTERS: ReadonlyMap<AtsProvider, AtsAdapter> = new Map([
   // ruled it fully off on 2026-11-01. Taking it off the add-board forms (8299ca5) still left the
   // existing SR watchlist rows polled, because this entry stayed. Absent here, getAdapter returns
   // null and supportedProviders omits it, so neither scout selects an SR row. The adapter file
-  // (scout/adapters/smartrecruiters.ts) is now imported only by tests. Workable is written too but
+  // itself was deleted the same day (P2 #1); git history keeps it. Workable is written too but
   // stays unregistered until it has a parcel.
   // Workday: the first POST board (the list endpoint answers GET with 400), 20 postings
   // a page, total on page one only. Registered 2026-11-01 for the 17 tenants verified
