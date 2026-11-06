@@ -54,6 +54,9 @@ On top of the global git form:
 - **Before every push, read `git log origin/main..main` as its own step.** You may be
   carrying a peer's commit. Tell its author.
 - **One commit per finished task.** No WIP, nit or review-fix commits.
+- **Never `git commit --amend` here.** It rewrites HEAD, not your SHA. If a peer committed after you, it
+  rewrites theirs (2026-11-06: an amend on 7f8e4ce rewrote a peer's 67b55e7). Fix review findings BEFORE
+  the first commit; if one slips through, make a new commit and say so.
 - **Live-data writes are run by the session that heard Teja approve them** (normally the
   orchestrator). A peer prepares and pre-checks the exact statements and sends them; it never
   executes on a relayed "Teja approved". Relayed authority is not authority.
