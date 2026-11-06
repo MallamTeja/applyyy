@@ -67,7 +67,18 @@ export type TechGateVerdict =
 // The ways stage 0 rejects. Distinct codes, so a drop for an excluded term, a drop for
 // matching nothing configured, and a campus-only programme can be counted apart, and each
 // set recovered wholesale if the rule behind it turns out wrong.
-export type TechGateDropCode = "tech_gate" | "tech_gate_unclassified" | "campus_restricted";
+export type TechGateDropCode =
+  | "tech_gate"
+  | "tech_gate_unclassified"
+  | "campus_restricted"
+  // The three title rules of Teja's 2026-11-06 23:33 IST ruling, one code each so each set is countable
+  // and recoverable on its own if a rule turns out too wide.
+  // AVP / VP / Vice President / Intermediate in the title.
+  | "title_seniority"
+  // A PhD-only role (the title says PhD and does not say it is merely preferred).
+  | "title_phd"
+  // A technician, technical writer, chip-design, manufacturing, quality or field-service job.
+  | "title_non_software";
 
 // Map a `search_preferences` row (or its absence) to the gate's config. Exported so every
 // caller maps it the same way; `?? []` treats a missing row and a null column alike, as
@@ -212,6 +223,81 @@ const CAMPUS_WORD = /\bcampus\b/i;
 // always written in capitals, and /i would let ordinary words collide ("nit" in prose).
 const NAMED_INSTITUTE = /\b(IIT|IIIT|NIT|BITS|IIM|IISc)\b/;
 
+// TITLE RULES (Teja, 2026-11-06 23:33 IST, "this is a big problem"). Live passed_filters held senior,
+// PhD-only and non-software roles because the configured exclusion list is plain text a human types
+// ("VP" never matched "AVP", nothing said "Vice President" or "Intermediate") and a title term like
+// "Engineer" or "Graduate" recognised them. These are built-in, closed and word-bounded, like the campus
+// rule above, and they run BEFORE the positive match so a configured title term cannot rescue them.
+
+// Rule 1, SENIORITY: bank grades and GitLab's mid-level grade. "Intermediate" is GitLab's title for a
+// mid-level role ("not a beginner-level job", Teja 23:28). SVP/EVP are the same family as VP. Whole words
+// only, so "VPN", "Interview" and "Intermediary" never match.
+const SENIORITY_TITLE = /\b(avp|svp|evp|vp|vice president|intermediate)\b/i;
+
+// Rule 2, PHD: a PhD in the title means a doctoral-only programme (Marvell, NVIDIA research internships).
+// Spellings seen or likely: PhD, Ph.D., Ph.D, "Ph D".
+// "PhD preferred" / "(PhD a plus)" is an invitation, not a requirement, so it is not this rule (review, 2026-11-07).
+const PHD_TITLE = /\bph\.?\s?d\b(?!\W*(?:preferred|plus|optional|desirable))/i;
+
+// Rule 3, NON-SOFTWARE, in three tiers. (a) These phrases name a job that is not software even when the
+// title also carries a software-looking word: "Backend Physical Design Engineer" is chip design.
+const NON_SOFTWARE_ALWAYS = /\b(technician|technical writer)\b/i;
+// "Physical design" is chip layout, but "Physical Design Automation Software Engineer" is EDA software: it is
+// rescued only by an unmistakable software role word. "Backend" does NOT rescue it, because Broadcom's
+// "Backend Physical Design Engineer" is the chip-design backend, not a server backend.
+const PHYSICAL_DESIGN = /\bphysical design\b/i;
+// The words that prove a physical-design title is software.
+const PHYSICAL_DESIGN_SOFTWARE = /\b(software|developer|sde|swe)\b/i;
+// (b) These name a non-software FUNCTION, but a software role can sit in that domain ("Software Engineer,
+// Manufacturing Systems"), so a title that is clearly software is not judged by them.
+const NON_SOFTWARE_FUNCTION = /\b(manufacturing|supplier quality|field services?)\b/i;
+// What makes a title clearly software, for tier (b) and (c). Narrower than TECH_TITLE_SIGNAL on purpose:
+// "engineer", "analyst" and "technical" are generic and cannot vouch for a title.
+const SOFTWARE_TITLE = /\b(software|developer|sde|swe|backend|back-end|frontend|front-end|full[- ]?stack|devops|sre|site reliability|machine learning|ml|ai|data scientist|data engineer|platform engineer|analytics engineer|cloud|api|java|python|golang|react)\b/i;
+// (c) A GENERIC engineering title ("Graduate Engineering Trainee") says nothing about the job, so the head
+// of the description is read for the same function phrases (GE HealthCare 9e2c0803: field service,
+// 23961e8a: manufacturing). Only generic titles, so "Data Analyst" is never judged by a company blurb.
+const GENERIC_ENGINEER_TITLE = /\b(graduate|trainee|engineer|engineering|intern)\b/i;
+// How much of the description counts as "the head". A character cap, not a section parse: it is long enough
+// for GE's role summary (the phrase sits near char 330) and short enough to stop before most company
+// boilerplate, but a company blurb inside it can still trip the rule on a generic title (accepted, 2026-11-07).
+const FUNCTION_HEAD_LIMIT = 500;
+
+// The first title rule a posting trips, or undefined. Pure, so each rule is testable on its own.
+function titleRuleDrop(title: string, descriptionRaw: string | null): TechGateVerdict | undefined {
+  // Normalised once, like every other match in this file.
+  const text = collapseWhitespace(title);
+  // Rule 1.
+  const grade = SENIORITY_TITLE.exec(text)?.[1];
+  // A grade word: dropped, naming it so a wrong drop is diagnosable.
+  if (grade !== undefined) return { drop: true, code: "title_seniority", reason: `"${title}" carries the seniority word "${grade}"` };
+  // Rule 2.
+  if (PHD_TITLE.test(text)) return { drop: true, code: "title_phd", reason: `"${title}" is a PhD-only role` };
+  // Rule 3 (a): never rescued.
+  const always = NON_SOFTWARE_ALWAYS.exec(text)?.[1];
+  // A non-software job.
+  if (always !== undefined) return { drop: true, code: "title_non_software", reason: `"${title}" is not a software role ("${always}")` };
+  // Physical design: chip layout unless the title says software or developer.
+  if (PHYSICAL_DESIGN.test(text) && !PHYSICAL_DESIGN_SOFTWARE.test(text)) return { drop: true, code: "title_non_software", reason: `"${title}" is not a software role ("physical design")` };
+  // A clearly-software title is not judged by tiers (b) and (c).
+  if (SOFTWARE_TITLE.test(text)) return undefined;
+  // Rule 3 (b): a non-software function in the title.
+  const fn = NON_SOFTWARE_FUNCTION.exec(text)?.[1];
+  // A manufacturing / quality / field-service title with no software word.
+  if (fn !== undefined) return { drop: true, code: "title_non_software", reason: `"${title}" is not a software role ("${fn}")` };
+  // Rule 3 (c): a generic engineering title is judged by the head of its description.
+  if (GENERIC_ENGINEER_TITLE.test(text)) {
+    // The role summary only.
+    const head = (descriptionRaw ?? "").slice(0, FUNCTION_HEAD_LIMIT);
+    // A non-software function named there.
+    const inHead = NON_SOFTWARE_FUNCTION.exec(head)?.[1];
+    // Dropped, naming where the phrase was found.
+    if (inHead !== undefined) return { drop: true, code: "title_non_software", reason: `"${title}" is a generic engineering title whose description says "${inHead}"` };
+  }
+  // No title rule objects.
+  return undefined;
+}
+
 // Decide whether one posting is worth screening further.
 //
 // The description is truncated rather than matched whole: a keyword buried in the
@@ -230,7 +316,13 @@ export function screenTechRole(
   // matched against, never interpolated anywhere.
   const haystack = `${title} ${(descriptionRaw ?? "").slice(0, DESCRIPTION_MATCH_LIMIT)}`;
 
-  // EXCLUSIONS FIRST, so a posting carrying both signals is rejected. "Technical
+  // THE BUILT-IN TITLE RULES FIRST (Teja, 2026-11-06 23:33 IST): a title they reject is dropped whatever the
+  // configured lists say, so a human-typed exclusion cannot shadow a rule's own code.
+  const ruled = titleRuleDrop(title, descriptionRaw);
+  // A rule objected: its verdict, with its own code.
+  if (ruled !== undefined) return ruled;
+
+  // EXCLUSIONS NEXT, so a posting carrying both signals is rejected. "Technical
   // Recruiter" contains a technical word and is not a technical job — the design doc's
   // own example of how fine this line is.
   // EXCLUSIONS READ THE TITLE ONLY (Teja, 2026-10-09 15:07, reversing the 09-17 rule that

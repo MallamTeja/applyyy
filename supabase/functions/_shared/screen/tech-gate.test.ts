@@ -396,3 +396,152 @@ test("campus: 'campus' without an institute, or an institute without 'campus', i
   // An ordinary word spelled like an acronym ("Bits") is not the institute: case matters.
   assert.deepEqual(screenTechRole("Software Engineer, Campus Bits Team", null, LIVE_LIKE), { drop: false });
 });
+
+// ---------------------------------------------------------------------------------------------
+// TITLE RULES, Teja 2026-11-06 23:33 IST ("this is a big problem"): four rules, each with its own
+// closed drop code so each set can be counted and recovered apart. They run BEFORE the positive
+// match, so a configured title term ("Software Engineer", "Intern") can never rescue a title they reject.
+// Live leaks they pin (passed_filters on 2026-11-06): Barclays "Mobile AVP Software Engineer", State
+// Street "... - Assistant Vice President", GitLab "Intermediate Data Engineer", Marvell "Research Intern
+// (PhD), ...", Micron "Graduate Engineering Technician", Nasdaq "... Technical Writer", GE HealthCare
+// "Graduate Engineering Trainee" whose job is field service / manufacturing.
+// ---------------------------------------------------------------------------------------------
+
+// The terms Teja hunts, with NO exclusions, so a verdict here comes from the title rules alone and never
+// from his live "VP" / "Senior" exclusions (which would answer first and hide the rule under test).
+const TITLE_RULE_PREFS: TechGatePreferences = {
+  // Broad enough that every negative below is positively recognised, which makes the negatives real.
+  titles: ["Software Engineer", "Engineer", "Intern", "Graduate", "Data Scientist", "AI Engineer", "SDE", "Backend", "Frontend", "Developer", "Analyst", "Trainee", "Technician", "Writer", "Design"],
+  // None: the rules must not lean on a keyword.
+  keywords: [],
+  // None, for the reason above.
+  excludedKeywords: [],
+};
+
+// The code a title lands on, or "pass". Kept as a helper so each case is one line.
+function titleVerdict(title: string, description: string | null = null): string {
+  // The gate's answer for this title under the rule-only preferences.
+  const verdict = screenTechRole(title, description, TITLE_RULE_PREFS);
+  // A drop names its code; anything else is a pass.
+  return verdict.drop ? verdict.code : "pass";
+}
+
+test("title rule 1, seniority: AVP, VP, Vice President and GitLab's Intermediate are dropped as title_seniority", () => {
+  // Every live leak plus the plain VP forms, each of which the old gate passed.
+  for (const title of [
+    "Software Engineer - AVP",
+    "Mobile AVP Software Engineer",
+    "Application Security Engineer, ADR - Assistant Vice President",
+    "VP, Software Engineering",
+    "Vice President - Backend Platform",
+    "SVP Engineering Systems",
+    "Intermediate Data Engineer",
+    "Intermediate Backend Engineer , Security Factory",
+  ]) {
+    // One code for the whole family, so the set is countable and revertible together.
+    assert.equal(titleVerdict(title), "title_seniority", title);
+  }
+});
+
+test("title rule 1, seniority: words that merely contain the letters are untouched", () => {
+  // VPN is a technology, not a grade; "Interview" and "Intermediary" are not "Intermediate".
+  for (const title of ["VPN Software Engineer", "Software Engineer, Interview Platform", "Intermediary Services Developer"]) {
+    // Whole-word matching only.
+    assert.equal(titleVerdict(title), "pass", title);
+  }
+});
+
+test("title rule 2, PhD: a PhD in the title is dropped as title_phd, in every live spelling", () => {
+  // Marvell and NVIDIA live titles, plus the dotted and spaced spellings.
+  for (const title of [
+    "Research Intern (PhD), Storage Systems for AI",
+    "Research Intern, Physical AI and GPU (PhD)",
+    "PhD Intern, AI ML in Wireless L1/L2 - Fall 2026",
+    "Research Engineer, Ph.D. Graduate",
+    "Applied Scientist Intern (Ph D)",
+  ]) {
+    // Its own code.
+    assert.equal(titleVerdict(title), "title_phd", title);
+  }
+});
+
+test("title rule 3, non-software: a technician, technical writer or physical-design title is dropped as title_non_software", () => {
+  // Micron, Nasdaq and Broadcom live titles. "Backend Physical Design Engineer" carries "Backend", a
+  // software-looking word, so these three phrases are NOT rescued by one.
+  for (const title of [
+    "Graduate Engineering Technician",
+    "PDE CEM Graduate Engineering Technician",
+    "Analyst—Information Developer / Technical Writer",
+    "Backend Physical Design Engineer",
+  ]) {
+    // Its own code.
+    assert.equal(titleVerdict(title), "title_non_software", title);
+  }
+});
+
+test("title rule 3, non-software: manufacturing / supplier quality / field service in a title drops unless the title is clearly software", () => {
+  // A manufacturing job with an engineer title: dropped.
+  assert.equal(titleVerdict("Graduate Manufacturing Engineer"), "title_non_software");
+  // Supplier quality and field service, likewise.
+  assert.equal(titleVerdict("Supplier Quality Engineer Trainee"), "title_non_software");
+  // Field service.
+  assert.equal(titleVerdict("Field Service Engineer"), "title_non_software");
+  // A software role FOR a manufacturing domain stays: its title says software, which these three phrases do not override.
+  assert.equal(titleVerdict("Software Engineer, Manufacturing Systems"), "pass");
+});
+
+test("title rule 3, non-software: a generic engineer title is judged by the head of its description", () => {
+  // GE HealthCare 9e2c0803 and 23961e8a: the title says nothing, the first lines say field service / manufacturing.
+  assert.equal(titleVerdict("Graduate Engineering Trainee", "Job Description Summary All resources required to perform services and maintenance activities on the customer site, and field services engineering."), "title_non_software");
+  // Manufacturing in the head.
+  assert.equal(titleVerdict("Graduate Engineering Trainee", "Job Description Summary As a Graduate Manufacturing Engineer, you will support New Product Introduction."), "title_non_software");
+  // The same generic title with a software JD passes: the rule needs a non-software function, not just a generic title.
+  assert.equal(titleVerdict("Graduate Engineering Trainee", "You will build backend services in Python and ship APIs."), "pass");
+  // Only the HEAD counts: a manufacturing company blurb deep in the body does not drop a generic title.
+  assert.equal(titleVerdict("Graduate Engineering Trainee", "You will build backend services in Python. ".repeat(30) + "Our company runs manufacturing plants."), "pass");
+  // A clearly-software title never reads its description for this rule, whatever the company does.
+  assert.equal(titleVerdict("Graduate Software Engineer", "We are a manufacturing and field service leader."), "pass");
+});
+
+test("negative set: the titles Teja hunts all still pass the title rules", () => {
+  // Each is a title the old gate passed and Teja wants; none may trip any of the four rules.
+  for (const title of [
+    "Software Engineer",
+    "Data Scientist",
+    "Backend Intern",
+    "AI Engineer",
+    "SDE Intern",
+    "Graduate Software Engineer",
+    // "Design" alone is not "physical design": a frontend design engineer is software (decision, 2026-11-06).
+    "Design Engineer — Frontend",
+    "Software Engineer Intern, Summer 2027",
+    "Full-Stack Software Engineer, (Forward Deployed), GPS",
+  ]) {
+    // Positive recognition by the usual terms, with no title-rule code.
+    assert.equal(titleVerdict(title), "pass", title);
+  }
+});
+
+// Review (2026-11-07): near-misses a naive word list would drop, each of which must keep passing.
+test("title rules: software roles beside a non-software domain word still pass", () => {
+  // EDA software: "physical design" with an unmistakable software word.
+  assert.equal(titleVerdict("Physical Design Automation Software Engineer"), "pass");
+  // A platform / analytics engineer in a manufacturing domain is software.
+  assert.equal(titleVerdict("Platform Engineer - Manufacturing Execution Systems"), "pass");
+  assert.equal(titleVerdict("Manufacturing Analytics Engineer"), "pass");
+  // "Technical Program Manager" is not a technical writer; "VPC" is not a VP.
+  assert.equal(titleVerdict("VPC Network Engineer"), "pass");
+  // PhD as a preference is not a PhD-only role.
+  assert.equal(titleVerdict("ML Intern (PhD preferred)"), "pass");
+  // The same word in the doctoral-only form still drops (positive control for the lookahead).
+  assert.equal(titleVerdict("ML Intern (PhD)"), "title_phd");
+});
+
+test("title rules answer before the exclusion list, and a drop carries its own code", () => {
+  // With Teja's "VP" exclusion configured, "VP, ..." is still the seniority code, not tech_gate: one family, one code.
+  const withVp: TechGatePreferences = { ...TITLE_RULE_PREFS, excludedKeywords: ["VP"] };
+  // The verdict.
+  const verdict = screenTechRole("VP, Software Engineering", null, withVp);
+  // Code from the new rule, reason naming the matched word.
+  assert.equal(verdict.drop && verdict.code, "title_seniority");
+});
