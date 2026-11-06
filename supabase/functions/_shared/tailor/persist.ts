@@ -153,6 +153,10 @@ export async function persistTailorOutcome(
       reason: "tailored_profile_written",
       // Only when the tailorer dropped a repeated ref.
       ...(outcome.dedupedRefs.length > 0 ? { deduplicated_refs: outcome.dedupedRefs } : {}),
+      // Only when the skills shape (2026-11-06) topped up or dropped a group, so neither is silent.
+      ...(outcome.skillsAdded.length > 0 ? { skills_floor_added: outcome.skillsAdded } : {}),
+      // The model picks removed because their group is irrelevant to the posting.
+      ...(outcome.skillsDropped.length > 0 ? { skills_groups_dropped: outcome.skillsDropped } : {}),
       // Only when the one-shot rewrite ran.
       ...(outcome.retry !== null ? { retry: { first_attempt_violations: outcome.retry.firstViolations, rewritten_refs: outcome.retry.rewrittenRefs } } : {}),
     },

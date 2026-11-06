@@ -33,7 +33,7 @@ import { buildBulletRewritePrompt, buildTailorPrompt, type TailorPrompt } from "
 // The honesty gate. The ONLY constructor of a `ResolvedResume`, per its own header.
 import { validateTailoredProfile, type TailorViolation } from "./validator.ts";
 // The posting's skill terms, deterministic and vocabulary-gated, for selected_jd_keywords.
-import { extractJdKeywords } from "./jd-keywords.ts";
+import { extractJdKeywords, keywordAppearsIn } from "./jd-keywords.ts";
 // The contract, reached through this stream's single re-export module. Nothing here
 // redefines one of these — a redefined type does not fail, it drifts.
 import type { MasterProfile, ResolvedResume, TailoredProfile } from "../contracts/shared-types.ts";
@@ -85,7 +85,10 @@ export type TailorOutcome =
   // for a clean answer, and persisted in the event so a prompt that repeats itself stays visible.
   // `retry` (2026-11-05): null when the first answer passed; else what failed first and which bullets the
   // one-shot rewrite replaced, persisted in the event so the retry's yield can be measured.
-  | { readonly kind: "tailored"; readonly resume: ResolvedResume; readonly refs: TailoredProfile; readonly jdKeywords: readonly string[]; readonly dedupedRefs: readonly DedupedRef[]; readonly retry: null | { readonly firstViolations: readonly TailorViolation[]; readonly rewrittenRefs: readonly string[] } }
+  // `skillsAdded` / `skillsDropped` (2026-11-06) list every skill ref shapeSkillGroups appended (floor
+  // top-ups) or removed (a model pick in a group the posting never touches); both persisted in the event
+  // so the reshaping is never silent.
+  | { readonly kind: "tailored"; readonly resume: ResolvedResume; readonly refs: TailoredProfile; readonly jdKeywords: readonly string[]; readonly dedupedRefs: readonly DedupedRef[]; readonly skillsAdded: readonly string[]; readonly skillsDropped: readonly string[]; readonly retry: null | { readonly firstViolations: readonly TailorViolation[]; readonly rewrittenRefs: readonly string[] } }
   // Never persisted as a profile; the reasons go to the dashboard and the row fails.
   // `retry` (2026-11-05): null when no retry ran; else the first attempt's violations and how the retry ended.
   | { readonly kind: "refused"; readonly violations: readonly TailorViolation[]; readonly retry: null | { readonly firstViolations: readonly TailorViolation[]; readonly result: "still_invalid" | "reply_unusable" } };
@@ -147,6 +150,79 @@ export function dedupeRepeatedRefs(tailored: TailoredProfile): { readonly profil
   };
   // A clean answer comes back unchanged in content, with nothing reported.
   return { profile, deduped };
+}
+
+/* THE SKILLS SECTION SHAPE (Teja, 2026-11-06). Three rulings, all enforced here in code:
+ *   23:17 "most tailored resumes, even at 80+ ATS, have only 1 or 2 skills per group; that is not enough"
+ *   23:42 "I don't need all these groups on every tailored resume" (only JD-relevant groups, aim 3-5)
+ *   23:43 "make groups from master and skills for them according to the JD"
+ * Measured that night: 78 of 103 groups across all 16 tailored/awaiting_approval/approved rows held 1-3
+ * skills, and the median row showed 6.5 groups.
+ *
+ * WHY CODE AND NOT A PROMPT RULE: a model asked for "at least 4" still returns 2. So the model's answer
+ * is only a hint, and the shape is decided deterministically:
+ *   1. A group's RELEVANCE is how many of its master skills the posting names (keywordAppearsIn, the
+ *      word-bounded rule the approval page uses, so "Go" is never credited from "Google").
+ *   2. Groups shown: those with relevance > 0, ranked by relevance, then model-chosen first, then master
+ *      order; at most SKILLS_MAX_GROUPS. A group the posting never touches is dropped even if the model
+ *      chose it (a backend JD shows no Machine Learning group). If NO group is relevant, the model's own
+ *      groups are kept: an empty skills section would be worse than an unjudged one.
+ *   3. Each shown group holds the model's picks, then its other master skills ranked posting-named
+ *      first, then master order, up to min(SKILLS_PER_GROUP_FLOOR, the group's master size). A group
+ *      smaller than the floor shows all it has: the master is the only honest source.
+ *
+ * WHAT IT NEVER DOES: invent a skill (only master refs, resolved by the unchanged validator after this)
+ * or hard-code a group name or size (both read from the master passed in at tailor time, the LATEST
+ * version; the master grew v16 -> v17 that evening and its category names may be renamed). Runs BEFORE
+ * the validator, so the stored tailor_refs re-validates to exactly the stored resume (rebuildOriginal in
+ * web tailoredEdits.ts depends on that). Every ref added or dropped is reported, never silent. Exported
+ * for the test. */
+export const SKILLS_PER_GROUP_FLOOR = 4;
+// The most groups one resume shows (Teja: "aim for 3-5").
+export const SKILLS_MAX_GROUPS = 5;
+
+// Decides the skills section; returns the profile plus the refs it added and dropped, in order.
+export function shapeSkillGroups(tailored: TailoredProfile, master: MasterProfile, jobDescription: string): { readonly profile: TailoredProfile; readonly added: readonly string[]; readonly dropped: readonly string[] } {
+  // Each master skill by id, so a model pick resolves to its group.
+  const byId = new Map(master.skills.map((skill) => [skill.id, skill]));
+  // Master categories in first-appearance order: the final tie-break, and the only source of names.
+  const categories = [...new Set(master.skills.map((skill) => skill.category))];
+  // Per group: how many of its master skills the posting names.
+  const relevance = new Map(categories.map((category) => [category, master.skills.filter((s) => s.category === category && keywordAppearsIn(s.name, jobDescription)).length]));
+  // The groups the model picked a resolvable skill in. An unresolved ref belongs to no group; it is kept
+  // below so the validator still refuses it (this function must never launder a fabrication).
+  const modelGroups = new Set(tailored.skills.flatMap(({ ref }) => byId.get(ref)?.category ?? []));
+  // Relevant groups, best first; the sort is stable, so master order breaks the last tie.
+  const relevant = categories.filter((c) => (relevance.get(c) ?? 0) > 0).sort((a, b) =>
+    (relevance.get(b) ?? 0) - (relevance.get(a) ?? 0) || Number(modelGroups.has(b)) - Number(modelGroups.has(a)));
+  // No relevant group at all: keep the model's groups rather than show an empty section.
+  const shown = new Set((relevant.length > 0 ? relevant : [...modelGroups]).slice(0, SKILLS_MAX_GROUPS));
+  // The model's picks that survive: in a shown group, or unresolved (left for the validator to refuse).
+  const kept = tailored.skills.filter(({ ref }) => { const skill = byId.get(ref); return skill === undefined || shown.has(skill.category); });
+  // The model's resolvable picks in a dropped group, reported.
+  const dropped = tailored.skills.filter(({ ref }) => !kept.some((k) => k.ref === ref)).map(({ ref }) => ref);
+  // Every ref already on the resume, so no top-up repeats one (the validator refuses duplicates).
+  const present = new Set(kept.map(({ ref }) => ref));
+  // The refs added, group by group in shown order.
+  const added: string[] = [];
+  // Each shown group, filled to its floor.
+  for (const category of shown) {
+    // How many the group holds already.
+    const count = kept.filter(({ ref }) => byId.get(ref)?.category === category).length;
+    // Its master skills not yet on the resume, in master order.
+    const candidates = master.skills.filter((s) => s.category === category && !present.has(s.id));
+    // The floor, capped at what the master holds for this group, minus what is there.
+    const need = Math.min(SKILLS_PER_GROUP_FLOOR, count + candidates.length) - count;
+    // Posting-named first; stable sort keeps master order among equals.
+    const ranked = candidates.sort((a, b) => Number(keywordAppearsIn(b.name, jobDescription)) - Number(keywordAppearsIn(a.name, jobDescription)));
+    // The top `need` (none when the group is already at the floor).
+    for (const skill of ranked.slice(0, Math.max(0, need))) added.push(skill.id);
+  }
+  // Unchanged answer: returned as it was.
+  if (added.length === 0 && dropped.length === 0) return { profile: tailored, added, dropped };
+  // The model's surviving picks, then the top-ups; the renderer groups by category, so within a group
+  // the model's choices come first. Group order on the page follows first appearance.
+  return { profile: { ...tailored, skills: [...kept, ...added.map((ref) => ({ ref }))] }, added, dropped };
 }
 
 /* The bullets a one-shot rewrite may fix, with their untraceable words, or null for "do not retry"
@@ -361,7 +437,12 @@ export function createTailorer(deps: TailorDeps): Tailorer {
     // Repeated refs normalised away BEFORE the gate (see dedupeRepeatedRefs: normalisation, never
     // leniency). The deduplicated profile is the one validated AND the one stored, so tailor_refs
     // re-validates to exactly the stored resume.
-    const { profile: tailored, deduped } = dedupeRepeatedRefs(parsed);
+    const { profile: deduplicated, deduped } = dedupeRepeatedRefs(parsed);
+
+    // The skills shape (relevant groups, floor per group), after dedupe (so a repeat never counts toward a
+    // group) and BEFORE the gate (so every added ref is resolved by the unchanged validator, and the stored
+    // refs match the resume).
+    const { profile: tailored, added: skillsAdded, dropped: skillsDropped } = shapeSkillGroups(deduplicated, deps.master, input.jobDescription);
 
     // The honesty gate. This is the only call in the codebase that can produce a
     // `ResolvedResume`, which is what makes "the renderer cannot resolve a ref even by
@@ -398,13 +479,13 @@ export function createTailorer(deps: TailorDeps): Tailorer {
       // Still failing: refused, with both attempts on record.
       if (!second.ok) return { kind: "refused", violations: second.violations, retry: { firstViolations: validation.violations, result: "still_invalid" } };
       // Passed: the merged profile is what is stored, so tailor_refs re-validates to this resume.
-      return { kind: "tailored", resume: second.resume, refs: merged, jdKeywords: extractJdKeywords(input.jobDescription), dedupedRefs: deduped, retry: { firstViolations: validation.violations, rewrittenRefs: [...rewrites.keys()] } };
+      return { kind: "tailored", resume: second.resume, refs: merged, jdKeywords: extractJdKeywords(input.jobDescription), dedupedRefs: deduped, skillsAdded, skillsDropped, retry: { firstViolations: validation.violations, rewrittenRefs: [...rewrites.keys()] } };
     }
 
     // Clean. The resume is safe to persist and to hand to the Auditor, when one exists.
     // `tailored` is the parsed model output that passed validation — the refs, unresolved.
     // `jdKeywords` comes from the SAME posting the model was given, never re-read later,
     // so the keywords and the resume can never describe two different versions of a job.
-    return { kind: "tailored", resume: validation.resume, refs: tailored, jdKeywords: extractJdKeywords(input.jobDescription), dedupedRefs: deduped, retry: null };
+    return { kind: "tailored", resume: validation.resume, refs: tailored, jdKeywords: extractJdKeywords(input.jobDescription), dedupedRefs: deduped, skillsAdded, skillsDropped, retry: null };
   };
 }

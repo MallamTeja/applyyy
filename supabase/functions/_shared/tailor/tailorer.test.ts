@@ -517,3 +517,118 @@ test("retry: a reply naming a bullet that did not fail is unusable (no partial m
   // The final violations are the first attempt's: nothing was merged.
   assert.deepEqual(outcome.violations, [{ kind: "unverifiable_token", ref: "bullet-rest-api", token: "robust" }]);
 });
+
+// --- the skills section shape (Teja, 2026-11-06: 1-2 skills per group "is not enough"; "I don't need
+// all these groups"; "make groups from master and skills for them according to the JD") --------------
+
+// A master with four groups of different sizes: one the floor fills, one smaller than the floor, one a
+// backend posting names but the model may skip, and one (Machine Learning) a backend posting never names.
+const SHAPE_MASTER: MasterProfile = {
+  // Everything but skills is the honest fixture's, so only the skills shape varies.
+  ...MASTER,
+  skills: [
+    // Languages: five in all, so the floor of 4 is reachable and one is left out.
+    { id: "skill-node", name: "Node.js", category: "Languages" },
+    { id: "lang-python", name: "Python", category: "Languages" },
+    { id: "lang-go", name: "Go", category: "Languages" },
+    { id: "lang-sql", name: "SQL", category: "Languages" },
+    { id: "lang-ts", name: "TypeScript", category: "Languages" },
+    // DevOps: only two, so the floor is capped at the group's size.
+    { id: "dev-docker", name: "Docker", category: "DevOps" },
+    { id: "dev-gcp", name: "Google Cloud Platform", category: "DevOps" },
+    // Machine Learning: a group the backend posting never mentions.
+    { id: "ml-xgboost", name: "XGBoost", category: "Machine Learning" },
+    { id: "ml-shap", name: "SHAP", category: "Machine Learning" },
+    // Tools: shown only when the posting names one of them.
+    { id: "tool-git", name: "Git", category: "Tools" },
+    { id: "tool-jira", name: "Jira", category: "Tools" },
+    { id: "tool-postman", name: "Postman", category: "Tools" },
+    { id: "tool-slack", name: "Slack", category: "Tools" },
+  ],
+};
+
+// A backend posting naming Node.js, SQL, TypeScript and Docker, and nothing from ML or Tools.
+const BACKEND_POSTING = { ...POSTING, jobDescription: "Backend role: SQL and TypeScript on Node.js services, shipped with Docker." };
+
+// Runs the real tailorer over SHAPE_MASTER with a model that returns exactly `skills`.
+async function shapeOutcome(skills: readonly { ref: string }[], posting: typeof POSTING) {
+  // The honest tailoring with only its skills replaced, so the rest always validates.
+  const answer: TailoredProfile = { ...HONEST_TAILORING, skills };
+  // The real runner: dedupe, shape, validate, exactly as production runs it.
+  const tailor = createTailorer({ callLlm: () => Promise.resolve(JSON.stringify(answer)), master: SHAPE_MASTER, masterVersion: MASTER_VERSION });
+  return await tailor(posting);
+}
+
+// Group sizes on a resolved resume, by category, in first-appearance order.
+function groupSizes(resume: { readonly skills: readonly { readonly category: string }[] }): Record<string, number> {
+  // Counted per group.
+  const sizes = new Map<string, number>();
+  // One pass over the printed skills.
+  for (const skill of resume.skills) sizes.set(skill.category, (sizes.get(skill.category) ?? 0) + 1);
+  // A plain object, so deepEqual compares it against a literal.
+  return Object.fromEntries(sizes);
+}
+
+// THE RED-ON-REVERT TEST: drop the shapeSkillGroups call in createTailorer and this goes red.
+test("skills shape: a backend posting shows its relevant groups at min(4, master size) and drops Machine Learning", async () => {
+  // The live 1-per-group shape, plus an ML pick the backend posting gives no reason for.
+  const outcome = await shapeOutcome([{ ref: "skill-node" }, { ref: "dev-docker" }, { ref: "ml-xgboost" }], BACKEND_POSTING);
+  // Topped-up refs still pass the unchanged validator: only master refs are ever added.
+  assert.equal(outcome.kind, "tailored");
+  if (outcome.kind !== "tailored") return;
+  // Languages reaches the floor; DevOps holds its whole group of 2; no ML, no Tools.
+  assert.deepEqual(groupSizes(outcome.resume), { Languages: 4, DevOps: 2 });
+  // Posting-named skills (SQL, TypeScript) before master order (Python); Go is left out.
+  assert.deepEqual(outcome.skillsAdded, ["lang-sql", "lang-ts", "lang-python", "dev-gcp"]);
+  // The ML pick is dropped and reported, never silently.
+  assert.deepEqual(outcome.skillsDropped, ["ml-xgboost"]);
+  // The stored refs are the shaped profile, so tailor_refs re-validates to this exact resume.
+  assert.deepEqual(outcome.refs.skills.map((s) => s.ref), ["skill-node", "dev-docker", "lang-sql", "lang-ts", "lang-python", "dev-gcp"]);
+});
+
+// The groups come from the master by the posting, not from the model's choice alone.
+test("skills shape: a group the posting names is shown even when the model skipped it", async () => {
+  // The posting names Jira; the model chose only Node.js.
+  const outcome = await shapeOutcome([{ ref: "skill-node" }], { ...BACKEND_POSTING, jobDescription: "Node.js backend, tickets tracked in Jira." });
+  assert.equal(outcome.kind, "tailored");
+  if (outcome.kind !== "tailored") return;
+  // Languages and Tools, both at the floor.
+  assert.deepEqual(groupSizes(outcome.resume), { Languages: 4, Tools: 4 });
+  // Jira leads its group because the posting names it.
+  assert.equal(outcome.refs.skills.find((s) => s.ref.startsWith("tool-"))?.ref, "tool-jira");
+});
+
+// A group already at the floor, with no other relevant group, is left exactly as the model chose it.
+test("skills shape: an answer that already fits comes back unchanged", async () => {
+  // Four Languages picks, and a posting that touches only Languages.
+  const picks = [{ ref: "skill-node" }, { ref: "lang-python" }, { ref: "lang-go" }, { ref: "lang-sql" }];
+  const outcome = await shapeOutcome(picks, { ...BACKEND_POSTING, jobDescription: "SQL and TypeScript on Node.js services." });
+  assert.equal(outcome.kind, "tailored");
+  if (outcome.kind !== "tailored") return;
+  // Nothing added, nothing dropped.
+  assert.deepEqual([outcome.skillsAdded, outcome.skillsDropped], [[], []]);
+  // Nothing reordered.
+  assert.deepEqual(outcome.refs.skills.map((s) => s.ref), picks.map((p) => p.ref));
+});
+
+// A posting that names no master skill cannot judge relevance, so the model's groups stand (floored).
+test("skills shape: with no relevant group, the model's own groups are kept rather than emptied", async () => {
+  // A posting with no skill words at all.
+  const outcome = await shapeOutcome([{ ref: "ml-xgboost" }], { ...BACKEND_POSTING, jobDescription: "Join a friendly team." });
+  assert.equal(outcome.kind, "tailored");
+  if (outcome.kind !== "tailored") return;
+  // The ML group stays, holding its whole master group of 2.
+  assert.deepEqual(groupSizes(outcome.resume), { "Machine Learning": 2 });
+});
+
+// Control: the shape must not launder a fabricated skill. An unresolved ref joins no group, is kept,
+// and is still refused by the validator.
+test("skills shape control: a fabricated skill ref is still refused", async () => {
+  // One real pick plus one ref the master does not hold.
+  const outcome = await shapeOutcome([{ ref: "skill-node" }, { ref: "skill-kubernetes" }], BACKEND_POSTING);
+  // Refused.
+  assert.equal(outcome.kind, "refused");
+  if (outcome.kind !== "refused") return;
+  // Naming the invented ref.
+  assert.ok(outcome.violations.some((v) => v.kind === "unresolved_ref" && v.ref === "skill-kubernetes"));
+});

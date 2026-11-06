@@ -54,7 +54,7 @@ const REFS = { master_version: 7, summary: null } as unknown as TailoredProfile;
 
 // A clean verdict, ready to persist.
 // `jdKeywords` is a recognisable pair so the keyword test can assert it arrived intact.
-const TAILORED: TailorOutcome = { kind: "tailored", resume: RESUME, refs: REFS, jdKeywords: ["Go", "PostgreSQL"], dedupedRefs: [], retry: null };
+const TAILORED: TailorOutcome = { kind: "tailored", resume: RESUME, refs: REFS, jdKeywords: ["Go", "PostgreSQL"], dedupedRefs: [], skillsAdded: [], skillsDropped: [], retry: null };
 
 // One recorded call against the database seam, in the order it was made.
 interface RecordedCall {
