@@ -13,10 +13,12 @@
 // written.
 // Type-only: the assisted flow only needs the profile's shape to pass it along.
 import type { AgentName, AnswerBankRow, MasterProfile, ResolvedResume } from '@applyy/shared-types';
-import type { ApplicationPage } from '../apply-one.ts';
+import type { ApplicationPage, RobotsCheck } from '../apply-one.ts';
 import { guardedAdvance, type StatusWriter } from '../guarded-advance.ts';
 import { planFill } from '../plan-fill.ts';
 import { planResumeAttachment, resumeFileName } from '../plan-resume-attachment.ts';
+// G2: the kit's drift check, reused so both human paths word an identity swap the same way.
+import { identityDriftWarnings } from '../apply-kit.ts';
 import type { RenderedResume } from '../render-resume-pdf.ts';
 
 // The worker's identity for the automated half of the flow. Named once so no call site
@@ -88,9 +90,10 @@ export interface AssistGateway extends StatusWriter {
   // The answer bank, so planFill can copy human-written answers.
   // Read-only: this flow never writes to the answer bank.
   fetchAnswers(): Promise<readonly AnswerBankRow[]>;
-  // Optional: absent means no profile fills (the safe direction); the real gateway delegates it.
-  // Declared on the assisted gateway port so the planner call below type-checks.
-  fetchLatestProfile?(): Promise<MasterProfile | null>;
+  // The latest master: the profile fills AND (G2, 2026-11-06) the resume's contact identity, per the
+  // one-email ruling (2026-10-24). REQUIRED since G2: a gateway without it cannot follow the ruling, so it
+  // must not compile; null (no master) refuses before the claim.
+  fetchLatestProfile(): Promise<MasterProfile | null>;
 }
 
 /** Everything the flow needs, injected. */
@@ -108,6 +111,9 @@ export interface AssistDeps {
   // interpreting it is `interpretAnswer`'s job, in one tested place.
   // Takes the question text so the CLI prints it exactly where the human is looking.
   readonly askHuman: (question: string) => Promise<string | null>;
+  // G1: the applier's robots gate (apply-one.ts createRobotsCheck). REQUIRED, so an assisted run without
+  // a robots gate does not compile.
+  readonly checkRobots: RobotsCheck;
   // Output sink, injected so tests can read what the human would have seen.
   // A function, not console, so output is capturable and assertable in tests.
   readonly log: (line: string) => void;
@@ -209,8 +215,23 @@ export async function runAssisted(deps: AssistDeps): Promise<AssistOutcome> {
   // Narrowed copies, so the compiler knows these are non-null below.
   // Trimmed so stray whitespace from the database cannot break navigation.
   const applyUrl = row.applyUrl.trim();
-  // The snapshot, now typed non-null for the renderer.
-  const resume = row.tailoredProfile;
+  // G2: THE LATEST MASTER, the one contact-identity source (one-email ruling, 2026-10-24), read before the
+  // claim so a missing one refuses with nothing written. The kit fails closed the same way (apply-kit.ts).
+  const master = await gateway.fetchLatestProfile();
+  // No master: no identity that follows the ruling, so no resume may be attached.
+  if (master === null) return { kind: 'refused', reason: 'no master profile: the resume identity must come from the latest master' };
+  // The approved snapshot's CONTENT under the latest master's IDENTITY: the exact merge the kit makes.
+  const resume: ResolvedResume = { ...row.tailoredProfile, identity: master.identity };
+  // Every identity fact the human did NOT see at approval, said out loud as a PROBLEM line below (the kit's
+  // own drift check), so the swap is never silent.
+  const identityDrift = identityDriftWarnings(row.tailoredProfile.identity, master.identity);
+
+  // G1 (2026-11-06): THE ROBOTS GATE, with the applier's strict rule: only an explicit 'allow' opens the
+  // page; 'refuse' and 'wait' both refuse. Before the claim, so a refusal leaves the row untouched. This
+  // path had no gate at all, while the applier and the kit both ask first.
+  const robots = await deps.checkRobots(applyUrl);
+  // Anything but allow: refused, naming the verdict.
+  if (robots.kind !== 'allow') return { kind: 'refused', reason: `robots.txt did not allow ${applyUrl} (${robots.kind}: ${robots.reason})` };
 
   // Lease the row so the scheduled applier cannot pick it up while a human works on it.
   if (!(await gateway.claim(applicationId))) {
@@ -254,7 +275,8 @@ export async function runAssisted(deps: AssistDeps): Promise<AssistOutcome> {
     const unfilled: string[] = [];
     // Anything that went wrong, shown to the human so they know what to finish by hand.
     // A list rather than a count, because the human needs the reasons, not a number.
-    const problems: string[] = [];
+    // Seeded with the identity drift (G2), so the human reads it before clicking Submit.
+    const problems: string[] = [...identityDrift];
     // One try around all fill work, so any throw still reaches the park below.
     try {
       // A captcha or login wall is reported, never worked around (constraint 5); the
@@ -268,15 +290,11 @@ export async function runAssisted(deps: AssistDeps): Promise<AssistOutcome> {
       // has no third branch that invents a value (constraint 4).
       // The accessibility-tree read of the form; shared by both planners below.
       const fields = await page.extractFields();
-      // Pure planner decision over those fields and the stored answers.
-      // Warn (once per call) when the gateway cannot supply a profile, so a wiring slip is visible not silent.
-      // Warn instead of throw: the flow still works, it just asks the human for more.
-      if (gateway.fetchLatestProfile === undefined) console.warn('[assisted-submit] gateway has no fetchLatestProfile; profile fills disabled');
-      // Profile read alongside the bank so factual fields (email, phone, links) can be copied.
-      // Null default so an absent method means no profile fills, the safe direction.
+      // Pure planner decision over those fields, the stored answers and the master read before the claim
+      // (one read, so the fills and the resume identity come from the same master version).
       // The company as the 4th argument, so "previously worked at <company>?" can be answered
       // here exactly as in the unattended path; omitted, that required question refuses.
-      const plan = planFill(fields, await gateway.fetchAnswers(), (await gateway.fetchLatestProfile?.()) ?? null, row.company);
+      const plan = planFill(fields, await gateway.fetchAnswers(), master, row.company);
       // Blockers are listed as unfilled so the human knows which questions are theirs.
       // Each blocker is a question the bank cannot answer, so it is the human's to do.
       for (const blocker of plan.blockers) unfilled.push(blocker.label);
@@ -305,7 +323,7 @@ export async function runAssisted(deps: AssistDeps): Promise<AssistOutcome> {
       for (const blocker of attachment.blockers) unfilled.push(blocker.label);
       // Null target means the form has no upload box, which is a legitimate shape.
       if (attachment.target !== null) {
-        // Rendered from the approved snapshot, so the bytes are what the human reviewed.
+        // Rendered from the approved snapshot's content under the latest master's identity (G2).
         // Fallible by design (a stale schema throws), hence inside the guarded block.
         const rendered = await renderResume(resume);
         await page.attachFile(attachment.target.id, {

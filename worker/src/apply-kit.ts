@@ -190,17 +190,19 @@ function sourceOf(fill: PlannedFill, facts: ReadonlySet<string>): KitSource {
 }
 
 /** One warning per identity fact the frozen snapshot holds differently from the latest master. */
-function identityDriftWarnings(snapshot: MasterIdentity, latest: MasterIdentity): string[] {
+// Exported (G2, 2026-11-06) so the assisted path says the same drift out loud; wording names "the resume",
+// which is true for both callers.
+export function identityDriftWarnings(snapshot: MasterIdentity, latest: MasterIdentity): string[] {
   // The facts a form or the resume header prints.
   const keys = ['full_name', 'email', 'phone', 'location'] as const;
   // Compared as written; a difference is reported with both values so Teja can see it.
   const drift = keys
     .filter((key) => (snapshot[key] ?? null) !== (latest[key] ?? null))
-    .map((key) => `identity.${key}: the row's tailored_profile has "${snapshot[key] ?? ''}", the latest master has "${latest[key] ?? ''}"; the kit and its resume use the latest master (one-email ruling, 2026-10-24)`);
+    .map((key) => `identity.${key}: the row's tailored_profile has "${snapshot[key] ?? ''}", the latest master has "${latest[key] ?? ''}"; the resume uses the latest master (one-email ruling, 2026-10-24)`);
   // Links compared as their ordered URL lists.
   const urls = (identity: MasterIdentity) => Array.from(identity.links ?? [], (link) => link.url).join(' ');
   // One line for the whole list.
-  if (urls(snapshot) !== urls(latest)) drift.push('identity.links: the row\'s tailored_profile differs from the latest master; the kit and its resume use the latest master');
+  if (urls(snapshot) !== urls(latest)) drift.push('identity.links: the row\'s tailored_profile differs from the latest master; the resume uses the latest master');
   return drift;
 }
 

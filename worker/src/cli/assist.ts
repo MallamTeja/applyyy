@@ -18,6 +18,8 @@ import { createResumeRenderer } from '../resume-renderer.ts';
 import type { SupabaseLike } from '../supabase-gateway.ts';
 // The pure flow; this file is just the wiring around it.
 import { runAssisted } from '../assist/assisted-submit.ts';
+// G1: the same robots gate the applier and the kit use.
+import { createRobotsCheck } from '../apply-one.ts';
 // The real database port for the flow.
 import { createSupabaseAssistGateway } from '../assist/supabase-assist-gateway.ts';
 // The machine-agent proof header, the same builder the edge functions use.
@@ -161,6 +163,8 @@ async function main(): Promise<void> {
       askHuman: askStdin,
       // Plain console output, since the human is at this terminal.
       log: (line) => console.log(line),
+      // G1: the applier's robots gate under its own token, so assist loads only what the applier may.
+      checkRobots: createRobotsCheck(),
     });
     // Machine-readable last line, useful when the output is pasted into a log.
     console.log(`[assist] result: ${JSON.stringify(outcome)}`);

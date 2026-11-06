@@ -19,6 +19,10 @@ import { syntheticResume } from './resolved-resume-fixture.ts';
 import { createSupabaseAssistGateway } from '../src/assist/supabase-assist-gateway.ts';
 // Type only: the client shape the stub is cast to.
 import type { SupabaseLike } from '../src/supabase-gateway.ts';
+// G1: the applier's robots port type.
+import type { RobotsCheck } from '../src/apply-one.ts';
+// G2: the master shape.
+import type { MasterProfile } from '@applyy/shared-types';
 
 // A text field the empty answer bank cannot answer, plus a file input for the resume.
 const FIELDS: FormField[] = [
@@ -45,8 +49,15 @@ const goodRow: AssistRow = {
   title: 'Engineer',
 };
 
+// G1: the event the robots fake logs for goodRow, carrying the URL, so every sequence pins WHICH URL was asked.
+const ROBOTS_ASKED = 'robots:https://example.test/apply';
+
+// G2: the latest master, whose identity differs from the snapshot's, so a test can see which one the resume used.
+// ponytail: identity-only cast; planFill reads no other master section today. Build a full master when it does.
+const latestMaster = { identity: { ...syntheticResume.identity, email: 'latest-master@example.test' } } as unknown as MasterProfile;
+
 /** Build fakes plus a shared event log so ORDER across ports can be asserted. */
-function setup(opts: { row?: AssistRow | null; answer?: string | null; gotoFails?: boolean } = {}) {
+function setup(opts: { row?: AssistRow | null; answer?: string | null; gotoFails?: boolean; robots?: 'allow' | 'refuse' | 'wait'; master?: MasterProfile | null } = {}) {
   // One log for every port: ordering between goto and the writes is the point.
   const events: string[] = [];
   // Records each status write as `advance:<to>:<agent>` in the shared log.
@@ -68,6 +79,8 @@ function setup(opts: { row?: AssistRow | null; answer?: string | null; gotoFails
     }),
     // Empty bank: every text field is therefore unanswerable.
     fetchAnswers: async () => [],
+    // G2: the latest master; `master: null` models an account with none.
+    fetchLatestProfile: async () => ('master' in opts ? (opts.master ?? null) : latestMaster),
   };
   // The submit spy lives on the fake page even though the AssistPage type cannot reach it.
   const submit = vi.fn(async () => {});
@@ -114,6 +127,18 @@ function setup(opts: { row?: AssistRow | null; answer?: string | null; gotoFails
     askHuman: vi.fn(async () => ('answer' in opts ? (opts.answer ?? null) : 'y')),
     // Collects output instead of printing it.
     log: (line: string) => lines.push(line),
+    // G1: the robots gate; allow unless a case says otherwise. Logged, so ordering is assertable.
+    // Typed as the real port with no cast, so tsc holds every verdict to the real RobotsVerdict shape (§5).
+    checkRobots: vi.fn<RobotsCheck>(async (url) => {
+      // Recorded at call time, WITH the URL asked about, so a test can pin which URL the gate saw.
+      events.push(`robots:${url}`);
+      // The verdict this case asked for, each in the gate's real shape.
+      if (opts.robots === 'refuse') return { kind: 'refuse', reason: 'test', source: 'policy' };
+      // A crawl-delay answer, as the gate returns one.
+      if (opts.robots === 'wait') return { kind: 'wait', reason: 'test', waitMs: 5000 };
+      // Default: the site allows us.
+      return { kind: 'allow', reason: 'test', crawlDelayMs: null };
+    }),
   };
   // Everything a test might want to inspect.
   return { deps, events, advance, gateway, page, submit, lines };
@@ -199,6 +224,8 @@ describe('runAssisted flow', () => {
     await runAssisted(t.deps);
     // The full ordered sequence, one assertion: goto, applying, fill work, park, human write.
     expect(t.events).toEqual([
+      // G1: robots is asked first, before the page.
+      ROBOTS_ASKED,
       'goto',
       'advance:applying:applier',
       'attach',
@@ -218,7 +245,8 @@ describe('runAssisted flow', () => {
     // Still approved, so no status moved.
     expect(t.advance).not.toHaveBeenCalled();
     // The lease went back, in the right order: after the attempted navigation.
-    expect(t.events).toEqual(['goto', 'release']);
+    // G1: robots first, then the attempted navigation, then the release.
+    expect(t.events).toEqual([ROBOTS_ASKED, 'goto', 'release']);
   });
 
   it('still parks at blocked_needs_human when filling throws', async () => {
@@ -352,5 +380,72 @@ describe('createSupabaseAssistGateway posting liveness', () => {
       // The exact tri-state value, not truthiness, because 'unknown' is truthy.
       expect(row?.postingDisappeared, JSON.stringify(jobRow)).toBe(expected);
     }
+  });
+});
+
+// G1 + G2 (2026-11-06, orchestrator 8b): the assisted path had NO robots gate (the applier and the kit both
+// have one) and attached the FROZEN snapshot's identity (the kit swaps in the latest master's, per the
+// one-email ruling of 2026-10-24). Both now match the applier and the kit.
+describe('runAssisted robots gate and identity (G1, G2)', () => {
+  it('G1: robots "refuse" is refused before the claim, the page and any write', async () => {
+    // A site whose robots.txt refuses us.
+    const t = setup({ robots: 'refuse' });
+    // Refused, naming robots.
+    const outcome = await runAssisted(t.deps);
+    expect(outcome).toMatchObject({ kind: 'refused' });
+    expect((outcome as { reason: string }).reason).toMatch(/robots/);
+    // Nothing leased, opened or written.
+    expect(t.gateway.claim).not.toHaveBeenCalled();
+    expect(t.events).toEqual([ROBOTS_ASKED]);
+  });
+
+  it('G1: robots "wait" is refused too: only an explicit allow passes (the applier strict rule)', async () => {
+    // A transient robots answer.
+    const t = setup({ robots: 'wait' });
+    // Refused, nothing leased.
+    expect((await runAssisted(t.deps)).kind).toBe('refused');
+    expect(t.gateway.claim).not.toHaveBeenCalled();
+    // Nothing opened either: robots was the only port touched.
+    expect(t.events).toEqual([ROBOTS_ASKED]);
+  });
+
+  it('G1: robots is asked about the TRIMMED url, the same one goto loads', async () => {
+    // Stray whitespace from the database around the URL.
+    const t = setup({ row: { ...goodRow, applyUrl: '  https://example.test/apply \n' } });
+    await runAssisted(t.deps);
+    // Asked about the trimmed URL, then that same URL opened.
+    expect(t.events.slice(0, 2)).toEqual([ROBOTS_ASKED, 'goto']);
+    expect(t.page.goto).toHaveBeenCalledWith('https://example.test/apply');
+  });
+
+  it('G2: an identity swap is said out loud as a PROBLEM line, never silent', async () => {
+    // The happy path: the master's email differs from the approved snapshot's.
+    const t = setup();
+    await runAssisted(t.deps);
+    // The kit's own drift wording, naming the field that changed.
+    expect(t.lines.some((line) => line.startsWith('PROBLEM: identity.email:'))).toBe(true);
+  });
+
+  // "Robots before the page" is pinned by the full ordered sequence in 'runAssisted flow' (robots, goto, ...).
+  it('G2: the resume carries the LATEST master identity over the snapshot content', async () => {
+    // The happy path; the snapshot email is the fixture's, the master's is latest-master@example.test.
+    const t = setup();
+    await runAssisted(t.deps);
+    // The one rendered resume.
+    const rendered = (t.deps.renderResume.mock.calls as unknown as Array<[typeof syntheticResume]>)[0]?.[0];
+    // Identity from the master...
+    expect(rendered?.identity.email).toBe('latest-master@example.test');
+    // ...content from the approved snapshot.
+    expect(rendered?.experience).toEqual(syntheticResume.experience);
+  });
+
+  it('G2: no master profile is refused before the claim (identity must come from the latest master)', async () => {
+    // An account with no master.
+    const t = setup({ master: null });
+    // Refused, nothing leased or opened.
+    const outcome = await runAssisted(t.deps);
+    expect(outcome).toMatchObject({ kind: 'refused' });
+    expect(t.gateway.claim).not.toHaveBeenCalled();
+    expect(t.events).not.toContain('goto');
   });
 });
