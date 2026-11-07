@@ -1,11 +1,13 @@
-/* THE DIFF VIEW - master versus tailored, side by side.
+/* THE APPROVAL CARD BODY - the decision about one tailored resume.
  *
- * This is the most important screen in the product. Everything upstream of it
- * is machinery; this is where a human decides whether something honest gets
- * sent. PROJECT_PLAN.md section 11 is the design brief.
+ * This is where a human decides whether something honest gets sent. PROJECT_PLAN.md section 11 is
+ * the design brief. Since 2026-11-07 (Teja's slim-card rulings) the card holds only what that
+ * decision needs: the job's facts, the ATS match figure, the audit verdict, the changes made to the
+ * tailor's resume, and Approve / Reject. The resume itself is read in the page's ResumePreview, and
+ * the AI chat is the ONLY edit path: every hand-edit control (click-to-edit, move, remove, add back,
+ * keyword "+ Add" chips) was removed, and the one undo left here is each changed line's Reset.
  *
- * The one thing this screen exists to do: make TWO KINDS OF EDIT impossible to
- * confuse.
+ * The one thing this screen exists to do: make TWO KINDS OF EDIT impossible to confuse.
  *
  *   A bullet reworded into the JD's language - same project, same 500 users,
  *   same tech - is SAFE. It gets a QUIET treatment on purpose. Safe content
@@ -17,52 +19,53 @@
  *   alert band, and a forced per-claim decision. If it wins the interview, the
  *   first technical question ends it - worse than never applying.
  *
- * Two visual LANGUAGES, not two shades of one. Different colour, different
- * weight, different structure, different required action.
- *
- * The structural part matters more than the colour. Approve stays DISABLED
- * until every flagged claim has an explicit decision recorded against it. That
- * is section 10 defense 1 applied to the interface: prefer designs where the
- * wrong answer cannot be expressed over designs that ask nicely. A tired
- * operator at row 30 of 35 cannot skim past this gate, because there is no
- * path through it that does not involve reading each claim.
+ * The structural part matters more than the colour. Approve stays DISABLED until every flagged
+ * claim has an explicit "keep it" recorded against it. That is section 10 defense 1 applied to the
+ * interface: prefer designs where the wrong answer cannot be expressed over designs that ask nicely.
+ * A tired operator at row 30 of 35 cannot skim past this gate, because there is no path through it
+ * that does not involve reading each claim.
  */
 
-// useId (2026-11-01): ties each new-bullet label to its textarea, unique per entry.
-// Fragment (2026-11-05): a keyed wrapper-free row for each skill group (TailoredText).
-import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react';
+// Fragment: a keyed wrapper-free row for each skill group (TailoredText). useRef: focus home after a Reset.
+import { Fragment, useMemo, useRef, useState } from 'react';
+// Types only: the component return shape.
 import type { ReactElement } from 'react';
 // Renders the AI chat into the page's right-hand dock while its state stays in this row's component.
 import { createPortal } from 'react-dom';
 
 import type {
-  AddedSkill,
-  // One entry's heading, offers and line ids (2026-11-01).
-  DiffEntry,
+  // One changed line, the unit Changes by AI lists.
   DiffLine,
-  // One section's place in the layout (2026-11-01).
-  DiffSection,
+  // Where Reset lands; also the 'edit' arm's target.
   EditTarget,
+  // One flagged claim in the alarm band.
   FlaggedClaim,
   // One printed skill with its group, which the grouped skills line is built from (2026-11-05).
   PrintedSkill,
+  // The whole view model.
   ResumeDiff,
+  // The AI's add/remove skill arms, imported so the page and this view share one shape.
   SkillEditAction,
+  // One marked run of tailored text.
   TailoredRun,
 } from './diffModel';
 import {
+  // Every claim still in the resume, which the Approve gate counts.
   collectFlaggedClaims,
+  // The honest ATS figure in the header.
   coveragePercent,
+  // A or B, which picks the status badge and the clean notice.
   deriveBucket,
-  // The one section-heading table, shared with the adapter's change sentences.
+  // The one section-heading table, shared with the adapter's change sentences; names a change's place.
   SECTION_TITLE,
 } from './diffModel';
+// The audit-state pill in the header.
 import { StatusBadge } from '../../app/StatusBadge';
-import { SourceBadge } from '../../app/SourceBadge';
 /* The shared http(s)-only gate for every href built from stored data. */
 import { safeHref } from '../../app/safeHref.ts';
-import type { DiscoverySource } from '../../data/contract';
-/* Types only: the structural-edit vocabulary (contract stubs live beside the pure edits). */
+/* Reject's in-place "are you sure?": a reject is one-way, and native dialogs are banned (CLAUDE.md section 8). */
+import { InlineConfirm, armConfirm } from '../../app/InlineConfirm';
+/* Types only: the structural-edit vocabulary the AI's arms carry (contract stubs live beside the pure edits). */
 import type { BulletSection, MoveDirection, SectionKind } from './tailoredEdits';
 /* Type only: who decided an edit, passed through to the page for the history note (2026-11-04). */
 import type { EditSource } from './saveTailoredEdit';
@@ -76,17 +79,20 @@ import { structureFromDiff } from './aiEdit';
 import type { ChatStore } from './resumeChat';
 /* Type only: a held re-check of an edited row (2026-11-05), shown above Approve. */
 import type { ApproveHold } from './approveCheck';
+/* Type only: the screener's one pay-band warning literal, so the chip can only ever say that sentence (N2). */
+import type { PAY_BAND_UK_US_ONLY } from '../../../../../supabase/functions/_shared/screen/work-auth-gate.ts';
 
 import './DiffView.css';
 
 /* The one decision left on a flagged claim: "keep it, I can defend it".
-   Until 2026-10-06 there was also 'remove', which reached p_detail and never changed the PDF -
-   the button said "cut" and the submitted resume kept the words. Cutting is now a real edit
-   (the bullet is removed and saved), so the only thing left to RECORD is the acknowledgement. */
+   Until 2026-10-06 there was also 'remove', which reached p_detail and never changed the PDF. Cutting
+   then became a real edit (a "Cut this bullet" button); since 2026-11-07 the AI chat does it, so the
+   only thing left to RECORD here is the acknowledgement. */
 export type ClaimDecision = 'keep';
 
-/* What the operator asked to change. DiffView only names the intent; the page turns it into a
-   new resume and saves it, so this component stays free of data access. */
+/* What an edit asks for. DiffView only names the intent; the page turns it into a new resume and
+   saves it, so this component stays free of data access. Since 2026-11-07 the AI chat emits every
+   arm except `reset`, which is the per-line undo in Changes by AI. */
 export type EditAction =
   // Replace one bullet's (or the summary's) text.
   | { readonly kind: 'edit'; readonly target: EditTarget; readonly text: string }
@@ -94,12 +100,12 @@ export type EditAction =
   | { readonly kind: 'remove'; readonly target: { readonly kind: 'bullet'; readonly ref: string } }
   // Put the tailor's original text (or the removed bullet) back.
   | { readonly kind: 'reset'; readonly target: EditTarget }
-  // T3: add an unselected master skill / take back one the operator added. Imported, not
+  // T3: add an unselected master skill / take back an added one. Imported, not
   // redeclared, so the page and this view can never disagree on the arm's shape.
   | SkillEditAction
-  // The operator vouches for a skill the master LACKS: it goes into a new master version first,
-  // then onto this resume (attestSkill.ts). Carries a name, unlike the T3 arms, because there is
-  // no master node to point at yet; `category` is one of the master's own groups.
+  // A skill the master LACKS: it goes into a new master version first, then onto this resume
+  // (attestSkill.ts). Carries a name, unlike the T3 arms, because there is no master node to
+  // point at yet; `category` is one of the master's own groups.
   | { readonly kind: 'attest_skill'; readonly keyword: string; readonly category: string }
   // STRUCTURAL EDITS (2026-11-01, docs/ui/2026-11-01-review-structure-edits-contract.md). Every one keeps
   // each node traced to the master; tracesToMaster checks that at the save boundary.
@@ -117,20 +123,22 @@ export type EditAction =
   | { readonly kind: 'attest_bullet'; readonly section: BulletSection; readonly parentRef: string; readonly text: string };
 
 /* A save either landed or it did not; the reason is shown to the operator verbatim. An attest
-   also hands back the master skill it put on the resume, which is what its Undo removes. */
+   also hands back the master skill it put on the resume. */
 export type EditResult = { readonly ok: true; readonly skillRef?: string | undefined } | { readonly ok: false; readonly reason: string };
 
 /* Pure presentation component - no data access, no Supabase. */
 export interface DiffViewProps {
+  // The view model of this row's resume.
   readonly diff: ResumeDiff;
   /* `acknowledged` (2026-11-05) is true only on the held card's second click, which approves past a
      re-check the operator has just read; every first click passes false. */
   readonly onApprove: (decisions: ReadonlyMap<string, ClaimDecision>, acknowledged: boolean) => void;
+  // Called only from Reject's inline Confirm, never from the first click.
   readonly onReject: (reason: string) => void;
   /* Async because it is a real write. Absent means "this screen offers no editing", which keeps
      any render-only caller (and the tests) working without stubbing a save path. */
-  /* The page's save; editSource (2026-11-04) says who decided the edit, for the history note. This
-     view's own controls always pass 'operator' (operatorEdit below); only the AI chat passes its own. */
+  /* The page's save; editSource (2026-11-04) says who decided the edit, for the history note. A
+     line's Reset passes 'operator'; the AI chat passes its own. */
   readonly onEdit?: ((action: EditAction, editSource: EditSource) => Promise<EditResult>) | undefined;
   /* D4: why editing is off for this row, shown instead of controls that could not be honest. */
   readonly editDisabledReason?: string | null | undefined;
@@ -139,8 +147,7 @@ export interface DiffViewProps {
   /* The page is approving or rejecting this row right now: no edit may land mid-approval and
      Approve must not fire twice, so every control waits. */
   readonly locked?: boolean | undefined;
-  /* The pinned master's skill groups, offered when the operator vouches for a missing skill.
-     Absent (or empty) means no attest offer: a skill with no honest group cannot be printed. */
+  /* The pinned master's skill groups, handed to the AI chat so a skill it adds prints under a real group. */
   readonly attestCategories?: readonly string[] | undefined;
   /* The AI box's ask (2026-10-31). Absent means no AI box; its proposals apply through onEdit,
      so a screen without a save path never shows it. */
@@ -154,228 +161,24 @@ export interface DiffViewProps {
   /* The page's held re-check of this edited row (2026-11-05): its findings, or why it could not
      run. Present turns Approve into the second click; absent is every row nothing holds. */
   readonly approveHold?: ApproveHold | undefined;
+  /* N2 (2026-11-07): the screener's pay-band warning for this job, computed by the page. Non-null
+     draws a signal chip in the facts line; absent or null draws nothing. */
+  readonly payBandWarning?: typeof PAY_BAND_UK_US_ONLY | null | undefined;
 }
-
-/* --- The job being approved against ------------------------------------- */
-
-/* The posting itself, beside the resume that claims to answer it.
- *
- * WHY THIS EXISTS AT ALL: this screen asks the operator to confirm a resume was
- * tailored honestly FOR A PARTICULAR JOB, and until 2026-09-17 it showed them
- * the resume and withheld the job. "Is this bullet really about what they asked
- * for?" could not be answered without leaving the page to find the posting by
- * hand - so in practice it was answered by assuming yes, which is the habit the
- * whole gate exists to prevent.
- *
- * The description is COLLAPSED by default. Expanded, it would push the
- * fabrication alert below the fold, and nothing may outrank that band. */
-function JobPosting({ diff }: { readonly diff: ResumeDiff }): ReactElement | null {
-  /* Local, because whether one operator expanded one posting is not state any
-     other part of the app has a reason to know about. */
-  const [expanded, setExpanded] = useState(false);
-
-  /* Validated once per render rather than at each use site; undefined means no safe
-     link (apply_url is board-supplied, see app/safeHref.ts). */
-  const href = safeHref(diff.applyUrl);
-
-  /* Tags stripped rather than rendered: this text came from a job board and is
-     UNTRUSTED. Stripping here and passing a plain string to a React text child
-     means there is no path by which markup in a posting reaches the DOM. */
-  const description =
-    typeof diff.jobDescription === 'string'
-      ? diff.jobDescription.replace(/<[^>]*>?/gm, ' ').replace(/\s+/g, ' ').trim()
-      : '';
-
-  /* Render nothing at all rather than an empty panel: a box saying "no job
-     details" is noise on a screen where everything visible must be worth
-     reading. */
-  if (href === undefined && description.length === 0) return null;
-
-  return (
-    <section className="job-posting" aria-labelledby={`posting-${diff.applicationId}`}>
-      <div className="job-posting__head">
-        <h3 id={`posting-${diff.applicationId}`} className="job-posting__title">
-          The posting this was written for
-        </h3>
-        {/* The link is the more valuable of the two, so it sits in the header
-            where it is reachable without expanding anything. */}
-        {href !== undefined && (
-          <a
-            className="button button--secondary button--small"
-            href={href}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Open the original posting
-          </a>
-        )}
-      </div>
-
-      {description.length > 0 && (
-        <>
-          {/* A real button, not a div with onClick: this has to be reachable by
-              keyboard, and aria-expanded is what tells a screen reader whether
-              the text below is currently showing. */}
-          <button
-            type="button"
-            className="button button--ghost button--small job-posting__toggle"
-            aria-expanded={expanded}
-            aria-controls={`posting-body-${diff.applicationId}`}
-            onClick={() => setExpanded((open) => !open)}
-          >
-            {expanded ? 'Hide the job description' : 'Read the job description'}
-          </button>
-
-          {/* `hidden` rather than unmounting, so an operator who expands, reads,
-              collapses and expands again does not lose their scroll position. */}
-          <p
-            id={`posting-body-${diff.applicationId}`}
-            className="job-posting__body"
-            hidden={!expanded}
-          >
-            {description}
-          </p>
-        </>
-      )}
-    </section>
-  );
-}
-
 
 /* --- Coverage ---------------------------------------------------------- */
 
-/* Three-segment bar: honest coverage, coverage from the operator's own edits, and coverage
-   purchased by fabrication. Exported for the test that pins the unmeasured branch
+/* The honest ATS figure, "N% Match", or the sentence saying it was never measured. The coverage
+   track, its legend and the keyword chips were removed 2026-11-07 (slim card): the one number is
+   what the decision uses. Exported for the test that pins the unmeasured branch
    (test/coverageUnmeasured.test.ts). */
-export function CoverageBar({
-  diff,
-  onEdit,
-  busy,
-  // The master's skill groups: present means a missing keyword can be vouched for here.
-  attestCategories,
-}: {
-  readonly diff: ResumeDiff;
-  /* T3: the save path for "add this master skill". Optional because the bar is also rendered
-     standalone (tests, read-only screens), and then a missing keyword is only a fact, not an offer. */
-  readonly onEdit?: ((action: EditAction) => Promise<EditResult>) | null | undefined;
-  /* A save is in flight somewhere in this diff; one write at a time per resume. */
-  readonly busy?: boolean | undefined;
-  /* The master's skill groups; with a save path, a keyword the master lacks becomes a vouch-and-add. */
-  readonly attestCategories?: readonly string[] | undefined;
-}): ReactElement {
-  /* The last failed add, shown under the chips. Declared before the unmeasured early return
-     because hooks must run in the same order on every render. */
-  const [addError, setAddError] = useState<string | null>(null);
-  /* What the polite live region says after a successful add. The clicked chip unmounts on success
-     and focus falls to <body>, so without this a screen-reader user hears nothing at all. */
-  const [addedNotice, setAddedNotice] = useState<string>('');
-  /* The keyword awaiting the operator's "yes, I have this" (null = no question open). A visible
-     question, not a one-click add: the click is an attestation, and the auditor exists to stop
-     claims nobody stands behind. */
-  const [pendingAttest, setPendingAttest] = useState<string | null>(null);
-  /* The group chosen for the pending skill; the renderer prints skills grouped, so it matters. */
-  const [attestCategory, setAttestCategory] = useState<string>('');
-  /* The last vouched-for skill, so its Undo can take it back off this resume before approval. */
-  const [lastAttested, setLastAttested] = useState<{ readonly name: string; readonly ref: string } | null>(null);
-  /* The add offers exist only with a save path; without one the chips stay today's plain spans. */
-  const addable = onEdit ? diff.coverage.addable : undefined;
-  /* Vouching needs a save path AND at least one honest group to print the skill under. */
-  const canAttest = Boolean(onEdit) && (attestCategories?.length ?? 0) > 0;
-
-  /* Open the question for one missing keyword, with NO group chosen (2026-11-04). It used to default
-     to the master's first group, so one click filed Code review, Machine learning and Testing under
-     "AI" (live master v14): a default that is a real group turns "not chosen" into a wrong answer. */
-  function askAttest(keyword: string): void {
-    // A new question clears the last failure, so the operator is not shown a stale reason.
-    setAddError(null);
-    // Nothing chosen: the select shows "Choose a group" and Add waits for a real pick.
-    setAttestCategory('');
-    // Shows the question under the chips.
-    setPendingAttest(keyword);
-  }
-
-  /* The operator said yes: master first, then this resume (the page does both). */
-  async function confirmAttest(): Promise<void> {
-    // Unreachable without a save path or an open question; narrows the types.
-    if (!onEdit || pendingAttest === null) return;
-    // Held so the question can close before the await without losing the name.
-    const keyword = pendingAttest;
-    // Cleared first, so a re-attempt is re-announced.
-    setAddedNotice('');
-    // One save; the page writes the master version and then the re-pinned resume.
-    const result = await onEdit({ kind: 'attest_skill', keyword, category: attestCategory });
-    // The question closes either way; a failure is shown under the chips.
-    setPendingAttest(null);
-    // Refused or unknown: nothing to undo, only a reason to show.
-    if (!result.ok) {
-      // Said where the click happened; the page's message names what (if anything) was stored.
-      setAddError(result.reason);
-      // No Undo offer and no success notice for a save that did not land.
-      return;
-    }
-    // Remembered for Undo only when the page named the skill it added.
-    setLastAttested(result.skillRef ? { name: keyword, ref: result.skillRef } : null);
-    // The chip flips to ✓ on the redraw; the live region says so for screen readers.
-    setAddedNotice(`Added ${keyword} to your master profile and this resume`);
-  }
-
-  /* Undo before approval: the existing remove path takes the skill back off THIS resume. The master
-     keeps it: master versions are immutable, and it is a true claim the operator made. */
-  async function undoAttest(): Promise<void> {
-    // Nothing to undo, or no save path.
-    if (!onEdit || lastAttested === null) return;
-    // The T3 removal of an operator-added skill.
-    const result = await onEdit({ kind: 'remove_skill', ref: lastAttested.ref });
-    // A refused undo is named; the skill is still on the resume.
-    if (!result.ok) {
-      // Shown under the chips, where the Undo was clicked.
-      setAddError(result.reason);
-      // The Undo offer stays, so the operator can try again.
-      return;
-    }
-    // Announced for screen readers, since the clicked Undo unmounts.
-    setAddedNotice(`Removed ${lastAttested.name} from this resume`);
-    // The Undo offer retires: there is nothing left on the resume to take back.
-    setLastAttested(null);
-  }
-
-  /* Add one master skill on one click. Until 2026-11-01 a native confirm asked "Only add skills you
-     actually have" first; Teja ruled it redundant: the skill is already in the operator's OWN master
-     profile, which is the claim, and addSkill() refuses any ref the master lacks (addSkill.test.ts).
-     A popup on every add only trained a reflex OK. A skill the master lacks still goes through the
-     in-page vouch question below, never a one-click add. */
-  async function addSkill(skill: AddedSkill): Promise<void> {
-    // Unreachable without a save path (no button is rendered then); narrows the type.
-    if (!onEdit) return;
-    // A new attempt clears the old failure.
-    setAddError(null);
-    // Emptied first, so adding the same name twice in a row still changes the text and is re-announced.
-    setAddedNotice('');
-    // The page looks the ref up in the pinned master and saves the whole resume.
-    const result = await onEdit({ kind: 'add_skill', ref: skill.ref });
-    // A refused save is named, so the operator knows the resume did not change.
-    if (!result.ok) setAddError(result.reason);
-    // A landed add is announced, since the chip that was clicked is gone.
-    else setAddedNotice(`Added ${skill.name} to this resume`);
-  }
-  /* Coverage the master genuinely supports. */
+export function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactElement {
+  /* Coverage the master genuinely supports: the figure the operator can defend. */
   const honestMeasure = coveragePercent(diff.coverage, 'honest');
-  /* Honest plus what the operator's own wording added. Never counted as "verified": the
-     master did not supply it, and nobody re-audited it (R1). */
-  const editsMeasure = coveragePercent(diff.coverage, 'withEdits');
-  /* Coverage including the flagged claims, which is what would actually be
-   * submitted if the operator approved blindly. */
-  const totalMeasure = coveragePercent(diff.coverage, 'withFabrication');
 
-  /* NOT MEASURED IS A STATE, NOT A NUMBER. Same denominator for every figure, so they are
-     unmeasured together; checking each lets the compiler narrow each to its percent below.
-     No bar, no badge and no "verified claims" line: each of those would state a result
-     about keywords that were never recorded. */
-  if (
-    honestMeasure.kind === 'unmeasured' ||
-    editsMeasure.kind === 'unmeasured' ||
-    totalMeasure.kind === 'unmeasured'
-  ) {
+  /* NOT MEASURED IS A STATE, NOT A NUMBER. No badge: it would state a result about keywords that
+     were never recorded. */
+  if (honestMeasure.kind === 'unmeasured') {
     return (
       <div className="coverage coverage--unmeasured">
         <div className="coverage__header-row">
@@ -389,256 +192,13 @@ export function CoverageBar({
     );
   }
 
-  /* Narrowed to measured above, so these are real ratios. */
-  const honest = honestMeasure.percent;
-  /* The edit segment is the gap between honest and honest-plus-edits. */
-  const edited = editsMeasure.percent - honest;
-  /* withFabrication adds only the flagged matches to honest, so its gap is the purchased part. */
-  const purchased = totalMeasure.percent - honest;
-
-  /* Each chip list once per distinct, non-blank keyword: a repeated keyword would collide as a
-     React key (and draw two chips), and a blank one would draw an empty "✕" chip. */
-  const distinct = (list: readonly string[]): string[] => [...new Set(list)].filter((k) => k.trim() !== '');
-
-  /* Keywords matched by nothing at all: not the master, not an edit, not a flagged claim. */
-  const matchedSet = new Set([
-    ...diff.coverage.honestlyMatched,
-    // `?? []`: same tolerance diffModel's coveragePercent has for a coverage built before edits existed.
-    ...(diff.coverage.matchedByEdit ?? []),
-    ...diff.coverage.matchedByFabrication,
-  ]);
-  // What is left over is genuinely missing from the resume.
-  const missingKeywords = distinct(diff.coverage.jdKeywords.filter((k) => !matchedSet.has(k)));
-
   return (
     <div className="coverage">
       <div className="coverage__header-row">
         <h3 className="coverage__title">ATS Match Score</h3>
-        {/* The badge stays the honest figure: it is the one the operator can defend. */}
-        <span className="coverage__ats-badge">{honest}% Match</span>
+        {/* The badge is the honest figure: it is the one the operator can defend. */}
+        <span className="coverage__ats-badge">{honestMeasure.percent}% Match</span>
       </div>
-
-      {/* The track. aria attributes carry the honest number, because that is
-          the one that describes the resume the operator can defend. */}
-      <div
-        className="coverage__track"
-        role="img"
-        aria-label={
-          honest +
-          '% of job-description keywords are supported by your master profile' +
-          (edited > 0 ? '; ' + edited + '% more come from your own edits' : '') +
-          (purchased > 0
-            ? '; a further ' + purchased + '% comes only from flagged claims'
-            : '')
-        }
-      >
-        {/* Forest segment: earned. */}
-        <span
-          className="coverage__fill coverage__fill--honest"
-          style={{ width: honest + '%' }}
-        />
-        {/* The operator's own wording: its own colour, so it can never read as master-verified. */}
-        {edited > 0 ? (
-          <span
-            className="coverage__fill coverage__fill--edited"
-            style={{ width: edited + '%' }}
-          />
-        ) : null}
-        {/* Oxblood segment: purchased with fabrication. Rendered only when it
-            exists, so a clean row shows a single uninterrupted bar. */}
-        {purchased > 0 ? (
-          <span
-            className="coverage__fill coverage__fill--purchased"
-            style={{ width: purchased + '%' }}
-          />
-        ) : null}
-      </div>
-
-      <p className="coverage__legend">
-        {/* The honest figure leads, because it is the real one. */}
-        <span className="coverage__stat coverage__stat--honest">
-          {honest}% verified from master
-        </span>
-        {/* Stated as an addition beside the verified figure, never inside it. */}
-        {edited > 0 ? (
-          <span className="coverage__stat coverage__stat--edited">
-            plus {edited}% from your edits
-          </span>
-        ) : null}
-        {/* The purchased figure is stated as an addition, not a total, so it
-            never reads as an achievement. */}
-        {purchased > 0 ? (
-          <span className="coverage__stat coverage__stat--purchased">
-            plus {purchased}% unverified / flagged
-          </span>
-        ) : edited > 0 ? null : (
-          <span className="coverage__stat">100% verified claims</span>
-        )}
-      </p>
-
-      {/* JD Keyword chips: matched, from your edits, flagged, and missing */}
-      <div className="coverage__keywords">
-        {distinct(diff.coverage.honestlyMatched).map((kw) => (
-          <span key={kw} className="kw-chip kw-chip--matched" title="Verified in master resume">
-            ✓ {kw}
-          </span>
-        ))}
-        {distinct(diff.coverage.matchedByEdit ?? []).map((kw) => (
-          <span key={kw} className="kw-chip kw-chip--edited" title="Only in text you edited">
-            ✎ {kw}
-          </span>
-        ))}
-        {distinct(diff.coverage.matchedByFabrication).map((kw) => (
-          <span key={kw} className="kw-chip kw-chip--flagged" title="Flagged untraced claim">
-            {/* A plain "!", not the old warning emoji: the frontend is emoji-free (2026-11-05) and noEmoji.test.ts scans this file. */}
-            ! {kw}
-          </span>
-        ))}
-        {missingKeywords.map((kw) => {
-          /* {ref,name}: an unselected master skill supplies it. null: the master has none.
-             undefined: no offer at all (no save path, or the original could not be rebuilt). */
-          const offer = addable?.get(kw);
-          /* A real button, so it is reachable by keyboard and its disabled state is the platform's. */
-          if (offer) {
-            return (
-              <button
-                key={kw}
-                type="button"
-                className="kw-chip kw-chip--missing kw-chip--addable"
-                // No aria-label: the name comes from the content, so it always contains the visible words (WCAG 2.5.3).
-                title="In your master profile — click to add to this resume"
-                // One write at a time per resume.
-                disabled={busy === true}
-                onClick={() => void addSkill(offer)}
-              >
-                {/* The keyword part keeps the missing look: it IS missing until the add lands. */}
-                ✕ {kw}{' '}
-                {/* The action part, drawn as a pill so the chip reads as a control, not a fact. */}
-                <span className="kw-chip__add">＋ Add {offer.name}</span>
-                {/* Spoken only: WHERE the skill comes from, which the visible "Add" leaves implicit. */}
-                <span className="visually-hidden"> from your master profile</span>
-              </button>
-            );
-          }
-          /* The master was checked and lacks it: offer to vouch for it. A real button, like the Add above. */
-          if (offer === null && canAttest) {
-            // The chip becomes the control; nothing is written until the question is answered.
-            return (
-              <button
-                // One chip per distinct keyword, so the keyword is a stable React key.
-                key={kw}
-                // Never a form submit, even if the bar is ever rendered inside a form.
-                type="button"
-                // Same look as the master-skill Add, so both offers read as one kind of control.
-                className="kw-chip kw-chip--missing kw-chip--addable"
-                // Says where the skill will go before the click, not after.
-                title="Not in your master profile — click to add it there and to this resume"
-                // One write at a time per resume, and one open question at a time.
-                disabled={busy === true || pendingAttest !== null}
-                // Opens the question only; the write waits for the explicit confirm.
-                onClick={() => askAttest(kw)}
-              >
-                {/* Still missing until the add lands. */}
-                ✕ {kw}{' '}
-                {/* Drawn as a pill so the chip reads as a control, like the master-skill Add. */}
-                <span className="kw-chip__add">＋ Add {kw}</span>
-                {/* Spoken only: where it goes, which the visible "Add" leaves implicit. */}
-                <span className="visually-hidden"> to your master profile and this resume</span>
-              </button>
-            );
-          }
-          // Not addable here: today's chip, with a title that says why when the master was checked.
-          return (
-            <span
-              key={kw}
-              className="kw-chip kw-chip--missing"
-              title={offer === null ? 'Not in your master profile' : 'Missing from resume'}
-            >
-              ✕ {kw}
-            </span>
-          );
-        })}
-      </div>
-
-      {/* One way out for keywords the master lacks: add them to the master itself, where they are
-          the operator's own claim, not to this resume. A plain <a> (not a router Link) because the
-          bar also renders outside any Router in tests; it navigates only and writes nothing. */}
-      {/* The question a vouch-and-add needs answered: is it true, and where does it print. */}
-      {pendingAttest !== null ? (
-        // A named group, so a screen reader announces the question as one unit with its controls.
-        <div className="coverage__attest" role="group" aria-label={`Add ${pendingAttest}`}>
-          {/* The attestation, stated plainly: this becomes the operator's own claim. */}
-          <p className="coverage__attest-question">
-            {/* The skill named, both places it will go, and the condition under which to say yes. */}
-            Add {pendingAttest} to your master profile and this resume? Only if you have real experience with it.
-          </p>
-          {/* The group it prints under; only the master's existing groups, so no stray heading appears. */}
-          <label className="coverage__attest-group">
-            {/* The visible label text, which also names the select for assistive tech. */}
-            Group{' '}
-            {/* Locked mid-save, so what is sent is what the operator sees. */}
-            <select value={attestCategory} disabled={busy === true} onChange={(e) => setAttestCategory(e.target.value)}>
-              {/* The starting value: an explicit non-choice, never a real group (see askAttest). */}
-              <option value="" disabled>
-                Choose a group
-              </option>
-              {/* One option per existing group, in master order. */}
-              {(attestCategories ?? []).map((category) => (
-                // The group name is unique in the list (skillGroups dedupes), so it is a stable key.
-                <option key={category} value={category}>
-                  {/* Shown exactly as the resume will print it. */}
-                  {category}
-                </option>
-              ))}
-            </select>
-          </label>
-          {/* Confirm: the one click that writes; waits until a group is chosen (attestSkill also refuses a blank one). */}
-          <button type="button" className="button button--small" disabled={busy === true || attestCategory === ''} onClick={() => void confirmAttest()}>
-            {/* Names the skill, so the button says exactly what it will do. */}
-            Add {pendingAttest}
-          </button>
-          {/* Cancel sends nothing at all. */}
-          <button type="button" className="button button--ghost button--small" disabled={busy === true} onClick={() => setPendingAttest(null)}>
-            {/* Plain word: closing the question is the whole effect. */}
-            Cancel
-          </button>
-        </div>
-      ) : null}
-
-      {/* Undo, until approval: takes the vouched-for skill back off this resume. */}
-      {lastAttested !== null ? (
-        // Visible confirmation that persists until Undo or a reload, unlike the spoken notice.
-        <p className="coverage__attest-done">
-          {/* Says both places it went, so Undo's narrower reach is not a surprise. */}
-          Added {lastAttested.name} to your master profile and this resume.{' '}
-          {/* Locked mid-save like every other control in this view. */}
-          <button type="button" className="button button--ghost button--small" disabled={busy === true} onClick={() => void undoAttest()}>
-            {/* Takes it off this resume only; the master version is immutable and keeps it. */}
-            Undo
-          </button>
-        </p>
-      ) : null}
-
-      {/* The way out when vouching is not offered here (no save path, or no groups to print under). */}
-      {!canAttest && missingKeywords.some((kw) => addable?.get(kw) === null) ? (
-        <p className="coverage__master-link">
-          <a href="/master-profile">Add missing skills to your master profile</a>
-        </p>
-      ) : null}
-
-      {/* A failed add: the resume is unchanged, said where the click happened. */}
-      {addError !== null ? (
-        <p className="line__edit-error" role="alert">
-          {/* Rendered as given: the page says "Not saved" only when that is known to be true. */}
-          {addError}
-        </p>
-      ) : null}
-
-      {/* Always mounted (a live region added together with its text is often not read), and
-          polite, so a landed add is announced without interrupting the operator. */}
-      <p className="visually-hidden" role="status">
-        {addedNotice}
-      </p>
     </div>
   );
 }
@@ -648,26 +208,18 @@ export function CoverageBar({
 /* Dark-surface alert for untraceable claims. Single-use alarm surface. */
 function FabricationAlert({
   claims,
-  lines,
-  masterVersion,
   decisions,
   onDecide,
-  onRemove,
   busy,
-  removeError,
 }: {
+  // The claims still in the resume.
   readonly claims: readonly FlaggedClaim[];
-  // Needed to find whether a claim sits in a bullet that can be removed.
-  readonly lines: readonly DiffLine[];
-  readonly masterVersion: number;
+  // What the operator has kept so far; a missing key is the gate.
   readonly decisions: ReadonlyMap<string, ClaimDecision>;
+  // Records one "keep".
   readonly onDecide: (key: string, decision: ClaimDecision) => void;
-  // Null when this screen offers no editing; then only "keep" is possible.
-  readonly onRemove: ((target: { readonly kind: 'bullet'; readonly ref: string }) => void) | null;
-  // A save is in flight; every control waits for it.
+  // A save or the page's approve is in flight; every control waits for it.
   readonly busy: boolean;
-  // The last failed removal's reason, shown in the band where the click happened.
-  readonly removeError: string | null;
 }): ReactElement {
   /* Name the first claim in the consequence sentence. A specific sentence -
    * "the first question is about your Docker setup" - lands where a generic
@@ -675,6 +227,7 @@ function FabricationAlert({
    * guard mandatory, and the fallback keeps the sentence grammatical if the
    * list is ever empty. */
   const firstClaim = claims[0];
+  // The example the consequence sentence names.
   const exampleClaim = firstClaim === undefined ? 'one of these' : firstClaim.text;
 
   return (
@@ -688,34 +241,22 @@ function FabricationAlert({
       <p className="alarm__consequence">
         {/* The consequence, in concrete terms. This is the sentence that makes
             the operator stop, so it is written as a scene rather than a rule. */}
-        Master version {masterVersion} does not support{' '}
+        Your master profile does not support{' '}
         {claims.length === 1 ? 'this' : 'these'}. If it wins the interview, the
         first technical question is about your {exampleClaim} work.
       </p>
 
       <p className="alarm__instruction">
-        {/* Says exactly what unblocks the screen. An empty or blocked state is
-            an instruction, not a mood. */}
-        Cut each claim from the resume, or keep it. Every claim needs one to unlock approval.
+        {/* Says exactly what unblocks the screen, and where the other route is now that cutting
+            happens in the AI chat. */}
+        Keep each claim you can defend to unlock approval. To change or drop one, ask the AI chat.
       </p>
-
-      {/* A failed cut leaves the bullet in the resume; saying so here, where the click was. */}
-      {removeError !== null ? (
-        <p className="alarm__error" role="alert">
-          Not cut: {removeError}
-        </p>
-      ) : null}
 
       <ul className="alarm__claims">
         {claims.map((claim) => {
           /* Undefined until the operator decides, which is what keeps Approve
              disabled. Absence of a decision is the gate. */
-          const decision = decisions.get(claim.key);
-          /* The line the claim sits on; unlocated claims have none. */
-          const line = lines.find((candidate) => candidate.id === claim.lineId);
-          /* Only a BULLET can be cut: removing a summary would delete the whole paragraph,
-             so a summary claim is fixed by editing the text instead. */
-          const target = line?.editTarget?.kind === 'bullet' ? line.editTarget : null;
+          const kept = decisions.get(claim.key) === 'keep';
 
           return (
             <li key={claim.key} className="alarm__claim">
@@ -724,40 +265,24 @@ function FabricationAlert({
                   rather than as a UI label about them. */}
               <span className="alarm__claim-text">{claim.text}</span>
 
-              <span className="alarm__choices" role="group" aria-label={'Decide on ' + claim.text}>
-                {/* A REAL cut: the whole bullet leaves the saved resume, and the claim with it. */}
-                {onRemove !== null && target !== null ? (
-                  <button
-                    type="button"
-                    className="button button--secondary button--small"
-                    disabled={busy}
-                    onClick={() => onRemove(target)}
-                  >
-                    Cut this bullet
-                  </button>
-                ) : null}
-
-                {/* Keeping requires affirming defensibility. The label is the
-                    commitment, so the operator cannot later say they were not
-                    asked. */}
-                <label className="alarm__choice">
-                  <input
-                    type="radio"
-                    /* Grouped per claim so each is an independent decision. */
-                    name={'decision-' + claim.key}
-                    value="keep"
-                    checked={decision === 'keep'}
-                    disabled={busy}
-                    onChange={() => onDecide(claim.key, 'keep')}
-                  />
-                  Keep it, I can defend it
-                </label>
-
-                {/* Tells the operator the other route when there is no cut button. */}
-                {onRemove !== null && line?.editTarget?.kind === 'summary' ? (
-                  <span className="alarm__hint">or edit the summary below</span>
-                ) : null}
-              </span>
+              {/* ONE compact control per claim (2026-11-07, D1). A real button with aria-pressed, so
+                  the kept state is spoken, not only coloured. The label is the commitment, so the
+                  operator cannot later say they were not asked. */}
+              <button
+                // Never a form submit.
+                type="button"
+                // The small control style, tinted for the dark band.
+                className="button button--small alarm__keep"
+                // Spoken as a toggle that is on once kept.
+                aria-pressed={kept}
+                // Waits for any save, and has nothing more to do once kept.
+                disabled={busy || kept}
+                // Records the acknowledgement; the gate re-counts on the next render.
+                onClick={() => onDecide(claim.key, 'keep')}
+              >
+                {/* The commitment, verbatim from the earlier radio label. */}
+                Keep it, I can defend it
+              </button>
             </li>
           );
         })}
@@ -773,7 +298,7 @@ function FabricationAlert({
  * Four treatments, and the differences between them are the whole point:
  *   null       - carried over untouched. No marking at all.
  *   traced     - reworded from a real master node. A quiet sage wash.
- *   edited     - the operator's own wording. Its own mark, NEVER the traced one (R1):
+ *   edited     - an edit's own wording. Its own mark, NEVER the traced one (R1):
  *                nothing checked it against the master.
  *   fabricated - traces to nothing. Oxblood, heavy underline, and announced to
  *                assistive technology, because a colour-only signal would hide
@@ -803,7 +328,7 @@ function Run({ run }: { readonly run: TailoredRun }): ReactElement {
   if (run.verdict === 'edited') {
     return (
       <span className="run run--edited">
-        {/* The operator's text, escaped like every other run. */}
+        {/* The edit's text, escaped like every other run. */}
         {run.text}
         {/* Spoken, so the provenance is not carried by colour alone. */}
         <span className="visually-hidden"> — edited by you, not checked against the master</span>
@@ -813,7 +338,9 @@ function Run({ run }: { readonly run: TailoredRun }): ReactElement {
 
   return (
     <span className="run run--traced">
+      {/* The tailor's traced words. */}
       {run.text}
+      {/* Spoken provenance, so the sage wash is not the only signal. */}
       <span className="visually-hidden"> — traced to {run.tracesTo}</span>
     </span>
   );
@@ -827,18 +354,18 @@ function Run({ run }: { readonly run: TailoredRun }): ReactElement {
  * renderSkills is private to its module and returns an HTML string, and this file renders React
  * nodes with no raw-HTML hatch. skillsGroupedDiff.test.ts compares the two outputs, so they cannot
  * drift silently. Only a line carrying printedSkills can be grouped; since 2026-11-05 diffAdapter emits
- * it on the D4 branch too (every D4 skill traced, as before), so only a non-skills line stays flat. */
+ * it on the D4 branch too, so only a non-skills line stays flat. */
 function TailoredText({ line }: { readonly line: DiffLine }): ReactElement {
   // No groups to show: the runs exactly as before, marking (R1) untouched.
   if (line.kind !== 'skills' || line.printedSkills === undefined) {
     // Fragment, so the caller's <p> stays the only wrapper.
     return <>{line.tailoredRuns.map((run, index) => <Run key={line.id + '-run-' + index} run={run} />)}</>;
   }
-  // The operator's additions, by ref: the only skills that are not traced (same split as the adapter).
+  // The additions, by ref: the only skills that are not traced (same split as the adapter).
   const added = new Set((line.addedSkills ?? []).map((skill) => skill.ref));
   // The master's own skill names, lower-cased: an added skill that is one of them is the owner's real
   // skill, so it traces to the master (2026-11-06: "Master skills the AI adds show 'not checked against
-  // the master'"). Display only: the coverage bar still counts it as "from your edits" (diffAdapter).
+  // the master'"). Display only: the coverage figure still counts it as "from your edits" (diffAdapter).
   const inMaster = new Set((line.masterSkills ?? []).map((skill) => skill.name.toLowerCase()));
   // A Map keeps insertion order, so groups appear where their first skill does, like renderSkills.
   const groups = new Map<string, PrintedSkill[]>();
@@ -872,27 +399,24 @@ function TailoredText({ line }: { readonly line: DiffLine }): ReactElement {
   );
 }
 
-/* The footer under a tailored line: where it came from, and what the Auditor said about the
-   version it replaced. Shared by both view modes so they cannot describe a line differently. */
+/* The footer under a changed line: who changed it, and what the Auditor said about the version it
+   replaced. Only changed lines are drawn (Changes by AI), so there is no "traced to <id>" branch any
+   more: an unchanged line is read in the page's ResumePreview, and a node id told the operator nothing. */
 function Provenance({ line }: { readonly line: DiffLine }): ReactElement {
   /* The untraceable runs on this line, so the footer can name them. */
   const fabricated = line.tailoredRuns.filter((run) => run.verdict === 'fabricated');
 
   return (
     <>
-      {/* Who wrote the line: removed, added, edited, or the tailor (traced). */}
+      {/* Who wrote the line: removed, added, or edited. A moved-only line says so on its own line below. */}
       {line.editState === 'removed' ? (
         <p className="line__provenance line__provenance--removed">removed by you</p>
       ) : line.editState === 'edited' && line.kind === 'bullet' && line.originalText === null ? (
-        /* A bullet the tailor never wrote: put back from the master, or new and attested by you.
+        /* A bullet the tailor never wrote: put back from the master, or new and attested.
            Not "edited": there is no tailor version it was edited from. */
         <p className="line__provenance line__provenance--edited">added by you</p>
       ) : line.editState === 'edited' ? (
         <p className="line__provenance line__provenance--edited">edited by you</p>
-      ) : fabricated.length === 0 ? (
-        <p className="line__provenance line__provenance--traced">
-          traced to <span className="identifier">{line.masterNodeId}</span>
-        </p>
       ) : null}
 
       {/* INDEPENDENT of who wrote it: a moved bullet keeps the tailor's words, so the move is said
@@ -908,7 +432,7 @@ function Provenance({ line }: { readonly line: DiffLine }): ReactElement {
         </p>
       ) : null}
 
-      {/* Claims the edit or removal replaced. Shown, not hidden, so the operator sees what they
+      {/* Claims the edit or removal replaced. Shown, not hidden, so the operator sees what was
           answered - but no longer flagged, because those words are no longer in the resume. */}
       {line.supersededClaims.map((claim) => (
         <p key={claim} className="line__superseded">
@@ -919,894 +443,283 @@ function Provenance({ line }: { readonly line: DiffLine }): ReactElement {
   );
 }
 
-/* One aligned row: master text on the left, tailored text on the right, a provenance footer,
- * and the edit controls that SAVE (there is no local-only edit any more). */
-function Line({
+/* --- Changes by AI (2026-11-07, D2) -------------------------------------
+ * Replaced the side-by-side master/tailored comparison and its Unified twin. One row per CHANGED
+ * line (edited, removed, moved, added); unchanged lines are not listed, since the resume is read in
+ * the page's ResumePreview. Each row shows the new text, the tailor's old text where it differs, and
+ * the line's Reset: the AI chat's only undo, which AiEditPanel's empty state points the operator to. */
+
+/* A changed line: its place, its new words, the old words, who changed it, and Reset. */
+function ChangeRow({
   line,
-  onEdit,
+  where,
+  onReset,
   busy,
-  editDisabledReason,
-  // Present only for a bullet drawn under its entry (groupedRows).
-  order,
+  onResetLanded,
 }: {
+  // The changed line.
   readonly line: DiffLine;
-  // Null when this screen offers no editing.
-  readonly onEdit: ((action: EditAction) => Promise<EditResult>) | null;
+  // "Experience · Acme" or "Summary": which part of the resume the change sits in.
+  readonly where: string;
+  // The save path for Reset; null when editing is off (no save path, or D4), so no Reset renders.
+  readonly onReset: ((target: EditTarget) => Promise<EditResult>) | null;
   // Any save in this diff is in flight; one write at a time per resume.
   readonly busy: boolean;
-  // D4: why no line can be edited, so each line's text can answer "why can't I click this?".
-  readonly editDisabledReason: string | null;
-  // A bullet drawn under its entry: whether it can move up or down among its printed siblings.
-  // Absent on summary/skills and on a flat (fixture) layout, which then offers no Move or Remove.
-  readonly order?: { readonly up: boolean; readonly down: boolean } | undefined;
+  // A landed Reset usually unmounts this row, so the parent moves focus somewhere that still exists.
+  readonly onResetLanded: () => void;
 }): ReactElement {
-  // Whether the textarea is open.
-  const [isEditing, setIsEditing] = useState<boolean>(false);
-  // The unsaved text; never displayed outside the textarea.
-  const [draftText, setDraftText] = useState<string>('');
-  // Whether THIS line started the in-flight save, so only it says "Saving…".
-  const [savingHere, setSavingHere] = useState<boolean>(false);
-  // The last failed save's reason, shown under the line.
+  // The last refused Reset's reason, shown under the row.
   const [error, setError] = useState<string | null>(null);
-  /* The text of a REFUSED edit save (e.g. "Changed elsewhere; reloaded."). The editor closes so the
-     reloaded stored text shows, but the operator's typing must not be lost (QA item 4): this keeps
-     it so one click can put it back into the editor, on top of whatever is stored now. */
-  const [unsavedDraft, setUnsavedDraft] = useState<string | null>(null);
-  // The clickable text, so focus can come back to it when the editor closes.
-  const textButtonRef = useRef<HTMLButtonElement | null>(null);
-  /* The tailored paragraph of a line with NO text button (skills, a removed bullet): where focus
-     goes after Remove or Reset unmounts the clicked control, instead of falling to <body>. */
-  const plainTextRef = useRef<HTMLParagraphElement | null>(null);
-  /* Set only when the EDITOR closes, so focus returns after cancel/save but never steals focus
-     on first render (every line mounts closed, and only one may own focus). */
-  const returnFocusRef = useRef<boolean>(false);
-
-  /* Return focus to the line's text after the editor closes: without it, focus falls to <body>
-     when the textarea unmounts and a keyboard user loses their place in a 30-line resume. */
-  useEffect(() => {
-    // Only after a close we caused, and only once the editor is gone.
-    if (!returnFocusRef.current || isEditing) return;
-    // The text button is still disabled mid-save: wait for the lock to lift (busy re-runs this).
-    if (textButtonRef.current?.disabled === true) return;
-    // Consumed here, found or not, so a later unrelated re-render can never yank focus back.
-    returnFocusRef.current = false;
-    // Back to the text the operator just edited, or to the plain paragraph when there is no button.
-    (textButtonRef.current ?? plainTextRef.current)?.focus();
-    /* busy: the button re-enables only when the save lock lifts. savingHere: a Reset or Remove
-       never opens the editor, so isEditing does not change and this is what re-runs the effect. */
-  }, [isEditing, busy, savingHere]);
-
-  /* One close path for Cancel, Escape and a finished save, so all three restore focus alike. */
-  function closeEditor(): void {
-    // Ask the effect above to restore focus once the textarea has unmounted.
-    returnFocusRef.current = true;
-    // Unmounts the textarea; the stored text renders again.
-    setIsEditing(false);
-  }
-
-  /* One open path for the text button, so the draft always starts from what is saved. */
-  function openEditor(): void {
-    // Start from what is saved, never from an old draft.
-    setDraftText(storedText);
-    // Choosing to edit afresh answers the kept draft, so its offer must not reappear on Cancel.
-    setUnsavedDraft(null);
-    // Open the editor.
-    setIsEditing(true);
-  }
-
+  // Whether THIS row started the in-flight save, so only its button says "Saving…".
+  const [savingHere, setSavingHere] = useState<boolean>(false);
   /* The STORED text: what the saved resume holds, which is what the PDF will print. */
   const storedText = line.tailoredRuns.map((run) => run.text).join('');
-  /* Editing needs a save path, a line that can be edited (not D4), and the page not saying editing is
-     off: when FULL is null the line keeps its editTarget, so the reason must switch the control off
-     here too, or the text stays clickable and every save is refused (review finding, 2026-11-01).
-     Skills get selection edits only. */
-  const target = onEdit === null || editDisabledReason ? null : line.editTarget;
-  /* Where TYPED text may land: bullets and the summary only. The skills arm of EditTarget takes
-     selection edits, never free text (R0), so a skills line never becomes click-to-type even once
-     it carries a target (Reset still uses `target`, which skills may legitimately have). */
-  const textTarget = target !== null && target.kind !== 'skills' ? target : null;
-  /* A human name for this line in aria-labels: its kind plus the start of its words (the stored
-     text, or the tailor's for a removed bullet), never a machine id a screen reader spells out. */
+  /* Words for the spoken name of this row's Reset: the stored text, or the tailor's for a removed bullet. */
   const lineWords = storedText !== '' ? storedText : (line.originalText ?? '');
-  // Trimmed to 40 characters so a label stays a label.
-  const lineName = (line.kind === 'summary' ? 'summary' : 'bullet') + ': ' + (lineWords.length > 40 ? lineWords.slice(0, 40) + '…' : lineWords);
-
-  /* A skills list is scanned token by token; resume prose is read as a
-     sentence. Different reading modes want different measure and leading. */
+  // Trimmed to 40 characters so a label stays a label; skills are named as the list they are.
+  const lineName = line.kind === 'skills' ? 'skills' : (line.kind === 'summary' ? 'summary' : 'bullet') + ': ' + (lineWords.length > 40 ? lineWords.slice(0, 40) + '…' : lineWords);
+  /* A skills list is scanned token by token; resume prose is read as a sentence. */
   const kindClass = 'line__text line__text--' + line.kind;
+  /* Reset needs a save path and a target, and only exists where resetTarget can honour it: words or
+     a removal to undo, with a tailor version to go back to. A moved-only line has no words to restore
+     (resetTarget answers "Nothing to reset"), and an added bullet has no tailor version; the AI chat
+     undoes those. */
+  const target = onReset === null ? null : line.editTarget;
+  // The narrowed target, or null when this row offers no Reset.
+  const resetTarget = target !== null && line.editState !== 'original' && !(line.kind === 'bullet' && line.originalText === null) ? target : null;
+  /* The tailor's words, shown muted only where they differ from what is stored now. */
+  const oldText = line.editState === 'edited' && line.originalText !== null && line.originalText !== storedText ? line.originalText : null;
 
-  /* Why THIS line's text is not clickable, as a hover title on the text. Undefined (no title)
-     when the screen offers no editing at all, or when the line IS editable - a title on every
-     non-editable line of a read-only screen would explain a feature that is not there. */
-  const whyNotEditable: string | undefined =
-    // No save path on this screen: nothing to explain.
-    onEdit === null
-      ? undefined
-      : // D4: the original could not be rebuilt, so the page-level reason applies to every line.
-        target === null
-        ? (editDisabledReason ?? undefined)
-        : // T3: skills are never typed (R0) but ARE addable, so point at where adding happens.
-          line.kind === 'skills'
-          ? 'Add skills from the missing keywords above'
-          : // A removed bullet has no text to edit; Reset is the way back.
-            line.editState === 'removed'
-            ? 'Removed. Use Reset to bring it back.'
-            : // Editable: the button's own title speaks instead.
-              undefined;
-
-  /* One path for every action on this line, so disabling and error handling cannot diverge. */
-  async function submit(action: EditAction): Promise<void> {
-    // No save path, nothing to do (the buttons are not rendered then anyway).
-    if (onEdit === null) return;
-    // A new attempt clears the old failure.
-    setError(null);
-    // ...and any draft kept from it: this attempt either saves it or keeps its own below.
-    setUnsavedDraft(null);
-    // Marks this line as the one saving.
-    setSavingHere(true);
-    // The page builds the new resume and writes it.
-    const result = await onEdit(action);
-    // Done either way.
-    setSavingHere(false);
-    // Success or failure, the editor closes so the STORED text is what shows, never the draft;
-    // through closeEditor so focus returns to the line rather than falling to <body>.
-    closeEditor();
-    // A refused save is named, so the operator knows the PDF did not change.
-    if (!result.ok) setError(result.reason);
-    // Only a typed edit has words to lose; Reset and Remove carry none.
-    if (!result.ok && action.kind === 'edit') setUnsavedDraft(action.text);
-  }
-
-  /* Puts a refused draft back into the editor. It is NOT re-sent: the stored text may have changed
-     under it, so the operator reads the reloaded line first and saves deliberately. */
-  function reopenUnsavedDraft(): void {
-    // Nothing kept (the button is not rendered then anyway).
-    if (unsavedDraft === null) return;
-    // The editor starts from the operator's words instead of the stored text.
-    setDraftText(unsavedDraft);
-    // Handed over to the editor, so the offer disappears.
-    setUnsavedDraft(null);
-    // The error is answered by reopening; a fresh one comes if the next save fails too.
-    setError(null);
-    // Open the editor.
-    setIsEditing(true);
-  }
-
-  return (
-    <>
-      <div className="line line--master">
-        <p className="line__side-label">Master</p>
-
-        {line.masterText === null ? (
-          <p className="line__no-master">
-            No single master line to compare. This paragraph draws on several
-            parts of your profile at once, which is why prose gets a closer
-            look than a reworded bullet.
-          </p>
-        ) : (
-          <p className={kindClass}>{line.masterText}</p>
-        )}
-
-        <p className="identifier">{line.masterNodeId}</p>
-      </div>
-
-      <div className="line line--tailored">
-        <div className="line__tailored-head">
-          <p className="line__side-label">Tailored</p>
-          {/* Controls only for an editable line and only while the editor is closed. */}
-          {target !== null && !isEditing ? (
-            <span className="line__controls">
-              {/* No "Edit text" button: the tailored text below IS the edit trigger, so a second
-                  button would be a second tab stop for the same action. */}
-              {/* Structural controls (2026-11-01): a printed bullet under its entry moves among its
-                  siblings or leaves the resume. Each name says which bullet, since every bullet has
-                  the same three buttons. */}
-              {order !== undefined && target.kind === 'bullet' && line.editState !== 'removed' ? (
-                <>
-                  {/* Up unless first, down unless last among the printed siblings; one move_bullet. */}
-                  <MoveButtons
-                    // The same words the line's other controls use for it.
-                    name={lineName}
-                    // Worked out by groupedRows from the printed siblings.
-                    up={order.up}
-                    // Same.
-                    down={order.down}
-                    // One write at a time per resume.
-                    busy={busy}
-                    // Through this line's submit, so its error and focus return work as for any edit.
-                    onMove={(direction) => void submit({ kind: 'move_bullet', ref: target.ref, direction })}
-                  />
-                  {/* Remove: the whole bullet off this resume (D2). */}
-                  <button
-                    // Never a form submit.
-                    type="button"
-                    // The shared small control style.
-                    className="line__edit-trigger"
-                    // One write at a time per resume.
-                    disabled={busy}
-                    // Starts with the visible word, so a voice command "Remove" matches (WCAG 2.5.3).
-                    aria-label={`Remove ${lineName}`}
-                    // The same D2 removal the alarm band's "Cut" sends; Reset brings a tailor's bullet back.
-                    onClick={() => void submit({ kind: 'remove', target })}
-                  >
-                    {/* The visible verb the accessible name starts with. */}
-                    Remove
-                  </button>
-                </>
-              ) : null}
-              {/* Reset exists only where there is something of the operator's to undo, and never on a
-                  bullet the tailor did not write: there is no tailor version to go back to, and Remove
-                  is how an added bullet leaves. */}
-              {line.editState !== 'original' && !(line.kind === 'bullet' && line.originalText === null) ? (
-                <button
-                  type="button"
-                  className="line__edit-trigger"
-                  disabled={busy}
-                  // No aria-label: the name comes from the content, so it contains the visible words (WCAG 2.5.3).
-                  onClick={() => void submit({ kind: 'reset', target })}
-                >
-                  {/* Mid-save the button says so; otherwise the visible verb plus a spoken suffix
-                      naming WHICH line, since every edited line has a Reset with the same words. */}
-                  {savingHere ? (
-                    'Saving…'
-                  ) : (
-                    <>
-                      Reset to tailor’s version
-                      {/* Spoken only: the skills list, or the line's kind and opening words. */}
-                      <span className="visually-hidden"> ({target.kind === 'skills' ? 'skills' : lineName})</span>
-                    </>
-                  )}
-                </button>
-              ) : null}
-            </span>
-          ) : null}
-        </div>
-
-        {isEditing && textTarget !== null ? (
-          <div className="line__edit-box">
-            <textarea
-              className="line__edit-textarea"
-              value={draftText}
-              // Locked while saving, so what is sent is what the operator sees.
-              disabled={busy}
-              onChange={(e) => setDraftText(e.target.value)}
-              // Human words, not the machine ref (contract v2 nit).
-              aria-label={'Edit ' + lineName}
-              autoFocus
-              onKeyDown={(e) => {
-                // Escape is the universal "cancel" for an inline editor; Enter stays a newline.
-                if (e.key === 'Escape') {
-                  // Cancels the browser's own default for Escape; propagation is untouched, so an
-                  // enclosing dialog's own Escape handler still sees the key.
-                  e.preventDefault();
-                  // Mid-save the draft is already sent; closing now would hide "Saving…".
-                  if (busy) return;
-                  // Same as Cancel: nothing was saved, so closing is the whole cancel.
-                  closeEditor();
-                }
-              }}
-            />
-            <div className="line__edit-actions">
-              <button
-                type="button"
-                className="line__edit-cancel"
-                disabled={busy}
-                // Nothing was saved, so closing is the whole cancel; focus goes back to the text.
-                onClick={closeEditor}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="line__edit-save"
-                disabled={busy}
-                onClick={() => void submit({ kind: 'edit', target: textTarget, text: draftText })}
-              >
-                {savingHere ? 'Saving…' : 'Save'}
-              </button>
-            </div>
-          </div>
-        ) : line.editState === 'removed' ? (
-          /* The tailor's words, struck: the operator can see what Reset would bring back. */
-          <p
-            ref={plainTextRef}
-            className={kindClass + ' line__text--removed'}
-            title={whyNotEditable}
-            // Focusable by script only (no tab stop), so focus has a home if the Reset button unmounts.
-            tabIndex={-1}
-          >
-            <s>{line.originalText}</s>
-          </p>
-        ) : textTarget !== null ? (
-          /* Click-to-edit: the text itself is the trigger. A real <button> (not a div with
-             onClick) so Enter/Space, focus and the disabled state come from the platform. */
-          <p className={kindClass}>
-            <button
-              ref={textButtonRef}
-              type="button"
-              className="line__text-button"
-              // Locked while any save in this diff is in flight, like every other control.
-              disabled={busy}
-              // The hover hint a sighted mouse user gets. No aria-label: it would REPLACE the content
-              // as the accessible name and silence the spoken verdicts inside the runs (R1).
-              title="Click to edit"
-              onClick={openEditor}
-            >
-              {/* The spoken verb, so the name is "Edit: <text and its verdicts>". */}
-              <span className="visually-hidden">Edit: </span>
-              {/* The same runs as before, so traced/fabricated/edited marking (R1) is unchanged. */}
-              {line.tailoredRuns.map((run, index) => (
-                <Run key={line.id + '-run-' + index} run={run} />
-              ))}
-            </button>
-          </p>
-        ) : (
-          /* Not editable here (skills, D4, or a read-only screen): plain text, with the reason
-             as a title when there is one to give. */
-          <p
-            ref={plainTextRef}
-            className={kindClass}
-            title={whyNotEditable}
-            // Script-focusable only where a control on this line can unmount under the operator's
-            // focus (Remove, Reset); a read-only screen has no such control, so no attribute there.
-            tabIndex={target !== null ? -1 : undefined}
-          >
-            {/* The runs, or the skills grouped as the PDF prints them (R4). */}
-            <TailoredText line={line} />
-          </p>
-        )}
-
-        {/* T3: each skill the operator added, labelled as theirs (never traced), with the way back. */}
-        {line.addedSkills !== undefined && line.addedSkills.length > 0 ? (
-          <ul
-            className="line__added-skills"
-            // `list-style: none` makes Safari/VoiceOver drop list semantics; the role keeps the count spoken.
-            role="list"
-          >
-            {line.addedSkills.map((skill) => (
-              <li key={skill.ref} className="line__added-skill">
-                {/* The name plus who put it there; nothing checked it against the master's evidence. */}
-                {skill.name} <span className="line__added-skill-tag">added by you</span>
-                {/* Remove only where a save path exists; a read-only screen just shows the label. */}
-                {target !== null ? (
-                  <button
-                    type="button"
-                    className="line__edit-trigger"
-                    // One write at a time per resume.
-                    disabled={busy}
-                    // Names the skill and its provenance, since every chip has the same button.
-                    aria-label={`Remove ${skill.name}, added by you`}
-                    onClick={() => void submit({ kind: 'remove_skill', ref: skill.ref })}
-                  >
-                    Remove
-                  </button>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        ) : null}
-
-        {/* A failed save keeps the stored text above and says why it did not change. */}
-        {error !== null ? (
-          <p className="line__edit-error" role="alert">
-            {/* Rendered as given: the page says "Not saved" only when that is known to be true. */}
-            {error}
-          </p>
-        ) : null}
-        {/* A refused typed edit stays one click away, only where the editor can still open. */}
-        {unsavedDraft !== null && textTarget !== null && !isEditing ? (
-          <button
-            type="button"
-            className="line__edit-trigger line__restore-draft"
-            // One write at a time per resume, like every other control on the line.
-            disabled={busy}
-            onClick={reopenUnsavedDraft}
-          >
-            Re-open my unsaved edit
-            {/* Spoken only: which line, since several lines could each hold a refused draft. */}
-            <span className="visually-hidden"> ({lineName})</span>
-          </button>
-        ) : null}
-
-        <Provenance line={line} />
-      </div>
-    </>
-  );
-}
-
-/* --- Structural edits (2026-11-01) --------------------------------------
- * Grouping by section and entry, moving, removing and adding back. Every control only NAMES an
- * EditAction; the page builds the new resume and saves it through the same path as a text edit,
- * where tracesToMaster checks that every node still traces to the pinned master. */
-
-/* The save path every structural control shares: one error and one "saving" flag per control group,
-   so a refusal is shown where the click happened and the button says it is working. */
-function useStructureAction(onEdit: (action: EditAction) => Promise<EditResult>) {
-  // The last refusal's reason, shown under the controls that caused it.
-  const [error, setError] = useState<string | null>(null);
-  // Whether THIS group started the in-flight save, so only its button says "Saving…".
-  const [saving, setSaving] = useState<boolean>(false);
-  /* Clears the old error, sends, and reports success so a form can clear its draft only on a save. */
-  async function run(action: EditAction): Promise<boolean> {
+  /* One Reset: clears the old failure, saves, then names a refusal or hands focus to the parent. */
+  async function reset(to: EditTarget): Promise<void> {
+    // Unreachable without a save path (no button is rendered then); narrows the type.
+    if (onReset === null) return;
     // A new attempt answers the old failure.
     setError(null);
-    // Marks this group as the one saving.
-    setSaving(true);
-    // The page builds and saves the new resume; DiffView's runEdit turns a throw into a reason.
-    const result = await onEdit(action);
+    // Marks this row as the one saving.
+    setSavingHere(true);
+    // The page builds the tailor's version of this line and saves the whole resume.
+    const result = await onReset(to);
     // Done either way.
-    setSaving(false);
-    // A refusal is named, so the operator knows the resume did not change.
+    setSavingHere(false);
+    // A refused save is named, so the operator knows the PDF did not change.
     if (!result.ok) setError(result.reason);
-    // Lets the caller react to a landed save only.
-    return result.ok;
-  }
-  // The three things a control group needs.
-  return { error, saving, run };
-}
-
-/* A refused structural save, said where the click happened. One component so all four groups word
-   and announce a refusal alike; nothing at all when there is none. */
-function ActionError({ error }: { readonly error: string | null }): ReactElement | null {
-  // No refusal, no paragraph (an empty alert would still be announced by some readers).
-  if (error === null) return null;
-  // role="alert": a refusal must be heard without hunting for it.
-  return (
-    <p className="line__edit-error" role="alert">
-      {error}
-    </p>
-  );
-}
-
-/* Up and Down for one item in an ordered list (a bullet among its siblings, a section in the print
-   order). One component so both lists name, disable and dispatch a move the same way. The arrows
-   carry their name in aria-label because a glyph is not a word a voice user could say. */
-function MoveButtons({
-  name,
-  up,
-  down,
-  busy,
-  onMove,
-}: {
-  // What moves, as a person would say it: "bullet: Built a REST API…", "Experience".
-  readonly name: string;
-  // Whether there is a place above; false on the first item.
-  readonly up: boolean;
-  // Whether there is a place below; false on the last item.
-  readonly down: boolean;
-  // Any save in this diff is in flight.
-  readonly busy: boolean;
-  // The caller turns a direction into its own EditAction (move_bullet or move_section).
-  readonly onMove: (direction: MoveDirection) => void;
-}): ReactElement {
-  // A fragment: the two buttons sit inline wherever the caller puts them.
-  return (
-    <>
-      {/* Up. */}
-      <button
-        // Never a form submit: there is no form, and a stray submit would reload the page.
-        type="button"
-        // The small control style every line control on this screen shares.
-        className="line__edit-trigger"
-        // The first item has nowhere up to go; disabled says so without a click.
-        disabled={busy || !up}
-        // Names the item, since every item in the list has the same arrow.
-        aria-label={`Move up, ${name}`}
-        // The hover hint for a sighted mouse user.
-        title="Move up"
-        // The caller's action, one place up.
-        onClick={() => onMove('up')}
-      >
-        ↑
-      </button>
-      {/* Down. */}
-      <button
-        // Same as above.
-        type="button"
-        // Same style.
-        className="line__edit-trigger"
-        // The last item has nowhere down to go.
-        disabled={busy || !down}
-        // Names the item.
-        aria-label={`Move down, ${name}`}
-        // The hover hint.
-        title="Move down"
-        // The caller's action, one place down.
-        onClick={() => onMove('down')}
-      >
-        ↓
-      </button>
-    </>
-  );
-}
-
-/* A long text trimmed for an accessible name, so a label stays a label (same 40 as Line's). */
-function shortText(text: string): string {
-  // Whole when short, cut with an ellipsis when long.
-  return text.length > 40 ? text.slice(0, 40) + '…' : text;
-}
-
-/* A section's heading row across both panes. A section the PDF does not print says so, because a
-   selected section missing from section_order is reviewed here yet never sent. */
-function SectionHead({ section }: { readonly section: DiffSection }): ReactElement {
-  // A heading, so a screen-reader user can jump section to section.
-  return (
-    <h3 className="diff__section-head">
-      {/* The name the PDF prints. */}
-      {SECTION_TITLE[section.kind]}
-      {/* A tag rather than a sentence: it qualifies the heading, it is not a paragraph of its own. */}
-      {section.printed ? null : <span className="tag-pill diff__not-printed">not printed</span>}
-    </h3>
-  );
-}
-
-/* An entry's heading row: whose bullets follow (the employer, the project, the certificate), whether
-   the operator added or removed it, and the control that takes it off the resume. */
-function EntryHead({
-  entry,
-  onEdit,
-  busy,
-}: {
-  // The entry to head.
-  readonly entry: DiffEntry;
-  // Null when this row cannot be edited (no save path, or D4); then the heading is read-only.
-  readonly onEdit: ((action: EditAction) => Promise<EditResult>) | null;
-  // Any save in this diff is in flight.
-  readonly busy: boolean;
-}): ReactElement {
-  // Hooks run unconditionally; with no save path the button below is simply not rendered.
-  const action = useStructureAction(onEdit ?? (async () => ({ ok: false, reason: 'Editing is off.' })));
-  // One row: label, who changed it, and Remove.
-  return (
-    <div className="diff__entry-head">
-      {/* The label, struck when the entry is no longer on the resume, so it reads as gone. */}
-      <h4 className="diff__entry-label">{entry.state === 'removed' ? <s>{entry.label}</s> : entry.label}</h4>
-      {/* Who changed it, in the same words the bullet provenance uses. */}
-      {entry.state === 'added' ? <span className="diff__entry-state">added by you</span> : null}
-      {/* Same, for a removed entry; "Add back from master" under its section brings it back. */}
-      {entry.state === 'removed' ? <span className="diff__entry-state">removed by you</span> : null}
-      {/* Only an entry that is on the resume can be taken off it. */}
-      {onEdit !== null && entry.state !== 'removed' ? (
-        // Remove entry, beside the label it names.
-        <button
-          // Never a form submit.
-          type="button"
-          // The shared small control style.
-          className="line__edit-trigger"
-          // One write at a time per resume.
-          disabled={busy}
-          // Starts with the visible words and names the entry, since every entry has this button.
-          aria-label={`Remove entry: ${entry.label}`}
-          // The whole entry, bullets and all, comes off; Add back under its section restores it.
-          onClick={() => void action.run({ kind: 'remove_entry', section: entry.section, ref: entry.ref })}
-        >
-          {/* Mid-save the button says so; otherwise the verb. */}
-          {action.saving ? 'Saving…' : 'Remove entry'}
-        </button>
-      ) : null}
-      {/* A refusal stays beside the entry it was about. */}
-      <ActionError error={action.error} />
-    </div>
-  );
-}
-
-/* Under an entry on the resume: the master bullets the tailor left out, and a box for a brand-new
-   bullet. Both collapsed in native <details>, so a 30-line review does not grow a form per entry. */
-function EntryTools({
-  entry,
-  onEdit,
-  busy,
-}: {
-  // The entry the tools act under.
-  readonly entry: DiffEntry;
-  // Always a real save path: this row is rendered only where editing is on.
-  readonly onEdit: (action: EditAction) => Promise<EditResult>;
-  // Any save in this diff is in flight.
-  readonly busy: boolean;
-}): ReactElement {
-  // One error and saving flag for both tools, which share the line of the screen.
-  const action = useStructureAction(onEdit);
-  // The new bullet's unsaved words.
-  const [draft, setDraft] = useState<string>('');
-  // Ties the visible label to the textarea, unique even when two entries share a label.
-  const draftId = useId();
-
-  /* Sends the new bullet. It is written into the master first (attestBullet), so the words stay only
-     in the box until that landed; a refusal keeps them for another try. */
-  async function saveNew(): Promise<void> {
-    // The page refuses empty text too; trimming here keeps a stray space from being a "bullet".
-    const text = draft.trim();
-    // Nothing to send.
-    if (text === '') return;
-    // Cleared only on a landed save, so a refusal never loses the operator's words.
-    if (await action.run({ kind: 'attest_bullet', section: entry.section, parentRef: entry.ref, text })) setDraft('');
+    // A landed one removes this row on the redraw; focus goes to the list's summary instead of <body>.
+    else onResetLanded();
   }
 
-  // Full width under the entry's bullets.
   return (
-    <div className="diff__entry-tools">
-      {/* Offered only when the master holds something the resume lacks under this entry. */}
-      {entry.addableBullets.length > 0 ? (
-        // Native disclosure: keyboard, state and semantics come from the platform.
-        <details className="diff__addback">
-          {/* The count, so the operator knows whether opening it is worth it. */}
-          <summary>
-            Add back from master ({entry.addableBullets.length})
-            {/* Spoken only: which entry, since every entry can have this list. */}
-            <span className="visually-hidden"> under {entry.label}</span>
-          </summary>
-          {/* `list-style: none` makes Safari drop list semantics; the role keeps the count spoken. */}
-          <ul className="diff__addback-list" role="list">
-            {entry.addableBullets.map((bullet) => (
-              // Keyed by the master ref, stable across saves.
-              <li key={bullet.ref} className="diff__addback-item">
-                {/* The master's own words, exactly what would print: an add-back reuses master text. */}
-                <span className="diff__addback-text">{bullet.text}</span>
-                {/* One button per offer. */}
-                <button
-                  // Never a form submit.
-                  type="button"
-                  // The shared small control style.
-                  className="line__edit-trigger"
-                  // One write at a time per resume.
-                  disabled={busy}
-                  // Names the bullet, since every offer has the same button.
-                  aria-label={`Add back bullet: ${shortText(bullet.text)}`}
-                  // Only the ref crosses to the page, which copies the bullet from FULL itself.
-                  onClick={() => void action.run({ kind: 'add_master_bullet', ref: bullet.ref })}
-                >
-                  Add back
-                </button>
-              </li>
-            ))}
-          </ul>
-        </details>
-      ) : null}
-
-      {/* Every entry on the resume can take a new bullet, which is written into the master first. */}
-      <details className="diff__new-bullet">
-        {/* The verb, visible; the entry, spoken. */}
-        <summary>
-          Add a new bullet
-          {/* Spoken only: under which entry. */}
-          <span className="visually-hidden"> under {entry.label}</span>
-        </summary>
-        {/* A real label, so the textarea's name says where the bullet goes. */}
-        <label className="diff__new-bullet-label" htmlFor={draftId}>
-          New bullet under {entry.label}
-        </label>
-        {/* The new bullet's words; resizable like the line editor. */}
-        <textarea
-          // Matches the label's htmlFor.
-          id={draftId}
-          // The same paper-on-sheet editor the line edit uses.
-          className="line__edit-textarea"
-          // Controlled, so a refused save keeps the words and a landed one clears them.
-          value={draft}
-          // Locked while saving, so what is sent is what the operator sees.
-          disabled={busy}
-          // Every keystroke into the draft.
-          onChange={(e) => setDraft(e.target.value)}
-        />
-        {/* Said BEFORE the button: this is the one control here that writes the master profile. */}
-        <p className="diff__new-bullet-note">
-          Saves to your master profile too, as a new version, then adds it to this resume.
+    <li className="line diff__change">
+      {/* Which part of the resume, so a change reads in context without the full resume beside it. */}
+      <p className="diff__change-where">{where}</p>
+      {/* The new words; a removed bullet shows the tailor's words struck, which Reset brings back. */}
+      {line.editState === 'removed' ? (
+        <p className={kindClass + ' line__text--removed'}>
+          <s>{line.originalText}</s>
         </p>
-        {/* Save: master first, then this resume. */}
-        <button
-          // Never a form submit.
-          type="button"
-          // The primary save style of the line editor.
-          className="line__edit-save"
-          // Empty text cannot be a bullet; one write at a time.
-          disabled={busy || draft.trim() === ''}
-          // Master first, then this resume.
-          onClick={() => void saveNew()}
+      ) : (
+        <p className={kindClass}>
+          {/* The runs, or the skills grouped as the PDF prints them (R4). */}
+          <TailoredText line={line} />
+        </p>
+      )}
+      {/* The tailor's version, muted, so the operator sees what the change replaced. */}
+      {oldText !== null ? (
+        <p className="line__text diff__change-old">
+          {/* A visible lead-in, so the muted line is not mistaken for a second bullet. */}
+          <span className="diff__change-old-label">Was: </span>
+          {/* <del>: the old words are semantically removed text, spoken as such. */}
+          <del>{oldText}</del>
+        </p>
+      ) : null}
+      {/* T3: each added skill keeps its provenance label; removal is the AI chat's job now. */}
+      {line.addedSkills !== undefined && line.addedSkills.length > 0 ? (
+        <ul
+          className="line__added-skills"
+          // `list-style: none` makes Safari/VoiceOver drop list semantics; the role keeps the count spoken.
+          role="list"
         >
-          {/* The verb names both writes, so nobody is surprised by a new master version. */}
-          {action.saving ? 'Saving…' : 'Save to master and resume'}
-        </button>
-      </details>
-
-      {/* A refusal of either tool, under both. */}
-      <ActionError error={action.error} />
-    </div>
-  );
-}
-
-/* Whole master entries a section lacks (the achievement or certification the tailor dropped). */
-function SectionAddBack({
-  section,
-  onEdit,
-  busy,
-}: {
-  // The section whose missing entries are offered.
-  readonly section: DiffSection;
-  // Always a real save path: rendered only where editing is on.
-  readonly onEdit: (action: EditAction) => Promise<EditResult>;
-  // Any save in this diff is in flight.
-  readonly busy: boolean;
-}): ReactElement {
-  // This list's own error and saving flag.
-  const action = useStructureAction(onEdit);
-  // Read once for the summary and the names.
-  const title = SECTION_TITLE[section.kind];
-  // Full width at the end of the section.
-  return (
-    <div className="diff__entry-tools">
-      {/* Native disclosure, collapsed: the offers are there when wanted, quiet otherwise. */}
-      <details className="diff__addback">
-        {/* How many, and of what, so the operator knows what is hidden behind it. */}
-        <summary>
-          Add back from master: {section.addableEntries.length} {title.toLowerCase()} not on this resume
-        </summary>
-        {/* Same list semantics note as the bullet offers. */}
-        <ul className="diff__addback-list" role="list">
-          {section.addableEntries.map((entry) => (
-            // Keyed by the master ref.
-            <li key={entry.ref} className="diff__addback-item">
-              {/* The entry's label, from the same labeller as the headings. */}
-              <span className="diff__addback-text">{entry.label}</span>
-              {/* One button per offer. */}
-              <button
-                // Never a form submit.
-                type="button"
-                // The shared small control style.
-                className="line__edit-trigger"
-                // One write at a time per resume.
-                disabled={busy}
-                // Names the entry and its section, since every offer has the same button.
-                aria-label={`Add back ${entry.label} (${title})`}
-                // Bullet sections only (summary and skills never carry entry offers); the page adds
-                // the entry with all its FULL bullets and appends the section to the order if absent.
-                onClick={() => {
-                  // Narrows the kind to a bullet section for the action's type.
-                  if (section.kind !== 'summary' && section.kind !== 'skills') void action.run({ kind: 'add_master_entry', section: section.kind, ref: entry.ref });
-                }}
-              >
-                Add back
-              </button>
+          {line.addedSkills.map((skill) => (
+            <li key={skill.ref} className="line__added-skill">
+              {/* The name plus who put it there; nothing checked it against the master's evidence. */}
+              {skill.name} <span className="line__added-skill-tag">added by you</span>
             </li>
           ))}
         </ul>
-      </details>
-      {/* A refusal stays under the list it came from. */}
-      <ActionError error={action.error} />
-    </div>
+      ) : null}
+      {/* Who changed it, and any flagged words it still carries. */}
+      <Provenance line={line} />
+      {/* The undo, where resetTarget can honour it. */}
+      {resetTarget !== null ? (
+        <button
+          // Never a form submit.
+          type="button"
+          // A quiet small control: an undo, not the screen's primary action.
+          className="button button--ghost button--small diff__change-reset"
+          // One write at a time per resume.
+          disabled={busy}
+          // No aria-label: the name comes from the content, so it contains the visible words (WCAG 2.5.3).
+          onClick={() => void reset(resetTarget)}
+        >
+          {/* Mid-save the button says so; otherwise the verb plus a spoken suffix naming WHICH line. */}
+          {savingHere ? (
+            'Saving…'
+          ) : (
+            <>
+              Reset to tailor’s version
+              {/* Spoken only: every changed line has a Reset with the same visible words. */}
+              <span className="visually-hidden"> ({lineName})</span>
+            </>
+          )}
+        </button>
+      ) : null}
+      {/* A refused Reset keeps the row and says why it did not change. */}
+      {error !== null ? (
+        <p className="line__edit-error" role="alert">
+          {/* Rendered as given: the page says "Not saved" only when that is known to be true. */}
+          {error}
+        </p>
+      ) : null}
+    </li>
   );
 }
 
-/* The printed section order with Up and Down per section: order is a tailoring decision carried in
-   section_order, and this is the one place the operator can change it. */
-function SectionOrder({
-  sections,
-  onEdit,
+/* The collapsed list of changed lines. Nothing at all when no line changed: an empty disclosure would
+   promise content that is not there. */
+function ChangesByAi({
+  diff,
+  onReset,
   busy,
 }: {
-  // The printed sections, in print order.
-  readonly sections: readonly DiffSection[];
-  // Always a real save path: rendered only where editing is on.
-  readonly onEdit: (action: EditAction) => Promise<EditResult>;
+  // The whole diff, for its lines and its section layout.
+  readonly diff: ResumeDiff;
+  // The Reset save path, or null when editing is off.
+  readonly onReset: ((target: EditTarget) => Promise<EditResult>) | null;
   // Any save in this diff is in flight.
   readonly busy: boolean;
-}): ReactElement {
-  // This list's own error and saving flag.
-  const action = useStructureAction(onEdit);
-  // Ties the list to its heading for assistive tech.
-  const headingId = useId();
-  // A landmark with a name, so it can be found from the regions list.
+}): ReactElement | null {
+  // The disclosure's summary: where focus goes when a landed Reset unmounts the clicked row.
+  const summaryRef = useRef<HTMLElement | null>(null);
+  // Changed = words changed or removed, or the bullet moved; that is everything Provenance can name.
+  const changed = diff.lines.filter((line) => line.editState !== 'original' || line.moved === true);
+  // No changes, no disclosure.
+  if (changed.length === 0) return null;
+
+  /* "Experience · Acme" for a bullet with a known entry, else the section's own title. */
+  function whereOf(line: DiffLine): string {
+    // Summary and skills are a section each.
+    if (line.kind !== 'bullet') return SECTION_TITLE[line.kind];
+    // A hand-built fixture without a layout: the kind is all there is to say.
+    if (line.section === undefined) return 'Bullet';
+    // The entry's human label from the adapter's layout, the same labeller the AI chat uses.
+    const label = diff.sections?.find((section) => section.kind === line.section)?.entries.find((entry) => entry.ref === line.entryRef)?.label;
+    // Section, then entry when known.
+    return label === undefined ? SECTION_TITLE[line.section] : `${SECTION_TITLE[line.section]} · ${label}`;
+  }
+
   return (
-    <section className="diff__order" aria-labelledby={headingId}>
-      {/* The name the region is announced by. */}
-      <h3 id={headingId} className="diff__order-head">
-        Section order
-      </h3>
-      {/* An ordered list, because the order IS the content. */}
-      <ol className="diff__order-list">
-        {sections.map((section, index) => (
-          // Keyed by kind, so a moved section keeps its row (and the focused arrow) across the save.
-          <li key={section.kind} className="diff__order-item">
-            {/* The heading as the PDF prints it. */}
-            <span className="diff__order-name">{SECTION_TITLE[section.kind]}</span>
-            {/* Up unless first, down unless last; the move is one move_section either way. */}
-            <MoveButtons
-              // The heading as printed.
-              name={SECTION_TITLE[section.kind]}
-              // Not the first.
-              up={index > 0}
-              // Not the last.
-              down={index < sections.length - 1}
-              // One write at a time per resume.
-              busy={busy}
-              // Through this list's own error and saving flag.
-              onMove={(direction) => void action.run({ kind: 'move_section', section: section.kind, direction })}
-            />
-          </li>
+    // Native disclosure, collapsed: keyboard, state and semantics come from the platform.
+    <details className="diff__changes">
+      {/* The count, so the operator knows how much changed before opening it. */}
+      <summary ref={summaryRef} className="diff__changes-summary">
+        Changes by AI ({changed.length})
+      </summary>
+      {/* `list-style: none` makes Safari drop list semantics; the role keeps the count spoken. */}
+      <ul className="diff__changes-list" role="list">
+        {changed.map((line) => (
+          <ChangeRow
+            // Keyed by line id, so a save elsewhere keeps each row's error state.
+            key={line.id}
+            // The changed line.
+            line={line}
+            // Its place in the resume.
+            where={whereOf(line)}
+            // The Reset save path, or none.
+            onReset={onReset}
+            // One write at a time.
+            busy={busy}
+            // Focus to the summary, which survives the row's unmount.
+            onResetLanded={() => summaryRef.current?.focus()}
+          />
         ))}
-      </ol>
-      {/* Said while a move saves, since the arrows carry no words. */}
-      {action.saving ? <p className="diff__edit-note">Saving…</p> : null}
-      {/* A refusal stays under the list. */}
-      <ActionError error={action.error} />
-    </section>
+      </ul>
+    </details>
   );
 }
 
-/* The split view's rows, grouped: section heading, then each entry's heading, its bullet lines and
- * its tools. ONE flat array of keyed elements rather than nested wrappers, for two reasons: the
- * panes are a two-column grid whose cells must be direct children, and a moved bullet keeps its
- * React key in the same array, so its Line keeps its state and focus across the move.
- * Any line no section claims is appended at the end: nothing on the resume may go unseen (D5a). */
-function groupedRows(
-  // The whole diff, for its lines.
-  diff: ResumeDiff,
-  // Its layout (passed apart so the caller has already proven it present).
-  sections: readonly DiffSection[],
-  // The lines' save path, as the flat layout passes it; each Line hides its own controls under D4.
-  onEdit: ((action: EditAction) => Promise<EditResult>) | null,
-  // The entry and section controls' save path: null unless this row is editable (not D4, not read-only).
-  structureEdit: ((action: EditAction) => Promise<EditResult>) | null,
-  // Any save in this diff is in flight.
-  busy: boolean,
-  // D4's reason, threaded to each Line's title.
-  editDisabledReason: string | null,
-): ReactElement[] {
-  // Lines by id, for the entries' id lists.
-  const byId = new Map(diff.lines.map((line) => [line.id, line]));
-  // Every line drawn so far, so the leftovers can be found.
-  const drawn = new Set<string>();
-  // The flat row list.
-  const rows: ReactElement[] = [];
-  /* One line as a row, with Move/Remove when it sits under an entry. */
-  const drawLine = (line: DiffLine, order?: { readonly up: boolean; readonly down: boolean }): void => {
-    // Remembered, so it is not drawn again as a leftover.
-    drawn.add(line.id);
-    // Keyed by line id, the same key the flat layout uses.
-    rows.push(<Line key={line.id} line={line} onEdit={onEdit} busy={busy} editDisabledReason={editDisabledReason} order={order} />);
-  };
+/* --- The action bar (2026-11-07, D4) ------------------------------------ */
 
-  // Section by section, in the adapter's layout order.
-  for (const section of sections) {
-    // The section heading row.
-    rows.push(<SectionHead key={'section:' + section.kind} section={section} />);
-    // Summary and skills are one line each, found by kind.
-    if (section.kind === 'summary' || section.kind === 'skills') {
-      // The line of that kind, if the resume has one.
-      const line = diff.lines.find((candidate) => candidate.kind === section.kind);
-      // Drawn under its heading.
-      if (line !== undefined) drawLine(line);
-    }
-    // Each entry, in display order.
-    for (const entry of section.entries) {
-      // The entry's heading row.
-      rows.push(<EntryHead key={'entry:' + section.kind + '.' + entry.ref} entry={entry} onEdit={structureEdit} busy={busy} />);
-      // Its lines, in display order.
-      const lines = entry.lineIds.map((id) => byId.get(id)).filter((line): line is DiffLine => line !== undefined);
-      // The printed ones: a removed bullet takes no place in the order Move works on.
-      const printedIds = lines.filter((line) => line.editState !== 'removed').map((line) => line.id);
-      // Every line, removed ones included, so a removal stays visible where it happened.
-      for (const line of lines) {
-        // Its place among the printed siblings; -1 for a removed line, which gets no Move.
-        const at = printedIds.indexOf(line.id);
-        // Up unless first, down unless last.
-        drawLine(line, at === -1 ? undefined : { up: at > 0, down: at < printedIds.length - 1 });
-      }
-      // Add back and Add a bullet, only under an entry that is on the resume, and only where editable.
-      if (structureEdit !== null && entry.state !== 'removed') {
-        // Keyed per entry, so its draft survives a save elsewhere.
-        rows.push(<EntryTools key={'tools:' + section.kind + '.' + entry.ref} entry={entry} onEdit={structureEdit} busy={busy} />);
-      }
-    }
-    // Whole entries to add back, at the end of their section.
-    if (structureEdit !== null && section.addableEntries.length > 0) {
-      // Keyed per section.
-      rows.push(<SectionAddBack key={'addback:' + section.kind} section={section} onEdit={structureEdit} busy={busy} />);
-    }
-  }
-  // Fail loud: any line the layout did not place is still drawn, never dropped.
-  for (const line of diff.lines) if (!drawn.has(line.id)) drawLine(line);
-  // Ready for the grid.
-  return rows;
+/* Approve (primary) then Reject (secondary), one bar, same button height. Reject is one-way, so its
+   click only ARMS an inline confirm (app/InlineConfirm.tsx); onReject runs from that Confirm alone.
+   Approve stays one click: its gate is the per-claim decisions, not a question. Hook-free and
+   exported, so test/diffViewSlim.test.ts calls the real click handlers by value. */
+export function ApprovalActions({
+  confirmId,
+  subject,
+  canApprove,
+  approveLabel,
+  onApproveClick,
+  onReject,
+  busy,
+}: {
+  // The InlineConfirm instance id, unique per row.
+  readonly confirmId: string;
+  // "Engineer at Acme": the confirm names the row it would reject.
+  readonly subject: string;
+  // The gate: every flagged claim kept and nothing in flight.
+  readonly canApprove: boolean;
+  // The ordinary label, or the held card's second-click label.
+  readonly approveLabel: string;
+  // Approve's whole effect, built by DiffView with the live decisions.
+  readonly onApproveClick: () => void;
+  // The page's reject; reached only through Confirm.
+  readonly onReject: (reason: string) => void;
+  // A save or the page's approve/reject is in flight.
+  readonly busy: boolean;
+}): ReactElement {
+  return (
+    /* The question opens in place of both buttons, so nothing below moves and Approve cannot be
+       clicked under an open reject question. */
+    <InlineConfirm id={confirmId}>
+      <div className="diff__actions-group">
+        <button
+          // Never a form submit.
+          type="button"
+          // The affirmative, filled action: the one this card exists for.
+          className="button button--approve"
+          // Locked until every flagged claim is kept and nothing is in flight.
+          disabled={!canApprove}
+          // One click; the page re-checks an edited row itself.
+          onClick={onApproveClick}
+        >
+          {/* The second click names what it approves past; a hold that could not check says that. */}
+          {approveLabel}
+        </button>
+        <button
+          // Never a form submit.
+          type="button"
+          // Secondary emphasis, reject's danger outline: it must not compete with Approve.
+          className="button button--secondary button--reject"
+          // No reject mid-save or mid-approval.
+          disabled={busy}
+          // Arms the confirm only; nothing is written until its Confirm.
+          onClick={(e) => armConfirm(confirmId, {
+            // Plain words: what happens, and that there is no way back from it here.
+            message: `Reject ${subject}? It leaves the approval queue and is never submitted. This cannot be undone.`,
+            // The confirm's own button names, with the row in them.
+            action: `Reject: ${subject}`,
+            // The one write, called at most once by Confirm.
+            onConfirm: () => onReject('rejected at approval gate'),
+            // For focus return on Cancel.
+            trigger: e.currentTarget,
+          })}
+        >
+          {/* The visible verb. */}
+          Reject application
+        </button>
+      </div>
+    </InlineConfirm>
+  );
 }
 
 /* --- The screen -------------------------------------------------------- */
@@ -1819,7 +732,7 @@ export function DiffView({
   editDisabledReason,
   hasCoverLetter,
   locked,
-  // Passed straight to the coverage bar, the only place a missing keyword is offered.
+  // Passed straight to the AI chat, so a skill it adds prints under a real group.
   attestCategories,
   // The AI box's ask; absent hides the box.
   onAssist,
@@ -1829,6 +742,8 @@ export function DiffView({
   chatDock,
   // The held re-check, shown above Approve; undefined when nothing is held.
   approveHold,
+  // N2: the pay-band chip's text, or nothing.
+  payBandWarning,
 }: DiffViewProps): ReactElement {
   /* Whether this row's chat has ever been docked: from then on its panel stays mounted (hidden) while another
      row holds the dock. State set during render, the supported pattern for state derived from a prop. */
@@ -1841,16 +756,13 @@ export function DiffView({
   const bucket = useMemo(() => deriveBucket(diff), [diff]);
   // The AI chat's structure (2026-11-01): derived from the diff, recomputed only when it changes.
   const assistStructure = useMemo(() => structureFromDiff(diff), [diff]);
-  // Side-by-side or unified; local because no other part of the app cares.
-  const [viewMode, setViewMode] = useState<'split' | 'unified'>('split');
 
+  // The operator's per-claim "keep" choices; a missing key is an undecided claim.
   const [decisions, setDecisions] = useState<ReadonlyMap<string, ClaimDecision>>(
     () => new Map(),
   );
   // One save at a time per resume: each save writes the WHOLE profile, so two in flight would race.
   const [saving, setSaving] = useState<boolean>(false);
-  // The last failed cut from the alarm band.
-  const [removeError, setRemoveError] = useState<string | null>(null);
   // One flag for "controls wait": our own save, or the page's approve/reject on this row.
   const busy = saving || locked === true;
 
@@ -1875,31 +787,23 @@ export function DiffView({
           }
         };
 
-  /* Every control in this view is the operator's own hand: one binding, so no control can forget
-     to say so and no AI path can borrow it by accident. */
-  const operatorEdit = runEdit === null ? null : (action: EditAction): Promise<EditResult> => runEdit(action, 'operator');
+  /* Reset is the operator's own click, so it says 'operator'; and it exists only where editing is
+     honestly on (a save path, and no editDisabledReason), the same rule the AI chat mounts under. */
+  const resetEdit = runEdit !== null && !editDisabledReason ? (target: EditTarget): Promise<EditResult> => runEdit({ kind: 'reset', target }, 'operator') : null;
 
+  /* Records one claim's decision in a fresh Map, so React sees a new value. */
   function decide(key: string, decision: ClaimDecision): void {
     setDecisions((previous) => {
+      // Copied, never mutated: the old Map may still be in a pending render.
       const next = new Map(previous);
+      // The decision for this claim.
       next.set(key, decision);
+      // The new state.
       return next;
     });
   }
 
-  /* Cutting from the alarm band: a real removal of the whole bullet, saved immediately. */
-  async function cut(target: { readonly kind: 'bullet'; readonly ref: string }): Promise<void> {
-    // Unreachable without a save path; the button is not rendered then.
-    if (runEdit === null) return;
-    // A new attempt clears the old failure.
-    setRemoveError(null);
-    // Same save path as every other edit.
-    const result = await runEdit({ kind: 'remove', target }, 'operator');
-    // The bullet is still there; say so in the band.
-    if (!result.ok) setRemoveError(result.reason);
-  }
-
-  /* THE GATE: every claim STILL IN THE RESUME needs a decision. A cut claim vanished from
+  /* THE GATE: every claim STILL IN THE RESUME needs a decision. A claim the AI chat cut vanished from
      `claims` with its bullet, so it needs none; a stale 'keep' for a claim that no longer
      exists is dropped before approval so the record lists only what was actually submitted. */
   const undecided = claims.filter((claim) => !decisions.has(claim.key));
@@ -1907,96 +811,82 @@ export function DiffView({
   const canApprove = undecided.length === 0 && !busy;
   // The keys that still exist, for filtering the decisions handed to the page.
   const liveKeys = new Set(claims.map((claim) => claim.key));
-  /* The save path for EVERY control (lines, coverage chips, entries, sections): only where editing is
-     honestly on (a save path, and no editDisabledReason). Lines used to get runEdit and decide from
-     their editTarget, which stays set when FULL is null, so the banner said "off" while text stayed
-     click-to-edit and every save was refused after typing (review finding, 2026-11-01). */
-  const structureEdit = operatorEdit !== null && !editDisabledReason ? operatorEdit : null;
   // The structural sentences behind part of editCount; absent on fixtures that predate them.
   const structureChanges = diff.structureChanges ?? [];
-  // The sections the PDF prints, in print order: what the Section order list reorders.
-  const printedSections = (diff.sections ?? []).filter((section) => section.printed);
+  /* Validated once per render; undefined means no safe link (apply_url is board-supplied, see app/safeHref.ts). */
+  const postingHref = safeHref(diff.applyUrl);
+  // Whether either salary bound is known, so the pill renders only with a figure in it.
+  const hasSalary = (diff.salaryMin !== null && diff.salaryMin !== undefined) || (diff.salaryMax !== null && diff.salaryMax !== undefined);
 
   return (
     <article className="diff">
       <header className="diff__header">
+        {/* No title <h2> since 2026-11-07: the page's row head already shows the job title,
+            "Company · location" and the toolbar, so a heading here repeated it when the card opened. */}
         <div className="diff__identity">
-          <div className="diff__title-row">
-            <h2 className="diff__title">
-              {diff.jobTitle} at {diff.companyName}
-            </h2>
-            <div className="diff__badges">
-              {diff.discoveredVia && diff.discoveredVia.length > 0 && (
-                <SourceBadge
-                  discoveredVia={diff.discoveredVia as readonly DiscoverySource[]}
-                  sourceRefs={diff.sourceRefs}
-                />
-              )}
-              {/* Three honest states: clean, flagged by the Auditor, or edited by the operator
-                  (which nothing re-audited, so it must not borrow either audit label). */}
-              <StatusBadge
-                status={bucket === 'A' ? 'audit_clean' : claims.length > 0 ? 'audit_flagged' : 'edited'}
-                label={bucket === 'A' ? 'audit_clean' : claims.length > 0 ? 'audit_flagged' : 'edited by you'}
-              />
-              <StatusBadge status="awaiting_approval" label="awaiting_approval" />
-            </div>
-          </div>
+          {/* ONE facts line (2026-11-07, D3), the first thing in the card: the audit verdict, work type,
+              salary, the posting, and the N2 pay-band chip. Employment type, locations and the discovery
+              source left the card. */}
           <div className="diff__tags">
-            {diff.employmentType && diff.employmentType !== 'unknown' && (
-              <span className="tag-pill tag-pill--type">
-                {diff.employmentType.replace('_', ' ')}
-              </span>
-            )}
+            {/* Three honest states: clean, flagged by the Auditor, or edited (which nothing re-audited, so
+                it must not borrow either audit label). Kept here because only Bucket A's row head carries
+                a badge, and it can only ever say audit_clean. The always-true awaiting_approval pill was
+                dropped 2026-11-07: every card on this page is. */}
+            <StatusBadge
+              status={bucket === 'A' ? 'audit_clean' : claims.length > 0 ? 'audit_flagged' : 'edited'}
+              // Plain words, not the enum (2026-11-07 audit: raw "audit_flagged" read as a code); the status
+              // prop keeps the colour class.
+              label={bucket === 'A' ? 'Verified' : claims.length > 0 ? 'Needs review' : 'edited by you'}
+            />
             {diff.workArrangement && diff.workArrangement !== 'unknown' && (
               <span className="tag-pill tag-pill--arrangement">
+                {/* Remote, hybrid or onsite, as the screener read it. */}
                 {diff.workArrangement}
               </span>
             )}
-            {((diff.salaryMin !== null && diff.salaryMin !== undefined) ||
-              (diff.salaryMax !== null && diff.salaryMax !== undefined)) && (
+            {hasSalary && (
               <span className="tag-pill tag-pill--salary">
+                {/* INR when the board named no currency: the market this pipeline searches. */}
                 {diff.salaryCurrency ?? 'INR'}{' '}
+                {/* A missing minimum reads as 0, the existing pill's rule. */}
                 {diff.salaryMin ? Number(diff.salaryMin).toLocaleString() : '0'}
+                {/* A range, or "and up" when only the minimum is known. */}
                 {diff.salaryMax ? ` – ${Number(diff.salaryMax).toLocaleString()}` : '+'}
               </span>
             )}
-            {diff.locations && diff.locations.length > 0 && (
-              <span className="tag-pill tag-pill--location">
-                {diff.locations.slice(0, 2).join(', ')}
-                {diff.locations.length > 2 ? ` +${diff.locations.length - 2}` : ''}
-              </span>
+            {postingHref !== undefined && (
+              <a
+                className="diff__posting-link"
+                // Only an http(s) URL reaches here (safeHref).
+                href={postingHref}
+                // The board, in its own tab: the review stays where it was.
+                target="_blank"
+                // No window.opener for a third-party page.
+                rel="noopener noreferrer"
+              >
+                Open the original posting
+              </a>
             )}
+            {/* N2: a signal chip, never the fabrication colour: it is a fact about the job, not the resume. */}
+            {payBandWarning ? <span className="tag-pill tag-pill--signal">{payBandWarning}</span> : null}
           </div>
-          <p className="diff__meta">
-            Tailored from master version {diff.masterVersion}
-          </p>
         </div>
 
-        {/* T3: given the save path so a missing keyword the master can supply becomes an Add, and
-            (with the master's groups) one it lacks becomes a vouch-and-add. */}
-        <CoverageBar diff={diff} onEdit={structureEdit} busy={busy} attestCategories={attestCategories} />
+        {/* The ATS figure is NOT repeated here (2026-11-07 audit): the row head's "ATS score" chip already
+            states it, and this second copy floated right of the facts line, off every column. */}
       </header>
-
-      {/* The job, before the verdict on the resume. Reading order is the
-          argument: you cannot judge whether a claim is honest about a posting
-          you have not been shown. */}
-      <JobPosting diff={diff} />
 
       {/* The alarm only when a claim remains; an edits-only row is B for a different reason. */}
       {claims.length > 0 ? (
         <FabricationAlert
           claims={claims}
-          lines={diff.lines}
-          masterVersion={diff.masterVersion}
           decisions={decisions}
           onDecide={decide}
-          onRemove={runEdit === null ? null : (target) => void cut(target)}
           busy={busy}
-          removeError={removeError}
         />
       ) : bucket === 'A' ? (
         <p className="clear-notice">
-          Every line traces to master version {diff.masterVersion}. Safe to
+          Every line traces to your master profile. Safe to
           batch-approve with the other clean applications.
         </p>
       ) : diff.editCount === 0 ? null : (
@@ -2028,12 +918,12 @@ export function DiffView({
         </div>
       ) : null}
 
-      {/* D5a: the structural half of that count, named, so a reordered resume never looks untouched.
-          Shown in both view modes, because the unified view has no headings to show a move with. */}
+      {/* D5a: the structural half of that count, named, so a reordered resume never looks untouched
+          (a moved section has no line of its own in Changes by AI). */}
       {structureChanges.length > 0 ? (
         // One block: the lead-in and its list read together.
         <div className="diff__structure-changes">
-          {/* The lead-in, in the "by you" words every other operator change on this screen uses. */}
+          {/* The lead-in, in the "by you" words every other change on this screen uses. */}
           <p className="diff__structure-changes-head">Structure changed by you</p>
           {/* `list-style` is kept here, so the list keeps its semantics without a role. */}
           <ul>
@@ -2045,7 +935,7 @@ export function DiffView({
         </div>
       ) : null}
 
-      {/* D4: the reason editing is off, once, above the lines it applies to. */}
+      {/* D4: the reason editing is off, once, above the changes it applies to. */}
       {onEdit !== undefined && editDisabledReason ? (
         <p className="diff__edit-note">{editDisabledReason}</p>
       ) : null}
@@ -2070,83 +960,8 @@ export function DiffView({
         return chatDock.node !== null ? createPortal(<div hidden={!chatDock.active}>{panel}</div>, chatDock.node) : null;
       })()}
 
-      {/* Section order, only where a move could be saved and only with something to reorder. */}
-      {structureEdit !== null && printedSections.length > 1 ? (
-        // Only the printed sections: an unprinted one has no place in the order to move from.
-        <SectionOrder sections={printedSections} onEdit={structureEdit} busy={busy} />
-      ) : null}
-
-      {/* View Mode Toolbar */}
-      <div className="diff__toolbar">
-        <span className="coverage__title">Comparison View</span>
-        <div className="diff__view-toggle" role="radiogroup" aria-label="Diff view mode">
-          <button
-            type="button"
-            className={`diff__view-btn ${viewMode === 'split' ? 'diff__view-btn--active' : ''}`}
-            onClick={() => setViewMode('split')}
-          >
-            Side-by-side
-          </button>
-          <button
-            type="button"
-            className={`diff__view-btn ${viewMode === 'unified' ? 'diff__view-btn--active' : ''}`}
-            onClick={() => setViewMode('unified')}
-          >
-            Inline Unified
-          </button>
-        </div>
-      </div>
-
-      {viewMode === 'split' ? (
-        <div className="diff__panes">
-          <h3 className="diff__pane-head">Your master profile</h3>
-          <h3 className="diff__pane-head">Tailored for this job</h3>
-
-          {/* Grouped by section and entry when the adapter laid the resume out (every live row);
-              a hand-built diff without a layout keeps the flat list it always had. */}
-          {diff.sections !== undefined
-            ? // Headings, entries and their tools, with the same Line for every bullet.
-              groupedRows(diff, diff.sections, operatorEdit, structureEdit, busy, editDisabledReason ?? null)
-            : // The pre-2026-11-01 flat list, unchanged.
-              diff.lines.map((line) => (
-                <Line
-                  // Keyed by line id, so a save keeps each line's editor state.
-                  key={line.id}
-                  // The line to draw.
-                  line={line}
-                  // The save path; each line switches its own controls off when it has no target or editing is off.
-                  onEdit={operatorEdit}
-                  // One write at a time.
-                  busy={busy}
-                  // Threaded down so each line's title can say why it is not clickable (D4).
-                  editDisabledReason={editDisabledReason ?? null}
-                />
-              ))}
-        </div>
-      ) : (
-        <div className="diff__panes--unified">
-          {/* Read-only view, but it shows edits and removals exactly as the split view does. */}
-          {diff.lines.map((line) => (
-            <div key={line.id} className="unified-line">
-              <div className="unified-line__meta">
-                <span className="identifier">{line.masterNodeId}</span>
-                <span className="tag-pill">{line.kind}</span>
-              </div>
-              {line.editState === 'removed' ? (
-                <p className={`line__text line__text--${line.kind} line__text--removed`}>
-                  <s>{line.originalText}</s>
-                </p>
-              ) : (
-                <p className={`line__text line__text--${line.kind}`}>
-                  {/* Same text as the split view, so the two modes cannot show the skills differently. */}
-                  <TailoredText line={line} />
-                </p>
-              )}
-              <Provenance line={line} />
-            </div>
-          ))}
-        </div>
-      )}
+      {/* D2: the changed lines, each with its Reset; nothing when the resume is the tailor's own. */}
+      <ChangesByAi diff={diff} onReset={resetEdit} busy={busy} />
 
       <footer className="diff__actions">
         {/* R6: said where the approval happens, because the Auditor saw only the tailor's words. Since
@@ -2188,34 +1003,32 @@ export function DiffView({
           <p className="diff__edit-note">Cover letter was generated before your edits.</p>
         ) : null}
 
-        <div className="diff__actions-group">
-          <button
-            type="button"
-            className="button button--approve"
-            disabled={!canApprove}
-            /* Only decisions about claims that are still in the resume. A held card's click is the
-               acknowledgement, so it says so; the page sends only if the stored version is unchanged. */
-            onClick={() => onApprove(new Map([...decisions].filter(([key]) => liveKeys.has(key))), approveHold !== undefined)}
-          >
-            {/* The second click names what it approves past; a hold that could not check says that. */}
-            {approveHold === undefined ? 'Approve and queue for submission' : approveHold.kind === 'flagged' ? 'Approve with these' : 'Approve unchecked'}
-          </button>
-
-          <button
-            type="button"
-            className="button button--reject"
-            onClick={() => onReject('rejected at approval gate')}
-          >
-            Reject application
-          </button>
-        </div>
-
+        {/* Explains a disabled Approve before the operator reaches for it. */}
         {undecided.length === 0 ? null : (
           <p className="diff__gate-note">
             {undecided.length} {undecided.length === 1 ? 'claim needs' : 'claims need'}{' '}
             a decision above.
           </p>
         )}
+
+        {/* The one action bar: Approve, then Reject behind its inline confirm. */}
+        <ApprovalActions
+          // One confirm per row, so arming this row's question closes any other.
+          confirmId={'reject:' + diff.applicationId}
+          // The row, as the confirm names it.
+          subject={`${diff.jobTitle} at ${diff.companyName}`}
+          // The per-claim gate.
+          canApprove={canApprove}
+          // The ordinary label, or the held card's second-click label.
+          approveLabel={approveHold === undefined ? 'Approve and queue for submission' : approveHold.kind === 'flagged' ? 'Approve with these' : 'Approve unchecked'}
+          /* Only decisions about claims that are still in the resume. A held card's click is the
+             acknowledgement, so it says so; the page sends only if the stored version is unchanged. */
+          onApproveClick={() => onApprove(new Map([...decisions].filter(([key]) => liveKeys.has(key))), approveHold !== undefined)}
+          // Reached only from the confirm's Confirm.
+          onReject={onReject}
+          // Reject waits for any save, like every other control.
+          busy={busy}
+        />
       </footer>
     </article>
   );

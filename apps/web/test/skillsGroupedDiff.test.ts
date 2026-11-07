@@ -8,7 +8,11 @@
  * against the REAL renderer's output, so the screen and the PDF cannot drift apart silently.
  *
  * Fixtures come from the REAL buildResumeDiff (as addSkillUi.test.ts does), so they carry the exact
- * printedSkills / addedSkills shapes the page gets. */
+ * printedSkills / addedSkills shapes the page gets.
+ *
+ * Since the slim card (2026-11-07) an UNCHANGED skills line is not drawn here at all (the resume is
+ * read in the page's ResumePreview), so every case adds a skill and reads the changed line under
+ * "Changes by AI". The untouched-resume and D4 cases went with the comparison view they rendered. */
 
 // The .tsx loader; must be the first import so it runs before any component loads.
 import './support/registerTsxHooks.ts';
@@ -29,7 +33,7 @@ let edits: typeof import('../src/features/approval/tailoredEdits.ts');
 let render: (element: unknown) => string;
 // Element factory, so no JSX in this .ts file.
 let h: typeof import('react').createElement;
-// A router context: the coverage bar may render a react-router <Link>.
+// A router context, harmless around the card; kept so a <Link> added to it later cannot throw here.
 let MemoryRouter: typeof import('react-router-dom').MemoryRouter;
 
 before(async () => {
@@ -140,7 +144,7 @@ const diffOf = (resolved: Resume, tailorVersion: Resume | null = original()): Di
     original: tailorVersion,
   } as never);
 
-// The full DiffView (split view, the default), with a save path so the skills line is editable.
+// The full DiffView with a save path; a changed skills line is listed under Changes by AI (2026-11-07).
 const page = (diff: Diff) =>
   render(
     h(MemoryRouter, null, h(view.DiffView, {
@@ -162,10 +166,10 @@ const visible = (html: string) =>
     // Then every remaining tag.
     .replace(/<[^>]*>/g, '');
 
-// The tailored skills paragraph of the split view (the one with tabindex, unique to the Line).
+// The changed skills line's paragraph in Changes by AI: the only skills <p> the slim card draws.
 const skillsParagraph = (html: string): string => {
-  // The skills <p> on the tailored side; the master side carries no tabindex.
-  const match = html.match(/<p class="line__text line__text--skills"[^>]*tabindex="-1"[^>]*>([\s\S]*?)<\/p>/);
+  // Exactly one: the master side and the unified view are gone, so there is no second copy.
+  const match = html.match(/<p class="line__text line__text--skills">([\s\S]*?)<\/p>/);
   // Missing is a failure in itself, named.
   assert.ok(match, 'expected the tailored skills paragraph');
   // Its inner markup.
@@ -190,15 +194,6 @@ const pdfGroupsOf = (resume: Resume): string[] =>
     .map((m) => visible(m[1]!).replace(/&#x27;/g, "'").trim());
 
 describe('skills line: grouped like the PDF', () => {
-  it('shows the group labels in first-appearance order, each with its skills under it', () => {
-    // The tailor's untouched resume.
-    const html = page(diffOf(original()));
-    // The split view's tailored skills paragraph.
-    const groups = groupsOf(skillsParagraph(html));
-    // Frameworks first (Node.js opened it), Express pulled back under it, then Databases.
-    assert.deepEqual(groups, ['Frameworks: Node.js, Express', 'Databases: PostgreSQL']);
-  });
-
   it('matches the groups the PDF renderer prints for the same resume, added skill included', () => {
     // The resume with the operator's Docker on it.
     const resolved = withDocker();
@@ -233,32 +228,14 @@ describe('skills line: grouped like the PDF', () => {
     assert.match(fragment, /<span class="run run--edited">Zig<span class="visually-hidden"> — edited by you, not checked against the master<\/span>/);
   });
 
-  it('leaves the per-skill Remove control and the Reset in place', () => {
-    // Docker added, so both controls should show.
+  it('keeps the "added by you" label and the Reset in place (no per-skill Remove since 2026-11-07)', () => {
+    // Docker added, so the label and Reset should show.
     const html = page(diffOf(withDocker()));
-    // The added skill's own Remove, unchanged by grouping.
-    assert.match(html, /<button\b[^>]*aria-label="Remove Docker, added by you"/);
+    // The added skill's provenance label, unchanged by grouping.
+    assert.match(html, /<li class="line__added-skill">Docker <span class="line__added-skill-tag">added by you<\/span><\/li>/);
+    // Paired absence: the slim card's only edit path is the AI chat, so no per-skill Remove button.
+    assert.doesNotMatch(html, /aria-label="Remove Docker, added by you"/);
     // Reset still names the skills line.
     assert.match(html, /Reset to tailor(?:&#x27;|’)s version<span class="visually-hidden"> \(skills\)<\/span>/);
-  });
-
-  it('a D4 row (no original) groups its skills too, every skill traced as the D4 line always was', () => {
-    // A D4 row: the stored resume with no tailor version to compare it to.
-    const html = page(diffOf(original(), null));
-    /* A D4 line is read-only, so its <p> has no tabindex for skillsParagraph to key on. The tailored
-       side is the skills <p> holding run spans; the master side is plain text. */
-    const fragment = [...html.matchAll(/<p class="line__text line__text--skills"[^>]*>([\s\S]*?)<\/p>/g)].map((m) => m[1]!).find((inner) => inner.includes('class="run run--'));
-    // Missing is a failure in itself, named.
-    assert.ok(fragment !== undefined, 'expected the tailored skills paragraph of the D4 row');
-    // What the PDF prints for the same resume.
-    const pdf = pdfGroupsOf(original());
-    // Positive control: the PDF really prints two rows, so the equality below is not vacuous.
-    assert.deepEqual(pdf, ['Frameworks: Node.js, Express', 'Databases: PostgreSQL']);
-    // Same rows, same order: a D4 row no longer shows a layout the PDF never prints.
-    assert.deepEqual(groupsOf(fragment), pdf);
-    // D4 marking kept: every skill is a traced run, as the D4 line's one run always was.
-    for (const name of ['Node.js', 'PostgreSQL', 'Express']) assert.ok(fragment.includes(`<span class="run run--traced">${name}<`), `${name} must be traced`);
-    // Paired absence: nothing on a D4 line reads as edited, since no edit can be told apart there.
-    assert.doesNotMatch(fragment, /run--edited/);
   });
 });

@@ -5,8 +5,42 @@
  * inequality is the design - matching their presentation would undo the whole
  * point of splitting them. */
 
+/* --- One spacing scale, one control height (2026-11-07) -----------------
+   Teja: "the alignment of buttons, things, components is my nightmare". The page now spaces its
+   blocks with --gap-2..--gap-5 only, and every button and field on it is one height, so no row has
+   a 24px button beside a 30px one. */
+
+/* Every button on this screen, including the ones DiffView and the chat draw, is the same height:
+   scoped by the page class, so the rest of the app keeps its own sizes. */
+.queue-page .button {
+  /* 32px: on the 8pt grid, and tall enough for a mouse target in a dense console. */
+  min-height: 2rem;
+  /* One type size for every button, so a small button's label never sits lower than its neighbour's. */
+  font-size: var(--size-sm);
+  /* Horizontal padding from the scale; vertical comes from the min-height and the centring flex. */
+  padding-block: 0;
+  /* A label never wraps to two lines and breaks the shared height. */
+  white-space: nowrap;
+}
+
+/* The toolbar's search and sort boxes share the buttons' height, so the toolbar has one bottom edge. */
+.queue-page .field__control {
+  /* Same 32px as the buttons. */
+  min-height: 2rem;
+}
+
+/* A visible ring on every control reached by keyboard. An outline, because the global ring is a
+   zero-specificity box-shadow that a button's own shadow can hide. */
+.queue-page .button:focus-visible {
+  /* The accent ring the cards use. */
+  outline: 2px solid var(--accent);
+  /* Off the button's border, so the ring is not lost against it. */
+  outline-offset: 2px;
+}
+
 .queue__bucket {
-  margin-top: var(--gap-6);
+  /* A section break: the largest step on this page's scale. */
+  margin-top: var(--gap-5);
 }
 
 .queue__bucket-heading {
@@ -19,7 +53,8 @@
 }
 
 .queue__bucket-note {
-  margin-top: var(--gap-1);
+  /* Under its heading by the scale's smallest block step. */
+  margin-top: var(--gap-2);
   max-width: 65ch;
   color: var(--text-secondary);
   font-size: var(--size-base);
@@ -29,15 +64,20 @@
 .queue__list {
   display: flex;
   flex-direction: column;
-  /* A wide gap between diff views so two consecutive applications never read
-     as one long document - the operator must be able to see where one decision
-     ends and the next begins. */
-  gap: var(--gap-7);
-  margin-top: var(--gap-5);
+  /* The page's largest step between cards so two consecutive applications never read as one long
+     document; each card's own frame does the rest (was --gap-7, off the page's scale). */
+  gap: var(--gap-5);
+  /* Under the bucket note by the in-section step. */
+  margin-top: var(--gap-4);
+  /* A <ul> of cards, not bullets. */
+  list-style: none;
+  /* The card's left edge sits on the page's column, not indented by the list default. */
+  padding: 0;
 }
 
 .queue__item {
-  padding: var(--gap-5);
+  /* The card inset: the same --gap-4 Bucket A's rows use, so both buckets' titles start on one column. */
+  padding: var(--gap-4);
   background: var(--sheet);
   border: 1px solid var(--rule);
   border-radius: var(--radius-sheet);
@@ -47,69 +87,119 @@
 /* --- Bucket A ---------------------------------------------------------- */
 
 .queue__clean-list {
+  /* Rows stacked; each row lays out its own head, chips and detail. */
   display: flex;
   flex-direction: column;
+  /* Same in-section step as Bucket B's list, then the same step down to the Approve-all button. */
   margin: var(--gap-4) 0;
+  /* A <ul> of rows: no bullets, no indent, so the frame sits on the page's column. */
+  list-style: none;
+  padding: 0;
+  /* One framed list with hairlines: the deliberately lighter weight of the verified bucket. */
   background: var(--sheet);
   border: 1px solid var(--rule);
   border-radius: var(--radius-sheet);
 }
 
 .queue__clean-row {
+  /* Head, chips and any opened detail stack top to bottom, full width. */
   display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--gap-3);
-  padding: var(--gap-3) var(--gap-4);
+  flex-direction: column;
+  /* The same inset as a Bucket B card, so titles and toolbars line up across the two buckets. */
+  padding: var(--gap-4);
   /* Hairline between rows, and none after the last */
   border-bottom: 1px solid var(--rule);
+  /* Only the hover wash moves. */
   transition: background-color 100ms ease;
 }
 
+/* The resting wash says the row is a thing you can open. */
 .queue__clean-row:hover {
   background: var(--surface-hover);
 }
 
+/* The list frame already closes the last row. */
 .queue__clean-row:last-child {
   border-bottom: none;
 }
 
-/* An openable row stacks its line above whatever it expands to, instead of laying
-   the expanded diff beside the job title. */
-.queue__clean-row--openable {
-  /* Column, so the detail sits under the line. */
-  flex-direction: column;
-  align-items: stretch;
+/* --- Row head: one shape in both buckets (2026-11-07) -------------------- */
+
+/* Who and where on the left, the row's one toolbar on the right. A two-column grid, not a
+   space-between flex, so the toolbar keeps one right edge whatever the title's length. */
+.queue__row {
+  /* The title column takes the spare width; the toolbar column is only as wide as its buttons. */
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  /* The toolbar centres on the two-line identity block, not on its first line. */
+  align-items: center;
+  /* Between the identity and the toolbar. */
+  gap: var(--gap-4);
 }
 
-/* The original one-line layout, now inside the openable row. */
-.queue__clean-line {
-  /* Title left, badges and buttons right, wrapping when narrow. */
+/* The title over the meta line, tight, because they are one fact: this job. */
+.queue__row-id {
+  /* Lets a long title wrap inside the grid track instead of widening the row. */
+  min-width: 0;
+}
+
+/* The job title. Chrome type (Teja's spec, 2026-11-07): the resume preview is the page's one
+   paper-font element, so the row reads as console and the document stands out against it. */
+.queue__row-title {
+  /* The card-header step, between body and section header. */
+  font-size: var(--size-card-head);
+  /* Weight carries the hierarchy, not colour. */
+  font-weight: 600;
+  /* Body ink. */
+  color: var(--text-primary);
+  /* Paragraph margins off; the row's gaps do the spacing. */
+  margin: 0;
+}
+
+/* Company · location, and Bucket A's audit badge, on one baseline under the title. */
+.queue__row-meta {
+  /* A wrapping row, so the badge drops under the company on a phone instead of overflowing. */
   display: flex;
   flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--gap-3);
+  /* Baseline, so the badge's smaller text sits on the company's line. */
+  align-items: baseline;
+  /* The badge clear of the location text. */
+  gap: var(--gap-2);
+  /* Secondary: it qualifies the title. */
+  color: var(--text-secondary);
+  font-size: var(--size-sm);
+  /* Under the title by the micro step (4px), on the 4pt grid. */
+  margin: var(--gap-1) 0 0;
 }
 
-/* An expanded diff or preview inside a clean row. */
-.queue__clean-detail {
-  /* Separated from the line it belongs to, still inside the row's hairlines. */
-  margin-top: var(--gap-3);
+/* The three toggles. One group, one gap, so every row's toolbar is the same object. */
+.queue__row-tools {
+  /* Side by side... */
+  display: flex;
+  /* ...wrapping on a phone rather than pushing the page sideways. */
+  flex-wrap: wrap;
+  /* Right-aligned when they wrap, so the column's right edge holds. */
+  justify-content: flex-end;
+  /* The tight in-group step. */
+  gap: var(--gap-2);
 }
 
-/* Bucket B's preview toggle, under its always-open diff. */
-.queue__preview-toggle {
-  /* Clear of the diff's own approve/reject controls. */
+/* A row's opened resume or review, under the chips. */
+.queue__detail {
+  /* The in-card block step. */
   margin-top: var(--gap-4);
 }
 
-.queue__clean-job {
-  /* Serif: this is the job the resume was written for, so it belongs to the
-     document side of the paper/machine split rather than to the chrome. */
-  font-family: var(--font-paper);
-  font-size: var(--size-base);
+/* On a narrow card the toolbar moves under the title, left-aligned with it, instead of squeezing it. */
+@media (max-width: 40rem) {
+  .queue__row {
+    /* One column: identity, then toolbar. */
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .queue__row-tools {
+    /* Left edge shared with the title above. */
+    justify-content: flex-start;
+  }
 }
 
 /* --- Empty state ------------------------------------------------------- */
@@ -118,7 +208,7 @@
    rather than a grey placeholder, and no illustration: it is a statement that
    the work is done. */
 .queue__empty {
-  margin-top: var(--gap-6);
+  margin-top: var(--gap-5);
   padding: var(--gap-5);
   max-width: 52ch;
   background: var(--sheet);
@@ -137,7 +227,7 @@
    on three channels at once, not just hue, because a status that relies on
    colour alone is the thing tokens.css forbids. */
 .queue__failed {
-  margin-top: var(--gap-6);
+  margin-top: var(--gap-5);
   padding: var(--gap-5);
   max-width: 52ch;
   background: color-mix(in oklab, var(--fabricated) 8%, var(--sheet));
@@ -164,7 +254,7 @@
    because offering one would imply this screen had checked something. */
 
 .queue__refused {
-  margin-bottom: var(--gap-6);
+  margin-bottom: var(--gap-5);
   padding: var(--gap-4) var(--gap-5);
   /* The alarm hue, matching the failed-read branch above — both mean "this
      console cannot tell you what you need to know", which is one meaning. */
@@ -421,9 +511,9 @@
   font-size: var(--size-base);
 }
 
-/* --- Row chips: fit, ATS score, deadline, queued-at (2026-11-04) -------- */
+/* --- Row chips: fit, ATS score, pay-band warning (2026-11-04; queued-at dropped 2026-11-07) -- */
 
-/* The four tag-pills under each queue row's line. Wraps, so at phone width they fold onto a second
+/* The tag-pills under each queue row's head. Wraps, so at phone width they fold onto a second
    line instead of widening the page. */
 .queue__row-chips {
   /* A row of pills... */
@@ -443,48 +533,74 @@
   text-transform: none;
 }
 
+/* The "Pay band UK/US only" warning (finding N2). No new colour: a stronger edge, primary ink and weight
+   set it apart from the two score chips, and its words say what is wrong. */
+.queue__row-chip--warn {
+  /* The strong rule the controls use, against the hairline of the score chips. */
+  border-color: var(--rule-strong);
+  /* Full-strength ink, not the secondary grey of a fact. */
+  color: var(--text-primary);
+  /* Weight, the colour-free channel. */
+  font-weight: 600;
+}
+
 /* SPLIT VIEW (2026-11-06). A plain block while no chat is open, so the page is unchanged until one is;
    the queue column needs minmax(0, 1fr) or a wide diff would push the dock off screen. */
 .queue__split--docked {
   display: grid;
-  /* The dock's width is the chat's reading measure; the queue keeps everything else. */
-  grid-template-columns: minmax(0, 1fr) 26rem;
+  /* The dock narrows with the window (2026-11-07): at 1280 a fixed 26rem left the cards ~540px, too narrow
+     for the resume. 26vw holds the chat's reading measure between 20rem and 26rem. */
+  grid-template-columns: minmax(0, 1fr) clamp(20rem, 26vw, 26rem);
   /* Top-aligned, or the grid would stretch the dock to the queue's full height. */
   align-items: start;
+  /* The page's section step between the queue and the dock. */
   gap: var(--gap-5);
 }
 
 /* The dock follows the operator down a long queue, and scrolls inside itself when the chat is longer
    than the screen, so the chat never leaves view while the resume beside it is read. */
 .queue__dock {
+  /* Stays in view while the queue scrolls. */
   position: sticky;
-  top: var(--gap-3);
-  max-height: calc(100vh - 2 * var(--gap-3));
+  /* Clear of the window's top edge by the in-section step. */
+  top: var(--gap-4);
+  /* Never taller than the window, so its bottom is always reachable. */
+  max-height: calc(100vh - 2 * var(--gap-4));
+  /* The chat scrolls inside the dock, not the page. */
   overflow-y: auto;
   /* The same panel surface and rule as the chat's own box, so the dock reads as one thing. */
   background: var(--panel);
   border: 1px solid var(--rule);
-  border-radius: var(--radius-md, 8px);
-  padding: var(--gap-3);
+  /* The card corner every panel on this page uses (was an undefined --radius-md). */
+  border-radius: var(--radius-sheet);
+  /* The card inset, so the dock's content starts on the same inset as the cards beside it. */
+  padding: var(--gap-4);
 }
 
 /* Names the job whose resume this chat edits. */
 .queue__dock-title {
+  /* Body size: a label for the panel, quieter than the bucket headings. */
   font-size: var(--size-base);
+  /* Section weight, so it reads as the dock's heading. */
   font-weight: var(--font-weight-section-header);
+  /* Body ink. */
   color: var(--text-primary);
-  margin-bottom: var(--gap-2);
+  /* Clear of the chat below by the tight step. */
+  margin: 0 0 var(--gap-3);
 }
 
-/* On a narrow screen there is no room beside the queue: the dock stacks above it instead. */
-@media (max-width: 60rem) {
+/* Below ~1100px there is no room beside the cards (Teja's spec, 2026-11-07): the dock stacks UNDER the
+   queue and pins to the bottom of the window, so the chat stays in view while the card above it is read. */
+@media (max-width: 68.75rem) {
   .queue__split--docked {
+    /* One column: the queue, then the dock. */
     grid-template-columns: minmax(0, 1fr);
   }
   .queue__dock {
-    position: static;
-    max-height: none;
-    /* First in reading order: the chat comes before the long queue it belongs to. */
-    order: -1;
+    /* Sticks to the window's bottom edge while the queue scrolls past above it. */
+    top: auto;
+    bottom: var(--gap-2);
+    /* Half the window at most, so the card it edits stays readable above it. */
+    max-height: 45vh;
   }
 }

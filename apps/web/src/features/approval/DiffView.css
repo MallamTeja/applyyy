@@ -4,7 +4,11 @@
  * of one control. They differ in hue, in weight, in whether they carry a
  * border, in type size, and in whether they sit on the paper or on the single
  * dark surface in the app. A reviewer glancing at the screen from two feet
- * away should be able to tell the two apart without reading. */
+ * away should be able to tell the two apart without reading.
+ *
+ * Slimmed 2026-11-07 with the card (DiffView.tsx header): the comparison grid, the unified view, the
+ * coverage track and keyword chips, the posting panel and every hand-edit control's rules went with
+ * the markup that used them. */
 
 .diff {
   display: flex;
@@ -18,8 +22,7 @@
 
 .diff__header {
   display: flex;
-  /* Identity left, coverage right. Wraps rather than compressing the coverage
-     bar into unreadability on a narrow window. */
+  /* Identity left, the match figure right. Wraps rather than crushing either on a narrow window. */
   flex-wrap: wrap;
   justify-content: space-between;
   align-items: flex-end;
@@ -30,43 +33,17 @@
   border-bottom: 1px solid var(--rule);
 }
 
-.diff__title-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--gap-3);
-}
-
-.diff__title {
-  /* Section rank (an h2 nested under the queue's h2 buckets), not page-title rank:
-     at --size-lg it rendered as a second h1 inside an 18px section (fixed 2026-10-23). */
-  font-size: var(--size-md);
-  font-weight: var(--font-weight-section-header);
-  line-height: var(--line-height-section-header);
-  color: var(--text-primary);
-  letter-spacing: -0.028em;
-}
-
-.diff__badges {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--gap-2);
-  flex-wrap: wrap;
-}
-
-.diff__meta {
-  margin-top: var(--gap-1);
-  color: var(--text-secondary);
-  font-size: var(--size-sm);
-  line-height: 1.4;
-}
-
+/* The one facts line (D3, 2026-11-07): audit badge, work type, salary, posting link, pay-band chip.
+   The first thing in the card since the title <h2> left it, so no top margin of its own. */
 .diff__tags {
+  /* One wrapping row of facts. */
   display: flex;
+  /* Pills, badge and link centred on one line. */
   align-items: center;
+  /* Room between facts. */
   gap: var(--gap-2);
+  /* Wraps at phone width instead of overflowing. */
   flex-wrap: wrap;
-  margin-top: var(--gap-2);
 }
 
 .tag-pill {
@@ -83,12 +60,6 @@
   letter-spacing: 0.01em;
 }
 
-.tag-pill--type {
-  background: var(--sheet);
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
 .tag-pill--arrangement {
   background: var(--panel);
   color: var(--text-primary);
@@ -100,14 +71,33 @@
   color: var(--traced-strong);
 }
 
-.tag-pill--location {
-  color: var(--text-secondary);
+/* N2: the pay-band warning. Signal (bronze), the app's "needs a look" colour: a fact about the job,
+   never the fabrication oxblood, which is reserved for the resume's own claims. */
+.tag-pill--signal {
+  /* The signal wash, which already flips per theme. */
+  background: var(--signal-wash);
+  /* A solid signal edge, so the chip survives greyscale against the neutral pills. */
+  border-color: var(--signal);
+  /* Strong signal ink, readable on the wash in both themes. */
+  color: var(--signal-strong);
+  /* The sentence is a fixed literal ("Pay band UK/US only"); capitalize would print "Uk/Us". */
+  text-transform: none;
+}
+
+/* "Open the original posting": a plain link in the facts line, not a button competing with Approve. */
+.diff__posting-link {
+  /* Pill-sized text, so the line reads as one row of facts. */
+  font-size: var(--size-xs);
+  /* A touch of weight: it is the one way out to the job itself. */
+  font-weight: 550;
+  /* The app's link colour. */
+  color: var(--accent);
 }
 
 /* --- Coverage --------------------------------------------------------- */
 
 .coverage {
-  /* Fixed enough to keep the bar a comparable length between rows, so the
+  /* Fixed enough to keep the figure in the same place between rows, so the
      operator can compare coverage across applications by eye. */
   flex: 0 1 20rem;
 }
@@ -117,72 +107,12 @@
   font-weight: 500;
 }
 
-.coverage__track {
-  display: flex;
-  margin-top: var(--gap-2);
-  height: 0.5rem;
-  /* The unfilled remainder is the panel colour, so missing coverage reads as
-     absence rather than as a third semantic state. */
-  background: var(--panel);
-  border: 1px solid var(--rule);
-  /* Square: this is a measurement, and a rounded meter reads as decoration. */
-  border-radius: 0;
-  overflow: hidden;
-}
-
-.coverage__fill {
-  /* Width comes from an inline style because it is data, not design. */
-  display: block;
-  height: 100%;
-}
-
-/* Earned coverage. Same forest as the traced marker, because it is the same
-   fact: this is supported by the master profile. */
-.coverage__fill--honest {
-  background: var(--traced);
-}
-
-/* Coverage bought with fabrication. Oxblood, and hatched so the distinction
-   survives greyscale printing and colour-blind vision - the difference between
-   these two segments is the most consequential thing in the bar. */
-.coverage__fill--purchased {
-  background: repeating-linear-gradient(
-    45deg,
-    var(--fabricated) 0 3px,
-    var(--fabricated-strong) 3px 6px
-  );
-}
-
-.coverage__legend {
-  display: flex;
-  flex-wrap: wrap;
-  /* A real gap rather than punctuation between the two figures. */
-  gap: var(--gap-3);
-  margin-top: var(--gap-2);
-  font-size: var(--size-xs);
-}
-
-.coverage__stat {
-  color: var(--ink-muted);
-}
-
-.coverage__stat--honest {
-  color: var(--traced);
-  font-weight: 500;
-}
-
-.coverage__stat--purchased {
-  color: var(--fabricated-strong);
-  font-weight: 500;
-}
-
-/* The unmeasured state: muted body text, no track and no badge colour, because there is no
-   result to colour. --ink-muted is the same token the neutral legend stat uses, so it follows
-   both themes without a [data-theme] rule. */
+/* The unmeasured state: muted body text, no badge colour, because there is no result to colour.
+   --ink-muted follows both themes without a [data-theme] rule. */
 .coverage__unmeasured {
-  /* Same spacing the track would have taken, so the header does not jump between rows. */
+  /* Separated from the heading above it. */
   margin-top: var(--gap-2);
-  /* Legend size: it replaces the legend, not the heading. */
+  /* Small: it qualifies the heading, it is not one. */
   font-size: var(--size-xs);
   /* Neutral: a missing measurement is neither earned (traced) nor fabricated. */
   color: var(--ink-muted);
@@ -210,125 +140,6 @@
   border: 1px solid var(--traced-edge);
 }
 
-.coverage__keywords {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--gap-1);
-  margin-top: var(--gap-3);
-}
-
-.kw-chip {
-  font-size: var(--size-xs);
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  font-family: var(--font-machine);
-  font-weight: 500;
-}
-
-.kw-chip--matched {
-  background: var(--traced-wash);
-  color: var(--traced);
-  border: 1px solid var(--traced);
-}
-
-.kw-chip--flagged {
-  background: var(--fabricated-wash);
-  color: var(--fabricated-strong);
-  border: 1px solid var(--fabricated);
-}
-
-.kw-chip--missing {
-  background: var(--panel);
-  color: var(--ink-muted);
-  border: 1px dashed var(--rule);
-}
-
-/* T3: a missing keyword the master can supply. Same missing look (it IS still missing until the
-   operator adds it), plus the signals that say "this one is a control". */
-.kw-chip--addable {
-  /* A button inherits no chip font by default; the chip's own font keeps the row uniform. */
-  font: inherit;
-  /* Re-applied after font: inherit, so it matches the other chips' size and face. */
-  font-size: var(--size-xs);
-  /* Same machine face as the other chips. */
-  font-family: var(--font-machine);
-  /* The pointer is the mouse user's first hint that this chip, unlike its neighbours, acts. */
-  cursor: pointer;
-}
-
-/* Hover/focus: the accent border, the colour of "you can act here" on this screen. The global
-   focus ring (base.css) still draws; this only adds to it. */
-.kw-chip--addable:hover:not(:disabled),
-.kw-chip--addable:focus-visible {
-  /* Solid accent replaces the dashed rule, so the change survives greyscale. */
-  border: 1px solid var(--accent);
-  /* Accent ink, readable in both themes. */
-  color: var(--accent-strong);
-}
-
-/* The action half of an addable chip ("＋ Add SQL"), drawn as a small accent pill so the chip
-   reads as a button at rest, not only on hover; the "✕ SQL" half keeps the plain missing look. */
-.kw-chip__add {
-  /* Pill shape on the inline text, without breaking the chip's single line. */
-  display: inline-block;
-  /* Tight padding: a pill inside a chip, not a second chip. */
-  padding: 0 5px;
-  /* Separated from the keyword it acts on. */
-  margin-left: 2px;
-  /* Fully rounded: the shape that says "press me" on this screen. */
-  border-radius: 999px;
-  /* Accent tokens already flip per theme, so no theme-specific rule is needed. */
-  border: 1px solid var(--accent);
-  /* Soft accent fill, the same wash the operator's own edits use. */
-  background: var(--accent-subtle);
-  /* Strong accent ink, readable on the subtle wash in both themes. */
-  color: var(--accent-strong);
-  /* A touch heavier than the keyword, so the verb is what the eye lands on. */
-  font-weight: 600;
-}
-
-/* Mid-save the chip waits like every other control. */
-.kw-chip--addable:disabled {
-  /* The cursor says so before the click does. */
-  cursor: not-allowed;
-  /* Visibly inert. */
-  opacity: 0.6;
-}
-
-/* The one link out for keywords the master lacks. */
-.coverage__master-link {
-  /* Separated from the chips it refers to. */
-  margin-top: var(--gap-2);
-  /* Small: a pointer, not a call to action competing with the score. */
-  font-size: var(--size-xs);
-}
-
-/* The vouch-and-add question and its Undo line: one row of text and controls under the chips. */
-.coverage__attest,
-/* ...and the Undo line after a landed add, which shares the same one-row layout. */
-.coverage__attest-done {
-  /* Separated from the chips it refers to, like the master link. */
-  margin-top: var(--gap-2);
-  /* Text, select and buttons on one line, wrapping on a narrow screen instead of overflowing. */
-  display: flex;
-  /* Wraps rather than forcing horizontal scroll at phone width. */
-  flex-wrap: wrap;
-  /* Controls line up with the text's middle. */
-  align-items: center;
-  /* Breathing room between the question and its controls. */
-  gap: var(--gap-2);
-  /* Same reading size as the other notes under the chips. */
-  font-size: var(--size-xs);
-}
-
-/* The question takes the full first row, so the controls sit together beneath it. */
-.coverage__attest-question {
-  /* A whole line to itself: the attestation must be read before the button. */
-  flex-basis: 100%;
-  /* The paragraph's default margin would double the gap above. */
-  margin: 0;
-}
-
 /* --- The fabrication alert -------------------------------------------- */
 
 /* The ONLY dark surface in the application. Its scarcity is the signal: a dark
@@ -351,6 +162,9 @@
   font-weight: 600;
   line-height: 1.2;
   letter-spacing: -0.015em;
+  /* The band's light ink. base.css's h3 colour otherwise wins over the band's inherited colour, which
+     printed this heading dark-on-dark (2026-11-07 audit, both themes). */
+  color: inherit;
 }
 
 .alarm__consequence {
@@ -383,7 +197,7 @@
 .alarm__claim {
   display: flex;
   flex-wrap: wrap;
-  /* Claim text and its two choices on one line where there is room, so each
+  /* Claim text and its one control on one line where there is room, so each
      claim reads as one decision rather than a form section. */
   align-items: center;
   justify-content: space-between;
@@ -403,31 +217,56 @@
   font-weight: 600;
 }
 
-.alarm__choices {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--gap-4);
+/* "Keep it, I can defend it" (D1, 2026-11-07): the one control per claim. On the dark band, so it
+   takes the band's light ink rather than the paper button's dark one. Scoped under .alarm so these rules
+   outrank base.css's .button fill (equal specificity lost on load order: a white box, 2026-11-07 audit). */
+.alarm .alarm__keep {
+  /* Transparent, so the raised claim surface shows through: the control is quieter than the claim. */
+  background: transparent;
+  /* The band's own light ink. */
+  color: inherit;
+  /* A light edge that reads on the dark ground in both themes. */
+  border-color: var(--alarm-ink-muted);
 }
 
-.alarm__choice {
-  display: flex;
-  align-items: center;
-  gap: var(--gap-2);
-  font-size: var(--size-sm);
-  /* The whole label is the hit target, which matters when the operator is
-     working through several of these quickly. */
-  cursor: pointer;
+/* Hover on the band: a hair of lift, never the paper panel colour, which would flash white. */
+.alarm .alarm__keep:hover:not(:disabled) {
+  /* The raised tone the claim already uses, so hover stays inside the band's palette. */
+  background: var(--alarm-raised);
+  /* Brighter edge, so the hover survives greyscale. */
+  border-color: var(--ink-inverse);
+  /* Keeps the light ink against the raised tone. */
+  color: inherit;
 }
 
-/* The native radio in the OS accent colour would be the one element on this
-   band not under the design system, so tint it to the alarm's own palette. */
-.alarm__choice input[type='radio'] {
-  accent-color: var(--fabricated);
+/* Kept: pressed, and visibly done. base.css's :disabled would grey it out like an unavailable control;
+   a kept claim is a recorded answer, so it keeps the light ink with a solid edge instead. */
+.alarm .alarm__keep[aria-pressed='true'] {
+  /* The band's raised tone: filled means "answered". */
+  background: var(--alarm-raised);
+  /* Light ink, overriding the disabled grey. */
+  color: var(--ink-inverse);
+  /* The fabricated edge: this claim still traces to nothing, the operator just stands behind it. */
+  border-color: var(--fabricated);
+  /* Not a pointer: there is nothing more to do. */
+  cursor: default;
+}
+
+/* Briefly disabled while a save runs: base.css's :disabled paints a white paper fill with grey ink, which
+   on the dark band read as an empty white box (2026-11-07 audit). Dimmed band ink instead. */
+.alarm .alarm__keep:disabled:not([aria-pressed='true']) {
+  /* The band shows through, as when enabled. */
+  background: transparent;
+  /* Dimmer than enabled, still legible on the dark ground. */
+  color: var(--alarm-ink-muted);
+  /* The same light edge as enabled. */
+  border-color: var(--alarm-ink-muted);
 }
 
 /* Focus rings on the dark band need the inverse ink, because the forest green
    default from base.css is close to invisible against --alarm-ground. */
-.alarm__choice input[type='radio']:focus-visible {
+.alarm .alarm__keep:focus-visible {
+  /* The band's light ink as the ring colour. */
   outline-color: var(--ink-inverse);
 }
 
@@ -444,29 +283,47 @@
   font-size: var(--size-sm);
 }
 
-/* --- The comparison grid --------------------------------------------- */
+/* --- Changes by AI (D2, 2026-11-07) ------------------------------------ */
 
-.diff__panes {
-  display: grid;
-  /* Equal columns so neither side looks authoritative by being wider. */
-  grid-template-columns: 1fr 1fr;
-  /* Column gap wide enough to read as a division between two documents; row
-     gap tight so a line and its provenance footer stay one unit. */
-  column-gap: var(--gap-5);
-  row-gap: var(--gap-4);
-  align-items: start;
+/* The collapsed list of changed lines that replaced the side-by-side comparison. */
+.diff__changes {
+  /* A quiet panel: reference material under the verdicts, not a verdict itself. */
+  background: var(--panel);
+  /* The same hairline every sheet on this screen uses. */
+  border: 1px solid var(--rule);
+  /* Sheet corners, like the rows inside it. */
+  border-radius: var(--radius-sheet);
+  /* Room around the summary and the list. */
+  padding: var(--gap-3) var(--gap-4);
 }
 
-.diff__pane-head {
-  padding-bottom: var(--gap-2);
-  /* The strong rule, because master-versus-tailored is a real semantic
-     division and must not look like a table row separator. */
-  border-bottom: 2px solid var(--rule-strong);
+/* The disclosure's label: "Changes by AI (N)". */
+.diff__changes-summary {
+  /* A pointer: the summary is a native toggle. */
+  cursor: pointer;
+  /* Small heading weight, like the other block heads on the card. */
   font-size: var(--size-sm);
+  /* Weight carries the hierarchy, not colour. */
   font-weight: 600;
 }
 
-/* Each cell is a sheet: this is document content, so it sits on paper. */
+/* One row per changed line, stacked. */
+.diff__changes-list {
+  /* Each row is a sheet; no bullets needed. */
+  list-style: none;
+  /* Under the summary. */
+  margin: var(--gap-3) 0 0;
+  /* No UA indent. */
+  padding: 0;
+  /* Stacked rows. */
+  display: flex;
+  /* One under another. */
+  flex-direction: column;
+  /* Room between rows so two Resets are not mis-clicked. */
+  gap: var(--gap-3);
+}
+
+/* Each change is a sheet: this is document content, so it sits on paper. */
 .line {
   padding: var(--gap-4);
   background: var(--sheet);
@@ -474,29 +331,48 @@
   border-radius: var(--radius-sheet);
 }
 
-/* The master pane is the reference, not the subject of review, so it recedes
-   slightly. One notch of hierarchy, not a greyed-out panel. */
-.line--master {
-  background: color-mix(in srgb, var(--sheet) 92%, var(--ground));
+/* A change row's own layout: its parts stacked, Reset left-aligned under them. */
+.diff__change {
+  /* Stacked parts. */
+  display: flex;
+  /* One under another. */
+  flex-direction: column;
+  /* Tight: the parts of one change read as one unit. */
+  gap: var(--gap-1);
+  /* The Reset button keeps its natural width instead of stretching. */
+  align-items: flex-start;
 }
 
-/* Per-cell side label. Hidden on wide screens - the column headings already
-   say which side is which, and repeating it on every sheet would be the sort
-   of redundant typographic label that clutters a dense screen. It exists only
-   for the stacked layout below. */
-.line__side-label {
-  display: none;
-}
-
-/* Stands in for a master line that does not exist, because a tailored summary
-   draws on several master nodes rather than rewording one. Sans and muted so it
-   reads as the console explaining itself rather than as resume content - the
-   one place in the master pane that is not the document. */
-.line__no-master {
-  max-width: 46ch;
-  color: var(--ink-muted);
+/* "Experience · Acme": where in the resume the change sits. */
+.diff__change-where {
+  /* Small: orientation, not content. */
   font-size: var(--size-xs);
-  font-style: italic;
+  /* Weight separates it from the resume words below. */
+  font-weight: 600;
+  /* Muted: a label, not the subject. */
+  color: var(--ink-muted);
+}
+
+/* The tailor's old words: muted, so the new text above stays the subject. */
+.diff__change-old {
+  /* Muted ink: these words will not be submitted. */
+  color: var(--ink-muted);
+  /* A step smaller than the new text. */
+  font-size: var(--size-sm);
+}
+
+/* "Was:", in the UI face, so it reads as a label and not as part of the old words. */
+.diff__change-old-label {
+  /* The machine face this app uses for labels about the document. */
+  font-family: var(--font-machine);
+  /* Small label size. */
+  font-size: var(--size-xs);
+}
+
+/* Reset sits under the provenance it would undo. */
+.diff__change-reset {
+  /* Separated from the provenance line above. */
+  margin-top: var(--gap-1);
 }
 
 /* Resume text. Serif because the artefact under review is a document. */
@@ -548,6 +424,17 @@
   border-bottom: 3px solid var(--fabricated);
 }
 
+/* The edit's wording: an accent wash with a dashed underline, so it survives greyscale. Accent,
+   never forest (R1 - nothing checked it against the master), never oxblood (it is not a finding). */
+.run--edited {
+  /* Accent, the colour of "you did this" elsewhere on the screen. */
+  background: var(--accent-subtle);
+  /* Same hair of padding as the traced wash, so lines do not shift. */
+  padding: 0 0.1em;
+  /* Dashed: a second, non-colour signal that this is not master-traced. */
+  border-bottom: 1px dashed var(--accent);
+}
+
 /* --- Provenance footers ---------------------------------------------- */
 
 .line__provenance {
@@ -555,11 +442,6 @@
   padding-top: var(--gap-2);
   border-top: 1px dotted var(--rule);
   font-size: var(--size-xs);
-}
-
-/* Quiet: confirms provenance exists. Lowercase, small, forest, unemphasised. */
-.line__provenance--traced {
-  color: var(--traced);
 }
 
 /* Loud: names the untraceable claims in words, so the finding survives a
@@ -570,280 +452,19 @@
   border-top-color: var(--fabricated);
 }
 
-/* --- View Mode Toggle ------------------------------------------------ */
-
-.diff__toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--gap-3);
-  padding: var(--gap-2) 0;
-}
-
-.diff__view-toggle {
-  display: inline-flex;
-  align-items: center;
-  background: var(--panel);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-control);
-  padding: 2px;
-  gap: 2px;
-}
-
-.diff__view-btn {
-  background: none;
-  border: none;
-  padding: 4px 10px;
-  font-size: var(--size-xs);
-  font-weight: 500;
-  color: var(--text-secondary);
-  border-radius: calc(var(--radius-control) - 2px);
-  cursor: pointer;
-  transition: background-color 100ms ease, color 100ms ease;
-}
-
-.diff__view-btn--active {
-  background: var(--sheet);
-  color: var(--text-primary);
-  font-weight: 600;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-}
-
-/* --- Unified View Mode ------------------------------------------------ */
-
-.diff__panes--unified {
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-4);
-}
-
-.unified-line {
-  padding: var(--gap-3) var(--gap-4);
-  background: var(--sheet);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-sheet);
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-2);
-}
-
-.unified-line__meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: var(--size-xs);
-  color: var(--text-muted);
-}
-
-/* --- Actions (Sticky Floating Bar) ----------------------------------- */
-
-/* Item 3 (2026-10-08): RESERVE the bar's height for scroll-into-view. A render check found that
-   focusing a line's Edit button while the sticky bar covered it neither scrolled nor revealed it:
-   the browser counts "behind a sticky bar" as visible (WCAG 2.4.11, Focus Not Obscured).
-   scroll-padding on the scroller shrinks the region focus scrolling treats as visible. Scoped with
-   :has() so pages without the bar keep their normal scrolling. Bar measured at 57px tall + gap. */
-html:has(.diff__actions) {
-  /* About the bar's height plus its bottom offset, with a little margin. */
-  scroll-padding-bottom: 6rem;
-}
-
-.diff__actions {
-  position: sticky;
-  bottom: var(--gap-3);
-  z-index: 80;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--gap-3);
-  padding: var(--gap-3) var(--gap-5);
-  /* OPAQUE (item 3, 2026-10-08). A 0.88-alpha light-dark() wash with a blur used to override this,
-     so diff text showed through as unreadable ghost lines behind the buttons. The bar sits on top
-     of the words being approved; nothing should show through it. */
-  background: var(--sheet);
-  border: 1px solid var(--rule-strong);
-  border-radius: var(--radius-sheet);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12), 0 1px 3px rgba(0, 0, 0, 0.08);
-}
-
-.diff__actions-group {
-  display: flex;
-  align-items: center;
-  gap: var(--gap-3);
-  flex-wrap: wrap;
-}
-
-/* Explains the disabled Approve button. */
-.diff__gate-note {
-  color: var(--fabricated-strong);
-  font-size: var(--size-sm);
-  font-weight: 500;
-}
-
-/* --- Narrow screens --------------------------------------------------- */
-
-@media (max-width: 62rem) {
-  /* At phone width the buttons wrap and the bar measured 149px tall, so reserve more. */
-  html:has(.diff__actions) {
-    /* Bar height plus offset, with margin. */
-    scroll-padding-bottom: 11rem;
-  }
-
-  .diff__panes {
-    grid-template-columns: 1fr;
-  }
-
-  .diff__pane-head {
-    display: none;
-  }
-
-  .line__side-label {
-    display: block;
-    margin-bottom: var(--gap-2);
-    padding-bottom: var(--gap-1);
-    border-bottom: 1px solid var(--rule);
-    font-family: var(--font-machine);
-    font-size: var(--size-xs);
-    font-weight: 600;
-    color: var(--ink-muted);
-  }
-}
-
-/* --- Inline Tailored Resume Editing ----------------------------------- */
-
-.line__edit-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  font-size: var(--size-xs);
-  padding: 0.15rem 0.45rem;
-  border-radius: var(--radius-control);
-  background: var(--panel);
-  border: 1px solid var(--rule);
-  color: var(--text-secondary);
-  cursor: pointer;
-  margin-left: auto;
-  transition: all 120ms ease;
-}
-
-.line__edit-trigger:hover {
-  background: var(--accent);
-  /* --ink-on-fill flips dark when --accent turns light in dark mode; fixed white failed contrast there. */
-  color: var(--ink-on-fill);
-  border-color: var(--accent);
-}
-
-.line__edit-box {
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-2);
-  margin-top: var(--gap-2);
-}
-
-.line__edit-textarea {
-  width: 100%;
-  min-height: 80px;
-  padding: var(--gap-3);
-  font-family: var(--font-paper);
-  font-size: var(--size-base);
-  line-height: 1.6;
-  /* --sheet because this is PAPER — the line above sets --font-paper, and an
-     editor for resume prose belongs on the document surface, not on chrome.
-     Resolved to `transparent` until now, so the textarea had no fill at all. */
-  background: var(--sheet);
-  color: var(--text-primary);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sheet);
-  outline: none;
-  box-shadow: 0 0 0 2px var(--accent-subtle);
-  resize: vertical;
-}
-
-.line__edit-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--gap-2);
-}
-
-.line__edit-save {
-  padding: 0.25rem 0.65rem;
-  font-size: var(--size-sm);
-  font-weight: 550;
-  background: var(--accent);
-  /* --ink-on-fill flips dark when --accent turns light in dark mode; fixed white failed contrast there. */
-  color: var(--ink-on-fill);
-  border: none;
-  border-radius: var(--radius-control);
-  cursor: pointer;
-}
-
-.line__edit-cancel {
-  padding: 0.25rem 0.65rem;
-  font-size: var(--size-sm);
-  background: transparent;
-  color: var(--text-secondary);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-control);
-  cursor: pointer;
-}
-
+/* "edited / added / moved by you": the accent of the edit's own wording. */
 .line__provenance--edited {
   color: var(--accent);
   font-weight: 550;
 }
 
-/* --- Saved operator edits (task 8, 2026-10-06) ------------------------
-   The operator's own wording is a THIRD language beside traced and fabricated: accent,
-   never forest (R1 - nothing checked it against the master), never oxblood (it is not a
-   finding). Semantic tokens only, so both themes follow without a [data-theme] rule. */
-
-/* Label row of the tailored pane; replaces an inline style so the layout lives in CSS. */
-.line__tailored-head {
-  /* Label left, controls right. */
-  display: flex;
-  /* Keeps the small buttons on the label's baseline. */
-  align-items: center;
-  /* Pushes the controls to the far edge. */
-  justify-content: space-between;
-  /* Room between the label and the controls on narrow panes. */
-  gap: var(--gap-2);
-}
-
-/* Edit and Reset side by side. */
-.line__controls {
-  /* A row of small buttons. */
-  display: inline-flex;
-  /* Separated so neither is mis-clicked. */
-  gap: var(--gap-1);
-}
-
-/* A save in flight locks every control; the cursor says so before the click does. */
-.line__edit-trigger:disabled,
-.line__edit-save:disabled,
-.line__edit-cancel:disabled {
-  /* Dimmed: visibly unavailable. */
-  opacity: 0.55;
-  /* The pointer would promise an action that will not happen. */
-  cursor: not-allowed;
-}
-
-/* The operator's wording: an accent wash with a dashed underline, so it survives greyscale. */
-.run--edited {
-  /* Accent, the colour of "you did this" elsewhere on the screen. */
-  background: var(--accent-subtle);
-  /* Same hair of padding as the traced wash, so lines do not shift. */
-  padding: 0 0.1em;
-  /* Dashed: a second, non-colour signal that this is not master-traced. */
-  border-bottom: 1px dashed var(--accent);
-}
-
-/* T3: the skills the operator added, one row each, under the skills line. */
+/* T3: the skills added to the line, one chip each, under the skills text. */
 .line__added-skills {
   /* A wrapping row of chips, not a bulleted list. */
   display: flex;
-  /* Long skill lists wrap rather than overflow the pane. */
+  /* Long skill lists wrap rather than overflow the row. */
   flex-wrap: wrap;
-  /* Separated so neither Remove is mis-clicked. */
+  /* Room between chips. */
   gap: var(--gap-1);
   /* Away from the skills text above. */
   margin: var(--gap-2) 0 0;
@@ -854,15 +475,15 @@ html:has(.diff__actions) {
 
 /* One added skill: the same accent treatment as an edited run, never the traced sage (R1). */
 .line__added-skill {
-  /* Name, tag and button on one line. */
+  /* Name and tag on one line. */
   display: inline-flex;
-  /* Vertically centred against the small button. */
+  /* Vertically centred. */
   align-items: center;
-  /* Breathing room between the three parts. */
+  /* Breathing room between the two parts. */
   gap: var(--gap-1);
-  /* Chip size, like the keyword chips above. */
+  /* Chip size. */
   font-size: var(--size-xs);
-  /* Same hair of padding as the keyword chips. */
+  /* A hair of padding inside the chip. */
   padding: 2px 6px;
   /* Chip corners. */
   border-radius: var(--radius-sm);
@@ -878,12 +499,6 @@ html:has(.diff__actions) {
   color: var(--accent-strong);
   /* Secondary to the skill name. */
   font-style: italic;
-}
-
-/* The Remove button sits inside the chip, so it drops the auto margin it has in the header. */
-.line__added-skill .line__edit-trigger {
-  /* Inline with the name, not pushed to the far edge. */
-  margin-left: 0;
 }
 
 /* A removed bullet: kept on screen, struck and muted, so Reset has something to point at. */
@@ -910,41 +525,19 @@ html:has(.diff__actions) {
   color: var(--ink-muted);
 }
 
-/* A failed save: the stored text stays above, and this says it did not change. */
-.line__edit-error,
-.alarm__error {
-  /* Separated from the text it refers to. */
+/* A refused Reset: the stored text stays above, and this says it did not change. */
+.line__edit-error {
+  /* Separated from the row it refers to. */
   margin-top: var(--gap-2);
   /* Readable, not a footnote: the PDF did not change and the operator must notice. */
   font-size: var(--size-xs);
   /* Weight carries it beyond colour alone. */
   font-weight: 600;
-  /* Error tone; the strong variant keeps contrast on the alarm band too. */
+  /* Error tone. */
   color: var(--fabricated-strong);
 }
 
-/* The alarm band is dark in both themes, so its error uses the band's own light ink. */
-.alarm__error {
-  /* Same ink as the rest of the band's text. */
-  color: inherit;
-}
-
-/* Quiet facts beside controls (the summary hint on the alarm band): information, not controls. */
-.line__edit-unavailable,
-.alarm__hint {
-  /* Small, beside the controls they stand in for. */
-  font-size: var(--size-xs);
-  /* Muted: information, not an action. */
-  color: var(--ink-muted);
-}
-
-/* The hint sits on the dark band, so it takes the band's ink. */
-.alarm__hint {
-  /* Inherits the band's light text, stays readable in both themes. */
-  color: inherit;
-  /* Still visibly secondary to the choices. */
-  opacity: 0.75;
-}
+/* --- Notes ------------------------------------------------------------- */
 
 /* Edits-only notice, D4 reason, cover-letter note: muted statements of fact. */
 .diff__edit-note {
@@ -954,377 +547,6 @@ html:has(.diff__actions) {
   font-size: var(--size-sm);
   /* Muted, because none of them is a verdict. */
   color: var(--ink-muted);
-}
-
-/* R6: the one sentence the operator must not miss before approving their own words. */
-.diff__own-wording {
-  /* Room above the buttons. */
-  margin-bottom: var(--gap-2);
-  /* Same size as the gate note it sits near. */
-  font-size: var(--size-sm);
-  /* Weight, not colour, so it reads as important without reading as an error. */
-  font-weight: 600;
-  /* Accent: this is about the operator's own action. */
-  color: var(--accent);
-}
-
-/* The held re-check (2026-11-05): findings the operator must read before the second click. */
-.diff__approve-hold {
-  /* Room above the buttons, like the line before it. */
-  margin-bottom: var(--gap-2);
-  /* Same size as the gate note. */
-  font-size: var(--size-sm);
-  /* The gate note's colour: these are unsupported claims, the same verdict that note speaks. */
-  color: var(--fabricated-strong);
-}
-
-/* Coverage from the operator's edits: accent, dotted, never forest (never "verified"). */
-.coverage__fill--edited {
-  /* Dotted pattern so it is distinct from both other segments in greyscale. */
-  background: repeating-linear-gradient(
-    90deg,
-    var(--accent) 0 4px,
-    var(--accent-subtle) 4px 6px
-  );
-}
-
-/* The legend's "from your edits" figure. */
-.coverage__stat--edited {
-  /* Same accent as its bar segment. */
-  color: var(--accent);
-  /* Same weight as the other two stated figures. */
-  font-weight: 500;
-}
-
-/* Keyword found only in text the operator wrote. */
-.kw-chip--edited {
-  /* Accent wash, matching the run marker. */
-  background: var(--accent-subtle);
-  /* Readable accent ink. */
-  color: var(--accent-strong);
-  /* Dashed, matching the run marker's underline. */
-  border: 1px dashed var(--accent);
-}
-
-
-/* --- The posting this resume was written for -----------------------------
-   ADDED 2026-09-17. The diff used to show the tailored resume and withhold the
-   job, so "is this claim honest about what they asked for" could not be checked
-   without leaving the page. This panel is deliberately QUIET: it is reference
-   material the operator consults, not a verdict competing with the fabrication
-   band, which must stay the loudest thing on the screen. */
-
-.job-posting {
-  /* --panel, one step below the sheet the diff sits on, so the posting reads as
-     the source material underneath rather than another finding on top. */
-  background: var(--panel);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-sheet);
-  padding: var(--gap-3) var(--gap-4);
-  /* Separated from the header above and the alert below; the alert supplies its
-     own top margin, so only the gap above is stated here. */
-  margin-top: var(--gap-4);
-}
-
-.job-posting__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  /* Wraps rather than crushing the link when the panel is narrow — the diff
-     stacks to one column under 62rem and this row goes with it. */
-  flex-wrap: wrap;
-  gap: var(--gap-2);
-}
-
-.job-posting__title {
-  /* Sized as a card header, not a section header: this sits INSIDE a diff card
-     and must not compete with the job title in the header above it. */
-  font-size: var(--size-card-head);
-  font-weight: 600;
-  color: var(--text-secondary);
-  margin: 0;
-}
-
-.job-posting__toggle {
-  margin-top: var(--gap-2);
-}
-
-.job-posting__body {
-  /* --font-paper: a job description is a DOCUMENT, not console chrome, and this
-     app's type system splits the two. It is also the text being read closely
-     against resume prose set in the same face, so matching them is what lets
-     the operator compare wording rather than typefaces. */
-  font-family: var(--font-paper);
-  font-size: var(--size-base);
-  /* Serif needs slightly more leading than the sans this app otherwise uses. */
-  line-height: 1.65;
-  color: var(--text-primary);
-  /* Under 80 characters. The rest of this file caps its prose at 46ch for the
-     same reason; a JD is longer, so it gets the wide measure rather than the
-     tight one, but it still gets one. */
-  max-width: 68ch;
-  margin: var(--gap-3) 0 0;
-  /* A long posting must not push the fabrication alert an entire screen down.
-     Scrolling the description keeps the alert reachable. */
-  max-height: 22rem;
-  overflow-y: auto;
-  /* Preserves the paragraph breaks that survived tag-stripping, without
-     re-introducing markup. */
-  white-space: pre-wrap;
-}
-
-/* --- Click-to-edit tailored text (2026-10-08) ---------------------------
-   The tailored text itself is the edit trigger. It must still READ as resume text, so the
-   button sheds all of its chrome and inherits the paragraph's type; only hover and focus
-   reveal that it is interactive. Tokens only, so both themes follow without [data-theme]. */
-.line__text-button {
-  /* Block and full width: the whole line is the hit target, not just the words' boxes. */
-  display: block;
-  /* Fills the pane so a click in the gap after a short line still opens the editor. */
-  width: 100%;
-  /* Buttons centre text by default; resume prose reads from the left. */
-  text-align: left;
-  /* Same family, size, weight and leading as the surrounding .line__text paragraph. */
-  font: inherit;
-  /* Ink comes from the paragraph, not the UA button colour. */
-  color: inherit;
-  /* No UA fill: the text sits on the sheet like every other line. */
-  background: transparent;
-  /* No UA border: a box around every line would turn the resume into a form. */
-  border: 0;
-  /* A hair of room so the hover wash does not touch the glyphs. */
-  padding: 0.1em 0.2em;
-  /* Pulls the padding back out so the text aligns with the master pane's text. */
-  margin: 0 -0.2em;
-  /* Matches the other small controls' rounding. */
-  border-radius: var(--radius-control);
-  /* An I-beam: this opens a text editor, not a navigation or a toggle. */
-  cursor: text;
-  /* Gentle wash on hover, quick enough not to lag the pointer. */
-  transition: background-color 120ms ease;
-  /* Deliberately NO outline/box-shadow rule: base.css's global :focus-visible ring must apply. */
-}
-
-/* Hover cue, only when clicking would actually do something. */
-.line__text-button:hover:not(:disabled) {
-  /* The accent wash already means "you can act here / you did this" on this screen. */
-  background: var(--accent-subtle);
-}
-
-/* Mid-save: still readable text, but it says it will not respond. */
-.line__text-button:disabled {
-  /* Same signal as the other locked controls. */
-  cursor: not-allowed;
-}
-
-/* --- Structural edits (2026-11-01) ------------------------------------
-   Section and entry headings, Move/Remove, Add back and the new-bullet box. Plain native controls
-   and semantic tokens only, so both themes follow without a [data-theme] rule
-   (docs/ui/theming-convention.md). */
-
-/* A section heading row across both panes: the resume's own structure, not chrome. */
-.diff__section-head {
-  /* Spans master and tailored, because a section belongs to both. */
-  grid-column: 1 / -1;
-  /* Name and tag on one baseline. */
-  display: flex;
-  /* Keeps the small tag aligned with the heading's text. */
-  align-items: baseline;
-  /* Room between the name and its tag. */
-  gap: var(--gap-2);
-  /* Separates one section from the last line of the previous one. */
-  margin-top: var(--gap-3);
-  /* Tight to its first entry. */
-  padding-bottom: var(--gap-1);
-  /* A real division in the document, lighter than the pane heads' strong rule. */
-  border-bottom: 1px solid var(--rule-strong);
-  /* Section headings read like the resume's own: a step above body text. */
-  font-size: var(--size-base);
-  /* Weight carries the hierarchy, not colour. */
-  font-weight: 600;
-}
-
-/* "not printed": qualifies the heading; muted because it is a fact, not an alarm. */
-.diff__not-printed {
-  /* Smaller than the heading it qualifies. */
-  font-size: var(--size-xs);
-  /* Regular weight, so it does not compete with the section name. */
-  font-weight: 400;
-  /* Muted ink: a statement of fact. */
-  color: var(--ink-muted);
-}
-
-/* An entry heading row (employer, project, certificate) across both panes. */
-.diff__entry-head {
-  /* Spans both panes, like the section heading above it. */
-  grid-column: 1 / -1;
-  /* Label, state and Remove on one line, wrapping on narrow screens. */
-  display: flex;
-  /* Wraps instead of overflowing on a phone. */
-  flex-wrap: wrap;
-  /* Keeps the small button on the label's line. */
-  align-items: center;
-  /* Room between label, state and button. */
-  gap: var(--gap-2);
-}
-
-/* The entry's label: who the following bullets belong to. */
-.diff__entry-label {
-  /* Body size: it labels lines, it is not a section. */
-  font-size: var(--size-sm);
-  /* Weight, so the employer stands out from its bullets. */
-  font-weight: 600;
-}
-
-/* "added by you" / "removed by you", in the same accent the line provenance uses. */
-.diff__entry-state {
-  /* Small, like the line provenance it mirrors. */
-  font-size: var(--size-xs);
-  /* The operator's own action, in the operator's colour (R1). */
-  color: var(--accent);
-  /* Same weight as .line__provenance--edited. */
-  font-weight: 550;
-}
-
-/* Add back / Add a new bullet under an entry or a section: full width, quiet until opened. */
-.diff__entry-tools {
-  /* Spans both panes; the tools act on the tailored side but read with the whole entry. */
-  grid-column: 1 / -1;
-  /* The two disclosures stacked. */
-  display: flex;
-  /* Stacked, not side by side: each opens to its own width. */
-  flex-direction: column;
-  /* Room between them. */
-  gap: var(--gap-2);
-  /* Small text: these are tools, not resume content. */
-  font-size: var(--size-sm);
-}
-
-/* The disclosure triangles' labels, styled as quiet links to an action, not as content. */
-.diff__addback > summary,
-.diff__new-bullet > summary {
-  /* A pointer: the summary is a native toggle. */
-  cursor: pointer;
-  /* Secondary ink until opened, so ten collapsed tools do not shout. */
-  color: var(--text-secondary);
-}
-
-/* The offers list: no bullets, the button is the marker. */
-.diff__addback-list {
-  /* Reset: each item carries its own button. */
-  list-style: none;
-  /* Under the summary, indented to the disclosure's content. */
-  margin: var(--gap-2) 0 0;
-  /* No UA indent. */
-  padding: 0;
-  /* One offer per row. */
-  display: flex;
-  /* Stacked. */
-  flex-direction: column;
-  /* Room between offers so the buttons are not mis-clicked. */
-  gap: var(--gap-2);
-}
-
-/* One offer: the master's words, then Add back. */
-.diff__addback-item {
-  /* Text and button side by side. */
-  display: flex;
-  /* Button aligned to the text's first line. */
-  align-items: flex-start;
-  /* Room between them. */
-  gap: var(--gap-2);
-}
-
-/* The offered text: resume prose, so it takes the paper font. */
-.diff__addback-text {
-  /* Takes the remaining width; the button keeps its own. */
-  flex: 1;
-  /* The resume's typeface: these are the words that would print. */
-  font-family: var(--font-paper);
-  /* Body ink. */
-  color: var(--ink);
-}
-
-/* The new-bullet box's contents, stacked under its summary. */
-.diff__new-bullet[open] {
-  /* Label, textarea, note, button. */
-  display: flex;
-  /* Stacked. */
-  flex-direction: column;
-  /* Room between them. */
-  gap: var(--gap-2);
-}
-
-/* The visible label naming the entry the bullet goes under. */
-.diff__new-bullet-label {
-  /* Small and semibold, a form label. */
-  font-size: var(--size-xs);
-  /* Weight separates it from the note below. */
-  font-weight: 600;
-}
-
-/* "Saves to your master profile too": the one fact the operator must not miss here. */
-.diff__new-bullet-note {
-  /* Small, but read before the button. */
-  font-size: var(--size-xs);
-  /* Accent: it is about the operator's own write to the master. */
-  color: var(--accent);
-}
-
-/* The Save button keeps its natural width instead of stretching across the column. */
-.diff__new-bullet .line__edit-save {
-  /* Left-aligned like the text above it. */
-  align-self: flex-start;
-}
-
-/* Section order: a short list above the comparison. */
-.diff__order {
-  /* Separated from the notes above it. */
-  margin-top: var(--gap-3);
-}
-
-/* Its heading, the size of the toolbar title near it. */
-.diff__order-head {
-  /* Small heading. */
-  font-size: var(--size-sm);
-  /* Weight for hierarchy. */
-  font-weight: 600;
-}
-
-/* The ordered list of sections, one compact row each. */
-.diff__order-list {
-  /* Room under the heading. */
-  margin: var(--gap-2) 0 0;
-  /* Numbers kept: the order IS the content. Indented just enough for them. */
-  padding-left: 1.5rem;
-  /* One row per section. */
-  display: flex;
-  /* Stacked. */
-  flex-direction: column;
-  /* Tight: a list of seven short names. */
-  gap: var(--gap-1);
-}
-
-/* One section: its name, then Up and Down. */
-.diff__order-item {
-  /* Keeps the list-item marker while laying out the row's children. */
-  display: list-item;
-  /* Small text, a control list. */
-  font-size: var(--size-sm);
-}
-
-/* The section name, given a fixed measure so the arrows line up down the list. */
-.diff__order-name {
-  /* Inline-block so it can take a width. */
-  display: inline-block;
-  /* Wide enough for "Certifications". */
-  min-width: 9rem;
-}
-
-/* The arrows sit beside the name; .line__edit-trigger's auto margin would push them away. */
-.diff__order-item .line__edit-trigger {
-  /* Beside the name, with a small gap. */
-  margin-left: var(--gap-1);
 }
 
 /* "Structure changed by you": the structural half of the edit count, named. */
@@ -1369,3 +591,64 @@ html:has(.diff__actions) {
   /* Room for the markers. */
   padding-left: 1.25rem;
 }
+
+/* --- Actions (the card's last block) ---------------------------------- */
+
+/* IN FLOW since 2026-11-07, no longer sticky: the slim card is short enough to read to the end, and the
+   sticky bar covered the claims it asked the operator to decide (audit fault 4: "2 claims need a decision
+   above" printed over the second claim). Being last in reading order is also what keeps focus unobscured,
+   so the old scroll-padding reservation for the sticky bar is gone with it. */
+.diff__actions {
+  /* Room above, separating the decision from the content it decides. */
+  margin-top: var(--gap-4);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-3);
+  padding: var(--gap-3) var(--gap-5);
+  /* OPAQUE (item 3, 2026-10-08). A 0.88-alpha light-dark() wash with a blur used to override this,
+     so diff text showed through as unreadable ghost lines behind the buttons. The bar sits on top
+     of the words being approved; nothing should show through it. */
+  background: var(--sheet);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sheet);
+}
+
+/* Approve then Reject: one row, both .button height, centred on one line (D4, 2026-11-07). */
+.diff__actions-group {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-3);
+  flex-wrap: wrap;
+}
+
+/* Explains the disabled Approve button. */
+.diff__gate-note {
+  color: var(--fabricated-strong);
+  font-size: var(--size-sm);
+  font-weight: 500;
+}
+
+/* R6: the one sentence the operator must not miss before approving edited words. */
+.diff__own-wording {
+  /* Room above the buttons. */
+  margin-bottom: var(--gap-2);
+  /* Same size as the gate note it sits near. */
+  font-size: var(--size-sm);
+  /* Weight, not colour, so it reads as important without reading as an error. */
+  font-weight: 600;
+  /* Accent: this is about the edits. */
+  color: var(--accent);
+}
+
+/* The held re-check (2026-11-05): findings the operator must read before the second click. */
+.diff__approve-hold {
+  /* Room above the buttons, like the line before it. */
+  margin-bottom: var(--gap-2);
+  /* Same size as the gate note. */
+  font-size: var(--size-sm);
+  /* The gate note's colour: these are unsupported claims, the same verdict that note speaks. */
+  color: var(--fabricated-strong);
+}
+

@@ -82,9 +82,9 @@ describe('approval queue toolbar wiring', () => {
 describe('approval queue row chips', () => {
   it('latency 2a: the queue select is an explicit column list with no raw_payload read', () => {
     // The applications columns, named one by one: `*` shipped fields this page never reads.
-    // The whole select, end to end: the jobs embed closes on description_raw, so no raw_payload key
+    // The whole select, end to end: the jobs embed closes on location_raw (2026-11-07, the pay-band chip), so no raw_payload key
     // (one ->> de-TOASTs the whole board JSON per row, ~95% of executor time, 2026-11-05) can ride in.
-    assert.match(page, /\.select\('id, status, status_changed_at, created_at, updated_at, master_version, tailored_profile, tailor_refs, selected_jd_keywords, match_score, audit_findings, cover_letter, jobs:job_id\(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, description_raw\)'\)/);
+    assert.match(page, /\.select\('id, status, status_changed_at, created_at, updated_at, master_version, tailored_profile, tailor_refs, selected_jd_keywords, match_score, audit_findings, cover_letter, jobs:job_id\(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, description_raw, location_raw\)'\)/);
   });
 
   it('labels the master fit "Fit" and the tailored coverage "ATS score", with dashes for unknown', () => {
@@ -99,16 +99,8 @@ describe('approval queue row chips', () => {
     assert.match(page, /`ATS score \$\{measure\.percent\}% · tailored vs JD` : 'ATS score —'/);
   });
 
-  it('reads the queued age from status_changed_at, through an ISO-day shape check', () => {
-    // Shape first: an ISO calendar-date prefix before any parse.
-    assert.match(page, /const ISO_DATE_PREFIX = \/\^\\d\{4\}-\\d\{2\}-\\d\{2\}\/;/);
-    // Round-tripped, so a rolled-over day like 2026-02-31 is refused.
-    assert.match(page, /new Date\(ms\)\.toISOString\(\)\.slice\(0, 10\) === day/);
-    // The queued age is read from the row's entry into review...
-    assert.match(page, /queuedAt: app\.status_changed_at/);
-    // ...and phrased by the discovery page's own age builder.
-    assert.match(page, /`Added to queue \$\{ago\}`/);
-  });
+  /* The queued-at chip was dropped on 2026-11-07 (Teja: slim cards); its absence is pinned in
+     approvalLayout.test.ts, which renders the chips for real. */
 
   it('draws the same chips in both buckets', () => {
     // Every place the one chip component is drawn, with the same arguments.

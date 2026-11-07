@@ -191,8 +191,10 @@ describe('AiEditPanel (chat)', () => {
     const html = render(h(panel.AiEditPanel, { diff, onEdit: async () => ({ ok: true }), onAssist: async () => ({ kind: 'error', message: '' }), busy: false, categories: [] }));
     // The heading.
     assert.match(html, /<h3[^>]*class="ai-chat__title"[^>]*>AI resume chat<\/h3>/);
-    // The past-chats picker, offering the unsaved new chat.
-    assert.match(html, /<select[^>]*class="ai-chat__picker"[^>]*><option[^>]*>New chat<\/option><\/select>/);
+    // The past-chats picker, offering the unsaved new chat under a label distinct from the "New chat" button.
+    assert.match(html, /<select[^>]*class="ai-chat__picker"[^>]*><option[^>]*>Current chat \(not started\)<\/option><\/select>/);
+    // Exactly one control on the bar says "New chat": the button (2026-11-07 audit found two side by side).
+    assert.equal((html.match(/>New chat</g) ?? []).length, 1);
     // The empty chat explains itself.
     assert.match(html, /<li class="ai-chat__empty">Say what to change/);
     // Send exists and is disabled on an empty message.

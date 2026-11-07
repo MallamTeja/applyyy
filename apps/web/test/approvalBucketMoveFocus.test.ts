@@ -117,7 +117,7 @@ describe('ApprovalQueuePage wiring for a cross-bucket save', () => {
     // Carries the id and is script-focusable.
     assert.match(b, /id=\{cardId\(diff\.applicationId\)\}[\s\S]*tabIndex=\{-1\}/);
     // Bucket A's card.
-    const a = between('className="queue__clean-row queue__clean-row--openable"', '<div className="queue__clean-line">');
+    const a = between('className="queue__clean-row queue__clean-row--openable"', '<div className="queue__row">');
     // Same id and focusability.
     assert.match(a, /id=\{cardId\(diff\.applicationId\)\}[\s\S]*tabIndex=\{-1\}/);
   });

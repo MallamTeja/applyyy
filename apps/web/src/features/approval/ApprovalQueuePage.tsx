@@ -29,13 +29,13 @@ import type { ReactElement } from 'react';
 
 import { PageHeader } from '../../app/PageHeader';
 import { StatusBadge } from '../../app/StatusBadge';
-import { SourceBadge } from '../../app/SourceBadge';
+/* No SourceBadge import (2026-11-07): Teja dropped the source badge from the queue row as noise;
+   DiffView keeps its own badge in the opened card, which is where the provenance is read. */
 // useToast is back, and now has a consumer: settle() reports every approve and
 // every reject. It was removed in a build-unblocking pass when the handler wrote
 // nothing, which was the honest state then and is not the state now.
 import { useToast } from '../../app/Toast';
 import type {
-  DiscoverySource,
   JobRow,
   MasterProfile,
   ResolvedResume,
@@ -112,9 +112,10 @@ import { newestInReviewFirst } from './queueOrder';
 import { DEFAULT_QUEUE_VIEW, QUEUE_ARRANGEMENT_LABELS, QUEUE_SORT_LABELS, applyQueueView, countByArrangement, fitChip } from './queueView';
 // The view's types: the state the toolbar edits, and the closed unions its controls choose from.
 import type { QueueArrangement, QueueSort, QueueView } from './queueView';
-/* "3 days ago" for the queued-at chip (2026-11-04): the discovery page's own phrase builder, reused
-   so both pages say an age the same way. Pure (no supabase, no JSX), so importing it costs nothing. */
-import { postedAgo } from '../discovery/discoveredList';
+/* Finding N2 (Teja ruled option C, 2026-11-07): a remote job whose pay band names only UK/US places is
+   never dropped, it is flagged on the card. The screener's own pure function, imported by relative path
+   (as aiEdit.ts imports the detector), so the browser and the gate can never disagree on the rule. */
+import { payBandRegionWarning } from '../../../../../supabase/functions/_shared/screen/work-auth-gate.ts';
 /* The auditor's own check, re-run on Approve of an EDITED row (Teja, 2026-11-05: "Check on Approve,
    hold for a 2nd click"). Pure and fail-closed: anything but a clean verdict holds the row. */
 import { checkBeforeApprove } from './approveCheck';
@@ -472,37 +473,53 @@ const QUEUE_SORTS = Object.keys(QUEUE_SORT_LABELS) as QueueSort[];
 const QUEUE_ARRANGEMENTS = Object.keys(QUEUE_ARRANGEMENT_LABELS) as QueueArrangement[];
 
 /* --- Row chips (Teja asked 2026-11-04) --------------------------------------------------------
-   Four facts per queue row, weighed before approving. Each is SHAPE-checked before it is shown,
+   The facts per queue row, weighed before approving. Each is SHAPE-checked before it is shown,
    because missing data quietly becoming an answer is this repo's dominant bug (CLAUDE.md section 6):
-   a null score reads "—", never "0", and junk never parses into a date. */
+   a null score reads "—", never "0", and a non-string column is no location at all.
+   The queued-at chip went on 2026-11-07 (Teja: slim cards); its date parsing went with it. */
 
-/* The raw values the chips are built from, captured in the load pass and keyed by application id.
-   Held as `unknown`: the client is untyped, so the formatters below are where the shape is proven.
+/* The values the chips are built from, captured in the load pass and keyed by application id.
    A side map like `stamps`, not fields on ResumeDiff: diffModel/diffAdapter are not this page's to
    change, and none of these facts changes when the resume is edited. */
 interface RowChipFacts {
-  // applications.match_score: the matcher's fit of the MASTER profile to the JD, 0..100.
+  // applications.match_score: the matcher's fit of the MASTER profile to the JD, 0..100. `unknown`: fitChip proves its shape.
   readonly fit: unknown;
-  // applications.status_changed_at: when the row reached awaiting_approval.
-  readonly queuedAt: unknown;
+  // jobs.location_raw as a string, or null: the board's own words, shown beside the company on the row.
+  readonly location: string | null;
+  // Finding N2's chip text, or null when the band is not UK/US only (or nothing could be read).
+  readonly payBand: ReturnType<typeof payBandRegionWarning>;
 }
 
-/* An ISO calendar date at the start of a string. Date.parse alone is no shape check: it reads "-5"
-   as the year -5 and silently rolls "2026-02-31" over to 3 March. */
-const ISO_DATE_PREFIX = /^\d{4}-\d{2}-\d{2}/;
+/* One stored row as the approval select returns it, narrowed to what the chips read. `unknown` columns:
+   the client is untyped, so this is where their shape is proven, not assumed. */
+interface ChipSourceRow {
+  // applications.match_score.
+  readonly match_score: unknown;
+  // The jobs embed; null when the job row is missing (that row is refused before this is called).
+  readonly jobs: { readonly location_raw?: unknown; readonly description_raw?: unknown } | null;
+}
 
-/* The ISO day a value starts with, or null unless it is a real calendar day. */
-function isoDay(value: unknown): string | null {
-  // Only a string can carry a date; a number or an object is no date at all.
-  if (typeof value !== 'string') return null;
-  // Shape first, so the lenient parser is never asked about junk.
-  const day = ISO_DATE_PREFIX.exec(value)?.[0];
-  // No ISO prefix: not a date.
-  if (day === undefined) return null;
-  // The date-only ISO form parses as UTC midnight, so no time zone can shift the day.
-  const ms = Date.parse(day);
-  // Round-tripped, so an impossible day that Date.parse rolls forward (2026-02-31) is refused.
-  return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 10) === day ? day : null;
+/* A column value as text, or null. A number or an object is not a location or a JD, and String() would
+   turn it into "[object Object]" for the gate to read. */
+function textOrNull(value: unknown): string | null {
+  // Only a real string passes; everything else is "not stored".
+  return typeof value === 'string' ? value : null;
+}
+
+/* The chip facts for one stored row. Exported and pure so a test can render the row's chips from a
+   stored-row fixture, through the same path the load pass takes. */
+export function chipFactsFor(app: ChipSourceRow): RowChipFacts {
+  // The board location, shape-checked once and used by both the row and the gate.
+  const location = textOrNull(app.jobs?.location_raw);
+  // The facts the row renders.
+  return {
+    // Passed through as stored; fitChip shape-checks it at render.
+    fit: app.match_score,
+    // Shown on the row's meta line.
+    location,
+    // The screener's own rule over the same two columns it reads (d5247b4); null in, null out.
+    payBand: payBandRegionWarning({ locationRaw: location, description: textOrNull(app.jobs?.description_raw) }),
+  };
 }
 
 /* "ATS score 85% · tailored vs JD": honest keyword coverage of the TAILORED resume, the same figure
@@ -514,19 +531,9 @@ function atsChip(diff: ResumeDiff): string {
   return measure.kind === 'measured' ? `ATS score ${measure.percent}% · tailored vs JD` : 'ATS score —';
 }
 
-/* "Added to queue 3 days ago", from when the row reached awaiting_approval. */
-function queuedChip(value: unknown, nowMs: number): string {
-  // postedAgo only refuses NaN, and Date.parse reads "-5" as a real year, so the ISO shape comes first.
-  const ago = typeof value === 'string' && isoDay(value) !== null ? postedAgo(value, nowMs) : null;
-  // No readable stamp (or one more than a day in the future): a dash, never a made-up age.
-  return ago === null ? 'Added to queue —' : `Added to queue ${ago}`;
-}
-
-/* The three chips under a queue row's line, in both buckets. One component, so Bucket A and Bucket B
-   can never show different facts or different words for the same fact. */
-function QueueRowChips({ diff, facts }: { readonly diff: ResumeDiff; readonly facts: RowChipFacts | undefined }): ReactElement {
-  // Read once per render; an age on a review screen need not tick while it is open.
-  const now = Date.now();
+/* The chips under a queue row's title, in both buckets. One component, so Bucket A and Bucket B can never
+   show different facts or different words for the same fact. Exported for the static-render test. */
+export function QueueRowChips({ diff, facts }: { readonly diff: ResumeDiff; readonly facts: RowChipFacts | undefined }): ReactElement {
   return (
     /* A wrapping flex row (ApprovalQueuePage.css), so the chips fold onto two lines at phone width
        instead of pushing the page sideways. */
@@ -535,8 +542,8 @@ function QueueRowChips({ diff, facts }: { readonly diff: ResumeDiff; readonly fa
       <span className="tag-pill">{fitChip(facts?.fit)}</span>
       {/* The tailored resume's coverage, beside the master's fit, so the two scores read as a pair. */}
       <span className="tag-pill">{atsChip(diff)}</span>
-      {/* How long this row has waited for a verdict. */}
-      <span className="tag-pill">{queuedChip(facts?.queuedAt, now)}</span>
+      {/* Finding N2: only when the gate says so. A warning, so it is set apart by weight and edge, not a new colour. */}
+      {facts?.payBand ? <span className="tag-pill queue__row-chip--warn">{facts.payBand}</span> : null}
     </div>
   );
 }
@@ -654,7 +661,7 @@ export function ApprovalQueuePage(): ReactElement {
   /* The toolbar's choices: sort, work type and search (2026-11-04). Page state, never stored:
      Teja asked for a view, not a preference, so a reload starts from the default again. */
   const [view, setView] = useState<QueueView>(DEFAULT_QUEUE_VIEW);
-  /* Each row's chip facts (fit, queued-at), from the same load pass as the queue. State,
+  /* Each row's chip facts (fit, location, pay-band warning), from the same load pass as the queue. State,
      not a ref: only the render reads it, and no async path ever writes it after the load. */
   const [chipFacts, setChipFacts] = useState<ReadonlyMap<string, RowChipFacts>>(() => new Map());
 
@@ -722,7 +729,9 @@ export function ApprovalQueuePage(): ReactElement {
              shipped match_reasoning, claim and failure fields this page never reads. These are the
              fields read here, by queueOrder.ts and by diffAdapter.ts. tailor_refs stays: original
              and attest are rebuilt from it. */
-          .select('id, status, status_changed_at, created_at, updated_at, master_version, tailored_profile, tailor_refs, selected_jd_keywords, match_score, audit_findings, cover_letter, jobs:job_id(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, description_raw)')
+          /* location_raw added 2026-11-07: the row shows the board's own location, and the "Pay band UK/US
+             only" chip (finding N2) reads it with description_raw, exactly as the screener's gate does. */
+          .select('id, status, status_changed_at, created_at, updated_at, master_version, tailored_profile, tailor_refs, selected_jd_keywords, match_score, audit_findings, cover_letter, jobs:job_id(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, description_raw, location_raw)')
           .eq('status', 'awaiting_approval')
           /* Newest entry into review first (2026-10-24): status_changed_at is when the row reached
              awaiting_approval, served by the (user_id, status, status_changed_at desc) index. Not
@@ -923,13 +932,10 @@ export function ApprovalQueuePage(): ReactElement {
           /* Only a real string: String(undefined) would be the stamp "undefined", sent as if it were
              a timestamp. Without one the row has no stamp, so it can never be approved (unverifiable). */
           if (typeof app.updated_at === 'string') stamps.set(app.id, app.updated_at);
-          // The chips' raw inputs, as loaded; the formatters shape-check them at render.
-          facts.set(app.id, {
-            // The matcher's 0..100 fit of the master, in the select's column list.
-            fit: app.match_score,
-            // When the row entered review; the same stamp the queue is ordered by.
-            queuedAt: app.status_changed_at,
-          });
+          // The chips' inputs (fit, location, pay-band warning), through the same pure builder the test renders.
+          /* `job`, not app.jobs: the untyped client infers the embed as an array, and `job` is the one row this
+             pass already narrowed (and refused when missing). */
+          facts.set(app.id, chipFactsFor({ match_score: app.match_score, jobs: job }));
           // Kept so a save rebuilds this exact diff with the new resume.
           rowSources.set(app.id, {
             application,
@@ -1894,8 +1900,9 @@ export function ApprovalQueuePage(): ReactElement {
 
   return (
     /* The wide variant: two resume panes need every pixel, and the standard
-       page measure would force the operator to scroll to compare them. */
-    <div className="page page--wide">
+       page measure would force the operator to scroll to compare them.
+       queue-page scopes the page's one control height (ApprovalQueuePage.css) to this screen only. */
+    <div className="page page--wide queue-page">
       <PageHeader path="approvals" />
 
       {/* SPLIT VIEW (Teja 2026-11-06): the queue on the left, the docked AI chat on the right while a row's
@@ -2143,42 +2150,82 @@ export function ApprovalQueuePage(): ReactElement {
                       {staleNotices.get(diff.applicationId)}
                     </p>
                   ) : null}
-                  {/* The fold control, Bucket A's line shape. The job's name shows only while
-                      folded: open, DiffView's own heading already says it. */}
-                  <div className="queue__clean-line">
-                    {/* Empty while open, so the button keeps its place on the right. */}
-                    <span className="queue__clean-job">{isFolded ? `${diff.jobTitle} at ${diff.companyName}` : null}</span>
-                    <button
-                      type="button"
-                      className="button button--secondary button--small"
-                      /* Disclosure semantics, as in Bucket A: true while the review shows. */
-                      aria-expanded={!isFolded}
-                      aria-controls={reviewId}
-                      onClick={() => {
-                        // Pressing Review opens the review AND docks this row's chat beside it.
-                        if (isFolded) openDock(diff.applicationId);
-                        else {
-                          // Hiding the review of the docked row closes its chat too: nothing left to chat beside.
-                          toggle(setFoldedB, diff.applicationId);
-                          if (dockId === diff.applicationId) setDockId(null);
-                        }
-                      }}
-                    >
-                      {/* Same words as Bucket A, so the action reads the same everywhere. */}
-                      {isFolded ? 'Review' : 'Hide review'}
-                    </button>
-                    {/* Bucket B rows start open, so Review is not pressed: this docks the chat without folding. */}
-                    <button
-                      type="button"
-                      className="button button--secondary button--small"
-                      onClick={() => toggleDock(diff.applicationId)}
-                    >
-                      {dockId === diff.applicationId ? 'Close chat' : 'Chat with AI'}
-                    </button>
+                  {/* THE ROW HEAD (2026-11-07), the same shape in both buckets: who and where on the left,
+                      the row's one toolbar on the right, so every row's buttons share one right edge.
+                      The title stays when the row opens, so the toolbar never jumps sideways. */}
+                  <div className="queue__row">
+                    <div className="queue__row-id">
+                      {/* The job, in chrome type: the resume preview is the page's one paper-font element. */}
+                      <p className="queue__row-title">{diff.jobTitle}</p>
+                      {/* Company, then the board's own location when it gave one. */}
+                      <p className="queue__row-meta">
+                        {/* One text node, so the flex gap never splits "Company · place" apart. */}
+                        {chipFacts.get(diff.applicationId)?.location ? `${diff.companyName} · ${chipFacts.get(diff.applicationId)?.location}` : diff.companyName}
+                      </p>
+                    </div>
+                    {/* One toolbar per row, same order in both buckets: read it, see it, then ask the AI. A named
+                        group so a screen reader says which job these three buttons act on. */}
+                    <div className="queue__row-tools" role="group" aria-label={`${diff.jobTitle} at ${diff.companyName}`}>
+                      <button
+                        type="button"
+                        className="button button--secondary"
+                        /* Disclosure semantics, as in Bucket A: true while the review shows. */
+                        aria-expanded={!isFolded}
+                        aria-controls={reviewId}
+                        onClick={() => {
+                          // Pressing Review opens the review AND docks this row's chat beside it.
+                          if (isFolded) openDock(diff.applicationId);
+                          else {
+                            // Hiding the review of the docked row closes its chat too: nothing left to chat beside.
+                            toggle(setFoldedB, diff.applicationId);
+                            if (dockId === diff.applicationId) setDockId(null);
+                          }
+                        }}
+                      >
+                        {/* Same words as Bucket A, so the action reads the same everywhere. */}
+                        {isFolded ? 'Review' : 'Hide review'}
+                      </button>
+                      <button
+                        type="button"
+                        className="button button--secondary"
+                        /* Disclosure semantics, as in Bucket A. */
+                        aria-expanded={isPreviewing}
+                        aria-controls={previewId}
+                        onClick={() => toggle(setPreviewing, diff.applicationId)}
+                      >
+                        {/* Same words as Bucket A, so the action reads the same everywhere. */}
+                        {isPreviewing ? 'Hide resume' : 'Preview resume'}
+                      </button>
+                      {/* Bucket B rows start open, so Review is not pressed: this docks the chat without folding.
+                          aria-pressed: a toggle, so its state is announced, not only its words. */}
+                      <button
+                        type="button"
+                        className="button button--secondary"
+                        aria-pressed={dockId === diff.applicationId}
+                        onClick={() => toggleDock(diff.applicationId)}
+                      >
+                        {dockId === diff.applicationId ? 'Close chat' : 'Chat with AI'}
+                      </button>
+                    </div>
                   </div>
-                  {/* Fit, ATS score and queued-at (2026-11-04; deadline dropped 2026-11-05), shown folded or open: DiffView
-                      shows only the ATS badge, so the other three would vanish when a row opens. */}
+                  {/* Fit, ATS score and the pay-band warning, shown folded or open: DiffView shows only the ATS
+                      badge, so the others would vanish when a row opens. */}
                   <QueueRowChips diff={diff} facts={chipFacts.get(diff.applicationId)} />
+                  {/* THE RESUME, above the audit (2026-11-07): read the document first, then the audit and its
+                      Approve/Reject bar, which DiffView ends with, so the decision is always the last block.
+                      Opened on demand because it is tall; outside the fold, so it shows folded or open. */}
+                  {isPreviewing && resume ? (
+                    <div id={previewId} className="queue__detail">
+                      <ResumePreview
+                        applicationId={diff.applicationId}
+                        tailoredProfile={resume}
+                        /* Pinned version from the snapshot; see Bucket A. */
+                        masterVersion={resume.master_version}
+                        jobTitle={diff.jobTitle}
+                        companyName={diff.companyName}
+                      />
+                    </div>
+                  ) : null}
                   {/* `hidden`, NOT a conditional mount: unmounting would drop the AI chat, a
                       half-typed edit and the row's attestations. Bucket A can unmount because
                       its rows open fresh; a Bucket B row may be mid-review when folded. */}
@@ -2208,33 +2255,10 @@ export function ApprovalQueuePage(): ReactElement {
                     chat={chatStore}
                     /* The chat renders in the right-hand dock, and only while it is THIS row's turn. */
                     chatDock={{ node: dockNode, active: dockId === diff.applicationId }}
+                    /* Finding N2's warning, from the same facts as the row chip, so the card and the row agree. */
+                    payBandWarning={chipFacts.get(diff.applicationId)?.payBand ?? null}
                   />
                   </div>
-                  {/* The diff is open unless folded; the rendered document is an extra,
-                      opened on demand because it is tall. */}
-                  <button
-                    type="button"
-                    className="button button--secondary button--small queue__preview-toggle"
-                    /* Disclosure semantics, as in Bucket A. */
-                    aria-expanded={isPreviewing}
-                    aria-controls={previewId}
-                    onClick={() => toggle(setPreviewing, diff.applicationId)}
-                  >
-                    {/* Same words as Bucket A, so the action reads the same everywhere. */}
-                    {isPreviewing ? 'Hide resume' : 'Preview resume'}
-                  </button>
-                  {isPreviewing && resume ? (
-                    <div id={previewId}>
-                      <ResumePreview
-                        applicationId={diff.applicationId}
-                        tailoredProfile={resume}
-                        /* Pinned version from the snapshot; see Bucket A. */
-                        masterVersion={resume.master_version}
-                        jobTitle={diff.jobTitle}
-                        companyName={diff.companyName}
-                      />
-                    </div>
-                  ) : null}
                 </li>
               );
             })}
@@ -2291,24 +2315,27 @@ export function ApprovalQueuePage(): ReactElement {
                       {staleNotices.get(diff.applicationId)}
                     </p>
                   ) : null}
-                  <div className="queue__clean-line">
-                    <span className="queue__clean-job">
-                      {diff.jobTitle} at {diff.companyName}
-                    </span>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.75rem' }}>
-                      {diff.discoveredVia && diff.discoveredVia.length > 0 && (
-                        <SourceBadge
-                          discoveredVia={diff.discoveredVia as readonly DiscoverySource[]}
-                          sourceRefs={diff.sourceRefs}
-                        />
-                      )}
-                      <StatusBadge status="audit_clean" label="audit_clean" />
-                      <span className="identifier">
-                        master v{diff.masterVersion}
-                      </span>
+                  {/* The same row head as Bucket B (2026-11-07). No source badge and no master-version tag any
+                      more (Teja: slim cards); the audit badge stays, on the meta line, so it lines up
+                      under the title instead of floating between buttons. */}
+                  <div className="queue__row">
+                    <div className="queue__row-id">
+                      {/* Chrome type, as in Bucket B. */}
+                      <p className="queue__row-title">{diff.jobTitle}</p>
+                      {/* Company, the board's location when known, then the audit verdict. */}
+                      <p className="queue__row-meta">
+                        {/* One text node, so the flex gap never splits "Company · place" apart. */}
+                        {chipFacts.get(diff.applicationId)?.location ? `${diff.companyName} · ${chipFacts.get(diff.applicationId)?.location}` : diff.companyName}
+                        {/* Every Bucket A row is audit-clean by definition (deriveBucket); the badge says so. */}
+                        {/* Plain words, matching DiffView's facts line; the status keeps the colour. */}
+                        <StatusBadge status="audit_clean" label="Verified" />
+                      </p>
+                    </div>
+                    {/* Bucket B's toolbar, same order and size. */}
+                    <div className="queue__row-tools" role="group" aria-label={`${diff.jobTitle} at ${diff.companyName}`}>
                       <button
                         type="button"
-                        className="button button--secondary button--small"
+                        className="button button--secondary"
                         /* aria-expanded is what tells a screen reader this is a disclosure. */
                         aria-expanded={isReviewing}
                         aria-controls={reviewId}
@@ -2327,14 +2354,7 @@ export function ApprovalQueuePage(): ReactElement {
                       </button>
                       <button
                         type="button"
-                        className="button button--secondary button--small"
-                        onClick={() => toggleDock(diff.applicationId)}
-                      >
-                        {dockId === diff.applicationId ? 'Close chat' : 'Chat with AI'}
-                      </button>
-                      <button
-                        type="button"
-                        className="button button--secondary button--small"
+                        className="button button--secondary"
                         /* Same disclosure semantics as Review. */
                         aria-expanded={isPreviewing}
                         aria-controls={previewId}
@@ -2343,17 +2363,49 @@ export function ApprovalQueuePage(): ReactElement {
                         {/* "resume", not "PDF": the PDF is one button further in. */}
                         {isPreviewing ? 'Hide resume' : 'Preview resume'}
                       </button>
-                    </span>
+                      {/* Last, as in Bucket B; a toggle, so its state is announced. */}
+                      <button
+                        type="button"
+                        className="button button--secondary"
+                        aria-pressed={dockId === diff.applicationId}
+                        onClick={() => toggleDock(diff.applicationId)}
+                      >
+                        {dockId === diff.applicationId ? 'Close chat' : 'Chat with AI'}
+                      </button>
+                    </div>
                   </div>
-                  {/* The same chips as Bucket B (2026-11-04), on their own wrapping line: the badge
-                      row above does not wrap, and three more pills there would overflow a phone. */}
+                  {/* The same chips as Bucket B, on their own wrapping line under the head. */}
                   <QueueRowChips diff={diff} facts={chipFacts.get(diff.applicationId)} />
+
+                  {/* The submitted document itself, ABOVE the audit, as in Bucket B: the decision bar that
+                      DiffView ends with stays the last block of the row. A missing snapshot cannot happen
+                      (rows without one are refused above), but if it did, saying so beats an empty frame. */}
+                  {isPreviewing ? (
+                    <div id={previewId} className="queue__detail">
+                      {resume ? (
+                        <ResumePreview
+                          applicationId={diff.applicationId}
+                          tailoredProfile={resume}
+                          /* The PINNED version from the snapshot itself: it is the version
+                             the renderer resolved against, whatever the row column says. */
+                          masterVersion={resume.master_version}
+                          jobTitle={diff.jobTitle}
+                          companyName={diff.companyName}
+                        />
+                      ) : (
+                        <p className="resume-preview__refused" role="alert">
+                          {/* Names the gap rather than hiding it. */}
+                          No tailored resume snapshot was loaded for this application.
+                        </p>
+                      )}
+                    </div>
+                  ) : null}
 
                   {/* The full comparison, identical to Bucket B's, approving through
                       the same RPC path. Only mounted when open: thirty diffs rendered
                       hidden would cost the whole page for rows nobody opened. */}
                   {isReviewing ? (
-                    <div id={reviewId} className="queue__clean-detail">
+                    <div id={reviewId} className="queue__detail">
                       <DiffView
                         diff={diff}
                         /* Same path as Bucket B, tagged so the audit log shows this
@@ -2379,31 +2431,9 @@ export function ApprovalQueuePage(): ReactElement {
                         chat={chatStore}
                         /* Same dock as Bucket B: this row's chat shows only while it is the docked one. */
                         chatDock={{ node: dockNode, active: dockId === diff.applicationId }}
+                        /* Finding N2's warning, from the same facts as the row chip, as in Bucket B. */
+                        payBandWarning={chipFacts.get(diff.applicationId)?.payBand ?? null}
                       />
-                    </div>
-                  ) : null}
-
-                  {/* The submitted document itself. A missing snapshot cannot happen
-                      (rows without one are refused above), but if it did, saying so
-                      beats an empty frame next to an approve button. */}
-                  {isPreviewing ? (
-                    <div id={previewId} className="queue__clean-detail">
-                      {resume ? (
-                        <ResumePreview
-                          applicationId={diff.applicationId}
-                          tailoredProfile={resume}
-                          /* The PINNED version from the snapshot itself: it is the version
-                             the renderer resolved against, whatever the row column says. */
-                          masterVersion={resume.master_version}
-                          jobTitle={diff.jobTitle}
-                          companyName={diff.companyName}
-                        />
-                      ) : (
-                        <p className="resume-preview__refused" role="alert">
-                          {/* Names the gap rather than hiding it. */}
-                          No tailored resume snapshot was loaded for this application.
-                        </p>
-                      )}
                     </div>
                   ) : null}
                 </li>

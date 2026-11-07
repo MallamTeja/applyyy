@@ -5,13 +5,14 @@
  * the same guarded save path as a hand edit (aiEdit.ts explains why that path). The one exception is
  * shouldAutoApply's: a skill the master lacks and the operator did not name waits for a click, so
  * the AI cannot write a claim into the master on its own. The row still needs Approve before anything
- * is submitted, every edited line keeps its Reset in the diff, and the preview / "Download PDF"
+ * is submitted, every edited or removed line keeps its Reset in Changes by AI below (the card's only
+ * undo since 2026-11-07, when the hand-edit controls went), and the preview / "Download PDF"
  * follow every applied edit because the page re-renders the saved resume.
  *
  * CHATS AND MEMORY. Every exchange is stored (resumeChat.ts, table resume_chat_messages), several
  * chats per resume, picked from a native <select>. The next ask carries the active chat's last
  * messages, so "make that shorter" works. Applied state is never stored: each card asks the
- * resume (isApplied), so a reopened chat, or one after a Reset, tells the truth.
+ * resume (isApplied), so a reopened chat, or one after a Reset in Changes by AI, tells the truth.
  *
  * THE AUDIT AS ADVICE, ON THE CARD (2026-11-01). Each bullet edit is run through the auditor's own
  * rule 5 (detector.ts bulletGroundingGaps) before Apply, and the card says which numbers and words
@@ -574,7 +575,8 @@ export function AiEditPanel({
         {/* Native select: keyboard and screen-reader support for free, no custom dropdown. */}
         <select id={`${baseId}-chats`} className="ai-chat__picker" value={chatId} onChange={(event) => setChatId(event.target.value)} disabled={locked}>
           {/* The open chat before its first message is not stored yet, so it is listed by hand. */}
-          {threads.some((t) => t.chatId === chatId) ? null : <option value={chatId}>New chat</option>}
+          {/* Worded apart from the "New chat" button beside it (2026-11-07 audit: two "New chat" side by side). */}
+          {threads.some((t) => t.chatId === chatId) ? null : <option value={chatId}>Current chat (not started)</option>}
           {/* Every stored chat, titled by its first instruction. */}
           {threads.map((thread) => (
             <option key={thread.chatId} value={thread.chatId}>
@@ -593,7 +595,7 @@ export function AiEditPanel({
         {/* An empty chat explains itself instead of showing blank space. */}
         {active.length === 0 ? (
           <li className="ai-chat__empty">
-            {loading ? 'Loading chats…' : 'Say what to change, or ask about this job. The AI applies edits your master profile backs up; anything else waits for your click, and each card says whether it landed. Reset in the comparison below undoes any of them.'}
+            {loading ? 'Loading chats…' : 'Say what to change, or ask about this job. The AI applies edits your master profile backs up; anything else waits for your click, and each card says whether it landed. Reset in Changes by AI below undoes an edited or removed line.'}
             {/* Starter messages, once the chats have loaded: a click fills the box, Send still sends. */}
             {loading ? null : (
               <div className="ai-chat__suggestions">

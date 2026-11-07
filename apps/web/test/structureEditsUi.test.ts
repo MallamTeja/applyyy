@@ -7,13 +7,15 @@
  *     row can never sit in Bucket A. The structural half lives in diff.structureChanges.
  *   - Bullets are grouped under their section and entry, achievements and certifications included,
  *     and a bullet in a section the PDF does not print earns no coverage.
- *   - Every control names its bullet, entry or section, and dispatches one of DiffView's EditActions.
+ *   - The page routes every structural EditAction (which only the AI chat emits since the 2026-11-07
+ *     slim card removed the hand controls) to its pure edit; a moved or added bullet is listed under
+ *     "Changes by AI" and says so.
  *
  * Adapter cases hand-edit the resume (JSON clone + splice) instead of calling the pure edits, so a
  * failure here is the diff's and not tailoredEdits'. Only the existing producers are used for the
  * fixture: rebuildOriginal (the tailor's version) and resolveFullMaster (FULL, the add-back source).
- * Render cases use react-dom/server and assert markup SHAPE. Click dispatch cannot run without a
- * DOM (apps/web has none), so the label-to-action pairing is checked on the comment-free source.
+ * Render cases use react-dom/server and assert markup SHAPE. Routing cannot run without a DOM
+ * (apps/web has none), so the page's action-to-edit pairing is checked on the comment-free source.
  *
  * Fixture: generic placeholder identity only (the repo is public). */
 
@@ -356,90 +358,14 @@ describe('grouping, offers and printed coverage', () => {
   });
 });
 
-// The accessible name Line builds for a bullet: kind plus the first 40 characters.
+// The spoken name ChangeRow builds for a bullet: kind plus the first 40 characters.
 const bulletName = (text: string) => 'bullet: ' + (text.length > 40 ? text.slice(0, 40) + '…' : text);
-// React escapes attribute text; the names here contain only letters, spaces, digits and "…".
-const button = (html: string, label: string) => new RegExp(`<button type="button" class="line__edit-trigger"( disabled="")? aria-label="${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`).exec(html);
 // The whole review screen for a diff, editable unless a reason is given.
 const page = (d: Diff, editDisabledReason: string | null = null) =>
   render(h(view.DiffView, { diff: d, onApprove: () => {}, onReject: () => {}, onEdit: async () => ({ ok: true }), editDisabledReason }));
 
 describe('the controls on screen', () => {
-  it('section and entry headings sit above their bullets, in print order', () => {
-    // The untouched screen.
-    const html = page(diffOf(original()));
-    // Positions of the landmarks.
-    const at = (needle: string) => html.indexOf(needle);
-    // Experience heading, then Acme, then its bullet, then Beta.
-    const order = [at('<h3 class="diff__section-head">Experience</h3>'), at('<h4 class="diff__entry-label">Acme · Backend Intern</h4>'), at(API), at('<h4 class="diff__entry-label">Beta Corp · Engineer</h4>')];
-    // All present.
-    assert.ok(order.every((i) => i >= 0), `landmarks missing: ${order.join(',')}`);
-    // And in that order.
-    assert.deepEqual([...order].sort((a, b) => a - b), order);
-    // The unprinted section is labelled as such.
-    assert.match(html, /<h3 class="diff__section-head">Achievements<span class="tag-pill diff__not-printed">not printed<\/span><\/h3>/);
-  });
-
-  it('each printed bullet has Move up, Move down and Remove naming it; the ends are disabled', () => {
-    // The untouched screen.
-    const html = page(diffOf(original()));
-    // First Acme bullet: cannot go up.
-    assert.equal(button(html, `Move up, ${bulletName(API)}`)?.[1], ' disabled=""');
-    // ...but can go down.
-    assert.equal(button(html, `Move down, ${bulletName(API)}`)?.[1], undefined);
-    // Its Remove names it.
-    assert.ok(button(html, `Remove ${bulletName(API)}`), 'Remove for the first bullet');
-    // Last Acme bullet: can go up, cannot go down.
-    assert.equal(button(html, `Move up, ${bulletName(TESTS)}`)?.[1], undefined);
-    // ...cannot go down.
-    assert.equal(button(html, `Move down, ${bulletName(TESTS)}`)?.[1], ' disabled=""');
-    // Every entry on the resume can be removed by name.
-    assert.ok(button(html, 'Remove entry: Beta Corp · Engineer'), 'Remove entry for Beta');
-  });
-
-  it('a section order list with Up and Down per printed section, ends disabled', () => {
-    // The untouched screen.
-    const html = page(diffOf(original()));
-    // The ordered list exists.
-    const list = /<ol class="diff__order-list">([\s\S]*?)<\/ol>/.exec(html)?.[1];
-    // Loud if missing.
-    assert.ok(list, 'section order list');
-    // One item per printed section, in print order.
-    assert.deepEqual([...list.matchAll(/<span class="diff__order-name">([^<]+)<\/span>/g)].map((m) => m[1]), ['Summary', 'Experience', 'Skills', 'Certifications']);
-    // The first cannot go up.
-    assert.equal(button(list, 'Move up, Summary')?.[1], ' disabled=""');
-    // The last cannot go down.
-    assert.equal(button(list, 'Move down, Certifications')?.[1], ' disabled=""');
-    // A middle one can go either way.
-    assert.equal(button(list, 'Move down, Experience')?.[1], undefined);
-  });
-
-  it('Add back offers: a master bullet under its entry, a dropped entry under its section', () => {
-    // The untouched screen.
-    const html = page(diffOf(original()));
-    // The left-out Acme bullet, named.
-    assert.ok(button(html, `Add back bullet: ${CI.slice(0, 40)}…`), 'add back the CI bullet');
-    // The dropped achievement, named with its section.
-    assert.ok(button(html, 'Add back Hackathon winner (Achievements)'), 'add back the hackathon');
-    // The dropped certification, same.
-    assert.ok(button(html, 'Add back AWS Cloud Practitioner (Certifications)'), 'add back the AWS cert');
-  });
-
-  it('Add a new bullet: a labelled textarea per entry on the resume, says it saves to the master, Save waits for text', () => {
-    // The untouched screen.
-    const html = page(diffOf(original()));
-    // Each label is tied to its textarea by id.
-    const labels = [...html.matchAll(/<label class="diff__new-bullet-label" for="([^"]+)">New bullet under ([^<]+)<\/label><textarea id="\1"/g)].map((m) => m[2]);
-    // One per entry on the resume, in layout order: printed sections first (experience, then the SQL
-    // cert), then the unprinted achievements section with the talk.
-    assert.deepEqual(labels, ['Acme · Backend Intern', 'Beta Corp · Engineer', 'SQL Basics', 'Conference speaker']);
-    // The master write is said on screen.
-    assert.match(html, /<p class="diff__new-bullet-note">Saves to your master profile too, as a new version, then adds it to this resume\.<\/p>/);
-    // Save is disabled while the box is empty.
-    assert.match(html, /<button type="button" class="line__edit-save" disabled="">Save to master and resume<\/button>/);
-  });
-
-  it('a moved bullet and an added one say so on their lines; an added one has no Reset', () => {
+  it('a moved bullet and an added one are listed in Changes by AI and say so; neither has a Reset', () => {
     // b-ci added, then the Acme list reordered so the tailor's two swap.
     const changed = clone(original());
     // Added from FULL.
@@ -452,31 +378,23 @@ describe('the controls on screen', () => {
     assert.equal(html.split('<p class="line__provenance line__provenance--edited">moved by you</p>').length - 1, 2);
     // One added line.
     assert.equal(html.split('<p class="line__provenance line__provenance--edited">added by you</p>').length - 1, 1);
-    // The structural change is listed above the panes, and the note counts changes, not lines.
+    // All three changed lines are listed (two moved, one added), each placed under its entry.
+    assert.match(html, /Changes by AI \(3\)/);
+    // The entry label the adapter's layout supplies, so a change reads in context.
+    assert.match(html, /<p class="diff__change-where">Experience · Acme · Backend Intern<\/p>/);
+    // The structural change is listed above the changes, and the note counts changes, not lines.
     assert.match(html, /<div class="diff__structure-changes"><p class="diff__structure-changes-head">Structure changed by you<\/p><ul><li>Reordered bullets under Acme · Backend Intern<\/li><\/ul><\/div>/);
     // 1 move + 1 added line.
     assert.match(html, /You made 2 changes, so this/);
-    // No Reset names the added bullet (Remove is how it leaves).
-    assert.ok(!html.includes(`Reset to tailor’s version<span class="visually-hidden"> (${bulletName(CI)})`), 'no Reset on an added bullet');
-    // ...while Remove does.
-    assert.ok(button(html, `Remove ${bulletName(CI)}`), 'Remove on the added bullet');
-  });
-
-  it('with editing off (D4) the layout stays but no structural control renders', () => {
-    // No original, and the page's reason.
-    const html = page(diffOf(original(), { original: null }), 'Editing is off.');
-    // Positive shape first: the grouping is still there.
-    assert.match(html, /<h4 class="diff__entry-label">Acme · Backend Intern<\/h4>/);
-    // No section order list.
-    assert.doesNotMatch(html, /class="diff__order"/);
-    // No Move, Remove entry, Add back or new-bullet box.
-    assert.doesNotMatch(html, /aria-label="(Move up|Move down|Remove entry|Add back)/);
-    // No new-bullet textarea.
-    assert.doesNotMatch(html, /class="diff__new-bullet"/);
+    // No Reset at all: resetTarget cannot restore a move (no words changed) or an added bullet (no
+    // tailor version); the AI chat undoes those. A Reset here would only ever answer "Nothing to reset".
+    assert.doesNotMatch(html, /Reset to tailor/);
+    // Paired absence: no hand Remove either (2026-11-07), the AI chat is the only edit path.
+    assert.ok(!html.includes(`aria-label="Remove ${bulletName(CI)}"`), 'no Remove on the added bullet');
   });
 });
 
-describe('each control dispatches its own EditAction (source shape: no DOM to click in)', () => {
+describe('the page routes each structural EditAction (source shape: no DOM to click in)', () => {
   // apps/web's own typescript, for a comment-free view of the source.
   const ts = createRequire(import.meta.url)('typescript') as typeof import('typescript');
   // A file's code with every comment removed, so a comment can neither satisfy nor trip a check.
@@ -486,46 +404,9 @@ describe('each control dispatches its own EditAction (source shape: no DOM to cl
     // Re-emitted without comments.
     return ts.createPrinter({ removeComments: true }).printFile(ts.createSourceFile('f.tsx', raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX));
   };
-  // The view and the page.
-  const viewSrc = code('../src/features/approval/DiffView.tsx');
-  // The page.
+  // The page. (DiffView's own control pairing went with its controls on 2026-11-07; the AI chat's
+  // mapping onto these actions is pinned in aiEdit.test.ts "maps each onto the page's own structural EditAction".)
   const pageSrc = code('../src/features/approval/ApprovalQueuePage.tsx');
-
-  it('DiffView: each named control sends the matching action', () => {
-    // Each anchor (a button's name, or a MoveButtons caller's name prop) paired with the handler
-    // attribute that follows it and the action that handler sends.
-    const pairs: [RegExp, string, RegExp][] = [
-      // The shared arrows: Up sends 'up', Down sends 'down', to whatever the caller does with it.
-      [/aria-label=\{`Move up, \$\{name\}`\}/, 'onClick=', /onMove\('up'\)/],
-      [/aria-label=\{`Move down, \$\{name\}`\}/, 'onClick=', /onMove\('down'\)/],
-      // A bullet's arrows move that bullet.
-      [/name=\{lineName\}/, 'onMove=', /submit\(\{ kind: 'move_bullet', ref: target\.ref, direction \}\)/],
-      // A section's arrows move that section.
-      [/name=\{SECTION_TITLE\[section\.kind\]\}/, 'onMove=', /action\.run\(\{ kind: 'move_section', section: section\.kind, direction \}\)/],
-      // The rest are one button each.
-      [/aria-label=\{`Remove \$\{lineName\}`\}/, 'onClick=', /submit\(\{ kind: 'remove', target \}\)/],
-      [/aria-label=\{`Remove entry: \$\{entry\.label\}`\}/, 'onClick=', /action\.run\(\{ kind: 'remove_entry', section: entry\.section, ref: entry\.ref \}\)/],
-      [/aria-label=\{`Add back bullet: \$\{shortText\(bullet\.text\)\}`\}/, 'onClick=', /action\.run\(\{ kind: 'add_master_bullet', ref: bullet\.ref \}\)/],
-      [/aria-label=\{`Add back \$\{entry\.label\} \(\$\{title\}\)`\}/, 'onClick=', /action\.run\(\{ kind: 'add_master_entry', section: section\.kind, ref: entry\.ref \}\)/],
-    ];
-    for (const [anchor, attr, action] of pairs) {
-      // The anchor must exist, or the pairing below would test nothing.
-      const at = viewSrc.search(anchor);
-      assert.ok(at >= 0, `anchor not found: ${anchor}`);
-      // The first handler attribute after the anchor is this control's.
-      const handlerAt = viewSrc.indexOf(attr, at);
-      // Must exist after the anchor.
-      assert.ok(handlerAt > at, `no ${attr} after ${anchor}`);
-      // The handler, up to the end of its element: `</button>` for a button, `/>` for MoveButtons.
-      const ends = ['</button>', '/>'].map((end) => viewSrc.indexOf(end, handlerAt)).filter((i) => i > handlerAt);
-      // The nearest end bounds this element, so a later control's handler is never read.
-      const handler = viewSrc.slice(handlerAt, Math.min(...ends));
-      // It sends exactly the paired action.
-      assert.match(handler, action, `${anchor} does not dispatch ${action}`);
-    }
-    // The new-bullet box sends attest_bullet with the entry as the parent.
-    assert.match(viewSrc, /action\.run\(\{ kind: 'attest_bullet', section: entry\.section, parentRef: entry\.ref, text \}\)/);
-  });
 
   it('the page routes every structural action to its pure edit, and a new bullet through attestBulletRow', () => {
     // Each case of pureEdit, with the call it must make.

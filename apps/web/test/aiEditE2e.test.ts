@@ -452,9 +452,10 @@ describe('AI resume chat, end to end (2026-11-05)', () => {
   it('2. DiffView and the live preview show every change', async () => {
     // The row, open.
     const card = await openCard();
-    // Both added skills carry the "added by you" tag in the diff.
-    for (const s of ADDED_SKILLS) await card.getByRole('button', { name: `Remove ${s.name}, added by you`, exact: true }).waitFor({ timeout: 10_000 });
-    // At least the two rephrased bullets are marked edited.
+    // Both added skills carry the "added by you" tag in Changes by AI. 'attached', not visible: the list is a
+    // collapsed <details> (slim card, 2026-11-07), and the per-skill Remove button this used to wait for is gone.
+    for (const s of ADDED_SKILLS) await card.locator('li.line__added-skill', { hasText: s.name }).locator('.line__added-skill-tag', { hasText: 'added by you' }).waitFor({ state: 'attached', timeout: 10_000 });
+    // At least the two rephrased bullets are marked edited (counted in the DOM, open or collapsed).
     assert.ok((await card.locator('.line__provenance--edited').count()) >= 2, 'both rephrased bullets must be marked edited in the diff');
     // The live preview.
     await assertPreviewShowsAll(await openPreview(card), 'live');

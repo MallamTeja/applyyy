@@ -62,21 +62,15 @@ describe('CoverageBar', () => {
     const html = bar(coverage(0, 0));
     // The unmeasured sentence, as its own element.
     assert.match(html, /<p class="coverage__unmeasured">[^<]*not measured/);
-    // No bar: a track of any width would state a measurement.
-    assert.doesNotMatch(html, /class="coverage__track"/);
     // No score badge, which is where "0% Match" was printed.
     assert.doesNotMatch(html, /class="coverage__ats-badge"/);
-    // No legend, which is where "100% verified claims" contradicted it.
-    assert.doesNotMatch(html, /class="coverage__legend"/);
   });
 
-  it('a measured 7 of 10 renders the bar at 70% and the badge', () => {
-    // A real measurement still renders exactly as before.
+  it('a measured 7 of 10 renders the 70% badge and nothing else (slim card, 2026-11-07)', () => {
+    // A real measurement renders the one figure the decision uses.
     const html = bar(coverage(10, 7));
-    // The bar exists.
-    assert.match(html, /class="coverage__track"/);
-    // The honest segment's width is the measured value.
-    assert.match(html, /class="coverage__fill coverage__fill--honest" style="width:70%"/);
+    // The track and legend were removed with the slim card: the badge alone carries the number.
+    assert.doesNotMatch(html, /class="coverage__track"|class="coverage__legend"/);
     // The badge exists, carrying the number.
     assert.match(html, /<span class="coverage__ats-badge">70% Match<\/span>/);
     // And the unmeasured sentence is absent, so the two states cannot co-render.
