@@ -145,8 +145,10 @@ export function PipelineDrawer({
              tailored for it ("sent" is only true from `applied` on, so it is not claimed here).
              Read-only: this drawer never writes a status.
              match_score, NOT fit_score (2026-10-08): fit_score exists in no migration and not in the live
-             table, so PostgREST refused this select and the drawer listed nothing for EVERY status. */
-          .select('id, created_at, match_score, tailored_profile, jobs:job_id(title, company_name, discovered_via, source_refs)')
+             table, so PostgREST refused this select and the drawer listed nothing for EVERY status.
+             jobs.disappeared_at (2026-11-07; migration 20261105200000_jobs_tombstone): a gone posting gets a
+             note instead of a Send that could only stop. */
+          .select('id, created_at, match_score, tailored_profile, jobs:job_id(title, company_name, discovered_via, source_refs, disappeared_at)')
           .eq('status', status)
           .order('created_at', { ascending: false })
           /* One page; the heading says "showing N of M" when the lane holds more (drawerHeading). */
@@ -177,6 +179,8 @@ export function PipelineDrawer({
           score: typeof row.match_score === 'number' && Number.isFinite(row.match_score) ? row.match_score : null,
           /* Null unless it is a real snapshot, so a malformed jsonb row offers nothing rather than an empty resume. */
           resume: readResumeSnapshot(row.tailored_profile),
+          /* Raw: the card's postingGoneNote checks the timestamp shape before it believes it. */
+          disappearedAt: row.jobs?.disappeared_at ?? null,
         }));
 
         setRows(mapped);

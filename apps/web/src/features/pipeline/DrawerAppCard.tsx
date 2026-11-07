@@ -46,6 +46,29 @@ export interface DrawerAppItem {
   readonly score?: number | null;
   /* Null unless tailored_profile passed readResumeSnapshot; null renders no resume action at all. */
   readonly resume: ResolvedResume | null;
+  /* jobs.disappeared_at, raw (2026-11-07): the matcher selects 0 rows for a gone posting, so Send
+     could only end in a bare "stopped". Optional so every caller without the column renders as before;
+     postingGoneNote checks its shape before the card believes it. */
+  readonly disappearedAt?: unknown;
+}
+
+/* An ISO-8601 timestamp as PostgREST returns timestamptz ("2026-11-05T15:38:12.123456+00:00"). The
+   shape is checked first because Date.parse is lenient ("-5" is year -5; repo CLAUDE.md §6). */
+const ISO_TIMESTAMP_RE = /^(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/;
+
+/* "Posting gone (since <date>)" for a job whose posting disappeared, or null when it has not (or the
+   value is not a real timestamp, which claims nothing). Exported so the Discovered page can reuse it. */
+export function postingGoneNote(disappearedAt: unknown): string | null {
+  /* Only a string can be a timestamp; null/undefined is a live posting. */
+  if (typeof disappearedAt !== 'string') return null;
+  /* The positive shape, so a lenient parse never turns junk into a date. */
+  const match = ISO_TIMESTAMP_RE.exec(disappearedAt);
+  /* Not the shape: no claim either way. */
+  if (match === null) return null;
+  /* Date-shaped but impossible (month 13): Date gives NaN, and NaN is not a date. */
+  if (!Number.isFinite(Date.parse(disappearedAt))) return null;
+  /* The calendar day as stored (UTC), so the note is the same on every machine. */
+  return `Posting gone (since ${match[1]})`;
 }
 
 /* ---- Send through pipeline (2026-10-08) ---- */
@@ -130,25 +153,65 @@ function callFailure(http: number | null, errorText: string | null): string {
   return errorText.includes(code) ? errorText : `${code}: ${errorText}`;
 }
 
-const STOP_MESSAGE: Record<StopReason, (step: string, finalStatus: string | null, httpStatus: number | null, errorText: string | null) => string> = {
+/* The longest engine text the card shows: the body is untrusted network data (an HTML error page
+   can land in `error`), and a reason only needs its first line or so to be diagnosable. */
+const MAX_REASON_CHARS = 300;
+
+/* The engine's own words for one response, from the fields the agents actually use (2026-11-07):
+   `error` (success:false and every non-2xx), `failures[].error` (a 200 that failed this row, e.g.
+   Netomi's gemini rate-limit), `reason` and `detail`. Strings only, never a stringified number, and
+   null when there are none, so an absent reason is said as "no reason given", never invented. */
+export function engineReasonText(body: unknown): string | null {
+  /* A non-object body carries no fields. */
+  if (typeof body !== 'object' || body === null) return null;
+  /* Loose view: the body came off the wire, so nothing in it is typed yet. */
+  const b = body as { error?: unknown; failures?: unknown; reason?: unknown; detail?: unknown };
+  /* A targeted run lists at most this row; the first entry with string words is the one. */
+  const failure = Array.isArray(b.failures)
+    ? (b.failures as unknown[]).find((f): f is { error: string } => typeof f === 'object' && f !== null && typeof (f as { error?: unknown }).error === 'string')
+    : undefined;
+  /* Non-empty strings only, in the order a reader needs them: what, then why. */
+  const parts = [b.error, failure?.error, b.reason, b.detail].filter((v): v is string => typeof v === 'string' && v.trim() !== '');
+  /* Nothing said. */
+  if (parts.length === 0) return null;
+  /* Each phrase once, in case two fields carry the same words. */
+  const text = [...new Set(parts)].join('; ');
+  /* Capped with a visible ellipsis, so a cut is never mistaken for the whole message. */
+  return text.length > MAX_REASON_CHARS ? `${text.slice(0, MAX_REASON_CHARS)}…` : text;
+}
+
+/* The short "why" for a stop: shared by the outcome sentence and the step line, so the two can never
+   disagree. A rate-limit is named in plain words (Teja, 2026-11-07: ~20 rows in 5 minutes exhausted
+   Gemini's per-minute quota), with the raw words kept so the next report stays diagnosable. */
+function stopDetail(reason: StopReason, http: number | null, errorText: string | null): string {
+  /* The agents' own code is rate_limited (gemini client); matched as that code, not as prose. */
+  if (errorText !== null && errorText.includes('rate_limited')) return `Gemini is rate-limited; try again in a minute: ${errorText}`;
+  /* A failed call: its code and words, as before (no response, 401, 503...). */
+  if (reason === 'invoke_error') return callFailure(http, errorText);
+  /* Every other stop came from a 2xx answer: its words, or the plain fact that it gave none. */
+  return errorText ?? 'no reason given';
+}
+
+const STOP_MESSAGE: Record<StopReason, (step: string, finalStatus: string | null, detail: string) => string> = {
   /* The call failed; the status code tells "signed out" (401) from "agent crashed" (500), and the
      function's own words (describeInvokeError, e.g. no_master_profile) say what to do about it. */
-  invoke_error: (step, _finalStatus, http, errorText) =>
+  invoke_error: (step, _finalStatus, detail) =>
     /* The final status is ignored: after a failed call the useful facts are the code and the reason. */
-    `Stopped at the ${step}: the call failed (${callFailure(http, errorText)}).`,
+    `Stopped at the ${step}: the call failed (${detail}).`,
   /* The kill switch answers 200 with a skip, so without this it would read as "did not move". */
   /* Names the real setting, not a metaphor: the gate halts unless system_settings.system_enabled is
      exactly true (gates.ts readKillSwitch), and "kill switch is off" would say the opposite. */
   halted: (step) => `Paused at the ${step}: the pipeline is switched off (system_settings.system_enabled is not true).`,
   /* A 200 whose body lists per-row failures is not a success. */
-  body_failure: (step, finalStatus) =>
-    /* Names where the row sits now; it may have moved partway before the failure. */
-    `Stopped at the ${step}: it answered but reported a failure for this row (now at ${finalStatus ?? 'unknown'}).`,
+  body_failure: (step, finalStatus, detail) =>
+    /* Names where the row sits now; it may have moved partway before the failure. The agent's words
+       are the point (2026-11-07: this sentence used to drop them, so Netomi's rate-limit was invisible). */
+    `Stopped at the ${step}: it answered but reported a failure for this row (now at ${finalStatus ?? 'unknown'}): ${detail}.`,
   /* Also the engine's after-loop fallback, where the row DID move to an intermediate status, so
      this says where the run ended, never that nothing moved. */
-  no_progress: (step, finalStatus) => `Stopped at the ${step}: the run ended with the row at ${finalStatus ?? 'an unknown status'}, short of approval.`,
+  no_progress: (step, finalStatus, detail) => `Stopped at the ${step}: the run ended with the row at ${finalStatus ?? 'an unknown status'}, short of approval (the agent said: ${detail}).`,
   /* The re-read failed, so where the row is now is genuinely unknown. */
-  status_unreadable: (step) => `Stopped after the ${step}: the row's status could not be read back.`,
+  status_unreadable: (step, _finalStatus, detail) => `Stopped after the ${step}: the row's status could not be read back (the agent said: ${detail}).`,
 };
 
 /* The matcher's drop sentence, one per cause. The pre-gate wording covers BOTH ways the gate drops
@@ -215,8 +278,49 @@ export const OUTCOME_MESSAGE: {
       : /* No guessed cause: the step and the fact, nothing more. */
         `The ${STEP_LABEL[o.atStep].toLowerCase()} marked this row failed.`,
   /* Delegated to the per-reason table so each reason has its own sentence. */
-  stopped: (o, http, errorText) => STOP_MESSAGE[o.reason](STEP_LABEL[o.atStep].toLowerCase(), o.finalStatus, http, errorText),
+  stopped: (o, http, errorText) => STOP_MESSAGE[o.reason](STEP_LABEL[o.atStep].toLowerCase(), o.finalStatus, stopDetail(o.reason, http, errorText)),
 };
+
+/* One step-list line, e.g. "Matcher: running". A STOPPED line carries the same why as the outcome
+   sentence (2026-11-07: "Matcher: stopped" alone sent Teja looking for events that were never
+   written). Only once the result is in, and only for the step the outcome stopped at. Pure, so tested. */
+export function stepLine(step: PipelineStep, display: StepDisplay, result: SendResult | null): string {
+  /* The bare line, as it has always read. */
+  const line = `${STEP_LABEL[step]}: ${display}`;
+  /* No why to add: not stopped, no result yet, or the outcome is not a stop at this step (a terminal
+     override such as "dropped" already has its own sentence below the list). */
+  if (display !== 'stopped' || result === null || result.outcome.kind !== 'stopped' || result.outcome.atStep !== step) return line;
+  /* The same detail the sentence uses. */
+  return `${line} (${stopDetail(result.outcome.reason, result.httpStatus, result.errorText)})`;
+}
+
+/* The gap between two paced sends. ponytail: a fixed 5 s per tab, sized for Gemini's per-minute
+   quota (each send makes 1-3 Gemini calls); a server-side rate limiter is the upgrade if sends ever
+   come from more than one tab at once. */
+export const SEND_GAP_MS = 5000;
+
+/* The tail of the send queue: the next send waits on it. Module-level, like the row lock, so every
+   card on every page shares one queue. */
+let sendQueue: Promise<void> = Promise.resolve();
+
+/* Runs sends one at a time, with a gap after each (2026-11-07: Teja sent ~20 rows in 5 minutes and
+   exhausted Gemini's per-minute quota). Resolves or rejects with fn's own result; a failed send never
+   jams the queue. sleep is injectable so a test can see the gap without waiting for it. */
+export function paceSend<T>(
+  // The send to run once the queue reaches it.
+  fn: () => Promise<T>,
+  // How long the next send waits after this one ends.
+  gapMs: number = SEND_GAP_MS,
+  // Real timer by default.
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+): Promise<T> {
+  /* Starts only after every earlier send and its gap. */
+  const run = sendQueue.then(fn);
+  /* The gap follows success and failure alike, so one throw cannot let the next send go early. */
+  sendQueue = run.then(() => sleep(gapMs), () => sleep(gapMs));
+  /* The caller gets fn's own outcome. */
+  return run;
+}
 
 /* The one place the mapped table is called. The cast is sound: outcome.kind selects the entry whose
    parameter is exactly Extract<..., {kind: outcome.kind}>, a correlation TypeScript cannot see. */
@@ -453,10 +557,10 @@ export function SendThroughPipeline({
             const res = await deps.invoke(step, id);
             /* Kept for the invoke_error sentence. */
             lastHttpStatus = res.httpStatus;
-            /* A string error only: the body is data from the network, so its shape is checked. */
-            const error = typeof res.body === 'object' && res.body !== null ? (res.body as { error?: unknown }).error : undefined;
-            /* Reset on every call, so a later success never carries an earlier failure's words. */
-            lastErrorText = res.ok || typeof error !== 'string' ? null : error;
+            /* The engine's words from EVERY answer, 2xx included (2026-11-07: a 200 whose body failed the
+               row was dropped here, so Netomi's rate-limit read as a bare "stopped"). Reset on every call,
+               so a later step never carries an earlier step's words; only a stop's sentence reads them. */
+            lastErrorText = engineReasonText(res.body);
             /* Unchanged, so the engine decides as it would without the wrapper. */
             return res;
           },
@@ -468,10 +572,15 @@ export function SendThroughPipeline({
         };
         /* Re-enabled in finally however the run ends; the lock itself is released by withRowLock. */
         try {
-          /* The engine runs this lane's agents in order and re-reads the row after each. */
-          const outcome = await runRowPipeline(observed, applicationId, steps, (event) =>
-            /* Functional update: events arrive between awaits and must not overwrite each other. */
-            setProgress((prev) => ({ ...(prev ?? {}), [event.step]: event.phase })),
+          /* The engine runs this lane's agents in order and re-reads the row after each. Paced: one row
+             at a time across every card, so a burst of clicks queues instead of exhausting Gemini's
+             per-minute quota. The row lock is held while queued, so the steps read "waiting". */
+          const outcome = await paceSend(() =>
+            /* Unchanged engine call, only deferred until the queue reaches it. */
+            runRowPipeline(observed, applicationId, steps, (event) =>
+              /* Functional update: events arrive between awaits and must not overwrite each other. */
+              setProgress((prev) => ({ ...(prev ?? {}), [event.step]: event.phase })),
+            ),
           );
           /* The list must say what the note says: a run that ended short at a "done" step shows it stopped. */
           setProgress((prev) => (prev === null ? prev : settleProgress(prev, outcome)));
@@ -539,8 +648,9 @@ export function SendThroughPipeline({
             {steps.map((step) => (
               /* data-state drives the colour; the text says the same thing for screen readers. */
               <li key={step} className="drawer__send-step" data-state={progress[step] ?? 'waiting'}>
-                {/* "Matcher: running" — a text node, never markup from the engine. */}
-                {STEP_LABEL[step]}: {progress[step] ?? 'waiting'}
+                {/* "Matcher: running", or "Matcher: stopped (why)": one text node, so the engine's
+                    untrusted words are escaped by React and never parsed as markup. */}
+                {stepLine(step, progress[step] ?? 'waiting', result)}
               </li>
             ))}
           </ol>
@@ -573,6 +683,8 @@ export function DrawerAppCard({
   /* Optional so every existing caller renders unchanged; see SendThroughPipelineProp. */
   readonly sendThroughPipeline?: SendThroughPipelineProp;
 }): ReactElement {
+  /* Read once: the gone-posting note, or null for a live posting (or an unreadable date). */
+  const goneNote = postingGoneNote(app.disappearedAt);
   /* An article per row: each card is a self-contained item in the drawer's list. */
   return (
     <article className="drawer__app-card">
@@ -620,7 +732,13 @@ export function DrawerAppCard({
       </div>
       {/* Only the passed_filters lane: other lanes are either not on this three-agent path or
           already past it, and running matcher/tailor/auditor there would be wrong. */}
-      {sendThroughPipeline !== undefined && sendThroughPipeline.status === SEND_LANE && (
+      {/* A gone posting: the matcher would select 0 rows and the run could only stop, so the card says
+          why instead of offering the button (2026-11-07, Rubrik). The drawer has no Reject; that lives
+          on the Discovered page. */}
+      {sendThroughPipeline !== undefined && sendThroughPipeline.status === SEND_LANE && goneNote !== null && (
+        <p className="drawer__send-reason">{goneNote}</p>
+      )}
+      {sendThroughPipeline !== undefined && sendThroughPipeline.status === SEND_LANE && goneNote === null && (
         <SendThroughPipeline
           /* The row this card draws. */
           applicationId={app.id}
