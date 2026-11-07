@@ -103,6 +103,32 @@ describe('checkBeforeApprove', () => {
     assert.ok(check.kind === 'flagged' && check.findings.some((finding) => finding.claim.includes('5000')));
   });
 
+  // Teja's ruling 2026-11-07 ~22:10 IST on the browser path: an AI-chat edit that moves a REAL master skill
+  // into a job that never used it ("... using Docker") must hold Approve, saying which skill and which entry.
+  it('holds an edit that names a master skill the edited entry never used, naming the skill and the entry', () => {
+    // MASTER plus Docker: a real skill, used only by a side project, so the validator lets it into any bullet.
+    const master = {
+      ...MASTER,
+      // The project that does use Docker.
+      projects: [{ id: 'proj-1', name: 'Infra Lab', links: [], start_display: '2025', end_display: '2025', start_date: null, end_date: null, bullets: [{ id: 'b-proj-1', text: 'Ran services in Docker containers', tags: [] }] }],
+      // Docker is a master skill.
+      skills: [...MASTER.skills, { id: 's-docker', name: 'Docker', category: 'Tools' }],
+    } as MasterProfile;
+    // The AI chat's edit: the Event Cell bullet now claims Docker.
+    const edited = resume({ bullet: 'Built a REST API with Express and Node.js using Docker, handling 500 users' });
+    // The auditor's own verdict, run in the browser.
+    const check = checkBeforeApprove(master, edited, null);
+    // Held, never clean.
+    assert.equal(check.kind, 'flagged');
+    // One finding Teja can act on: the skill and the job, by name.
+    assert.ok(
+      check.kind === 'flagged' && check.findings.some((finding) => /never ties to Event Cell - Backend Intern: Docker\./.test(finding.reason)),
+      JSON.stringify(check),
+    );
+    // Positive control: the same master with the unedited bullet passes, so the hold is the edit's doing.
+    assert.deepEqual(checkBeforeApprove(master, resume(), null), { kind: 'clean' });
+  });
+
   /* The attest re-pin (spec item 2): attesting a skill makes a NEW master version that has the skill,
      and re-pins the row to it. Checked against that master, the skill is grounded. */
   it('audits against the row\'s CURRENT pinned master, so an attested skill does not false-flag', () => {

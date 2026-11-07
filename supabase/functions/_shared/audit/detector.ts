@@ -279,6 +279,21 @@ export function buildMasterIndex(master: MasterProfile): MasterIndex {
 }
 
 /**
+ * The skill and technology terms a text names: every curated-vocabulary hit (the same vocabulary the
+ * ATS score counts) plus every master skill name it contains. Word-bounded and case-insensitive through
+ * keywordAppearsIn, so "Node.js"/"NodeJS", "React"/"React.js" and "C++" match as whole terms and "Go" is
+ * never read out of "Google". Exported for the auditor tests (peer 3, 2026-11-07).
+ */
+export function skillTermsIn(text: string, masterSkillNames: Iterable<string>): string[] {
+  // Vocabulary hits first; a Set so a term named twice is one term.
+  const terms = new Set<string>(extractJdKeywords(text));
+  // Then the owner's own skill names, which the vocabulary may not list (e.g. "RAG Pipelines").
+  for (const name of masterSkillNames) if (keywordAppearsIn(name, text)) terms.add(name);
+  // In a stable order, so a finding's reason reads the same on every run.
+  return [...terms];
+}
+
+/**
  * Detect all anti-fabrication violations and hallucinations in a tailored profile.
  *
  * Compares the tailored resume (`ResolvedResume`) and raw tailor refs (`TailoredProfile`)
@@ -308,6 +323,14 @@ export function detectAuditFindings(
   // Read as TEXT (N1, 2026-11-07): a stored HTML posting's attributes and footer must never be read as
   // the posting's words.
   const jdKeywords = jobDescription ? extractJdKeywords(postingText(jobDescription) ?? "") : [];
+
+  // SKILL TIED TO ITS ENTRY (Teja ruling 2026-11-07 ~22:10 IST, "flag it for review"): the master has no
+  // per-entry skills field, so an entry's tie is the text of its OWN master bullets. Read once from the
+  // pinned master. A tailored bullet naming a skill outside this text claims it in a place Teja may not
+  // be able to defend ("built X using AWS" on a project that never used AWS).
+  const entryBulletText = new Map<NodeId, string>();
+  // Experience and projects only: the two sections where "I used X here" is a claim about real work.
+  for (const entry of [...master.experience, ...master.projects]) entryBulletText.set(entry.id, entry.bullets.map((b) => b.text).join("\n"));
 
   // Step 2: Audit Skills Section
   // Loop through skills in tailored resume
@@ -510,6 +533,33 @@ export function detectAuditFindings(
             });
           }
 
+          // SKILL NOT TIED TO THIS ENTRY: only for experience and projects (the entries the map holds).
+          if (sectionName === "experience" || sectionName === "projects") {
+            // The entry's own master text; missing (unreachable after the unresolved check) is "", so it FAILS
+            // CLOSED and every term flags instead of passing vacuously.
+            const tiedText = entryBulletText.get(item.ref) ?? "";
+            // Every skill term the tailored bullet names that this entry's master bullets never mention.
+            const untied = skillTermsIn(bullet.text, index.skillNames.values()).filter((term) => !keywordAppearsIn(term, tiedText));
+            // One finding per bullet, naming the skills and the entry so Teja can act on it.
+            if (untied.length > 0) {
+              // Flags the row for individual review, the same routing as every finding.
+              findings.push({
+                // The existing kind whose definition names this case ("a technology swapped for the one the JD asked for").
+                kind: "unfaithful_rewording",
+                // Bullet path
+                path: bulletPath,
+                // The same place by refs, the review page's key
+                ref_path: `${sectionName}.${item.ref}.${bullet.ref}`,
+                // The tailored text, as written
+                claim: bullet.text,
+                // Names the skills and the entry, so the fix (remove, or confirm you used it there) is obvious.
+                reason: `Bullet names skill(s) your master never ties to ${getClaimLabel(item)}: ${untied.join(", ")}. Keep only if you used them there.`,
+                // Deterministic word match against the pinned master
+                confidence: 0.9,
+              });
+            }
+          }
+
           // JD KEYWORD DROPPED (P2 #17, Teja ruling A 2026-11-07): a posting keyword the PINNED master
           // bullet has and the tailored bullet lost. keywordAppearsIn on both sides, so "Go" is not
           // credited from "Google" and a master "C" never stands in for a posting's "C++".
@@ -655,6 +705,44 @@ export function detectAuditFindings(
           confidence: 0.95,
         });
       }
+    }
+
+    // SUMMARY WORDS (pending P1 #7a, 2026-11-07): D4 checks only the summary's NUMBERS. Its skill and
+    // technology words must also exist somewhere in the pinned master: a skill name, any bullet, the default
+    // summary, or the PICKED variant's own paragraph (an unpicked variant's words do not vouch). Outside the
+    // tailorRefs block on purpose: with no refs there is no variant, so the pool is smaller and the check
+    // fails CLOSED rather than being skipped the way D4 is.
+    const pickedSummaryText = (master.summary_variants ?? []).find((variant) => variant.id === tailorRefs?.summary_variant)?.summary.text ?? "";
+    // Everything the master says, as one text to match whole words against.
+    const masterWords = [
+      // The default summary, when there is one.
+      master.summary?.text ?? "",
+      // The chosen variant's paragraph, or "" when none was chosen.
+      pickedSummaryText,
+      // Every skill name.
+      ...index.skillNames.values(),
+      // Every bullet of every section.
+      ...[...index.bullets.values()].map((info) => info.bullet.text),
+    ].join("\n");
+    // Summary terms the master never states.
+    const unknownTerms = skillTermsIn(resume.summary, index.skillNames.values()).filter((term) => !keywordAppearsIn(term, masterWords));
+    // One finding for the whole summary, naming every unknown term.
+    if (unknownTerms.length > 0) {
+      // Flags the row for individual review.
+      findings.push({
+        // The summary's existing kind: prose its master does not support.
+        kind: "summary_unsupported",
+        // Summary path
+        path: "summary",
+        // The same place by refs, the review page's key
+        ref_path: "summary",
+        // The printed summary, as the reviewer will read it
+        claim: resume.summary,
+        // The words to verify or remove
+        reason: `Summary names skill(s) your master profile never mentions: ${unknownTerms.join(", ")}`,
+        // Deterministic word match against the pinned master
+        confidence: 0.9,
+      });
     }
   }
 
