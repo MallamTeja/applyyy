@@ -36,6 +36,10 @@ import { createRobotsCheck } from '../apply-one.ts';
 import { createFormUrlResolver, fetchJson, type GreenhouseBoard } from '../form-url.ts';
 // The rehearsal and its read-only page adapter.
 import { readOnlyPage, rehearseAssisted } from '../assist/rehearse.ts';
+// The password check, which ends only its own session.
+import { signInCheck, type SignInClient } from '../assist/sign-in-check.ts';
+// The client for that one check only; nothing else in this CLI talks to the DB through supabase-js.
+import { createClient } from '@supabase/supabase-js';
 
 // sha256 of the seeded APPLYY_AGENT_KEY (CLAUDE.md §7): a copy is checked without printing it.
 // gitleaks' generic-api-key rule flagged this line in CI (fc915af): a 64-hex value named *KEY*. It is a
@@ -165,8 +169,9 @@ async function main(): Promise<void> {
   // Said, so "not checked" is not read as "passed".
   else record('posting open', 'PASS', 'n/a: not a job-boards.greenhouse.io URL');
 
-  // 3. Sign-in with the app password, when set, then straight out. No other client is ever made.
-  await signInCheck(String(row['user_id']), record);
+  // 3. Sign-in with the app password, when set, then out of THAT session only (scope 'local': the default
+  // 'global' logged Teja's browser out on 2026-11-07). No other client is ever made.
+  for (const line of await signInCheck(process.env, String(row['user_id']), (url, anon) => createClient(url, anon, { auth: { persistSession: false, autoRefreshToken: false } }) as unknown as SignInClient)) record(line.name, line.verdict, line.why);
 
   // 4. The rehearsal on the real form.
   const boards = (jsonOf(row['boards']) as unknown[]) ?? [];
@@ -215,28 +220,6 @@ async function main(): Promise<void> {
   }
   // The table and the exit code.
   finish(results);
-}
-
-/** Signs in with the app password when it is set, checks the owner, signs out. WAIT when unset. */
-async function signInCheck(ownerId: string, record: (name: string, verdict: Verdict, why: string) => void): Promise<void> {
-  // All four are needed for a sign-in.
-  const { SUPABASE_URL: url, SUPABASE_ANON_KEY: anon, APPLYY_APP_USER_EMAIL: email, APPLYY_APP_USER_PASSWORD: password } = process.env;
-  // Not set yet: Teja's to fill.
-  if (!url || !anon || !email || !password) return void record('sign-in', 'WAIT', 'needs SUPABASE_URL, SUPABASE_ANON_KEY, APPLYY_APP_USER_EMAIL, APPLYY_APP_USER_PASSWORD');
-  // Loaded only here, so the rehearsal path never holds a DB client.
-  const { createClient } = await import('@supabase/supabase-js');
-  // No persisted session: nothing outlives this check.
-  const client = createClient(url, anon, { auth: { persistSession: false, autoRefreshToken: false } });
-  // The same sign-in assist does.
-  const auth = await client.auth.signInWithPassword({ email, password });
-  // Who it signed in as.
-  const signedIn = auth.data.session?.user?.id ?? null;
-  // The password works.
-  record('sign-in', auth.error || !signedIn ? 'FAIL' : 'PASS', auth.error ? auth.error.message : 'session issued, then signed out');
-  // And it is the row's owner: two accounts share a prefix.
-  if (signedIn) record('signed-in = owner', signedIn === ownerId ? 'PASS' : 'FAIL', `signed in ${signedIn.slice(0, 8)}, owner ${ownerId.slice(0, 8)}`);
-  // Out again.
-  if (auth.data.session) await client.auth.signOut();
 }
 
 /** Prints the table and exits 0 / 2 / 1. */
