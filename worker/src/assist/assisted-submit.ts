@@ -14,6 +14,10 @@
 // Type-only: the assisted flow only needs the profile's shape to pass it along.
 import type { AgentName, AnswerBankRow, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 import type { ApplicationPage, RobotsCheck } from '../apply-one.ts';
+// Type-only: the resolver port, injected so tests never reach Greenhouse.
+import type { FormUrlResolver } from '../form-url.ts';
+// The verdict union, so the refusal wording below can switch on every arm.
+import type { RobotsVerdict } from '../../../packages/master-robots/src/index.ts';
 import { guardedAdvance, type StatusWriter } from '../guarded-advance.ts';
 import { planFill } from '../plan-fill.ts';
 import { planResumeAttachment, resumeFileName } from '../plan-resume-attachment.ts';
@@ -114,6 +118,9 @@ export interface AssistDeps {
   // G1: the applier's robots gate (apply-one.ts createRobotsCheck). REQUIRED, so an assisted run without
   // a robots gate does not compile.
   readonly checkRobots: RobotsCheck;
+  // The applier's form-URL resolver (form-url.ts): an iframed Greenhouse posting resolves to its real form.
+  // REQUIRED, like checkRobots, so assist cannot open a different URL from the one robots.txt approved.
+  readonly resolveFormUrl: FormUrlResolver;
   // Output sink, injected so tests can read what the human would have seen.
   // A function, not console, so output is capturable and assertable in tests.
   readonly log: (line: string) => void;
@@ -165,6 +172,17 @@ export type AssistOutcome =
 function messageOf(error: unknown): string {
   // Error instances carry a message; anything else is stringified rather than lost.
   return error instanceof Error ? error.message : String(error);
+}
+
+/** The refusal line for a non-allow robots verdict, split so "rerun later" never reads like "no" (ruling b). */
+// Exported for its own test: the wording is what Teja acts on at the terminal.
+export function robotsRefusal(url: string, robots: Exclude<RobotsVerdict, { kind: 'allow' }>): string {
+  // A crawl-delay answer is transient: the same run later may be allowed.
+  if (robots.kind === 'wait') return `robots.txt asked us to wait ${robots.waitMs}ms for ${url}: rerun later (${robots.reason})`;
+  // Timeout, 5xx or network drop: the policy was never read, so this is an outage, not a "no".
+  if (robots.source === 'indeterminate') return `robots.txt could not be read for ${url} (indeterminate): rerun later (${robots.reason})`;
+  // Every other refusal is the site's answer: do not retry, apply by hand if at all.
+  return `robots.txt refuses ${url} (${robots.source}): ${robots.reason}`;
 }
 
 /**
@@ -229,9 +247,13 @@ export async function runAssisted(deps: AssistDeps): Promise<AssistOutcome> {
   // G1 (2026-11-06): THE ROBOTS GATE, with the applier's strict rule: only an explicit 'allow' opens the
   // page; 'refuse' and 'wait' both refuse. Before the claim, so a refusal leaves the row untouched. This
   // path had no gate at all, while the applier and the kit both ask first.
-  const robots = await deps.checkRobots(applyUrl);
-  // Anything but allow: refused, naming the verdict.
-  if (robots.kind !== 'allow') return { kind: 'refused', reason: `robots.txt did not allow ${applyUrl} (${robots.kind}: ${robots.reason})` };
+  // Resolved FIRST (2026-11-07, ruling a): an iframed Greenhouse posting's form lives on Greenhouse, so the
+  // gate must ask about the URL goto loads below, exactly as the applier and the kit do.
+  const formUrl = await deps.resolveFormUrl({ id: applicationId, applyUrl });
+  // The gate, on that same URL.
+  const robots = await deps.checkRobots(formUrl);
+  // Anything but allow: refused, worded so Teja can tell "try again later" from "no" (ruling b).
+  if (robots.kind !== 'allow') return { kind: 'refused', reason: robotsRefusal(formUrl, robots) };
 
   // Lease the row so the scheduled applier cannot pick it up while a human works on it.
   if (!(await gateway.claim(applicationId))) {
@@ -249,7 +271,8 @@ export async function runAssisted(deps: AssistDeps): Promise<AssistOutcome> {
     // still approved and the lease is released in `finally`.
     try {
       // domcontentloaded is enough; the human is watching the real page load.
-      await page.goto(applyUrl);
+      // The resolved form URL, the one robots.txt was asked about above.
+      await page.goto(formUrl);
     } catch (error) {
       // Reported, not retried: the row is still approved and nothing was written.
       return { kind: 'navigation_failed', error: messageOf(error) };

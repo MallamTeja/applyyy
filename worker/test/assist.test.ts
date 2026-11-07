@@ -8,6 +8,8 @@ import {
   ASSISTED_BLOCK_NOTE,
   interpretAnswer,
   runAssisted,
+  // Ruling b: the refusal wording, tested on its own.
+  robotsRefusal,
   type AssistGateway,
   type AssistRow,
 } from '../src/assist/assisted-submit.ts';
@@ -21,6 +23,8 @@ import { createSupabaseAssistGateway } from '../src/assist/supabase-assist-gatew
 import type { SupabaseLike } from '../src/supabase-gateway.ts';
 // G1: the applier's robots port type.
 import type { RobotsCheck } from '../src/apply-one.ts';
+// Ruling a: the resolver port type, so the fake is held to the real signature.
+import type { FormUrlResolver } from '../src/form-url.ts';
 // G2: the master shape.
 import type { MasterProfile } from '@applyy/shared-types';
 
@@ -57,7 +61,7 @@ const ROBOTS_ASKED = 'robots:https://example.test/apply';
 const latestMaster = { identity: { ...syntheticResume.identity, email: 'latest-master@example.test' } } as unknown as MasterProfile;
 
 /** Build fakes plus a shared event log so ORDER across ports can be asserted. */
-function setup(opts: { row?: AssistRow | null; answer?: string | null; gotoFails?: boolean; robots?: 'allow' | 'refuse' | 'wait'; master?: MasterProfile | null } = {}) {
+function setup(opts: { row?: AssistRow | null; answer?: string | null; gotoFails?: boolean; robots?: 'allow' | 'refuse' | 'wait'; master?: MasterProfile | null; formUrl?: string } = {}) {
   // One log for every port: ordering between goto and the writes is the point.
   const events: string[] = [];
   // Records each status write as `advance:<to>:<agent>` in the shared log.
@@ -139,6 +143,8 @@ function setup(opts: { row?: AssistRow | null; answer?: string | null; gotoFails
       // Default: the site allows us.
       return { kind: 'allow', reason: 'test', crawlDelayMs: null };
     }),
+    // Ruling a: the form-URL resolver. Identity unless a case names the embedded form it resolves to.
+    resolveFormUrl: vi.fn<FormUrlResolver>(async (row) => opts.formUrl ?? row.applyUrl),
   };
   // Everything a test might want to inspect.
   return { deps, events, advance, gateway, page, submit, lines };
@@ -416,6 +422,27 @@ describe('runAssisted robots gate and identity (G1, G2)', () => {
     // Asked about the trimmed URL, then that same URL opened.
     expect(t.events.slice(0, 2)).toEqual([ROBOTS_ASKED, 'goto']);
     expect(t.page.goto).toHaveBeenCalledWith('https://example.test/apply');
+  });
+
+  it('G1: an iframed Greenhouse posting is robots-checked and opened on its boards.greenhouse.io form URL', async () => {
+    // The employer page embeds Greenhouse; the resolver confirms the real form (as form-url.ts does live).
+    const embedded = 'https://boards.greenhouse.io/embed/job_app?for=acme&token=4901533101';
+    const t = setup({ row: { ...goodRow, applyUrl: 'https://acme.example.test/careers/job?gh_jid=4901533101' }, formUrl: embedded });
+    await runAssisted(t.deps);
+    // Robots was asked about the Greenhouse form, and that same URL was the one loaded.
+    expect(t.events.slice(0, 2)).toEqual([`robots:${embedded}`, 'goto']);
+    expect(t.page.goto).toHaveBeenCalledWith(embedded);
+  });
+
+  it('G1 wording: "rerun later" for wait and indeterminate, a plain refusal for a real policy', () => {
+    // Transient: a crawl-delay ask.
+    expect(robotsRefusal('u', { kind: 'wait', reason: 'r', waitMs: 5000 })).toMatch(/rerun later/);
+    // Outage: the policy was never read.
+    expect(robotsRefusal('u', { kind: 'refuse', reason: 'r', source: 'indeterminate' })).toMatch(/indeterminate\): rerun later/);
+    // A real answer from the site: refuses, and does NOT invite a rerun.
+    const definite = robotsRefusal('u', { kind: 'refuse', reason: 'r', source: 'policy' });
+    expect(definite).toMatch(/^robots\.txt refuses u \(policy\)/);
+    expect(definite).not.toMatch(/rerun/);
   });
 
   it('G2: an identity swap is said out loud as a PROBLEM line, never silent', async () => {

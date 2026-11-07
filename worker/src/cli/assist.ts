@@ -20,6 +20,8 @@ import type { SupabaseLike } from '../supabase-gateway.ts';
 import { runAssisted } from '../assist/assisted-submit.ts';
 // G1: the same robots gate the applier and the kit use.
 import { createRobotsCheck } from '../apply-one.ts';
+// The same embedded-form resolver the applier and the kit wire (cli/apply.ts, cli/apply-kit.ts).
+import { createFormUrlResolver, fetchJson, supabaseBoardLookup } from '../form-url.ts';
 // The real database port for the flow.
 import { createSupabaseAssistGateway } from '../assist/supabase-assist-gateway.ts';
 // The machine-agent proof header, the same builder the edge functions use.
@@ -165,6 +167,9 @@ async function main(): Promise<void> {
       log: (line) => console.log(line),
       // G1: the applier's robots gate under its own token, so assist loads only what the applier may.
       checkRobots: createRobotsCheck(),
+      // The applier's own resolver over this signed-in client, so an iframed Greenhouse posting is opened
+      // (and robots-checked) on its real form URL.
+      resolveFormUrl: createFormUrlResolver(supabaseBoardLookup(client), fetchJson),
     });
     // Machine-readable last line, useful when the output is pasted into a log.
     console.log(`[assist] result: ${JSON.stringify(outcome)}`);
