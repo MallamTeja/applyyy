@@ -1007,3 +1007,34 @@ test("summary numbers control: no summary gives no finding", () => {
   // Clean.
   assert.deepEqual(outcome.findings, []);
 });
+
+// ============================================================================
+// ref_path (2026-11-07, peer 3 via the orchestrator)
+// ============================================================================
+// The review page keys a bullet line by refs ("experience.<entry-ref>.<bullet-ref>", diffAdapter.ts:412),
+// while `path` is positional ("experience[0].bullets[0]"). Every finding now also carries ref_path in the
+// page's form: additive, so `path` is unchanged. Red on revert.
+test("ref_path: a bullet finding carries the review page's ref form beside the positional path", () => {
+  // An invented metric in the experience bullet, which the detector flags.
+  const resume = createCleanResume();
+  // Mutated in place: the fixture factory returns a fresh object.
+  (resume.experience[0].bullets[0] as { text: string }).text = "Built a REST API with Express and Node.js for a college event portal, handling 98765 users";
+  // Audited.
+  const outcome = auditApplication(TEST_MASTER, resume);
+  // One finding, on that bullet.
+  const finding = outcome.findings[0];
+  // The positional path is unchanged.
+  assert.equal(finding?.path, "experience[0].bullets[0]");
+  // And the ref path names the entry and bullet by id.
+  assert.equal(finding?.ref_path, "experience.exp-1.b-exp-1");
+});
+
+// The summary keeps the one key the page already uses for it.
+test("ref_path: a summary finding's ref_path is 'summary'", () => {
+  // Zero summary refs, which the detector flags.
+  const refs = { ...createCleanTailorRefs(), summary: { text: "Backend engineer.", refs: [] } } as TailoredProfile;
+  // Audited.
+  const outcome = auditApplication(TEST_MASTER, createCleanResume(), refs);
+  // Every finding here is on the summary, keyed the page's way.
+  assert.deepEqual(outcome.findings.map((f) => f.ref_path), ["summary"]);
+});

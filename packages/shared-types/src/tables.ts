@@ -408,6 +408,13 @@ export interface BlockDetail {
 interface AuditFindingBase {
   /** Where in the tailored profile the claim appears, e.g. `experience[1].bullets[0]`. */
   path: string;
+  /**
+   * The same place by REFS, in the review page's own key form (2026-11-07): `<section>.<entry-ref>.<bullet-ref>`
+   * for a bullet, `<section>.<entry-ref>` for an entry, `skills.<skill-ref>`, or `summary`. Additive beside the
+   * positional `path` (which the page used to miss on, peer 3's finding). OPTIONAL: rows audited before this
+   * field lack it, and a reader falls back to `path`.
+   */
+  ref_path?: string;
   /** The claim itself, quoted so the human reviewer sees exactly what was written. */
   claim: string;
   /** Why it was flagged, e.g. "no master skill node matches PostgreSQL". */

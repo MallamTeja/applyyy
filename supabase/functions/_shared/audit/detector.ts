@@ -329,6 +329,8 @@ export function detectAuditFindings(
         kind: "unresolved_ref",
         // Path in tailored profile
         path,
+        // The same place by refs, the review page's key (additive, 2026-11-07; path stays positional)
+        ref_path: `skills.${skill.ref}`,
         // Claim string quoted for reviewer
         claim: skill.name,
         // Explanation reason string
@@ -348,6 +350,8 @@ export function detectAuditFindings(
           kind: "unfaithful_rewording",
           // Path in tailored profile
           path,
+          // The same place by refs, the review page's key (additive, 2026-11-07; path stays positional)
+          ref_path: `skills.${skill.ref}`,
           // Claim string quoted for reviewer
           claim: skill.name,
           // Explanation reason string
@@ -388,6 +392,8 @@ export function detectAuditFindings(
           kind: "unresolved_ref",
           // Path in tailored profile
           path: parentPath,
+          // The same place by refs, the review page's key (additive, 2026-11-07; path stays positional)
+          ref_path: `${sectionName}.${item.ref}`,
           // Claim string
           claim: getClaimLabel(item),
           // Explanation reason
@@ -419,6 +425,8 @@ export function detectAuditFindings(
             kind: "unresolved_ref",
             // Bullet path
             path: bulletPath,
+            // The same place by refs, the review page's key (additive, 2026-11-07; path stays positional)
+            ref_path: `${sectionName}.${item.ref}.${bullet.ref}`,
             // Bullet text claim
             claim: bullet.text,
             // Reason explanation
@@ -435,6 +443,8 @@ export function detectAuditFindings(
               kind: "misattributed_bullet",
               // Bullet path
               path: bulletPath,
+              // The same place by refs, the review page's key (additive, 2026-11-07; path stays positional)
+              ref_path: `${sectionName}.${item.ref}.${bullet.ref}`,
               // Bullet claim text
               claim: bullet.text,
               // Reason explanation
@@ -467,6 +477,8 @@ export function detectAuditFindings(
               kind: "unfaithful_rewording",
               // Bullet path
               path: bulletPath,
+              // The same place by refs, the review page's key (additive, 2026-11-07; path stays positional)
+              ref_path: `${sectionName}.${item.ref}.${bullet.ref}`,
               // Claim text
               claim: bullet.text,
               // Reason explanation
@@ -487,6 +499,8 @@ export function detectAuditFindings(
               kind: "unfaithful_rewording",
               // Bullet path
               path: bulletPath,
+              // The same place by refs, the review page's key (additive, 2026-11-07; path stays positional)
+              ref_path: `${sectionName}.${item.ref}.${bullet.ref}`,
               // Claim text
               claim: bullet.text,
               // Reason explanation
@@ -509,6 +523,8 @@ export function detectAuditFindings(
               kind: "jd_keyword_dropped",
               // Bullet path
               path: bulletPath,
+              // The same place by refs, the review page's key (additive, 2026-11-07; path stays positional)
+              ref_path: `${sectionName}.${item.ref}.${bullet.ref}`,
               // The tailored text, as written, so the reviewer sees what lost the word
               claim: bullet.text,
               // The words to put back
@@ -554,6 +570,8 @@ export function detectAuditFindings(
           kind: "summary_unsupported",
           // Summary path
           path: summaryPath,
+          // The same place by refs, the review page's key (additive, 2026-11-07; path stays positional)
+          ref_path: "summary",
           // Claim text
           claim: resume.summary,
           // Reason explanation
@@ -577,6 +595,8 @@ export function detectAuditFindings(
             kind: "summary_unsupported",
             // Summary path
             path: summaryPath,
+            // The same place by refs, the review page's key (additive, 2026-11-07; path stays positional)
+            ref_path: "summary",
             // Claim text
             claim: resume.summary,
             // Reason explanation
@@ -625,6 +645,8 @@ export function detectAuditFindings(
           kind: "summary_unsupported",
           // Summary path
           path: summaryPath,
+          // The same place by refs, the review page's key (additive, 2026-11-07; path stays positional)
+          ref_path: "summary",
           // The printed summary, as the reviewer will read it
           claim: resume.summary,
           // The numbers to verify or remove
