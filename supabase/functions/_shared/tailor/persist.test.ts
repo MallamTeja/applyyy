@@ -304,6 +304,30 @@ test("dedupe on the success path is recorded in the tailored event", async () =>
   assert.deepEqual(args.p_detail, { reason: "tailored_profile_written", deduplicated_refs: [{ ref: "skill-node", where: "skills" }] });
 });
 
+// The skills shape (2026-11-06) on record: every ref it added or dropped reaches the event, so the
+// reshaping is never silent. Red on revert of either spread in persist.ts.
+test("skills shape: the refs added and dropped are recorded in the tailored event as skills_floor_added and skills_dropped", async () => {
+  // A verdict whose shape topped up one group and dropped one irrelevant pick.
+  const { client, calls } = recordingClient();
+  // Both lists non-empty, so both keys must appear.
+  await persistTailorOutcome(client, APPLICATION_ID, { ...TAILORED, skillsAdded: ["lang-sql", "lang-ts"], skillsDropped: ["ml-xgboost"] } as TailorOutcome);
+  // The status move is the last call; its detail carries both lists under their exact keys.
+  const args = calls.at(-1)!.payload.args as Record<string, unknown>;
+  // The key is skills_dropped (skill refs), not skills_groups_dropped (renamed 2026-11-07: it never held groups).
+  assert.deepEqual(args.p_detail, { reason: "tailored_profile_written", skills_floor_added: ["lang-sql", "lang-ts"], skills_dropped: ["ml-xgboost"] });
+});
+
+// The control: an untouched skills section adds neither key, so the event stays as small as before.
+test("skills shape: an unshaped answer adds neither skills key to the tailored event", async () => {
+  // TAILORED has empty skillsAdded and skillsDropped.
+  const { client, calls } = recordingClient();
+  // Persisted as is.
+  await persistTailorOutcome(client, APPLICATION_ID, TAILORED);
+  // Only the reason: an empty list is never written as a key.
+  const args = calls.at(-1)!.payload.args as Record<string, unknown>;
+  assert.deepEqual(args.p_detail, { reason: "tailored_profile_written" });
+});
+
 
 // ---- The retry on record (2026-11-05) ---------------------------------------------------------------
 

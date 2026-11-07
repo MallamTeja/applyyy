@@ -115,6 +115,30 @@ test("case-sensitive terms: REST and AI are acronyms, not English words or lette
   assert.equal(keywordAppearsIn("AI", "AI agents"), true);
 });
 
+// The one-letter languages (review 2026-11-07): the live master (v19) holds a skill named "C", and the
+// skills shape asks keywordAppearsIn(name, posting). The plain fallback bounds only letters and digits,
+// so "C" was credited by "C++", "C#" and "C-level", and "R" by "R&D". Red on revert of LETTER_LANGUAGES.
+test("a one-letter language is not credited by C++, C#, C-level, Objective-C or R&D", () => {
+  // Every look-alike in one posting, and no real C anywhere.
+  assert.equal(keywordAppearsIn("C", "C++ / C# / C-level stakeholders"), false);
+  // A different language whose name ends in "-C".
+  assert.equal(keywordAppearsIn("C", "iOS work in Objective-C"), false);
+  // Lower case is the letter, never the language.
+  assert.equal(keywordAppearsIn("C", "section c of the form"), false);
+  // "R&D" is research, not the R language.
+  assert.equal(keywordAppearsIn("R", "a strong R&D culture"), false);
+});
+
+// The control: the real languages still count, alone or beside their look-alikes.
+test("a one-letter language is credited when the posting names it", () => {
+  // C listed beside C++.
+  assert.equal(keywordAppearsIn("C", "C/C++ systems programming"), true);
+  // C as a plain word in a list.
+  assert.equal(keywordAppearsIn("C", "Python, C, Go"), true);
+  // R as a plain word.
+  assert.equal(keywordAppearsIn("R", "statistics in R or Python"), true);
+});
+
 test("an unknown keyword falls back to a word-bounded, case-insensitive match", () => {
   // Not in the vocabulary, so the fallback rule applies; case-insensitive, so "svelte" counts.
   assert.equal(keywordAppearsIn("Svelte", "built with svelte"), true);

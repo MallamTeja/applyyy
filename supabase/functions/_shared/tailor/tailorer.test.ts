@@ -20,7 +20,7 @@ import { test } from "node:test";
 // Strict, so a missing key never compares equal to a key holding `undefined`.
 import assert from "node:assert/strict";
 // Extension-suffixed specifier so this runs under Deno and `node --test` alike.
-import { createTailorer, TAILOR_REQUIRED_ARRAY_KEYS } from "./tailorer.ts";
+import { createTailorer, shapeSkillGroups, TAILOR_REQUIRED_ARRAY_KEYS } from "./tailorer.ts";
 // The schema Gemini is actually sent, and the section tuple its enum is built from —
 // imported, never restated, so these tests check the shipped values.
 import { TAILOR_RESPONSE_SCHEMA, TAILOR_SECTION_KINDS } from "./prompt.ts";
@@ -582,8 +582,50 @@ test("skills shape: a backend posting shows its relevant groups at min(4, master
   assert.deepEqual(outcome.skillsAdded, ["lang-sql", "lang-ts", "lang-python", "dev-gcp"]);
   // The ML pick is dropped and reported, never silently.
   assert.deepEqual(outcome.skillsDropped, ["ml-xgboost"]);
-  // The stored refs are the shaped profile, so tailor_refs re-validates to this exact resume.
-  assert.deepEqual(outcome.refs.skills.map((s) => s.ref), ["skill-node", "dev-docker", "lang-sql", "lang-ts", "lang-python", "dev-gcp"]);
+  // The stored refs are the shaped profile, so tailor_refs re-validates to this exact resume. Grouped
+  // and ranked (2026-11-07): Languages (3 named) before DevOps (1 named); inside each, posting-named first.
+  assert.deepEqual(outcome.refs.skills.map((s) => s.ref), ["skill-node", "lang-sql", "lang-ts", "lang-python", "dev-docker", "dev-gcp"]);
+});
+
+// RED 1 (review 2026-11-07; Teja: "rank by the JD"): inside a group, a skill the posting names comes
+// before a model pick it does not name. The old shape kept the model's picks first. Red on revert.
+test("skills shape: inside a group, a posting-named skill ranks ahead of a model pick the posting never names", async () => {
+  // The model leads with Python and Go; the posting names neither, only SQL, TypeScript and Node.js.
+  const outcome = await shapeOutcome([{ ref: "lang-python" }, { ref: "lang-go" }, { ref: "skill-node" }, { ref: "lang-sql" }], BACKEND_POSTING);
+  assert.equal(outcome.kind, "tailored");
+  if (outcome.kind !== "tailored") return;
+  // The Languages refs in page order: the three posting-named (master order), then the model's two others.
+  const languages = outcome.refs.skills.map((s) => s.ref).filter((ref) => ref.startsWith("lang-") || ref === "skill-node");
+  assert.deepEqual(languages, ["skill-node", "lang-sql", "lang-python", "lang-go"]);
+});
+
+// Yellow (review 2026-11-07): the page orders groups by first appearance, so the shape must emit the
+// most relevant group first, not whichever group the model happened to list first. Red on revert.
+test("skills shape: the most relevant group comes first on the page even when the model listed it last", async () => {
+  // The model lists DevOps (1 posting-named skill) before Languages (3).
+  const outcome = await shapeOutcome([{ ref: "dev-docker" }, { ref: "skill-node" }], BACKEND_POSTING);
+  assert.equal(outcome.kind, "tailored");
+  if (outcome.kind !== "tailored") return;
+  // Group order on the resolved resume, by first appearance.
+  assert.deepEqual(Object.keys(groupSizes(outcome.resume)), ["Languages", "DevOps"]);
+});
+
+// RED 2 (review 2026-11-07): the live master holds a skill named "C". A posting that names only C++ must
+// give that group relevance 0, so a C-only group is not shown on its strength. Red on revert.
+test("skills shape: a master skill named C is not made relevant by a C++ posting", () => {
+  // Two groups: one holding only "C", one the posting really names.
+  const master: MasterProfile = { ...MASTER, skills: [
+    // The one-letter language from the live master.
+    { id: "lang-c", name: "C", category: "Systems" },
+    // A skill the posting does name.
+    { id: "skill-node", name: "Node.js", category: "Backend" },
+  ] };
+  // Only the look-alikes, plus Node.js.
+  const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "lang-c" }, { ref: "skill-node" }] }, master, "C++ and C# services on Node.js; C-level reporting.");
+  // The Systems group is irrelevant, so its pick is dropped and reported.
+  assert.deepEqual(shaped.dropped, ["lang-c"]);
+  // Only Backend remains.
+  assert.deepEqual(shaped.profile.skills.map((s) => s.ref), ["skill-node"]);
 });
 
 // The groups come from the master by the posting, not from the model's choice alone.
@@ -600,8 +642,9 @@ test("skills shape: a group the posting names is shown even when the model skipp
 
 // A group already at the floor, with no other relevant group, is left exactly as the model chose it.
 test("skills shape: an answer that already fits comes back unchanged", async () => {
-  // Four Languages picks, and a posting that touches only Languages.
-  const picks = [{ ref: "skill-node" }, { ref: "lang-python" }, { ref: "lang-go" }, { ref: "lang-sql" }];
+  // Four Languages picks, already ranked by the posting (named Node.js and SQL first, then master order),
+  // and a posting that touches only Languages.
+  const picks = [{ ref: "skill-node" }, { ref: "lang-sql" }, { ref: "lang-python" }, { ref: "lang-go" }];
   const outcome = await shapeOutcome(picks, { ...BACKEND_POSTING, jobDescription: "SQL and TypeScript on Node.js services." });
   assert.equal(outcome.kind, "tailored");
   if (outcome.kind !== "tailored") return;

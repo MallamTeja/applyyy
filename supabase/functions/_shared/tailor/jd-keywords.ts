@@ -178,6 +178,20 @@ const SKILL_VOCABULARY: readonly SkillTerm[] = [
 // term -> entry, built once at module load so a per-keyword lookup is O(1), not a scan per call.
 const VOCABULARY_BY_TERM: ReadonlyMap<string, SkillTerm> = new Map(SKILL_VOCABULARY.map((entry) => [entry.term, entry]));
 
+/* THE ONE-LETTER LANGUAGES, matched but never extracted (review 2026-11-07). The live master (v19) holds
+ * a skill named "C", and the skills shape asks keywordAppearsIn(skill name, posting). The fallback below
+ * bounds only letters and digits, so it credited "C" from "C++", "C#", "C-level" and "Objective-C", and
+ * "R" from "R&D": a C-only group looked relevant to every C++ posting. These patterns are case-SENSITIVE
+ * (lower-case "c" is a letter, not a language) and also refuse a following "+", "#", "&" or "-word" and a
+ * preceding "word-". Deliberately NOT in SKILL_VOCABULARY: extractJdKeywords' output is a future cache-key
+ * input and the ATS denominator, and adding a term there changes both; this map only stops false credit. */
+const LETTER_LANGUAGES: ReadonlyMap<string, RegExp> = new Map([
+  // C, but not C++, C#, C-level or Objective-C. "C/C++" still credits C: the slash names both.
+  ["C", /(?<![A-Za-z0-9]|[A-Za-z]-)C(?![A-Za-z0-9+#&]|-[A-Za-z])/],
+  // R, but not R&D, R-squared or a letter inside a word.
+  ["R", /(?<![A-Za-z0-9]|[A-Za-z]-)R(?![A-Za-z0-9+#&]|-[A-Za-z])/],
+]);
+
 // Entity-decoded so "Ruby &amp; Rails" in scraped HTML reads as text. One helper so the
 // extractor and the matcher cannot decode differently.
 const decodeEntities = (text: string): string => text.replace(/&amp;/g, "&");
@@ -195,6 +209,10 @@ function appearsInDecoded(keyword: string, decoded: string): boolean {
   // which is case-insensitive and WOULD credit "go to market". Reachable only by a hand-edited
   // row: the column is written solely by extractJdKeywords, which emits canonical terms.
   if (entry) return entry.pattern.test(decoded);
+  // A one-letter language uses its own stricter pattern (see LETTER_LANGUAGES); exact key, so "c" falls through.
+  const letter = LETTER_LANGUAGES.get(keyword);
+  // Checked before the fallback, which would credit "C" from "C++".
+  if (letter) return letter.test(decoded);
   // Unknown keyword: escaped so "C++"-like text is literal, never a regex; bounded and
   // case-insensitive like word(), so it is never a raw substring ("Svelte" not in "sveltekit").
   return word(keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).test(decoded);

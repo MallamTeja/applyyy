@@ -155,8 +155,9 @@ export async function persistTailorOutcome(
       ...(outcome.dedupedRefs.length > 0 ? { deduplicated_refs: outcome.dedupedRefs } : {}),
       // Only when the skills shape (2026-11-06) topped up or dropped a group, so neither is silent.
       ...(outcome.skillsAdded.length > 0 ? { skills_floor_added: outcome.skillsAdded } : {}),
-      // The model picks removed because their group is irrelevant to the posting.
-      ...(outcome.skillsDropped.length > 0 ? { skills_groups_dropped: outcome.skillsDropped } : {}),
+      // The model picks removed because their group is irrelevant to the posting. Skill REFS, so the key is
+      // skills_dropped (renamed 2026-11-07 from skills_groups_dropped before any row carried it: never deployed).
+      ...(outcome.skillsDropped.length > 0 ? { skills_dropped: outcome.skillsDropped } : {}),
       // Only when the one-shot rewrite ran.
       ...(outcome.retry !== null ? { retry: { first_attempt_violations: outcome.retry.firstViolations, rewritten_refs: outcome.retry.rewrittenRefs } } : {}),
     },

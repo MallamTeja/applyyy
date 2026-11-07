@@ -167,9 +167,12 @@ export function dedupeRepeatedRefs(tailored: TailoredProfile): { readonly profil
  *      order; at most SKILLS_MAX_GROUPS. A group the posting never touches is dropped even if the model
  *      chose it (a backend JD shows no Machine Learning group). If NO group is relevant, the model's own
  *      groups are kept: an empty skills section would be worse than an unjudged one.
- *   3. Each shown group holds the model's picks, then its other master skills ranked posting-named
- *      first, then master order, up to min(SKILLS_PER_GROUP_FLOOR, the group's master size). A group
- *      smaller than the floor shows all it has: the master is the only honest source.
+ *   3. Each shown group holds the model's picks, topped up from its other master skills ranked
+ *      posting-named first, then master order, to at least min(SKILLS_PER_GROUP_FLOOR, the group's master
+ *      size). The floor is a MINIMUM: a group the model filled past it keeps every pick. A group smaller
+ *      than the floor shows all it has: the master is the only honest source.
+ *   4. ORDER (Teja, 2026-11-07, "rank by the JD"): groups in the order of step 2, and inside each group
+ *      posting-named skills first, then master order. The model's own order is not kept.
  *
  * WHAT IT NEVER DOES: invent a skill (only master refs, resolved by the unchanged validator after this)
  * or hard-code a group name or size (both read from the master passed in at tailor time, the LATEST
@@ -218,11 +221,25 @@ export function shapeSkillGroups(tailored: TailoredProfile, master: MasterProfil
     // The top `need` (none when the group is already at the floor).
     for (const skill of ranked.slice(0, Math.max(0, need))) added.push(skill.id);
   }
-  // Unchanged answer: returned as it was.
-  if (added.length === 0 && dropped.length === 0) return { profile: tailored, added, dropped };
-  // The model's surviving picks, then the top-ups; the renderer groups by category, so within a group
-  // the model's choices come first. Group order on the page follows first appearance.
-  return { profile: { ...tailored, skills: [...kept, ...added.map((ref) => ({ ref }))] }, added, dropped };
+  // Each master skill's position, the tie-break inside a group after "the posting names it".
+  const masterIndex = new Map(master.skills.map((skill, index) => [skill.id, index]));
+  // The kept picks and the top-ups as one pool of entries; a kept entry keeps its own object.
+  const pool = [...kept, ...added.map((ref) => ({ ref }))];
+  // RANKED BY THE JD (Teja, 2026-11-07, review RED 1 + the group-order yellow). The renderer groups by
+  // category and orders groups by first appearance, so the order emitted here IS the page order:
+  // groups in shown order (relevance first), and inside each group the skills the posting names first,
+  // then master order. The model's picks get no seat ahead of a posting-named skill.
+  const ordered = [...shown].flatMap((category) => pool
+    // This group's resolvable entries only.
+    .filter(({ ref }) => byId.get(ref)?.category === category)
+    // Posting-named first; master position breaks ties, so the result never depends on the model's order.
+    .sort((a, b) => Number(keywordAppearsIn(byId.get(b.ref)!.name, jobDescription)) - Number(keywordAppearsIn(byId.get(a.ref)!.name, jobDescription))
+      || (masterIndex.get(a.ref) ?? 0) - (masterIndex.get(b.ref) ?? 0)));
+  // Unresolved refs last, kept so the validator still refuses them (never laundered by being left out).
+  const skills = [...ordered, ...kept.filter(({ ref }) => !byId.has(ref))];
+  // The shaped section (an answer that already fits comes back with the same refs in the same order). A
+  // reorder alone is not reported (no ref changed); added and dropped always are.
+  return { profile: { ...tailored, skills }, added, dropped };
 }
 
 /* The bullets a one-shot rewrite may fix, with their untraceable words, or null for "do not retry"
