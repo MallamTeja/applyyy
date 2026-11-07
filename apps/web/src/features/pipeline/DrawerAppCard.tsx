@@ -157,6 +157,32 @@ function callFailure(http: number | null, errorText: string | null): string {
    can land in `error`), and a reason only needs its first line or so to be diagnosable. */
 const MAX_REASON_CHARS = 300;
 
+/* `reason` as words. Most agents send a string; the matcher sends an object since e88b7d8
+   (2026-11-07, supabase/functions/matcher/run-reason.ts): { code, message, status? }, a closed set
+   of codes saying why a targeted run found nothing. Each code reads as plain words; an unknown code
+   reads as the server's own message; any other shape yields nothing, never "[object Object]". */
+function matcherReasonText(reason: unknown): string | null {
+  /* A string reason is already words, as every other agent sends it. */
+  if (typeof reason === 'string') return reason;
+  /* Only a plain object can be the matcher's shape; an array or null is not. */
+  if (typeof reason !== 'object' || reason === null || Array.isArray(reason)) return null;
+  /* Loose view: off the wire, so each field is checked before use. */
+  const r = reason as { code?: unknown; message?: unknown; status?: unknown };
+  /* The server's own sentence, used when a code has no better words or for an unknown code. */
+  const message = typeof r.message === 'string' ? r.message : null;
+  /* The tombstone: the board took the posting down. */
+  if (r.code === 'target_posting_gone') return 'Posting gone';
+  /* The row was deleted or never existed under this user. */
+  if (r.code === 'target_not_found') return 'This job is no longer in your list';
+  /* The row moved on; name where it is when the status is readable, else the server's sentence. */
+  if (r.code === 'target_not_at_input_status') return typeof r.status === 'string' && r.status !== '' ? `Already at ${r.status}` : message;
+  /* Keep the code in the words so stopDetail says "Gemini is rate-limited" (the message can be a
+     bare status=429 line that never spells it), without naming it twice when it already does. */
+  if (r.code === 'rate_limited') return message === null || message.includes('rate_limited') ? message : `rate_limited: ${message}`;
+  /* An unknown code, or no code: the server's sentence verbatim (capped by the caller), or nothing. */
+  return message;
+}
+
 /* The engine's own words for one response, from the fields the agents actually use (2026-11-07):
    `error` (success:false and every non-2xx), `failures[].error` (a 200 that failed this row, e.g.
    Netomi's gemini rate-limit), `reason` and `detail`. Strings only, never a stringified number, and
@@ -171,7 +197,7 @@ export function engineReasonText(body: unknown): string | null {
     ? (b.failures as unknown[]).find((f): f is { error: string } => typeof f === 'object' && f !== null && typeof (f as { error?: unknown }).error === 'string')
     : undefined;
   /* Non-empty strings only, in the order a reader needs them: what, then why. */
-  const parts = [b.error, failure?.error, b.reason, b.detail].filter((v): v is string => typeof v === 'string' && v.trim() !== '');
+  const parts = [b.error, failure?.error, matcherReasonText(b.reason), b.detail].filter((v): v is string => typeof v === 'string' && v.trim() !== '');
   /* Nothing said. */
   if (parts.length === 0) return null;
   /* Each phrase once, in case two fields carry the same words. */

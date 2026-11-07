@@ -51,3 +51,35 @@ describe('SourceBadge chips', () => {
     assert.deepEqual(labels(html), ['Greenhouse career page', 'LinkedIn post']);
   });
 });
+
+// 2026-11-07 audit: a non-array discovered_via crashed the page ("e.map is not a function"). The column is
+// text[], but the value arrives off the wire as untrusted JSON, so SourceBadge checks the SHAPE (CLAUDE.md
+// section 6) instead of trusting a truthiness test that a non-empty string also passes.
+describe("SourceBadge on a malformed discovered_via or source_refs", () => {
+  it("a string, an object or a number renders nothing instead of throwing", () => {
+    // Each passes the old `!discoveredVia || length === 0` test or has no .map; none is an array.
+    for (const value of ["greenhouse", "{greenhouse}", { 0: "greenhouse", length: 1 }, 7]) {
+      // Rendered: must not throw, and draws no chip.
+      assert.equal(render(h(badge.SourceBadge, { discoveredVia: value as never, sourceRefs: [GREENHOUSE_REF] as never })), "", JSON.stringify(value));
+    }
+  });
+
+  it("non-string entries are skipped; the string ones still get their chip", () => {
+    // A null and a number beside a real source.
+    const html = render(h(badge.SourceBadge, { discoveredVia: [null, 3, "greenhouse"] as never, sourceRefs: [GREENHOUSE_REF] as never }));
+    // Only the real source draws a chip.
+    assert.deepEqual(labels(html), ["Greenhouse career page"]);
+  });
+
+  it("a non-array source_refs, or a null ref in it, reads as no refs instead of throwing", () => {
+    // The same source with genuinely no refs: the chip a malformed refs value must equal.
+    const noRefs = render(h(badge.SourceBadge, { discoveredVia: ["greenhouse"] as never, sourceRefs: [] as never }));
+    // Non-vacuity: that baseline draws one chip.
+    assert.equal(labels(noRefs).length, 1);
+    // A string where the array belongs, and an array holding a null.
+    for (const refs of ["oops", [null]]) {
+      // The source still draws its chip, exactly as with no refs at all.
+      assert.equal(render(h(badge.SourceBadge, { discoveredVia: ["greenhouse"] as never, sourceRefs: refs as never })), noRefs, JSON.stringify(refs));
+    }
+  });
+});

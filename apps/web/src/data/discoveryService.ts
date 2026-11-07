@@ -19,6 +19,8 @@
  */
 
 import { supabase } from './supabase';
+// Every browser edge call goes through it: a revoked session refreshes once, else signs out with a plain sentence.
+import { invokeEdge } from './edgeCall';
 
 /* What every remote-feed button shows instead of a scan. One sentence, so the modal and the
    tests agree on it; the time matches the cron in .github/workflows/scout-remote.yml. */
@@ -231,9 +233,15 @@ export async function runWatchlistScan(
 
   // invoke() attaches the session JWT, which scout-ats requires. It never throws: HTTP,
   // relay and network failures all come back as `error` (functions-js FunctionsClient).
-  const { data, error } = await client.functions.invoke('scout-ats', {
-    body: {},
-  });
+  // Through invokeEdge, so a session revoked elsewhere refreshes once before it is a 401 here.
+  const answer = await invokeEdge(client, 'scout-ats', { body: {} });
+  // The session is gone for good and this browser is signed out: say so, nothing was scanned.
+  if (answer.kind === 'signed_out') {
+    // Same shape as the 401 branch below, with the plain sentence instead of the raw refusal.
+    return { ok: false, message: answer.message, boardsScanned: 0, jobsInserted: 0, appsCreated: 0, error: 'unauthenticated' };
+  }
+  // The function answered: its own data and error, exactly as invoke returned them.
+  const { data, error } = answer;
 
   // Non-2xx responses arrive as an error carrying the raw Response in `context`.
   if (error) {

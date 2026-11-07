@@ -6,6 +6,8 @@
 import { useState } from 'react';
 // The http(s)-only href gate: a scouted apply_url is LLM-proposed, so it is untrusted.
 import { safeHref } from '../../app/safeHref.ts';
+// Every browser edge call goes through it: a revoked session refreshes once, else signs out with a plain sentence.
+import { invokeEdge, type EdgeClient } from '../../data/edgeCall.ts';
 // Styles are co-located so the panel can be mounted or removed as one unit.
 import './WebScoutPanel.css';
 
@@ -67,14 +69,10 @@ export type WebScoutState =
   // Everything else that went wrong; the message says what, never a guessed cause.
   | { kind: 'error'; message: string };
 
-// Minimal slice of SupabaseClient the panel needs; structural so a test fake fits.
-export interface WebScoutClient {
-  // Only the functions namespace is needed, so a test fake does not have to implement auth or storage.
-  functions: {
-    // Mirrors supabase-js: error and data are both returned, never thrown, for non-2xx responses.
-    invoke(name: string, options: { body: Record<string, unknown> }): Promise<{ data: unknown; error: unknown }>;
-  };
-}
+// Minimal slice of SupabaseClient the panel needs; structural so a test fake fits. It is invokeEdge's
+// client (functions plus auth) since 2026-11-07: a revoked session needs auth.refreshSession and a local
+// sign-out, so the old functions-only slice could not survive one.
+export type WebScoutClient = EdgeClient;
 
 // Narrowing helper: a plain object, not null or an array, before any property is read.
 // Exported (2026-10-31) for AddJobLinkPanel, which validates its function's body the same way.
@@ -188,7 +186,11 @@ export async function runWebScout(client: WebScoutClient, query: string): Promis
   // The call itself can reject (network down); that must become an error state.
   try {
     // Contract: invoke('scout-web', { body }).
-    const { data, error } = await client.functions.invoke('scout-web', { body });
+    const answer = await invokeEdge(client, 'scout-web', { body });
+    // The session is gone and this browser is signed out: the existing sign-in-again state, with the plain sentence.
+    if (answer.kind === 'signed_out') return { kind: 'unauthorized', message: answer.message };
+    // The function answered: its own data and error.
+    const { data, error } = answer;
     // Non-2xx path: classify by the body's status when it is readable.
     // Checked before `data` because supabase-js returns data null alongside an error.
     if (error) {

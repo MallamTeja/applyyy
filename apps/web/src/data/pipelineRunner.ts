@@ -16,6 +16,8 @@
 // Extension included so `node --test` (type stripping, strict ESM resolution) can load
 // this module for the classification tests; Vite accepts it either way.
 import { supabase } from './supabase.ts';
+// Every browser edge call goes through it; its client type is this module's client type too.
+import { invokeEdge, type EdgeClient } from './edgeCall.ts';
 
 // The five agents in run order, as a closed union so a typo cannot name a sixth.
 export type PipelineAgentId = 'normalizer' | 'screener' | 'matcher' | 'tailor' | 'auditor';
@@ -45,13 +47,10 @@ export interface PipelineRunResult {
 }
 
 // The one slice of the Supabase client this module touches. Narrowed so tests can hand
-// in a stub without constructing a real client (which needs env and a network).
-export interface FunctionsInvoker {
-  readonly functions: {
-    // Mirrors supabase-js: errors come back in `error`, not as a throw.
-    invoke(name: string, options?: Record<string, unknown>): Promise<{ data: unknown; error: unknown }>;
-  };
-}
+// in a stub without constructing a real client (which needs env and a network). It is
+// invokeEdge's client (functions plus auth) since 2026-11-07, because a revoked session
+// needs auth.refreshSession and a local sign-out; the old functions-only slice could not.
+export type FunctionsInvoker = EdgeClient;
 
 // Batch size per agent. Kept small so one click costs at most ~10 Gemini calls per LLM agent.
 const BATCH_LIMIT = 10;
@@ -214,17 +213,24 @@ export async function runPipeline(
     try {
       // `limit` goes in the query string: every function reads searchParams.get("limit"),
       // never the body. functions-js builds `${url}/${functionName}`, so a query suffix survives.
-      const { data, error } = await client.functions.invoke(`${agent.id}?limit=${BATCH_LIMIT}`);
-      if (error) {
+      // No options, so no body is sent, as before; invokeEdge refreshes a revoked session once.
+      const answer = await invokeEdge(client, `${agent.id}?limit=${BATCH_LIMIT}`);
+      // The session is gone and this browser is signed out: every later agent would be refused the same way.
+      if (answer.kind === 'signed_out') {
+        // The plain sentence on this step.
+        outcome = { status: 'failed', moved: 0, message: answer.message };
+        // Stop here, so the later agents are recorded as not run instead of called.
+        stopReason = answer.message;
+      } else if (answer.error) {
         // Read the function's own reason out of the Response instead of "non-2xx".
-        const described = await describeInvokeError(error);
+        const described = await describeInvokeError(answer.error);
         // A transport/HTTP error moved nothing.
         outcome = { status: 'failed', moved: 0, message: described.message };
         // Auth errors repeat identically for every agent, so stop rather than spam four more.
         if (described.stop) stopReason = `${agent.name} was refused — ${described.message}`;
       } else {
         // A 2xx is only a candidate success until its body is checked.
-        outcome = classifyResponse(agent.id, data);
+        outcome = classifyResponse(agent.id, answer.data);
       }
     } catch (err) {
       // invoke() should not throw, but a stub or a future SDK might; treat it as a failure.

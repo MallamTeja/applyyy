@@ -68,7 +68,7 @@ import {
 import type { FilterRuleConfig } from '../settings/filtersStore.ts';
 // The drawer's per-row button, reused so both lanes share one lock, one step list and one set of sentences.
 // isRowInFlight + withRowLock: Reject takes the SAME per-row lock, so a card never rejects and sends at once.
-import { OutcomeNote, SendThroughPipeline, isRowInFlight, withRowLock } from '../pipeline/DrawerAppCard.tsx';
+import { OutcomeNote, SendThroughPipeline, isRowInFlight, postingGoneNote, withRowLock } from '../pipeline/DrawerAppCard.tsx';
 // The tested Reject/Undo pieces: which lanes may reject, the one write, and its sentences.
 import { canReject, describeReject, moveRejectedJob } from './rejectJob.ts';
 // description_raw can be HTML or entity-escaped HTML; both the card preview and the JD modal show it as plain text.
@@ -1066,7 +1066,12 @@ export function DiscoveredJobsPage(): ReactElement {
                     outcome note says "Dropped by the screener" when it disagrees with the
                     preview. Only a real-shaped id gets a button: a row without one cannot be
                     addressed, and the engine would refuse it anyway. */}
-                {isApplicationId(applicationId) && (
+                {/* A posting its board took down gets the drawer card's own note instead of Send (2026-11-07):
+                    the tailor refuses a gone posting, so the click could only fail. Same reader as the
+                    drawer, so the two can never disagree on what counts as gone. */}
+                {postingGoneNote(job.disappeared_at) !== null ? (
+                  <span className="drawer__send-reason">{postingGoneNote(job.disappeared_at)}</span>
+                ) : isApplicationId(applicationId) && (
                   <SendThroughPipeline
                     /* The row the agents act on; also the per-row lock key. */
                     applicationId={applicationId}

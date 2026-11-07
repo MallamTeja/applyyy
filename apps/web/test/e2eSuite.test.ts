@@ -1142,4 +1142,77 @@ describe('Playwright E2E Operator Console Suite', () => {
       await page.unroute('**/rest/v1/answer_bank**');
     }
   });
+  // 2026-11-07 (handoff items 3 and 7). The Discovered page never read jobs.disappeared_at, so a posting
+  // its board had taken down still offered "Send through pipeline", and the tailor then refused it. And
+  // a discovered_via that was not an array crashed the whole page ("e.map is not a function") because
+  // SourceBadge trusted a truthiness test. Only a real render can show both: the page is not
+  // importable in node (it imports the live client), so this drives it in Chromium.
+  it('17. Discovered: a gone posting says "Posting gone" instead of Send, and a non-array discovered_via renders without crashing', async () => {
+    // Every column the list select names, so the card renders as it would for a real row.
+    const job = (id: string, title: string, company: string, extra: Record<string, unknown>) => ({
+      // The job key the card is keyed by.
+      id,
+      // Shown in the card title.
+      title,
+      // Shown in the card header.
+      company_name: company,
+      // A plain location, so no filter reads it as foreign.
+      location_raw: 'Remote', locations: [], work_arrangement: 'remote', employment_type: 'full_time',
+      // Tech words, so the tech gate passes it into the matched view.
+      description_raw: 'Backend engineer: Node.js, TypeScript, PostgreSQL, REST APIs.',
+      // A safe link for the Apply anchor.
+      apply_url: 'https://example.com/jobs/1', ats_provider: 'greenhouse', source_refs: [],
+      // Dated, so the sort has a key.
+      posted_at: '2026-11-06T00:00:00Z', posted_at_source: 'ats',
+      // Nothing gated on experience, degree or pay.
+      min_experience_years: null, requires_advanced_degree: null, salary_min: null, salary_max: null, salary_currency: null,
+      // The two fields under test, per row.
+      ...extra,
+    });
+    // Row A: the board took it down on 2026-11-05.
+    const gone = { id: 'a1111111-1111-4111-8111-111111111111', status: 'passed_filters', created_at: '2026-11-06T10:00:00Z', job: job('c1111111-1111-4111-8111-111111111111', 'Gone Backend Engineer', 'GoneCo', { discovered_via: ['greenhouse'], disappeared_at: '2026-11-05T15:38:00+00:00' }) };
+    // Row B: still live, but discovered_via arrived as a bare string.
+    const live = { id: 'a2222222-2222-4222-8222-222222222222', status: 'passed_filters', created_at: '2026-11-06T09:00:00Z', job: job('c2222222-2222-4222-8222-222222222222', 'Live Backend Engineer', 'LiveCo', { discovered_via: 'greenhouse', disappeared_at: null }) };
+    // Uncaught errors in the page; the old SourceBadge threw one here.
+    const errors: string[] = [];
+    // Recorded, never thrown, so the assertion below names the error.
+    const onError = (e: Error): void => { errors.push(e.message); };
+    // Listening from here on; removed in finally.
+    page.on('pageerror', onError);
+    // Page-level: wins over the catch-all [] for the list read only.
+    await page.route('**/rest/v1/applications**', async (route) => {
+      // The list read is the one whose select embeds the job.
+      const params = new URL(route.request().url()).searchParams;
+      // Only the Ready lane's list read gets the rows; everything else keeps the catch-all.
+      if (route.request().method() === 'GET' && (params.get('select') ?? '').includes('job:job_id') && params.get('status') === 'eq.passed_filters') {
+        // Both rows, newest first as the page orders them.
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([gone, live]) });
+      }
+      // The count read and every other table read.
+      return route.fallback();
+    });
+    try {
+      // A fresh load; the page opens on the Ready lane (OPENING_LANE).
+      await page.goto(`${serverUrl}/discovered`, { waitUntil: 'domcontentloaded' });
+      // One card per row, found by its title.
+      const card = (title: string) => page.locator('article.job-card', { has: page.locator('h3.job-card__title', { hasText: title }) });
+      // The live card renders at all: before the fix the string discovered_via crashed the page here.
+      await card('Live Backend Engineer').waitFor({ timeout: 10_000 });
+      // No uncaught error on the way.
+      assert.deepEqual(errors, [], 'the page must not throw on a non-array discovered_via');
+      // The gone card says so, with the day its board dropped it.
+      assert.match((await card('Gone Backend Engineer').textContent()) ?? '', /Posting gone \(since 2026-11-05\)/, 'a gone posting must say "Posting gone"');
+      // ...and offers no Send: the tailor would only refuse it.
+      assert.equal(await card('Gone Backend Engineer').getByRole('button', { name: /^Send through pipeline/ }).count(), 0, 'a gone posting must not offer Send');
+      // Non-vacuity: the live card still offers Send, so the button exists on this lane.
+      assert.equal(await card('Live Backend Engineer').getByRole('button', { name: /^Send through pipeline/ }).count(), 1, 'a live posting must still offer Send');
+      // And it carries no gone note.
+      assert.doesNotMatch((await card('Live Backend Engineer').textContent()) ?? '', /Posting gone/, 'a live posting must not say gone');
+    } finally {
+      // Later tests are not recorded.
+      page.off('pageerror', onError);
+      // Later tests get the catch-all [] again.
+      await page.unroute('**/rest/v1/applications**');
+    }
+  });
 });

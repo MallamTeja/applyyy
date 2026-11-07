@@ -47,7 +47,7 @@ describe('the narrowed list select (2026-10-24)', () => {
       'id', 'title', 'company_name', 'location_raw', 'locations', 'work_arrangement', 'employment_type',
       'description_raw', 'apply_url', 'ats_provider', 'discovered_via', 'source_refs', 'posted_at',
       'posted_at_source', 'min_experience_years', 'requires_advanced_degree', 'salary_min', 'salary_max',
-      'salary_currency',
+      'salary_currency', 'disappeared_at',
     ]);
   });
 
@@ -55,7 +55,7 @@ describe('the narrowed list select (2026-10-24)', () => {
     // The exact string sent to PostgREST: id and status for the card, created_at for the keyset cursor.
     assert.equal(
       DISCOVERED_LIST_SELECT,
-      'id, status, created_at, job:job_id(id, title, company_name, location_raw, locations, work_arrangement, employment_type, description_raw, apply_url, ats_provider, discovered_via, source_refs, posted_at, posted_at_source, min_experience_years, requires_advanced_degree, salary_min, salary_max, salary_currency)',
+      'id, status, created_at, job:job_id(id, title, company_name, location_raw, locations, work_arrangement, employment_type, description_raw, apply_url, ats_provider, discovered_via, source_refs, posted_at, posted_at_source, min_experience_years, requires_advanced_degree, salary_min, salary_max, salary_currency, disappeared_at)',
     );
   });
 });
