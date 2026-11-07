@@ -168,9 +168,19 @@ export type SubmitResult =
   // The page was not in a state where a click could be safe (no single submit
   // control, or fields already invalid), so NOTHING was clicked at all.
   | { readonly kind: 'not_attempted'; readonly reason: BlockReason; readonly detail: string }
+  // Greenhouse refused the submit POST with HTTP 428 and emailed a security code
+  // (Axiad, row 3c476629, 2026-10-24). The board did NOT accept the application, so
+  // this is a provable "not sent" for a human, never an unknown outcome. `detail` names
+  // the requests and responses that proved it. Decided only by playwright-page.ts's
+  // securityCodeGate, which demands an exact 428 on a Greenhouse POST.
+  | { readonly kind: 'security_code_required'; readonly detail: string }
   // Anything else: a timeout, an unfamiliar page, a navigation that does not
   // look like a confirmation. The click happened and its result is unknown.
   | { readonly kind: 'unconfirmed'; readonly detail: string };
+
+// What Teja must do when Greenhouse's security-code gate stopped a submit, in the words
+// the dashboard shows. Exported so a test pins the exact text the park writes.
+export const SECURITY_CODE_ACTION = "Greenhouse emailed a security code: enter it in the form's security code field and resubmit";
 
 /** One document handed to a file input, as the employer's page will receive it. */
 export interface AttachedFile {
@@ -890,10 +900,19 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
   // pre-fill blocker, through the one edge into the human queue.
   if (result.kind !== 'confirmed') {
     // Each kind maps to its own row-level reason; a form rejection is a question
-    // the form wanted answered differently, so it shares the answer reason.
-    const reason: BlockReason = result.kind === 'rejected_by_form' ? 'unanswerable_question' : result.reason;
-    // The labels the form flagged, or the page's explanation when no field did.
-    const unanswered = result.kind === 'rejected_by_form' ? [...result.labels] : [result.kind === 'not_attempted' ? result.detail : result.kind];
+    // the form wanted answered differently, so it shares the answer reason. The
+    // security-code gate is an identity check on the employer's portal, which is
+    // what the existing `mfa` reason means (enums.ts), so no new DB enum value.
+    const reason: BlockReason = result.kind === 'rejected_by_form'
+      ? 'unanswerable_question'
+      : result.kind === 'security_code_required' ? 'mfa' : result.reason;
+    // The labels the form flagged, the action Teja must take for the security code,
+    // or the page's explanation when no field did.
+    const unanswered = result.kind === 'rejected_by_form'
+      ? [...result.labels]
+      : result.kind === 'security_code_required'
+        ? [SECURITY_CODE_ACTION]
+        : [result.kind === 'not_attempted' ? result.detail : result.kind];
     await guardedAdvance(gateway, {
       applicationId: row.id,
       from: 'applying',
@@ -907,6 +926,12 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
         // Which post-click case it was, so a reviewer can tell "the form said no"
         // from "Google asked a question" without opening the screenshot.
         submit_result: result.kind,
+        // The security-code gate also carries a machine code (the same `code` key the
+        // posting_closed park uses, read by apply-kit-sweep), the action in words, and
+        // the responses that proved nothing was accepted. Absent for every other kind.
+        ...(result.kind === 'security_code_required'
+          ? { code: 'security_code_required', reason: SECURITY_CODE_ACTION, submit_detail: result.detail }
+          : {}),
       },
     });
     // The page-level blockers are not field-level FillBlockers, so none are listed.

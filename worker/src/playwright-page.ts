@@ -169,6 +169,35 @@ function isCaptchaTraffic(url: string): boolean {
 }
 
 /**
+ * Whether a URL is on Greenhouse's own hosts (greenhouse.io or a subdomain of it).
+ *
+ * Scopes the HTTP 428 "security code required" reading (see submit()) to the one board
+ * whose meaning of 428 was measured: Axiad, row 3c476629, 2026-10-24 13:46 IST, where the
+ * submit POST answered 428 and Greenhouse emailed "Security code for your application" in
+ * the same minute. Another server's 428 is only "Precondition Required" in general and
+ * proves nothing about whether an application was stored, so it stays `unconfirmed`.
+ * Exact host comparison on a parsed URL, so `greenhouse.io.evil.example` never matches.
+ */
+function isGreenhouseUrl(url: string): boolean {
+  // Unparseable URLs are NOT Greenhouse's: the 428 reading then never applies (fail closed).
+  let host: string;
+  try {
+    // The parser lower-cases the host, so the comparison below needs no case folding.
+    host = new URL(url).hostname;
+  } catch {
+    // No host, no scope: the response stays evidence only.
+    return false;
+  }
+  // The apex itself, or any subdomain (job-boards., boards., boards-api.).
+  return host === 'greenhouse.io' || host.endsWith('.greenhouse.io');
+}
+
+// HTTP 428 Precondition Required. On a Greenhouse submit POST it is the email-verification
+// gate: the application was NOT accepted, and Greenhouse emailed a code to paste and resubmit.
+// A named constant so the one status the named outcome hangs on is greppable and exact.
+const GREENHOUSE_SECURITY_CODE_STATUS = 428;
+
+/**
  * The machine-readable `code` of an error response body, or null.
  *
  * Only a JSON object with a non-empty string `code` counts (Greenhouse:
@@ -904,7 +933,9 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
       // Greenhouse answers a reCAPTCHA refusal with a non-2xx JSON `code` (captcha-failed,
       // 2026-10-24 GitLab run 40073654094, confirmed by the security-code email it sent)
       // and leaves the page as it was, so the response is the one place the cause shows.
-      const employerResponses: { text: string; code: string | null }[] = [];
+      // `status`, `method` and `url` are kept structured beside the display text for ONE
+      // verdict only: the Greenhouse 428 security-code gate (see securityCodeGate below).
+      const employerResponses: { text: string; code: string | null; status: number; method: string; url: string }[] = [];
       // Same filter as the request log: non-GET, not the captcha provider's own traffic.
       const onResponse = (response: { status(): number; text(): Promise<string>; request(): { method(): string; url(): string } }) => {
         // The request this response answers.
@@ -912,7 +943,18 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
         // A GET page load or a captcha round trip is not the application coming back.
         if (request.method() === 'GET' || isCaptchaTraffic(request.url())) return;
         // Recorded synchronously, so the status is in the log however soon the loop ends.
-        const entry: { text: string; code: string | null } = { text: `${response.status()} ${request.url()}`, code: null };
+        const entry: { text: string; code: string | null; status: number; method: string; url: string } = {
+          // The display form every unconfirmed detail already carries.
+          text: `${response.status()} ${request.url()}`,
+          // Filled in later from the body, best effort (below).
+          code: null,
+          // The exact status, so only a literal 428 can become the named outcome.
+          status: response.status(),
+          // The method, so only a POST (the form being sent) can carry that outcome.
+          method: request.method(),
+          // The endpoint, so only Greenhouse's own host can carry it (isGreenhouseUrl).
+          url: request.url(),
+        };
         employerResponses.push(entry);
         // A refusal's body names its cause. Best effort: a body still in flight at the
         // deadline is simply absent, and a read failure must not reject unhandled.
@@ -925,6 +967,36 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
         employerResponses.length === 0
           ? detail
           : `${detail}; responses: ${employerResponses.map((r) => (r.code === null ? r.text : `${r.text} code=${r.code}`)).join(', ')}`;
+
+      /**
+       * THE GREENHOUSE SECURITY-CODE GATE, read from the responses (Axiad, 2026-10-24).
+       *
+       * 'gate' only when ALL hold, so the named "not sent" outcome is proof, not a guess:
+       *  - a POST to a Greenhouse host answered EXACTLY 428 (the board refused the send
+       *    pending email verification);
+       *  - every non-GET employer write has been answered (none still in flight that
+       *    could be a second, accepted send);
+       *  - no employer write was answered below 400 (nothing else was accepted).
+       * 'none' when no such 428 arrived; 'open' when one did but the other two do not hold
+       * yet. Both of those fall through to the ordinary reading, which is `unconfirmed`
+       * after any send: the fail-closed direction.
+       */
+      // Whether a non-GET employer write has gone out with no response recorded yet. The
+      // response log records only non-GET writes, so the two counts compare like for like.
+      const awaitingResponse = (): boolean => employerResponses.length < employerWrites.filter((w) => !w.startsWith('GET ')).length;
+
+      const securityCodeGate = (): 'none' | 'open' | 'gate' => {
+        // The refusal itself: exact status, POST, Greenhouse's own host.
+        const refused = employerResponses.some((r) => r.status === GREENHOUSE_SECURITY_CODE_STATUS && r.method === 'POST' && isGreenhouseUrl(r.url));
+        // No 428 from Greenhouse: this reading has nothing to say.
+        if (!refused) return 'none';
+        // A write still in flight could be an accepted send: not proved yet.
+        if (awaitingResponse()) return 'open';
+        // Any accepted (or redirected) write might have stored an application somewhere.
+        if (employerResponses.some((r) => r.status < 400)) return 'open';
+        // Refused by the gate, and nothing else went out unanswered or accepted.
+        return 'gate';
+      };
 
       try {
         // THE CLICK. noWaitAfter: Playwright must not decide when the page is
@@ -969,8 +1041,37 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
             return { kind: 'confirmed', evidence: `url=${url} ${thanks}` };
           }
 
+          // 1b. SECURITY CODE REQUIRED: Greenhouse refused the POST with 428 and emailed a
+          // code. Read BEFORE the challenge and invalid-field looks, because the page may
+          // now show (and flag) a security-code input, which would otherwise read as
+          // "fields flagged after a send" and land as an unknown outcome.
+          if (securityCodeGate() === 'gate') {
+            // MADE TRUE BY CONSTRUCTION, as the settle window does: every further request
+            // from this page and its context is aborted (the page is closed after the
+            // status write and never used again), so no late send can follow this answer.
+            await page.route('**/*', (route) => route.abort());
+            // Popups and other pages of the same context.
+            await context.route('**/*', (route) => route.abort());
+            // Re-read after sealing: a write that slipped out meanwhile demotes it.
+            if (securityCodeGate() !== 'gate') {
+              // Something changed while sealing: unknown, never "not sent".
+              return { kind: 'unconfirmed', detail: withResponses(`HTTP 428 seen, then ${employerWrites.join(', ')}`) };
+            }
+            // Proved: refused by the gate, nothing else accepted, nothing else can leave.
+            return { kind: 'security_code_required', detail: withResponses(`Greenhouse answered HTTP ${GREENHOUSE_SECURITY_CODE_STATUS} after ${employerWrites.join(', ')}`) };
+          }
+
           // 2. CHALLENGED: invisible reCAPTCHA escalated to a question for a human.
           if (await visibleChallenge()) {
+            // A send whose response is still on its way: look again, because that response
+            // may be Greenhouse's 428 (branch 1b), which decides "not sent". The page can show
+            // its reaction before the response event reaches this process (measured in
+            // submit-outcome-428.test.ts). A response that never comes ends at the deadline
+            // as `unconfirmed`, the same answer as below, only later.
+            if (employerWrites.length > 0 && awaitingResponse()) return `challenge shown, awaiting the response to ${employerWrites.join(', ')}`;
+            // The 428 can land DURING the await above, after branch 1b already read 'none' on this
+            // look: hand it back to the next look, where 1b decides, instead of answering unknown.
+            if (securityCodeGate() === 'gate') return `challenge shown, then HTTP ${GREENHOUSE_SECURITY_CODE_STATUS} arrived; re-reading`;
             // Something reached the employer: the send may have happened.
             if (employerWrites.length > 0) {
               return { kind: 'unconfirmed', detail: withResponses(`challenge shown after ${employerWrites.join(', ')}`) };
@@ -986,7 +1087,13 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
             // The fields the form refused, by the names the human knows them by.
             const invalid = await page.evaluate(readInvalidFieldLabels);
             // Flagged fields AFTER a send: server-side errors on an application that
-            // may have been stored. Unknown, never "blocked".
+            // may have been stored. Unknown, never "blocked". Held while a response is still
+            // on its way, for the same reason as the challenge branch: it may be the 428.
+            if (invalid.length > 0 && employerWrites.length > 0 && awaitingResponse()) return `fields flagged (${invalid.join('; ')}), awaiting the response to ${employerWrites.join(', ')}`;
+            // Same race as the challenge branch: the 428 arrived while readInvalidFieldLabels ran
+            // (measured: the "428 then a flagged field" test, 3/3 runs). The next look's 1b decides.
+            if (invalid.length > 0 && employerWrites.length > 0 && securityCodeGate() === 'gate') return `fields flagged (${invalid.join('; ')}), then HTTP ${GREENHOUSE_SECURITY_CODE_STATUS} arrived; re-reading`;
+            // Every response is in and none was the gate: unknown.
             if (invalid.length > 0 && employerWrites.length > 0) {
               return { kind: 'unconfirmed', detail: withResponses(`fields flagged (${invalid.join('; ')}) after ${employerWrites.join(', ')}`) };
             }
