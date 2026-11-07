@@ -777,6 +777,39 @@ function keywordDropNote(finding: AuditFinding): KeywordDropNote | null {
   return { key: finding.path + '::' + text, path: finding.path, reason: shown };
 }
 
+/* --- The auditor's index path form ------------------------------------- */
+
+/* The one INDEX shape that names a line here: `<section>[i].bullets[j]` (detector.ts:409). Indices
+   are canonical decimals only (no sign, no leading zero), so "01" or "-1" can never alias a real
+   bullet. The detector's other index shapes, `<section>[i]` (an entry, detector.ts:381) and
+   `skills[i]` (detector.ts:322), name no line in this view in either form, so they are left alone
+   and stay unlocated, as before. `summary` is the same word in both forms. */
+const INDEX_BULLET_PATH = /^([a-z]+)\[(0|[1-9][0-9]*)\]\.bullets\[(0|[1-9][0-9]*)\]$/;
+
+/* A finding path in the form the lines are keyed by. The REF form passes through unchanged. The
+ * INDEX form is looked up in `read`, the resume the auditor indexed, and becomes
+ * `<section>.<entryRef>.<bulletRef>`. Anything the index cannot name exactly (unknown section,
+ * index out of range, an element without a string ref) is returned UNCHANGED, so it misses every
+ * line and lands in the alarm (CLAUDE.md §6): never guessed onto a neighbouring bullet. Pure. */
+function refPathOf(path: string, read: ResolvedResume): string {
+  /* Only the exact index shape is translated; every other string is already final. */
+  const match = INDEX_BULLET_PATH.exec(path);
+  /* Not the index form: the ref form, `summary`, or junk, all of which keep their own text. */
+  if (match === null) return path;
+  /* The capture groups; all three exist whenever the pattern matched. */
+  const [, section, entryIndex, bulletIndex] = match;
+  /* The section by the walk's own list, so only the five bullet sections can resolve. */
+  const group = bulletGroups(read).find((g) => g.section === section);
+  /* The entry the auditor counted to; undefined when the section is unknown or the index is past the end. */
+  const entry = group === undefined ? undefined : entriesOf(group.entries)[Number(entryIndex)];
+  /* Its bullet, read only from a real array (stored jsonb is not trusted to the type). */
+  const bullet = entry !== undefined && Array.isArray(entry.bullets) ? entry.bullets[Number(bulletIndex)] : undefined;
+  /* Both refs must be non-empty strings, or the built path could match a line it does not name. */
+  if (typeof entry?.ref !== 'string' || entry.ref === '' || typeof bullet?.ref !== 'string' || bullet.ref === '') return path;
+  /* The same key bulletLines builds for this bullet's line. */
+  return section + '.' + entry.ref + '.' + bullet.ref;
+}
+
 /* --- The adapter ------------------------------------------------------- */
 
 export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
@@ -806,7 +839,14 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
   const keywordDrops: KeywordDropNote[] = [];
   /* The findings that take the fabricated/unlocated path: every one that is not a readable note. */
   const flaggable: AuditFinding[] = [];
-  for (const finding of application.audit_findings) {
+  /* The resume the auditor indexed: the tailor's version, which is what it read (the row is audited
+     before any operator edit, and an attest re-pin keeps the original's claims identical). The stored
+     resume can have moved or lost a bullet since, so its indices may name a neighbour. Without an
+     original (D4) the stored resume is the only one there is. */
+  const auditedResume = original ?? resolved;
+  for (const stored of application.audit_findings) {
+    /* One path form from here on, so the line lookup, the notes and the alarm all key by ref. */
+    const finding: AuditFinding = { ...stored, path: refPathOf(stored.path, auditedResume) };
     /* Split once, here, so the line walk and the unlocated list below agree on which is which. */
     const note = keywordDropNote(finding);
     /* A readable note goes to its own list and nowhere else. */
