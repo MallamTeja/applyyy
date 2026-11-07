@@ -54,7 +54,7 @@ const REFS = { master_version: 7, summary: null } as unknown as TailoredProfile;
 
 // A clean verdict, ready to persist.
 // `jdKeywords` is a recognisable pair so the keyword test can assert it arrived intact.
-const TAILORED: TailorOutcome = { kind: "tailored", resume: RESUME, refs: REFS, jdKeywords: ["Go", "PostgreSQL"], dedupedRefs: [], skillsAdded: [], skillsDropped: [], retry: null };
+const TAILORED: TailorOutcome = { kind: "tailored", resume: RESUME, refs: REFS, jdKeywords: ["Go", "PostgreSQL"], dedupedRefs: [], skillsAdded: [], skillsDropped: [], skillsInvented: [], retry: null };
 
 // One recorded call against the database seam, in the order it was made.
 interface RecordedCall {
@@ -352,4 +352,15 @@ test("retry: a refusal after a rewrite records both attempts and the retry resul
   // The event: the final verdict, the first attempt, and how the retry ended.
   const args = calls.at(-1)!.payload.args as Record<string, unknown>;
   assert.deepEqual(args.p_detail, { reason: "tailor_validation_failed", violations: finalViolations, first_attempt_violations: firstViolations, retry: "still_invalid" });
+});
+
+// D1 (2026-11-07): an invented skill the tailorer dropped reaches the event under its own key. Red on revert.
+test("D1: invented skill refs are recorded in the tailored event as skills_invented_dropped", async () => {
+  // A verdict whose tailorer dropped one invented skill.
+  const { client, calls } = recordingClient();
+  // Persisted.
+  await persistTailorOutcome(client, APPLICATION_ID, { ...TAILORED, skillsInvented: ["skill_openai"] } as TailorOutcome);
+  // The status move's detail names it.
+  const args = calls.at(-1)!.payload.args as Record<string, unknown>;
+  assert.deepEqual(args.p_detail, { reason: "tailored_profile_written", skills_invented_dropped: ["skill_openai"] });
 });

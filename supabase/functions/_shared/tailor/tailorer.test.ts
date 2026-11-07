@@ -166,11 +166,12 @@ test("an honest tailoring carries its raw refs for the Auditor", async () => {
 });
 
 test("a tailoring citing a ref absent from the master is refused, not thrown", async () => {
-  // One fabricated skill ref. Everything else is honest, so a refusal here can only be
-  // about the fake ref — the test names one cause, not a soup of them.
+  // One fabricated EXPERIENCE ref (an employer never held). Everything else is honest, so a refusal here
+  // can only be about the fake ref. A fabricated SKILL ref is dropped before the gate since D1 (2026-11-07),
+  // so an entry ref is what exercises the refusal now.
   const fabricated: TailoredProfile = {
     ...HONEST_TAILORING,
-    skills: [{ ref: "skill-kubernetes-never-used" }],
+    experience: [...HONEST_TAILORING.experience, { ref: "exp-never-held", bullets: [] }],
   };
   const tailor = tailorerReturning(JSON.stringify(fabricated));
 
@@ -395,8 +396,8 @@ test("a skill listed twice is deduplicated before the validator, and the dedupe 
 });
 
 test("control: a FABRICATED ref is still refused, duplicate or not", async () => {
-  // The same repeat plus a ref the master does not have.
-  const fabricated: TailoredProfile = { ...HONEST_TAILORING, skills: [{ ref: "skill-node" }, { ref: "skill-node" }, { ref: "skill-kubernetes-never-used" }] };
+  // The same repeat plus an ENTRY ref the master does not have (a fabricated skill is dropped since D1).
+  const fabricated: TailoredProfile = { ...HONEST_TAILORING, skills: [{ ref: "skill-node" }, { ref: "skill-node" }], experience: [...HONEST_TAILORING.experience, { ref: "exp-never-held", bullets: [] }] };
   const outcome = await tailorerReturning(JSON.stringify(fabricated))(POSTING);
   // Normalisation never vouches for content: the fabrication is refused as before.
   assert.equal(outcome.kind, "refused");
@@ -472,8 +473,9 @@ test("retry: a rewrite that still invents a word fails, with BOTH attempts' viol
 });
 
 test("retry: an unresolved ref is not retried (one call, fails as before)", async () => {
-  // A fabricated skill plus the invented word: not ONLY unverifiable tokens.
-  const { tailor, prompts } = tailorerReplying([JSON.stringify({ ...INVENTED_ONCE, skills: [{ ref: "skill-kubernetes-never-used" }] })]);
+  // A fabricated entry plus the invented word: not ONLY unverifiable tokens (an entry, since a fabricated
+  // skill is dropped before the gate under D1).
+  const { tailor, prompts } = tailorerReplying([JSON.stringify({ ...INVENTED_ONCE, experience: [...INVENTED_ONCE.experience, { ref: "exp-never-held", bullets: [] }] })]);
   const outcome = await tailor(POSTING);
   // Refused on the first verdict.
   assert.equal(outcome.kind, "refused");
@@ -572,21 +574,22 @@ function groupSizes(resume: { readonly skills: readonly { readonly category: str
 }
 
 // THE RED-ON-REVERT TEST: drop the shapeSkillGroups call in createTailorer and this goes red.
-test("skills shape: a backend posting shows its relevant groups at min(4, master size) and drops Machine Learning", async () => {
+test("skills shape: a backend posting shows its relevant groups at min(4, master size), topped up to three groups", async () => {
   // The live 1-per-group shape, plus an ML pick the backend posting gives no reason for.
   const outcome = await shapeOutcome([{ ref: "skill-node" }, { ref: "dev-docker" }, { ref: "ml-xgboost" }], BACKEND_POSTING);
   // Topped-up refs still pass the unchanged validator: only master refs are ever added.
   assert.equal(outcome.kind, "tailored");
   if (outcome.kind !== "tailored") return;
-  // Languages reaches the floor; DevOps holds its whole group of 2; no ML, no Tools.
-  assert.deepEqual(groupSizes(outcome.resume), { Languages: 4, DevOps: 2 });
-  // Posting-named skills (SQL, TypeScript) before master order (Python); Go is left out.
-  assert.deepEqual(outcome.skillsAdded, ["lang-sql", "lang-ts", "lang-python", "dev-gcp"]);
-  // The ML pick is dropped and reported, never silently.
-  assert.deepEqual(outcome.skillsDropped, ["ml-xgboost"]);
+  // Languages reaches the floor; DevOps holds its whole group of 2. Only two groups are relevant, so
+  // D2 (2026-11-07) tops up to three with the model's ML group, filled to its whole group of 2.
+  assert.deepEqual(groupSizes(outcome.resume), { Languages: 4, DevOps: 2, "Machine Learning": 2 });
+  // Posting-named skills (SQL, TypeScript) before master order (Python); Go is left out; ML's floor adds SHAP.
+  assert.deepEqual(outcome.skillsAdded, ["lang-sql", "lang-ts", "lang-python", "dev-gcp", "ml-shap"]);
+  // Nothing dropped: the ML pick now fills the third group.
+  assert.deepEqual(outcome.skillsDropped, []);
   // The stored refs are the shaped profile, so tailor_refs re-validates to this exact resume. Grouped
-  // and ranked (2026-11-07): Languages (3 named) before DevOps (1 named); inside each, posting-named first.
-  assert.deepEqual(outcome.refs.skills.map((s) => s.ref), ["skill-node", "lang-sql", "lang-ts", "lang-python", "dev-docker", "dev-gcp"]);
+  // and ranked (2026-11-07): Languages (3 named) before DevOps (1 named), then the topped-up ML group.
+  assert.deepEqual(outcome.refs.skills.map((s) => s.ref), ["skill-node", "lang-sql", "lang-ts", "lang-python", "dev-docker", "dev-gcp", "ml-xgboost", "ml-shap"]);
 });
 
 // RED 1 (review 2026-11-07; Teja: "rank by the JD"): inside a group, a skill the posting names comes
@@ -615,19 +618,22 @@ test("skills shape: the most relevant group comes first on the page even when th
 // RED 2 (review 2026-11-07): the live master holds a skill named "C". A posting that names only C++ must
 // give that group relevance 0, so a C-only group is not shown on its strength. Red on revert.
 test("skills shape: a master skill named C is not made relevant by a C++ posting", () => {
-  // Two groups: one holding only "C", one the posting really names.
+  // Four groups: one holding only "C", three the posting really names (three, so D2's top-up to three
+  // groups never has to reach for Systems: this test is about relevance, not the top-up).
   const master: MasterProfile = { ...MASTER, skills: [
     // The one-letter language from the live master.
     { id: "lang-c", name: "C", category: "Systems" },
-    // A skill the posting does name.
+    // Skills the posting does name, one per group.
     { id: "skill-node", name: "Node.js", category: "Backend" },
+    { id: "db-pg", name: "PostgreSQL", category: "Databases" },
+    { id: "dev-docker", name: "Docker", category: "DevOps" },
   ] };
-  // Only the look-alikes, plus Node.js.
-  const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "lang-c" }, { ref: "skill-node" }] }, master, "C++ and C# services on Node.js; C-level reporting.");
+  // Only the look-alikes for C, plus the three real skills.
+  const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "lang-c" }, { ref: "skill-node" }] }, master, "C++ and C# services on Node.js with PostgreSQL in Docker; C-level reporting.");
   // The Systems group is irrelevant, so its pick is dropped and reported.
   assert.deepEqual(shaped.dropped, ["lang-c"]);
-  // Only Backend remains.
-  assert.deepEqual(shaped.profile.skills.map((s) => s.ref), ["skill-node"]);
+  // Only the three relevant groups remain.
+  assert.deepEqual(shaped.profile.skills.map((s) => s.ref), ["skill-node", "db-pg", "dev-docker"]);
 });
 
 // The groups come from the master by the posting, not from the model's choice alone.
@@ -687,14 +693,42 @@ test("N1: an HTML posting reaches the tailor prompt as text, with no <h2>, style
 
 // Control: the shape must not launder a fabricated skill. An unresolved ref joins no group, is kept,
 // and is still refused by the validator.
-test("skills shape control: a fabricated skill ref is still refused", async () => {
+// REWRITTEN for Teja's ruling D1 (2026-11-07 10:38 IST, live row ef1e796a: the model invented
+// "skill_openai" and the whole row failed): an invented SKILL ref is dropped before the gate and recorded,
+// never printed and never fatal. Red on revert of the drop in createTailorer.
+test("D1: an invented skill ref is dropped before the gate, recorded, and the row is still tailored", async () => {
   // One real pick plus one ref the master does not hold.
   const outcome = await shapeOutcome([{ ref: "skill-node" }, { ref: "skill-kubernetes" }], BACKEND_POSTING);
+  // Tailored, not refused.
+  assert.equal(outcome.kind, "tailored");
+  if (outcome.kind !== "tailored") return;
+  // Never printed: no resolved skill carries the invented ref.
+  assert.equal(outcome.refs.skills.some((s) => s.ref === "skill-kubernetes"), false);
+  // Recorded, so the drop is visible on the dashboard.
+  assert.deepEqual(outcome.skillsInvented, ["skill-kubernetes"]);
+});
+
+// The control: only SKILLS are forgiven. An invented bullet ref is still a fabrication the gate refuses.
+test("D1 control: an invented bullet ref is still refused", async () => {
+  // The honest answer with one bullet ref the master lacks.
+  const answer = { ...HONEST_TAILORING, experience: HONEST_TAILORING.experience.map((entry, i) => i === 0 ? { ...entry, bullets: [...entry.bullets, { ref: "bullet-made-up", text: "Built a REST API" }] } : entry) };
+  // The real tailorer.
+  const tailor = createTailorer({ callLlm: () => Promise.resolve(JSON.stringify(answer)), master: MASTER, masterVersion: MASTER_VERSION });
   // Refused.
-  assert.equal(outcome.kind, "refused");
-  if (outcome.kind !== "refused") return;
-  // Naming the invented ref.
-  assert.ok(outcome.violations.some((v) => v.kind === "unresolved_ref" && v.ref === "skill-kubernetes"));
+  assert.equal((await tailor(POSTING)).kind, "refused");
+});
+
+// D2 (Teja, 2026-11-07 10:38 IST): fewer than 3 JD-relevant groups are topped up to 3 with the model's own
+// groups, in the model's order, each still filled to the floor. Red on revert of the top-up.
+test("D2: one relevant group is topped up to three with the model's groups, in the model's order", async () => {
+  // A posting naming only Python; the model picked from DevOps, Tools and Machine Learning, in that order.
+  const outcome = await shapeOutcome([{ ref: "dev-docker" }, { ref: "tool-git" }, { ref: "ml-xgboost" }], { ...BACKEND_POSTING, jobDescription: "We write Python." });
+  assert.equal(outcome.kind, "tailored");
+  if (outcome.kind !== "tailored") return;
+  // Languages (relevant) first, then the first two model groups; ML is the fourth and is dropped.
+  assert.deepEqual(groupSizes(outcome.resume), { Languages: 4, DevOps: 2, Tools: 4 });
+  // The ML pick is reported as dropped.
+  assert.deepEqual(outcome.skillsDropped, ["ml-xgboost"]);
 });
 
 // ---- summary variants end to end (pending #11, 2026-11-07) ---------------------------------------------

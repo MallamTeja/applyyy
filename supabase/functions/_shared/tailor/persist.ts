@@ -158,6 +158,9 @@ export async function persistTailorOutcome(
       // The model picks removed because their group is irrelevant to the posting. Skill REFS, so the key is
       // skills_dropped (renamed 2026-11-07 from skills_groups_dropped before any row carried it: never deployed).
       ...(outcome.skillsDropped.length > 0 ? { skills_dropped: outcome.skillsDropped } : {}),
+      // D1 (2026-11-07): skill refs the model invented, dropped before the gate rather than failing the row,
+      // so an invented skill is visible on the dashboard instead of either printed or silent.
+      ...(outcome.skillsInvented.length > 0 ? { skills_invented_dropped: outcome.skillsInvented } : {}),
       // Only when the one-shot rewrite ran.
       ...(outcome.retry !== null ? { retry: { first_attempt_violations: outcome.retry.firstViolations, rewritten_refs: outcome.retry.rewrittenRefs } } : {}),
     },

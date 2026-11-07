@@ -586,6 +586,53 @@ export function detectAuditFindings(
           });
         }
       }
+
+      // SUMMARY NUMBERS (Teja ruling D4, 2026-11-07 10:38 IST): every number the printed summary states must
+      // appear in a node the summary CITES. Valid refs only prove the cited ids exist; without this a summary
+      // citing a real bullet could still print "40 engineers" that no node ever said.
+      // Each citable node's own text, keyed by id, read from the PINNED master (never the audited resume).
+      const citableText = new Map<NodeId, string>();
+      // The owner's default summary paragraph, when the master has one.
+      if (master.summary !== null) citableText.set(master.summary.id, master.summary.text);
+      // The picked variant's paragraph, the only variant text the refs check above accepts.
+      const pickedVariant = (master.summary_variants ?? []).find((variant) => variant.id === tailorRefs.summary_variant);
+      // Keyed by its paragraph id, exactly the id a ref names.
+      if (pickedVariant) citableText.set(pickedVariant.summary.id, pickedVariant.summary.text);
+      // Every bullet, by its own id (a bullet citation vouches for that bullet only).
+      for (const [bulletId, info] of index.bullets) citableText.set(bulletId, info.bullet.text);
+      // Every skill name, by its id: a skill like "Python 3" can carry a number.
+      for (const [skillId, name] of index.skillNames) citableText.set(skillId, name);
+      // An entry citation vouches for its own fields AND its bullets; the bullet texts joined once per entry.
+      const bulletsText = (bullets: readonly MasterBullet[]): string => bullets.map((b) => b.text).join(" ");
+      // Experience: role, company and the printed dates, which is where years in a summary come from.
+      for (const e of master.experience) citableText.set(e.id, [e.role, e.company, e.start_display, e.end_display, bulletsText(e.bullets)].join(" "));
+      // Projects: the name plus its bullets.
+      for (const p of master.projects) citableText.set(p.id, [p.name, bulletsText(p.bullets)].join(" "));
+      // Education: degree, field (nullable, so `?? ""`) and institution plus its bullets.
+      for (const ed of master.education) citableText.set(ed.id, [ed.degree, ed.field ?? "", ed.institution, bulletsText(ed.bullets)].join(" "));
+      // Achievements and certifications share one shape: label, nullable description, bullets.
+      for (const a of [...master.achievements, ...master.certifications]) citableText.set(a.id, [a.label, a.description ?? "", bulletsText(a.bullets)].join(" "));
+      // The numbers the CITED nodes state, by the same extractMetrics rule bullets use ("500+" counts as "500").
+      // An unresolvable ref contributes nothing: it already has its own finding above.
+      const citedMetrics = new Set(extractMetrics(tailorRefs.summary.refs.map((ref) => citableText.get(ref) ?? "").join(" ")));
+      // Summary numbers no cited node states, each named once so the reason lists it once.
+      const unsupportedMetrics = [...new Set(extractMetrics(resume.summary))].filter((m) => !citedMetrics.has(m));
+      // One finding for the whole summary, listing every unsupported number.
+      if (unsupportedMetrics.length > 0) {
+        // Flags the row for individual review (ruling D4).
+        findings.push({
+          // The existing summary kind: the summary claims something its sources do not support.
+          kind: "summary_unsupported",
+          // Summary path
+          path: summaryPath,
+          // The printed summary, as the reviewer will read it
+          claim: resume.summary,
+          // The numbers to verify or remove
+          reason: `Summary states number(s) no cited node supports: ${unsupportedMetrics.join(", ")}`,
+          // Deterministic match, same confidence as the invented-bullet-metric finding
+          confidence: 0.95,
+        });
+      }
     }
   }
 

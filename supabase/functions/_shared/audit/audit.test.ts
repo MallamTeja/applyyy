@@ -954,3 +954,56 @@ test("summary variant control: an unpicked variant's summary id is still unsuppo
   // Flagged as an unsupported summary.
   assert.deepEqual(outcome.findings.map((f) => f.kind), ["summary_unsupported"]);
 });
+
+// ============================================================================
+// Summary numbers (Teja ruling D4, 2026-11-07 10:38 IST)
+// ============================================================================
+// "Every number in the resume SUMMARY must appear in a node the summary cites; a miss gives a finding, and the
+// row goes to individual review." Refs alone only prove the cited ids EXIST; these pin that the printed numbers
+// come from them too.
+
+// THE RED-ON-REVERT TEST: remove the summary-number check in detector.ts and this goes red.
+test("summary numbers: a number no cited node states is one summary_unsupported finding", () => {
+  // The clean resume, whose summary now claims an audience size the master never states.
+  const resume = { ...createCleanResume(), summary: "Backend engineer who served 40 engineers with Node.js and Express REST APIs." };
+  // The clean refs: sum-1 and b-exp-1 exist, so only the number can be wrong.
+  const outcome = auditApplication(TEST_MASTER, resume, createCleanTailorRefs());
+  // Exactly one finding, on the summary.
+  assert.deepEqual(outcome.findings.map((f) => [f.kind, f.path]), [["summary_unsupported", "summary"]]);
+  // It names the unsupported number, so the reviewer knows what to check.
+  assert.ok(outcome.findings[0].reason.includes("40"), outcome.findings[0].reason);
+  // The ruling: the row goes to individual review.
+  assert.equal(outcome.status, "audit_flagged");
+});
+
+// Control: a number a cited bullet states is grounded (b-exp-1 says "500 users").
+test("summary numbers control: a number in a cited bullet gives no finding", () => {
+  // The summary repeats the cited bullet's 500.
+  const resume = { ...createCleanResume(), summary: "Backend engineer who built a Node.js REST API serving 500 users." };
+  // Same clean refs, which cite b-exp-1.
+  const outcome = auditApplication(TEST_MASTER, resume, createCleanTailorRefs());
+  // Clean: the check ran (the test above proves it can fire) and found the number.
+  assert.deepEqual(outcome.findings, []);
+});
+
+// Control: the number exists in the master, but only in a node the summary does NOT cite.
+test("summary numbers control: a number only in an uncited node is still a finding", () => {
+  // The same 500-user summary as the control above.
+  const resume = { ...createCleanResume(), summary: "Backend engineer who built a Node.js REST API serving 500 users." };
+  // Cites only the master summary, which states no number; b-exp-1 is no longer cited.
+  const refs = { ...createCleanTailorRefs(), summary: { text: resume.summary, refs: ["sum-1"] } } as TailoredProfile;
+  // Audited.
+  const outcome = auditApplication(TEST_MASTER, resume, refs);
+  // Flagged on the summary, naming 500: being SOMEWHERE in the master is not enough.
+  assert.deepEqual(outcome.findings.map((f) => [f.kind, f.reason.includes("500")]), [["summary_unsupported", true]]);
+});
+
+// Control: a resume with no summary has nothing to check.
+test("summary numbers control: no summary gives no finding", () => {
+  // The clean resume with the summary removed.
+  const resume = { ...createCleanResume(), summary: null };
+  // Audited with the clean refs.
+  const outcome = auditApplication(TEST_MASTER, resume, createCleanTailorRefs());
+  // Clean.
+  assert.deepEqual(outcome.findings, []);
+});
