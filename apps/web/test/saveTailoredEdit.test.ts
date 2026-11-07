@@ -730,3 +730,27 @@ describe('the history note says when the AI chat made the edit (2026-11-04)', ()
     assert.equal(row.detail.source, 'ai_chat_auto');
   });
 });
+
+describe('the history note carries the one-page cuts made in the same save (2026-11-07)', () => {
+  it('a save that trimmed to fit one page records page_fit_trimmed beside the edit', async () => {
+    // One cut, exactly as pageFitEdit.ts reports it.
+    const cut = [{ step: 'weakest_bullet', ref: 'b-old', text: 'An old bullet' }];
+    // Saved with the cut.
+    const { done, calls } = run({}, NEXT, { ...EVENT, pageFitTrimmed: cut });
+    // Saved.
+    assert.equal((await done).ok, true);
+    // The one note.
+    const row = inserts(calls)[0]!.args[0] as { detail: Record<string, unknown> };
+    // The cut is in the history, never silent.
+    assert.deepEqual(row.detail.page_fit_trimmed, cut);
+  });
+
+  it('a save with nothing cut writes no page_fit_trimmed key (the note shape is unchanged)', async () => {
+    // An empty cut list, as every untouched edit carries.
+    const { done, calls } = run({}, NEXT, { ...EVENT, pageFitTrimmed: [] });
+    // Saved.
+    assert.equal((await done).ok, true);
+    // No key at all.
+    assert.equal('page_fit_trimmed' in (inserts(calls)[0]!.args[0] as { detail: object }).detail, false);
+  });
+});

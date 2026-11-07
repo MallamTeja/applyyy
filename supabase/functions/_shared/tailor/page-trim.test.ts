@@ -62,24 +62,37 @@ test("a resume that already fits is returned untouched", () => {
   assert.deepEqual([out.fits, out.trimmed, out.resume === resume], [true, [], true]);
 });
 
-test("TRIM_ORDER is Teja's ruling: projects over the cap, then weakest bullets, then certifications", () => {
+test("TRIM_ORDER is Teja's ruling (23:55): certifications, then projects over the cap, then weakest bullets", () => {
   // The order is data; this pins it so a reorder is a deliberate, visible change.
-  assert.deepEqual(TRIM_ORDER, ["project_bullet_over_cap", "weakest_bullet", "certification"]);
+  assert.deepEqual(TRIM_ORDER, ["certification", "project_bullet_over_cap", "weakest_bullet"]);
 });
 
-test("projects above 4 bullets are trimmed first, weakest (no keyword, latest) first", () => {
-  // Budget allows exactly two removals.
+test("RULING 23:55: one line over with 3 certifications and a 5-bullet project cuts the 3rd certification, not a bullet", () => {
+  // A project at 5 bullets (above the cap of 4) AND 3 certifications: both steps have a candidate.
+  const resume = { ...v24Like(), projects: [{ ref: "proj_x", bullets: [b("x1"), b("x2"), b("x3"), b("x4"), b("x5")] }] } as unknown as ResolvedResume;
+  // Over by exactly one unit.
+  const out = fitToOnePage(resume, JD, (r) => units(r) <= units(resume) - 1);
+  // The certification went, the latest zero-score one; no bullet was touched.
+  assert.deepEqual(out.trimmed, [{ step: "certification", ref: "cert_ml", text: "Machine Learning" }]);
+  // The 5-bullet project is intact.
+  assert.equal(out.resume.projects[0]!.bullets.length, 5);
+});
+
+test("certifications go first, weakest first, never below 2; then projects above 4 bullets", () => {
+  // Budget allows exactly two removals: one certification (3 -> 2, the floor), then one project bullet.
   const out = fitToOnePage(v24Like(), JD, (r) => units(r) <= START - 2);
-  // Both from proj_one_on_one (6 -> 4), the zero-score bullets, latest first: p6 then p4. Text carried for the UI.
+  // cert_ml (no keyword, latest) first; then proj_one_on_one's latest zero-score bullet p6. Text carried for the UI.
   assert.deepEqual(out.trimmed, [
+    { step: "certification", ref: "cert_ml", text: "Machine Learning" },
     { step: "project_bullet_over_cap", ref: "p6", text: "did routine things" },
-    { step: "project_bullet_over_cap", ref: "p4", text: "did routine things" },
   ]);
+  // cert_sql (names a JD keyword) survives, and the floor of 2 holds.
+  assert.deepEqual(out.resume.certifications.map((c) => c.ref), ["cert_sql", "cert_prompt"]);
 });
 
 test("then the weakest bullets anywhere, never below a floor; skills, summary and education untouched", () => {
-  // Down to the bullet floors with all 3 certifications kept.
-  const out = fitToOnePage(v24Like(), JD, (r) => units(r) <= FLOOR_BULLETS + 3);
+  // Down to the bullet floors with the 2 floor certifications.
+  const out = fitToOnePage(v24Like(), JD, (r) => units(r) <= FLOOR_BULLETS + 2);
   // Fits.
   assert.equal(out.fits, true);
   // The Aczen floor: exactly 4 left, and its keyword bullets survived; of the two
@@ -93,17 +106,8 @@ test("then the weakest bullets anywhere, never below a floor; skills, summary an
   for (const a of out.resume.achievements) assert.equal(a.bullets.length, 1, a.ref);
   // Skills, summary and education never change.
   assert.deepEqual([out.resume.skills, out.resume.summary, out.resume.education], [v24Like().skills, v24Like().summary, v24Like().education]);
-  // No certification went while a bullet above its floor remained.
-  assert.equal(out.resume.certifications.length, 3);
-});
-
-test("certifications go last, weakest first, never below 2", () => {
-  // Floors plus 2 certifications fits exactly.
-  const out = fitToOnePage(v24Like(), JD, (r) => units(r) <= FLOOR_BULLETS + 2);
-  // The last removal is a certification: the latest zero-score one.
-  assert.deepEqual(out.trimmed.at(-1), { step: "certification", ref: "cert_ml", text: "Machine Learning" });
-  // cert_sql (names a JD keyword) survives.
-  assert.deepEqual(out.resume.certifications.map((c) => c.ref), ["cert_sql", "cert_prompt"]);
+  // Certifications at their floor, never below.
+  assert.equal(out.resume.certifications.length, PAGE_FIT_FLOORS.minCertifications);
 });
 
 test("over one page at every floor fails CLOSED and names the floors that held", () => {

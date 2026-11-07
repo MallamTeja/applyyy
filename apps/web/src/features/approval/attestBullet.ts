@@ -42,6 +42,8 @@ import {
 } from './tailoredEdits';
 // The write boundary every resume edit goes through, able to move the pin with the resume.
 import { saveTailoredEdit, type EditSource, type StoredRow } from './saveTailoredEdit';
+// The one-page rule, live: the attested resume is fitted on one page before it is saved (2026-11-07).
+import { fitEditToOnePage } from './pageFitEdit';
 
 /* The client the two masterStore calls take; the page's real client, or a test double cast to it.
    Derived from masterStore's own signature so the two can never drift apart. */
@@ -69,6 +71,9 @@ export interface AttestBulletArgs {
   readonly newBulletId: string;
   // Who decided the new bullet (a hand click, or the AI chat card), for the history note; required so no caller defaults it.
   readonly source: EditSource;
+  /* The row's JD keywords (selected_jd_keywords), for the one-page fit this save runs (2026-11-07).
+     Required, so no caller can skip the fit by omission. */
+  readonly jdKeywords: readonly string[];
 }
 
 /* How an attest ends. On success the page gets the new pin's master and original, which it must
@@ -79,6 +84,8 @@ export type AttestBulletOutcome =
       readonly ok: true;
       // The saved resume, at the new pin.
       readonly resume: ResolvedResume;
+      // What the one-page fit cut in this save, in words for the page; null when nothing was cut.
+      readonly notice: string | null;
       // The master at the new pin.
       readonly master: MasterProfile;
       // The tailor's version rebuilt at the new pin (identical claims, new version label).
@@ -233,13 +240,19 @@ export async function attestBullet(client: Client, args: AttestBulletArgs): Prom
   const proven = plan(target, version, args);
   // Refused after the insert: the version stays (immutable), the row is untouched.
   if (!proven.ok) return { ok: false, message: proven.message, masterInserted: true };
+  /* One page (2026-11-07): fitted BEFORE the write; the fitted resume is what is stored. The trimmer
+     may cut the very line just vouched for if it is the weakest; the notice then says so. Floors that
+     overflow refuse here: the master version stays (immutable), the row is untouched. */
+  const fitted = fitEditToOnePage(proven.resume, args.jdKeywords);
+  // Refused before the write, in the check's own words.
+  if (!fitted.ok) return { ok: false, message: fitted.reason, masterInserted: true };
 
   // One write: the resume with the new line, and all three pins, guarded by status and stamp.
   const saved = await saveTailoredEdit(client, {
     // The row being written.
     applicationId: args.applicationId,
-    // The resume with the attested bullet, already labelled with the new version.
-    resume: proven.resume,
+    // The resume with the attested bullet, already labelled with the new version, fitted on one page.
+    resume: fitted.resume,
     // What is stored now, for the R0' check (relabelled to the new pin inside the save).
     previous: args.current,
     // The tailor's version at the NEW pin, proven claim-for-claim identical above.
@@ -249,7 +262,7 @@ export async function attestBullet(client: Client, args: AttestBulletArgs): Prom
     // Optimistic concurrency: refused if another tab changed the row.
     expectedUpdatedAt: args.expectedUpdatedAt,
     // The event names the new master bullet and the words the operator vouched for.
-    event: { kind: 'resume_attest_bullet', ref: args.newBulletId, before: null, after: text, source: args.source },
+    event: { kind: 'resume_attest_bullet', ref: args.newBulletId, before: null, after: text, source: args.source, pageFitTrimmed: fitted.trimmed },
     // All three pins move in this same statement.
     repin: { version, tailorRefs: proven.refs },
   });
@@ -259,8 +272,10 @@ export async function attestBullet(client: Client, args: AttestBulletArgs): Prom
   return {
     // Landed.
     ok: true,
-    // The resume as stored.
-    resume: proven.resume,
+    // The resume as stored (fitted).
+    resume: fitted.resume,
+    // What the one-page fit cut, in words, for the page to show; null when nothing was cut.
+    notice: fitted.notice,
     // The pin's master, which the page swaps into the row's source.
     master: target,
     // The pin's original, so "edited" keeps being derived correctly.

@@ -162,6 +162,8 @@ function run(answers: Parameters<typeof fakeClient>[0], overrides: Record<string
     tailorRefs: clone(TAILOR_REFS),
     expectedUpdatedAt: LOADED_STAMP,
     newSkillId: NEW_ID,
+    // No JD keywords: the one-page fit still runs, ranking every bullet equally.
+    jdKeywords: [],
     // A hand attest on the page unless a test says otherwise.
     source: 'operator',
     ...overrides,

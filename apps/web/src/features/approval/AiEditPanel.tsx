@@ -336,6 +336,8 @@ export function AiEditPanel({
   structure,
   // A prompt the card's ATS panel asks to pre-fill; absent until a suggestion chip is clicked.
   seed,
+  // The one-page preflight for a whole batch; absent means no check (render-only callers).
+  onPreflight,
 }: {
   // The rendered diff: the AI's context is built from it, so it sees what the operator sees.
   readonly diff: ResumeDiff;
@@ -354,6 +356,10 @@ export function AiEditPanel({
   readonly structure?: AssistStructure | undefined;
   // One pre-fill request; a fresh object per click so a repeated keyword still fills (see the effect).
   readonly seed?: { readonly text: string } | null | undefined;
+  /* The one-page preflight (2026-11-07): the page simulates the WHOLE batch, each op followed by the
+     one-page fit its save will run, and answers the reason it would stop on the floors (null = fine).
+     Asked BEFORE the first save, so a batch never lands half-applied because op 3 hit the floors. */
+  readonly onPreflight?: ((actions: readonly EditAction[]) => string | null) | undefined;
 }): ReactElement {
   // Ties labels to controls and the heading to the region.
   const baseId = useId();
@@ -483,12 +489,16 @@ export function AiEditPanel({
        order through the page's guarded save, exactly as a click would; the composer stays locked
        until they land. A skill new to the master stays a card (2026-11-05). First failure stops the run,
        since the row probably changed and later saves would fail the same way. */
-    for (const [index, op] of (reply?.ops ?? []).entries()) {
+    // The ops the AI will apply by itself, with their card keys, in order.
+    const auto = (reply?.ops ?? []).flatMap((op, index) =>
       // Left as a card for a click (or a "Could not do" card, which has nothing to apply).
-      if (op.op === 'rejected' || !shouldAutoApply(op, text)) continue;
-      // Applied; a refusal shows on its card with Retry.
-      if (reply !== undefined && !(await apply(op, opKey(reply, index), 'ai_chat_auto'))) break;
-    }
+      reply === undefined || op.op === 'rejected' || !shouldAutoApply(op, text) ? [] : [{ op, key: opKey(reply, index) }]);
+    // The one-page preflight over the whole batch, before any save.
+    const held = onPreflight?.(auto.map(({ op, key }) => actionFor(op, key))) ?? null;
+    // Held: nothing is applied, the cards stay for a click, and the reason is said.
+    if (held !== null) setError(`Not applied: ${held}`);
+    // Otherwise each op in order; a refusal shows on its card with Retry and stops the run.
+    else for (const { op, key } of auto) if (!(await apply(op, key, 'ai_chat_auto'))) break;
     // Unlocks.
     setAsking(false);
   }
@@ -514,7 +524,7 @@ export function AiEditPanel({
     // Shown as in progress. No popup: the card already showed every flag before this click.
     setOpState(key, { status: 'applying' });
     // The page's save; a refusal comes back as a reason.
-    const result = await onEdit(toEditAction(op.op === 'add_skill' ? { ...op, category: groups.get(key) ?? op.category } : op), editSource);
+    const result = await onEdit(actionFor(op, key), editSource);
     // Landed: the diff re-renders and isApplied turns the card to "Applied".
     if (result.ok) setOpState(key, undefined);
     // Refused or unknown, in the save path's words.
@@ -523,21 +533,30 @@ export function AiEditPanel({
     return result.ok;
   }
 
+  /* The page action for one op: an added skill files under the group the operator picked on its card. */
+  function actionFor(op: ApplicableOp, key: string): EditAction {
+    // Only add_skill carries a group choice; every other op converts as it is.
+    return toEditAction(op.op === 'add_skill' ? { ...op, category: groups.get(key) ?? op.category } : op);
+  }
+
   /* Apply every not-yet-applied op of one reply in order; stop at the first failure. */
   async function applyAll(message: ChatMessage): Promise<void> {
+    // The ops Apply all will save, with their card keys, in order.
+    const batch = (message.ops ?? []).flatMap((op, index) =>
+      /* Skipped: a "Could not do" card (nothing to apply), one already on the resume, and a new bullet,
+         which writes a new claim into the MASTER and so always takes its own click, never a batch
+         (review finding, 2026-11-01): a hostile job text that induces one cannot ride along. */
+      op.op === 'rejected' || isApplied(op, diff, structure ?? null) || op.op === 'new_bullet' ? [] : [{ op, key: opKey(message, index) }]);
+    // The one-page preflight over the whole batch, before any save.
+    const held = onPreflight?.(batch.map(({ op, key }) => actionFor(op, key))) ?? null;
+    // Held: nothing is applied; the reason is said where the chat shows errors.
+    if (held !== null) { setError(`Not applied: ${held}`); return; }
     // Locks the buttons.
     setApplyingAll(true);
     // One at a time: each save writes the whole resume, so two in flight would race.
-    for (const [index, op] of (message.ops ?? []).entries()) {
-      // Nothing to apply on a "Could not do" card.
-      if (op.op === 'rejected') continue;
-      // Already on the resume: skipped.
-      if (isApplied(op, diff, structure ?? null)) continue;
-      /* A new bullet writes a new claim into the MASTER, so it always takes its own click, never a
-         batch (review finding, 2026-11-01): a hostile job text that induces one cannot ride along. */
-      if (op.op === 'new_bullet') continue;
+    for (const { op, key } of batch) {
       // A failure usually means the row changed; later saves would fail the same way.
-      if (!(await apply(op, opKey(message, index), 'ai_chat_click'))) break;
+      if (!(await apply(op, key, 'ai_chat_click'))) break;
     }
     // Unlocks.
     setApplyingAll(false);

@@ -1,8 +1,8 @@
 // The one-page rule, content side: remove the least-relevant content until the resume fits.
 //
 // THE RULE (Teja, 2026-11-07 22:43 IST): "the tailored resume and the resumes after applying
-// edits need to be in 1 page only, this is rule." HOW (his 23:00 ruling): first shrink the
-// typography, then remove the weakest bullets, then certifications, never below the floors;
+// edits need to be in 1 page only, this is rule." HOW (his 23:00 ruling, order revised 23:55):
+// first shrink the typography, then remove certifications, then the weakest bullets, never below the floors;
 // never remove skills; fail closed when the floors themselves do not fit. And (23:18): it runs
 // LIVE in the approval preview as he edits, deterministically, not by AI.
 //
@@ -48,10 +48,14 @@ export type TrimStep = "project_bullet_over_cap" | "weakest_bullet" | "certifica
 
 /**
  * THE ORDER, as one list: the first step with a candidate is taken, one removal at a time,
- * and the fit is re-measured after each. Teja's ruling, top to bottom. Reordering is a
- * one-line change here.
+ * and the fit is re-measured after each. Reordering is a one-line change here.
+ * Ruling history:
+ * - 2026-11-07 23:00 IST (Teja): bullets, then certifications (shipped in 41d7430).
+ * - 2026-11-07 23:55 IST (Teja): certifications go BEFORE bullets ("lowest priority, trimmed
+ *   first"), still never below PAGE_FIT_FLOORS.minCertifications. Rows tailored between the two
+ *   rulings were trimmed in the old order.
  */
-export const TRIM_ORDER: readonly TrimStep[] = ["project_bullet_over_cap", "weakest_bullet", "certification"];
+export const TRIM_ORDER: readonly TrimStep[] = ["certification", "project_bullet_over_cap", "weakest_bullet"];
 
 /** What was removed, in removal order: enough to show it ("Trimmed to fit one page: ...") and to record it. */
 export interface TrimItem {

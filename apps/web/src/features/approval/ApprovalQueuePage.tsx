@@ -47,6 +47,8 @@ import { DiffView } from './DiffView';
 // EditAction/EditResult are the save contract between the diff's controls and this page.
 import type { ClaimDecision, EditAction, EditResult } from './DiffView';
 import { buildResumeDiff } from './diffAdapter';
+// The one-page rule, live: every edit is fitted on one page before it is saved (2026-11-07).
+import { fitEditToOnePage, preflightBatch } from './pageFitEdit';
 // The adapter's own row shape, so the page holds exactly the fields the diff is built from.
 import type { DiffAdapterInput } from './diffAdapter';
 // coveragePercent (2026-11-04): the row's "ATS score" chip, the same honest figure as the badge and the 'ats' sort.
@@ -1555,6 +1557,8 @@ export function ApprovalQueuePage(): ReactElement {
         expectedUpdatedAt: stamp,
         // A fresh master node id; NodeIds must be unique across the whole master.
         newSkillId: `skill_${crypto.randomUUID()}`,
+        // The row's JD keywords, for the one-page fit in the same save.
+        jdKeywords: source.application.selected_jd_keywords,
         // Into the history note's detail.source.
         source: editSource,
       });
@@ -1585,6 +1589,8 @@ export function ApprovalQueuePage(): ReactElement {
     latestSources.current.set(applicationId, nextSource);
     // Redrawn against the NEW source now; the closure would still hold the old pin's master.
     adoptRow(applicationId, attested.resume, attested.updatedAt, nextSource);
+    // A one-page trim in this save is never silent.
+    if (attested.notice !== null) toast.info(attested.notice);
     // Bucket before and after, derived the same way the render partitions the queue.
     const from = previousDiff === undefined ? undefined : deriveBucket(previousDiff);
     // adoptRow just put the rebuilt diff in the ref synchronously, so this is the bucket it renders in.
@@ -1654,6 +1660,8 @@ export function ApprovalQueuePage(): ReactElement {
         expectedUpdatedAt: stamp,
         // A fresh master node id; NodeIds must be unique across the whole master.
         newBulletId: `bullet_${crypto.randomUUID()}`,
+        // The row's JD keywords, for the one-page fit in the same save.
+        jdKeywords: source.application.selected_jd_keywords,
         // Into the history note's detail.source.
         source: editSource,
       });
@@ -1682,6 +1690,8 @@ export function ApprovalQueuePage(): ReactElement {
     latestSources.current.set(applicationId, nextSource);
     // Redrawn against the NEW source now; the closure would still hold the old pin's master.
     adoptRow(applicationId, attested.resume, attested.updatedAt, nextSource);
+    // A one-page trim in this save is never silent.
+    if (attested.notice !== null) toast.info(attested.notice);
     // Bucket before and after, derived the same way the render partitions the queue.
     const from = previousDiff === undefined ? undefined : deriveBucket(previousDiff);
     // adoptRow just put the rebuilt diff in the ref synchronously.
@@ -1704,6 +1714,27 @@ export function ApprovalQueuePage(): ReactElement {
      never describe a resume that was not stored. */
   /* editSource (2026-11-04): who decided the edit, written to the history note; required, so no path
      is logged as the operator by omission. Named editSource because `source` below is the RowSource. */
+  /* THE AI-BATCH PREFLIGHT (2026-11-07): simulate a whole batch on this row's latest saved resume,
+     each op through the same pureEdit and one-page fit its save will run, BEFORE the first save. The
+     reason the batch would stop on the one-page floors, or null. Pure: reads refs, writes nothing.
+     A row the page cannot simulate answers null: each save then refuses on its own guards. */
+  function preflightRow(applicationId: string, actions: readonly EditAction[]): string | null {
+    // The same inputs editRow reads.
+    const source = latestSources.current.get(applicationId);
+    // The latest saved resume, the one the first op builds on.
+    const current = latestResumes.current.get(applicationId);
+    // Not simulable: editRow's own guards will refuse these saves with their own reasons.
+    if (source === undefined || current === undefined || source.original === null || source.full === null) return null;
+    // Narrowed copies for the closure.
+    const { original, master, full } = source;
+    // One step = one pure edit; the two master-writing kinds change nothing here (their saves report themselves).
+    return preflightBatch(current, actions, (resume, action) =>
+      // attest_* write the master on their own paths, so the simulation leaves the resume as it is.
+      action.kind === 'attest_skill' || action.kind === 'attest_bullet' ? { ok: false } : pureEdit(action, resume, original, master, full),
+      // The row's JD keywords, as every save uses.
+      source.application.selected_jd_keywords);
+  }
+
   async function editRow(applicationId: string, action: PageEditAction, editSource: EditSource): Promise<EditResult> {
     /* A page that is gone never writes: its refs hold a stamp the mounted page no longer trusts. In the
        page, never the panel: a Bucket A->B move remounts the panel while this page stays current. */
@@ -1747,6 +1778,13 @@ export function ApprovalQueuePage(): ReactElement {
     const outcome = pureEdit(action, current, source.original, source.master, source.full);
     // A refused edit never reaches the network.
     if (!outcome.ok) return notSaved(outcome.reason);
+    /* THE ONE-PAGE RULE, LIVE (Teja, 2026-11-07 23:18 IST): the edited resume is fitted on one page
+       BEFORE the save, and the fitted one is what is saved, so no save ever stores page two. The
+       same pure trimmer the tailor runs; a cut is announced below and recorded in the history note.
+       Floors that overflow, or a resume the check cannot measure, refuse the edit (fail closed). */
+    const fitted = fitEditToOnePage(outcome.resume, source.application.selected_jd_keywords);
+    // Refused before any write, in the check's own words.
+    if (!fitted.ok) return notSaved(fitted.reason);
 
     // Emptied before the save, so the same sentence twice in a row still changes the text and is re-announced.
     setAnnouncement('');
@@ -1761,8 +1799,8 @@ export function ApprovalQueuePage(): ReactElement {
       saved = await saveTailoredEdit(supabase, {
         // The row being edited.
         applicationId,
-        // The whole new resume.
-        resume: outcome.resume,
+        // The whole new resume, fitted on one page (the edit plus any one-page trims).
+        resume: fitted.resume,
         // What it was computed from, for the R0 boundary check (fix 5).
         previous: current,
         // The tailor's version: the ground truth for refs and master_text.
@@ -1772,7 +1810,8 @@ export function ApprovalQueuePage(): ReactElement {
         // Optimistic concurrency: refused if another tab changed the row (fix 2a).
         expectedUpdatedAt: stamp,
         // What changed and who decided it, for the append-only log.
-        event: { kind: EVENT_KIND[action.kind], ref: eventRef(action), before: outcome.before, after: outcome.after, source: editSource },
+        // pageFitTrimmed: the one-page cuts this save made, so the history shows them beside the edit.
+        event: { kind: EVENT_KIND[action.kind], ref: eventRef(action), before: outcome.before, after: outcome.after, source: editSource, pageFitTrimmed: fitted.trimmed },
       });
     } finally {
       // Released whatever happened, so a failure never strands the row as "saving".
@@ -1794,8 +1833,10 @@ export function ApprovalQueuePage(): ReactElement {
       return saved.reason === 'unconfirmed' ? { ok: false, reason: saved.message } : notSaved(saved.message);
     }
 
-    // Saved: the new resume and the NEW stamp, so the next edit presents the right one.
-    adoptRow(applicationId, outcome.resume, saved.updatedAt);
+    // Saved: the STORED resume (fitted, not the raw edit) and the NEW stamp, so the page shows what is stored.
+    adoptRow(applicationId, fitted.resume, saved.updatedAt);
+    // A one-page trim is never silent: what was cut, in words, on the page (Teja asked to see it).
+    if (fitted.notice !== null) toast.info(fitted.notice);
     // Bucket before, derived the same way the render partitions the queue.
     const from = previousDiff === undefined ? undefined : deriveBucket(previousDiff);
     // adoptRow just put the rebuilt diff in the ref synchronously, so this is the bucket the row now renders in.
@@ -2249,6 +2290,8 @@ export function ApprovalQueuePage(): ReactElement {
                     onReject={(reason) => rejectReviewed(diff.applicationId, reason)}
                     /* Saves for real; see editRow. */
                     onEdit={(action, editSource) => editRow(diff.applicationId, action, editSource)}
+                    /* The AI chat's one-page preflight over a whole batch (2026-11-07). */
+                    onPreflight={(actions) => preflightRow(diff.applicationId, actions)}
                     /* D4: only when the tailor's original could not be rebuilt. */
                     editDisabledReason={editOffReason(sources.get(diff.applicationId))}
                     /* So the diff can say the letter predates the edits. */
@@ -2425,6 +2468,8 @@ export function ApprovalQueuePage(): ReactElement {
                         onReject={(reason) => rejectReviewed(diff.applicationId, reason)}
                         /* Same save path as Bucket B; an edit moves the row there (R2). */
                         onEdit={(action, editSource) => editRow(diff.applicationId, action, editSource)}
+                    /* The AI chat's one-page preflight over a whole batch (2026-11-07). */
+                    onPreflight={(actions) => preflightRow(diff.applicationId, actions)}
                         /* D4, as in Bucket B. */
                         editDisabledReason={editOffReason(sources.get(diff.applicationId))}
                         /* Cover-letter note, as in Bucket B. */

@@ -144,6 +144,9 @@ export interface DiffViewProps {
   /* The page's save; editSource (2026-11-04) says who decided the edit, for the history note. A
      line's Reset passes 'operator'; the AI chat passes its own. */
   readonly onEdit?: ((action: EditAction, editSource: EditSource) => Promise<EditResult>) | undefined;
+  /* The one-page preflight for an AI batch (2026-11-07), handed through to the chat: the page simulates
+     the batch with its own pure edits and the one-page fit; null means every op would save on one page. */
+  readonly onPreflight?: ((actions: readonly EditAction[]) => string | null) | undefined;
   /* D4: why editing is off for this row, shown instead of controls that could not be honest. */
   readonly editDisabledReason?: string | null | undefined;
   /* Whether the row carries a generated cover letter, which an edit does not regenerate. */
@@ -834,6 +837,8 @@ export function DiffView({
   onApprove,
   onReject,
   onEdit,
+  // The one-page preflight, passed straight to the AI chat.
+  onPreflight,
   editDisabledReason,
   hasCoverLetter,
   locked,
@@ -1064,7 +1069,7 @@ export function DiffView({
         // The panel itself: bound to THIS row's onEdit and id, so whatever it applies lands on this row only.
         const panel =
           runEdit !== null && onAssist !== undefined && !editDisabledReason ? (
-            <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} structure={assistStructure ?? undefined} seed={chatSeed} />
+            <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onPreflight={onPreflight} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} structure={assistStructure ?? undefined} seed={chatSeed} />
           ) : /* Docked and read-only: say why, instead of a dock that is silently empty. */ chatDock?.active === true && editDisabledReason ? (
             <p className="diff__edit-note">AI chat is off for this resume: {editDisabledReason}</p>
           ) : null;

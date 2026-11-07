@@ -266,7 +266,10 @@ type SaveArgs = {
   // The stamp the page last saw; the write lands only if nobody changed the row since.
   expectedUpdatedAt: string;
   // What was done, and who decided it (EditSource), for the append-only log.
-  event: { kind: EditEventKind; ref: string; before: string | null; after: string | null; source: EditSource };
+  /* pageFitTrimmed (2026-11-07): what the one-page fit cut in this same save (pageFitEdit.ts), so a
+     trim is in the history beside the edit that caused it, never silent. Optional: attest saves and
+     every edit that fitted untouched carry none, and the note then has no such key. */
+  event: { kind: EditEventKind; ref: string; before: string | null; after: string | null; source: EditSource; pageFitTrimmed?: readonly { step: string; ref: string; text: string }[] };
   /* Only for an attested skill: the row moves to a NEW master version. All three pins travel in
      the same single-row UPDATE (tailored_profile's, the column, tailor_refs'), because a pin that
      disagrees with tailor_refs makes the page's rebuild refuse and switches editing off. The caller
@@ -289,7 +292,12 @@ async function recordEvent(client: MinimalClient, args: SaveArgs, updatedAt: str
       // The browser's only legal value (see EditSource): the human's session wrote the row.
       agent: 'human',
       // Before and after text, so the log alone can reconstruct what changed; source says who decided it.
-      detail: { kind: args.event.kind, ref: args.event.ref, before: args.event.before, after: args.event.after, source: args.event.source },
+      detail: {
+        // The edit itself, as before.
+        kind: args.event.kind, ref: args.event.ref, before: args.event.before, after: args.event.after, source: args.event.source,
+        // The one-page cuts made in the same save, only when there were any.
+        ...(args.event.pageFitTrimmed !== undefined && args.event.pageFitTrimmed.length > 0 ? { page_fit_trimmed: args.event.pageFitTrimmed } : {}),
+      },
     });
     // The resume is saved either way; only whether the log caught it differs.
     return { ok: true, eventRecorded: !eventError, updatedAt };

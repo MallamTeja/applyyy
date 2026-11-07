@@ -89,8 +89,9 @@ describe('ApprovalQueuePage wiring for a cross-bucket save', () => {
     const edit = between('async function editRow(', '// Flip one id in a set-valued state');
     // Cleared before the network write, so a repeat is re-announced.
     assert.ok(edit.indexOf("setAnnouncement('')") >= 0 && edit.indexOf("setAnnouncement('')") < edit.indexOf('await saveTailoredEdit('), 'cleared before the save');
-    // Set after adoptRow, from the action, the outcome (skill name) and both buckets.
-    assert.match(edit, /adoptRow\(applicationId, outcome\.resume, saved\.updatedAt\);[\s\S]*setAnnouncement\(announcementFor\(action\.kind, outcome, from, to\)\);/);
+    // Set after adoptRow, from the action, the outcome (skill name) and both buckets. adoptRow takes the
+    // FITTED resume since 2026-11-07 (the one-page rule): the stored resume, not the raw edit.
+    assert.match(edit, /adoptRow\(applicationId, fitted\.resume, saved\.updatedAt\);[\s\S]*setAnnouncement\(announcementFor\(action\.kind, outcome, from, to\)\);/);
     // Never on the failure branch: that branch returns before the announcement.
     assert.ok(edit.indexOf('if (!saved.ok) {') < edit.indexOf('setAnnouncement(announcementFor('), 'announced only after the failure branch returned');
   });

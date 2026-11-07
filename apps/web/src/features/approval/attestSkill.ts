@@ -23,6 +23,8 @@ import { masterSkillNamed } from '../settings/masterAdd';
 import { addableSkillFor, addSkill, deepEqual, masterFromRow, rebuildOriginal, skillTokens } from './tailoredEdits';
 // The write boundary every resume edit goes through, now able to move the pin with the resume.
 import { saveTailoredEdit, type EditSource, type StoredRow } from './saveTailoredEdit';
+// The one-page rule, live: the attested resume is fitted on one page before it is saved (2026-11-07).
+import { fitEditToOnePage } from './pageFitEdit';
 
 /* The client the two masterStore calls take; the page's real client, or a test double cast to it.
    Derived from masterStore's own signature so the two can never drift apart. */
@@ -48,6 +50,9 @@ export interface AttestArgs {
   readonly newSkillId: string;
   // Who decided the attest (a hand click, or the AI chat), for the history note; required so no caller defaults it.
   readonly source: EditSource;
+  /* The row's JD keywords (selected_jd_keywords), for the one-page fit this save runs (2026-11-07).
+     Required, so no caller can skip the fit by omission. */
+  readonly jdKeywords: readonly string[];
 }
 
 /* How an attest ends. On success the page gets the new pin's master and original, which it must
@@ -58,6 +63,8 @@ export type AttestOutcome =
       readonly ok: true;
       // The saved resume, at the new pin.
       readonly resume: ResolvedResume;
+      // What the one-page fit cut in this save, in words for the page; null when nothing was cut.
+      readonly notice: string | null;
       // The master at the new pin.
       readonly master: MasterProfile;
       // The tailor's version rebuilt at the new pin (identical claims, new version label).
@@ -203,13 +210,20 @@ export async function attestSkill(client: Client, args: AttestArgs): Promise<Att
   const added = addSkill({ ...args.current, master_version: version }, target, skillRef);
   // e.g. already on the resume; said in addSkill's own words.
   if (!added.ok) return { ok: false, message: added.reason, masterInserted };
+  /* One page (2026-11-07): the attested resume is fitted BEFORE the write, and the fitted one is
+     stored. Skills are never trimmed, so the new skill stays; something else may be cut, and is
+     announced. Floors that overflow refuse here, after the master version (if made) was inserted:
+     that version stays (immutable), and the row is untouched, like every other post-insert refusal. */
+  const fitted = fitEditToOnePage(added.resume, args.jdKeywords);
+  // Refused before the write, in the check's own words.
+  if (!fitted.ok) return { ok: false, message: fitted.reason, masterInserted };
 
   // One write: the resume with the skill, and all three pins, guarded by status and stamp.
   const saved = await saveTailoredEdit(client, {
     // The row being written.
     applicationId: args.applicationId,
-    // The resume with the attested skill, already labelled with the new version.
-    resume: added.resume,
+    // The resume with the attested skill, already labelled with the new version, fitted on one page.
+    resume: fitted.resume,
     // What is stored now, for the unchanged R0 check (relabelled to the new pin inside the save).
     previous: args.current,
     // The tailor's version at the NEW pin, proven claim-for-claim identical above.
@@ -219,7 +233,7 @@ export async function attestSkill(client: Client, args: AttestArgs): Promise<Att
     // Optimistic concurrency: refused if another tab changed the row.
     expectedUpdatedAt: args.expectedUpdatedAt,
     // The event names the master skill and that the operator vouched for it.
-    event: { kind: 'resume_attest_skill', ref: skillRef, before: null, after: name, source: args.source },
+    event: { kind: 'resume_attest_skill', ref: skillRef, before: null, after: name, source: args.source, pageFitTrimmed: fitted.trimmed },
     // All three pins move in this same statement.
     repin: { version, tailorRefs: rebuilt.refs },
   });
@@ -229,8 +243,10 @@ export async function attestSkill(client: Client, args: AttestArgs): Promise<Att
   return {
     // Landed.
     ok: true,
-    // The resume as stored.
-    resume: added.resume,
+    // The resume as stored (fitted).
+    resume: fitted.resume,
+    // What the one-page fit cut, in words, for the page to show; null when nothing was cut.
+    notice: fitted.notice,
     // The pin's master, which the page swaps into the row's source.
     master: target,
     // The pin's original, so "edited" keeps being derived correctly.
