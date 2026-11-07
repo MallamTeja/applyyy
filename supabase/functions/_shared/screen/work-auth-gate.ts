@@ -445,3 +445,41 @@ export function screenWorkAuth(
   // No positive signal: keep. Missing data is never a rejection.
   return keep();
 }
+
+// ---- "Pay band UK/US only" (finding N2; Teja ruled option C, 2026-11-07 10:14 IST) ----
+// A remote job can say "Remote anywhere" and still list pay only for the UK/US (Circuithub:
+// "UK £80k–£125k · US $125k–$250k"). Teja ruled such a job is NEVER dropped: the approval card shows
+// a chip and he decides per row. So this is a separate pure function, not part of screenWorkAuth,
+// and nothing here can change a verdict. The web bundles this file (apps/web imports it by relative
+// path), so it must stay browser-safe: no Deno APIs, no npm:/jsr:/node: imports.
+
+// The one chip text. A closed literal, so the card can only ever render this exact string.
+export const PAY_BAND_UK_US_ONLY = "Pay band UK/US only" as const;
+
+// A UK/US place, then a salary-sized amount in the same sentence ("UK £80k", "US based
+// applicants, the salary range is $97,600", "San Francisco Bay Area & NYC Metro: $149,000").
+// CASE-SENSITIVE on purpose: lower-case "us" is the English word ("join us: $120,000").
+// Salary-sized means "80k" or "97,600" (2-3 digits then k or ,ddd): "USD 2,000" (a learning budget),
+// "$500M" and "$1B" (funding) never match. [^.\n] keeps the pair inside one sentence or line.
+// ponytail: place-then-amount only. "$125k (US)" (amount first) is missed; add the mirrored order
+// if a real row shows it. A missed chip costs nothing: the job is kept either way.
+const PAY_BAND_PLACE_THEN_AMOUNT =
+  /\b(?:UK|U\.K\.|US|U\.S\.|USA|United States|United Kingdom|London|San Francisco|Bay Area|NYC|New York|Seattle)\b[^.\n]{0,60}?(?:[£$]\s?\d{2,3}(?:,\d{3}|k)\b|\d{2,3}(?:,\d{3}|k)\s?(?:USD|GBP)\b)/;
+
+// Any India pay or place in the JD: then the band is not UK/US ONLY, so no chip.
+const PAY_BAND_INDIA = /₹|\bINR\b|\bLPA\b|\bIndia\b/i;
+
+// The chip for one job, or null. Remote jobs only: an on-site UK/US job is already judged by its
+// location. Missing data is never a claim (CLAUDE.md §6): no JD or no board text gives null.
+export function payBandRegionWarning(job: { readonly locationRaw: string | null; readonly description: string | null }): typeof PAY_BAND_UK_US_ONLY | null {
+  // Only a board location that says remote is in scope.
+  if (job.locationRaw === null || !REMOTE.test(job.locationRaw)) return null;
+  // The JD as plain text, so markup between the place and the amount cannot hide the pair.
+  const text = job.description === null ? null : stripHtml(job.description);
+  // No readable JD: nothing to claim.
+  if (text === null) return null;
+  // India pay or place anywhere: the band is not UK/US only.
+  if (PAY_BAND_INDIA.test(text)) return null;
+  // The chip when a UK/US place leads a salary-sized amount; otherwise nothing.
+  return PAY_BAND_PLACE_THEN_AMOUNT.test(text) ? PAY_BAND_UK_US_ONLY : null;
+}
