@@ -71,6 +71,8 @@ import type { FilterRuleConfig } from '../settings/filtersStore.ts';
 import { OutcomeNote, SendThroughPipeline, isRowInFlight, withRowLock } from '../pipeline/DrawerAppCard.tsx';
 // The tested Reject/Undo pieces: which lanes may reject, the one write, and its sentences.
 import { canReject, describeReject, moveRejectedJob } from './rejectJob.ts';
+// description_raw can be HTML or entity-escaped HTML; both the card preview and the JD modal show it as plain text.
+import { jdPlainText } from './jdText.ts';
 // Type only: the status a rejected card came from, kept so Undo can return it there.
 import type { ApplicationStatus } from '../../data/contract.ts';
 // Type only: one finished run's answer, kept here after the card unmounts on reload.
@@ -1009,7 +1011,8 @@ export function DiscoveredJobsPage(): ReactElement {
                   onClick={() => setActiveJdModal(job)}
                   title="Click to view full job description"
                 >
-                  {job.description_raw.replace(/<[^>]*>?/gm, ' ').slice(0, 220)}...
+                  {/* Plain text first, THEN slice: slicing raw HTML could cut a tag in half and leave entities visible. */}
+                  {jdPlainText(job.description_raw).slice(0, 220)}...
                 </div>
               )}
 
@@ -1153,7 +1156,8 @@ export function DiscoveredJobsPage(): ReactElement {
 
             <div className="jd-modal__body">
               {activeJdModal.description_raw ? (
-                <div>{activeJdModal.description_raw}</div>
+                // A text node, never innerHTML: jdPlainText's "\n" breaks render via .jd-modal__text's pre-line.
+                <div className="jd-modal__text">{jdPlainText(activeJdModal.description_raw)}</div>
               ) : (
                 <p>No description text provided for this posting.</p>
               )}

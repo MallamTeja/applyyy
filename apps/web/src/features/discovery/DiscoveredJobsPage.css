@@ -281,6 +281,13 @@
   white-space: pre-wrap;
 }
 
+/* The JD as jdPlainText returns it: its "\n" line and paragraph breaks must show, while any stray
+   space run folds (pre-line, not the body's pre-wrap). No colour here: it inherits the body's token. */
+.jd-modal__text {
+  /* Honour the breaks jdPlainText produced from <p>/<br>/<li>; fold leftover spaces. */
+  white-space: pre-line;
+}
+
 .jd-modal__footer {
   padding: var(--gap-4);
   border-top: 1px solid var(--rule);
