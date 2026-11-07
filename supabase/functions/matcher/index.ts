@@ -840,11 +840,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     skipped_stale: skippedStaleCount,
     // Rows the pre-gate dropped before scoring, at zero Gemini cost: ALL pre-gate stages (tech, work-auth,
     // experience), so the honest name is pre_gate_dropped (#19, owned by peer 2 since 2026-11-07).
+    // (The legacy tech_gate_dropped key went in #19 step 3, 2026-11-07, after both workflows switched in a6865e5.)
     pre_gate_dropped: preGateDroppedCount,
-    // LEGACY NAME, the same value, until step 2 lands (#19, a three-step rename): postscreen-drain.yml:337
-    // and pregate-sweep.yml:176/245/253 REQUIRE this key and abort without it, so both keys ship until the
-    // workflows read pre_gate_dropped; step 3 then deletes this line.
-    tech_gate_dropped: preGateDroppedCount,
     // The same drops by drop_reason code (tech_gate, tech_gate_unclassified, work_auth,
     // experience_ceiling), so a reader is never told a work-auth drop was a title problem.
     pre_gate_dropped_by_code: preGateDroppedByCode,
