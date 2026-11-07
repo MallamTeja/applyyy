@@ -135,8 +135,9 @@ export function inputFor(row: Pick<UnansweredQuestionRow, 'field_kind' | 'option
   return { input: 'text', answerType: 'text' };
 }
 
-/** True when the bank already holds an answer the worker will use for this key. */
-function isAnswered(bank: ReadonlyMap<string, BankQuestion>, key: string): boolean {
+/** True when the bank already holds an answer the worker will use for this key. Exported (2026-11-07) so the
+ * Manual apply card hides a question by the same rule this page does. */
+export function isAnswered(bank: ReadonlyMap<string, BankQuestion>, key: string): boolean {
   // The bank's question for the key, if any.
   const q = bank.get(key);
   // Only an attested, non-placeholder, non-empty answer counts: anything less still blocks.
@@ -193,8 +194,14 @@ export function buildCards(
   return cards.sort((a, b) => b.blocks.length - a.blocks.length || b.lastSeenAt.localeCompare(a.lastSeenAt));
 }
 
-/** The answerable BankQuestion a card's Save hands to saveBankAnswer. */
-export function cardToBankQuestion(card: QuestionCard): BankQuestion {
+/** The answerable BankQuestion a card's Save hands to saveBankAnswer. Takes only what it reads, plus the
+ * page it was answered on, so the Manual apply card (2026-11-07) saves through this very function. */
+export function cardToBankQuestion(
+  // The key, the question text and the save type: the only card fields the row needs.
+  card: Pick<QuestionCard, 'key' | 'text' | 'answerType'>,
+  // Where Teja answered it, shown in the main table so the row explains where it came from.
+  answeredOn = 'Unanswered questions',
+): BankQuestion {
   return {
     // The exact key the planner looks up: the whole point of saving it.
     key: card.key,
@@ -209,7 +216,7 @@ export function cardToBankQuestion(card: QuestionCard): BankQuestion {
     // No seed default either.
     defaultValue: null,
     // Shown in the main table, so the row explains where it came from.
-    why: 'Asked by an application form; answered from Unanswered questions.',
+    why: `Asked by an application form; answered from ${answeredOn}.`,
     // saveBankAnswer writes needs_human false anyway; kept consistent here.
     needsHuman: false,
     // Never used yet.

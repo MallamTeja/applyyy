@@ -72,7 +72,7 @@ function renderCard(row: unknown, kit: unknown): string {
 describe('the row read carries the tailored resume', () => {
   it('selects tailored_profile with the job embed (the exact column list)', () => {
     // Positive full shape: a dropped column fails here, not silently at runtime.
-    assert.equal(data.ROW_SELECT, 'id, status, updated_at, status_changed_at, tailored_profile, jobs:job_id(title, company_name, apply_url)');
+    assert.equal(data.ROW_SELECT, 'id, status, updated_at, status_changed_at, block_reason, tailored_profile, jobs:job_id(title, company_name, apply_url, ats_provider)');
   });
 
   it('the rail badge reads without tailored_profile (it only counts rows; every cold load pays for it)', () => {

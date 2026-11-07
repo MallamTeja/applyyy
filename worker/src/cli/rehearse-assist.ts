@@ -28,6 +28,8 @@ import { chromium } from 'playwright';
 import type { AnswerBankRow, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 // The production page port, narrowed to reads before the rehearsal sees it.
 import { createPlaywrightPage } from '../playwright-page.ts';
+// The one Workday predicate and refusal line, shared with apply-one's guard and the web card.
+import { isWorkdayJob, WORKDAY_REFUSAL } from '../workday.ts';
 // Renders the resume on its own page.
 import { createResumeRenderer } from '../resume-renderer.ts';
 // The applier's robots gate, the one assist uses.
@@ -123,7 +125,7 @@ async function main(): Promise<void> {
 
   // 2. Everything the checks and the rehearsal read, in one SELECT, owner-scoped (system_settings
   // holds two accounts; an unfiltered read once answered for the wrong one, CLAUDE.md §6).
-  const [row] = select(`select a.status, a.user_id, a.tailored_profile, j.apply_url, j.company_name,
+  const [row] = select(`select a.status, a.user_id, a.tailored_profile, j.apply_url, j.company_name, j.ats_provider,
       (select count(*) from system_settings s where s.user_id = a.user_id) n_settings,
       (select system_enabled from system_settings s where s.user_id = a.user_id) sys_on,
       (select auto_apply_on_approve from system_settings s where s.user_id = a.user_id) auto_on,
@@ -169,6 +171,15 @@ async function main(): Promise<void> {
   // Said, so "not checked" is not read as "passed".
   else record('posting open', 'PASS', 'n/a: not a job-boards.greenhouse.io URL');
 
+  // Workday needs a candidate account this system never creates, so the real applier parks such a row before
+  // goto (apply-one.ts). The rehearsal must refuse it the same way, BEFORE a browser is launched at the form
+  // (2026-11-07: this CLI had no such check). The raw column values, so a SQL null is null, never the string "null".
+  if (isWorkdayJob(typeof row['apply_url'] === 'string' ? row['apply_url'] : null, typeof row['ats_provider'] === 'string' ? row['ats_provider'] : null)) {
+    // A FAIL: the bot can never apply here; the row belongs on Manual apply.
+    record('workday', 'FAIL', WORKDAY_REFUSAL);
+    // Printed and exited, with no browser opened.
+    return finish(results);
+  }
   // 3. Sign-in with the app password, when set, then out of THAT session only (scope 'local': the default
   // 'global' logged Teja's browser out on 2026-11-07). No other client is ever made.
   for (const line of await signInCheck(process.env, String(row['user_id']), (url, anon) => createClient(url, anon, { auth: { persistSession: false, autoRefreshToken: false } }) as unknown as SignInClient)) record(line.name, line.verdict, line.why);

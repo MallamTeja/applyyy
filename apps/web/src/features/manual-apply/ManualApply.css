@@ -232,3 +232,87 @@
   /* A pointer says "this opens". */
   cursor: pointer;
 }
+
+/* "Bot can't apply: <reason>" (2026-11-07): the first line under every card's title, so why the job is here is read first. */
+.kit-card__why {
+  /* Small, like the card's other notes. */
+  font-size: var(--size-xs);
+  /* Secondary text: context, not an alarm. */
+  color: var(--text-secondary);
+  /* Tight under the title, space before the actions. */
+  margin: 0 0 var(--gap-2);
+}
+
+/* The open questions block: the needs-a-human wash, since every item in it is Teja's to answer. */
+.kit-card__questions {
+  /* The needs-a-human wash, as the warnings. */
+  background: var(--signal-wash);
+  /* Its edge. */
+  border-left: 3px solid var(--signal);
+  /* Inner space. */
+  padding: var(--gap-2) var(--gap-3);
+  /* Space before the full field list. */
+  margin: 0 0 var(--gap-3);
+}
+
+/* The block's heading, at body scale: it labels a list, not a section of the page. */
+.kit-card__questions-title {
+  /* Body size. */
+  font-size: var(--size-sm);
+  /* Close to the list. */
+  margin: 0 0 var(--gap-1);
+}
+
+/* The questions, numbered in form order. */
+.kit-card__question-list {
+  /* Flush with the heading. */
+  margin: 0;
+  /* Room for the numbers. */
+  padding-left: var(--gap-3);
+}
+
+/* One question: label, then the input row or the hint, then the save outcome, each on its own line. */
+.kit-card__question {
+  /* Stacked. */
+  display: flex;
+  /* Top to bottom. */
+  flex-direction: column;
+  /* Small gaps inside one question. */
+  gap: var(--gap-1);
+  /* Space between questions. */
+  margin-block-end: var(--gap-2);
+}
+
+/* The input and its Save on one line, wrapping on a phone. */
+.kit-card__answer {
+  /* In a row. */
+  display: flex;
+  /* Wraps at narrow widths instead of overflowing the card. */
+  flex-wrap: wrap;
+  /* Space between input and button. */
+  gap: var(--gap-1);
+  /* The button sits level with a one-line input. */
+  align-items: flex-start;
+}
+
+/* The answer controls: full width up to a readable measure, themed like the page. */
+.kit-card__answer input,
+.kit-card__answer select,
+.kit-card__answer textarea {
+  /* Grows to fill the row. */
+  flex: 1 1 16rem;
+  /* Never wider than a readable line. */
+  max-width: 40rem;
+  /* Small text, like the rest of the card. */
+  font-size: var(--size-xs);
+  /* Compact. */
+  padding: 2px 6px;
+  /* The shared control radius. */
+  border-radius: var(--radius-control);
+  /* Outlined. */
+  border: 1px solid var(--rule);
+  /* Sheet background, so it reads on the wash. */
+  background: var(--sheet);
+  /* Primary text. */
+  color: var(--text-primary);
+}

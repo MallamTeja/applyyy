@@ -51,6 +51,14 @@ import type { ApplyKit, KitField, KitSkipCode, KitState } from './applyKit';
 import { ResumePreview } from '../resume-preview/ResumePreview';
 // The page's reads.
 import { loadManualApply } from './manualApplyData';
+// Why the bot cannot apply, and the open questions the card offers inputs for (pure, unit tested).
+import { botCantApplyReasons, isBanked, openQuestionToBankQuestion, openQuestions } from './botCantApply';
+// Type only: one open question.
+import type { OpenQuestion } from './botCantApply';
+// The Answer bank's own read and browser save: no agent key, so the trigger stamps the answer as Teja's (attested).
+import { loadAnswerBank, saveBankAnswer } from '../settings/answerBankStore';
+// Type only: the loaded bank's question shape.
+import type { BankQuestion } from '../settings/answerBankStore';
 // The pure rules behind the preview toggle and the select-choices display.
 import { pressPreview } from './previewToggle';
 // Same, for the choices.
@@ -305,11 +313,124 @@ function TailoredResume(props: { readonly row: ManualApplyRow }): ReactElement {
   );
 }
 
+/* The loaded answer bank the cards answer into, and the re-read after a save. bank null = not loaded: still
+   loading (error null) or failed (error set). The page owns ONE read for every card. */
+export interface CardAnswers {
+  // The bank as loaded, or null before/without a successful read.
+  readonly bank: readonly BankQuestion[] | null;
+  // The read's failure, shown instead of a Save (saveBankAnswer refuses every write after a failed read anyway).
+  readonly error: string | null;
+  // Called after a landed save: the page re-reads the bank, so the question flips to "In your answer bank".
+  readonly onSaved: () => void;
+}
+
+/* The kit's open questions, answerable in place (Teja, 2026-11-07: "I will answer those questions ... and add
+   those answers to the answer bank, so the answer bank grows"). Only a question a saved answer can clear gets an
+   input; a never-fill label or a checkbox says to answer it on the form (orchestrator ruling, 23:31). */
+function OpenQuestions(props: { readonly rowId: string; readonly questions: readonly OpenQuestion[]; readonly answers: CardAnswers | undefined }): ReactElement {
+  // Destructured for readability.
+  const { rowId, questions, answers } = props;
+  // Per-key drafts; nothing is written until Save.
+  const [drafts, setDrafts] = useState<Readonly<Record<string, string>>>({});
+  // Per-key outcome line of the last Save (or why nothing was saved).
+  const [said, setSaid] = useState<Readonly<Record<string, string>>>({});
+  // The key mid-save, so a double click cannot send two writes.
+  const [saving, setSaving] = useState<string | null>(null);
+  // The bank, only when it loaded: every input and Save depends on it.
+  const bank = answers?.bank ?? null;
+  // One draft setter for all three input kinds.
+  const draft = (key: string, value: string): void => setDrafts((d) => ({ ...d, [key]: value }));
+  /* The ONLY write in this component, reached only from a Save click. */
+  const save = async (question: OpenQuestion): Promise<void> => {
+    // Trimmed: the worker types the stored text exactly.
+    const value = (drafts[question.key] ?? '').trim();
+    // A blank is never stored as an answer; say why nothing happened.
+    if (value === '') return setSaid((s) => ({ ...s, [question.key]: 'Type or pick an answer first.' }));
+    // Locks the card's Save buttons.
+    setSaving(question.key);
+    // try/finally so the buttons always re-enable, even if the save throws.
+    try {
+      // The Answer bank page's own save path and row shape.
+      const res = await saveBankAnswer(openQuestionToBankQuestion(question), value);
+      // The store's own words on a failure (a blocked read, a sync error).
+      setSaid((s) => ({ ...s, [question.key]: res.ok ? 'Saved to your answer bank. The next kit fills it.' : res.error ?? 'Save failed.' }));
+      // Landed: the page re-reads the bank, and the question shows as banked.
+      if (res.ok) answers?.onSaved();
+    } finally {
+      // Re-enabled either way.
+      setSaving(null);
+    }
+  };
+  return (
+    /* Its own block between the warnings and the full field list, so the questions are not lost among the fields. */
+    <div className="kit-card__questions">
+      {/* Names the block. */}
+      <h3 className="kit-card__questions-title">Questions the bot needs you to answer</h3>
+      {/* No bank: say why there is no Save, never offer one that would be refused. */}
+      {bank === null ? <p className="panel__note" role={answers?.error ? 'alert' : 'status'}>{answers?.error ? `Answer bank could not be read (${answers.error}), so saving is off. Reload to try again.` : 'Reading your answer bank…'}</p> : null}
+      {/* One item per question, in form order. */}
+      <ol className="kit-card__question-list">
+        {questions.map((q) => {
+          // The input id: unique per card and question, so its <label> points at the right control.
+          const inputId = `kit-q-${rowId}-${q.key}`;
+          // The current draft, '' before typing.
+          const value = drafts[q.key] ?? '';
+          // An input is drawn only for a question a saved answer can clear, with the bank loaded and no answer in it yet.
+          const editable = q.answerable && bank !== null && !isBanked(bank, q);
+          return (
+            /* Keyed by the planner key: one question per key on a form. */
+            <li key={q.key} className="kit-card__question">
+              {/* The form's own words, as text; a <label> only when there is a control for it to name. */}
+              {editable ? <label className="kit-field__label" htmlFor={inputId}>{q.label}</label> : <span className="kit-field__label">{q.label}</span>}
+              {!q.answerable ? (
+                /* The planner never fills this label: an input here would be a dead control. */
+                <span className="kit-field__hint">The bot never fills this one; answer it on the form.</span>
+              ) : bank === null ? null : isBanked(bank, q) ? (
+                /* Already answered (attested) in the bank: the next kit fills it. */
+                <span className="kit-field__hint">In your answer bank; the next kit fills it.</span>
+              ) : (
+                /* The input and its Save. */
+                <span className="kit-card__answer">
+                  {q.input === 'select' ? (
+                    /* The form's options verbatim: the worker types the stored text exactly. */
+                    <select id={inputId} value={value} onChange={(e) => draft(q.key, e.target.value)}>
+                      {/* The empty choice, so nothing is pre-picked for Teja. */}
+                      <option value="">Pick one</option>
+                      {/* One option per form option. */}
+                      {q.options.map((o) => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                  ) : q.input === 'textarea' ? (
+                    /* Long answers (essays). */
+                    <textarea id={inputId} rows={3} value={value} onChange={(e) => draft(q.key, e.target.value)} />
+                  ) : (
+                    /* Everything else is typed. */
+                    <input id={inputId} type="text" value={value} onChange={(e) => draft(q.key, e.target.value)} />
+                  )}
+                  {/* type=button: it can never submit anything; disabled while a save on this card is out. */}
+                  <button type="button" className="kit-resume__button" disabled={saving !== null} onClick={() => void save(q)}>Save answer</button>
+                </span>
+              )}
+              {/* The last Save's outcome for this question; role=status so it is announced. */}
+              {said[q.key] !== undefined ? <span className="kit-field__hint" role="status">{said[q.key]}</span> : null}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 /* One job's card. Pure: everything arrives as props, so a static render tests exactly what is shown.
    `resolve` is required, so a card can never be drawn with its resolve buttons silently missing. */
-export function KitCard(props: { readonly row: ManualApplyRow; readonly kit: KitState; readonly resolve: KitResolve }): ReactElement {
+/* `answers` is optional only so a card can be drawn without the bank; then its questions say "Reading your
+   answer bank" and offer no Save, never a Save that skips the bank read. */
+export function KitCard(props: { readonly row: ManualApplyRow; readonly kit: KitState; readonly resolve: KitResolve; readonly answers?: CardAnswers }): ReactElement {
   // Destructured for readability.
-  const { row, kit, resolve } = props;
+  const { row, kit, resolve, answers } = props;
+  // Why the bot cannot apply, from what was recorded only; empty prints "—".
+  const reasons = botCantApplyReasons(row, kit);
+  // The open questions the card lists (empty unless the kit is readable).
+  const questions = openQuestions(kit);
   // This card's resolve moves; empty at applying.
   const moves = kitResolveMoves(row.status);
   // The kit's form URL first (it is the page the kit was read from), else the job's apply URL; both via safeHref.
@@ -322,6 +443,8 @@ export function KitCard(props: { readonly row: ManualApplyRow; readonly kit: Kit
         {/* Same label as the recovery queues. */}
         {row.label} <span className="identifier">{row.status}</span>
       </h2>
+      {/* Why this job is here and not with the bot (2026-11-07). "—" when nothing recorded a reason: never a guess. */}
+      <p className="kit-card__why"><strong>Bot can't apply:</strong> {reasons.length > 0 ? reasons.join('; ') : '—'}</p>
       {/* The two actions that start an application by hand. */}
       <div className="kit-card__actions">
         {/* New tab so this page stays open beside the form; noopener noreferrer gives the employer page no handle back. */}
@@ -386,6 +509,8 @@ export function KitCard(props: { readonly row: ManualApplyRow; readonly kit: Kit
               {kit.kit.warnings.map((w, i) => <li key={i}>{w}</li>)}
             </ul>
           ) : null}
+          {/* The open questions with their inputs, before the full field list. */}
+          {questions.length > 0 ? <OpenQuestions rowId={row.id} questions={questions} answers={answers} /> : null}
           {/* The fields, in the order the form asks them. */}
           <ol className="kit-card__fields">
             {/* Keyed by position, which IS the form order. */}
@@ -424,6 +549,18 @@ export function ManualApplyPage(): ReactElement {
       setRead({ kind: 'error', message: 'The manual-apply list could not be read.' });
     }
   }, []);
+  // The answer bank, read once for every card's questions; null bank = loading (no error) or failed (error).
+  const [bankRead, setBankRead] = useState<{ readonly bank: readonly BankQuestion[] | null; readonly error: string | null }>({ bank: null, error: null });
+  // One read; loadAnswerBank THROWS on a failed remote read (and then blocks every save), so the catch says why.
+  const loadBank = useCallback(async () => {
+    try {
+      // Seeds plus remote rows, with attestedByHuman from the table.
+      setBankRead({ bank: await loadAnswerBank(), error: null });
+    } catch (err) {
+      // No Save is offered after this; the message says what broke.
+      setBankRead({ bank: null, error: err instanceof Error ? err.message : String(err) });
+    }
+  }, []);
   // The "Left your queue" read, separate from the cards' so one failing read never blanks the other.
   const [leftRead, setLeftRead] = useState<LeftQueueRead>({ kind: 'loading' });
   // One read of the section; loadLeftQueue reports failures as { error }, the catch covers a throwing client.
@@ -437,8 +574,8 @@ export function ManualApplyPage(): ReactElement {
   // as a card, so after any move both lists must show what is stored.
   const loadAll = useCallback(async () => {
     // Independent reads, run in parallel; neither throws.
-    await Promise.all([load(), loadLeft()]);
-  }, [load, loadLeft]);
+    await Promise.all([load(), loadLeft(), loadBank()]);
+  }, [load, loadLeft, loadBank]);
   // The card resolves: the System health locks, strip and write; each move re-reads the page so a resolved card leaves.
   const { busy, frozen, notes, move } = useRecoveryMoves(loadAll, 'manual_apply');
   // The section's Re-open: the same write path, logged under its own source so the event log tells it apart.
@@ -478,6 +615,8 @@ export function ManualApplyPage(): ReactElement {
             kit={read.kits.get(row.id) ?? NO_KIT}
             /* In flight or frozen locks the buttons; frozen alone adds the reload sentence; the write runs through the shared move path. */
             resolve={{ locked: busy.has(row.id) || frozen.has(row.id), frozen: frozen.has(row.id), onMove: (to) => void move(row, row.status, to) }}
+            /* The one bank read; a landed save re-reads it so the question shows as banked. */
+            answers={{ bank: bankRead.bank, error: bankRead.error, onSaved: () => void loadBank() }}
           />
         ))
       )}

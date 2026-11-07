@@ -47,6 +47,12 @@ export interface ManualApplyRow {
   readonly jobTitle: string | null;
   // Same, the company.
   readonly company: string | null;
+  // applications.block_reason as returned (UNTRUSTED text; botCantApply.ts proves it against the enum), null when
+  // absent. The card's "Bot can't apply" line reads it while the row is parked (2026-11-07). Null on a badge row.
+  readonly blockReason: string | null;
+  // jobs.ats_provider as returned, null when absent: the provider half of the Workday signal (a tenant fronted on
+  // careers.company.com has no Workday host). Null on a badge row.
+  readonly atsProvider: string | null;
 }
 
 // A Set for the status membership test.
@@ -55,8 +61,9 @@ const KNOWN: ReadonlySet<string> = new Set(APPLICATION_STATUSES);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // The columns every application read needs; status_changed_at is the approve time of an approved row
 // (the transition trigger sets it only when the status changes, so later edits do not move it).
-// tailored_profile is the resume the card previews and prints (P1, 2026-11-05). Exported for the test that pins it.
-export const ROW_SELECT = 'id, status, updated_at, status_changed_at, tailored_profile, jobs:job_id(title, company_name, apply_url)';
+// tailored_profile is the resume the card previews and prints (P1, 2026-11-05). block_reason and the job's
+// ats_provider feed the card's "Bot can't apply" line (2026-11-07). Exported for the test that pins it.
+export const ROW_SELECT = 'id, status, updated_at, status_changed_at, block_reason, tailored_profile, jobs:job_id(title, company_name, apply_url, ats_provider)';
 // The rail badge only counts rows, so it skips the tailored_profile jsonb (every cold load pays for this read, 420dc2d).
 export const BADGE_ROW_SELECT = 'id, status, updated_at, status_changed_at, jobs:job_id(title, company_name, apply_url)';
 // Bounds every read; far above any real manual queue, so it only stops a pathological table.
@@ -65,15 +72,15 @@ const READ_CAP = 200;
 /* One raw application row, validated, or null. Exported so the test proves the resume and job fields map. */
 export function parseRow(raw: unknown): ManualApplyRow | null {
   // Loose read, then proven.
-  const r = raw as { id?: unknown; status?: unknown; updated_at?: unknown; status_changed_at?: unknown; tailored_profile?: unknown; jobs?: unknown } | null;
+  const r = raw as { id?: unknown; status?: unknown; updated_at?: unknown; status_changed_at?: unknown; block_reason?: unknown; tailored_profile?: unknown; jobs?: unknown } | null;
   // An id, a known status and the stamp are required; a row without them cannot be resolved safely.
   if (typeof r?.id !== 'string' || typeof r.status !== 'string' || !KNOWN.has(r.status) || typeof r.updated_at !== 'string') return null;
   // The joined job, tolerating the to-many array shape like rowLabel does.
-  const job = (Array.isArray(r.jobs) ? r.jobs[0] : r.jobs) as { apply_url?: unknown; title?: unknown; company_name?: unknown } | null | undefined;
+  const job = (Array.isArray(r.jobs) ? r.jobs[0] : r.jobs) as { apply_url?: unknown; title?: unknown; company_name?: unknown; ats_provider?: unknown } | null | undefined;
   // The approve time: meaningful only while the row sits at approved (at other statuses it is when THAT status began).
   const approvedAt = r.status === 'approved' && typeof r.status_changed_at === 'string' ? r.status_changed_at : null;
   // Shaped for the card.
-  return { id: r.id, status: r.status as ApplicationStatus, label: rowLabel(r.id, r.jobs), applyUrl: typeof job?.apply_url === 'string' ? job.apply_url : null, stamp: r.updated_at, approvedAt, resume: readResumeSnapshot(r.tailored_profile), jobTitle: typeof job?.title === 'string' ? job.title : null, company: typeof job?.company_name === 'string' ? job.company_name : null };
+  return { id: r.id, status: r.status as ApplicationStatus, label: rowLabel(r.id, r.jobs), applyUrl: typeof job?.apply_url === 'string' ? job.apply_url : null, stamp: r.updated_at, approvedAt, resume: readResumeSnapshot(r.tailored_profile), jobTitle: typeof job?.title === 'string' ? job.title : null, company: typeof job?.company_name === 'string' ? job.company_name : null, blockReason: typeof r.block_reason === 'string' ? r.block_reason : null, atsProvider: typeof job?.ats_provider === 'string' ? job.ats_provider : null };
 }
 
 /* The kit events, newest first, as one exact-filtered read. */

@@ -27,6 +27,8 @@ import { guardedAdvance, type StatusWriter } from './guarded-advance.ts';
 // isEeoQuestion: the planner's own EEO test, reused by the fill loop's optional-EEO degrade.
 import { isEeoQuestion, planFill, questionKey, type FillBlocker } from './plan-fill.ts';
 import { resolveSubmissionMode, type SubmissionEnv } from './submission-mode.ts';
+// The one Workday predicate and refusal line, shared with the rehearse CLI and the web card (workday.ts).
+import { isWorkdayApplyUrl, isWorkdayJob, WORKDAY_REFUSAL } from './workday.ts';
 import type { FormField } from './extract-fields.ts';
 // Which file input receives the resume, or why none can. Pure and browser-free,
 // so the decision is unit-testable away from a live DOM.
@@ -329,31 +331,10 @@ export async function recheckBeforeSubmit(row: ClaimedApplication, page: Applica
   return null;
 }
 
-// Workday's job hosts. A posting on either domain needs a Workday candidate account
-// before any form appears, which the applier cannot and must not create.
-const WORKDAY_APEXES = ['myworkdayjobs.com', 'myworkdaysite.com'] as const;
-
-/**
- * True when the apply URL's HOST is a Workday host: an apex exactly, or a subdomain of
- * one (a dot-anchored suffix, so `evilmyworkdayjobs.com` is not a match). The host
- * comes from `new URL`, never from a substring of the raw string, so a Workday name in
- * a path or query cannot match. An unparseable URL is not Workday; the robots gate
- * refuses it downstream.
- */
-export function isWorkdayApplyUrl(applyUrl: string): boolean {
-  // The parsed, lower-cased host; null when the string is not a URL.
-  let host: string;
-  // URL throws on garbage; that is "no host", not an error.
-  try {
-    // The WHATWG parser lower-cases the host and drops any port.
-    host = new URL(applyUrl).hostname;
-  } catch {
-    // No host, so no match.
-    return false;
-  }
-  // Exact apex, or a label boundary before it.
-  return WORKDAY_APEXES.some((apex) => host === apex || host.endsWith(`.${apex}`));
-}
+// The Workday predicate and its refusal line live in workday.ts (zero imports) since 2026-11-07, so the
+// rehearse CLI and the web's Manual apply card ask the very same question this guard does (imported at the top).
+// Re-exported: apply-one-workday.test.ts and any relative importer still reach it here.
+export { isWorkdayApplyUrl };
 
 /** Everything one application needs, injected. */
 export interface ApplyToOneInput {
@@ -483,9 +464,9 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
   // creates, so the only honest outcome is a human applying by hand. Either signal is
   // enough. The host catches a Workday link whatever its provider (a pasted link can
   // arrive as `unknown`). The provider catches a tenant fronted on careers.company.com.
-  if (isWorkdayApplyUrl(row.applyUrl) || row.atsProvider === 'workday') {
-    // One line for the event log and the release reason.
-    const reason = 'Workday requires a candidate account; applying through Workday is out of scope, so a human applies by hand.';
+  if (isWorkdayJob(row.applyUrl, row.atsProvider)) {
+    // One line for the event log and the release reason, shared with the CLI and the card.
+    const reason = WORKDAY_REFUSAL;
     // A live run parks in ONE write, the same guarded edge the robots park uses.
     if (mode.submits) {
       // approved -> blocked_needs_human, so the transition graph is enforced.

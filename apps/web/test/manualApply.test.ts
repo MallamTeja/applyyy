@@ -82,8 +82,10 @@ describe('valid kit', () => {
   it('renders every field in form order, with a copy button per typed answer', () => {
     // The real card.
     const html = renderCard(stateOf(kitDetail()));
+    // The field list only: since 2026-11-07 the open-questions block above it also names the unanswered label.
+    const fields = html.slice(html.indexOf('class="kit-card__fields"'));
     // Every label, at increasing positions: the form's order.
-    const positions = ['First Name', 'Email', 'Resume/CV', 'Will you require visa sponsorship?', 'How did you hear about us?'].map((l) => html.indexOf(l));
+    const positions = ['First Name', 'Email', 'Resume/CV', 'Will you require visa sponsorship?', 'How did you hear about us?'].map((l) => fields.indexOf(l));
     // All present.
     assert.ok(positions.every((p) => p >= 0), `all labels rendered: ${positions}`);
     // Strictly increasing.
