@@ -23,6 +23,8 @@ import { useCallback, useEffect, useState } from 'react';
 import type { AuthError, Session, SupabaseClient, User } from '@supabase/supabase-js';
 
 import { supabase } from './supabase.ts';
+// The local-scope sign-out, shared with the edge-call helper so both sign out the same way.
+import { signOutThisBrowser } from './edgeCall.ts';
 
 /* No default operator email lives here, deliberately. A hard-coded address shipped in
  * the public bundle and was pre-filled on the production login page, telling every
@@ -228,8 +230,9 @@ export function useAuth(client: AuthClientSubset | null = supabase?.auth ?? null
     }
     /* Clear previous error */
     setError(null);
-    /* Call Supabase signOut */
-    const { error: signOutError } = await client.signOut();
+    /* Sign out THIS browser only. The default signOut scope is global, which revokes every session of
+       the account, killing the worker's and CI's sessions mid-run (Teja's 05:33:21 sign-out, 2026-11-07). */
+    const { error: signOutError } = await signOutThisBrowser(client);
     /* If an error occurred, record it in state */
     if (signOutError) {
       /* Set error state */

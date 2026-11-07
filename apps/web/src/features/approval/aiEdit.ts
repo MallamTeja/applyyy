@@ -49,6 +49,11 @@ import { bulletGroundingGaps, tokenizeText } from '../../../../../supabase/funct
 /* The closed list of section names, shared with the tailor's schema and the edge function, so a
    stored op naming a section is checked against the same seven words everywhere. */
 import { TAILOR_SECTION_KINDS } from '../../../../../supabase/functions/_shared/tailor/prompt.ts';
+/* The one edge call that refreshes once and retries once on a revoked session (2026-11-07), so the chat
+   never shows the raw `invalid_session` code. */
+import { invokeEdge } from '../../data/edgeCall.ts';
+// Its client shape; the ask's own client type is this one.
+import type { EdgeClient } from '../../data/edgeCall.ts';
 
 /* The body the edge function validates (resume-assist/assist.ts parseAssistRequest). */
 export interface AssistBody {
@@ -211,13 +216,9 @@ export type AuditAdvice =
   // The audit has no rule for this edit, said as such.
   | { readonly kind: 'not_checked'; readonly why: string };
 
-/* The slice of supabase-js this file calls; structural, so a test passes a fake. */
-export interface AssistClient {
-  readonly functions: {
-    // supabase-js adds the session's Authorization header itself.
-    invoke(name: string, options: { body: Record<string, unknown> }): Promise<{ data: unknown; error: unknown }>;
-  };
-}
+/* The slice of supabase-js this file calls; structural, so a test passes a fake. It is the shared
+   edge-call client (2026-11-07): the ask needs `auth` too, to refresh a session revoked elsewhere. */
+export type AssistClient = EdgeClient;
 
 // The edge function's own caps, mirrored so a long list is trimmed here instead of refused there.
 const MAX_LIST = 40;
@@ -1228,8 +1229,13 @@ export async function requestAssist(client: AssistClient | null, body: AssistBod
   if (client === null) return { kind: 'error', message: 'The app is not connected to the database.' };
   // The call.
   try {
-    // The function validates the body again; nothing here is trusted by it.
-    const { data, error } = await client.functions.invoke('resume-assist', { body: { ...body } });
+    // The function validates the body again; nothing here is trusted by it. Routed through the shared
+    // helper so a session revoked elsewhere is refreshed once, or ends in a plain sentence.
+    const answer = await invokeEdge(client, 'resume-assist', { body: { ...body } });
+    // The session could not be recovered and this browser is signed out: the plain sentence, never the code.
+    if (answer.kind === 'signed_out') return { kind: 'error', message: answer.message };
+    // Otherwise exactly what invoke returned, read as before.
+    const { data, error } = answer;
     // A non-2xx answer: read the function's own message when it sent one.
     if (error) {
       // The JSON body behind the error, if readable.
