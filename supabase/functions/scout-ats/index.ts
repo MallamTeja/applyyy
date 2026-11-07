@@ -12,7 +12,9 @@ import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 import { haltedByKillSwitch, planScoutRunClose } from "./gate.ts";
 // The board fetch, through the robots-gated shared transport (111791c closed every
 // httpFetch path; this import closes the one bare `fetch(` that remained here).
-import { fetchBoard } from "./poll-fetch.ts";
+import { fetchBoard, fetchPage } from "./poll-fetch.ts";
+// Feed liveness (2026-11-07): in-flight rows with no ATS are retired when their own page says 404/410.
+import { feedApplicationIds, probeFeedRows, FEED_LIVENESS_CAP, FEED_LIVENESS_PROVIDERS, FEED_LIVENESS_STATUSES, type FeedLivenessRow } from "../_shared/scout/feed-liveness.ts";
 // The adapters, the row builder, and the board-read rules: `collectBoardPages` reads a
 // paged board in full or not at all, `boardRefusal` refuses a stranger's or a soft-200
 // emptied board before any write, and `failureMark` is the one failed-poll update. All
@@ -115,6 +117,9 @@ const MAX_BOARD_LIMIT = 50;
 // 150 s wall clock with room for the boards and writes after the last read; reads stop once
 // fewer than WORKDAY_DETAIL_MIN_REMAINING_MS (20 s) are left.
 const SCOUT_ATS_BUDGET_MS = 100_000;
+// Feed liveness stops requesting below this much budget: one 8 s page timeout plus the run-close
+// writes must still fit, and a skipped probe only waits for the next run.
+const FEED_PROBE_MIN_REMAINING_MS = 15_000;
 
 // Parses `?limit` the same way the pipeline agents parse their batch size.
 function resolveBoardLimit(raw: string | null): number {
@@ -831,6 +836,75 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
     }
   }
 
+  // FEED LIVENESS (2026-11-07). In-flight rows with NO ATS (remote-feed mirrors: 'other'; pasted or
+  // manual pages: 'unknown') have no board to poll, so the loop above never sees them. Each gets one
+  // robots-gated GET of its own page; only an explicit 404/410 retires it, and a host where every one
+  // of >= 2 probes said gone is reported instead of retired (feed-liveness.ts has the full rule).
+  // Run once per invocation, after the boards, because the boards are the scout's main job.
+  // Guarded hosts are not repeated here: they reach disappearance_refused_reason via feedRefusals.
+  const feedLiveness = { probed: 0, closed: 0 };
+  // The rows: owner-scoped, live, no ATS, with an in-flight application (the inner join drops the rest).
+  const { data: feedRows, error: feedReadError } = await db
+    .from("jobs")
+    .select("id, apply_url, disappeared_at, applications!inner(id, status)")
+    .eq("user_id", clientResult.userId)
+    .in("ats_provider", [...FEED_LIVENESS_PROVIDERS])
+    .is("disappeared_at", null)
+    .in("applications.status", [...FEED_LIVENESS_STATUSES]);
+  // Labelled refusals for the run row's liveness_refused segment (not errors: the boards polled fine).
+  const feedRefusals: string[] = [];
+  if (feedReadError) {
+    // An unreadable snapshot is "no evidence", never "no rows": recorded, nothing marked.
+    feedRefusals.push(`feed: snapshot_failed: ${feedReadError.message}`);
+  } else {
+    // Probe within the cap. A null answer is "unknown", so near the deadline the remaining rows are
+    // skipped without a request rather than racing the function's wall clock.
+    const probe = await probeFeedRows(feedRows as FeedLivenessRow[], (u) => deadline.remainingMs() < FEED_PROBE_MIN_REMAINING_MS ? Promise.resolve(null) : fetchPage(u), FEED_LIVENESS_CAP);
+    // Reported as measured.
+    feedLiveness.probed = probe.probed;
+    // Each guarded host is a labelled refusal, so a restructure is visible on the health page.
+    for (const host of probe.refusedHosts) feedRefusals.push(`feed/${host}: all_probes_gone`);
+    if (probe.closedIds.length > 0) {
+      // Same scoping as the board marks: owner, ids, and only rows still live.
+      const { error: feedMarkError } = await db
+        .from("jobs")
+        .update({ disappeared_at: now.toISOString() })
+        .eq("user_id", clientResult.userId)
+        .in("id", probe.closedIds)
+        .is("disappeared_at", null);
+      if (feedMarkError) {
+        // Not marked: recorded, and the next run probes again.
+        feedRefusals.push(`feed: mark_write_failed: ${feedMarkError.message}`);
+      } else {
+        // Counted only when the write landed.
+        feedLiveness.closed = probe.closedIds.length;
+        // A reason event for every in-flight application whose posting was retired, so the card and
+        // the history say why. application_events is append-only; a failed insert is logged only.
+        const closed = new Set(probe.closedIds);
+        // One note per in-flight application of a retired job.
+        const notes = (feedRows as FeedLivenessRow[]).filter((job) => closed.has(job.id)).flatMap((job) =>
+          feedApplicationIds(job).map((applicationId) => ({
+            user_id: clientResult.userId,
+            application_id: applicationId,
+            event_type: "note",
+            agent: "scout_ats",
+            detail: {
+              reason: "posting_closed",
+              // One proof only: there is no ATS listing to cross-check against.
+              evidence: "posting page answered 404/410 (no ATS listing to cross-check)",
+              url: job.apply_url,
+            },
+          })));
+        if (notes.length > 0) {
+          // The event write; RLS admits scout_ats through the agent-key header every edge client sends.
+          const { error: noteError } = await db.from("application_events").insert(notes);
+          // Logged: the job is retired either way, and the worker refuses it on disappeared_at.
+          if (noteError) console.warn(`[scout-ats] feed liveness note failed: ${noteError.message}`);
+        }
+      }
+    }
+  }
+
   // THE MOST IMPORTANT ONE OF THE THREE. Before this, the success path was the only
   // exit that never closed its run row, so every HEALTHY scout invocation left a row
   // stuck at 'running' — which the health page reads as the signature of a crash.
@@ -847,7 +921,9 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
   // Liveness refusals, recorded on the run but NOT counted as errors: the boards polled fine.
   const livenessRefusals = summaries
     .filter((s) => s.liveness?.disappearance_refused_reason)
-    .map((s) => `${s.provider}/${s.board}: ${s.liveness?.disappearance_refused_reason}`);
+    .map((s) => `${s.provider}/${s.board}: ${s.liveness?.disappearance_refused_reason}`)
+    // Feed liveness refusals (above), in the same labelled segment.
+    .concat(feedRefusals);
   // Run-level total for the response.
   const totalDisappearedMarked = summaries.reduce((n, s) => n + (s.liveness?.disappeared_marked ?? 0), 0);
   // How the run closes and how the caller is answered, decided in one pure place (gate.ts)
@@ -923,6 +999,9 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
     // the cap or the deadline (those are stored blank and dropped as missing_description).
     // Zeros when the run made none, including an unscreened run.
     workday_detail: { fetched: workdayRun?.fetched ?? 0, filled: workdayRun?.filled ?? 0, skipped: workdayRun?.skipped ?? 0 },
+    // No-ATS rows: pages probed and rows retired (2026-11-07). A new field the web
+    // ignores (it reads only the fields it names), so no deploy order applies.
+    feed_liveness: feedLiveness,
     // Per-board detail.
     results: summaries,
   };

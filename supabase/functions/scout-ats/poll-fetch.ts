@@ -42,3 +42,27 @@ export function fetchBoard(url: string, robotsCache?: RobotsCache, body?: string
     robots: { policy: "scouting", ...(robotsCache === undefined ? {} : { cache: robotsCache }) },
   });
 }
+
+/**
+ * Fetch one posting PAGE (HTML) through the same robots-gated transport, for feed liveness
+ * (_shared/scout/feed-liveness.ts, 2026-11-07): rows with no ATS are probed on their own page.
+ *
+ * Separate from fetchBoard because that one asks for JSON, and an HTML route can answer a JSON
+ * Accept with 404 or 406. A 404 there would read as "posting gone", the one wrong answer this
+ * probe must never give, so the page is asked for as a browser asks for it.
+ */
+export function fetchPage(url: string): Promise<Response | null> {
+  // Options spelled once, as in fetchBoard.
+  return httpFetch(url, {
+    // A page, asked for as a page (see the doc comment for why not JSON).
+    headers: { "Accept": "text/html" },
+    // Single attempt: a retry inside the scout's 100 s budget costs a board poll, and a
+    // missed probe only waits for the next run.
+    retry: { maxRetries: 0 },
+    // Short: a slow page is "unknown" anyway, and the probe runs after every board poll.
+    timeoutMs: 8_000,
+    // The same board-read robots policy as fetchBoard: a Disallow refuses before the host
+    // is contacted, and the refusal reads as "unknown", never "gone". The transport's isolate cache.
+    robots: { policy: "scouting" },
+  });
+}
