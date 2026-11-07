@@ -10,7 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 // Extension-suffixed so this runs under Deno and `node --test` alike.
 // keywordAppearsIn is the NUMERATOR's rule; testing it beside the extractor keeps them one rule.
-import { extractJdKeywords, keywordAppearsIn } from "./jd-keywords.ts";
+import { canonicalSkillTerm, extractJdKeywords, keywordAppearsIn } from "./jd-keywords.ts";
 
 // A short posting in the shape of the live GitLab one, written for this test.
 const POSTING = [
@@ -200,4 +200,33 @@ test("one rule: every term extractJdKeywords returns is credited by keywordAppea
     // The term in the message names the offender instead of a bare "false !== true".
     assert.equal(keywordAppearsIn(term, text), true, `extracted but not credited: ${term}`);
   }
+});
+
+// Item 2 (2026-11-07): master v20 adds "AWS" and "Microsoft Azure" (DevOps & Cloud). A skill name and a
+// posting may spell one technology two ways; the vocabulary's own patterns decide they are the same.
+// Red on revert of canonicalSkillTerm's use in keywordAppearsIn, or of the AWS/Azure patterns.
+test("AWS and Azure match across their spelled-out names, in both directions", () => {
+  // The master's "Microsoft Azure" is credited by a posting that says "Azure".
+  assert.equal(keywordAppearsIn("Microsoft Azure", "Deploy services on Azure and Kubernetes."), true);
+  // The master's "AWS" is credited by a posting that spells it out.
+  assert.equal(keywordAppearsIn("AWS", "Experience with Amazon Web Services (EC2, S3)."), true);
+  // And the other way round.
+  assert.equal(keywordAppearsIn("Amazon Web Services", "AWS Lambda and DynamoDB"), true);
+  // The plain spellings still work.
+  assert.equal(keywordAppearsIn("Azure", "Microsoft Azure DevOps"), true);
+  // The extractor writes the canonical term once, whichever spelling the posting used.
+  assert.deepEqual(extractJdKeywords("Amazon Web Services and Microsoft Azure"), ["AWS", "Azure"]);
+});
+
+// The control: a name nobody aliased is not stretched to a neighbour.
+test("canonicalSkillTerm maps only a name a vocabulary pattern matches whole", () => {
+  // Whole-name matches map to the term.
+  assert.equal(canonicalSkillTerm("Postgres"), "PostgreSQL");
+  assert.equal(canonicalSkillTerm("Golang"), "Go");
+  assert.equal(canonicalSkillTerm("Microsoft Azure"), "Azure");
+  assert.equal(canonicalSkillTerm("Amazon Web Services"), "AWS");
+  // A name that only CONTAINS a term is not that term ("AWS Lambda" is a different skill).
+  assert.equal(canonicalSkillTerm("AWS Lambda"), null);
+  // An unknown skill has no term.
+  assert.equal(canonicalSkillTerm("Dagster"), null);
 });

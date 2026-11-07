@@ -130,12 +130,13 @@ const SKILL_VOCABULARY: readonly SkillTerm[] = [
   { term: "Helm", pattern: exact("Helm") },
   // Infrastructure as code.
   { term: "Terraform", pattern: word("terraform") },
-  // Case-sensitive acronym.
-  { term: "AWS", pattern: exact("AWS") },
+  // Case-sensitive acronym, or the name spelled out (item 2, 2026-11-07: master v20 holds "AWS").
+  { term: "AWS", pattern: exact("AWS|Amazon Web Services") },
   // Also "GCP"; written as resumes spell it.
   { term: "Google Cloud", pattern: word("google cloud(?: platform)?|gcp") },
-  // Case-sensitive: the cloud, not the colour.
-  { term: "Azure", pattern: exact("Azure") },
+  // Case-sensitive: the cloud, not the colour. "Microsoft Azure" as one match, so the name master v20
+  // holds is this term as a whole (canonicalSkillTerm), not just a string that contains it.
+  { term: "Azure", pattern: exact("(?:Microsoft )?Azure") },
   // Operating system.
   { term: "Linux", pattern: word("linux") },
   // With or without spaces around the slash.
@@ -209,6 +210,11 @@ function appearsInDecoded(keyword: string, decoded: string): boolean {
   // which is case-insensitive and WOULD credit "go to market". Reachable only by a hand-edited
   // row: the column is written solely by extractJdKeywords, which emits canonical terms.
   if (entry) return entry.pattern.test(decoded);
+  // Another spelling of a vocabulary term ("Microsoft Azure", "Postgres", "Amazon Web Services") uses
+  // that term's curated pattern, so a skill name and a posting that spell one technology two ways agree.
+  const canonical = canonicalSkillTerm(keyword);
+  // Found: matched exactly as the term itself would be.
+  if (canonical !== null) return VOCABULARY_BY_TERM.get(canonical)!.pattern.test(decoded);
   // A one-letter language uses its own stricter pattern (see LETTER_LANGUAGES); exact key, so "c" falls through.
   const letter = LETTER_LANGUAGES.get(keyword);
   // Checked before the fallback, which would credit "C" from "C++".
@@ -216,6 +222,22 @@ function appearsInDecoded(keyword: string, decoded: string): boolean {
   // Unknown keyword: escaped so "C++"-like text is literal, never a regex; bounded and
   // case-insensitive like word(), so it is never a raw substring ("Svelte" not in "sveltekit").
   return word(keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).test(decoded);
+}
+
+/**
+ * The vocabulary term a skill NAME spells, or null (item 2, 2026-11-07). A name maps to a term only when
+ * that term's own pattern matches the WHOLE name: "Postgres" is PostgreSQL and "Microsoft Azure" is
+ * Azure, but "AWS Lambda" is not AWS (it is a different skill that merely contains it). Read from the
+ * vocabulary's patterns, so there is no second alias list to drift from them. Exported for resume-assist,
+ * which files a requested skill under the master's own entry for it.
+ */
+export function canonicalSkillTerm(name: string): string | null {
+  // Surrounding spaces are not part of a name.
+  const trimmed = name.trim();
+  // The first entry whose pattern consumes the whole name.
+  const entry = SKILL_VOCABULARY.find((candidate) => candidate.pattern.exec(trimmed)?.[0] === trimmed);
+  // Its canonical spelling, or none.
+  return entry?.term ?? null;
 }
 
 /**
