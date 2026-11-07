@@ -515,6 +515,8 @@ export function detectAuditFindings(
               reason: `Bullet dropped posting keyword(s) the master bullet has: ${droppedKeywords.join(", ")}`,
               // Deterministic: both sides are matched by the same rule
               confidence: 1.0,
+              // The same words as data, so the review page labels them without parsing `reason` (peer 3, 2026-11-07)
+              keywords: droppedKeywords,
             });
           }
         }

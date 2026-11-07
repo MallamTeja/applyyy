@@ -449,9 +449,24 @@ export interface MisattributedBulletFinding extends AuditFindingBase {
   actual_parent_ref: NodeId;
 }
 
+/**
+ * A posting keyword the pinned master bullet has and the tailored bullet lost (P2 #17, 2026-11-07).
+ * Its own member, like MisattributedBulletFinding, because the reviewer acts on WHICH words were lost,
+ * and that must be data, not prose to parse back out of `reason` (peer 3's request, CLAUDE.md §6).
+ */
+export interface JdKeywordDroppedFinding extends AuditFindingBase {
+  kind: 'jd_keyword_dropped';
+  /**
+   * The lost keywords, in the posting vocabulary's spelling, never empty when written. OPTIONAL in the
+   * type because rows audited between the kind's first deploy (2f65404, 09:57 IST) and this field's
+   * carry only `reason`: a reader falls back to `reason` when it is absent, never to "nothing lost".
+   */
+  keywords?: readonly string[];
+}
+
 /** Every other kind of finding: one path, one claim, one reason. */
 export interface GenericAuditFinding extends AuditFindingBase {
-  kind: Exclude<AuditFindingKind, 'misattributed_bullet'>;
+  kind: Exclude<AuditFindingKind, 'misattributed_bullet' | 'jd_keyword_dropped'>;
 }
 
 /**
@@ -488,7 +503,7 @@ export interface GenericAuditFinding extends AuditFindingBase {
  * documented translation rather than an undocumented divergence — `kind` values are
  * identical on both sides, and MUST stay identical.
  */
-export type AuditFinding = MisattributedBulletFinding | GenericAuditFinding;
+export type AuditFinding = MisattributedBulletFinding | JdKeywordDroppedFinding | GenericAuditFinding;
 
 /**
  * Your application to a job. Separate from `jobs` so one posting has one application

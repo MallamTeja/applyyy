@@ -888,6 +888,10 @@ test("jd_keyword_dropped: a posting keyword the master bullet had and the tailor
   assert.deepEqual(outcome.findings.map((f) => [f.kind, f.path]), [["jd_keyword_dropped", "experience[0].bullets[0]"]]);
   // The reason names the dropped keyword, so the reviewer knows what to put back.
   assert.ok(outcome.findings[0].reason.includes("Kafka"), outcome.findings[0].reason);
+  // And the same word as data (peer 3, 2026-11-07), so the review page never parses the prose.
+  const finding = outcome.findings[0];
+  // Narrowed by kind, so `keywords` is the typed field, not a cast.
+  assert.deepEqual(finding.kind === "jd_keyword_dropped" ? finding.keywords : null, ["Kafka"]);
   // Ruling A: the row goes to individual review.
   assert.equal(outcome.status, "audit_flagged");
 });
