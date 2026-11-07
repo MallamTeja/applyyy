@@ -50,6 +50,8 @@ import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 // Import Gemini API transport middleware with key pool failover and token pacer.
 // Manages 429 retries, least-recently-used key rotation, and rate limiting.
 import { generateGeminiContent } from "../_shared/gemini/client.ts";
+// The response's top-level `reason` (2026-11-07): why a targeted run found nothing, or that Gemini rate-limited.
+import { matcherRunReason } from "./run-reason.ts";
 // One failure line for every Gemini caller: reason, HTTP status, short redacted detail.
 import { formatGeminiFailure } from "../_shared/gemini/failure-message.ts";
 // Import Matcher scorer factory and prompt definitions.
@@ -373,6 +375,20 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     // Fail run with 503 error response detailing queue query failure.
     return await failRun(503, "queue_unreadable", rowsError.message);
   }
+
+  /* WHY A TARGETED RUN FOUND NOTHING (2026-11-07, for the response's `reason`): one extra read, only when a
+     targeted run selected 0 rows, of the row's status and whether its job left the board. undefined when
+     the read fails, so an unknown is never reported as "not found" (CLAUDE.md §6). */
+  const targetLookup = applicationId !== null && (rows ?? []).length === 0
+    ? await db.from("applications").select("status, jobs (disappeared_at)").eq("id", applicationId).maybeSingle()
+    : null;
+  // The lookup as matcherRunReason reads it: the row, null for "no such row", undefined for "not read".
+  const targetRow = targetLookup === null || targetLookup.error
+    ? undefined
+    : targetLookup.data === null
+      ? null
+      // disappeared_at set on the embedded job means the posting left its board.
+      : { status: String((targetLookup.data as { status: unknown }).status), disappeared: ((targetLookup.data as { jobs: { disappeared_at?: unknown } | null }).jobs?.disappeared_at ?? null) !== null };
 
   // Serialize candidate master profile object to JSON string representation for prompt.
   // Prepares candidate background text for Gemini instruction block.
@@ -845,5 +861,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     gemini_calls: geminiCallsCount,
     // Array of individual application row failure objects.
     failures,
+    // WHY, in one readable field (2026-11-07): a targeted run that found nothing, or a rate limit. Null
+    // otherwise. Additive; failures[].error is unchanged (the web's card reads it today).
+    reason: matcherRunReason({ targeted: applicationId !== null, found: (rows ?? []).length, target: targetRow, failures }),
   });
 }));
