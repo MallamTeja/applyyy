@@ -125,9 +125,25 @@ function repaired(value: string | null): string | null {
 
 // Arbeitnow's link-back footer, the last line of every description once tags are gone:
 // "Find Jobs in Germany on Arbeitnow". Anchored to the END so the same words mid-text survive.
-// The leading whitespace and dash rule go with it: job 3f73f9cc ended "...request to: -----Find more
-// English Speaking Jobs in France on Arbeitnow", on the same line as the sentence before it.
-const ARBEITNOW_FOOTER = /\s*-*\s*Find [^\n]{1,80} on Arbeitnow\s*$/;
+// Starts with the LITERAL "Find " and every quantifier is bounded, so it cannot backtrack polynomially
+// (peer 2's ReDoS finding, 2026-11-07: a leading /\s*-*\s*/ took 7.6 s on 50k dashes). The dash rule
+// before it (job 3f73f9cc ended "...request to: -----Find more English Speaking Jobs in France on
+// Arbeitnow") is trimmed by a plain loop in stripArbeitnowFooter, never by a regex.
+const ARBEITNOW_FOOTER = /Find [^\n]{1,80} on Arbeitnow\s*$/;
+
+// The text without a trailing Arbeitnow footer and the dashes/whitespace glued in front of it.
+function stripArbeitnowFooter(text: string): string {
+  // Where the footer starts, or no footer at all.
+  const match = ARBEITNOW_FOOTER.exec(text);
+  // Nothing to remove.
+  if (match === null) return text;
+  // Walk back over the dash rule and whitespace before the footer: linear, one char at a time.
+  let end = match.index;
+  // A dash or any whitespace (including the newline that separates it) belongs to the footer.
+  while (end > 0 && /[\s-]/.test(text[end - 1]!)) end -= 1;
+  // Everything before that run is the description.
+  return text.slice(0, end);
+}
 
 // A feed description as clean text: HTML to line-broken text, entities decoded, footer gone (N1,
 // 2026-11-07: 129 Arbeitnow and 52 RemoteOK rows stored HTML, which fed the matcher and tailor).
@@ -149,7 +165,7 @@ function cleanDescription(raw: string | null): string {
     return repairedRaw;
   }
   // The footer off the end; a description that was only the footer becomes empty, which it is.
-  return text.replace(ARBEITNOW_FOOTER, '');
+  return stripArbeitnowFooter(text);
 }
 
 // Builds one RemoteJob from one item, or null when it cannot be a safe posting.

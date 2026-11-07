@@ -47,6 +47,22 @@ describe('remote-feed descriptions are stored as clean text', () => {
     expect(jobs[0]?.description).toBe('If you require assistance, please submit a request to:');
   });
 
+  it('ReDoS: a 50k-dash run with no footer parses in well under a second', () => {
+    // Peer 2's security review (2026-11-07): an unanchored /\s*-*\s*Find .../ retried at every offset
+    // of a long whitespace/dash run, which is polynomial. Description text is attacker-controlled.
+    // One unbroken dash run: `-*` eats it from every offset, then backtracks (stripHtml already
+    // collapses space runs, so dashes are the input that reaches the regex intact).
+    const hostile = `${'-'.repeat(50_000)}x`;
+    // Timed around the whole parse, the path a real feed item takes.
+    const started = performance.now();
+    const { jobs } = parseArbeitnow(arbeitnow(hostile));
+    const elapsedMs = performance.now() - started;
+    // Generous for CI, far below the quadratic blow-up (seconds at this size).
+    expect(elapsedMs).toBeLessThan(250);
+    // Non-vacuity: the posting was parsed and kept its text.
+    expect(jobs[0]?.description.endsWith('x')).toBe(true);
+  });
+
   it('RemoteOK: HTML paragraphs become text lines too', () => {
     // The legal-notice element first, as the live feed sends it.
     // (An escaped "&lt;tag&gt;" is dropped as a tag: stripHtml decodes before stripping, by design.)
