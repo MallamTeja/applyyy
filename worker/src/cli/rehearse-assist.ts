@@ -38,7 +38,9 @@ import { createFormUrlResolver, fetchJson, type GreenhouseBoard } from '../form-
 import { readOnlyPage, rehearseAssisted } from '../assist/rehearse.ts';
 
 // sha256 of the seeded APPLYY_AGENT_KEY (CLAUDE.md §7): a copy is checked without printing it.
-const AGENT_KEY_SHA = '173cffbd0242d72a9d5bb98b993637269d4a3ea0f4e8217686a4e8bc3850d9ce';
+// gitleaks' generic-api-key rule flagged this line in CI (fc915af): a 64-hex value named *KEY*. It is a
+// one-way DIGEST, already published in CLAUDE.md §7, not the key; hence the inline allow marker.
+const AGENT_KEY_SHA = '173cffbd0242d72a9d5bb98b993637269d4a3ea0f4e8217686a4e8bc3850d9ce'; // gitleaks:allow
 // Env names assist needs (values never printed).
 const NEEDED = ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'APPLYY_APP_USER_EMAIL', 'APPLYY_APP_USER_PASSWORD', 'APPLYY_AGENT_KEY'] as const;
 // The repo root: `pnpm --filter` runs scripts from worker/, a direct `node` call usually from the root.
