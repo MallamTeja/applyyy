@@ -171,14 +171,6 @@
   list-style-position: inside;
 }
 
-/* Each lane's heading in the resolve section. */
-.kit-resolve__title {
-  /* Small heading. */
-  font-size: var(--size-sm);
-  /* Space above, separating the two lanes. */
-  margin: var(--gap-3) 0 var(--gap-1);
-}
-
 /* The Mark applied / Failed buttons under the card's actions (2026-11-05). */
 .kit-card__resolve {
   /* Separates the resolve from the start-the-application row above it. */

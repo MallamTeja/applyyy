@@ -154,8 +154,9 @@ describe('links', () => {
   it('renders NO href for a javascript: form_url, and says the link is unavailable', () => {
     // A hostile form URL in an otherwise valid kit; the job's own apply URL is ignored because the kit names one.
     const html = renderCard(stateOf(kitDetail({ form_url: 'javascript:alert(1)' })));
-    // Positive shape: the only anchors are in-app (the Answer-bank link); no external href at all.
-    assert.deepEqual(html.match(/href="[^"]*"/g), ['href="/answer-bank"']);
+    // Positive shape: the only anchors are in-app (System health for a lane row's cause since 2026-11-07, and the
+    // Answer-bank link); no external href at all.
+    assert.deepEqual(html.match(/href="[^"]*"/g), ['href="/health"', 'href="/answer-bank"']);
     // Said.
     assert.match(html, /Form link unavailable/);
   });

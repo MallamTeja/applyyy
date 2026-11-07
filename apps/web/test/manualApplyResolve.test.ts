@@ -59,8 +59,11 @@ describe('Manual apply kit card: resolve buttons', () => {
   it('kitResolveMoves narrows to applied and failed, never the approval withdrawal', () => {
     // approved also has a human edge to passed_filters; it must not become a card button.
     assert.deepEqual([...page.kitResolveMoves('approved')].sort(), ['applied', 'failed']);
-    // A manual-action lane row is resolved in its queue below, never from the card (one lock owner per row).
-    assert.deepEqual(page.kitResolveMoves('blocked_needs_human'), []);
+    // A manual-action lane row is resolved ON ITS CARD since 2026-11-07 (Teja could not find the queue below
+    // the cards for Gushwork at needs_verification): the same two resolves as an approved row.
+    assert.deepEqual([...page.kitResolveMoves('needs_verification')].sort(), ['applied', 'failed']);
+    // Same for the blocked lane; its third edge (-> dropped_filter) stays on System health.
+    assert.deepEqual([...page.kitResolveMoves('blocked_needs_human')].sort(), ['applied', 'failed']);
     // applying has no human resolve edge: the worker owns it.
     assert.deepEqual(page.kitResolveMoves('applying'), []);
   });
@@ -85,13 +88,26 @@ describe('Manual apply kit card: resolve buttons', () => {
     assert.equal((html.match(/<button[^>]*disabled=""[^>]*>(I applied \(mark applied\)|Failed \/ skip)<\/button>/g) ?? []).length, 2);
   });
 
-  it('a lane card points at the queue below instead of drawing its own buttons', () => {
-    // A blocked row: its graph has both resolves, but the queue under "After you apply" owns them.
+  it('a needs_verification card renders Mark applied and Mark failed on the card itself', () => {
+    // The Gushwork 207dd30d case (2026-11-07): applied by hand, and the card offered no way to record it.
+    const html = renderCard('needs_verification');
+    // The applied resolve, named for the row, enabled.
+    assert.match(html, /<button[^>]*aria-label="I applied \(mark applied\): Intermediate Backend Engineer, India at GitLab"[^>]*>I applied \(mark applied\)<\/button>/);
+    // The give-up resolve.
+    assert.match(html, /<button[^>]*>Failed \/ skip<\/button>/);
+    // Never the held re-arm (needs_verification -> approved).
+    assert.doesNotMatch(html, /Mark as approved/);
+    // No pointer at a queue that is no longer on this page.
+    assert.doesNotMatch(html, /resolve it below/);
+    // Points at where the worker's cause and any receipt live, so applied is not clicked on hope.
+    assert.match(html, /System health/);
+  });
+
+  it('a blocked_needs_human card also resolves on the card', () => {
+    // The other manual-action lane gets the same two buttons.
     const html = renderCard('blocked_needs_human');
-    // No second set of buttons.
-    assert.doesNotMatch(html, /I applied \(mark applied\)|Failed \/ skip/);
-    // Pointed at, not hidden.
-    assert.match(html, /resolve it below/);
+    // Both resolves present.
+    assert.equal((html.match(/<button[^>]*>(I applied \(mark applied\)|Failed \/ skip)<\/button>/g) ?? []).length, 2);
   });
 
   it('a card at applying has no resolve buttons and says the worker owns it', () => {

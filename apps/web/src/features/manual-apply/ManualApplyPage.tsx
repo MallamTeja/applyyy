@@ -15,8 +15,9 @@
  * RecoveryMoves and the write is useRecoveryMoves, the very pieces the System health queues use; the
  * moves come from the graph (approved gained both human edges in migration 20261105121500), narrowed
  * to those two by kitResolveMoves. A card at `applying` has none: the worker owns that row. A card in a
- * manual-action lane has none either: its row is resolved in the queue under "After you apply", and two
- * sets of buttons for one row would mean two lock owners that cannot see each other's moves. */
+ * manual-action lane (needs_verification, blocked_needs_human) has them too since 2026-11-07, and the
+ * "After you apply" lane queues left this page: two sets of buttons for one row would mean two lock owners
+ * that cannot see each other's moves. Those queues, with each row's cause and receipt, stay on System health. */
 
 // State for the read, the per-field copy feedback and the resume download.
 import { useCallback, useEffect, useState } from 'react';
@@ -35,7 +36,7 @@ import { supabase } from '../../data/supabase';
 // The two manual-action lanes whose resolves this page offers, shared with System health and the badge.
 import { MANUAL_ACTION_STATUSES, screenMoves } from '../../data/humanLanes';
 // The working resolve queues, reused whole, and their manual-action wording.
-import { RecoveryMoves, RecoveryNotes, RecoveryQueue, manualActionMeaning, manualActionVerb, useRecoveryMoves } from '../health/RecoveryQueue';
+import { RecoveryMoves, RecoveryNotes, manualActionMeaning, manualActionVerb, useRecoveryMoves } from '../health/RecoveryQueue';
 // The kit's "Copy all" text.
 import { copyAllText } from './applyKit';
 // Types only: a kit, a field, the per-application state and a skip code.
@@ -48,7 +49,8 @@ import { loadManualApply } from './manualApplyData';
 // The pure rules behind the preview toggle and the select-choices display.
 import { pressPreview } from './previewToggle';
 // Same, for the choices.
-import { choiceView } from './fieldChoices';// Type only: one row.
+import { choiceView } from './fieldChoices';
+// Type only: one row.
 import type { ManualApplyRow } from './manualApplyData';
 // The recovery queues' table styles, reused rather than copied.
 import '../health/health.css';
@@ -161,8 +163,9 @@ function ResumePreviewButton(props: { readonly rowId: string }): ReactElement {
 }
 
 /* A select/radio field's choices (Teja, 2026-11-07): a matched answer shows only its own option, no choices
-   read shows nothing, and everything else sits behind a native disclosure with its count, never a wall of text. */
-function FieldChoices(props: { readonly field: KitField }): ReactElement | null {
+   read shows nothing, and everything else sits behind a native disclosure with its count, never a wall of text.
+   Exported (2026-11-07) so the Applied page's prepared answers draw choices exactly as this page does. */
+export function FieldChoices(props: { readonly field: KitField }): ReactElement | null {
   // What to show for this answer against these options (pure, unit tested).
   const view = choiceView(props.field.value, props.field.options);
   // No options were read.
@@ -217,10 +220,11 @@ function KitFieldRow(props: { readonly field: KitField; readonly index: number }
 const KIT_RESOLVES: readonly ApplicationStatus[] = ['applied', 'failed'];
 
 /* The resolve moves a card at `status` offers: the graph's human edges, narrowed to KIT_RESOLVES. From the
-   graph, so a status without the edge gets no button the database would refuse. Exported for the test. */
+   graph, so a status without the edge gets no button the database would refuse. Exported for the test.
+   LANE ROWS INCLUDED since 2026-11-07: Teja applied to Gushwork 207dd30d (needs_verification) by hand and
+   found no way to record it, because the buttons sat in a queue below every card. The card now owns them,
+   and the duplicate queue left this page, so each row still has exactly one lock owner here. */
 export function kitResolveMoves(status: ApplicationStatus): readonly ApplicationStatus[] {
-  // A lane row's buttons live in its queue below (one lock owner per row); the card points there.
-  if (MANUAL_ACTION_STATUSES.includes(status)) return [];
   // Graph first, then the narrowing; order follows the graph.
   return screenMoves(status).filter((to) => KIT_RESOLVES.includes(to));
 }
@@ -328,12 +332,12 @@ export function KitCard(props: { readonly row: ManualApplyRow; readonly kit: Kit
       {row.status === 'applying' ? (
         /* No button: a human move out of applying would race a live submit. */
         <p className="panel__note">In flight: the worker owns it. If it stalls, it moves to System health for you to check.</p>
-      ) : MANUAL_ACTION_STATUSES.includes(row.status) ? (
-        /* Its queue below owns the buttons and their locks. */
-        <p className="panel__note">After you apply, resolve it below under "After you apply: resolve".</p>
       ) : moves.length > 0 ? (
-        /* The System health buttons themselves, with a kit-card confirm slot so the queue below never shares it. */
+        /* The System health buttons themselves, with a kit-card confirm slot of its own. */
         <div className="kit-card__resolve">
+          {/* A lane row's worker cause and any matched receipt email are shown on System health, not here: say
+              where, so "applied" is checked before it is clicked. */}
+          {MANUAL_ACTION_STATUSES.includes(row.status) ? <p className="panel__note">Not sure it went through? Its cause and any receipt email are on <Link to="/health">System health</Link>.</p> : null}
           {/* No lease: only applying has one, and applying gets no buttons. */}
           <RecoveryMoves confirmId={`kit:${row.status}:${row.id}`} status={row.status} row={row} moves={moves} verb={manualActionVerb} meaning={manualActionMeaning} locked={resolve.locked} frozen={resolve.frozen} lease={null} onMove={resolve.onMove} />
         </div>
@@ -447,23 +451,12 @@ export function ManualApplyPage(): ReactElement {
           />
         ))
       )}
-      {/* The resolves, reused whole from System health: after applying by hand, mark it here. */}
-      <section className="panel" aria-label="Resolve manual applications">
-        {/* What these buttons are for. */}
-        <h2 className="panel__title">After you apply: resolve</h2>
-        {/* Each queue re-reads after a move; re-read the kits too with Refresh. */}
-        <p className="panel__note">Mark each job once you have applied (or given up). <button type="button" className="kit-resume__button" onClick={() => void load()}>Refresh kits</button></p>
-        {/* The unknown-outcome lane. */}
-        {MANUAL_ACTION_STATUSES.map((status) => (
-          /* Keyed by lane. */
-          <div key={status} className="kit-resolve">
-            {/* Which lane. */}
-            <h3 className="kit-resolve__title"><span className="identifier">{status}</span></h3>
-            {/* The working queue, with the manual-action wording. */}
-            <RecoveryQueue source="manual_apply" status={status} verb={manualActionVerb} meaning={manualActionMeaning} />
-          </div>
-        ))}
-      </section>
+      {/* The lane queues that used to sit here were removed 2026-11-07: every lane row is a card above with its
+          own resolve buttons, and a second set here meant two lock owners per row. System health keeps them. */}
+      <p className="panel__note">
+        {/* Kits land a few minutes after approve; this re-reads rows and kits without a page reload. */}
+        Waiting on a kit? <button type="button" className="kit-resume__button" onClick={() => void load()}>Refresh kits</button>
+      </p>
     </div>
   );
 }
