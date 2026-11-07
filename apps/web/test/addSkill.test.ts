@@ -637,3 +637,126 @@ describe('review fix 3: editRow refuses an edit when the resume pin no longer ma
     assert.match(head, /master version changed since the page loaded; reload before editing\./);
   });
 });
+
+/* ATS panel (peer 3, 2026-11-07): Teja asked for the ATS % to move after AI-chat edits, for the missing JD
+   keywords as suggestions, and for a "+N%" projection. Each figure must come from the ONE scorer
+   (coveragePercent), never a guess, so these tests pin the projection to the scorer run on the resume with
+   the suggestion actually added through the real addSkill + buildResumeDiff path. */
+describe('ATS panel: figures from the one scorer', () => {
+  // Express is traced, Docker is a master skill the tailor left out, Rust is in no master at all.
+  const KEYWORDS = ['Express', 'Docker', 'Rust'];
+  // The diff the page builds, with the original so coverage.addable is populated (D4 off).
+  const diff = (resolved: Resume, keywords: readonly string[] = KEYWORDS) =>
+    adapter.buildResumeDiff({
+      // Minimal row: id, pin, no findings, the JD keywords.
+      application: { id: 'app-ats', master_version: VERSION, audit_findings: [], selected_jd_keywords: keywords } as never,
+      // Header fields only.
+      job: { title: 'Backend Engineer', company_name: 'Acme' } as never,
+      // What tailored_profile holds now.
+      resolved,
+      // The pinned master.
+      master: MASTER,
+      // The rebuilt original, so adds are offered.
+      original: original(),
+    } as never);
+  // The new model exports, read loosely so a missing one fails its own test with a named message.
+  const modelFn = (name: string): AnyFn => {
+    // The module namespace as a plain record.
+    const f = (model as unknown as Record<string, unknown>)[name];
+    // Named, so the report says which export is absent.
+    assert.equal(typeof f, 'function', `diffModel.ts does not export ${name}()`);
+    // Narrowed for the caller.
+    return f as AnyFn;
+  };
+  // Static render of one element: no DOM library exists in apps/web.
+  const html = async (type: unknown, props: Record<string, unknown>): Promise<string> => {
+    // Element factory, so no JSX in a .ts file.
+    const { createElement } = await import('react');
+    // The server renderer.
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    // Rendered to a string the assertions read.
+    return renderToStaticMarkup(createElement(type as never, props as never));
+  };
+  // The row chips, from the real page module.
+  const chips = async (d: unknown) => html((await import('../src/features/approval/ApprovalQueuePage.tsx')).QueueRowChips, { diff: d, facts: undefined });
+  // The card's ATS panel, from the real card module.
+  const panel = async (d: unknown) => html((await import('../src/features/approval/DiffView.tsx')).CoverageBar, { diff: d, onSuggest: () => undefined });
+
+  it('the projection equals scorer(resume + master-backed suggestions)', () => {
+    // Before: only Express matches, 1 of 3.
+    const before = diff(original());
+    // After: Docker added the way the AI chat's add_skill lands it.
+    const after = diff(added(original(), 'skill-docker'));
+    // The projection over the BEFORE resume...
+    const projected = modelFn('projectedCoverage')(before.coverage);
+    // ...is exactly the scorer over the AFTER resume, counting the operator's edits.
+    assert.deepEqual(projected, model.coveragePercent(after.coverage, 'withEdits'));
+    // And it is a real rise (1/3 to 2/3), so the equality is not two unmeasured arms agreeing.
+    assert.deepEqual(projected, { kind: 'measured', percent: 67 });
+    // Rust is in no master, so it is left out: crediting it would credit fabrication.
+    assert.deepEqual(model.coveragePercent(before.coverage, 'honest'), { kind: 'measured', percent: 33 });
+  });
+
+  it('missingKeywords lists the JD keywords no run contains, in JD order', () => {
+    // Docker and Rust are absent from the tailored resume; Express is present.
+    assert.deepEqual(modelFn('missingKeywords')(diff(original()).coverage), ['Docker', 'Rust']);
+    // Once Docker is added, only Rust is missing.
+    assert.deepEqual(modelFn('missingKeywords')(diff(added(original(), 'skill-docker')).coverage), ['Rust']);
+  });
+
+  it('applying an edit that adds a missing JD keyword changes the shown ATS chip', async () => {
+    // Before the edit.
+    const before = await chips(diff(original()));
+    // After the AI chat's add_skill of Docker.
+    const after = await chips(diff(added(original(), 'skill-docker')));
+    // The verified figure is the anchor before.
+    assert.match(before, /ATS score 33% · tailored vs JD/);
+    // Before, there is no edit gain to show.
+    assert.doesNotMatch(before, /from edits/);
+    // After, the gain from the edit is shown: 67 - 33.
+    assert.match(after, /ATS score 33% · tailored vs JD · \+34% from edits/);
+  });
+
+  it('the card panel shows verified %, the projection and the suggestion chips', async () => {
+    // Unedited: verified 33%, Docker suggestable (master), Rust not.
+    const out = await panel(diff(original()));
+    // The honest badge.
+    assert.match(out, /<span class="coverage__ats-badge">33% Match<\/span>/);
+    // The projection, from the scorer: 67%.
+    assert.match(out, /<p class="coverage__projection">[^<]*67%/);
+    // Docker is a button that pre-fills the AI chat.
+    assert.match(out, /<button[^>]*class="kw-chip kw-chip--missing kw-chip--suggest"[^>]*>[^<]*Docker/);
+    // Rust is shown missing but is NOT a button: the master cannot back it.
+    assert.match(out, /<span[^>]*class="kw-chip kw-chip--missing"[^>]*>[^<]*Rust/);
+    // Express shows as matched.
+    assert.match(out, /<span[^>]*class="kw-chip kw-chip--matched"[^>]*>[^<]*Express/);
+  });
+
+  it('after the add, the panel shows the edit gain and drops the spent projection', async () => {
+    // Docker added.
+    const edited = await panel(diff(added(original(), 'skill-docker')));
+    // The old panel's words for the gain.
+    assert.match(edited, /plus 34% from your edits/);
+    // Nothing master-backed is left to add, so no projection.
+    assert.doesNotMatch(edited, /class="coverage__projection"/);
+  });
+
+  it('a missing score renders "—" and no gain or projection, never 0% or +0%', async () => {
+    // No JD keywords recorded, with an edit present that a careless formatter could print as +0%.
+    const empty = diff(added(original(), 'skill-docker'), []);
+    // The chip.
+    const chip = await chips(empty);
+    // Dash, no number.
+    assert.match(chip, /ATS score —/);
+    // No gain text at all.
+    assert.doesNotMatch(chip, /from edits|\+0%/);
+    // The panel.
+    const out = await panel(empty);
+    // The not-measured sentence.
+    assert.match(out, /class="coverage__unmeasured"/);
+    // No projection, no zero figures.
+    assert.doesNotMatch(out, /coverage__projection|0% Match|\+0%/);
+    // The helper agrees: unmeasured, never a number.
+    assert.deepEqual(modelFn('projectedCoverage')(empty.coverage), { kind: 'unmeasured' });
+  });
+});

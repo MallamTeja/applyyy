@@ -56,6 +56,10 @@ import {
   coveragePercent,
   // A or B, which picks the status badge and the clean notice.
   deriveBucket,
+  // The ATS panel's suggestions: JD keywords in no run.
+  missingKeywords,
+  // The ATS panel's projection: the same scorer after the master-backed adds.
+  projectedCoverage,
   // The one section-heading table, shared with the adapter's change sentences; names a change's place.
   SECTION_TITLE,
 } from './diffModel';
@@ -168,13 +172,30 @@ export interface DiffViewProps {
 
 /* --- Coverage ---------------------------------------------------------- */
 
-/* The honest ATS figure, "N% Match", or the sentence saying it was never measured. The coverage
-   track, its legend and the keyword chips were removed 2026-11-07 (slim card): the one number is
-   what the decision uses. Exported for the test that pins the unmeasured branch
-   (test/coverageUnmeasured.test.ts). */
-export function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactElement {
+/* The ATS panel: the honest figure "N% Match", the gain from the operator's edits, a projection if the
+   master-backed suggestions were added, and the keyword chips; or the sentence saying it was never
+   measured. Slimmed to the badge alone 2026-11-07 (morning), then brought back the same night at Teja's
+   ask ("old style" ATS display). Read-only by design: the AI chat is the only edit path, so a missing
+   master-backed keyword is a button that only PRE-FILLS the chat prompt (onSuggest); it never edits.
+   Every figure comes from one scorer (coveragePercent). Exported for test/coverageUnmeasured.test.ts and
+   test/addSkill.test.ts. */
+export function CoverageBar({
+  diff,
+  onSuggest,
+}: {
+  // The row's view model; only diff.coverage is read.
+  readonly diff: ResumeDiff;
+  // Pre-fills the AI chat with a prompt for one keyword; absent where no chat can take it (editing off).
+  readonly onSuggest?: ((keyword: string) => void) | undefined;
+}): ReactElement {
   /* Coverage the master genuinely supports: the figure the operator can defend. */
   const honestMeasure = coveragePercent(diff.coverage, 'honest');
+  /* The same scorer counting the operator's edits: the figure that moves after an AI-chat edit. */
+  const editsMeasure = coveragePercent(diff.coverage, 'withEdits');
+  /* The same scorer counting flagged claims: shown only so the operator sees what lying would buy. */
+  const flaggedMeasure = coveragePercent(diff.coverage, 'withFabrication');
+  /* The same scorer if every master-backed suggestion were added. */
+  const projectedMeasure = projectedCoverage(diff.coverage);
 
   /* NOT MEASURED IS A STATE, NOT A NUMBER. No badge: it would state a result about keywords that
      were never recorded. */
@@ -192,12 +213,96 @@ export function CoverageBar({ diff }: { readonly diff: ResumeDiff }): ReactEleme
     );
   }
 
+  /* The honest base. Every other figure shares its denominator, so each is measured when it is. */
+  const honest = honestMeasure.percent;
+  /* The rise from the operator's edits; 0 (and so hidden) if the arm were ever unmeasured. */
+  const edited = editsMeasure.kind === 'measured' ? editsMeasure.percent - honest : 0;
+  /* The rise only flagged claims supply. */
+  const flagged = flaggedMeasure.kind === 'measured' ? flaggedMeasure.percent - honest : 0;
+  /* The projection, kept only when it beats today's with-edits figure: an equal one adds nothing to do. */
+  const projected =
+    projectedMeasure.kind === 'measured' && projectedMeasure.percent > honest + edited ? projectedMeasure.percent : null;
+  /* Distinct, non-blank keywords per bucket, so a repeated JD keyword is one chip. */
+  const distinct = (list: readonly string[]): string[] => [...new Set(list)].filter((keyword) => keyword.trim() !== '');
+  /* The suggestions, in JD order. */
+  const missing = missingKeywords(diff.coverage);
+  /* The suggestions the master can back: the projection's assumption (its count is stated in the sentence)
+     and the only chips offered as buttons. One Set, so the two can never disagree. */
+  const backed = new Set(missing.filter((keyword) => (diff.coverage.addable?.get(keyword) ?? null) !== null));
+
   return (
     <div className="coverage">
       <div className="coverage__header-row">
         <h3 className="coverage__title">ATS Match Score</h3>
         {/* The badge is the honest figure: it is the one the operator can defend. */}
-        <span className="coverage__ats-badge">{honestMeasure.percent}% Match</span>
+        <span className="coverage__ats-badge">{honest}% Match</span>
+      </div>
+      {/* The track: honest solid, edits striped accent, flagged hatched. role=img with the whole sentence, so a
+          screen reader hears the split the colours show. Widths are integers from the scorer, never raw input. */}
+      <div
+        className="coverage__track"
+        role="img"
+        aria-label={
+          honest + '% of job-description keywords are supported by your master profile' +
+          (edited > 0 ? '; ' + edited + '% more come from your edits' : '') +
+          (flagged > 0 ? '; a further ' + flagged + '% comes only from flagged claims' : '')
+        }
+      >
+        {/* Master-verified share. */}
+        <span className="coverage__fill coverage__fill--honest" style={{ width: honest + '%' }} />
+        {/* The edits' share, only when there is one. */}
+        {edited > 0 ? <span className="coverage__fill coverage__fill--edited" style={{ width: edited + '%' }} /> : null}
+        {/* The flagged share, only when there is one. */}
+        {flagged > 0 ? <span className="coverage__fill coverage__fill--purchased" style={{ width: flagged + '%' }} /> : null}
+      </div>
+      {/* The legend, in the old panel's words. Zero shares are omitted, never printed as "plus 0%". */}
+      <p className="coverage__legend">
+        {/* The base. */}
+        <span className="coverage__stat coverage__stat--honest">{honest}% verified from master</span>
+        {/* What the AI-chat edits added. */}
+        {edited > 0 ? <span className="coverage__stat coverage__stat--edited">plus {edited}% from your edits</span> : null}
+        {/* What only flagged claims add. */}
+        {flagged > 0 ? <span className="coverage__stat coverage__stat--purchased">plus {flagged}% unverified / flagged</span> : null}
+      </p>
+      {/* The projection: the scorer's own figure after the master-backed adds, with how many it assumes. */}
+      {projected !== null ? (
+        <p className="coverage__projection">
+          {projected}% if you add {backed.size === 1 ? 'the 1 suggestion' : `the ${backed.size} suggestions`} your master profile backs
+        </p>
+      ) : null}
+      {/* The keyword chips. Keywords are UNTRUSTED JD text: React text children only (constraint #17). */}
+      <div className="coverage__keywords">
+        {distinct(diff.coverage.honestlyMatched).map((keyword) => (
+          // Verified: in a traced run or a printed master credential.
+          <span key={'m:' + keyword} className="kw-chip kw-chip--matched" title="Verified in master resume">✓ {keyword}</span>
+        ))}
+        {distinct(diff.coverage.matchedByEdit ?? []).map((keyword) => (
+          // Present only in text the operator (via the AI chat) changed.
+          <span key={'e:' + keyword} className="kw-chip kw-chip--edited" title="Only in text you edited">✎ {keyword}</span>
+        ))}
+        {distinct(diff.coverage.matchedByFabrication).map((keyword) => (
+          // Present only through a flagged claim.
+          <span key={'f:' + keyword} className="kw-chip kw-chip--flagged" title="Flagged untraced claim">! {keyword}</span>
+        ))}
+        {missing.map((keyword) =>
+          // A master-backed suggestion with a chat to take it: a button that only fills the prompt.
+          onSuggest !== undefined && backed.has(keyword) ? (
+            <button
+              key={'s:' + keyword}
+              type="button"
+              className="kw-chip kw-chip--missing kw-chip--suggest"
+              // Says what the click does, since it does not edit the resume itself.
+              title="Your master profile has this. Click to ask the AI chat to add it."
+              // Fills the chat prompt; the operator still reads it and presses Send.
+              onClick={() => onSuggest(keyword)}
+            >
+              + {keyword}
+            </button>
+          ) : (
+            // Not in the master (or no chat): shown, never offered, so the panel cannot invite a fabrication.
+            <span key={'x:' + keyword} className="kw-chip kw-chip--missing" title="Not in your master profile">✕ {keyword}</span>
+          ),
+        )}
       </div>
     </div>
   );
@@ -765,6 +870,9 @@ export function DiffView({
   const [saving, setSaving] = useState<boolean>(false);
   // One flag for "controls wait": our own save, or the page's approve/reject on this row.
   const busy = saving || locked === true;
+  /* The ATS panel's last chip click, handed to this row's AI chat as a pre-filled prompt. A new object per
+     click, so the panel's effect fires again for the same keyword. */
+  const [chatSeed, setChatSeed] = useState<{ readonly text: string } | null>(null);
 
   /* Every save from this view goes through here, so `saving` cannot be left stuck and a
      thrown error becomes a shown reason instead of an unhandled rejection. */
@@ -872,9 +980,19 @@ export function DiffView({
           </div>
         </div>
 
-        {/* The ATS figure is NOT repeated here (2026-11-07 audit): the row head's "ATS score" chip already
-            states it, and this second copy floated right of the facts line, off every column. */}
       </header>
+
+      {/* The ATS panel (back 2026-11-07 night, Teja's ask): below the facts line, full width, so it no longer
+          floats off the column as the morning audit found. Its chips only pre-fill this row's AI chat, and only
+          where that chat is shown (the same condition the panel below uses). */}
+      <CoverageBar
+        diff={diff}
+        onSuggest={
+          runEdit !== null && onAssist !== undefined && !editDisabledReason
+            ? (keyword) => setChatSeed({ text: `Add ${keyword} where I can defend it` })
+            : undefined
+        }
+      />
 
       {/* The alarm only when a claim remains; an edits-only row is B for a different reason. */}
       {claims.length > 0 ? (
@@ -946,7 +1064,7 @@ export function DiffView({
         // The panel itself: bound to THIS row's onEdit and id, so whatever it applies lands on this row only.
         const panel =
           runEdit !== null && onAssist !== undefined && !editDisabledReason ? (
-            <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} structure={assistStructure ?? undefined} />
+            <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} structure={assistStructure ?? undefined} seed={chatSeed} />
           ) : /* Docked and read-only: say why, instead of a dock that is silently empty. */ chatDock?.active === true && editDisabledReason ? (
             <p className="diff__edit-note">AI chat is off for this resume: {editDisabledReason}</p>
           ) : null;

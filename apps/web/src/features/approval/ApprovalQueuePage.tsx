@@ -523,12 +523,20 @@ export function chipFactsFor(app: ChipSourceRow): RowChipFacts {
 }
 
 /* "ATS score 85% · tailored vs JD": honest keyword coverage of the TAILORED resume, the same figure
-   as DiffView's "ATS Match Score" badge and the toolbar's 'ats' sort. */
+   as DiffView's "ATS Match Score" badge and the toolbar's 'ats' sort. After AI-chat edits it adds
+   " · +N% from edits" (Teja, 2026-11-07: "ATS score not changed after doing edits"). An edit's words
+   never count as master-verified, so the honest anchor cannot move; the gain is shown beside it. */
 function atsChip(diff: ResumeDiff): string {
   // The badge's own call, so the chip, the badge and the sort can never disagree.
   const measure = coveragePercent(diff.coverage, 'honest');
   // A closed union: only the measured arm has a percent; no JD keywords means nothing was measured.
-  return measure.kind === 'measured' ? `ATS score ${measure.percent}% · tailored vs JD` : 'ATS score —';
+  if (measure.kind !== 'measured') return 'ATS score —';
+  // The same scorer counting the operator's edits; measured whenever honest is (same denominator).
+  const withEdits = coveragePercent(diff.coverage, 'withEdits');
+  // The rise the edits bought; the unmeasured arm cannot occur here, so 0 is only a real "no gain".
+  const gain = withEdits.kind === 'measured' ? withEdits.percent - measure.percent : 0;
+  // The gain only when there is one: "+0%" would read as an edit that did nothing.
+  return `ATS score ${measure.percent}% · tailored vs JD` + (gain > 0 ? ` · +${gain}% from edits` : '');
 }
 
 /* The chips under a queue row's title, in both buckets. One component, so Bucket A and Bucket B can never

@@ -97,9 +97,188 @@
 /* --- Coverage --------------------------------------------------------- */
 
 .coverage {
-  /* Fixed enough to keep the figure in the same place between rows, so the
-     operator can compare coverage across applications by eye. */
-  flex: 0 1 20rem;
+  /* A full-width band in .diff's COLUMN flex since 2026-11-07 night. The old `flex: 0 1 20rem` was a width
+     inside the header row; in a column it would be a 20rem HEIGHT, so the panel takes its content height. */
+  flex: none;
+}
+
+/* The track: honest solid, edits striped, flagged hatched (ported from the pre-7211fd7 panel). */
+.coverage__track {
+  /* The fills sit side by side in one bar. */
+  display: flex;
+  /* Separated from the heading row. */
+  margin-top: var(--gap-2);
+  /* A thin bar: a proportion, not a headline. */
+  height: 0.5rem;
+  /* The unfilled remainder. */
+  background: var(--panel);
+  /* Edged so the empty part still reads as a bar. */
+  border: 1px solid var(--rule);
+  /* Fills never spill past the edge. */
+  overflow: hidden;
+}
+
+/* Every fill takes the full bar height; its width comes inline from the scorer. */
+.coverage__fill {
+  /* A span sized by width. */
+  display: block;
+  /* The bar's height. */
+  height: 100%;
+}
+
+/* The master-verified share: the traced colour used for every verified thing. */
+.coverage__fill--honest {
+  /* Solid: the figure the operator can defend. */
+  background: var(--traced);
+}
+
+/* The edits' share: accent stripes, the "by you" colour, distinct from both verified and flagged. */
+.coverage__fill--edited {
+  /* Striped so it reads as a different kind of credit even without colour vision. */
+  background: repeating-linear-gradient(90deg, var(--accent) 0 4px, var(--accent-subtle) 4px 6px);
+}
+
+/* The flagged share: the fabrication hatch, so lying never looks like progress. */
+.coverage__fill--purchased {
+  /* Hatched in the fabrication colours. */
+  background: repeating-linear-gradient(45deg, var(--fabricated) 0 3px, var(--fabricated-strong) 3px 6px);
+}
+
+/* The legend under the track: one short stat per share. */
+.coverage__legend {
+  /* Stats in a row. */
+  display: flex;
+  /* Wrapping at phone width instead of scrolling sideways. */
+  flex-wrap: wrap;
+  /* Space between stats. */
+  gap: var(--gap-3);
+  /* Separated from the track. */
+  margin-top: var(--gap-2);
+  /* Small: it explains the bar. */
+  font-size: var(--size-xs);
+}
+
+/* A neutral stat. */
+.coverage__stat {
+  /* Muted by default. */
+  color: var(--ink-muted);
+}
+
+/* The verified stat, in the traced colour of its fill. */
+.coverage__stat--honest {
+  /* Matches its fill. */
+  color: var(--traced);
+  /* A touch heavier so the base figure leads. */
+  font-weight: 500;
+}
+
+/* The edits stat, in the accent of its fill. */
+.coverage__stat--edited {
+  /* Matches its fill. */
+  color: var(--accent);
+  /* Same weight as the base. */
+  font-weight: 500;
+}
+
+/* The flagged stat, in the fabrication colour of its fill. */
+.coverage__stat--purchased {
+  /* Matches its fill. */
+  color: var(--fabricated-strong);
+  /* Same weight as the base. */
+  font-weight: 500;
+}
+
+/* The projection sentence: what adding the master-backed suggestions would score. */
+.coverage__projection {
+  /* Separated from the legend. */
+  margin-top: var(--gap-2);
+  /* Same size as the legend it extends. */
+  font-size: var(--size-xs);
+  /* Accent: it is a possible edit, the same "by you" family as the edits share. */
+  color: var(--accent-strong);
+}
+
+/* The keyword chips. */
+.coverage__keywords {
+  /* Chips flow. */
+  display: flex;
+  /* And fold at phone width. */
+  flex-wrap: wrap;
+  /* Tight: many chips in little space. */
+  gap: var(--gap-1);
+  /* Separated from the sentences above. */
+  margin-top: var(--gap-3);
+}
+
+/* One keyword. */
+.kw-chip {
+  /* Small: a token, not prose. */
+  font-size: var(--size-xs);
+  /* Snug padding. */
+  padding: 2px 6px;
+  /* The app's small radius. */
+  border-radius: var(--radius-sm);
+  /* Monospace marks it as the JD's own keyword. */
+  font-family: var(--font-machine);
+  /* Readable at the small size. */
+  font-weight: 500;
+}
+
+/* Verified: the traced family. */
+.kw-chip--matched {
+  /* Washed fill. */
+  background: var(--traced-wash);
+  /* Traced ink. */
+  color: var(--traced);
+  /* Solid edge: settled. */
+  border: 1px solid var(--traced);
+}
+
+/* From edits: the accent family, dashed because nothing audited it. */
+.kw-chip--edited {
+  /* Accent wash. */
+  background: var(--accent-subtle);
+  /* Accent ink. */
+  color: var(--accent-strong);
+  /* Dashed: credited, not verified. */
+  border: 1px dashed var(--accent);
+}
+
+/* Flagged: the fabrication family. */
+.kw-chip--flagged {
+  /* Fabrication wash. */
+  background: var(--fabricated-wash);
+  /* Fabrication ink. */
+  color: var(--fabricated-strong);
+  /* Solid edge: a real finding. */
+  border: 1px solid var(--fabricated);
+}
+
+/* Missing: neutral and dashed, an absence. */
+.kw-chip--missing {
+  /* The panel colour: nothing earned. */
+  background: var(--panel);
+  /* Muted ink. */
+  color: var(--ink-muted);
+  /* Dashed: a gap. */
+  border: 1px dashed var(--rule);
+}
+
+/* A missing keyword the master backs: a button that only pre-fills the AI chat. */
+.kw-chip--suggest {
+  /* Clickable, so it says so. */
+  cursor: pointer;
+  /* Accent edge marks it actionable; still dashed (from .kw-chip--missing) because it is still missing. */
+  border-color: var(--accent);
+  /* Accent ink, same reason. */
+  color: var(--accent-strong);
+}
+
+/* Hover and keyboard focus both show the chip is live. */
+.kw-chip--suggest:hover,
+.kw-chip--suggest:focus-visible {
+  /* The accent wash: the edits family it would join. */
+  background: var(--accent-subtle);
 }
 
 .coverage__title {

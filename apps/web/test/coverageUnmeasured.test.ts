@@ -66,11 +66,13 @@ describe('CoverageBar', () => {
     assert.doesNotMatch(html, /class="coverage__ats-badge"/);
   });
 
-  it('a measured 7 of 10 renders the 70% badge and nothing else (slim card, 2026-11-07)', () => {
-    // A real measurement renders the one figure the decision uses.
+  it('a measured 7 of 10 renders the 70% badge, the track and the legend (ATS panel back, 2026-11-07 night)', () => {
+    // A real measurement renders the honest figure.
     const html = bar(coverage(10, 7));
-    // The track and legend were removed with the slim card: the badge alone carries the number.
-    assert.doesNotMatch(html, /class="coverage__track"|class="coverage__legend"/);
+    // Teja asked for the old-style panel back: the track and legend render with a measurement.
+    assert.match(html, /class="coverage__track"/);
+    // The legend states the verified share in words.
+    assert.match(html, /70% verified from master/);
     // The badge exists, carrying the number.
     assert.match(html, /<span class="coverage__ats-badge">70% Match<\/span>/);
     // And the unmeasured sentence is absent, so the two states cannot co-render.

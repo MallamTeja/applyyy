@@ -301,10 +301,11 @@ describe('slim card: data dumps are gone', () => {
     assert.doesNotMatch(html, /[Mm]aster version/);
     // No node id anywhere: not a "traced to <id>" footer, not an identifier span, not a spoken suffix.
     assert.ok(!html.includes('node-id-never-shown'), 'a node id is shown');
-    // No keyword chips of any kind, and no coverage track or legend.
-    assert.doesNotMatch(html, /class="kw-chip|class="coverage__track"|class="coverage__legend"|class="coverage__keywords"/);
-    // The ATS figure is not repeated in the card (2026-11-07 audit): the row head's "ATS score" chip carries it.
-    assert.doesNotMatch(html, /class="coverage__ats-badge"|ATS Match Score/);
+    // The ATS panel is back (Teja, 2026-11-07 night) but read-only: none of the old hand-edit controls
+    // (the "+ Add" skill chip, the attest group, the Undo, the master link) can return with it.
+    assert.doesNotMatch(html, /kw-chip--addable|kw-chip__add|coverage__attest|coverage__master-link/);
+    // Positive control: the panel itself did render, so the absence above is not a missing panel.
+    assert.match(html, /<span class="coverage__ats-badge">50% Match<\/span>/);
     // No JD body and no posting panel.
     assert.ok(!html.includes('JD-BODY-SENTINEL'), 'the JD body rendered');
     // No posting panel class.

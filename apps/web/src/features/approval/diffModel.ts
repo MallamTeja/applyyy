@@ -438,3 +438,27 @@ export function coveragePercent(
   /* Rounded so the badge, bar and legend all show one integer. */
   return { kind: 'measured', percent: Math.round((matched / total) * 100) };
 }
+
+/* The JD keywords the resume contains in NO run (traced, flagged or edited), in JD order and
+   without repeats. These are the ATS panel's suggestions (2026-11-07). One function so the chips
+   and the projection can never disagree on what is missing. */
+export function missingKeywords(coverage: KeywordCoverage): readonly string[] {
+  /* Every keyword some run already supplies; `?? []` for fixtures built before matchedByEdit. */
+  const present = new Set([...coverage.honestlyMatched, ...coverage.matchedByFabrication, ...(coverage.matchedByEdit ?? [])]);
+  /* A Set over the filtered list drops repeats and keeps first-seen (JD) order; a blank is no keyword. */
+  return [...new Set(coverage.jdKeywords.filter((keyword) => keyword.trim() !== '' && !present.has(keyword)))];
+}
+
+/* The ATS figure if every MASTER-BACKED suggestion were added: the same scorer (coveragePercent,
+   'withEdits') over the same coverage with those keywords moved into matchedByEdit, because that is
+   exactly where an added master skill lands (diffAdapter: an added skill is an 'edited' run). So the
+   projection is the scorer's own answer for the edited resume, never an estimate (pinned by
+   test/addSkill.test.ts against a real add). Keywords the master cannot back (addable null or absent)
+   are left out: counting them would credit fabrication. Unmeasured stays unmeasured, so the UI can
+   never print "+0%". */
+export function projectedCoverage(coverage: KeywordCoverage): CoverageMeasure {
+  /* Only suggestions the master can supply; an absent addable map (editing off, D4) offers none. */
+  const backed = missingKeywords(coverage).filter((keyword) => (coverage.addable?.get(keyword) ?? null) !== null);
+  /* The scorer, unchanged, over the coverage as it would be after those adds. */
+  return coveragePercent({ ...coverage, matchedByEdit: [...(coverage.matchedByEdit ?? []), ...backed] }, 'withEdits');
+}

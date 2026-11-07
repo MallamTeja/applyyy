@@ -96,7 +96,9 @@ describe('approval queue row chips', () => {
     // The tailored resume's honest coverage, the badge's own figure...
     assert.match(page, /coveragePercent\(diff\.coverage, 'honest'\)/);
     // ...named "ATS score", with a dash when nothing was measured.
-    assert.match(page, /`ATS score \$\{measure\.percent\}% · tailored vs JD` : 'ATS score —'/);
+    assert.match(page, /if \(measure\.kind !== 'measured'\) return 'ATS score —';/);
+    // The measured label; the "+N% from edits" suffix after it is pinned by render in addSkill.test.ts.
+    assert.match(page, /`ATS score \$\{measure\.percent\}% · tailored vs JD`/);
   });
 
   /* The queued-at chip was dropped on 2026-11-07 (Teja: slim cards); its absence is pinned in

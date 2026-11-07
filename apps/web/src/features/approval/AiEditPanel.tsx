@@ -334,6 +334,8 @@ export function AiEditPanel({
   chat,
   // The current resume's structure; absent means no structural ops (the pre-2026-11-01 chat).
   structure,
+  // A prompt the card's ATS panel asks to pre-fill; absent until a suggestion chip is clicked.
+  seed,
 }: {
   // The rendered diff: the AI's context is built from it, so it sees what the operator sees.
   readonly diff: ResumeDiff;
@@ -350,6 +352,8 @@ export function AiEditPanel({
   // Section order, entries and master items not on the resume, built by the page from the current
   // resume (aiEdit.AssistStructure explains how); optional so the page can wire it separately.
   readonly structure?: AssistStructure | undefined;
+  // One pre-fill request; a fresh object per click so a repeated keyword still fills (see the effect).
+  readonly seed?: { readonly text: string } | null | undefined;
 }): ReactElement {
   // Ties labels to controls and the heading to the region.
   const baseId = useId();
@@ -546,6 +550,17 @@ export function AiEditPanel({
     // Focused, so Enter sends it or the operator edits it first.
     inputRef.current?.focus();
   }
+
+  /* An ATS-panel suggestion chip was clicked (2026-11-07): fill the composer the same way a starter does.
+     Keyed on the seed OBJECT, so clicking the same keyword twice (a new object) fills it again. */
+  useEffect(() => {
+    // Nothing seeded yet, or the card cleared it.
+    if (seed === null || seed === undefined) return;
+    // The starter path: fill and focus, never send.
+    suggest(seed.text);
+    // suggest only sets state and focuses; it is redefined each render but behaves the same, so only seed is a dep.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seed]);
 
   /* Start an empty chat; stored chats stay in the picker. */
   function newChat(): void {
