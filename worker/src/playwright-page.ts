@@ -77,6 +77,14 @@ export const FORM_RENDER_TIMEOUT_MS = 15_000;
 // T3: the bound on readMenuOptions' click and Escape. A visible widget answers in milliseconds;
 // one that cannot be clicked (hidden, covered) costs this once, then the kit lists it without options.
 const MENU_ACTION_TIMEOUT_MS = 2_000;
+// How long after the first click readMenuOptions keeps re-clicking a widget that still says
+// aria-expanded="false" (hydration landed after `load`; the Stripe Country flake, 2026-11-07).
+// Live hydration took ~1.8 s from goto, most of it before `load`, so 1.5 s past `load` covers it;
+// a widget that truly cannot open costs this once, then reads as "no list".
+const MENU_HYDRATION_RETRY_MS = 1_500;
+// The beat between those re-clicks: long enough for a handler to attach, short enough that a
+// hydrated widget opens within one interval.
+const MENU_RECLICK_INTERVAL_MS = 150;
 
 export const CLOSED_POSTING = /no longer accepting applications|(?:this |the )?(?:position|role|job) has been filled|(?:this |the )?(?:job|position|posting)(?: posting)? is no longer (?:available|open|active)|this job (?:has )?(?:expired|closed)|job not found|(?:the )?page you(?:'re| are) looking for (?:could not|cannot|can't) be found/i;
 
@@ -525,17 +533,34 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
       // Opens the menu; react-select renders its options only while open. Bounded: Playwright's
       // default 30 s actionability wait would stall the kit once per widget that cannot be clicked.
       await target.click({ timeout: MENU_ACTION_TIMEOUT_MS });
+      // `load` is only a stand-in for "React attached its handlers"; hydration can land later (the
+      // Stripe Country flake, 2026-11-07: one look at aria-expanded="false" returned null and the kit
+      // shipped Country with no options). So a still-closed widget is re-clicked until this deadline.
+      const reclickUntil = Date.now() + MENU_HYDRATION_RETRY_MS;
       try {
-        // Bounded poll of THIS widget's scoped menu (readCombobox never reads page-wide).
-        for (let attempt = 0; attempt < 10; attempt += 1) {
+        // Bounded poll of THIS widget's scoped menu (readCombobox never reads page-wide). Re-clicks do
+        // not count as polls; the deadline above bounds them instead.
+        for (let attempt = 0; attempt < 10; ) {
           // Scoped read, untagged: this method only looks.
           const menu = await page.evaluate(readCombobox, { inputId: id, mark: false });
           // Options rendered: these are the exact texts fill() would compare against.
           if (menu.resolved && menu.texts.length > 0) return menu.texts;
           // A widget that still DECLARES itself closed after the click did not open (react-select sets
-          // aria-expanded="true" on open, measured on Greenhouse): nothing will render, so stop now.
-          // Only the explicit "false" counts; a widget without the attribute gets the full poll.
-          if ((await target.getAttribute('aria-expanded')) === 'false') return null;
+          // aria-expanded="true" on open, measured on Greenhouse). Only the explicit "false" counts; a
+          // widget without the attribute gets the full poll.
+          if ((await target.getAttribute('aria-expanded')) === 'false') {
+            // Past the hydration allowance: it really will not open, so "no list", never an empty one.
+            if (Date.now() >= reclickUntil) return null;
+            // Not hydrated yet: give it a beat, then click again. Only while closed, so a click can
+            // never toggle an open menu shut.
+            await page.waitForTimeout(MENU_RECLICK_INTERVAL_MS);
+            // Same bounded click as the first one.
+            await target.click({ timeout: MENU_ACTION_TIMEOUT_MS });
+            // Re-read at once; this was not a poll of an open menu.
+            continue;
+          }
+          // An open menu: count the poll.
+          attempt += 1;
           // 50 ms x 10 = 0.5 s: react-select renders a static list on the click; a search box never does.
           await page.waitForTimeout(50);
         }

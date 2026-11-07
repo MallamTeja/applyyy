@@ -160,4 +160,23 @@ describe('T3: readMenuOptions opens a combobox, reads it and closes it', () => {
       await raw.close();
     }
   });
+
+  test('handlers that attach 400 ms after load (slow hydration) still give the full list', async () => {
+    // The Stripe Country flake: `load` fired, the click hit an un-hydrated input, one look saw
+    // aria-expanded="false" and returned null, so the kit shipped Country with no options.
+    const raw = await tab();
+    try {
+      // The port under test.
+      const page = createPlaywrightPage(raw);
+      // The same widgets, hydrated late.
+      await page.goto(`${server.url}/synthetic/combobox-menu.html?hydrateMs=400`);
+      // Read at once, as the kit does: the reader must retry the click, not give up on one look.
+      expect(await page.readMenuOptions!('question_1')).toEqual(['Yes', 'No']);
+      // Closed afterwards, as in the eager case.
+      expect(await raw.locator('[role="option"]').count()).toBe(0);
+    } finally {
+      // Closed either way.
+      await raw.close();
+    }
+  });
 });

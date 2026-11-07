@@ -35,6 +35,12 @@
     </div>
   </form>
   <script>
+    // ?hydrateMs=N attaches the handlers N ms AFTER `load`, as a slow React hydration does: a click
+    // before then lands on the server-rendered input and nothing opens (the Stripe Country flake,
+    // 2026-11-07). Without the parameter the handlers attach at once, as before.
+    const hydrateMs = Number(new URLSearchParams(location.search).get('hydrateMs') ?? '0');
+    // Wraps the original setup so it can run now or late.
+    function hydrate() {
     // Every combobox in the fixture behaves the same way; the list comes from data-options.
     for (const input of document.querySelectorAll('[role="combobox"]')) {
       // The menu's id, as react-select names it.
@@ -79,6 +85,11 @@
         input.setAttribute('aria-expanded', 'false');
       });
     }
+    }
+    // Late: after `load` plus the delay, so waitForLoadState('load') alone is NOT enough.
+    if (hydrateMs > 0) addEventListener('load', () => setTimeout(hydrate, hydrateMs));
+    // Default: at once, the original behaviour.
+    else hydrate();
   </script>
 </body>
 </html>
