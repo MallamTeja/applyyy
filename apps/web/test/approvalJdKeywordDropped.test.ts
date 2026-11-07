@@ -166,6 +166,23 @@ describe('jd_keyword_dropped on the approval page', () => {
     assert.equal(model.collectFlaggedClaims(d).length, 1);
   });
 
+  it('jd_keyword_dropped with structured keywords names them, not the reason prose', () => {
+    // The producer's structured field (1866e7f): the words to name, in vocabulary spelling.
+    const d = diff([dropped(DETECTOR_PATH, { keywords: ['Kafka', 'Redis'] })]);
+    // The note names the keywords plainly; the prose is no longer needed.
+    assert.deepEqual(d.keywordDrops?.map((note) => note.reason), ['Kafka, Redis']);
+  });
+
+  it('jd_keyword_dropped with malformed keywords falls back to the reason verbatim', () => {
+    // Each malformed shape: empty list, a non-string member, a blank member, not a list at all.
+    for (const keywords of [[], ['Kafka', 7], ['  '], 'Kafka']) {
+      // The diff with the broken field.
+      const d = diff([dropped(DETECTOR_PATH, { keywords })]);
+      // Never a half-list or a guess: the producer's own words instead.
+      assert.deepEqual(d.keywordDrops?.map((note) => note.reason), [REASON], `keywords ${JSON.stringify(keywords)}`);
+    }
+  });
+
   it('jd_keyword_dropped reason over the cap is cut and ends with an ellipsis', () => {
     // A reason far past any real one.
     const d = diff([dropped(DETECTOR_PATH, { reason: 'x'.repeat(5000) })]);

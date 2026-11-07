@@ -761,14 +761,20 @@ const KEYWORD_DROP_REASON_CAP = 300;
 function keywordDropNote(finding: AuditFinding): KeywordDropNote | null {
   // Any other kind keeps its existing path.
   if ((finding as { kind?: unknown }).kind !== 'jd_keyword_dropped') return null;
-  // ponytail: reason shown verbatim; read a structured `keywords: string[]` here once the producer stores one.
+  // The structured keywords (producer 1866e7f, 2026-11-07); absent on rows audited before it, so optional.
+  const keywords: unknown = (finding as { keywords?: unknown }).keywords;
+  // Trusted only as a non-empty list of non-blank strings; any other shape falls back to the reason (§6).
+  const named = Array.isArray(keywords) && keywords.length > 0 && keywords.every((k) => typeof k === 'string' && k.trim() !== '') ? (keywords as string[]).join(', ') : null;
+  // The producer's prose, the fallback for old rows and malformed lists.
   const reason: unknown = (finding as { reason?: unknown }).reason;
-  // No words to show: fail closed to the generic path.
-  if (typeof reason !== 'string' || reason.trim() === '') return null;
-  // Cut an over-long reason and say it was cut.
-  const shown = reason.length > KEYWORD_DROP_REASON_CAP ? reason.slice(0, KEYWORD_DROP_REASON_CAP) + '…' : reason;
+  // No keywords and no words to show: fail closed to the generic path.
+  if (named === null && (typeof reason !== 'string' || reason.trim() === '')) return null;
+  // The keywords when readable, else the reason verbatim.
+  const text = named ?? (reason as string);
+  // Cut an over-long text and say it was cut.
+  const shown = text.length > KEYWORD_DROP_REASON_CAP ? text.slice(0, KEYWORD_DROP_REASON_CAP) + '…' : text;
   // Path plus reason keys the note; React escapes the text when it renders.
-  return { key: finding.path + '::' + reason, path: finding.path, reason: shown };
+  return { key: finding.path + '::' + text, path: finding.path, reason: shown };
 }
 
 /* --- The adapter ------------------------------------------------------- */
