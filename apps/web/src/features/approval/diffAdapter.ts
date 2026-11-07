@@ -45,6 +45,7 @@ import type {
   DiffSection,
   DiffSectionKind,
   FlaggedClaim,
+  KeywordDropNote,
   ResumeDiff,
   TailoredRun,
 } from './diffModel';
@@ -746,6 +747,30 @@ function summaryLine(
   };
 }
 
+/* --- Dropped JD keywords ------------------------------------------------ */
+
+/* The longest reason shown. Long enough for any real "dropped keyword(s): ..." list; a cap so a
+   malformed stored reason cannot push the rest of the review off the screen. */
+const KEYWORD_DROP_REASON_CAP = 300;
+
+/* A jd_keyword_dropped finding as a note, or null to send it down the generic flagged path.
+   THE ONE KIND CHECK for this finding: its `claim` is the whole bullet, so the fabricated path would
+   mark a true bullet as invented. Null on anything but a non-empty string reason (CLAUDE.md §6): a
+   note that cannot be shown must not vanish, so it stays a flagged claim and still blocks.
+   The finding comes from jsonb, so `kind` and `reason` are read as unknown, not trusted to the type. */
+function keywordDropNote(finding: AuditFinding): KeywordDropNote | null {
+  // Any other kind keeps its existing path.
+  if ((finding as { kind?: unknown }).kind !== 'jd_keyword_dropped') return null;
+  // ponytail: reason shown verbatim; read a structured `keywords: string[]` here once the producer stores one.
+  const reason: unknown = (finding as { reason?: unknown }).reason;
+  // No words to show: fail closed to the generic path.
+  if (typeof reason !== 'string' || reason.trim() === '') return null;
+  // Cut an over-long reason and say it was cut.
+  const shown = reason.length > KEYWORD_DROP_REASON_CAP ? reason.slice(0, KEYWORD_DROP_REASON_CAP) + '…' : reason;
+  // Path plus reason keys the note; React escapes the text when it renders.
+  return { key: finding.path + '::' + reason, path: finding.path, reason: shown };
+}
+
 /* --- The adapter ------------------------------------------------------- */
 
 export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
@@ -771,7 +796,22 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
    * scan of every finding. At 35 rows a day this is not a performance
    * decision - it is so the lookup key is written in exactly one place. */
   const findingsByPath = new Map<string, AuditFinding[]>();
+  /* Dropped-keyword notes, kept apart so they never become fabricated runs or unlocated claims. */
+  const keywordDrops: KeywordDropNote[] = [];
+  /* The findings that take the fabricated/unlocated path: every one that is not a readable note. */
+  const flaggable: AuditFinding[] = [];
   for (const finding of application.audit_findings) {
+    /* Split once, here, so the line walk and the unlocated list below agree on which is which. */
+    const note = keywordDropNote(finding);
+    /* A readable note goes to its own list and nowhere else. */
+    if (note !== null) {
+      // Shown under its own heading.
+      keywordDrops.push(note);
+      // Not located, not unlocated: it is not a claim.
+      continue;
+    }
+    /* Everything else, including a malformed jd_keyword_dropped, keeps the existing path. */
+    flaggable.push(finding);
     const existing = findingsByPath.get(finding.path);
     if (existing === undefined) {
       findingsByPath.set(finding.path, [finding]);
@@ -845,7 +885,8 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
    * Dropping one would mean the screen showed a clean, batch-approvable row
    * while the Auditor had flagged a claim - the gate failing open, silently,
    * which is worse than having no gate because the operator would trust it. */
-  const unlocatedClaims: FlaggedClaim[] = application.audit_findings
+  /* `flaggable`, not every finding: a dropped-keyword note is listed apart and never "unlocated". */
+  const unlocatedClaims: FlaggedClaim[] = flaggable
     .filter(
       (finding) =>
         /* Located inside a line: it is a fabricated run there. */
@@ -908,6 +949,8 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
     },
     lines,
     unlocatedClaims,
+    /* Always set, even empty, so deriveBucket counts the real list, never an absent one. */
+    keywordDrops,
     /* Derived from the lines AND the structural changes, never passed in, so it cannot disagree with
        them (R2). The structural half is D5a: a moved or added-back item changes no line's words, and
        without it a reordered resume would count 0 and ride the batch button into Bucket A. */

@@ -1999,7 +1999,9 @@ export function DiffView({
           Every line traces to master version {diff.masterVersion}. Safe to
           batch-approve with the other clean applications.
         </p>
-      ) : (
+      ) : diff.editCount === 0 ? null : (
+        /* Only when there are edits: a row that is B for a dropped keyword alone says so below,
+           and "You made 0 changes" would be false. */
         <p className="diff__edit-note">
           {/* R2: an edited row never rides the batch button, and this says why it left. "Changes",
               not "lines", since 2026-11-01: a moved section or an added certification is counted too. */}
@@ -2007,6 +2009,24 @@ export function DiffView({
           application needs your individual approval rather than the batch.
         </p>
       )}
+
+      {/* P2 #17: a posting keyword the master bullet had and the tailored one lost. Its own block, never
+          the fabrication alarm, because the words that remain are true. Still visible, because the
+          auditor flagged it and it is why the row left the batch. The reason is the auditor's own
+          text, as a React child (escaped), already length-capped by the adapter. */}
+      {(diff.keywordDrops?.length ?? 0) > 0 ? (
+        <div className="diff__keyword-drops">
+          {/* The plain-words heading. */}
+          <p className="diff__keyword-drops-head">Dropped a JD keyword your master had</p>
+          {/* One item per flagged bullet, in the auditor's words. */}
+          <ul>
+            {diff.keywordDrops?.map((note) => (
+              // Path plus reason, unique per finding.
+              <li key={note.key}>{note.reason}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {/* D5a: the structural half of that count, named, so a reordered resume never looks untouched.
           Shown in both view modes, because the unified view has no headings to show a move with. */}

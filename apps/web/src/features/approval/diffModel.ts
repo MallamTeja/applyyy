@@ -296,6 +296,11 @@ export interface ResumeDiff {
    * the bucket calculation, and still blocks approval until decided. Fail loud,
    * never fail clean. */
   readonly unlocatedClaims: readonly FlaggedClaim[];
+  /* The auditor's jd_keyword_dropped findings (P2 #17, 2026-11-07): a true posting keyword the master
+   * bullet had was lost. NOT a FlaggedClaim, because nothing false was written and the fabrication alarm
+   * would call a true bullet invented. Still counted by deriveBucket, so the row never rides the batch.
+   * Optional so hand-built fixtures that predate it still compile; the adapter always sets it. */
+  readonly keywordDrops?: readonly KeywordDropNote[];
   /* How many lines differ from the rebuilt original (edited or removed), PLUS every
    * structural change (structureChanges). Counted once here so the bucket, the Review
    * notice and the approval detail all read the same number rather than each re-deriving it. */
@@ -345,6 +350,16 @@ export interface FlaggedClaim {
   readonly lineKind: DiffLine['kind'];
 }
 
+/* One dropped-keyword note as the page shows it: the producer's reason, verbatim and capped. */
+export interface KeywordDropNote {
+  /* Stable React key: path plus the reason, since one bullet carries at most one such finding. */
+  readonly key: string;
+  /* The auditor's path for the bullet, kept so the note can be traced back to the stored finding. */
+  readonly path: string;
+  /* The auditor's own words, never parsed; the adapter caps the length. */
+  readonly reason: string;
+}
+
 /* Every claim that traces to nothing: the runs found inside lines, plus any
  * finding the adapter could not place. Both must be here - a gate that only
  * counts the located ones can be opened while an unlocated finding stands. */
@@ -378,8 +393,9 @@ export function collectFlaggedClaims(diff: ResumeDiff): FlaggedClaim[] {
  * DIFFERENT text, so its silence no longer covers this resume and the row must
  * not ride the batch button. */
 export function deriveBucket(diff: ResumeDiff): ReviewBucket {
-  /* Either reason alone is enough; neither may be traded against the other. */
-  return collectFlaggedClaims(diff).length > 0 || diff.editCount > 0 ? 'B' : 'A';
+  /* Any reason alone is enough; none may be traded against another. A dropped JD keyword is the
+     third: the auditor flagged the row, so it gets an individual look (fail closed). */
+  return collectFlaggedClaims(diff).length > 0 || diff.editCount > 0 || (diff.keywordDrops?.length ?? 0) > 0 ? 'B' : 'A';
 }
 
 /* Keyword coverage as a CLOSED UNION, so "nothing was measured" cannot be a number.

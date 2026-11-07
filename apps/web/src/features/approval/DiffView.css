@@ -1348,3 +1348,24 @@ html:has(.diff__actions) {
   /* Room for the markers. */
   padding-left: 1.25rem;
 }
+
+/* Dropped JD keywords (P2 #17): a note, not an alarm. Same quiet block as the structure list, because
+   nothing false was written; its own class so neither block's look is tied to the other's meaning. */
+.diff__keyword-drops {
+  /* Separated from the note above it. */
+  margin-top: var(--gap-2);
+  /* Small: a list of facts. */
+  font-size: var(--size-sm);
+}
+
+/* Its heading. */
+.diff__keyword-drops-head {
+  /* Weight, so the reasons read as one block under it. */
+  font-weight: 600;
+}
+
+/* The reasons keep their list markers; just indented. */
+.diff__keyword-drops ul {
+  /* Room for the markers. */
+  padding-left: 1.25rem;
+}
