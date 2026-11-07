@@ -48,6 +48,9 @@ import type { AtsProvider, JobInsert } from "../_shared/contracts/shared-types.t
 // The Workday detail read (2026-11-05): the list endpoint carries no description, so new
 // title-passing Workday rows get theirs from the detail endpoint before they are stored.
 import { fillWorkdayDescriptions, newWorkdayDetailRun, WORKDAY_DETAIL_CAP, type WorkdayDetailRun } from "../_shared/scout/workday-detail.ts";
+// Queue liveness (2026-11-07): a queue row that left its board is confirmed closed on the same poll,
+// so Teja never approves or applies to a dead posting (the 14-day backlog wait does not apply to it).
+import { checkPosting, postingCheckUrl, queueApplicationIds, queueCandidates, QUEUE_LIVENESS_CAP, type QueueSnapshotJob } from "../_shared/scout/queue-liveness.ts";
 // The title-only verdict decides which Workday postings are worth a detail read.
 import { screenTechRole } from "../_shared/screen/tech-gate.ts";
 // The countdown that stops detail reads before the function's own wall clock does.
@@ -93,6 +96,9 @@ interface PollSummary {
     // Why marking was refused or failed, null when it ran. A refusal is NOT a board
     // failure: the poll worked, it just was not evidence of closures.
     readonly disappearance_refused_reason: string | null;
+    // Queue rows (awaiting_approval, approved) confirmed closed early by their posting endpoint
+    // (queue-liveness.ts). Already-marked rows are counted in disappeared_marked, not here.
+    readonly queue_closed: number;
   };
 }
 
@@ -348,6 +354,8 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
   // Counted separately from ordinary failures: this is the one failure mode where the
   // board is HEALTHY and the watchlist row is what's wrong.
   let totalIdentityMismatch = 0;
+  // Queue-liveness confirmation requests left this run, shared across every board.
+  let queueChecksLeft = QUEUE_LIVENESS_CAP;
 
   // 3. Poll each board
   for (const board of boards as WatchlistRow[]) {
@@ -460,7 +468,9 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
       // never over-mark. Page it if a board ever exceeds 1000 stored jobs.
       const { data: boardJobs, error: boardJobsError } = await db
         .from("jobs")
-        .select("id, fingerprint, disappeared_at, repost_count, last_seen_at")
+        // ats_job_id, apply_url and the applications' statuses feed queue liveness (2026-11-07):
+        // the posting endpoint is built from them, and only queue rows are confirmed early.
+        .select("id, fingerprint, disappeared_at, repost_count, last_seen_at, ats_job_id, apply_url, applications(id, status)")
         // Explicit owner scope, not only RLS: the update below must never cross users.
         .eq("user_id", clientResult.userId)
         // Provider + slug identify the board's company (core_tables.sql jobs columns).
@@ -469,7 +479,7 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
         // Only rows this board's adapter has ever reported can drop off this board.
         .contains("discovered_via", [adapter.discoverySource]);
       // The snapshot's row shape; postgrest hands back loosely typed rows.
-      type BoardJob = { id: string; fingerprint: string; disappeared_at: string | null; repost_count: number; last_seen_at: string | null };
+      type BoardJob = QueueSnapshotJob & { repost_count: number; last_seen_at: string | null };
       // Typed once for both splits below.
       const snapshot = (boardJobs ?? []) as BoardJob[];
       // Live jobs: the candidates for marking.
@@ -679,6 +689,8 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
       let markedCount = 0;
       // Rows actually cleared, counted only when the write landed.
       let reappearedCount = 0;
+      // Queue rows confirmed closed by their posting endpoint, counted only when the write landed.
+      let queueClosedCount = 0;
       if (boardJobsError) {
         // An unreadable snapshot is "no evidence", never "no stored jobs": refuse, don't fail.
         refusedReason = `snapshot_failed: ${boardJobsError.message}`;
@@ -714,6 +726,64 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
           else markedCount = plan.ids.length;
         }
 
+        // QUEUE LIVENESS (2026-11-07). Only on a TRUSTED poll (a refused plan means the listing is
+        // not evidence). A queue row absent from this complete listing and not marked above gets ONE
+        // request to its own posting endpoint; only an explicit 404 (or Workday canApply:false)
+        // retires it now instead of after the 14-day backlog wait. Unknown changes nothing.
+        if (plan.kind !== "refuse") {
+          // Rows the posting endpoint confirmed closed.
+          const closedIds: string[] = [];
+          for (const job of queueCandidates(snapshot, polledFingerprints, plan.ids)) {
+            // The provider's own endpoint, or null (Ashby, a malformed id): cannot confirm, skip.
+            const url = postingCheckUrl(board.ats_provider, board.board_token, job);
+            // No endpoint: the 14-day path still applies.
+            if (url === null) continue;
+            // Out of requests for this run: the rest wait for the next poll.
+            if (queueChecksLeft <= 0) break;
+            // One request spent.
+            queueChecksLeft -= 1;
+            // The robots-gated GET, the same transport the board poll used.
+            if ((await checkPosting((u) => fetchBoard(u), board.ats_provider, url)) === "closed") closedIds.push(job.id);
+          }
+          if (closedIds.length > 0) {
+            // Same scoping as the planner's mark: owner, ids, and only rows still live.
+            const { error: closeError } = await db
+              .from("jobs")
+              .update({ disappeared_at: now.toISOString() })
+              .eq("user_id", clientResult.userId)
+              .in("id", closedIds)
+              .is("disappeared_at", null);
+            // Logged, not thrown: the board polled fine; the next poll retries the confirmation.
+            if (closeError) console.warn(`[scout-ats] queue liveness mark failed: ${closeError.message}`);
+            // Counted only when it landed.
+            else queueClosedCount = closedIds.length;
+          }
+          // A reason event for every QUEUE application retired this poll, by the planner or by the
+          // confirmation, so the history says why the row can no longer be approved or applied.
+          // application_events is append-only; a failed insert is logged, never retried as a cleanup.
+          const retired = new Set([...(markedCount > 0 ? plan.ids : []), ...(queueClosedCount > 0 ? closedIds : [])]);
+          // One note per queue application whose job was retired.
+          const notes = snapshot.filter((job) => retired.has(job.id)).flatMap((job) =>
+            queueApplicationIds(job).map((applicationId) => ({
+              user_id: clientResult.userId,
+              application_id: applicationId,
+              event_type: "note",
+              agent: "scout_ats",
+              detail: {
+                reason: "posting_closed",
+                // Which proof retired it: the posting endpoint, or the planner's churn mark.
+                evidence: closedIds.includes(job.id) ? "absent from board listing + posting endpoint gone (404 / canApply:false)" : "absent from board listing (liveness planner)",
+                board: `${board.ats_provider}/${board.board_token}`,
+              },
+            })));
+          if (notes.length > 0) {
+            // The event write; RLS admits scout_ats through the agent-key header every edge client sends.
+            const { error: noteError } = await db.from("application_events").insert(notes);
+            // Logged: the job is retired either way, and the worker refuses it on disappeared_at.
+            if (noteError) console.warn(`[scout-ats] queue liveness note failed: ${noteError.message}`);
+          }
+        }
+
         // Reposts: cleared and counted. Per row because repost_count is per-row + 1.
         // ponytail: read-then-write increment, same ceiling as seen_count above.
         for (const job of planReappearances({ storedDisappeared, polledFingerprints, pollOk: true })) {
@@ -740,6 +810,7 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
           disappeared_marked: markedCount,
           reappeared: reappearedCount,
           disappearance_refused_reason: refusedReason,
+          queue_closed: queueClosedCount,
         },
       });
     } catch (fetchErr: unknown) {
