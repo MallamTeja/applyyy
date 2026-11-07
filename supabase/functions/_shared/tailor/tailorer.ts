@@ -34,6 +34,8 @@ import { buildBulletRewritePrompt, buildTailorPrompt, type TailorPrompt } from "
 import { validateTailoredProfile, type TailorViolation } from "./validator.ts";
 // The posting's skill terms, deterministic and vocabulary-gated, for selected_jd_keywords.
 import { extractJdKeywords, keywordAppearsIn } from "./jd-keywords.ts";
+// Stored postings may be raw HTML; every reader here sees the text (N1, 2026-11-07).
+import { postingText } from "./posting-text.ts";
 // The contract, reached through this stream's single re-export module. Nothing here
 // redefines one of these — a redefined type does not fail, it drifts.
 import type { MasterProfile, ResolvedResume, TailoredProfile } from "../contracts/shared-types.ts";
@@ -432,7 +434,12 @@ function parseTailoredProfile(raw: string): TailoredProfile {
 // Build a tailorer bound to one model and one pinned master profile.
 export function createTailorer(deps: TailorDeps): Tailorer {
   // Closes over the trusted inputs so each call supplies only the untrusted posting.
-  return async function tailor(input: TailorJobInput): Promise<TailorOutcome> {
+  return async function tailor(stored: TailorJobInput): Promise<TailorOutcome> {
+    // The posting as TEXT (N1, 2026-11-07): stored rows may be raw HTML. Converted once, here, so the
+    // prompt, the JD keywords and the skills shape all read the same text. postingText never returns
+    // null for a string, so the non-null assertion only restores the type.
+    const input: TailorJobInput = { ...stored, jobDescription: postingText(stored.jobDescription)! };
+
     // Assemble with the scraped fields fenced. Only the master and the pin reach the
     // instruction region; the posting goes to the untrusted region as text.
     const prompt = buildTailorPrompt({

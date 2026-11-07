@@ -28,6 +28,8 @@ import { buildScorerPrompt, type ScorerPrompt } from "./prompt.ts";
 export type { ScorerPrompt } from "./prompt.ts";
 // The weighting, banding and validation.
 import { weightedTotal, type DimensionScores } from "./rubric.ts";
+// The posting as text, the one helper every edge reader of description_raw shares (N1).
+import { postingText } from "../tailor/posting-text.ts";
 
 // What a model call looks like from here: a prompt in, raw response text out.
 //
@@ -67,7 +69,8 @@ export function createScorer(deps: ScorerDeps): Scorer {
     const prompt = buildScorerPrompt({
       jobTitle: snapshot.title,
       company: snapshot.company_name,
-      jobDescription: snapshot.description_raw,
+      // As TEXT (N1, 2026-11-07): stored rows may be raw HTML, pure token cost and noise to the model.
+      jobDescription: postingText(snapshot.description_raw),
       locationRaw: snapshot.location_raw,
       candidateProfile: deps.candidateProfile,
       masterVersion: deps.masterVersion,

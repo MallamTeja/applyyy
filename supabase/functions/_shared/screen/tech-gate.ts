@@ -35,6 +35,9 @@
 // matching none of it IS an answer. The empty-config case keeps the old branch because
 // that is the one the starvation argument was really about: a new user with no lists.
 
+// The adapters' HTML-to-text, so the 300-character head is read over text, as its siblings read (N1).
+import { stripHtml } from "../ats/types.ts";
+
 // The config, read from `search_preferences` (supporting_tables.sql:178-183). Named
 // rather than passed as three loose arrays so a caller cannot transpose two of them —
 // swapping `titles` and `excludedKeywords` would invert the gate and still compile.
@@ -314,11 +317,16 @@ export function screenTechRole(
   // Title plus the head of the body, read by KEYWORDS only since 2026-10-09 (titles and
   // exclusions read the title alone). Both are UNTRUSTED board text and are only ever
   // matched against, never interpolated anywhere.
-  const haystack = `${title} ${(descriptionRaw ?? "").slice(0, DESCRIPTION_MATCH_LIMIT)}`;
+  // THE BODY AS TEXT (N1, 2026-11-07), like required-experience.ts and work-auth-gate.ts: a stored HTML row's
+  // first 300 characters are mostly tags and inline styles, so the window would hold markup, not the role.
+  // stripHtml's null (no body, or all markup) reads as an empty head, as a null body always did.
+  const description = stripHtml(descriptionRaw);
+  // The window over the text, never over the markup.
+  const haystack = `${title} ${(description ?? "").slice(0, DESCRIPTION_MATCH_LIMIT)}`;
 
   // THE BUILT-IN TITLE RULES FIRST (Teja, 2026-11-06 23:33 IST): a title they reject is dropped whatever the
   // configured lists say, so a human-typed exclusion cannot shadow a rule's own code.
-  const ruled = titleRuleDrop(title, descriptionRaw);
+  const ruled = titleRuleDrop(title, description);
   // A rule objected: its verdict, with its own code.
   if (ruled !== undefined) return ruled;
 

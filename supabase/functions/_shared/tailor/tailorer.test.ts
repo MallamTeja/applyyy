@@ -21,6 +21,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 // Extension-suffixed specifier so this runs under Deno and `node --test` alike.
 import { createTailorer, shapeSkillGroups, TAILOR_REQUIRED_ARRAY_KEYS } from "./tailorer.ts";
+// The live HTML posting excerpt (row 76280e87), shared with the postingText suite.
+import { CIRCUITHUB_HTML } from "./posting-html.fixture.ts";
 // The schema Gemini is actually sent, and the section tuple its enum is built from —
 // imported, never restated, so these tests check the shipped values.
 import { TAILOR_RESPONSE_SCHEMA, TAILOR_SECTION_KINDS } from "./prompt.ts";
@@ -662,6 +664,25 @@ test("skills shape: with no relevant group, the model's own groups are kept rath
   if (outcome.kind !== "tailored") return;
   // The ML group stays, holding its whole master group of 2.
   assert.deepEqual(groupSizes(outcome.resume), { "Machine Learning": 2 });
+});
+
+// N1 (2026-11-07): a stored HTML posting reaches the model as text. Red on revert of the postingText
+// line in createTailorer: the prompt then carries every tag and inline style of live row 76280e87.
+test("N1: an HTML posting reaches the tailor prompt as text, with no <h2>, style= or min-height", async () => {
+  // Every prompt the model was sent.
+  const prompts: string[] = [];
+  // A model that records the prompt and answers honestly.
+  const tailor = createTailorer({ callLlm: (prompt) => { prompts.push(JSON.stringify(prompt)); return Promise.resolve(JSON.stringify(HONEST_TAILORING)); }, master: MASTER, masterVersion: MASTER_VERSION });
+  // The live CircuitHub excerpt as the posting.
+  const outcome = await tailor({ ...POSTING, jobDescription: CIRCUITHUB_HTML });
+  // Still a normal tailoring.
+  assert.equal(outcome.kind, "tailored");
+  // No markup in what the model saw.
+  for (const junk of ["<h2>", "style=", "min-height"]) assert.equal(prompts[0].includes(junk), false, `${junk} reached the prompt`);
+  // The posting's words did reach it.
+  assert.ok(prompts[0].includes("OR-Tools"));
+  // And the stored keywords come from the same text.
+  if (outcome.kind === "tailored") assert.deepEqual(outcome.jdKeywords, ["PostgreSQL", "Python", "SQL"]);
 });
 
 // Control: the shape must not launder a fabricated skill. An unresolved ref joins no group, is kept,

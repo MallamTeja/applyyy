@@ -545,3 +545,26 @@ test("title rules answer before the exclusion list, and a drop carries its own c
   // Code from the new rule, reason naming the matched word.
   assert.equal(verdict.drop && verdict.code, "title_seniority");
 });
+
+// N1 (2026-11-07): stored rows can be raw HTML (live row 76280e87). The gate reads only the first 300
+// characters of the body, and on an HTML row those are mostly tags and inline styles, so a keyword in the
+// first lines of the TEXT fell outside the window. Its siblings (required-experience.ts, work-auth-gate.ts)
+// already read stripHtml's text. Red on revert of the stripHtml line in screenTechRole.
+test("N1: an HTML body is read as text, so a keyword early in the prose is inside the 300-character head", () => {
+  // Eight styled empty paragraphs (about 300 characters of markup), then a short paragraph naming React.
+  const html = '<p style="min-height:1.5em"></p>'.repeat(8) + '<h2>About the role</h2><p style="min-height:1.5em">We build the product in <strong>React</strong> and TypeScript.</p>';
+  // "React" sits past character 300 of the stored text but near the start of the posting's words.
+  assert.ok(html.indexOf("React") > 300, "fixture must place the keyword past the raw window");
+  // An unlisted title, so only the keyword can classify it.
+  const verdict = screenTechRole("Product Builder", html, PREFS);
+  // Kept: the keyword is found in the text.
+  assert.equal(verdict.drop, false, JSON.stringify(verdict));
+});
+
+// The control: a body that was already text is read exactly as before.
+test("N1 control: a plain-text body is matched exactly as before", () => {
+  // The same words with no markup.
+  const verdict = screenTechRole("Product Builder", "We build the product in React and TypeScript.", PREFS);
+  // Kept, as it always was.
+  assert.equal(verdict.drop, false, JSON.stringify(verdict));
+});

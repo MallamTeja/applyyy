@@ -36,6 +36,8 @@ import type {
 } from "../contracts/shared-types.ts";
 // The posting's keywords and the one word-bounded matching rule the ATS score uses (jd_keyword_dropped).
 import { extractJdKeywords, keywordAppearsIn } from "../tailor/jd-keywords.ts";
+// Stored postings may be raw HTML; the check reads their text (N1).
+import { postingText } from "../tailor/posting-text.ts";
 
 /**
  * Union of legal audit finding kinds derived from AuditFinding.
@@ -303,7 +305,9 @@ export function detectAuditFindings(
 
   // The posting's keywords, read once, by the SAME vocabulary that fills selected_jd_keywords, so the
   // finding speaks about the words the ATS score counts. No posting: nothing to keep, no check.
-  const jdKeywords = jobDescription ? extractJdKeywords(jobDescription) : [];
+  // Read as TEXT (N1, 2026-11-07): a stored HTML posting's attributes and footer must never be read as
+  // the posting's words.
+  const jdKeywords = jobDescription ? extractJdKeywords(postingText(jobDescription) ?? "") : [];
 
   // Step 2: Audit Skills Section
   // Loop through skills in tailored resume

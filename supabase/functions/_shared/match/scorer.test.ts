@@ -17,6 +17,8 @@ import { createScorer, type LlmCaller } from "./scorer.ts";
 // The case shape comes from the eval gate rather than being redefined here — conforming
 // to that seam is what makes this scorer directly runnable by `runEvalGate`.
 import type { EvalCase } from "../eval/gate.ts";
+// The live HTML posting excerpt (row 76280e87), shared with the tailor suites.
+import { CIRCUITHUB_HTML } from "../tailor/posting-html.fixture.ts";
 
 // One posting to score. Only the fields the scorer reads need to be realistic.
 const CASE: EvalCase = {
@@ -155,4 +157,19 @@ test("a posting with no description is still scoreable", async () => {
   const sparse: EvalCase = { ...CASE, job_snapshot: { ...CASE.job_snapshot, description_raw: null, location_raw: null } };
   const result = await scorer(stubCaller(GOOD_RESPONSE))(sparse);
   assert.equal(result.score, 69);
+});
+
+// N1 (2026-11-07): a stored HTML posting reaches the matcher model as text. Red on revert of the
+// postingText call in createScorer: the prompt then carries every tag and inline style of row 76280e87.
+test("N1: an HTML posting reaches the matcher prompt as text, with no <h2>, style= or min-height", async () => {
+  // Every prompt the model was sent.
+  const prompts: string[] = [];
+  // A model that records the prompt and answers well.
+  const score = scorer((prompt) => { prompts.push(JSON.stringify(prompt)); return Promise.resolve(GOOD_RESPONSE); });
+  // The live CircuitHub excerpt as the posting.
+  await score({ ...CASE, job_snapshot: { ...CASE.job_snapshot, description_raw: CIRCUITHUB_HTML } });
+  // No markup in what the model saw.
+  for (const junk of ["<h2>", "style=", "min-height"]) assert.equal(prompts[0].includes(junk), false, `${junk} reached the prompt`);
+  // The posting's words did reach it.
+  assert.ok(prompts[0].includes("OR-Tools"));
 });
