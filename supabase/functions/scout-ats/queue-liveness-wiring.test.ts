@@ -36,7 +36,7 @@ describe("scout-ats: queue liveness wiring", () => {
 
   it("asks the posting endpoint through the robots-gated board transport, within the run's cap", () => {
     // fetchBoard applies the 'scouting' robots policy; a bare fetch here would skip robots.txt.
-    at('checkPosting((u) => fetchBoard(u), board.ats_provider, url)');
+    at('checkPosting((u) => fetchBoard(u), board.ats_provider, url, job.ats_job_id)');
     // The shared per-run allowance is checked before a request is spent.
     const capCheck = at("if (queueChecksLeft <= 0) break;");
     // The request itself.

@@ -10,7 +10,9 @@
 //
 // THE RULE (CLAUDE.md §6). Closed needs TWO independent proofs: the row is absent from a complete,
 // trusted 200 listing (the scout's own poll, which already ran) AND the provider's own posting
-// endpoint says gone: an explicit 404, or Workday's `canApply: false`. Everything else (a timeout,
+// endpoint says gone: an explicit 404, or Workday's `canApply: false`. Ashby has no per-posting
+// endpoint, so its second proof is a fresh read of the whole board that, well-formed and non-empty,
+// no longer holds the posting's id (added 2026-11-07). Everything else (a timeout,
 // a 403, a 5xx, a bot challenge, a robots refusal, an odd body) is "unknown" and changes nothing.
 // FIS answered 403 for a closed posting on 2026-11-07, and a WAF answers 403 for live ones too.
 //
@@ -25,6 +27,8 @@ import { BotProtectionError, HttpError } from "../http/errors.ts";
 import { workdayDetailUrl } from "./adapters/workday.ts";
 // The shared object guard.
 import { isRecord } from "../ats/types.ts";
+// Ashby's board URL, built exactly as the poll builds it, so the second read hits the same listing.
+import { ashbyAdapter } from "../ats/ashby.ts";
 
 // The statuses whose postings are confirmed early: the rows Teja is about to act on.
 const QUEUE_STATUSES: ReadonlySet<string> = new Set(["awaiting_approval", "approved"]);
@@ -85,8 +89,8 @@ export function queueApplicationIds(job: QueueSnapshotJob): string[] {
 
 // Greenhouse ids are numbers; anything else could steer the request elsewhere on the API.
 const GREENHOUSE_ID = /^\d+$/;
-// Lever ids are uuids.
-const LEVER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Lever ids are uuids, and so are Ashby's.
+const LEVER_ID =/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // The provider's own endpoint for ONE posting, or null when there is none (Ashby, any other
 // provider) or the stored id is not the provider's shape. null means "cannot confirm", never "closed".
@@ -107,15 +111,20 @@ export function postingCheckUrl(provider: string, boardToken: string, job: Queue
   }
   // Workday: the detail endpoint from the apply link (anchored match; null for any other shape).
   if (provider === "workday") return job.apply_url === null ? null : workdayDetailUrl(job.apply_url);
-  // Ashby lists a whole board but has no per-posting endpoint: nothing to confirm with.
+  // Ashby has no per-posting endpoint, so its proof is a second read of the whole board, from the
+  // adapter's own URL builder (2026-11-07). A uuid id is required to look for in that listing.
+  if (provider === "ashby") return job.ats_job_id !== null && LEVER_ID.test(job.ats_job_id) ? ashbyAdapter.buildRequestUrl(boardToken) : null;
+  // Any other provider: nothing to confirm with.
   return null;
 }
 
-// One confirmation request. Never throws. Only an explicit "gone" is "closed".
+// One confirmation request. Never throws. Only an explicit "gone" is "closed". `atsJobId` is what an
+// Ashby listing is searched for; the per-posting providers do not read it.
 export async function checkPosting(
   get: (url: string) => Promise<Response | null>,
   provider: string,
   url: string,
+  atsJobId: string | null,
 ): Promise<PostingVerdict> {
   // The response, or the transport's typed failure.
   let res: Response | null;
@@ -125,13 +134,16 @@ export async function checkPosting(
   } catch (e) {
     // A bot challenge is the site refusing us, whatever its status: not evidence.
     if (e instanceof BotProtectionError) return "unknown";
-    // The one explicit "gone".
-    if (e instanceof HttpError && e.status === 404) return "closed";
+    // The one explicit "gone", for a POSTING endpoint. Ashby's URL is the whole board: a 404 there
+    // says the board moved, not that this posting closed.
+    if (e instanceof HttpError && e.status === 404 && provider !== "ashby") return "closed";
     // 403, 5xx, network, timeout, robots refusal: unknown.
     return "unknown";
   }
   // No response at all: unknown.
   if (res === null) return "unknown";
+  // Ashby: the whole board, searched on the raw ids.
+  if (provider === "ashby") return ashbyListingVerdict(res, atsJobId);
   // Greenhouse and Lever: a 200 for the posting is the posting.
   if (provider !== "workday") return "open";
   // Workday answers 200 for a posting it no longer takes applications for; its flag decides.
@@ -144,6 +156,33 @@ export async function checkPosting(
     return canApply === false ? "closed" : canApply === true ? "open" : "unknown";
   } catch {
     // A soft-200 HTML page or an unreadable body.
+    return "unknown";
+  }
+}
+
+// An Ashby board listing read as proof for one posting. Closed ONLY when the body is a well-formed,
+// NON-EMPTY `jobs` array whose every entry has a string id and none is this posting's id. Any
+// listing entry counts as present, listed or not: the posting still exists. An empty list is what a
+// truncated or broken answer looks like, and one entry without an id means the list cannot be
+// trusted to be complete; both are unknown (CLAUDE.md §6).
+async function ashbyListingVerdict(res: Response, atsJobId: string | null): Promise<PostingVerdict> {
+  // Nothing to look for.
+  if (atsJobId === null) return "unknown";
+  try {
+    // The parsed board.
+    const payload: unknown = JSON.parse(await res.text());
+    // The postings array, or nothing.
+    const jobs = isRecord(payload) && Array.isArray(payload.jobs) ? (payload.jobs as unknown[]) : null;
+    // No array, or an empty one: not evidence.
+    if (jobs === null || jobs.length === 0) return "unknown";
+    // Every id, or null when any entry lacks one.
+    const ids = jobs.map((job) => (isRecord(job) && typeof job.id === "string" ? job.id : null));
+    // One malformed entry: the listing is not trusted to be complete.
+    if (ids.includes(null)) return "unknown";
+    // Present means open; absent from a complete listing means closed.
+    return ids.includes(atsJobId) ? "open" : "closed";
+  } catch {
+    // A soft-200 page or an unreadable body.
     return "unknown";
   }
 }

@@ -65,26 +65,28 @@ test("queue liveness: the posting endpoint per provider, refusing ids of the wro
     postingCheckUrl("workday", "wf.wd1/WellsFargoJobs", ghJob({ apply_url: "https://wf.wd1.myworkdayjobs.com/WellsFargoJobs/job/Bengaluru-India/Intern_R-557386" })),
     "https://wf.wd1.myworkdayjobs.com/wday/cxs/wf/WellsFargoJobs/job/Bengaluru-India/Intern_R-557386",
   );
-  // Ashby has no per-posting endpoint: nothing to confirm with, so no check.
-  assert.equal(postingCheckUrl("ashby", "cursor", ghJob({ ats_job_id: "166c3951-1d2a-4e61-b79b-bedefe96073b" })), null);
+  // Ashby has no per-posting endpoint: the board listing itself, the adapter's own URL.
+  assert.equal(postingCheckUrl("ashby", "cursor", ghJob({ ats_job_id: "166c3951-1d2a-4e61-b79b-bedefe96073b" })), "https://api.ashbyhq.com/posting-api/job-board/cursor");
+  // A non-uuid Ashby id cannot be matched against the listing: no check.
+  assert.equal(postingCheckUrl("ashby", "cursor", ghJob({ ats_job_id: "8280700" })), null);
 });
 
 test("queue liveness: an explicit 404 or Workday canApply:false is closed; 200 is open", async () => {
   // The Thoughtworks case: the job endpoint says 404.
-  assert.equal(await checkPosting(status(404), "greenhouse", "https://x/jobs/1"), "closed");
+  assert.equal(await checkPosting(status(404), "greenhouse", "https://x/jobs/1", null), "closed");
   // A live posting.
-  assert.equal(await checkPosting(ok({ id: 1, title: "SDE" }), "greenhouse", "https://x/jobs/1"), "open");
+  assert.equal(await checkPosting(ok({ id: 1, title: "SDE" }), "greenhouse", "https://x/jobs/1", null), "open");
   // Workday's own flag.
-  assert.equal(await checkPosting(ok({ jobPostingInfo: { canApply: false } }), "workday", "https://x"), "closed");
+  assert.equal(await checkPosting(ok({ jobPostingInfo: { canApply: false } }), "workday", "https://x", null), "closed");
   // Workday open.
-  assert.equal(await checkPosting(ok({ jobPostingInfo: { canApply: true } }), "workday", "https://x"), "open");
+  assert.equal(await checkPosting(ok({ jobPostingInfo: { canApply: true } }), "workday", "https://x", null), "open");
 });
 
 test("queue liveness: every other failure is unknown, never closed (CLAUDE.md §6)", async () => {
   // FIS answered 403 for a closed posting, and a WAF answers 403 for a live one: not evidence.
-  assert.equal(await checkPosting(status(403), "workday", "https://x"), "unknown");
+  assert.equal(await checkPosting(status(403), "workday", "https://x", null), "unknown");
   // A server error.
-  assert.equal(await checkPosting(status(503), "greenhouse", "https://x"), "unknown");
+  assert.equal(await checkPosting(status(503), "greenhouse", "https://x", null), "unknown");
   // A bot challenge, even on a 404, is the site refusing us, not the posting closing.
   assert.equal(await checkPosting(async (url) => { throw new BotProtectionError(url, 404, "", 1); }, "greenhouse", "https://x"), "unknown");
   // A network drop or timeout.
@@ -92,10 +94,10 @@ test("queue liveness: every other failure is unknown, never closed (CLAUDE.md §
   // A robots refusal.
   assert.equal(await checkPosting(async (url) => { throw new RobotsDisallowedError(url, "refuse", "disallow", null); }, "lever", "https://x"), "unknown");
   // No response at all.
-  assert.equal(await checkPosting(async () => null, "lever", "https://x"), "unknown");
+  assert.equal(await checkPosting(async () => null, "lever", "https://x", null), "unknown");
   // Workday 200 with no flag, or a soft-200 HTML page: unknown, never closed.
-  assert.equal(await checkPosting(ok({ jobPostingInfo: {} }), "workday", "https://x"), "unknown");
-  assert.equal(await checkPosting(async () => new Response("<html>Sign in</html>", { status: 200 }), "workday", "https://x"), "unknown");
+  assert.equal(await checkPosting(ok({ jobPostingInfo: {} }), "workday", "https://x", null), "unknown");
+  assert.equal(await checkPosting(async () => new Response("<html>Sign in</html>", { status: 200 }), "workday", "https://x", null), "unknown");
 });
 
 test("queue liveness: a robots-disallowed posting endpoint is never requested", async () => {
@@ -116,7 +118,7 @@ test("queue liveness: a robots-disallowed posting endpoint is never requested", 
   }) as typeof fetch;
   try {
     // The production GET with a private robots cache.
-    const verdict = await checkPosting((url) => fetchBoard(url, new Map()), "greenhouse", "https://boards-api.greenhouse.io/v1/boards/x/jobs/1");
+    const verdict = await checkPosting((url) => fetchBoard(url, new Map()), "greenhouse", "https://boards-api.greenhouse.io/v1/boards/x/jobs/1", null);
     // Refused, so unknown.
     assert.equal(verdict, "unknown");
     // Only robots.txt was read, and it really was read.
@@ -131,4 +133,29 @@ test("queue liveness: a robots-disallowed posting endpoint is never requested", 
 test("queue liveness: the per-run cap is small and positive", () => {
   // A whole queue fits (21 rows on 2026-11-07), and a board-wide burst cannot happen.
   assert.ok(QUEUE_LIVENESS_CAP >= 10 && QUEUE_LIVENESS_CAP <= 50);
+});
+
+// ---- Ashby (2026-11-07): no per-posting endpoint, so the proof is a SECOND, independent read of the
+// whole board, matched on the raw jobs[].id. Independent of the poll's parse: the adapter skips
+// entries (no title, unlisted), and a skipped entry would otherwise look "absent".
+const CURSOR_ID = "166c3951-1d2a-4e61-b79b-bedefe96073b";
+
+test("queue liveness, Ashby: absent from a complete, well-formed listing is closed; present is open", async () => {
+  // The board still holds two other postings, not this one.
+  assert.equal(await checkPosting(ok({ jobs: [{ id: "aaaaaaaa-0000-0000-0000-000000000001" }, { id: "aaaaaaaa-0000-0000-0000-000000000002" }] }), "ashby", "https://x", CURSOR_ID), "closed");
+  // Present, even unlisted: the posting exists, so it is not closed.
+  assert.equal(await checkPosting(ok({ jobs: [{ id: CURSOR_ID, isListed: false }] }), "ashby", "https://x", CURSOR_ID), "open");
+});
+
+test("queue liveness, Ashby: an empty, malformed or missing listing is unknown, never closed", async () => {
+  // An empty board is what a truncated or broken answer looks like: never evidence.
+  assert.equal(await checkPosting(ok({ jobs: [] }), "ashby", "https://x", CURSOR_ID), "unknown");
+  // No jobs array.
+  assert.equal(await checkPosting(ok({ apiVersion: "1" }), "ashby", "https://x", CURSOR_ID), "unknown");
+  // One entry without a string id: the listing cannot be trusted to be complete.
+  assert.equal(await checkPosting(ok({ jobs: [{ id: "aaaaaaaa-0000-0000-0000-000000000001" }, { title: "no id" }] }), "ashby", "https://x", CURSOR_ID), "unknown");
+  // A 404 for the BOARD says the board moved, not that this posting closed.
+  assert.equal(await checkPosting(status(404), "ashby", "https://x", CURSOR_ID), "unknown");
+  // No id to look for.
+  assert.equal(await checkPosting(ok({ jobs: [{ id: "aaaaaaaa-0000-0000-0000-000000000001" }] }), "ashby", "https://x", null), "unknown");
 });

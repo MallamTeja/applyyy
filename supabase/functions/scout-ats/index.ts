@@ -734,7 +734,8 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
           // Rows the posting endpoint confirmed closed.
           const closedIds: string[] = [];
           for (const job of queueCandidates(snapshot, polledFingerprints, plan.ids)) {
-            // The provider's own endpoint, or null (Ashby, a malformed id): cannot confirm, skip.
+            // The provider's own endpoint (Ashby: its board listing), or null (another provider, a
+            // malformed id): cannot confirm, skip.
             const url = postingCheckUrl(board.ats_provider, board.board_token, job);
             // No endpoint: the 14-day path still applies.
             if (url === null) continue;
@@ -742,8 +743,9 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
             if (queueChecksLeft <= 0) break;
             // One request spent.
             queueChecksLeft -= 1;
-            // The robots-gated GET, the same transport the board poll used.
-            if ((await checkPosting((u) => fetchBoard(u), board.ats_provider, url)) === "closed") closedIds.push(job.id);
+            // The robots-gated GET, the same transport the board poll used; the id is what an Ashby
+            // listing is searched for.
+            if ((await checkPosting((u) => fetchBoard(u), board.ats_provider, url, job.ats_job_id)) === "closed") closedIds.push(job.id);
           }
           if (closedIds.length > 0) {
             // Same scoping as the planner's mark: owner, ids, and only rows still live.
