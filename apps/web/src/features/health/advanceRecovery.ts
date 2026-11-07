@@ -43,7 +43,8 @@ export interface RecoveryClient {
 /* The screen a move was made from, written into the append-only event log. A CLOSED union and a
    REQUIRED field (2026-11-05): the log cannot be corrected later, so a third screen must name itself
    rather than silently inherit 'health_recovery', which is how the Manual apply card nearly would have. */
-export type RecoverySource = 'health_recovery' | 'manual_apply';
+// 'manual_apply_reopen' (2026-11-07): the Manual apply "Left your queue" Re-open button, so the log tells it apart from a card's own resolve.
+export type RecoverySource = 'health_recovery' | 'manual_apply' | 'manual_apply_reopen';
 
 /* One requested move, everything the RPC and the read-back need. */
 export interface RecoveryMove {

@@ -17,7 +17,12 @@
  * to those two by kitResolveMoves. A card at `applying` has none: the worker owns that row. A card in a
  * manual-action lane (needs_verification, blocked_needs_human) has them too since 2026-11-07, and the
  * "After you apply" lane queues left this page: two sets of buttons for one row would mean two lock owners
- * that cannot see each other's moves. Those queues, with each row's cause and receipt, stay on System health. */
+ * that cannot see each other's moves. Those queues, with each row's cause and receipt, stay on System health.
+ *
+ * LEFT YOUR QUEUE (2026-11-07): below the cards, a collapsed audit list of approved jobs that left the queue
+ * without being applied (leftQueue.ts reads it, LeftQueueSection.tsx draws it). Its one move, Re-open
+ * (failed -> needs_verification), is a second useRecoveryMoves logged as 'manual_apply_reopen'. Its rows are
+ * never cards (no card status is in it), so each row still has one lock owner on this page. */
 
 // State for the read, the per-field copy feedback and the resume download.
 import { useCallback, useEffect, useState } from 'react';
@@ -52,6 +57,12 @@ import { pressPreview } from './previewToggle';
 import { choiceView } from './fieldChoices';
 // Type only: one row.
 import type { ManualApplyRow } from './manualApplyData';
+// The "Left your queue" read and its one status rule (failed -> needs_verification), owned by the data module.
+import { loadLeftQueue, reopenTarget } from './leftQueue';
+// Type only: the section's three read states.
+import type { LeftQueueRead } from './leftQueue';
+// The pure section view: everything it shows and does arrives as props from this page.
+import { LeftQueueSection } from './LeftQueueSection';
 // The recovery queues' table styles, reused rather than copied.
 import '../health/health.css';
 // This page's own styles.
@@ -411,13 +422,30 @@ export function ManualApplyPage(): ReactElement {
       setRead({ kind: 'error', message: 'The manual-apply list could not be read.' });
     }
   }, []);
+  // The "Left your queue" read, separate from the cards' so one failing read never blanks the other.
+  const [leftRead, setLeftRead] = useState<LeftQueueRead>({ kind: 'loading' });
+  // One read of the section; loadLeftQueue reports failures as { error }, the catch covers a throwing client.
+  const loadLeft = useCallback(async () => {
+    // The two reads plus the parse, or the error they hit.
+    const result = await loadLeftQueue().catch(() => ({ error: 'The left-queue jobs could not be read.' }));
+    // Shown either way: an unreadable audit trail says so instead of reading as empty.
+    setLeftRead('error' in result ? { kind: 'error', message: result.error } : { kind: 'ready', rows: result.rows });
+  }, []);
+  // Both reads together: a card's "Failed / skip" lands the row in the section, and a Re-open brings it back
+  // as a card, so after any move both lists must show what is stored.
+  const loadAll = useCallback(async () => {
+    // Independent reads, run in parallel; neither throws.
+    await Promise.all([load(), loadLeft()]);
+  }, [load, loadLeft]);
   // The card resolves: the System health locks, strip and write; each move re-reads the page so a resolved card leaves.
-  const { busy, frozen, notes, move } = useRecoveryMoves(load, 'manual_apply');
+  const { busy, frozen, notes, move } = useRecoveryMoves(loadAll, 'manual_apply');
+  // The section's Re-open: the same write path, logged under its own source so the event log tells it apart.
+  const reopen = useRecoveryMoves(loadAll, 'manual_apply_reopen');
   // Read on mount.
   useEffect(() => {
-    // load never throws.
-    void load();
-  }, [load]);
+    // loadAll never throws.
+    void loadAll();
+  }, [loadAll]);
 
   return (
     /* The page body. */
@@ -457,6 +485,21 @@ export function ManualApplyPage(): ReactElement {
         {/* Kits land a few minutes after approve; this re-reads rows and kits without a page reload. */}
         Waiting on a kit? <button type="button" className="kit-resume__button" onClick={() => void load()}>Refresh kits</button>
       </p>
+      {/* What each Re-open did, beside the section it was clicked in; always mounted so the first line is announced. */}
+      <RecoveryNotes notes={reopen.notes} />
+      {/* Approved jobs that left the queue, collapsed; its Re-open moves failed -> needs_verification only. */}
+      <LeftQueueSection
+        /* Loading, error or the rows. */
+        read={leftRead}
+        /* In flight or frozen locks the button, as on the cards. */
+        locked={(id) => reopen.busy.has(id) || reopen.frozen.has(id)}
+        /* Frozen alone adds the reload sentence. */
+        frozen={(id) => reopen.frozen.has(id)}
+        /* The data module's rule, checked against the graph; the view owns none. */
+        reopenTarget={reopenTarget}
+        /* Called only from the inline confirm's Confirm; from is the row's own status, never assumed. */
+        onReopen={(row, to) => void reopen.move(row, row.status, to)}
+      />
     </div>
   );
 }
