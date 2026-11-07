@@ -1038,3 +1038,118 @@ test("ref_path: a summary finding's ref_path is 'summary'", () => {
   // Every finding here is on the summary, keyed the page's way.
   assert.deepEqual(outcome.findings.map((f) => f.ref_path), ["summary"]);
 });
+
+// ============================================================================
+// Skill tied to its entry (Teja ruling 2026-11-07 ~22:10 IST: "flag it for review")
+// ============================================================================
+// The validator lets any master skill appear in any bullet (skillTokens), so "built X using AWS" passed
+// even where that project never used AWS. The master has no per-entry skills field; an entry's tie is the
+// text of its own master bullets (live master v24 measured: 0 of 12 rows flag, 329 terms checked).
+
+// The clean resume with its one experience bullet rewritten.
+function resumeWithExperienceBullet(text: string): ResolvedResume {
+  // A deep copy, so no other test sees the rewrite.
+  const resume = structuredClone(createCleanResume()) as { experience: { bullets: { text: string }[] }[] } & ResolvedResume;
+  // b-exp-1, rendered at experience[0].bullets[0].
+  resume.experience[0].bullets[0].text = text;
+  // Typed back.
+  return resume;
+}
+// The findings this check produces, told apart from other unfaithful_rewording findings by their own words.
+const untiedFindings = (findings: readonly { kind: string; reason: string }[]) => findings.filter((f) => f.reason.includes("never ties to"));
+
+// THE RED-ON-REVERT TEST: remove the entry-tie check in detector.ts and this goes red.
+test("skill tie: a master skill in a bullet whose entry never mentions it is a finding naming the skill and the entry", () => {
+  // React is a master skill, but only the Portfolio Site project mentions it; the Event Cell job does not.
+  const outcome = auditApplication(TEST_MASTER, resumeWithExperienceBullet("Built a REST API with Express and Node.js using React for a college event portal, handling 500 users"), null);
+  // Exactly one such finding, on the bullet.
+  assert.deepEqual(untiedFindings(outcome.findings).map((f) => [f.kind, (f as { path: string }).path]), [["unfaithful_rewording", "experience[0].bullets[0]"]]);
+  // It names the skill and the entry, so Teja knows what to remove or confirm.
+  assert.match(untiedFindings(outcome.findings)[0].reason, /never ties to Event Cell - Backend Intern: React\./);
+  // The row goes to individual review.
+  assert.equal(outcome.status, "audit_flagged");
+});
+
+// Control: the same skill in the entry that does mention it passes (the clean project bullet names React).
+test("skill tie control: React in the Portfolio Site project, whose master bullet names React, is clean", () => {
+  // The untouched clean resume: the project bullet says React and its master bullet does too.
+  const outcome = auditApplication(TEST_MASTER, createCleanResume(), null);
+  // No finding at all.
+  assert.deepEqual(outcome.findings, []);
+});
+
+// Punctuation: "NodeJS" in the tailored bullet is the same term as the master's "Node.js".
+test("skill tie control: NodeJS and Node.js are one term, so a respelling is not an untied skill", () => {
+  // The master bullet says "Node.js"; the tailored bullet respells it.
+  const outcome = auditApplication(TEST_MASTER, resumeWithExperienceBullet("Built a REST API with Express and NodeJS for a college event portal, handling 500 users"), null);
+  // Not reported as untied (another rule may still question the spelling; that is not this check).
+  assert.deepEqual(untiedFindings(outcome.findings), []);
+});
+
+// Punctuation: C++ is matched as a whole term, and a master "C" never ties a "C++".
+test("skill tie: C++ in a bullet whose entry says only C is untied; the same entry saying C++ is tied", () => {
+  // A master whose job bullet says C, with C++ as a master skill.
+  const withC = masterWithBulletText("Built a REST API with Express and Node.js in C for a college event portal, handling 500 users");
+  // C++ added as a master skill, so it is a skill the validator would let into any bullet.
+  const master = { ...withC, skills: [...withC.skills, { id: "s-cpp", name: "C++", category: "Languages" }] } as MasterProfile;
+  // The tailored bullet claims C++.
+  const claimsCpp = resumeWithExperienceBullet("Built a REST API with Express and Node.js in C++ for a college event portal, handling 500 users");
+  // Flagged, naming C++.
+  assert.match(untiedFindings(auditApplication(master, claimsCpp, null).findings)[0]?.reason ?? "", /: C\+\+\./);
+  // Positive control: when the entry's master bullet says C++, the same bullet is tied.
+  const withCpp = { ...masterWithBulletText("Built a REST API with Express and Node.js in C++ for a college event portal, handling 500 users"), skills: master.skills } as MasterProfile;
+  // No untied finding.
+  assert.deepEqual(untiedFindings(auditApplication(withCpp, claimsCpp, null).findings), []);
+});
+
+// ============================================================================
+// Summary words (pending P1 #7a, 2026-11-07)
+// ============================================================================
+// D4 checks the summary's numbers only. Its skill and technology words must also exist in the master.
+
+// The clean resume with a different printed summary.
+const resumeWithSummary = (summary: string): ResolvedResume => ({ ...createCleanResume(), summary });
+// This check's findings, told apart from D4's by their own words.
+const unknownSummaryFindings = (findings: readonly { kind: string; reason: string }[]) => findings.filter((f) => f.reason.includes("never mentions"));
+
+// THE RED-ON-REVERT TEST: remove the summary-words check in detector.ts and this goes red.
+test("summary words: a technology the master never mentions is a summary_unsupported finding naming it", () => {
+  // Kubernetes is in no skill, bullet or summary of the master.
+  const outcome = auditApplication(TEST_MASTER, resumeWithSummary("Backend engineer experienced with Node.js, Express and Kubernetes."), createCleanTailorRefs());
+  // One finding on the summary, of the summary's kind.
+  assert.deepEqual(unknownSummaryFindings(outcome.findings).map((f) => [f.kind, (f as { path: string }).path]), [["summary_unsupported", "summary"]]);
+  // Naming Kubernetes, and not the words the master does state.
+  assert.match(unknownSummaryFindings(outcome.findings)[0].reason, /never mentions: Kubernetes$/);
+  // The row goes to individual review.
+  assert.equal(outcome.status, "audit_flagged");
+});
+
+// Fail closed: with no tailor refs, D4 is skipped, but this check still runs.
+test("summary words: with no tailor refs the check still runs (fails closed, never skipped)", () => {
+  // The three-argument call with null refs.
+  const outcome = auditApplication(TEST_MASTER, resumeWithSummary("Backend engineer experienced with Node.js and Kubernetes."), null);
+  // Still flagged.
+  assert.equal(unknownSummaryFindings(outcome.findings).length, 1);
+});
+
+// Variants: a word in the PICKED variant's paragraph passes; the same word in an unpicked variant does not.
+test("summary words: the picked variant's own paragraph vouches for its words; an unpicked one does not", () => {
+  // A master with one variant that mentions Kubernetes.
+  const master = { ...TEST_MASTER, summary_variants: [{ id: "variant-ops", label: "Ops", headline: "Platform Engineer", summary: { id: "summary-ops", text: "Platform engineer running Kubernetes clusters." } }] } as MasterProfile;
+  // The summary the tailor printed.
+  const resume = resumeWithSummary("Platform engineer running Kubernetes clusters.");
+  // Picked: the variant's words are the owner's own.
+  const picked = { ...createCleanTailorRefs(), summary_variant: "variant-ops", summary: { text: "Platform engineer running Kubernetes clusters.", refs: ["summary-ops"] } } as TailoredProfile;
+  // No unknown-word finding.
+  assert.deepEqual(unknownSummaryFindings(auditApplication(master, resume, picked).findings), []);
+  // Not picked: Kubernetes is unknown again.
+  assert.equal(unknownSummaryFindings(auditApplication(master, resume, createCleanTailorRefs()).findings).length, 1);
+});
+
+// Control: the clean summary names only words the master has, including the punctuated Node.js.
+test("summary words control: Node.js and Express, both in the master, give no finding", () => {
+  // The clean resume's own summary.
+  const outcome = auditApplication(TEST_MASTER, createCleanResume(), createCleanTailorRefs());
+  // Clean.
+  assert.deepEqual(outcome.findings, []);
+});
