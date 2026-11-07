@@ -10,6 +10,7 @@
   "scripts": {
     "apply": "node src/cli/apply.ts",
     "assist": "node src/cli/assist.ts",
+    "rehearse": "node src/cli/rehearse-assist.ts",
     "run-one": "node src/cli/run-one.ts",
     "keepalive":"node src/cli/keepalive.ts",
     "scout": "node src/cli/scout.ts",
