@@ -32,24 +32,38 @@ export interface TypographyStep {
   readonly gapScale: number;
   // The @page margin in mm, all four sides.
   readonly pageMarginMm: number;
+  // The summary paragraph's top and bottom margin in em (the browser default <p> margin is 1em).
+  // 1 on the original rungs, so their CSS (and so their rendered bytes) is unchanged.
+  readonly paragraphEm: number;
 }
 
 /**
  * THE LADDER, widest first. Step 0 MUST equal print-styles.ts exactly: it adds no CSS, so a
  * resume that already fits renders byte-identical to before this module existed (the golden
  * fixture test proves it). The last rung is the READABLE MINIMUM, stated here once:
- * body 9.5pt (10.5 × 0.905), line-height 1.25, page margin 10mm. Below that a printed
- * resume reads as small print, and ATS text extraction starts to degrade.
+ * body 9.5pt (10.5 × 0.905) and never smaller, line-height 1.15, page margin 7mm, summary
+ * paragraph margin 0.3em. Below that a printed resume reads as small print, and a margin
+ * under ~7mm reaches the unprintable edge of ordinary printers.
+ *
+ * Rungs 4-5 were added 2026-11-08: two live rows (Tether 04d5c6e4, L&T 7890ff1b) were 12-19%
+ * over at rung 3 with every content floor reached. Teja's rule is layout before content, and the
+ * body font may not go below 9.5pt, so the dense rungs tighten only leading, gaps, margins and
+ * the summary's paragraph margin. No multi-column skills: a column is exactly what this template
+ * forbids for ATS reading order (print-styles.ts, .resume).
  */
 export const TYPOGRAPHY_LADDER: readonly TypographyStep[] = [
   // Today's stylesheet, untouched.
-  { fontScale: 1, lineHeight: 1.38, gapScale: 1, pageMarginMm: 14 },
+  { fontScale: 1, lineHeight: 1.38, gapScale: 1, pageMarginMm: 14, paragraphEm: 1 },
   // Air out of the leading and gaps first: the cheapest change a reader notices least.
-  { fontScale: 1, lineHeight: 1.3, gapScale: 0.8, pageMarginMm: 12 },
+  { fontScale: 1, lineHeight: 1.3, gapScale: 0.8, pageMarginMm: 12, paragraphEm: 1 },
   // Then a half point off the type.
-  { fontScale: 0.952, lineHeight: 1.28, gapScale: 0.7, pageMarginMm: 11 },
-  // The readable minimum. Nothing renders smaller than this.
-  { fontScale: 0.905, lineHeight: 1.25, gapScale: 0.6, pageMarginMm: 10 },
+  { fontScale: 0.952, lineHeight: 1.28, gapScale: 0.7, pageMarginMm: 11, paragraphEm: 1 },
+  // The old minimum (until 2026-11-08): 9.5pt body.
+  { fontScale: 0.905, lineHeight: 1.25, gapScale: 0.6, pageMarginMm: 10, paragraphEm: 1 },
+  // Dense: tighter leading and gaps, 8mm margin, the summary's paragraph margin halved.
+  { fontScale: 0.905, lineHeight: 1.18, gapScale: 0.4, pageMarginMm: 8, paragraphEm: 0.5 },
+  // The readable minimum. Nothing renders denser than this.
+  { fontScale: 0.905, lineHeight: 1.15, gapScale: 0.3, pageMarginMm: 7, paragraphEm: 0.3 },
 ];
 
 // A4 in points (210 × 297 mm), the paper @page declares.
@@ -330,7 +344,8 @@ export function flowHeight(flow: readonly FlowItem[], step: TypographyStep): num
     // A margin joins the pending run.
     if (item.kind === 'margin') {
       // mm scaled by the step's gaps, or em of the body font (the <p> default).
-      const v = item.bodyEm !== undefined ? item.bodyEm * STYLE.body.size * step.fontScale : item.mm * MM * step.gapScale;
+      // (the <p> margin is scaled by the rung's paragraphEm: 1, the browser default, on the original rungs).
+      const v = item.bodyEm !== undefined ? item.bodyEm * step.paragraphEm * STYLE.body.size * step.fontScale : item.mm * MM * step.gapScale;
       // Collapse.
       pending = Math.max(pending, v);
       continue;
@@ -413,7 +428,8 @@ body { font-size: ${pt(10.5)}; line-height: ${s.lineHeight}; }
 .resume__bullet { margin: 0 0 ${mm(0.8)} 0; }
 .resume__skill-group { margin: 0 0 ${mm(1)} 0; }
 .resume__entry-detail { font-size: ${pt(10)}; margin: ${mm(0.6)} 0 0 0; }
-`;
+${s.paragraphEm === 1 ? '' : `.resume__summary { margin: ${s.paragraphEm}em 0; }
+`}`;
 }
 
 /** The <article> of a rendered document: the part that is laid out on the page. */
