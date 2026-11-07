@@ -12,7 +12,9 @@ import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 import { haltedByKillSwitch, planScoutRunClose } from "./gate.ts";
 // The board fetch, through the robots-gated shared transport (111791c closed every
 // httpFetch path; this import closes the one bare `fetch(` that remained here).
-import { fetchBoard, fetchPage } from "./poll-fetch.ts";
+import { fetchBoard } from "./poll-fetch.ts";
+// The SSRF-guarded posting-page fetch for feed liveness; Deno-only, so kept out of poll-fetch.ts.
+import { fetchPage } from "./page-fetch.ts";
 // Feed liveness (2026-11-07): in-flight rows with no ATS are retired when their own page says 404/410.
 import { feedApplicationIds, probeFeedRows, FEED_LIVENESS_CAP, FEED_LIVENESS_PROVIDERS, FEED_LIVENESS_STATUSES, type FeedLivenessRow } from "../_shared/scout/feed-liveness.ts";
 // The adapters, the row builder, and the board-read rules: `collectBoardPages` reads a
