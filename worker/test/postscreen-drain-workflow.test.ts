@@ -50,7 +50,7 @@ const script = drainScript(drain);
 // gate ends at once: a page that reads 0 rows ends its stage before the pacing sleep.
 const EMPTY_PAGES = {
   // matcher/index.ts: rows_in plus the four advance counters and failures.
-  matcher: { status: 'succeeded', rows_in: 0, scored: 0, dropped: 0, tech_gate_dropped: 0, failed: 0, failures: [] },
+  matcher: { status: 'succeeded', rows_in: 0, scored: 0, dropped: 0, pre_gate_dropped: 0, failed: 0, failures: [] },
   // tailor/index.ts: tailored, refused, skipped, failures and (since 2026-11-05) deferred.
   tailor: { status: 'succeeded', tailored: 0, refused: 0, skipped: [], failures: [], deferred: 0 },
   // auditor/index.ts: audited, resumed, failed and failures.
@@ -69,7 +69,7 @@ function okPage(body: Record<string, unknown>): FakePage {
 /** A matcher page that read `rowsIn` rows and scored all of them (`errored` failures besides). */
 function matcherPage(rowsIn: number, errored = 0): FakePage {
   // rows_in is what the drain reads as `processed`; scored keeps the page off the stall cap.
-  return okPage({ status: 'succeeded', rows_in: rowsIn, scored: rowsIn - errored, dropped: 0, tech_gate_dropped: 0, failed: 0, failures: Array.from({ length: errored }, (_, i) => ({ applicationId: `row-${i}`, error: 'gemini 429' })) });
+  return okPage({ status: 'succeeded', rows_in: rowsIn, scored: rowsIn - errored, dropped: 0, pre_gate_dropped: 0, failed: 0, failures: Array.from({ length: errored }, (_, i) => ({ applicationId: `row-${i}`, error: 'gemini 429' })) });
 }
 
 /**
@@ -282,7 +282,7 @@ describe('postscreen-drain.yml page loop', () => {
     // A soft-200 platform page is not a short page either.
     ['non-JSON 200', { status: 200, body: '<html>timeout</html>' }, 'matcher: non-JSON response'],
     // A body without rows_in is a changed shape, never 0 rows.
-    ['missing rows_in', { status: 200, body: JSON.stringify({ status: 'succeeded', scored: 0, dropped: 0, tech_gate_dropped: 0, failed: 0, failures: [] }) }, 'matcher: rows_in is missing'],
+    ['missing rows_in', { status: 200, body: JSON.stringify({ status: 'succeeded', scored: 0, dropped: 0, pre_gate_dropped: 0, failed: 0, failures: [] }) }, 'matcher: rows_in is missing'],
   ])('a matcher page with %s stops the run red, never "stage done"', (_label, page, reason) => {
     // The bad answer is the matcher's first page.
     const run = runDrain(ELIGIBLE, '', { matcher: [page] });

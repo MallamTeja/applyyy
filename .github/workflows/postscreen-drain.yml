@@ -334,7 +334,7 @@ jobs:
               // by the tech pre-gate, or moved to failed. skipped_stale (another run's claim)
               // is neither moved nor an error, so it counts toward processed only.
               const advanced = requireCount(body, 'scored', stage) + requireCount(body, 'dropped', stage)
-                + requireCount(body, 'tech_gate_dropped', stage) + requireCount(body, 'failed', stage);
+                + requireCount(body, 'pre_gate_dropped', stage) + requireCount(body, 'failed', stage);
               // The rows the matcher read this page. dry: rows_in is the select's own length.
               return { processed: requireCount(body, 'rows_in', stage), advanced, errored, dry: true, summary: body.status ?? 'ok' };
             }

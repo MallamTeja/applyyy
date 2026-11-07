@@ -47,8 +47,8 @@ const INCIDENT_PAGE = {
   // Rows judged on this page.
   rows_in: 500,
   // The pre-gate's drops, printed as dropped=.
-  tech_gate_dropped: 71,
-  // The same drops by code, which must add up to tech_gate_dropped.
+  pre_gate_dropped: 71,
+  // The same drops by code, which must add up to pre_gate_dropped.
   pre_gate_dropped_by_code: { work_auth: 1, tech_gate: 70 },
   // The count the old log never printed.
   failed: 358,
@@ -138,9 +138,9 @@ describe('pregate-sweep.yml log', () => {
   // Totals are summed across pages, and by-code maps are merged key by key.
   test('CLEAN sums failed and the by-code drops across pages', () => {
     // A first page that is not the end of the backlog.
-    const first = { ...INCIDENT_PAGE, done: false, next_after_id: 'ba1e5d1d-84a5-4cfb-b5a6-e5a2943bf154', failed: 8, tech_gate_dropped: 3, pre_gate_dropped_by_code: { tech_gate: 3 } };
+    const first = { ...INCIDENT_PAGE, done: false, next_after_id: 'ba1e5d1d-84a5-4cfb-b5a6-e5a2943bf154', failed: 8, pre_gate_dropped: 3, pre_gate_dropped_by_code: { tech_gate: 3 } };
     // A last page with a different mix and no failures.
-    const last = { ...INCIDENT_PAGE, failed: 0, error_detail: null, tech_gate_dropped: 2, pre_gate_dropped_by_code: { work_auth: 2 } };
+    const last = { ...INCIDENT_PAGE, failed: 0, error_detail: null, pre_gate_dropped: 2, pre_gate_dropped_by_code: { work_auth: 2 } };
     // Both pages, in order.
     const run = runSweep([first, last]);
     // Still clean.

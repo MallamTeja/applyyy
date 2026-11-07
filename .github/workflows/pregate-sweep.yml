@@ -2,7 +2,7 @@
 # passed_filters backlog, page by page, on demand.
 # Exists because the app-user credentials live only in this repo's Actions secrets
 # (set 2026-09-11 for apply.yml), not on the operator's PC; same reason run-one.yml exists.
-# The sweep DROPS rows (tech_gate_dropped) and drops are one-way, so every abort below
+# The sweep DROPS rows (pre_gate_dropped) and drops are one-way, so every abort below
 # fails CLOSED: any response we cannot read exactly stops the run rather than paging on.
 # The sweep can also move rows to `failed` (an unusable job, e.g. no description). Those
 # are printed as failed= with the matcher's reasons, and do not block CLEAN: a failed row is
@@ -173,7 +173,7 @@ jobs:
             if (typeof body.done !== 'boolean') abort('done is missing or not a boolean');
             // Every counter must be a non-negative integer. `failed` is among them: a body
             // without it must stop the run, never be read as "nothing failed".
-            for (const key of ['unjudged_errors', 'gemini_calls', 'rows_in', 'tech_gate_dropped', 'pregate_survivors', 'failed']) {
+            for (const key of ['unjudged_errors', 'gemini_calls', 'rows_in', 'pre_gate_dropped', 'pregate_survivors', 'failed']) {
               // Number.isInteger refuses NaN, strings and floats in one check.
               if (!Number.isInteger(body[key]) || body[key] < 0) abort(`${key} is missing or not a non-negative integer`);
             }
@@ -242,7 +242,7 @@ jobs:
               // Summed per pass; this is the number the retry decision reads.
               passErrors += page.unjudged_errors;
               // Run totals for the summary.
-              totalDropped += page.tech_gate_dropped;
+              totalDropped += page.pre_gate_dropped;
               // Same.
               totalRowsIn += page.rows_in;
               // Same; failed rows never enter passErrors, because a retry cannot change them.
@@ -250,7 +250,7 @@ jobs:
               // Each code's count added to the run's, so the summary splits drops by cause too.
               for (const [code, n] of Object.entries(page.pre_gate_dropped_by_code)) totalByCode[code] = (totalByCode[code] ?? 0) + n;
               // One line per page in the log: counts and cursor only, never a secret.
-              console.log(`pass ${pass} page ${pages}: after_id=${afterId ?? '-'} rows_in=${page.rows_in} dropped=${page.tech_gate_dropped} failed=${page.failed} by_code=${byCodeText(page.pre_gate_dropped_by_code)} survivors=${page.pregate_survivors} unjudged_errors=${page.unjudged_errors} gemini_calls=${page.gemini_calls} status=${page.status} done=${page.done} next_after_id=${page.next_after_id ?? 'null'}`);
+              console.log(`pass ${pass} page ${pages}: after_id=${afterId ?? '-'} rows_in=${page.rows_in} dropped=${page.pre_gate_dropped} failed=${page.failed} by_code=${byCodeText(page.pre_gate_dropped_by_code)} survivors=${page.pregate_survivors} unjudged_errors=${page.unjudged_errors} gemini_calls=${page.gemini_calls} status=${page.status} done=${page.done} next_after_id=${page.next_after_id ?? 'null'}`);
               // The count says how many failed; the matcher's error_detail says why (index.ts:811
               // lists the distinct reasons). Bounded, since it is free text from the response.
               if (page.failed > 0) console.log(`pass ${pass} page ${pages} failed_detail: ${String(page.error_detail ?? 'none').slice(0, 300)}`);
