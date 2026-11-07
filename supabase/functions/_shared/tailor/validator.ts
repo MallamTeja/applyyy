@@ -61,7 +61,13 @@ export type TailorViolation =
   // is a defect in the profile that makes the honesty check unable to reach a verdict
   // at all. Reported distinctly for exactly that reason: the remedy is to fix the
   // master, not to re-run the Tailor.
-  | { readonly kind: "ambiguous_master_ids"; readonly ids: readonly NodeId[] };
+  | { readonly kind: "ambiguous_master_ids"; readonly ids: readonly NodeId[] }
+  // The one-page rule (Teja, 2026-11-07): the resume is over one A4 page at the readable-minimum
+  // typography even after page-trim.ts removed everything above its floors. `blockedBy` names the
+  // floors that held, so the fix (lower a floor, or shorten the master) is readable from the event.
+  // Produced by the tailorer, not by validateTailoredProfile: the validator answers "is it honest",
+  // and a two-page resume is honest but still must not be stored.
+  | { readonly kind: "page_overflow"; readonly blockedBy: readonly string[] };
 
 // Success carries the render input; failure carries every reason. A union rather than
 // a throw, because the caller must persist the violations for the dashboard rather

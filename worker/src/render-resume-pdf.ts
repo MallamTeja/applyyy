@@ -96,6 +96,18 @@ export async function renderResumePdf(input: RenderResumePdfInput): Promise<Rend
   // footer had been dealt with.
   const normalised = withFixedPdfTimestamps(bytes);
 
+  // THE ONE-PAGE GATE (Teja, 2026-11-07: "the tailored resume and the resumes after applying
+  // edits need to be in 1 page only, this is rule"). The tailor and the web edit gate keep a
+  // resume on one page by MODEL (@applyy/resume-template page-fit.ts); this is the real
+  // renderer's answer, on the machine that is about to send it, with whatever font that
+  // machine resolved. Here, in the one function all four render sites call (apply-one,
+  // apply-kit, assisted-submit, rehearse), so no path can attach a two-page PDF. It throws
+  // like a stale schema does: apply-one renders BEFORE approved -> applying, so the row stays
+  // approved and nothing is sent.
+  const pages = await countPdfPages(normalised);
+  // Exactly one: zero is a broken render, more is the rule broken. Both refuse.
+  if (pages !== 1) throw new ResumeNotOnePageError(pages);
+
   // Hashed here, over the exact buffer that will be uploaded and attached, so
   // the digest cannot describe a different serialisation than the one sent.
   const sha256 = createHash('sha256').update(normalised).digest('hex');
@@ -181,4 +193,42 @@ function indexOfAscii(haystack: Uint8Array, needle: string): number {
   }
 
   return -1;
+}
+
+/** The rendered resume is not exactly one page, so it must not be sent (the one-page rule). */
+export class ResumeNotOnePageError extends Error {
+  // The real page count, carried so the log line and a test can say how far over it is.
+  readonly pages: number;
+  // Built from the count alone; the message is what an operator reads in the run log.
+  constructor(pages: number) {
+    // Plain words, and where to fix it: the approval card is where content is removed.
+    super(`resume renders to ${pages} pages; the one-page rule refuses to send it. Remove content in the approval card, or re-tailor.`);
+    // Named, so a catch can tell it from a render crash.
+    this.name = 'ResumeNotOnePageError';
+    // Kept for the caller.
+    this.pages = pages;
+  }
+}
+
+/**
+ * Pages in a PDF, by pdf.js: a real parser, not a byte-pattern count.
+ * Fails CLOSED: a count that is not a positive integer throws, because "unknown" must never
+ * read as "one page" (CLAUDE.md section 6).
+ */
+export async function countPdfPages(pdfBytes: Uint8Array): Promise<number> {
+  // Through a variable specifier and lazily, the same pattern ats-parse-check.ts uses: pdf.js
+  // loads once per process, on the first render, not at import time.
+  const specifier = 'pdfjs-dist/legacy/build/pdf.mjs';
+  // Only the slice of the API this needs.
+  const pdfjs = (await import(specifier)) as { getDocument(src: unknown): { promise: Promise<{ numPages: number; destroy(): Promise<void> }> } };
+  // A copy: pdf.js transfers (detaches) the buffer it is given, and these bytes are still to be hashed and sent.
+  const document = await pdfjs.getDocument({ data: new Uint8Array(pdfBytes), useSystemFonts: true }).promise;
+  // Read, then release the parser's worker-side state.
+  const pages = document.numPages;
+  // Freed whether or not the count is usable.
+  await document.destroy();
+  // The shape check: a positive integer, or this is not a count.
+  if (!Number.isInteger(pages) || pages < 1) throw new Error(`countPdfPages: pdf.js returned an unusable page count: ${String(pages)}`);
+  // The count.
+  return pages;
 }

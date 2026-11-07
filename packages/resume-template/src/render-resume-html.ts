@@ -42,7 +42,11 @@ import type {
   ResolvedResume,
   ResolvedSkill,
   TailoredSectionKind,
-} from '@applyy/shared-types';
+  // By RELATIVE path, not the bare '@applyy/shared-types' (2026-11-07): the Deno tailor now
+  // imports this renderer to ask fitsOnePage, and supabase/functions/deno.json has no entry
+  // for the bare name. A relative path resolves the same file in Node, Deno and Vite with no
+  // import-map change (which, per CLAUDE.md section 3, would need its own canary deploy).
+} from '../../shared-types/src/index.ts';
 
 // Escaping is a security boundary: bullet text is downstream of a job
 // description, which section 17 classifies as untrusted input.
@@ -51,6 +55,10 @@ import { escapeHtml, safeHref } from './escape-html.ts';
 // The stylesheet is inlined into the document so the render stays self-contained
 // and needs no network — see the reasoning in print-styles.ts.
 import { RESUME_STYLESHEET } from './print-styles.ts';
+
+// The one-page model: the article markup is measured, and the widest typography step that fits
+// one A4 page is printed (Teja, 2026-11-07: shrink the type before removing content).
+import { articleOf, flowFits, flowOf, pickStepIndex, stepStylesheet, TYPOGRAPHY_LADDER } from './page-fit.ts';
 
 /**
  * Thrown when a resume cannot be rendered honestly.
@@ -499,19 +507,26 @@ export function renderResumeHtml(resume: ResolvedResume): string {
   // A full document, not a fragment: page.pdf() needs <html> and the inlined
   // <style>, and the React preview gets the identical bytes via iframe srcdoc.
   // lang="en" helps PDF text extraction pick the right word-breaking rules.
+  // The article on its own first, because it is what the page-fit model measures: the same
+  // markup prints at every step; only the CSS differs.
+  const article = `<article class="resume">
+<h1 class="resume__name">${escapeHtml(resume.identity.full_name)}</h1>${headline}
+${renderContact(resume.identity)}
+${sections}
+</article>`;
+  // The widest step at which the article fits one page (the readable minimum when none does).
+  // Step 0 adds nothing, so a resume that already fits is byte-identical to before.
+  // No CRLF normalisation needed: the model splits text on \s+, which swallows a stray \r.
+  const stepCss = stepStylesheet(pickStepIndex(flowOf(article)));
   const document = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <title>${escapeHtml(resume.identity.full_name)} — Resume</title>
-<style>${RESUME_STYLESHEET}</style>
+<style>${RESUME_STYLESHEET}${stepCss}</style>
 </head>
 <body>
-<article class="resume">
-<h1 class="resume__name">${escapeHtml(resume.identity.full_name)}</h1>${headline}
-${renderContact(resume.identity)}
-${sections}
-</article>
+${article}
 </body>
 </html>
 `;
@@ -527,4 +542,21 @@ ${sections}
   // means the byte-for-byte guarantee does not depend on a git setting, an
   // archive extraction, or a consumer vendoring the source.
   return document.replace(/\r\n/g, '\n');
+}
+
+/**
+ * THE ONE-PAGE QUESTION, for the tailor's trimmer and the web edit gate: does this resume fit
+ * one A4 page at the readable minimum typography (the last rung of TYPOGRAPHY_LADDER)?
+ * True: renderResumeHtml prints it on one page, at the widest step that fits.
+ * False: content must go; refuse the edit, or trim.
+ * Fails CLOSED: a resume this renderer refuses (a stale schema_version) answers false,
+ * because unmeasurable is not "fits" (CLAUDE.md section 6).
+ */
+export function fitsOnePage(resume: ResolvedResume): boolean {
+  // The printed document, or nothing to measure.
+  let html: string;
+  // The renderer's own refusal is caught, never passed through as a fit.
+  try { html = renderResumeHtml(resume); } catch { return false; }
+  // Measured at the minimum rung, the last one the renderer can fall back to.
+  return flowFits(flowOf(articleOf(html)), TYPOGRAPHY_LADDER[TYPOGRAPHY_LADDER.length - 1]!);
 }

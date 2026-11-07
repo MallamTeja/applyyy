@@ -54,7 +54,7 @@ const REFS = { master_version: 7, summary: null } as unknown as TailoredProfile;
 
 // A clean verdict, ready to persist.
 // `jdKeywords` is a recognisable pair so the keyword test can assert it arrived intact.
-const TAILORED: TailorOutcome = { kind: "tailored", resume: RESUME, refs: REFS, jdKeywords: ["Go", "PostgreSQL"], dedupedRefs: [], skillsAdded: [], skillsDropped: [], skillsInvented: [], retry: null };
+const TAILORED: TailorOutcome = { kind: "tailored", resume: RESUME, refs: REFS, jdKeywords: ["Go", "PostgreSQL"], dedupedRefs: [], skillsAdded: [], skillsDropped: [], skillsInvented: [], retry: null, pageFitTrimmed: [] };
 
 // One recorded call against the database seam, in the order it was made.
 interface RecordedCall {
@@ -363,4 +363,18 @@ test("D1: invented skill refs are recorded in the tailored event as skills_inven
   // The status move's detail names it.
   const args = calls.at(-1)!.payload.args as Record<string, unknown>;
   assert.deepEqual(args.p_detail, { reason: "tailored_profile_written", skills_invented_dropped: ["skill_openai"] });
+});
+
+// The one-page rule (2026-11-07): what was trimmed to fit one page reaches the event, never silent. Red on revert.
+test("one-page: trimmed bullets are recorded in the tailored event as page_fit_trimmed", async () => {
+  // A verdict whose tailoring dropped one bullet to fit the page.
+  const { client, calls } = recordingClient();
+  // The trim item exactly as page-trim.ts produces it.
+  const item = { step: "weakest_bullet", ref: "b_x", text: "did a thing" } as const;
+  // Persisted.
+  await persistTailorOutcome(client, APPLICATION_ID, { ...TAILORED, pageFitTrimmed: [item] } as TailorOutcome);
+  // The status move's detail names it, with the printed text.
+  const args = calls.at(-1)!.payload.args as Record<string, unknown>;
+  // Only the new key beside the reason.
+  assert.deepEqual(args.p_detail, { reason: "tailored_profile_written", page_fit_trimmed: [item] });
 });

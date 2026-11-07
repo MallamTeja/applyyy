@@ -21,7 +21,11 @@
 // The renderer itself, plus its error type so callers can distinguish a contract
 // violation (a stale pinned snapshot) from an ordinary bug and fail the
 // application loudly instead of submitting a malformed PDF.
-export { renderResumeHtml, ResumeRenderError } from './render-resume-html.ts';
+// fitsOnePage: the one-page rule's question, asked by the tailor and the web edit gate.
+export { renderResumeHtml, ResumeRenderError, fitsOnePage } from './render-resume-html.ts';
+
+// The typography ladder, exported so the calibration test can render and measure every rung.
+export { TYPOGRAPHY_LADDER, stepStylesheet, flowOf, flowFits, articleOf, pickStepIndex } from './page-fit.ts';
 
 // Exported so the React preview can prove it uses the identical stylesheet
 // rather than an approximation. renderResumeHtml already inlines it; this is for

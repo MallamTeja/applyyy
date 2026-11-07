@@ -163,6 +163,9 @@ export async function persistTailorOutcome(
       ...(outcome.skillsInvented.length > 0 ? { skills_invented_dropped: outcome.skillsInvented } : {}),
       // Only when the one-shot rewrite ran.
       ...(outcome.retry !== null ? { retry: { first_attempt_violations: outcome.retry.firstViolations, rewritten_refs: outcome.retry.rewrittenRefs } } : {}),
+      // The one-page rule (2026-11-07): every bullet or certification removed to fit one page, in
+      // removal order with its printed text, so a trim is never silent. Absent when nothing went.
+      ...(outcome.pageFitTrimmed.length > 0 ? { page_fit_trimmed: outcome.pageFitTrimmed } : {}),
     },
   });
   // A failure here leaves the profile written and the status unmoved — recoverable by
