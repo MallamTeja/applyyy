@@ -140,8 +140,10 @@ test("parseAssistOps files skills under the master's own group and drops printed
   const parsed = parseAssistOps(answer, request());
   // Narrowed.
   assert.ok(parsed.ok);
-  // Only Kafka, filed under the master's spelling "Tools".
-  assert.deepEqual(parsed.ops, [{ op: "add_skill", name: "Kafka", category: "Tools" }]);
+  // Kafka, filed under the master's spelling "Tools"; gRPC's "Frameworks" is not one of the owner's groups
+  // and no group is named for its kind, so it lands in the catch-all "Tools" (2026-11-07: a group is
+  // decided, never asked for). The printed and the repeated ones stay dropped.
+  assert.deepEqual(parsed.ops, [{ op: "add_skill", name: "Kafka", category: "Tools" }, { op: "add_skill", name: "gRPC", category: "Tools" }]);
 });
 
 test("parseAssistOps caps the ops and refuses non-JSON", () => {
@@ -550,17 +552,23 @@ test("an add_skill with no name is rejected with a reason, and a name in text or
   assert.equal(rejectedFor({ op: "add_skill", id: "C", category: "Languages" })?.why, "The AI's answer did not name the skill.");
 });
 
-test("an add_skill under a group the master lacks names that group and lists at most five real ones", () => {
-  // Two groups: both listed.
-  assert.deepEqual(rejectedFor({ op: "add_skill", name: "Rust", category: "Programming" }), { what: 'Add skill "Rust"', why: '"Programming" is not one of your skill groups (Languages, Tools).' });
-  // Six groups: five listed, then an ellipsis.
+// REWRITTEN 2026-11-07 (Teja: "make everything automatic"): a group the master lacks, or no group at all,
+// used to be a rejection that asked the owner. Now the group is decided: the skill's kind, else a catch-all.
+test("an add_skill under a group the master lacks, or under none, is filed by the skill's kind, never refused", () => {
+  // Rust is a language: the owner's "Languages", whatever the model wrote.
+  assert.equal(rejectedFor({ op: "add_skill", name: "Rust", category: "Programming" }), null);
+  // The same with no group at all.
+  const parsed = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Rust" }], note: "" }), request());
+  // Filed under Languages.
+  assert.deepEqual(parsed.ok ? parsed.ops : null, [{ op: "add_skill", name: "Rust", category: "Languages" }]);
+  // Six groups, none named for a language and no catch-all: the first group, deterministically.
   const six = parseAssistRequest(body({ categories: ["A", "B", "C", "D", "E", "F"] }));
   // Valid fixture.
   assert.ok(six.ok);
-  // Capped list.
-  assert.equal(rejectedFor({ op: "add_skill", name: "Rust", category: "Programming" }, six.request)?.why, '"Programming" is not one of your skill groups (A, B, C, D, E, …).');
-  // No group at all is its own reason, not "is not one of your groups".
-  assert.equal(rejectedFor({ op: "add_skill", name: "Rust" })?.why, "The AI's answer did not say which skill group. Say which one: Languages, Tools.");
+  // Filed under "A".
+  const sixParsed = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Rust", category: "Programming" }], note: "" }), six.request);
+  // The first group.
+  assert.deepEqual(sixParsed.ok ? sixParsed.ops : null, [{ op: "add_skill", name: "Rust", category: "A" }]);
   // Already printed: named in the resume's own spelling.
   assert.deepEqual(rejectedFor({ op: "add_skill", name: "postgres", category: "Tools" }), { what: 'Add skill "postgres"', why: '"Postgres" is already on the resume.' });
 });
@@ -697,7 +705,7 @@ test("the rejected list stops at 20 while dropped keeps counting, and every labe
   const long = parseAssistOps(
     JSON.stringify({
       ops: [
-        // A near-cap name under a huge unknown group: the why lists five long groups.
+        // A near-cap name under a huge unknown group: KEPT since 2026-11-07, filed under the first group.
         { op: "add_skill", name: "n".repeat(59), category: "c".repeat(5000) },
         // A huge unprinted skill: quoted in the why, clipped.
         { op: "remove_skill", name: "r".repeat(5000) },
@@ -712,8 +720,10 @@ test("the rejected list stops at 20 while dropped keeps counting, and every labe
   );
   // Narrowed.
   assert.ok(long.ok);
-  // Four reasons.
-  assert.equal(long.rejected.length, 4);
+  // Three reasons: the unknown-group add is no longer one (it is filed, not refused).
+  assert.equal(long.rejected.length, 3);
+  // And the kept add carries a real group, never the model's 5000-character one.
+  assert.deepEqual(long.ops.map((op) => op.op === "add_skill" ? op.category : null), [`0${"g".repeat(79)}`]);
   // Each within the contract's caps.
   for (const r of long.rejected) assert.ok(r.what.length <= 120 && r.why.length <= 200, JSON.stringify(r));
 });
@@ -1016,11 +1026,12 @@ test("a past-tense claim with no 'I' is dropped from the note, like a first-pers
   // Three claim shapes the first-person filter let through, each next to a sentence that is not a claim.
   for (const claim of ["Added GCP, MySQL, Redis, MongoDB to your Tools group.", "GCP is now on your resume.", "Done.", "Those skills have been added."]) {
     // Ops all failed: the note must lead with what happened and carry no claim.
-    const parsed = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "GCP" }], note: claim + " Kafka fits Tools best." }), request());
+    // The op fails because the skill is already printed (since 2026-11-07 a missing group no longer fails one).
+    const parsed = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "postgres" }], note: claim + " Kafka fits Tools best." }), request());
     // Valid answer shape.
     assert.ok(parsed.ok);
     // The claim is gone, the honest remainder stays, and the failure leads.
-    assert.equal(parsed.note, "Nothing was changed: The AI's answer did not say which skill group. Say which one: Languages, Tools. Kafka fits Tools best.");
+    assert.equal(parsed.note, 'Nothing was changed: "Postgres" is already on the resume. Kafka fits Tools best.');
   }
 });
 
@@ -1045,4 +1056,77 @@ test("an empty note gets a one-line summary of the surviving ops, or says nothin
   assert.ok(none.ok);
   // Said in words.
   assert.equal(none.note, "No changes proposed.");
+});
+
+// ---- add_skill files a skill under the master's own group (2026-11-07, Teja 10:10 IST) ---------------
+// Live: "Add skill "Python"" and "Add skill "AWS"" each failed with "The AI's answer did not say which
+// skill group", though both are master v20 skills (Python under Languages, AWS under DevOps & Cloud). The
+// schema cannot make `category` required for one op kind, so the model may omit it; the server knows the
+// answer and must never ask the owner for it.
+
+// Master v20's groups, and two of its skills that are not on the resume.
+const V20_GROUPS = ["AI", "Languages", "Frameworks", "Databases", "DevOps & Cloud", "Machine Learning", "Backend & Systems", "Tools"];
+// What the browser sends as MASTER SKILLS NOT ON RESUME.
+const V20_AVAILABLE = [{ name: "Python", category: "Languages" }, { name: "AWS", category: "DevOps & Cloud" }, { name: "Microsoft Azure", category: "DevOps & Cloud" }];
+
+// The live request shape: the owner's ask, master v20's groups, the two unprinted master skills.
+function v20Request(): AssistRequest {
+  // Through the real validator, like every other fixture here.
+  const parsed = parseAssistRequest(body({ instruction: "use the JD and more relevant skills and skill groups", categories: V20_GROUPS, availableSkills: V20_AVAILABLE }));
+  // Valid fixture.
+  if (!parsed.ok) throw new Error(parsed.message);
+  // The request.
+  return parsed.request;
+}
+
+// The kept ops for one answer.
+function keptOps(ops: unknown[]): unknown {
+  // The real parser over the v20 request.
+  const parsed = parseAssistOps(JSON.stringify({ ops, note: "" }), v20Request());
+  // Narrowed; a refused answer is a broken fixture.
+  assert.ok(parsed.ok);
+  // Every rejection would be a "could not be done" card: there must be none.
+  assert.deepEqual(parsed.rejected, []);
+  // The ops that reach the browser.
+  return parsed.ops;
+}
+
+// The live failure, now filed. (Python and AWS also reach the right group by kind, so the master lookup's
+// red-on-revert test is the next one, where kind and master disagree.)
+test("add_skill: a master skill with no category is filed under the master's own group (live Python/AWS)", () => {
+  // Exactly the live answer: two group-less adds.
+  assert.deepEqual(keptOps([{ op: "add_skill", name: "Python" }, { op: "add_skill", name: "AWS" }]), [
+    { op: "add_skill", name: "Python", category: "Languages" },
+    { op: "add_skill", name: "AWS", category: "DevOps & Cloud" },
+  ]);
+});
+
+// THE RED-ON-REVERT TEST for the master lookup: a master skill has exactly one true group; the model's
+// guess never overrides it, and the master's spelling replaces the model's.
+test("add_skill: the master's group wins over a different group the model wrote, and the master's spelling is used", () => {
+  // A wrong group, and a spelled-out name for a master skill.
+  assert.deepEqual(keptOps([{ op: "add_skill", name: "aws", category: "Tools" }, { op: "add_skill", name: "Azure" }]), [
+    { op: "add_skill", name: "AWS", category: "DevOps & Cloud" },
+    { op: "add_skill", name: "Microsoft Azure", category: "DevOps & Cloud" },
+  ]);
+});
+
+// A skill the master does not hold still gets a group, deterministically, never a "could not do" card.
+test("add_skill: a new skill with no usable group gets a deterministic group from its kind, else Tools", () => {
+  // A known database term, a known language, and a skill no vocabulary knows; one with a group the master lacks.
+  assert.deepEqual(keptOps([{ op: "add_skill", name: "Redis" }, { op: "add_skill", name: "Kotlin", category: "Programming" }, { op: "add_skill", name: "Dagster" }]), [
+    { op: "add_skill", name: "Redis", category: "Databases" },
+    { op: "add_skill", name: "Kotlin", category: "Languages" },
+    { op: "add_skill", name: "Dagster", category: "Tools" },
+  ]);
+});
+
+// The prompt says the field is required and where its value comes from.
+test("add_skill: the system prompt makes category required and names its source", () => {
+  // The stable system text.
+  const system = buildAssistPrompt(v20Request()).systemInstruction;
+  // Required, from SKILL GROUPS, and the master's own group for a master skill.
+  assert.match(system, /add_skill ALWAYS carries "category"/);
+  // The groups themselves reach the model in the resume block.
+  assert.match(buildAssistPrompt(v20Request()).userContent, /SKILL GROUPS: AI \| Languages \| Frameworks \| Databases \| DevOps & Cloud/);
 });
