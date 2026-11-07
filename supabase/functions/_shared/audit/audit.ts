@@ -43,15 +43,19 @@ export interface AuditOutcome {
  * @param master Pinned MasterProfile from database.
  * @param resume ResolvedResume sitting in application's tailored_profile column.
  * @param tailorRefs Optional raw TailoredProfile from application's tailor_refs column.
+ * @param jobDescription The posting the row was tailored for (jobs.description_raw), or null/absent
+ *   when unknown; only the jd_keyword_dropped check reads it (P2 #17, 2026-11-07).
  * @returns AuditOutcome containing status ('audit_clean' or 'audit_flagged') and findings.
  */
 export function auditApplication(
   master: MasterProfile,
   resume: ResolvedResume,
   tailorRefs?: TailoredProfile | null,
+  // Optional so every existing caller keeps its exact behaviour; the auditor passes it.
+  jobDescription?: string | null,
 ): AuditOutcome {
-  // Execute anti-fabrication detection logic across all profile nodes
-  const findings = detectAuditFindings(master, resume, tailorRefs);
+  // Execute anti-fabrication detection logic across all profile nodes, plus the dropped-keyword check
+  const findings = detectAuditFindings(master, resume, tailorRefs, jobDescription);
 
   // Profile is clean if zero findings were detected
   const isClean = findings.length === 0;

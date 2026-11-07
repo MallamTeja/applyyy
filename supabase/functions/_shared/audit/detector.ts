@@ -34,6 +34,8 @@ import type {
   // Tailored profile shape type
   TailoredProfile,
 } from "../contracts/shared-types.ts";
+// The posting's keywords and the one word-bounded matching rule the ATS score uses (jd_keyword_dropped).
+import { extractJdKeywords, keywordAppearsIn } from "../tailor/jd-keywords.ts";
 
 /**
  * Union of legal audit finding kinds derived from AuditFinding.
@@ -283,18 +285,25 @@ export function buildMasterIndex(master: MasterProfile): MasterIndex {
  * @param master The pinned master profile.
  * @param resume The resolved tailored resume.
  * @param tailorRefs Optional raw tailored profile containing raw refs.
+ * @param jobDescription The posting, or null/absent; without it the jd_keyword_dropped check is skipped.
  * @returns Array of AuditFinding objects describing any detected discrepancies.
  */
 export function detectAuditFindings(
   master: MasterProfile,
   resume: ResolvedResume,
   tailorRefs?: TailoredProfile | null,
+  // Optional: callers before 2026-11-07 pass three arguments and keep their exact findings.
+  jobDescription?: string | null,
 ): AuditFinding[] {
   // Initialize findings accumulator array
   const findings: AuditFinding[] = [];
 
   // Step 1: Build lookup index for master profile
   const index = buildMasterIndex(master);
+
+  // The posting's keywords, read once, by the SAME vocabulary that fills selected_jd_keywords, so the
+  // finding speaks about the words the ATS score counts. No posting: nothing to keep, no check.
+  const jdKeywords = jobDescription ? extractJdKeywords(jobDescription) : [];
 
   // Step 2: Audit Skills Section
   // Loop through skills in tailored resume
@@ -480,6 +489,28 @@ export function detectAuditFindings(
               reason: `Bullet text contains ungrounded term(s) not found in master: ${ungroundedTokens.join(", ")}`,
               // Confidence score
               confidence: 0.85,
+            });
+          }
+
+          // JD KEYWORD DROPPED (P2 #17, Teja ruling A 2026-11-07): a posting keyword the PINNED master
+          // bullet has and the tailored bullet lost. keywordAppearsIn on both sides, so "Go" is not
+          // credited from "Google" and a master "C" never stands in for a posting's "C++".
+          const droppedKeywords = jdKeywords.filter((keyword) => keywordAppearsIn(keyword, masterText) && !keywordAppearsIn(keyword, bullet.text));
+
+          // One finding per bullet, naming every keyword it lost.
+          if (droppedKeywords.length > 0) {
+            // Record the dropped-keyword finding; it flags the row for individual review by design.
+            findings.push({
+              // The kind added for this check
+              kind: "jd_keyword_dropped",
+              // Bullet path
+              path: bulletPath,
+              // The tailored text, as written, so the reviewer sees what lost the word
+              claim: bullet.text,
+              // The words to put back
+              reason: `Bullet dropped posting keyword(s) the master bullet has: ${droppedKeywords.join(", ")}`,
+              // Deterministic: both sides are matched by the same rule
+              confidence: 1.0,
             });
           }
         }

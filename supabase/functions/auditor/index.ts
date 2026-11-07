@@ -402,8 +402,13 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
         continue;
       }
 
-      // Execute anti-fabrication audit against the PINNED master profile
-      const outcome = auditApplication(pinned.master, resume, tailorRefs);
+      // The posting the row was tailored for, already in the select (:224) for the pre-gate; a missing
+      // job or text skips only the jd_keyword_dropped check (P2 #17, 2026-11-07), never the audit.
+      const jobDescription = (row.jobs as unknown as AuditorJobEmbed | null)?.description_raw ?? null;
+
+      // Execute anti-fabrication audit against the PINNED master profile, with the posting for the
+      // dropped-keyword check
+      const outcome = auditApplication(pinned.master, resume, tailorRefs, jobDescription);
 
       // Step 1: Write audit findings array into applications table row
       const findingsWrite = await db

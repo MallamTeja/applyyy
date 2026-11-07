@@ -859,3 +859,65 @@ test("detectAuditFindings ignores a master_text carried in the resume", () => {
   // Named for the metric, as the master is what it was compared against.
   assert.ok(outcome.findings.some((f) => f.kind === "unfaithful_rewording" && f.reason.includes("5000")), JSON.stringify(outcome.findings));
 });
+
+// ============================================================================
+// jd_keyword_dropped (P2 #17, Teja ruling A, 2026-11-07 09:47 IST)
+// ============================================================================
+// The tailor prompt's keep rule (630d6b5) is only a hint: live row 67b979b3 lost its ONLY keyword
+// match when the model turned "AI orchestration pipelines" into "orchestration pipelines". These
+// tests pin the hard guard: a posting keyword the pinned master bullet contains, missing from the
+// tailored bullet, is a finding, so the row is flagged for individual review.
+
+// A master whose experience bullet names Kafka, so a posting asking for Kafka makes it a kept keyword.
+function masterWithBulletText(text: string): MasterProfile {
+  // A deep copy, so no other test sees the edited bullet.
+  const master = structuredClone(TEST_MASTER) as { experience: { bullets: { text: string }[] }[] } & MasterProfile;
+  // The one experience bullet the clean resume renders (b-exp-1).
+  master.experience[0].bullets[0].text = text;
+  // Typed back as the contract shape.
+  return master;
+}
+
+// THE RED-ON-REVERT TEST: remove the jd_keyword_dropped check in detector.ts and this goes red.
+test("jd_keyword_dropped: a posting keyword the master bullet had and the tailored bullet dropped is one finding", () => {
+  // The master says Kafka; the clean resume's bullet text does not.
+  const master = masterWithBulletText("Built a REST API with Express and Node.js on Kafka for a college event portal, handling 500 users");
+  // A posting that asks for Kafka.
+  const outcome = auditApplication(master, createCleanResume(), null, "We stream events through Kafka.");
+  // Exactly one finding, of the new kind, naming the keyword and the bullet it was dropped from.
+  assert.deepEqual(outcome.findings.map((f) => [f.kind, f.path]), [["jd_keyword_dropped", "experience[0].bullets[0]"]]);
+  // The reason names the dropped keyword, so the reviewer knows what to put back.
+  assert.ok(outcome.findings[0].reason.includes("Kafka"), outcome.findings[0].reason);
+  // Ruling A: the row goes to individual review.
+  assert.equal(outcome.status, "audit_flagged");
+});
+
+// Control: the posting never names Kafka, so dropping it is the tailor's right.
+test("jd_keyword_dropped control: a keyword the posting does not name may be dropped", () => {
+  // The same master and resume.
+  const master = masterWithBulletText("Built a REST API with Express and Node.js on Kafka for a college event portal, handling 500 users");
+  // A posting about Node.js and Express only; both are still in the tailored bullet.
+  const outcome = auditApplication(master, createCleanResume(), null, "Node.js and Express backend.");
+  // Clean.
+  assert.deepEqual(outcome.findings, []);
+});
+
+// Control: "C" in the master is not the "C++" a posting asks for (the LETTER_LANGUAGES rule, fa5c31d).
+test("jd_keyword_dropped control: a master C and a C++ posting give no finding", () => {
+  // The master mentions C; the tailored bullet does not.
+  const master = masterWithBulletText("Built a REST API with Express and Node.js in C for a college event portal, handling 500 users");
+  // The posting names only C++.
+  const outcome = auditApplication(master, createCleanResume(), null, "Systems work in C++.");
+  // Nothing dropped: the master never said C++.
+  assert.deepEqual(outcome.findings, []);
+});
+
+// Control: an audit with no posting (every caller before 2026-11-07) runs the old checks only.
+test("jd_keyword_dropped control: with no job description the check does not run", () => {
+  // Kafka dropped, but no posting to say it mattered.
+  const master = masterWithBulletText("Built a REST API with Express and Node.js on Kafka for a college event portal, handling 500 users");
+  // The three-argument call every older caller makes.
+  const outcome = auditApplication(master, createCleanResume(), null);
+  // Clean, as before.
+  assert.deepEqual(outcome.findings, []);
+});

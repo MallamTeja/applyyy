@@ -549,6 +549,15 @@ export const AUDIT_FINDING_KINDS = [
    * more often than the others and must never be auto-cleared.
    */
   'summary_unsupported',
+  /**
+   * A keyword the POSTING names and the pinned master bullet contains, missing from the
+   * tailored bullet (P2 #17; Teja ruling A, 2026-11-07 09:47 IST). Nothing false was
+   * written; a true, matching word was lost, so the resume scores worse against this job
+   * than the master would. The tailor prompt's keep rule (630d6b5) is only a hint; this is
+   * the hard check. It flags the row (individual review, no batch approval) by Teja's
+   * choice: live row 67b979b3 lost its only keyword match this way. `reason` names the word.
+   */
+  'jd_keyword_dropped',
   /** Anything the Auditor could not classify. `reason` carries the detail. */
   'other',
 ] as const;
