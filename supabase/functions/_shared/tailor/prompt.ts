@@ -213,6 +213,19 @@ function renderMasterProfile(master: MasterProfile, masterVersion: number): stri
     sections.push(`- ref=${skill.id} :: ${skill.name} [${skill.category}]`);
   }
 
+  // The owner's alternative headline + summary pairs (pending #11, 2026-11-07), only when the master has
+  // any, so a master without them renders byte-for-byte as before. Each is the OWNER's text: picking one
+  // invents nothing; its paragraph id becomes citable in summary.refs only when it is picked.
+  if ((master.summary_variants ?? []).length > 0) {
+    // The header says what to do with the list, in the trusted region, next to the data it governs.
+    sections.push("\nSUMMARY VARIANTS (optional: set `summary_variant` to ONE id below when its framing fits this job better than the default headline; its headline then prints instead, and you may cite its summary ref in `summary.refs`; omit `summary_variant` to keep the default):");
+    // One line per variant: what to name, what prints, and the paragraph to draw on.
+    for (const variant of master.summary_variants ?? []) {
+      // Id, label, headline, and the paragraph with its citable ref.
+      sections.push(`- id=${variant.id} :: ${variant.label} | headline: ${variant.headline} | summary ref=${variant.summary.id} :: ${variant.summary.text}`);
+    }
+  }
+
   // Joined once with newlines into a single formatted string block.
   return sections.join("\n");
 }
@@ -699,8 +712,20 @@ export function buildTailorPrompt(input: TailorPromptInput): TailorPrompt {
     // UNTRUSTED REGION. All three scraped fields inside ONE fence, guarded with XML structural fencing.
     // Joined with newline characters into one user content string block.
     userContent: userContentParts.join("\n"),
-    // Declared on every call, identical every time.
+    // Declared on every call; identical every time for a master without summary variants.
     // Response schema structure enforced for Gemini API calls.
-    responseSchema: TAILOR_RESPONSE_SCHEMA,
+    responseSchema: tailorResponseSchema(input.master),
   };
+}
+
+// The response schema for one master (pending #11, 2026-11-07): the fixed schema, plus an optional
+// `summary_variant` closed to the master's own variant ids when it has any. A master without variants
+// gets TAILOR_RESPONSE_SCHEMA itself, so its calls are unchanged. Not required: omitted is the default.
+function tailorResponseSchema(master: MasterProfile): Record<string, unknown> {
+  // The ids the model may pick from.
+  const ids = (master.summary_variants ?? []).map((variant) => variant.id);
+  // None: today's schema, the same object.
+  if (ids.length === 0) return TAILOR_RESPONSE_SCHEMA;
+  // A copy with one more optional property; the closed enum stops an invented id at the source.
+  return { ...TAILOR_RESPONSE_SCHEMA, properties: { ...TAILOR_RESPONSE_SCHEMA.properties, summary_variant: { type: "string", enum: ids } } };
 }

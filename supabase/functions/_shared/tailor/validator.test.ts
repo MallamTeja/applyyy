@@ -1412,3 +1412,66 @@ test("a v8-shaped master (no links key) resolves with no links key, so old rebui
   // ...or on the achievement: byte-identical to what the validator produced before v9.
   assert.equal("links" in (result.resume.achievements[0] ?? {}), false, "an absent master key gained a links key");
 });
+
+// ---- summary variants (pending #11, 2026-11-07) -------------------------------------------------------
+// A master with one owner-written variant: its own headline and its own summary paragraph.
+const VARIANT_MASTER: MasterProfile = {
+  // Everything else is the honest fixture's.
+  ...MASTER,
+  summary_variants: [
+    {
+      // What the Tailor names.
+      id: "variant-swe",
+      // For the model and the owner; never printed.
+      label: "Software engineering",
+      // Printed instead of identity.headline when picked.
+      headline: "Software Engineer",
+      // The owner's paragraph for this framing, citable by its id.
+      summary: { id: "summary-swe", text: "Software engineer who ships Node.js services." },
+    },
+  ],
+};
+
+// THE RED-ON-REVERT TEST: drop the variant lookup in validateTailoredProfile and this goes red.
+test("summary variant: a picked variant prints its headline and its summary id is citable", () => {
+  // The baseline, picking the variant and citing its summary.
+  const result = validateTailoredProfile({ ...baseline(), summary_variant: "variant-swe", summary: { text: "Software engineer who ships Node.js services.", refs: ["summary-swe"] } }, VARIANT_MASTER, PINNED_VERSION);
+  // Accepted.
+  assert.equal(result.ok, true, result.ok === false ? JSON.stringify(result.violations) : "");
+  if (!result.ok) return;
+  // The variant's headline, not the master default "Backend Engineer".
+  assert.equal(result.resume.identity.headline, "Software Engineer");
+});
+
+// The control: an id the master does not hold is refused, never silently read as the default.
+test("summary variant: an unknown variant id is refused as unresolved_ref", () => {
+  // A made-up variant.
+  const result = validateTailoredProfile({ ...baseline(), summary_variant: "variant-made-up" }, VARIANT_MASTER, PINNED_VERSION);
+  // Refused, naming the field.
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  // Exactly the variant violation.
+  assert.deepEqual(result.violations, [{ kind: "unresolved_ref", ref: "variant-made-up", where: "summary_variant" }]);
+});
+
+// The control: a variant's summary id is citable only when that variant is picked, so a default-headline
+// resume cannot borrow a framing it does not print.
+test("summary variant: without picking the variant, its summary id is not citable", () => {
+  // Cites the variant summary but picks no variant.
+  const result = validateTailoredProfile({ ...baseline(), summary: { text: "Software engineer who ships Node.js services.", refs: ["summary-swe"] } }, VARIANT_MASTER, PINNED_VERSION);
+  // Refused.
+  assert.equal(result.ok, false);
+});
+
+// No variant picked (null or absent): exactly today's headline.
+test("summary variant: null or absent keeps the master's own headline", () => {
+  // Both spellings of "default".
+  for (const tailored of [{ ...baseline(), summary_variant: null }, baseline()]) {
+    // Accepted.
+    const result = validateTailoredProfile(tailored, VARIANT_MASTER, PINNED_VERSION);
+    // Narrowed.
+    assert.ok(result.ok);
+    // The default headline.
+    if (result.ok) assert.equal(result.resume.identity.headline, "Backend Engineer");
+  }
+});

@@ -413,6 +413,11 @@ function parseTailoredProfile(raw: string): TailoredProfile {
       throw new Error("Tailor response has a malformed summary");
     }
   }
+  // The picked summary variant (pending #11, 2026-11-07): absent, null or a string id, kept AS HELD so
+  // tailor_refs re-validates to the stored resume. Any other shape is a malformed reply, never "default".
+  if (parsed.summary_variant !== undefined && parsed.summary_variant !== null && typeof parsed.summary_variant !== "string") {
+    throw new Error("Tailor response has a malformed summary_variant");
+  }
 
   // THE CONTRACT VERSION. TailoredProfile declares `schema_version: 1`, but the schema sent
   // to Gemini (prompt.ts TAILOR_RESPONSE_SCHEMA) has no such property, so a live reply never

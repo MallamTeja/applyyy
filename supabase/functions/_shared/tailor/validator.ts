@@ -749,6 +749,15 @@ export function validateTailoredProfile(
     });
   }
 
+  // --- Summary variant (pending #11, 2026-11-07) ----------------------------
+  // The owner-written headline + summary the Tailor picked, or none. Null and absent both mean "the
+  // default", so every tailor_refs stored before this field rebuilds to its stored resume unchanged.
+  const variantId = tailored.summary_variant ?? null;
+  // Looked up by exact id in the master's own list (absent list = no variants).
+  const variant = variantId === null ? undefined : (master.summary_variants ?? []).find((candidate) => candidate.id === variantId);
+  // A picked id the master does not hold is a fabricated ref, never quietly read as the default.
+  if (variantId !== null && variant === undefined) violations.push({ kind: "unresolved_ref", ref: variantId, where: "summary_variant" });
+
   // --- Summary ------------------------------------------------------------
   // aa names this the weakest point in the contract, and states why: prose cannot be
   // constrained by refs the way a bullet can. The non-empty `refs` requirement is the
@@ -779,7 +788,9 @@ export function validateTailoredProfile(
       // paragraph" — but that only works if the id is ACCEPTED here. Leave this line
       // out and a tailoring that honestly cites the master summary is rejected as a
       // fabrication, which is the loudest possible way to punish the honest case.
-      const citesMasterSummary = master.summary !== null && master.summary.id === ref;
+      // The PICKED variant's paragraph is the owner's own text too (2026-11-07), so it is citable; a
+      // variant that is not picked is not, so a default-headline resume cannot borrow another framing.
+      const citesMasterSummary = (master.summary !== null && master.summary.id === ref) || (variant !== undefined && variant.summary.id === ref);
       // The summary may cite any node kind, so every index is consulted — including
       // the two added on 2026-09-11. A summary drawing on an award it cannot name is
       // a summary forced to leave its strongest evidence undeclared.
@@ -814,7 +825,8 @@ export function validateTailoredProfile(
         // Name, email and links, exactly as stored.
         ...master.identity,
         // Absent becomes null for each optional line (see nullIfAbsent).
-        headline: nullIfAbsent(master.identity.headline),
+        // The picked variant's headline (2026-11-07), else the master's own, exactly as before.
+        headline: variant !== undefined ? variant.headline : nullIfAbsent(master.identity.headline),
         phone: nullIfAbsent(master.identity.phone),
         location: nullIfAbsent(master.identity.location),
       },

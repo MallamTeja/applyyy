@@ -549,3 +549,40 @@ test("a bullet-less node gets an explicit no-bullets line; a node with bullets d
   // Its second line, which carries the "never" and the empty-array answer.
   assert.ok(lines.includes("  never the node's own ref. A node with no indented bullets returns \"bullets\": []."));
 });
+
+// ---- summary variants (pending #11, 2026-11-07) -------------------------------------------------------
+// The owner's alternative headline + summary pairs reach the model, and the schema lets it pick one by id.
+const VARIANT_MASTER: MasterProfile = {
+  // Everything else as the fixture has it.
+  ...MASTER,
+  // One variant.
+  summary_variants: [{ id: "variant-swe", label: "Software engineering", headline: "Software Engineer", summary: { id: "summary-swe", text: "Software engineer who ships Node.js services." } }],
+};
+
+// THE RED-ON-REVERT TEST: drop the variants block or the schema field and this goes red.
+test("summary variants: listed in the trusted region and pickable by id through the schema", () => {
+  // A prompt over the variant master.
+  const prompt = buildTailorPrompt({ master: VARIANT_MASTER, masterVersion: PINNED_VERSION, jobDescription: "Backend role.", jobTitle: "Backend Engineer", company: "Acme" });
+  // The variant's id, label, headline and citable summary id are all in the instruction region.
+  for (const part of ["SUMMARY VARIANTS", "id=variant-swe", "Software engineering", "headline: Software Engineer", "ref=summary-swe"]) assert.ok(prompt.systemInstruction.includes(part), part);
+  // The schema offers exactly the master's variant ids, and does not require one.
+  const schema = prompt.responseSchema as { properties: Record<string, { enum?: unknown }>; required: string[] };
+  // Closed to the real ids.
+  assert.deepEqual(schema.properties.summary_variant?.enum, ["variant-swe"]);
+  // Optional: omitted means the default headline.
+  assert.equal(schema.required.includes("summary_variant"), false);
+});
+
+// The control: a master with no variants gets exactly today's prompt and schema, byte for byte.
+test("summary variants: a master without variants gets the unchanged prompt and schema", () => {
+  // Today's master.
+  const before = buildTailorPrompt({ master: MASTER, masterVersion: PINNED_VERSION, jobDescription: "Backend role.", jobTitle: "Backend Engineer", company: "Acme" });
+  // An explicit empty list reads the same as none.
+  const empty = buildTailorPrompt({ master: { ...MASTER, summary_variants: [] }, masterVersion: PINNED_VERSION, jobDescription: "Backend role.", jobTitle: "Backend Engineer", company: "Acme" });
+  // No variants block.
+  assert.equal(before.systemInstruction.includes("SUMMARY VARIANTS"), false);
+  // No summary_variant field.
+  assert.equal("summary_variant" in (before.responseSchema as { properties: object }).properties, false);
+  // Identical either way.
+  assert.deepEqual(empty, before);
+});

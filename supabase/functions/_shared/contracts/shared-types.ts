@@ -32,6 +32,9 @@ export type {
   // Re-exported because `TailoredSummary.refs` can now cite it, so the validator has
   // to be able to name the type it is resolving that citation against.
   MasterSummary,
+  // An owner-written alternative headline + summary (pending #11, 2026-11-07): the validator resolves the
+  // one the Tailor picks, so it must name the type.
+  MasterSummaryVariant,
   // Undated award and credential nodes. Added 2026-09-11 because ingest was silently
   // dropping both sections off the real resume — a fact present in the document and
   // absent from the contract. They are bullet-bearing parents like experience, which

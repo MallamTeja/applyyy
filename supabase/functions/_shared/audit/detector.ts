@@ -563,10 +563,14 @@ export function detectAuditFindings(
         });
       }
 
+      // The PICKED summary variant's paragraph id (pending #11, 2026-11-07): the owner's own text, so
+      // citable, exactly as the validator rules it. An unpicked variant stays uncitable.
+      const pickedVariantSummaryId = (master.summary_variants ?? []).find((variant) => variant.id === tailorRefs.summary_variant)?.summary.id;
+
       // Check each declared reference in summary.refs
       for (const ref of tailorRefs.summary.refs) {
-        // Verify reference exists in master profile global ID space
-        if (!index.allIds.has(ref)) {
+        // Verify reference exists in master profile global ID space, or is the picked variant's paragraph
+        if (!index.allIds.has(ref) && ref !== pickedVariantSummaryId) {
           // Record invalid summary node reference finding
           findings.push({
             // Summary unsupported kind

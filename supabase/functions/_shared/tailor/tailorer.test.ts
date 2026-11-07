@@ -696,3 +696,28 @@ test("skills shape control: a fabricated skill ref is still refused", async () =
   // Naming the invented ref.
   assert.ok(outcome.violations.some((v) => v.kind === "unresolved_ref" && v.ref === "skill-kubernetes"));
 });
+
+// ---- summary variants end to end (pending #11, 2026-11-07) ---------------------------------------------
+test("summary variant: a picked variant flows through the tailorer into the stored refs and the printed headline", async () => {
+  // The fixture master plus one variant.
+  const master: MasterProfile = { ...MASTER, summary_variants: [{ id: "variant-swe", label: "Software engineering", headline: "Software Engineer", summary: { id: "summary-swe", text: "Software engineer who ships Node.js services." } }] };
+  // A model that picks it.
+  const tailor = createTailorer({ callLlm: () => Promise.resolve(JSON.stringify({ ...HONEST_TAILORING, summary_variant: "variant-swe" })), master, masterVersion: MASTER_VERSION });
+  // Run.
+  const outcome = await tailor(POSTING);
+  // Tailored.
+  assert.equal(outcome.kind, "tailored");
+  if (outcome.kind !== "tailored") return;
+  // The pick is stored as held, so tailor_refs rebuilds this resume.
+  assert.equal(outcome.refs.summary_variant, "variant-swe");
+  // And the variant's headline prints.
+  assert.equal(outcome.resume.identity.headline, "Software Engineer");
+});
+
+// The control: a reply whose summary_variant is not a string is malformed, not quietly the default.
+test("summary variant: a non-string summary_variant is a malformed reply", async () => {
+  // A number where an id belongs.
+  const tailor = createTailorer({ callLlm: () => Promise.resolve(JSON.stringify({ ...HONEST_TAILORING, summary_variant: 7 })), master: MASTER, masterVersion: MASTER_VERSION });
+  // Thrown, like every other shape failure.
+  await assert.rejects(tailor(POSTING), /malformed summary_variant/);
+});

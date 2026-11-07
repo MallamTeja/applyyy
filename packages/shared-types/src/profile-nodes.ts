@@ -266,6 +266,23 @@ export interface MasterSummary {
 }
 
 /**
+ * An alternative headline + summary the owner wrote for one kind of role (pending #11, 2026-11-07),
+ * e.g. a software-engineering framing beside the default AI one. The Tailor may pick at most one per
+ * job (`TailoredProfile.summary_variant`); the validator then prints its headline and accepts its
+ * summary's id as a citable source. Both texts are the OWNER's, so choosing one invents nothing.
+ */
+export interface MasterSummaryVariant {
+  /** What the Tailor names when it picks this variant. Unique within the master. */
+  id: NodeId;
+  /** A short name for the owner and the model, e.g. "Software engineering". Never printed. */
+  label: string;
+  /** Printed as the resume's headline instead of `identity.headline` when this variant is picked. */
+  headline: string;
+  /** The owner's own paragraph for this framing; its `id` is citable in `TailoredSummary.refs`. */
+  summary: MasterSummary;
+}
+
+/**
  * One achievement — a hackathon placing, a ranking, a scholarship.
  *
  * NO DATE FIELDS, AND THAT IS A DECISION RATHER THAN AN OMISSION. The real resume
@@ -362,6 +379,14 @@ export interface MasterProfile {
    * exists to fix. `| null` forces every site to state which case it is in.
    */
   summary: MasterSummary | null;
+  /**
+   * The owner's alternative headline + summary pairs (pending #11, 2026-11-07). OPTIONAL, unlike the
+   * sections around it, on purpose: every stored master before v22 lacks the key, and absent must mean
+   * exactly today's behaviour (the default headline, nothing extra in the prompt), byte for byte, so
+   * every stored snapshot still rebuilds. Not a new section, so it cannot be silently dropped from a
+   * render: it only ever replaces the headline and adds a citable summary source.
+   */
+  summary_variants?: DocumentOrdered<MasterSummaryVariant>;
   education: DocumentOrdered<MasterEducation>;
   experience: DocumentOrdered<MasterExperience>;
   projects: DocumentOrdered<MasterProject>;
@@ -493,6 +518,12 @@ export interface TailoredProfile {
   /** Which sections to emit and in what order. */
   section_order: DocumentOrdered<TailoredSectionKind>;
   summary: TailoredSummary | null;
+  /**
+   * The master summary variant this tailoring prints (its id), or null / absent for the default
+   * headline (pending #11, 2026-11-07). Optional and copied AS HELD, so every stored tailor_refs from
+   * before still re-validates to its stored resume (rebuildOriginal). An id the master lacks is refused.
+   */
+  summary_variant?: NodeId | null;
   skills: DocumentOrdered<TailoredSkill>;
   experience: DocumentOrdered<TailoredExperience>;
   projects: DocumentOrdered<TailoredProject>;

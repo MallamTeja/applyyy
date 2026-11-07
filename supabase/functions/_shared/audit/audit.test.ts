@@ -925,3 +925,32 @@ test("jd_keyword_dropped control: with no job description the check does not run
   // Clean, as before.
   assert.deepEqual(outcome.findings, []);
 });
+
+// ============================================================================
+// Summary variants (pending #11, 2026-11-07)
+// ============================================================================
+// A tailoring that picks an owner-written variant cites that variant's summary id. The auditor (edge AND the
+// web's approve re-check) must accept it, or every variant row is flagged and the review page marks the whole
+// summary as fabricated (peer 3's finding: detector.ts knew only master.summary.id). Red on revert.
+test("summary variant: the picked variant's summary id is a supported summary ref", () => {
+  // The master plus one variant whose summary has its own id.
+  const master = { ...TEST_MASTER, summary_variants: [{ id: "variant-swe", label: "Software engineering", headline: "Software Engineer", summary: { id: "summary-swe", text: "Software engineer who ships Node.js services." } }] } as MasterProfile;
+  // The clean refs, picking the variant and citing its summary plus a real bullet.
+  const refs = { ...createCleanTailorRefs(), summary_variant: "variant-swe", summary: { text: "Software engineer who ships Node.js services.", refs: ["summary-swe", "b-exp-1"] } } as TailoredProfile;
+  // Audited.
+  const outcome = auditApplication(master, createCleanResume(), refs);
+  // No summary finding: the variant's paragraph is the owner's own text.
+  assert.deepEqual(outcome.findings, []);
+});
+
+// Control: a variant that is NOT picked is not citable, matching the validator's rule.
+test("summary variant control: an unpicked variant's summary id is still unsupported", () => {
+  // The same master.
+  const master = { ...TEST_MASTER, summary_variants: [{ id: "variant-swe", label: "Software engineering", headline: "Software Engineer", summary: { id: "summary-swe", text: "Software engineer who ships Node.js services." } }] } as MasterProfile;
+  // Cites the variant summary without picking it.
+  const refs = { ...createCleanTailorRefs(), summary: { text: "Software engineer.", refs: ["summary-swe"] } } as TailoredProfile;
+  // Audited.
+  const outcome = auditApplication(master, createCleanResume(), refs);
+  // Flagged as an unsupported summary.
+  assert.deepEqual(outcome.findings.map((f) => f.kind), ["summary_unsupported"]);
+});
