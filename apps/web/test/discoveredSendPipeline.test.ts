@@ -174,8 +174,9 @@ describe('outcome sentences for the discovered lane', () => {
   });
 
   it('a matcher drop names the matcher and its advance floor', () => {
-    // The outcome for a row scored below the code-constant floor.
-    const text = card.describeOutcome({ kind: 'dropped', finalStatus: 'dropped_filter', atStep: 'matcher', matcherDrop: { kind: 'low_score', score: 31 } }, null);
+    // The outcome for a row scored below the code-constant floor. 29, one below the floor of 30
+    // (Teja, 2026-11-07; 31 was below the old 45), so the fixture is a score the floor can produce.
+    const text = card.describeOutcome({ kind: 'dropped', finalStatus: 'dropped_filter', atStep: 'matcher', matcherDrop: { kind: 'low_score', score: 29 } }, null);
     // Agent named first, then the reason.
     assert.match(text, /^Dropped by the matcher: .*advance floor/);
   });

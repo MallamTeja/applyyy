@@ -16,10 +16,19 @@
 // can never disagree about which band a score is in.
 import { bandForScore, type FitBand } from "./rubric.ts";
 
-// THE THRESHOLD: 45, the floor of the `moderate` band (rubric.ts:63). That band is the one
-// rubric.ts:61 names "THE HUMAN-REVIEW BAND" — §P3 routes it to Teja rather than deciding
-// for him — so everything at or above it must reach the approval queue, and only the
-// `weak` (30-44, "probably skip") and `poor` ("skip") bands stop here.
+// THE THRESHOLD: 30, the floor of the `weak` band (rubric.ts:65). Everything at or above it
+// reaches the Tailor and then Teja's approval queue; only the `poor` band (0-29, "skip")
+// stops here. The `weak` band (30-44, "probably skip, absent a strategic reason") now goes
+// to Teja too, because the strategic reason is his call, not the Matcher's.
+//
+// RULING HISTORY (kept so nobody "restores" an old value as a bug fix):
+//   - 45 since 25b4b5c (2026-10-05): the floor of the `moderate` band (rubric.ts:63), the one
+//     rubric.ts:61 names "THE HUMAN-REVIEW BAND"; `weak` and `poor` both stopped here.
+//   - 45 kept on review, 2026-11-06.
+//   - Lowered to 30 by Teja, 2026-11-07 22:45 IST: "keep floor at 30 not 45".
+//
+// The band edges in rubric.ts did NOT move: `moderate` still starts at 45 and is still the
+// human-review band. Only the advance floor moved, down to the next band edge.
 //
 // A NAMED CONSTANT, NOT A SETTING, because no min-score field exists anywhere today
 // (checked live 2026-10-05: search_preferences, system_settings and filter_rules have
@@ -27,9 +36,11 @@ import { bandForScore, type FitBand } from "./rubric.ts";
 // a per-user setting; until then, changing it is a reviewed edit pinned by score-threshold.test.ts.
 //
 // Restated as a number rather than read from rubric.ts's table because that table is
-// module-private. score-threshold.test.ts pins 45 explicitly AND checks the 44/45 rows
-// against bandForScore, so a band retune that moves the moderate floor fails a test.
-export const MATCH_ADVANCE_FLOOR = 45;
+// module-private. score-threshold.test.ts pins 30 explicitly AND checks the 29/30 rows
+// against bandForScore, so a band retune that moves the weak floor fails a test.
+// MIRRORED in _shared/pipeline/row-pipeline.ts (MATCHER_ADVANCE_FLOOR) for the web's "below
+// the floor" sentence; apps/web/test/rowPipelineParity.test.ts pins the two together.
+export const MATCH_ADVANCE_FLOOR = 30;
 
 // The three outcomes as a closed union, so the caller must handle the refusal case and
 // cannot collapse it into a boolean that treats "unreadable" like "low".
@@ -77,7 +88,8 @@ export function decideScoreThreshold(score: unknown, humanPicked = false): Score
   }
   // Banded by the rubric's own function, so the band in the event matches the dashboard.
   const band = bandForScore(score);
-  // `>=` because the floor itself belongs to the human-review band (rubric.ts:63).
+  // `>=` because the floor itself is the first `weak` score (rubric.ts:65), and `weak` now
+  // advances: a `>` would drop a 30, the first score Teja asked to see.
   if (score >= MATCH_ADVANCE_FLOOR || humanPicked) {
     // Reviewable or better: on to the Tailor.
     return { kind: "advance", score, band };

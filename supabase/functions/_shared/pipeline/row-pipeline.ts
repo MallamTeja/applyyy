@@ -96,7 +96,9 @@ export interface RowPipelineDeps {
 
 // The matcher's advance floor, MIRRORED from supabase/functions/_shared/match/score-threshold.ts
 // (a Deno module the browser bundle does not import). rowPipelineParity.test.ts pins the two.
-export const MATCHER_ADVANCE_FLOOR = 45;
+// History: 45 from 25b4b5c (2026-10-05, kept 2026-11-06); lowered to 30 by Teja 2026-11-07
+// 22:45 IST ("keep floor at 30 not 45"). Change it only together with score-threshold.ts.
+export const MATCHER_ADVANCE_FLOOR = 30;
 
 // Why the matcher dropped a row. Closed, so the card must word each cause.
 export type MatcherDropCause =

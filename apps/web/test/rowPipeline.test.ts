@@ -629,10 +629,10 @@ describe('runRowPipeline: matcher drop cause', () => {
   });
 
   it('a score below the floor on a matcher drop is a low score, carrying the score', async () => {
-    // A real low score.
-    const { out } = await dropWith(async () => ({ value: 31 }));
+    // A real low score: 29, one below the floor of 30 (Teja, 2026-11-07; 31 was below the old 45).
+    const { out } = await dropWith(async () => ({ value: 29 }));
     // The value in hand, so the sentence may quote it.
-    assert.deepEqual(out, { kind: 'dropped', finalStatus: 'dropped_filter', atStep: 'matcher', matcherDrop: { kind: 'low_score', score: 31 } });
+    assert.deepEqual(out, { kind: 'dropped', finalStatus: 'dropped_filter', atStep: 'matcher', matcherDrop: { kind: 'low_score', score: 29 } });
   });
 
   it('an unreadable score is unknown, never a guess', async () => {

@@ -351,8 +351,9 @@ describe('outcome sentences stay true (review D1-D4)', () => {
   });
 
   it('a matcher drop claims no user setting that does not exist', () => {
-    // The floor is a code constant, not a user threshold.
-    const text = card.describeOutcome({ kind: 'dropped', atStep: 'matcher', finalStatus: 'dropped_filter', matcherDrop: { kind: 'low_score', score: 31 } }, null);
+    // The floor is a code constant, not a user threshold. 29, so the fixture stays a score the
+    // floor of 30 can really produce (it was 31 under the old 45).
+    const text = card.describeOutcome({ kind: 'dropped', atStep: 'matcher', finalStatus: 'dropped_filter', matcherDrop: { kind: 'low_score', score: 29 } }, null);
     // Names the matcher's own floor.
     assert.match(text, /matcher's advance floor/);
     // Never "your threshold".
@@ -381,9 +382,10 @@ describe('matcher drop sentences: pre-gate vs low score vs unknown', () => {
 
   it('low-score drop names the score and the floor', () => {
     // A real low score, read back from the row.
-    const text = card.describeOutcome({ ...base, matcherDrop: { kind: 'low_score', score: 31 } }, null);
+    // 29: the top of `poor`, one below the floor of 30 (Teja's ruling, 2026-11-07; it was 31 under the old 45).
+    const text = card.describeOutcome({ ...base, matcherDrop: { kind: 'low_score', score: 29 } }, null);
     // The value in hand and the code-constant floor.
-    assert.equal(text, "Dropped by the matcher: it scored 31, below the matcher's advance floor of 45.");
+    assert.equal(text, "Dropped by the matcher: it scored 29, below the matcher's advance floor of 30.");
   });
 
   it('unknown-score drop is the neutral sentence', () => {

@@ -4,10 +4,11 @@
 // Before this gate every scored row advanced to `scored`, so a 5/100 match would be
 // tailored, audited and queued for Teja exactly like a 90. Three ways it can go wrong:
 //
-//   1. THE BOUNDARY OFF BY ONE. 45 is the floor of the human-review band, so 45 must
-//      advance and 44 must drop. A `>` where `>=` belongs drops the first reviewable job.
+//   1. THE BOUNDARY OFF BY ONE. 30 is the floor (the `weak` band's floor, Teja's ruling of
+//      2026-11-07 22:45 IST; it was 45 before), so 30 must advance and 29 must drop.
+//      A `>` where `>=` belongs drops the first reviewable job.
 //   2. GARBAGE BECOMING A VERDICT. NaN compares false against everything, so a naive
-//      `score < 45` reads NaN as "not below" and advances it. Missing data must never
+//      `score < 30` reads NaN as "not below" and advances it. Missing data must never
 //      become an answer — it must stay put and be reported.
 //   3. THE WRONG SCALE. The scorer emits integers 0-100. A 0-1 fraction like 0.82 would
 //      read as a near-zero score and be dropped silently; it must be refused instead.
@@ -20,14 +21,19 @@ import { decideScoreThreshold, MATCH_ADVANCE_FLOOR } from "./score-threshold.ts"
 
 // The threshold is pinned here on purpose: changing it must be a visible, reviewed edit
 // to this test, not something that drifts in with an unrelated rubric change.
-test("the advance floor is 45, the floor of the rubric's moderate (human-review) band", () => {
-  // If this fails, someone retuned the bands — re-read rubric.ts §P3 before updating.
-  assert.equal(MATCH_ADVANCE_FLOOR, 45);
+// History: 45 (moderate floor) from 25b4b5c 2026-10-05; lowered to 30 by Teja 2026-11-07 22:45 IST.
+test("the advance floor is 30, the floor of the rubric's weak band (Teja, 2026-11-07)", () => {
+  // If this fails, someone moved the floor — re-read the ruling history in score-threshold.ts first.
+  assert.equal(MATCH_ADVANCE_FLOOR, 30);
 });
 
 // Table-driven so each boundary reads as one row and a missing case is visible.
 const ADVANCES: ReadonlyArray<[number, string]> = [
-  // The exact floor: the first score the human-review band contains.
+  // The exact floor: the first `weak` score, which Teja asked to see (2026-11-07).
+  [30, "weak"],
+  // The top of weak: dropped under the old 45 floor, advances now.
+  [44, "weak"],
+  // The moderate (human-review) band floor, still a band edge in rubric.ts.
   [45, "moderate"],
   // Inside moderate.
   [59, "moderate"],
@@ -49,12 +55,10 @@ for (const [score, band] of ADVANCES) {
 
 // Scores below the floor drop, with the score in the reason so the dashboard can show why.
 const DROPS: ReadonlyArray<[number, string]> = [
-  // One below the floor: the off-by-one this file exists to catch.
-  [44, "weak"],
-  // The weak band floor.
-  [30, "weak"],
-  // Just inside poor.
+  // One below the floor, the top of poor: the off-by-one this file exists to catch.
   [29, "poor"],
+  // Mid poor.
+  [15, "poor"],
   // The bottom of the scale is a real score, not a missing one.
   [0, "poor"],
 ];
