@@ -127,15 +127,30 @@ describe('the toggle button on the card', () => {
     return render(h(MemoryRouter, null, h(page.KitCard, { row: row as never, kit: kit as never, resolve: { locked: false, frozen: false, onMove: () => undefined } })));
   };
 
-  it('starts as "Hide preview" with aria-expanded=true, because the block starts open', () => {
-    // The card, no kit.
+  it('starts closed: "Resume preview" with aria-expanded=false, and the block has no open attribute', () => {
+    // Teja, 2026-11-07 11:11 IST: every preview open on load buried the page; each opens only on a press.
     const html = renderCard({ kind: 'none' });
-    // The label says what a press does now.
-    assert.match(html, />Hide preview<\/button>/);
+    // The label says what a press does now: open it.
+    assert.match(html, />Resume preview<\/button>/);
     // The state is exposed, not only the label.
-    assert.match(html, /aria-expanded="true"/);
-    // The old open-only label is gone: a button must not say "Resume preview" while the preview is showing.
-    assert.doesNotMatch(html, />Resume preview<\/button>/);
+    assert.match(html, /aria-expanded="false"/);
+    // The block itself renders closed (no open attribute), so the label and the element agree.
+    assert.match(html, /<details class="kit-card__resume" id="tailored-resume-[^"]+">/);
+    // Never "Hide preview" over a closed block.
+    assert.doesNotMatch(html, />Hide preview<\/button>/);
+  });
+
+  it('a press opens a closed block, a second press closes it again', () => {
+    // The pure step the button runs, on a stand-in element that starts closed like the card's block.
+    const block = { open: false, scrollIntoView: () => undefined };
+    // First press: opened, and reported open.
+    assert.equal(toggle.pressPreview(block), true);
+    // The element itself is open.
+    assert.equal(block.open, true);
+    // Second press: closed again.
+    assert.equal(toggle.pressPreview(block), false);
+    // And the element agrees.
+    assert.equal(block.open, false);
   });
 });
 

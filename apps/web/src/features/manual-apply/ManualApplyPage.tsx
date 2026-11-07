@@ -143,8 +143,9 @@ const resumeBlockId = (rowId: string): string => `tailored-resume-${rowId}`;
    the button also stays right when the operator clicks the <details> summary directly. Shown only when the
    row has a valid snapshot: otherwise it controls nothing. */
 function ResumePreviewButton(props: { readonly rowId: string }): ReactElement {
-  // Whether the block is open. Starts true because the card renders the block open; the effect below corrects it.
-  const [open, setOpen] = useState(true);
+  // Whether the block is open. Starts false because the card renders the block closed (Teja, 2026-11-07
+  // 11:11 IST); the effect below still reads the real element in case that ever changes.
+  const [open, setOpen] = useState(false);
   // Keep the label in step with the element, whoever toggles it (this button or the native summary).
   useEffect(() => {
     // The block this button controls; absent only if the card was re-rendered away.
@@ -274,8 +275,9 @@ const SKIP_WORDS: Readonly<Record<KitSkipCode, string>> = {
 
 /* The row's own tailored resume, kit or no kit (Teja, 2026-11-05: "the tailored resume must be there in
    the Manual apply section, kit or no kit"). Built in the browser from applications.tailored_profile and
-   its pinned master by the shared ResumePreview, whose Download PDF prints it. Open by default: it is the
-   one thing every manual application needs. */
+   its pinned master by the shared ResumePreview, whose Download PDF prints it. CLOSED by default since
+   2026-11-07 (Teja, 11:11 IST): every card's preview open on load buried the page and pushed each card's
+   buttons out of reach; "Resume preview" or the summary opens one when it is needed. */
 function TailoredResume(props: { readonly row: ManualApplyRow }): ReactElement {
   // Destructured for readability.
   const { row } = props;
@@ -283,7 +285,7 @@ function TailoredResume(props: { readonly row: ManualApplyRow }): ReactElement {
   if (row.resume === null) return <p className="panel__note" role="note">No tailored resume on this row, so there is nothing to download here.</p>;
   return (
     /* Native details: keyboard-operable, and collapsible once the PDF is saved. */
-    <details className="kit-card__resume" id={resumeBlockId(row.id)} open>
+    <details className="kit-card__resume" id={resumeBlockId(row.id)}>
       {/* Names both things the block offers. */}
       <summary>Tailored resume: preview and Download PDF</summary>
       {/* The same props the Applied page and the pipeline drawer pass. */}

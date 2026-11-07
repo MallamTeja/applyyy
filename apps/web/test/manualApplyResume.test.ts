@@ -171,14 +171,15 @@ describe('the card has a "Resume preview" button beside the download (Teja, 2026
     // The card.
     const html = renderCard(data.parseRow(raw()), kit);
     // The button names its target block, so a screen reader hears what it controls.
-    assert.match(html, new RegExp(`<button type="button" class="kit-resume__button kit-resume__preview" aria-controls="tailored-resume-${ID}" aria-expanded="true">Hide preview</button>`));
+    assert.match(html, new RegExp(`<button type="button" class="kit-resume__button kit-resume__preview" aria-controls="tailored-resume-${ID}" aria-expanded="false">Resume preview</button>`));
     // The block it opens carries that same id (a dangling aria-controls is a lie).
-    assert.match(html, new RegExp(`<details class="kit-card__resume" id="tailored-resume-${ID}" open="">`));
+    // Closed on load since 2026-11-07 (Teja 11:11 IST): no open attribute.
+    assert.match(html, new RegExp(`<details class="kit-card__resume" id="tailored-resume-${ID}">`));
     // Order: the preview button sits right after the download one, inside the actions row.
     // Both indices are proven present first: indexOf returns -1 for a missing string, and -1 < n would pass vacuously.
     const download = html.indexOf('Download resume (Mallam Teja Resume.pdf)');
     // The preview button's position.
-    const preview = html.indexOf('Hide preview</button>');
+    const preview = html.indexOf('Resume preview</button>');
     // Both found.
     assert.ok(download >= 0 && preview >= 0, 'both buttons must render');
     // Then the order.
@@ -189,7 +190,7 @@ describe('the card has a "Resume preview" button beside the download (Teja, 2026
     // No kit at all.
     const html = renderCard(data.parseRow(raw()), { kind: 'none' });
     // The button is there: it needs only the row's own snapshot.
-    assert.match(html, />Hide preview<\/button>/);
+    assert.match(html, />Resume preview<\/button>/);
   });
 
   it('a row with no valid resume has no button (it would open nothing)', () => {
@@ -198,6 +199,6 @@ describe('the card has a "Resume preview" button beside the download (Teja, 2026
     // Positive anchor first: the card did render its actions row, so the absence below is not an empty render.
     assert.match(html, /<div class="kit-card__actions">/);
     // Absent, not disabled-and-confusing.
-    assert.doesNotMatch(html, />Hide preview<\/button>/);
+    assert.doesNotMatch(html, />Resume preview<\/button>/);
   });
 });
