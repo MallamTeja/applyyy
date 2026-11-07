@@ -82,6 +82,47 @@ function salary(value: unknown): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+// Repairs text a feed DOUBLE-ENCODED (UTF-8 bytes read as Latin-1, then UTF-8 encoded again),
+// and returns anything else unchanged.
+//
+// WHY (2026-11-07). RemoteOK's JSON carries the mojibake itself, as escapes: the bytes on the
+// wire for the Dubai posting's location are `\u00d8\u00af\u00d8\u00a8...`, i.e. the JSON string
+// IS "Ø¯Ø¨..." and res.json() decoded it correctly, once. So the fix belongs here, at the feed
+// boundary, not in the fetch. Unrepaired, the work-auth gate read "Ø¯Ø¨Ù..." as no known
+// country and let a UAE-only job (row 0cccc73a) through. One fetch on 2026-11-07: all 87
+// non-ASCII text fields in RemoteOK's 100 items were mojibake, none genuine.
+//
+// NEVER GUESSES (§6: a lenient decode must not become an answer). It repairs only when all
+// three hold, else the input comes back untouched:
+//   (i)   a mojibake signature is present: some char in U+0080..U+00FF;
+//   (ii)  every char is <= U+00FF, so reading the string as Latin-1 bytes loses nothing;
+//   (iii) those bytes are STRICT UTF-8 (a fatal decoder refuses instead of inserting U+FFFD).
+// A correct "Zürich" fails (iii) (a lone 0xFC byte is not UTF-8), so real Latin-1 text survives.
+export function repairDoubleEncodedUtf8(text: string): string {
+  // (i) Pure ASCII cannot be mojibake, and is by far the common case, so it returns first.
+  if (!/[\u0080-\u00ff]/.test(text)) return text;
+  // (ii) A char above U+00FF has no Latin-1 byte, so the string was not built from one; leave it.
+  if (/[^\u0000-\u00ff]/.test(text)) return text;
+  // Each char IS one byte now (proven by (ii)), so this is the lossless Latin-1 encoding.
+  const bytes = Uint8Array.from(text, (ch) => ch.charCodeAt(0));
+  // A fatal decoder THROWS on malformed input; the default one would quietly emit U+FFFD.
+  // Strict UTF-8 is a bijection, so a decode that succeeds IS the exact inverse of the corruption:
+  // no round-trip re-encode is needed to prove (iii).
+  try {
+    // ignoreBOM keeps a leading EF BB BF as U+FEFF instead of silently dropping those three bytes.
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    // (iii) failed: these were real Latin-1 chars, not UTF-8 bytes in disguise.
+    return text;
+  }
+}
+
+// A read string, repaired when double-encoded; null stays null so the caller's defaults still apply.
+function repaired(value: string | null): string | null {
+  // Absent stays absent; a repair never invents text.
+  return value === null ? null : repairDoubleEncodedUtf8(value);
+}
+
 // Builds one RemoteJob from one item, or null when it cannot be a safe posting.
 function toRemoteJob(
   // The raw feed item.
@@ -95,10 +136,11 @@ function toRemoteJob(
   const record = asRecord(item);
   // Refused, and counted by the caller.
   if (record === null) return null;
-  // Trimmed, non-empty strings only (readString's rule, shared with the ATS adapters).
-  const title = readString(record, keys.title);
-  // Same rule for the company.
-  const company = readString(record, keys.company);
+  // Trimmed, non-empty strings only (readString's rule, shared with the ATS adapters), repaired
+  // when the feed double-encoded them ("â" for an en dash in RemoteOK titles, 2026-11-07).
+  const title = repaired(readString(record, keys.title));
+  // Same rule for the company ("Sothebyâs" in the same fetch).
+  const company = repaired(readString(record, keys.company));
   // THE SAFETY GATE: only an absolute http(s) URL is storable; a javascript:/data: one is absent.
   const applyUrl = readHttpUrl(record, ...keys.urls);
   // A posting nobody can identify or apply to is not a row.
@@ -108,10 +150,12 @@ function toRemoteJob(
     title,
     company,
     // The feed's own default when blank, unchanged from the old inline code (fingerprint stability).
-    location: readString(record, keys.location) ?? keys.locationDefault,
+    // Repaired first: the work-auth gate reads this, and mojibake Arabic names no country (row 0cccc73a).
+    location: repaired(readString(record, keys.location)) ?? keys.locationDefault,
     applyUrl,
     // Excerpt-or-full fallbacks in the order each feed is richest; empty when it gave none.
-    description: readString(record, ...keys.description) ?? '',
+    // Repaired too: the work-auth gate's JD-location line and the matcher read the description.
+    description: repaired(readString(record, ...keys.description)) ?? '',
     feed,
     // Absent salary fields read as null.
     salaryMin: keys.salaryMin === undefined ? null : salary(record[keys.salaryMin]),
