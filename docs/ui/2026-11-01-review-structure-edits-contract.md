@@ -1,5 +1,10 @@
 # Review page: structural resume edits: contract (2026-11-01)
 
+> **SUPERSEDED 2026-11-07.** On 2026-11-07 (10:08 IST) Teja ruled that resume edits on the Approval queue go through the
+> AI chat only. The 10:25 IST redesign removes the manual structure-edit controls this contract describes (click-to-edit,
+> move up/down, remove entry, add bullet, add back from master). The AI chat's ops still use the data shapes below. Read
+> this file as history for the UI, not as a spec.
+
 Teja asked that the review page (and its AI chat) can change **achievements and
 certifications**, **section order**, **bullet order**, and add **new bullets**. Today the
 save gate `onlyTextChanged` (`apps/web/src/features/approval/tailoredEdits.ts`) refuses all
