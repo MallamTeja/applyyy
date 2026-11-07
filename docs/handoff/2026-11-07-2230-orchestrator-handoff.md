@@ -1,25 +1,32 @@
-# Orchestrator handoff — 2026-11-07 11:40 IST
+# Orchestrator handoff — 2026-11-07 22:30 IST
 
-**Resume here.** True as of 2026-11-07 11:40 IST. Open work: [2026-11-07-1140-pending-tasks.md](2026-11-07-1140-pending-tasks.md).
-This pair replaces the 00:45 pair (git history keeps it). Re-measure every number before you build on it (CLAUDE.md §2).
+**Resume here.** True as of 2026-11-07 22:30 IST. Open work: [2026-11-07-2230-pending-tasks.md](2026-11-07-2230-pending-tasks.md).
+This pair replaces the 11:40 pair, which replaced the 00:45 pair (git history keeps both). Re-measure every number
+before you build on it (CLAUDE.md §2).
 
-Written by orchestrator applyyy-37 [e17aec]. Sources: `git log`, live SELECTs at 11:3x, and the 4 peer bridge files in
-`C:\Users\tejam\applyyy-handoff-keep\2026-11-07-peer{1-1f,2-c9,3-41,4-f4}.md`.
+Written by orchestrator applyyy-37 [e17aec] at 11:40. Corrected at 22:30 by peer 1 (1a) for orchestrator applyyy-ea,
+from facts the orchestrator verified tonight plus peer 1's own live SELECTs at 22:25. Sources: `git log`, live SELECTs,
+and the peer bridge files in `C:\Users\tejam\applyyy-handoff-keep\2026-11-07-peer*.md`.
 
 ## Progress: 71% (5 of 7 stages)
 
 Goal: one human-approved pipeline that runs end to end for real (discovered → screened → tailored → approved →
 submitted → confirmed applied → tracked). These five stages work live: discovered, screened, tailored, approved,
 tracked. The gaps:
-- **Stage 5, bot submit:** never proven. Every approved job so far was applied to by hand (8 applied rows, all
-  `manual_apply`/human). `worker/src/cli/rehearse-assist.ts` proves a row is ready without claiming it; the real run
-  is `node --env-file=.env worker/src/cli/assist.ts --id <uuid>`. Teja must run it himself: it opens a visible browser
-  and asks y/n on stdin, and the orchestrator's shell has no stdin. The password line in the root `.env` is now filled.
+- **Stage 5, bot submit:** never proven. Every applied row so far was applied by hand. 7 rows are `applied` at
+  22:25 IST: the email tracker moved cac40516 `applied → rejected` at 18:59 IST. `worker/src/cli/rehearse-assist.ts`
+  proves a row is ready without claiming it; the real run is
+  `node --env-file=.env worker/src/cli/assist.ts --id <uuid>`. Teja must run it himself: it opens a visible browser
+  and asks y/n on stdin, and the orchestrator's shell has no stdin. The password line in the root `.env` is filled.
+  The first bot target is Canonical `8e9d58ce` (Greenhouse). It waits on Teja's approval (pending list, P0 #1).
+  **The bot handles Greenhouse, Lever and Ashby, not Workday** (`worker/src/apply-one.ts:481-488` parks a Workday row
+  for a human).
 - **Stage 6, receipt-confirm:** ON HOLD by Teja's ruling.
 
 ## Where things stand
 
-- **origin/main = `bbfb872`.** The tree was clean at 11:40.
+- **origin/main = `8f91837`** at 22:25 IST, plus this docs commit. `8f91837` (scout-ats feed liveness for no-ATS
+  rows, peer 2) landed after 11:40; the deploy table below does not show whether it is deployed.
 - **Deployed today** (all from pinned clean worktrees, all with `--import-map`). Latest version of each:
 
 | Function | From | IST |
@@ -39,8 +46,10 @@ tracked. The gaps:
   - v23: +HTML, +CSS.
   - v24: 3 `summary_variants` (variant-ai-llm, variant-backend-fullstack, variant-ml-data).
   - Build every master write on the highest version. The DB triggers assign `content_hash`, so insert 'pending'.
-- **Live counts at 11:15:** passed_filters 19, scored 59, awaiting_approval 15, approved 5 (Tether 04d5c6e4, L&T 7890ff1b,
-  Broadridge afc4e657, EA 3f87ad01, Fractal 1849aaa1; all with fresh kits from 11:21), applied 8.
+- **Live counts at 22:25 IST:** passed_filters 22, scored 59, awaiting_approval 15, approved 5, applied 7, rejected 1,
+  failed 88. The approved rows are Tether 04d5c6e4, L&T 7890ff1b, Broadridge afc4e657, EA 3f87ad01 and Fractal 1849aaa1.
+  None can be bot-submitted: Broadridge and Fractal are Workday (hand-apply lane), and Tether, L&T and EA are non-ATS rows.
+- **GitLab 267dcfcd** was set to `failed` at 22:13 IST (posting_closed).
 
 ## Teja's rulings today (all applied)
 
@@ -59,6 +68,8 @@ tracked. The gaps:
 | HackerRank cb64a4bf: skip (semester overlap) | stays failed |
 | No re-tailor of existing rows after master edits | standing |
 | Peers start every new task fresh (/clear); retire this peer set and start new peers | memory `peer-fresh-context-per-task` |
+| Evening: no left queue rail; the approval page stays 2 columns | nothing to build |
+| Evening: a master skill in a bullet not tied to that experience = auditor finding, row to review | ruled, NOT built |
 
 ## Live writes today (orchestrator, on Teja's word in its window)
 
@@ -76,8 +87,12 @@ tracked. The gaps:
 - **supabase-js `signOut()` defaults to scope 'global'** and revokes EVERY session of the user, the browser included. The
   orchestrator's 11:04 rehearse run did this, and the AI chat then answered `invalid_session` (401 from gates.ts:74).
   Fixed: rehearse now uses `scope:'local'` (`6594a38`), and the web's Sign out is local too (`bbfb872`).
-  `applyyy-handoff-keep/submit-preflight.mjs` is SUPERSEDED by rehearse-assist.ts and still signs out globally:
-  never run it.
+  `applyyy-handoff-keep/submit-preflight.mjs`, which signed out globally, was deleted at 22:08 IST.
+- **`attested_by_human` is stamped ONLY by a logged-in browser save.** A write without the agent-key header from the CLI
+  or any other client does not stamp it. The 11:40 handoff said otherwise. The India answers were written by CLI at
+  22:20 with `attested_by_human = false`, so Teja must Save them on the Answer bank page.
+- **A rehearsal can pass most checks on a row the bot will refuse.** `rehearse-assist.ts` has no Workday refusal. On
+  Broadridge and Fractal only the empty kit made it exit 1. Check the ATS host first.
 - **A bulk status move swallows Teja's clicks.** The 09:49 re-tailor moved rows while he was approving, and his approvals
   never landed. Warn him first (memory `applyyy-bulk-move-warn-teja-first`).
 - **Committed ≠ deployed, again:** the tailor retry (11-05) only went live 11-07 04:12.
@@ -90,7 +105,12 @@ tracked. The gaps:
 
 ## Sessions
 
-Peers this session (all DONE and told to stop; Teja is retiring them):
+Evening set (orchestrator applyyy-ea; Teja named the windows himself):
+- peer 1 = 1a: first-bot-submit recon (DONE), then this docs cleanup
+- peer 2 = 00: scout-ats, non-ATS liveness probe
+- peer 3 = 2e: apps/web follow-ups
+
+Morning peers (all DONE and retired):
 - peer 1 = applyyy-1f [32479f]
 - peer 2 = applyyy-c9 [4c1611]
 - peer 3 = applyyy-41 [140606]

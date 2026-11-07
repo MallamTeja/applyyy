@@ -1,5 +1,7 @@
 # `applyy` — live progress
 
+> **STALE as of 2026-11-07:** this file contradicts the current state (no bot submit has been proven yet; Workday is not bot-supported). See [docs/handoff/](handoff/) for current facts.
+
 **This file holds ONLY the live "Current state" and the re-verified open items.**
 The dated September 2026 log that used to follow (with its in-place correction notes
 through 2026-10-23) was moved verbatim to

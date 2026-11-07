@@ -1,5 +1,7 @@
 # applyy — Job Application Automation: Full Plan
 
+> **STALE as of 2026-11-07:** this file contradicts the current state (its status line is from 2026-10-23; no bot submit has been proven yet). See [docs/handoff/](docs/handoff/) for current facts.
+
 **Status (2026-10-23):** every agent in §7 exists as code; automated post-approval submission landed 2026-10-09 (`c557533`, human approval still required for every application), but nothing schedules the middle of the pipeline — see §5. Regenerate numbers, never quote them: applied migrations — `supabase migration list --linked`; tables and RLS — `select relname, relrowsecurity from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and relkind = 'r'`. Live state: the "Current state" section of [`docs/PROGRESS.md`](docs/PROGRESS.md). The system as built: [`docs/SYSTEM_ARCHITECTURE.md`](docs/SYSTEM_ARCHITECTURE.md).
 
 > This line read *"design approved, spec not yet written, zero code"* until
