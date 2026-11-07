@@ -206,3 +206,84 @@ test("only Workday rows without text are read", async () => {
   // The existing text is untouched.
   assert.equal(described.description_raw, "Existing JD.");
 });
+
+// ---- Locations from the same detail read (2026-11-07, pending-tasks P2 #16) ----
+// The list endpoint says "3 Locations" for a multi-site posting. The work-auth gate reads that as
+// "no place named", and an unknown location PASSES (Teja, 11-05), so a US-only Fiserv posting
+// reached the queue. The detail response the read above already fetches names every site.
+
+// The gate the screener runs on location_raw, so the tests prove the leak closes, not just a string.
+import { screenWorkAuth } from "../screen/work-auth-gate.ts";
+
+// A detail body with a description AND the posting's sites, shaped like Fiserv R-10405605 (read 2026-11-07).
+function detailWithSites(location: unknown, additionalLocations: unknown, country: unknown): string {
+  // The real envelope: the description keeps the existing fill working alongside.
+  return JSON.stringify({ jobPostingInfo: { title: "SDE", jobDescription: "<p>JD</p>", location, additionalLocations, country } });
+}
+
+// The country object Workday sends for a US primary site.
+const US = { descriptor: "United States of America", id: "bc33aa3152ec42d4995f4791a106ed09" };
+
+// A multi-location row as the list builds it.
+function multiRow(slug = "R-1"): JobInsert {
+  // Only location_raw differs from the single-site row.
+  return { ...workdayRow("Software Engineer", slug), location_raw: "3 Locations" };
+}
+
+// India is Teja's authorised country; the screener passes it the same way.
+const verdict = (row: JobInsert) => screenWorkAuth({ title: row.title, locationRaw: row.location_raw ?? null, description: null }, ["India"], "unknown");
+
+test("a multi-location listing gets every site from the detail, primary qualified by its country", async () => {
+  // US primary, one India site.
+  const row = multiRow();
+  // One read answers both.
+  const d = deps(() => new Response(detailWithSites("Berkeley Heights, New Jersey", ["Pune, India"], US), { status: 200 }));
+  // Fill.
+  await fillWorkdayDescriptions([row], newWorkdayDetailRun(d, 5));
+  // Still exactly one request: the locations ride on the description read.
+  assert.equal(d.urls.length, 1);
+  // "; " is the gate's part separator; the country makes the US primary site recognisable.
+  assert.equal(row.location_raw, "Berkeley Heights, New Jersey, United States of America; Pune, India");
+  // An India site is a place Teja may work, so the job stays.
+  assert.equal(verdict(row).drop, false);
+});
+
+test("a US-only multi-location posting is dropped by the work-auth gate once its sites are read", async () => {
+  // The Fiserv shape: every site in the US.
+  const row = multiRow();
+  // Primary plus two US extras.
+  const d = deps(() => new Response(detailWithSites("Berkeley Heights, New Jersey", ["Omaha, Nebraska", "Columbus, Ohio"], US), { status: 200 }));
+  // Fill.
+  await fillWorkdayDescriptions([row], newWorkdayDetailRun(d, 5));
+  // The leak: before the fix this stayed "3 Locations" and passed as unknown.
+  assert.equal(verdict(row).drop, true);
+});
+
+test("a failed or malformed detail keeps the list's 'N Locations', never an invented place", async () => {
+  // Four rows, four bad answers.
+  const rows = ["R-1", "R-2", "R-3", "R-4"].map((slug) => multiRow(slug));
+  // In order: a 404, a soft-200 page, a non-string site in the list, no primary location.
+  const answers = [
+    new Response("not found", { status: 404 }),
+    new Response("<html>Sign in</html>", { status: 200 }),
+    new Response(detailWithSites("Berkeley Heights, New Jersey", ["Omaha, Nebraska", 42], US), { status: 200 }),
+    new Response(detailWithSites(undefined, ["Omaha, Nebraska"], US), { status: 200 }),
+  ];
+  // The next answer to hand out.
+  let next = 0;
+  // Handed out one per GET.
+  await fillWorkdayDescriptions(rows, newWorkdayDetailRun(deps(() => answers[next++]!), 5));
+  // Every row keeps the list's text, which the gate reads as unknown, exactly as before.
+  assert.deepEqual(rows.map((row) => row.location_raw), ["3 Locations", "3 Locations", "3 Locations", "3 Locations"]);
+});
+
+test("a single-site listing keeps its own location; only 'N Locations' is replaced", async () => {
+  // The list already named the place.
+  const row = workdayRow("Software Engineer");
+  // A detail that would say something else.
+  const d = deps(() => new Response(detailWithSites("Somewhere Else", [], US), { status: 200 }));
+  // Fill.
+  await fillWorkdayDescriptions([row], newWorkdayDetailRun(d, 5));
+  // Untouched: the list's own prose is already a place.
+  assert.equal(row.location_raw, "Pune, India");
+});

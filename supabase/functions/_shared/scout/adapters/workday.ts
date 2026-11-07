@@ -142,6 +142,47 @@ export function parseWorkdayDescription(payload: unknown): string | null {
   return stripHtml(readString(payload.jobPostingInfo, "jobDescription"));
 }
 
+// The list's text for a multi-site posting: "3 Locations", "1 Location". Exactly this shape and
+// nothing looser, so a real place name is never mistaken for a count and overwritten.
+export const WORKDAY_LOCATION_COUNT = /^\d+ Locations?$/;
+
+// Every site of a posting, from a detail response, as one string the work-auth gate can split,
+// or null when the response does not hold the expected shape.
+//
+// WHY (2026-11-07, pending-tasks P2 #16): the list says "3 Locations" for a multi-site posting.
+// The gate reads that as "no place named", and an unknown location PASSES (Teja, 11-05), so a
+// US-only Fiserv posting (R-10405605) reached the queue as "location unknown".
+// SHAPE (read live from Fiserv's detail endpoint, 2026-11-07): `location` is the primary site
+// ("Berkeley Heights, New Jersey"), `additionalLocations` the other sites as strings, and
+// `country.descriptor` the PRIMARY site's country only. The country is appended to the primary
+// site because the gate knows no US state names: "Berkeley Heights, New Jersey" alone resolves
+// to nothing and would still pass as unknown.
+// STRICT (CLAUDE.md §6): no primary site, a non-array list or one non-string entry is null, and
+// the caller then keeps the list's text. A partial list could hide the one site that matters.
+export function parseWorkdayLocations(payload: unknown): string | null {
+  // The envelope and its one field must both be objects.
+  if (!isRecord(payload) || !isRecord(payload.jobPostingInfo)) return null;
+  // Shorthand for the posting object.
+  const info = payload.jobPostingInfo;
+  // The primary site is required: without it there is nothing to qualify or lead with.
+  const primary = readString(info, "location");
+  // No primary site: the response is not the shape this reads.
+  if (primary === null) return null;
+  // The primary site's country, when Workday sends one; its absence is allowed, not guessed.
+  const country = isRecord(info.country) ? readString(info.country, "descriptor") : null;
+  // Absent means "no other sites"; present must be an array.
+  const extra: unknown = info.additionalLocations ?? [];
+  // Anything but an array is a shape this does not know.
+  if (!Array.isArray(extra)) return null;
+  // Every entry must be real text; one bad entry refuses the whole list.
+  if (!extra.every((site) => typeof site === "string" && site.trim().length > 0)) return null;
+  // Primary first, qualified by its country unless it already names it.
+  const head = country !== null && !primary.includes(country) ? `${primary}, ${country}` : primary;
+  // "; " is a separator the gate splits on (work-auth-gate.ts PART_SEPARATOR); "," is not,
+  // because it joins a city to its state or country inside one site.
+  return [head, ...(extra as string[]).map((site) => site.trim())].join("; ");
+}
+
 // A readable page position: where this page starts, and page one's total once known.
 interface Cursor {
   // The page's first posting index.

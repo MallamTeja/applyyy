@@ -15,8 +15,9 @@
 // the detail path is never read. Rows are filled IN PLACE, because the scouts hand the same
 // row objects to planScreenedApplications; a copy would not reach the screener.
 
-// The pure halves: the detail URL from the apply link, and the description from the response.
-import { parseWorkdayDescription, workdayDetailUrl } from "./adapters/workday.ts";
+// The pure halves: the detail URL from the apply link, and the description and the sites from
+// the response.
+import { parseWorkdayDescription, parseWorkdayLocations, WORKDAY_LOCATION_COUNT, workdayDetailUrl } from "./adapters/workday.ts";
 // The shared countdown both scouts already use for their own budgets.
 import type { Deadline } from "../agent/deadline.ts";
 // Row shape from the schema owner.
@@ -99,8 +100,10 @@ export async function fillWorkdayDescriptions(rows: readonly JobInsert[], run: W
     run.left -= 1;
     // Counted before the result, so a read that fails still shows.
     run.fetched += 1;
-    // The text, or null for anything unreadable.
-    const description = await readDescription(run.get, url);
+    // The parsed body, or null for anything unreadable.
+    const payload = await readDetail(run.get, url);
+    // Only jobPostingInfo.jobDescription with real text counts.
+    const description = parseWorkdayDescription(payload);
     // Only real text is written; null leaves the row as the list built it.
     if (description !== null) {
       // In place: the scout hands this same object to planScreenedApplications.
@@ -108,12 +111,21 @@ export async function fillWorkdayDescriptions(rows: readonly JobInsert[], run: W
       // Counted for the run log.
       run.filled += 1;
     }
+    // The SAME response also names every site (2026-11-07, P2 #16): no extra request, so the
+    // cap above bounds this too. Only the list's "N Locations" is replaced; a place the list
+    // already named is kept. The gate reads "N Locations" as unknown, which passes.
+    if (typeof row.location_raw === "string" && WORKDAY_LOCATION_COUNT.test(row.location_raw)) {
+      // Every site joined for the gate, or null for a response without the expected shape.
+      const sites = parseWorkdayLocations(payload);
+      // null keeps the list's text, so a bad read is "unknown" as before, never an invented place.
+      if (sites !== null) row.location_raw = sites;
+    }
   }
 }
 
-// One detail read: the description, or null for a refusal, a non-2xx, a non-JSON body or a
-// response without the field. Never throws, so one bad posting cannot fail its board.
-async function readDescription(get: WorkdayDetailDeps["get"], url: string): Promise<string | null> {
+// One detail read: the parsed JSON body, or null for a refusal, a non-2xx or a non-JSON body.
+// Never throws, so one bad posting cannot fail its board. The field parsers decide the shape.
+async function readDetail(get: WorkdayDetailDeps["get"], url: string): Promise<unknown> {
   try {
     // The robots-gated GET.
     const res = await get(url);
@@ -121,14 +133,10 @@ async function readDescription(get: WorkdayDetailDeps["get"], url: string): Prom
     if (res === null || !res.ok) return null;
     // Text first, so a soft-200 HTML page is refused by the parse below, not by a throw.
     const text = await res.text();
-    // The parsed body, or null when it is not JSON.
-    let payload: unknown = null;
-    // JSON or nothing.
-    try { payload = JSON.parse(text); } catch { return null; }
-    // Only jobPostingInfo.jobDescription with real text counts.
-    return parseWorkdayDescription(payload);
+    // JSON or nothing; the parsers refuse any JSON of the wrong shape.
+    try { return JSON.parse(text); } catch { return null; }
   } catch {
-    // A robots refusal, an HTTP error or a network failure: no description.
+    // A robots refusal, an HTTP error or a network failure: nothing read.
     return null;
   }
 }
