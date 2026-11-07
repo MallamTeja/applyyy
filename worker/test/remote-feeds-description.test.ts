@@ -40,6 +40,13 @@ describe('remote-feed descriptions are stored as clean text', () => {
     expect(jobs[0]?.description).toBe(CIRCUITHUB_TEXT);
   });
 
+  it('Arbeitnow: a footer glued to a dash rule on the last line goes, dashes and all (job 3f73f9cc)', () => {
+    // The one row the 10:39 backfill left: no newline before "Find", a "-----" rule in front of it.
+    const { jobs } = parseArbeitnow(arbeitnow('<p>If you require assistance, please submit a request to: -----Find more English Speaking Jobs in France on Arbeitnow</p>'));
+    // The sentence stays; the rule and the footer go.
+    expect(jobs[0]?.description).toBe('If you require assistance, please submit a request to:');
+  });
+
   it('RemoteOK: HTML paragraphs become text lines too', () => {
     // The legal-notice element first, as the live feed sends it.
     // (An escaped "&lt;tag&gt;" is dropped as a tag: stripHtml decodes before stripping, by design.)

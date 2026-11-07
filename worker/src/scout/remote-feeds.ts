@@ -125,7 +125,9 @@ function repaired(value: string | null): string | null {
 
 // Arbeitnow's link-back footer, the last line of every description once tags are gone:
 // "Find Jobs in Germany on Arbeitnow". Anchored to the END so the same words mid-text survive.
-const ARBEITNOW_FOOTER = /\n?Find [^\n]{1,80} on Arbeitnow\s*$/;
+// The leading whitespace and dash rule go with it: job 3f73f9cc ended "...request to: -----Find more
+// English Speaking Jobs in France on Arbeitnow", on the same line as the sentence before it.
+const ARBEITNOW_FOOTER = /\s*-*\s*Find [^\n]{1,80} on Arbeitnow\s*$/;
 
 // A feed description as clean text: HTML to line-broken text, entities decoded, footer gone (N1,
 // 2026-11-07: 129 Arbeitnow and 52 RemoteOK rows stored HTML, which fed the matcher and tailor).
