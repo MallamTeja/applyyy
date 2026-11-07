@@ -12,7 +12,7 @@
 // whole feed. Each of those is decided here now, once, and tested.
 
 // The shared apply-URL and text readers, so remote rows pass the same http(s) gate as ATS rows (d153a2a).
-import { readHttpUrl, readString } from '../../../supabase/functions/_shared/ats/types.ts';
+import { readHttpUrl, readString, stripHtml } from '../../../supabase/functions/_shared/ats/types.ts';
 // The same canonical fingerprint the ATS scout uses, so a posting seen on both dedupes to one job.
 import { jobFingerprint } from '../../../supabase/functions/_shared/normalize/fingerprint.ts';
 // Types for the row this module emits.
@@ -123,6 +123,33 @@ function repaired(value: string | null): string | null {
   return value === null ? null : repairDoubleEncodedUtf8(value);
 }
 
+// Arbeitnow's link-back footer, the last line of every description once tags are gone:
+// "Find Jobs in Germany on Arbeitnow". Anchored to the END so the same words mid-text survive.
+const ARBEITNOW_FOOTER = /\n?Find [^\n]{1,80} on Arbeitnow\s*$/;
+
+// A feed description as clean text: HTML to line-broken text, entities decoded, footer gone (N1,
+// 2026-11-07: 129 Arbeitnow and 52 RemoteOK rows stored HTML, which fed the matcher and tailor).
+// Uses the ATS adapters' own stripHtml, so every board's description reads the same way.
+function cleanDescription(raw: string | null): string {
+  // No description is the feed's old default, unchanged.
+  if (raw === null) return '';
+  // Mojibake repaired FIRST: decoding entities can add chars above U+00FF (&mdash; is —),
+  // and the repair refuses any string holding one, so the other order would skip it.
+  const repairedRaw = repairDoubleEncodedUtf8(raw);
+  // Tags out, block ends as newlines, entities decoded once; null when no text was left.
+  const text = stripHtml(repairedRaw);
+  // §6: markup that strips to nothing is NOT "no description". Keep the raw text and say so,
+  // so a malformed body stays visible instead of passing silently as an empty one.
+  if (text === null) {
+    // One line per such posting; the scout's log is where a human would look.
+    console.warn(`[remote-feeds] description stripped to nothing; kept raw (${repairedRaw.length} chars)`);
+    // The raw text, as before this change.
+    return repairedRaw;
+  }
+  // The footer off the end; a description that was only the footer becomes empty, which it is.
+  return text.replace(ARBEITNOW_FOOTER, '');
+}
+
 // Builds one RemoteJob from one item, or null when it cannot be a safe posting.
 function toRemoteJob(
   // The raw feed item.
@@ -154,8 +181,8 @@ function toRemoteJob(
     location: repaired(readString(record, keys.location)) ?? keys.locationDefault,
     applyUrl,
     // Excerpt-or-full fallbacks in the order each feed is richest; empty when it gave none.
-    // Repaired too: the work-auth gate's JD-location line and the matcher read the description.
-    description: repaired(readString(record, ...keys.description)) ?? '',
+    // Repaired and stripped to text: the work-auth gate, the matcher and the tailor read it.
+    description: cleanDescription(readString(record, ...keys.description)),
     feed,
     // Absent salary fields read as null.
     salaryMin: keys.salaryMin === undefined ? null : salary(record[keys.salaryMin]),
