@@ -57,6 +57,12 @@ import {
   readEdges,
   statusText,
 } from './appliedView';
+// The newest prepared kit per row, parsed by the shared Manual apply rules.
+import { answersFor, readKitAnswers } from './submittedDetails';
+// Types only.
+import type { AnswersRead, PreparedAnswers as PreparedAnswersState } from './submittedDetails';
+// The pure block that draws one row's prepared answers.
+import { PreparedAnswers } from './PreparedAnswers';
 // Types only.
 import type { AppliedRow, AppliedSort, AppliedStage, AppliedView, StageEdge, StageFilter, TimelineItem } from './appliedView';
 // The page's layout; semantic tokens only.
@@ -66,11 +72,12 @@ import './Applied.css';
 const APPLIED_LIMIT = 500;
 // A signed link only needs to outlive one click (the same window as ManualApplyPage).
 const SIGNED_URL_SECONDS = 60;
-// Everything one row needs, in one request. Events are filtered to status_change by the query below.
+// Everything one row needs, in one request. Events are filtered to status_change by the query below;
+// their detail says which screen made the move (a Manual apply mark means Teja typed the answers).
 const APPLIED_SELECT =
   'id, status, updated_at, applied_at, resume_storage_path, screenshot_storage_path, tailored_profile, ' +
   'jobs:job_id(title, company_name, locations, apply_url), ' +
-  'application_events(event_type, from_status, to_status, created_at), ' +
+  'application_events(event_type, from_status, to_status, created_at, detail), ' +
   'email_events(from_address, subject, received_at, classification)';
 
 /* The rows read: three honest states, and an empty list only after a successful read. */
@@ -211,9 +218,11 @@ export function AppliedRowView(props: {
   readonly now: number;
   // Called with the target stage when a move is CONFIRMED; the button only opens the confirm.
   readonly onMove: (to: AppliedStage) => void;
+  // This row's prepared form answers; optional so a render without the kit read says "reading", not nothing.
+  readonly answers?: PreparedAnswersState;
 }): ReactElement {
-  // Destructured once.
-  const { row, edges, busy, error, now, onMove } = props;
+  // Destructured once; an absent answers prop is the loading state, never "no answers".
+  const { row, edges, busy, error, now, onMove, answers = { kind: 'loading' } } = props;
   // The row's confirm slot; the page prefix keeps it apart from other screens' confirms.
   const confirmId = `applied:${row.id}`;
   // Only the moves the live edges hold for this status; none until the graph has been read.
@@ -264,9 +273,13 @@ export function AppliedRowView(props: {
           /* Same signed-download path, the screenshots bucket. */
           <SignedDownload bucket="screenshots" path={row.screenshotPath} label="Download form screenshot" name={`Download form screenshot: ${name}`} />
         ) : null}
+        {/* Which master the frozen resume was tailored from, whichever form of it is offered above. */}
+        {row.resume !== null ? <span className="applied-row__muted">Resume from master v{row.resume.master_version}</span> : null}
         {/* The worker never attaches a cover letter, so there is nothing to download. */}
         <span className="applied-row__muted">No cover letter was sent</span>
       </div>
+      {/* The form answers the kit prepared, beside the resume they went with. */}
+      <PreparedAnswers answers={answers} typedByHand={row.answersTypedByHand} />
       {/* The stage moves. */}
       <div className="applied-row__moves">
         {/* The confirm opens in place of the buttons, so the card keeps its height. */}
@@ -364,9 +377,11 @@ export function AppliedListView(props: {
   readonly now: number;
   // A confirmed move.
   readonly onMove: (row: AppliedRow, to: AppliedStage) => void;
+  // The kit read for every row; optional so a render without it shows "reading" per row.
+  readonly answers?: AnswersRead;
 }): ReactElement {
-  // Destructured once.
-  const { read, edges, view, onView, busy, errors, now, onMove } = props;
+  // Destructured once; an absent kit read is still loading, never "no answers".
+  const { read, edges, view, onView, busy, errors, now, onMove, answers = { kind: 'loading' } } = props;
   // Before the first answer: neither "none" nor an error is known.
   if (read.kind === 'loading') return <p className="applied__note">Reading applied jobs…</p>;
   // role=alert: a list that cannot be read is not an empty list.
@@ -425,7 +440,7 @@ export function AppliedListView(props: {
         <ul className="applied__list">
           {/* Keyed by id: the lock, the error and the confirm all follow the row. */}
           {shown.map((row) => (
-            <AppliedRowView key={row.id} row={row} edges={edges} busy={busy.has(row.id)} error={errors.get(row.id) ?? null} now={now} onMove={(to) => onMove(row, to)} />
+            <AppliedRowView key={row.id} row={row} edges={edges} busy={busy.has(row.id)} error={errors.get(row.id) ?? null} now={now} onMove={(to) => onMove(row, to)} answers={answersFor(answers, row.id)} />
           ))}
         </ul>
       )}
@@ -439,6 +454,8 @@ export function AppliedJobsPage(): ReactElement {
   const [read, setRead] = useState<RowsRead>({ kind: 'loading' });
   // The transitions read.
   const [edges, setEdges] = useState<EdgesRead>({ kind: 'loading' });
+  // The prepared kit answers read, after the rows (it is keyed by their ids).
+  const [answers, setAnswers] = useState<AnswersRead>({ kind: 'loading' });
   // The toolbar's choices; reset on reload, deliberately (no storage: a filter that survives hides rows).
   const [view, setView] = useState<AppliedView>(DEFAULT_APPLIED_VIEW);
   // Rows with a move in flight, rendered disabled.
@@ -459,7 +476,9 @@ export function AppliedJobsPage(): ReactElement {
       // The list cannot be read.
       setRead({ kind: 'error', message: 'Not connected to the database.' });
       // Nor can the graph.
-      return setEdges({ kind: 'error', message: 'not connected to the database' });
+      setEdges({ kind: 'error', message: 'not connected to the database' });
+      // Nor the kits.
+      return setAnswers({ kind: 'error', message: 'not connected to the database' });
     }
     try {
       // Concurrent: neither depends on the other.
@@ -489,8 +508,10 @@ export function AppliedJobsPage(): ReactElement {
       ]);
       // A newer read started meanwhile: this answer is stale.
       if (seq !== readSeq.current) return;
-      // supabase-js returns errors; each read reports its own.
-      if (apps.error) setRead({ kind: 'error', message: apps.error.message || 'unknown error' });
+      // The graph's own state; a failure here shows no buttons, never a remembered graph.
+      setEdges(graph.error ? { kind: 'error', message: graph.error.message || 'unknown error' } : { kind: 'ok', edges: readEdges(graph.data) });
+      // supabase-js returns errors; each read reports its own. No rows means no kits to read either.
+      if (apps.error) return setRead({ kind: 'error', message: apps.error.message || 'unknown error' });
       // Validated rows only; a row that cannot be shown or moved safely is skipped, not guessed.
       else {
         // The raw answer, as an array or nothing.
@@ -499,9 +520,31 @@ export function AppliedJobsPage(): ReactElement {
         const rows = raw.map(readAppliedRow).filter((r): r is AppliedRow => r !== null);
         // Counted on the raw answer, so a skipped row cannot hide the overflow.
         setRead({ kind: 'rows', rows: rows.slice(0, APPLIED_LIMIT), more: raw.length > APPLIED_LIMIT });
+        // The ids shown, so the kit read asks for exactly these rows' notes.
+        const ids = rows.slice(0, APPLIED_LIMIT).map((r) => r.id);
+        // No rows: nothing to ask for, and the empty list hides every block anyway.
+        if (ids.length === 0) return setAnswers(readKitAnswers([]));
+        // Kits are notes of kind apply_kit (the Manual apply read's filter), under RLS "read own events".
+        const kits = await supabase
+          // The append-only log.
+          .from('application_events')
+          // The join key, the ordering time, the payload newestKitStates parses.
+          .select('application_id, created_at, detail')
+          // Kits are written as notes.
+          .eq('event_type', 'note')
+          // Kits only; a skip note is not a set of answers.
+          .eq('detail->>kind', 'apply_kit')
+          // This page's rows only.
+          .in('application_id', ids)
+          // Newest first; newestKitStates re-checks the order itself.
+          .order('created_at', { ascending: false })
+          // Bounded, so PostgREST's max-rows never cuts silently: newest first means a cut drops only old kits.
+          .limit(APPLIED_LIMIT * 4);
+        // A newer read started meanwhile: this answer is stale.
+        if (seq !== readSeq.current) return;
+        // A failed read is said on every row, never "No form answers" (supabase-js returns, it does not throw).
+        setAnswers(kits.error ? { kind: 'error', message: kits.error.message || 'unknown error' } : readKitAnswers(kits.data));
       }
-      // The graph's own state; a failure here shows no buttons, never a remembered graph.
-      setEdges(graph.error ? { kind: 'error', message: graph.error.message || 'unknown error' } : { kind: 'ok', edges: readEdges(graph.data) });
     } catch {
       // A throwing client is a failed read, if this is still the newest one.
       if (seq !== readSeq.current) return;
@@ -509,6 +552,8 @@ export function AppliedJobsPage(): ReactElement {
       setRead({ kind: 'error', message: 'The applied jobs could not be read.' });
       // No graph, no buttons.
       setEdges({ kind: 'error', message: 'the read threw' });
+      // And no kits: said, not "none".
+      setAnswers({ kind: 'error', message: 'the read threw' });
     }
   }, []);
 
@@ -565,7 +610,7 @@ export function AppliedJobsPage(): ReactElement {
       {/* Title and lede from the route table. */}
       <PageHeader path="applied" />
       {/* Everything else is the pure list view. */}
-      <AppliedListView read={read} edges={edges} view={view} onView={setView} busy={busy} errors={errors} now={Date.now()} onMove={(row, to) => void move(row, to)} />
+      <AppliedListView read={read} edges={edges} view={view} onView={setView} busy={busy} errors={errors} now={Date.now()} onMove={(row, to) => void move(row, to)} answers={answers} />
     </div>
   );
 }

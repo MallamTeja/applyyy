@@ -235,6 +235,9 @@ export interface AppliedRow {
   readonly resume: ResolvedResume | null;
   // Status changes and matched emails, oldest first.
   readonly timeline: readonly TimelineItem[];
+  // True when the move to applied came from the Manual apply page: Teja typed the final answers in the
+  // browser, so the prepared kit answers may differ from what the employer received.
+  readonly answersTypedByHand: boolean;
 }
 
 /* A non-blank string, or null. */
@@ -263,6 +266,18 @@ function appliedAtOf(r: Record<string, unknown>): number | null {
   }
   // Nothing says when: "—" on screen.
   return null;
+}
+
+/* Whether the row entered applied from the Manual apply page (useRecoveryMoves(load, 'manual_apply') records
+   p_detail.source). Only an exact match counts: a missing or odd detail is not evidence of a hand-typed form. */
+function enteredAppliedByHand(events: unknown): boolean {
+  // A missing embed is no evidence.
+  return (Array.isArray(events) ? events : []).some((raw) => {
+    // Rows only.
+    const e = asRecord(raw);
+    // The move into applied, with the screen that made it.
+    return e !== null && e.event_type === 'status_change' && e.to_status === 'applied' && asRecord(e.detail)?.source === 'manual_apply';
+  });
 }
 
 /* One stored row as the page's select returns it, or null when it cannot be shown or moved safely:
@@ -305,6 +320,8 @@ export function readAppliedRow(raw: unknown): AppliedRow | null {
     resume: readResumeSnapshot(r.tailored_profile),
     // Merged and sorted.
     timeline: mergeTimeline(r.application_events, r.email_events),
+    // From the same status events; the select embeds their detail for this.
+    answersTypedByHand: enteredAppliedByHand(r.application_events),
   };
 }
 

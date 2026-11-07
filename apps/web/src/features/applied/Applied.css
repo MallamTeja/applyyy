@@ -175,8 +175,9 @@
   font-size: var(--size-sm);
 }
 
-/* The rebuild disclosure and the timeline disclosure. */
+/* The rebuild, prepared-answers and timeline disclosures. */
 .applied-row__rebuild,
+.applied-row__answers,
 .applied-row__timeline {
   /* Full card width when open. */
   width: 100%;
@@ -184,6 +185,7 @@
 
 /* The disclosure triangles' text, as a quiet control. */
 .applied-row__rebuild > summary,
+.applied-row__answers > summary,
 .applied-row__timeline > summary {
   /* A clickable cursor; it is a control. */
   cursor: pointer;
