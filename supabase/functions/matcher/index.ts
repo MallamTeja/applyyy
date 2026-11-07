@@ -838,10 +838,12 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     dropped: droppedCount,
     // Rows another run took first; not failures, and not scored by this run.
     skipped_stale: skippedStaleCount,
-    // Rows the pre-gate dropped before scoring, at zero Gemini cost: ALL pre-gate stages.
-    // LEGACY NAME kept on purpose: postscreen-drain.yml:281 and pregate-sweep.yml:171/226 require
-    // this key and sum it into their row accounting, so renaming it here alone would break both.
-    // ponytail: rename to pre_gate_dropped together with both workflows in one change.
+    // Rows the pre-gate dropped before scoring, at zero Gemini cost: ALL pre-gate stages (tech, work-auth,
+    // experience), so the honest name is pre_gate_dropped (#19, owned by peer 2 since 2026-11-07).
+    pre_gate_dropped: preGateDroppedCount,
+    // LEGACY NAME, the same value, until step 2 lands (#19, a three-step rename): postscreen-drain.yml:337
+    // and pregate-sweep.yml:176/245/253 REQUIRE this key and abort without it, so both keys ship until the
+    // workflows read pre_gate_dropped; step 3 then deletes this line.
     tech_gate_dropped: preGateDroppedCount,
     // The same drops by drop_reason code (tech_gate, tech_gate_unclassified, work_auth,
     // experience_ceiling), so a reader is never told a work-auth drop was a title problem.
