@@ -193,4 +193,30 @@ describe('audit finding path forms on the approval page', () => {
       assert.deepEqual(flagged(d), [], path);
     }
   });
+
+  // 2026-11-07: the auditor (6526679) now stores `ref_path`, the adapter's own key form, on every
+  // finding. It is the auditor's own answer to "which bullet", so it outranks re-deriving one from `path`.
+  it('ref_path is read first: it wins over an index path that would land elsewhere', () => {
+    // path alone resolves to b-a1; ref_path names b-b2, so b-b2 must be the one flagged.
+    const finding = { ...claimAt('experience[0].bullets[0]'), ref_path: 'experience.exp-beta.b-b2' };
+    // Located on the bullet ref_path names, not the one the index form would pick.
+    assert.deepEqual(flagged(diff([finding])), ['experience.exp-beta.b-b2|Built']);
+  });
+
+  it('ref_path locates a finding whose path form the adapter cannot translate', () => {
+    // `experience[0]` alone stays unlocated by refPathOf; ref_path carries the bullet.
+    const finding = { ...claimAt('experience[0]'), ref_path: 'experience.exp-acme.b-a2' };
+    // Located on b-a2 through ref_path.
+    assert.deepEqual(flagged(diff([finding])), ['experience.exp-acme.b-a2|Built']);
+  });
+
+  it('a missing, empty or non-string ref_path falls back to the path, as older rows need', () => {
+    // Older rows lack it; a malformed value is treated the same way, never as a path.
+    for (const refPath of [undefined, '', 42, null, ['experience.exp-beta.b-b2']]) {
+      // The index form resolves to b-b2 through the fallback.
+      const finding = { ...claimAt('experience[1].bullets[1]'), ref_path: refPath };
+      // Same answer as before ref_path existed.
+      assert.deepEqual(flagged(diff([finding])), ['experience.exp-beta.b-b2|Built'], String(refPath));
+    }
+  });
 });

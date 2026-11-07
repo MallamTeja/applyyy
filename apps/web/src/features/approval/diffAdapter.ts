@@ -845,8 +845,12 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
      original (D4) the stored resume is the only one there is. */
   const auditedResume = original ?? resolved;
   for (const stored of application.audit_findings) {
+    /* The auditor's own ref_path first (6526679, 2026-11-07): it already is the adapter's key form, and
+       it is the auditor's answer to "which bullet", so nothing is re-derived. Shape-checked, because the
+       row is untrusted JSON and older rows lack it; anything but a non-empty string falls back. */
+    const refPath: unknown = (stored as { ref_path?: unknown }).ref_path;
     /* One path form from here on, so the line lookup, the notes and the alarm all key by ref. */
-    const finding: AuditFinding = { ...stored, path: refPathOf(stored.path, auditedResume) };
+    const finding: AuditFinding = { ...stored, path: typeof refPath === 'string' && refPath !== '' ? refPath : refPathOf(stored.path, auditedResume) };
     /* Split once, here, so the line walk and the unlocated list below agree on which is which. */
     const note = keywordDropNote(finding);
     /* A readable note goes to its own list and nowhere else. */

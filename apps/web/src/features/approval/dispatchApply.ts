@@ -14,12 +14,12 @@
 
 // The shared error-body reader and record check, already exported for the discovery panels.
 import { isRecord, readErrorBody } from '../discovery/WebScoutPanel';
+// Every browser edge call goes through it: a revoked session refreshes once, else signs out with a plain sentence.
+import { invokeEdge, type EdgeClient } from '../../data/edgeCall.ts';
 
-/* The one slice of the supabase client this needs, so a test can fake it. */
-export interface DispatchClient {
-  // supabase.functions.invoke, as the approval page's client has it.
-  readonly functions: { invoke(name: string): Promise<{ data: unknown; error: unknown }> };
-}
+/* The one slice of the supabase client this needs, so a test can fake it: invokeEdge's client
+   (functions plus auth, for the one refresh and the local sign-out). */
+export type DispatchClient = EdgeClient;
 
 /* What the function said. */
 export type DispatchResult =
@@ -35,7 +35,11 @@ export async function requestDispatch(client: DispatchClient): Promise<DispatchR
   // The call.
   try {
     // No body: the function reads everything it needs under the caller's session.
-    const { data, error } = await client.functions.invoke('dispatch-apply');
+    const answer = await invokeEdge(client, 'dispatch-apply');
+    // The session is gone and this browser is signed out: nothing was started, and the sentence says why.
+    if (answer.kind === 'signed_out') return { kind: 'error', message: answer.message };
+    // The function answered: its own data and error.
+    const { data, error } = answer;
     // A non-2xx: the function's own message when it sent one.
     if (error) {
       // The JSON body behind the error, if readable.

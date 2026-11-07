@@ -84,6 +84,9 @@ export const DISCOVERED_JOB_COLUMNS = [
   'salary_max',
   // The salary pill.
   'salary_currency',
+  // When the board took the posting down (null while live): the card says "Posting gone" instead of Send,
+  // because the tailor refuses a gone posting and the click would only fail (2026-11-07).
+  'disappeared_at',
 ] as const;
 
 // A jobs row as this page receives it: exactly the selected columns, so tsc guards the select.

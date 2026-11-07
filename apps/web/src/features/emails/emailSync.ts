@@ -30,6 +30,8 @@ export const GMAIL_SYNC_DEBOUNCE_MS = 60_000;
    Imported for this file's own use, and re-exported so EmailMonitoringPage's existing
    `import { type EmailEventRow } from './emailSync.ts'` keeps resolving to the shared one. */
 import type { EmailEventRow } from '../../data/contract.ts';
+// Every browser edge call goes through it: a revoked session refreshes once, else signs out with a plain sentence.
+import { invokeEdge, type EdgeClient } from '../../data/edgeCall.ts';
 export type { EmailEventRow };
 
 /* The sync outcomes the page renders — a closed union, not a boolean pair, so the
@@ -46,11 +48,7 @@ export type GmailSyncOutcome =
 
 /* The slice of supabase-js the sync needs; injected so tests never touch a network.
    Same seam shape as pipelineRunner's FunctionsInvoker. */
-export interface GmailSyncClient {
-  readonly functions: {
-    invoke(name: string, options?: Record<string, unknown>): Promise<{ data: unknown; error: unknown }>;
-  };
-}
+export type GmailSyncClient = EdgeClient;
 
 /**
  * Decide whether the on-open auto-sync should call the function at all.
@@ -112,7 +110,12 @@ export async function syncGmailInbox(client: GmailSyncClient): Promise<GmailSync
   let error: unknown;
   try {
     /* POST with an empty body; the function reads everything from the JWT. */
-    ({ data, error } = await client.functions.invoke('gmail-sync', { body: {} }));
+    const answer = await invokeEdge(client, 'gmail-sync', { body: {} });
+    /* The session is gone and this browser is signed out (the app then shows sign-in): the quiet
+       status line gets the plain sentence; the stored events stay on screen as for any failure. */
+    if (answer.kind === 'signed_out') return { kind: 'failed', message: answer.message };
+    /* The function answered: its own data and error. */
+    ({ data, error } = answer);
   } catch (err) {
     /* supabase-js reports failures in `error`, not by throwing — but a seam double or a
        network layer might throw anyway, and a gate that can crash its caller gets

@@ -18,6 +18,8 @@ import type { InvokeResult, PipelineStep, RowPipelineDeps } from './rowPipeline.
 import { describeInvokeError } from '../../data/pipelineRunner.ts';
 /* Type only: the invoke half of the client, already declared for the batch runner. */
 import type { FunctionsInvoker } from '../../data/pipelineRunner.ts';
+/* Every browser edge call goes through it: a revoked session refreshes once, else signs out with a plain sentence. */
+import { invokeEdge } from '../../data/edgeCall.ts';
 /* The app's one client, or null when the machine has no Supabase env. */
 import { supabase } from '../../data/supabase.ts';
 
@@ -44,7 +46,10 @@ export function makeRowPipelineDeps(client: RowPipelineClient): RowPipelineDeps 
         /* The id rides in the query string, the same way pipelineRunner.ts:208 passes `limit`:
            functions-js builds `${url}/${functionName}`, so the suffix survives. Encoded because
            this is a URL; for a uuid the encoding is the identity. */
-        const result = await client.functions.invoke(`${step}?application_id=${encodeURIComponent(applicationId)}`);
+        const result = await invokeEdge(client, `${step}?application_id=${encodeURIComponent(applicationId)}`);
+        /* The session is gone and this browser is signed out. 401 is what the server said; the
+           plain sentence is the reason, so the card never shows the raw invalid_session code. */
+        if (result.kind === 'signed_out') return { ok: false, httpStatus: 401, body: { error: result.message } };
         /* supabase-js reports HTTP failures in `error`, not as a throw. */
         if (result.error) {
           /* Present on FunctionsHttpError/RelayError only; a fetch error has no Response. */
@@ -55,8 +60,8 @@ export function makeRowPipelineDeps(client: RowPipelineClient): RowPipelineDeps 
           return { ok: false, httpStatus: context instanceof Response ? context.status : null, body: { error: described.message } };
         }
         /* Newer supabase-js also returns the raw Response; read its status when present rather
-           than inventing a 200 the SDK never told us. */
-        const response = (result as { response?: unknown }).response;
+           than inventing a 200 the SDK never told us. invokeEdge passes it through untouched. */
+        const response = result.response;
         /* The parsed body goes to the engine, which checks it for halts and per-row failures. */
         return { ok: true, httpStatus: response instanceof Response ? response.status : null, body: result.data };
       } catch (err) {
@@ -109,6 +114,8 @@ export const liveRowPipelineDeps: RowPipelineDeps | null =
     : makeRowPipelineDeps({
         /* The real functions client; its wider invoke signature is assignable to FunctionsInvoker. */
         functions: supabase.functions,
+        /* The real auth client: invokeEdge refreshes a revoked session through it, or signs this browser out. */
+        auth: supabase.auth,
         /* The only query, delegated to liveRead so it is typed by the real SDK. */
         readStatusRow: (applicationId) => liveRead(applicationId),
       });

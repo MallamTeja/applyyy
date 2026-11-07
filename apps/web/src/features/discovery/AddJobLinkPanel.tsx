@@ -23,6 +23,8 @@ import type { RowPipelineDeps, RowPipelineOutcome } from '../pipeline/rowPipelin
 import { safeHref } from '../../app/safeHref.ts';
 // The same defensive reader WebScoutPanel uses for a function's non-2xx body.
 import { isRecord, readErrorBody, type WebScoutClient } from './WebScoutPanel.tsx';
+// Every browser edge call goes through it: a revoked session refreshes once, else signs out with a plain sentence.
+import { invokeEdge } from '../../data/edgeCall.ts';
 // Shared look with the sibling panel.
 import './WebScoutPanel.css';
 // Only the modal's placement, scrim and header row; the card look stays WebScoutPanel.css's.
@@ -145,7 +147,11 @@ export async function runJobLinkIntake(client: WebScoutClient, url: string, conf
   // A rejected promise (network down) becomes an error state.
   try {
     // Contract: invoke('job-link-intake', { body }).
-    const { data, error } = await client.functions.invoke('job-link-intake', { body });
+    const answer = await invokeEdge(client, 'job-link-intake', { body });
+    // The session is gone and this browser is signed out: nothing was added, and the sentence says why.
+    if (answer.kind === 'signed_out') return { kind: 'error', message: answer.message };
+    // The function answered: its own data and error.
+    const { data, error } = answer;
     // Non-2xx: classify by the function's own status field.
     if (error) {
       // The body lives behind error.context in supabase-js.

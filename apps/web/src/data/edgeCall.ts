@@ -22,7 +22,9 @@ const SESSION_CODES: ReadonlySet<string> = new Set(['invalid_session', 'missing_
 export interface EdgeClient {
   readonly functions: {
     // supabase-js adds the CURRENT session's token on every call, so a retry after a refresh sends the new one.
-    invoke(name: string, options: { body: Record<string, unknown> }): Promise<{ data: unknown; error: unknown }>;
+    // Options are optional: three callers send no body at all, and must keep sending none.
+    // `response` is the raw Response newer supabase-js returns beside data; the row pipeline reads its status.
+    invoke(name: string, options?: { body: Record<string, unknown> }): Promise<{ data: unknown; error: unknown; response?: unknown }>;
   };
   readonly auth: {
     // Trades the refresh token for a new session; fails with { error } when the token was revoked.
@@ -36,7 +38,8 @@ export interface EdgeClient {
    A closed union so a caller cannot read `data` off a signed-out result. */
 export type EdgeCallResult =
   // The function answered (2xx or any error that is not a session problem): exactly what invoke returned.
-  | { readonly kind: 'answered'; readonly data: unknown; readonly error: unknown }
+  // Spread from invoke's own result, so `response` is there exactly when the SDK gave one and no caller loses the status.
+  | { readonly kind: 'answered'; readonly data: unknown; readonly error: unknown; readonly response?: unknown }
   // The session could not be recovered; this browser is now signed out.
   | { readonly kind: 'signed_out'; readonly message: string };
 
@@ -76,11 +79,11 @@ async function isSessionRefusal(error: unknown): Promise<boolean> {
 
 /* Call an edge function; on a session 401, refresh once and retry once. Never throws on its own
    account (invoke's own throws, which supabase-js does not do, reach the caller unchanged). */
-export async function invokeEdge(client: EdgeClient, name: string, options: { body: Record<string, unknown> }): Promise<EdgeCallResult> {
+export async function invokeEdge(client: EdgeClient, name: string, options?: { body: Record<string, unknown> }): Promise<EdgeCallResult> {
   // The first attempt.
   const first = await client.functions.invoke(name, options);
   // Anything but a session 401 is the caller's to read.
-  if (!(await isSessionRefusal(first.error))) return { kind: 'answered', data: first.data, error: first.error };
+  if (!(await isSessionRefusal(first.error))) return { kind: 'answered', ...first };
   // One refresh: a token that simply expired comes back here.
   const refreshed = await client.auth.refreshSession();
   // A revoked refresh token (global logout) cannot recover; stop before any retry.
@@ -90,7 +93,7 @@ export async function invokeEdge(client: EdgeClient, name: string, options: { bo
   // Still a session 401 after a good refresh: final, no second refresh.
   if (await isSessionRefusal(second.error)) return signedOut(client);
   // The retry's answer, whatever it is.
-  return { kind: 'answered', data: second.data, error: second.error };
+  return { kind: 'answered', ...second };
 }
 
 /* The give-up path: clear this browser's session so the app shows sign-in, then the plain sentence. */

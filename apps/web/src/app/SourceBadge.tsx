@@ -155,13 +155,19 @@ export function SourceBadge({
   sourceRefs,
   className = '',
 }: SourceBadgeProps): ReactElement | null {
-  if (!discoveredVia || discoveredVia.length === 0) return null;
+  // Both props arrive off the wire as untrusted JSON, typed only by a cast at the call sites. A
+  // truthiness test let a non-empty string through to .map and crashed the page ("e.map is not a
+  // function", 2026-11-07 audit), so the SHAPE is checked (CLAUDE.md section 6): an array of strings.
+  const sources: readonly string[] = Array.isArray(discoveredVia) ? discoveredVia.filter((s): s is string => typeof s === 'string') : [];
+  // No readable source: no chip, rather than a crash or a guessed one.
+  if (sources.length === 0) return null;
 
-  const refs: readonly JobSourceRef[] = sourceRefs ?? [];
+  // Same check for the refs: toBadgeInfo reads .provider off each one, so a null entry would throw there.
+  const refs: readonly JobSourceRef[] = Array.isArray(sourceRefs) ? sourceRefs.filter((r) => typeof r === 'object' && r !== null) : [];
   // One chip per distinct label+url. A source with no ref of its own borrows refs[0] in toBadgeInfo, so
   // xAI's {greenhouse, manual} (a pasted Greenhouse link, 2026-11-05 A3) drew "Greenhouse career page" twice:
   // the same chip, same link. Identical chips say nothing new; a Map keeps the first one's position.
-  const badges: BadgeInfo[] = [...new Map(discoveredVia.map((src) => toBadgeInfo(src, refs)).map((b) => [`${b.label}\n${b.url ?? ''}`, b] as const)).values()];
+  const badges: BadgeInfo[] = [...new Map(sources.map((src) => toBadgeInfo(src, refs)).map((b) => [`${b.label}\n${b.url ?? ''}`, b] as const)).values()];
 
   return (
     <span className={`source-badge-group ${className}`.trim()}>

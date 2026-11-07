@@ -72,6 +72,58 @@ describe('the engine response is read into words (engineReasonText)', () => {
   });
 });
 
+// 2026-11-07: the matcher's top-level `reason` became an object (e88b7d8, run-reason.ts):
+// { code, message, status? }. The string-only reader dropped it, so a targeted run that found
+// nothing said "no reason given". Each closed code reads as plain words.
+describe("the matcher's reason object is read into plain words", () => {
+  it('target_posting_gone says "Posting gone"', () => {
+    // The matcher's exact object for a tombstoned posting.
+    assert.equal(card.engineReasonText({ success: true, processed: 0, reason: { code: 'target_posting_gone', message: 'The posting is gone from its board, so the matcher skipped it.' } }), 'Posting gone');
+  });
+
+  it('target_not_found says the job is no longer in the list', () => {
+    // The matcher's exact object for a missing row.
+    assert.equal(card.engineReasonText({ reason: { code: 'target_not_found', message: 'No application with that id exists.' } }), 'This job is no longer in your list');
+  });
+
+  it('target_not_at_input_status names the status the row is at', () => {
+    // The object carries the row's real status.
+    assert.equal(card.engineReasonText({ reason: { code: 'target_not_at_input_status', message: 'The application is at scored, not passed_filters, so the matcher has nothing to score.', status: 'scored' } }), 'Already at scored');
+  });
+
+  it('target_not_at_input_status with no readable status keeps the message verbatim', () => {
+    // A status that is not a non-empty string is not invented into the sentence.
+    assert.equal(card.engineReasonText({ reason: { code: 'target_not_at_input_status', message: 'The application is at x.', status: 7 } }), 'The application is at x.');
+  });
+
+  it('rate_limited keeps the code in its words, so the stop says Gemini is rate-limited', () => {
+    // A 429 line that never spells rate_limited itself (run-reason.ts matches status=429 too).
+    const text = card.engineReasonText({ reason: { code: 'rate_limited', message: 'gemini_call_failed: status=429 Resource has been exhausted' } });
+    // The code is prefixed so stopDetail's rate-limit sentence fires; the raw words stay for diagnosis.
+    assert.equal(text, 'rate_limited: gemini_call_failed: status=429 Resource has been exhausted');
+    // A message that already names it is not prefixed twice.
+    assert.equal(card.engineReasonText({ reason: { code: 'rate_limited', message: 'gemini_call_failed: rate_limited_all_retries_exhausted' } }), 'gemini_call_failed: rate_limited_all_retries_exhausted');
+  });
+
+  it('an unknown code reads as its message verbatim, capped; a malformed object adds nothing', () => {
+    // A code this reader does not know: the server's own sentence.
+    assert.equal(card.engineReasonText({ reason: { code: 'something_new', message: 'A new case.' } }), 'A new case.');
+    // A long message is capped like every other untrusted text.
+    const long = card.engineReasonText({ reason: { code: 'something_new', message: 'b'.repeat(5000) } });
+    // Same cap as the other fields.
+    assert.ok(long !== null && long.length <= 301 && long.endsWith('…'));
+    // No code and no message: nothing, never "[object Object]".
+    assert.equal(card.engineReasonText({ reason: { foo: 1 } }), null);
+    // An array is not the object shape.
+    assert.equal(card.engineReasonText({ reason: ['target_posting_gone'] }), null);
+  });
+
+  it('a string reason still reads as before', () => {
+    // Other agents send reason as a plain string.
+    assert.equal(card.engineReasonText({ reason: 'kill switch on' }), 'kill switch on');
+  });
+});
+
 describe('every stop says the reason (outcome sentence)', () => {
   it('body_failure quotes the agent words', () => {
     // A 200 whose body reported the row failed.
