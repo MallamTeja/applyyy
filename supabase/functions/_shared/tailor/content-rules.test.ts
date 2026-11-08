@@ -101,6 +101,40 @@ test("tailored resume never keeps 3 projects: exactly 2, the >= 4-bullet ones fi
   assert.ok(changes.some((c) => c.change === "dropped" && c.ref === "proj_f1"));
 });
 
+/** The master with a 4th project, proj_x: eligible (4 bullets) and the MOST JD-relevant, so applyy would lose on relevance. */
+function masterWithStrongRival(): MasterProfile {
+  // The base master.
+  const base = master();
+  // A rival naming both JD keywords in every bullet.
+  const rival = { ...base.projects[0]!, id: "proj_x", name: "TypeScript PostgreSQL platform", bullets: [mb("x1", "TypeScript PostgreSQL"), mb("x2", "TypeScript PostgreSQL"), mb("x3", "TypeScript PostgreSQL"), mb("x4", "TypeScript PostgreSQL")] };
+  // proj_one made relevant too, so both rivals outrank applyy on score.
+  const one = { ...base.projects[0]!, bullets: base.projects[0]!.bullets.map((b) => ({ ...b, text: `${b.text} TypeScript PostgreSQL` })) };
+  // Order: the rivals first, applyy last (master order is the final tie-break, so it cannot help applyy).
+  return { ...base, projects: [rival, one, base.projects[1]!, base.projects[2]!] } as MasterProfile;
+}
+
+test("applyy is always one of the 2 projects", () => {
+  // The model picked the two strongest rivals and not applyy.
+  const answer = { ...greedyAnswer(), projects: [{ ref: "proj_x", bullets: [{ ref: "x1", text: "TypeScript PostgreSQL" }] }, { ref: "proj_one", bullets: [{ ref: "o1", text: "Built a mentoring app TypeScript PostgreSQL" }] }] } as unknown as TailoredProfile;
+  // Enforced against the master where applyy loses on every other criterion.
+  const { profile, changes } = enforceContentRules(answer, masterWithStrongRival(), JD);
+  // Applyy holds a slot; the other is the model's first pick (proj_x: chosen, eligible, highest score).
+  assert.deepEqual(profile.projects.map((p) => p.ref).sort(), ["proj_applyy", "proj_x"]);
+  // The displaced pick and the added applyy are both recorded.
+  assert.ok(changes.some((c) => c.change === "dropped" && c.ref === "proj_one") && changes.some((c) => c.change === "added" && c.ref === "proj_applyy"));
+});
+
+test("a master without proj_applyy still picks 2 by relevance", () => {
+  // The same strong-rival master with applyy removed.
+  const noApplyy = { ...masterWithStrongRival(), projects: masterWithStrongRival().projects.filter((p) => p.id !== "proj_applyy") } as MasterProfile;
+  // The greedy answer minus applyy.
+  const answer = { ...greedyAnswer(), projects: greedyAnswer().projects.filter((p) => p.ref !== "proj_applyy") } as unknown as TailoredProfile;
+  // Enforced.
+  const { profile } = enforceContentRules(answer, noApplyy, JD);
+  // The two eligible ones (proj_one picked; proj_x most relevant); f1 (3 bullets) loses as before.
+  assert.deepEqual(profile.projects.map((p) => p.ref).sort(), ["proj_one", "proj_x"]);
+});
+
 test("each kept project is topped up to 4 bullets from master text, most JD-relevant first", () => {
   // Enforced.
   const { profile } = enforceContentRules(greedyAnswer(), master(), JD);

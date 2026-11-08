@@ -215,9 +215,19 @@ export async function replayStoredMoves(
     // Fresh statuses, read AFTER this call's receipt confirmations, so a row the receipt
     // just moved to applied is seen at applied.
     // Paged (Review #3): applied rows pile up past PostgREST's 1000-row cap, and a cut-short
-    // read would silently leave rows out of the sweep. Ordered by id so the pages are stable.
+    // read would silently leave rows out of the sweep. A TOTAL order keeps the pages stable:
+    // created_at first, id as the unique tiebreak, so no two rows ever compare equal.
+    // WHY NOT order("id") (it was, until 2026-11-08): this read runs as the app user, so RLS
+    // applies, and the status enum's `=` is not leakproof. Postgres then ignores the status
+    // statistics (it guessed 25,281 matching rows; 29 match) and walked applications_pkey in id
+    // order, filtering ~35,900 rows per page: 938 ms and 36,160 buffers for page 1, and the same
+    // walk again for the empty page readAllPages needs. No index can fix it, because under RLS
+    // the status filter can never be an index condition. No index yields created_at order for
+    // one user, so the planner seq-scans (6.6 MB) and sorts the few matches instead: 5.4 ms,
+    // 918 buffers (EXPLAIN ANALYZE as authenticated, docs/status/2026-11-08-web-latency-db.md).
+    // Any index that later leads with (user_id, created_at) would bring the walk back; this test pins the order.
     // The joined job (2026-11-04) is what the re-match below matches on, the same fields index.ts loads.
-    const apps = await readAllPages((from, to) => db.from("applications").select("id, status, jobs(company_name, company_slug, title)").in("status", [...MATCH_POOL_STATUSES]).order("id").range(from, to));
+    const apps = await readAllPages((from, to) => db.from("applications").select("id, status, jobs(company_name, company_slug, title)").in("status", [...MATCH_POOL_STATUSES]).order("created_at", { ascending: true }).order("id", { ascending: true }).range(from, to));
     // No statuses, no decisions.
     if (typeof apps === "string") return { moved, errors: [...errors, `replay: applications read failed: ${apps}`] };
     // Shape-checked: only a string id with a tracked status becomes a candidate row.

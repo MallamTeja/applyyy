@@ -47,6 +47,9 @@ export const PAGE_FIT_FLOORS = {
   // A tailored resume holds AT MOST this many projects ("never and ever 3 projects, only 2"), and exactly this many
   // when the master has them.
   maxProjects: 2,
+  // Projects that ALWAYS take one of those slots when the master holds them (Teja, 2026-11-08 ruling G(a):
+  // "proj_applyy is always one of the 2 projects"). The other slot goes by relevance. Ids, so a rename is one edit here.
+  alwaysProjects: ["proj_applyy"] as readonly string[],
   // Achievement entries kept at least ("achievements at least 2").
   minAchievements: 2,
   // Education entries kept at least ("both educations; the diploma counts").

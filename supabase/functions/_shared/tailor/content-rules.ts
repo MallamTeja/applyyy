@@ -116,13 +116,13 @@ export function enforceContentRules(
   const picked = tailored.projects.filter((p) => masterProjects.has(p.ref));
   // The model's picks by ref, so a kept pick keeps its reworded bullets.
   const pickedByRef = new Map(picked.map((p) => [p.ref, p] as const));
-  // Every master project ranked: a project able to meet the 4-bullet rule first, then the model's
-  // judgement (its picks), then JD keyword overlap, then master order (stable sort).
+  // Every master project ranked: an always-shown project first (proj_applyy, ruling G(a) 2026-11-08), then a project
+  // able to meet the 4-bullet rule, then the model's judgement (its picks), then JD keyword overlap, then master order.
   const ranked = master.projects
     // Each with what ranks it.
-    .map((p, index) => ({ p, eligible: p.bullets.length >= PAGE_FIT_FLOORS.minBullets.projects, chosen: pickedByRef.has(p.id), score: keywordScore(entryText(p), jdKeywords), index }))
-    // Eligible, chosen, score: each descending; index ascending.
-    .sort((a, b) => Number(b.eligible) - Number(a.eligible) || Number(b.chosen) - Number(a.chosen) || b.score - a.score || a.index - b.index);
+    .map((p, index) => ({ p, always: PAGE_FIT_FLOORS.alwaysProjects.includes(p.id), eligible: p.bullets.length >= PAGE_FIT_FLOORS.minBullets.projects, chosen: pickedByRef.has(p.id), score: keywordScore(entryText(p), jdKeywords), index }))
+    // Always, eligible, chosen, score: each descending; index ascending (Array sort is stable).
+    .sort((a, b) => Number(b.always) - Number(a.always) || Number(b.eligible) - Number(a.eligible) || Number(b.chosen) - Number(a.chosen) || b.score - a.score || a.index - b.index);
   // The kept ids: exactly min(cap, master) of them.
   const keep = new Set(ranked.slice(0, PAGE_FIT_FLOORS.maxProjects).map((r) => r.p.id));
   // The model's picks that lost their place, recorded (never silent).

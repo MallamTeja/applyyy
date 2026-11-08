@@ -79,8 +79,16 @@ function fakeDb(canned: {
       update: (payload: unknown) => ((filters.update = payload), builder),
       // Same.
       eq: (column: string, value: unknown) => ((filters[`eq:${column}`] = value), builder),
-      // Order recorded for the window test.
-      order: (column: string, options: unknown) => ((filters[`order:${column}`] = options), builder),
+      // Order recorded for the window test, plus the SEQUENCE of order calls, because which
+      // column sorts first (not just which columns appear) decides the plan (2026-11-08).
+      order: (column: string, options: unknown) => {
+        // Keyed by column, as the window test reads it.
+        filters[`order:${column}`] = options;
+        // Appended in call order: [column, options] pairs, first sort key first.
+        filters.orders = [...((filters.orders as unknown[] | undefined) ?? []), [column, options]];
+        // Chainable, like the real builder.
+        return builder;
+      },
       // The bound, recorded.
       limit: (n: number) => ((filters.limit = n), builder),
       // A page, recorded and applied by pick().
@@ -370,4 +378,24 @@ test("re-match: a link write that fails is a run error, never a crash", async ()
   assert.deepEqual([result.moved, result.errors.length], [0, 1]);
   // Named.
   assert.match(result.errors[0]!, /e-bjak.*permission denied/);
+});
+
+// THE RED-ON-REVERT TEST (2026-11-08): the tracked-applications read must sort by created_at
+// first and id second. Reverting to order("id") alone puts Postgres back on a full walk of
+// applications_pkey under RLS (938 ms and 36,160 buffers per page, measured), so this pins
+// the exact sort sequence, not just "some order exists".
+test("replay: the applications read orders by created_at, then id as the unique tiebreak", async () => {
+  // One tracked row is enough to make the read run; nothing else is under test here.
+  const { db, calls } = fakeDb({ apps: { data: [APPLIED], error: null } });
+  // Switch on, so the sweep reads at all.
+  await replayStoredMoves(db, true, NO_LIVE);
+  // Every page of the applications read, in the order they were sent.
+  const appReads = calls.queries.filter((q) => q.table === "applications");
+  // Paged until empty: page 1 holds the row, page 2 proves the read is complete.
+  assert.equal(appReads.length, 2);
+  // Each page sorts identically, or the pages would not line up.
+  for (const read of appReads) {
+    // created_at first, then id: a total order, because id is unique.
+    assert.deepEqual(read.filters.orders, [["created_at", { ascending: true }], ["id", { ascending: true }]]);
+  }
 });
