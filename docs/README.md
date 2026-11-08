@@ -20,7 +20,7 @@ Regenerate the list of docs this page must cover:
 | [architecture/pipeline-end-to-end.md](architecture/pipeline-end-to-end.md) | One job through every status, with the agent, trigger and gates at each step |
 | [SYSTEM_ARCHITECTURE.md](SYSTEM_ARCHITECTURE.md) | The current architecture: components, agents, status graph, security, deploys, known gaps |
 | [PROGRESS.md](PROGRESS.md) | Live progress toward the product goal, with the commands that re-derive it |
-| [handoff/2026-11-08-0045-orchestrator-handoff.md](handoff/2026-11-08-0045-orchestrator-handoff.md) | Newest orchestrator handoff. Open work is in [handoff/2026-11-08-0045-pending-tasks.md](handoff/2026-11-08-0045-pending-tasks.md) |
+| [handoff/2026-11-08-1745-orchestrator-handoff.md](handoff/2026-11-08-1745-orchestrator-handoff.md) | Newest orchestrator handoff. Open work is in [handoff/2026-11-08-1745-pending-tasks.md](handoff/2026-11-08-1745-pending-tasks.md) |
 
 ## Living reference docs
 
@@ -91,8 +91,8 @@ Status is copied from each record's `Status 2026-11-08` banner. "No banner" mean
 
 | Doc | Status | What it is |
 |---|---|---|
-| [handoff/2026-11-08-0045-orchestrator-handoff.md](handoff/2026-11-08-0045-orchestrator-handoff.md) | Newest pair | Orchestrator handoff, 2026-11-08 00:45 IST. Resume from here |
-| [handoff/2026-11-08-0045-pending-tasks.md](handoff/2026-11-08-0045-pending-tasks.md) | Newest pair | Pending tasks at the same moment |
+| [handoff/2026-11-08-1745-orchestrator-handoff.md](handoff/2026-11-08-1745-orchestrator-handoff.md) | Newest pair | Orchestrator handoff, 2026-11-08 00:45 IST. Resume from here |
+| [handoff/2026-11-08-1745-pending-tasks.md](handoff/2026-11-08-1745-pending-tasks.md) | Newest pair | Pending tasks at the same moment |
 
 Older handoffs are in git history only (`git log --diff-filter=D --name-only -- docs/handoff`).
 
@@ -102,7 +102,6 @@ Older handoffs are in git history only (`git log --diff-filter=D --name-only -- 
 |---|---|---|
 | [status/2026-11-08-live-events-watch.md](status/2026-11-08-live-events-watch.md) | No banner | Read-only watch of tailor and auditor events: one-page trim, summary variants, new auditor findings |
 | [status/2026-11-08-low-score-rows.md](status/2026-11-08-low-score-rows.md) | No banner | Low-score and failed rows Teja wants to apply to; prepared writes for the orchestrator |
-| [status/2026-09-16-tailor-queue-deploy-blocker.md](status/2026-09-16-tailor-queue-deploy-blocker.md) | Superseded | "No acting agent" on Tailor and Queue; the fast path was deleted |
 | [status/2026-09-11-peer-assignments.md](status/2026-09-11-peer-assignments.md) | Superseded | Peer session assignments and pending list, 2026-09-11 |
 | [status/2026-09-11-session-accounting.md](status/2026-09-11-session-accounting.md) | Historical | Sessions, commits and git rules on the morning of 2026-09-11 |
 | [status/2026-09-progress-log-archive.md](status/2026-09-progress-log-archive.md) | Historical | The September progress log, moved out of `PROGRESS.md` |

@@ -43,3 +43,12 @@ Not a cause: resume rendering on page load (#7 aside). The CPU bench measured it
 ## Fixed so far
 
 Filled in as each fix lands, with before/after numbers from the same probe.
+
+Probe note: the first probe (`scratchpad/lat/measure.mjs`) sent `content-range` without
+`access-control-expose-headers`. The browser then hides counts, so any count-based path looks worse than in
+production. After-numbers use the corrected copy (`scratchpad/measure-fixtures.mjs`, which adds the header and
+table-backed `agent_runs` fixtures).
+
+| # | Fix | Files | Before → after | Proof |
+|---|---|---|---|---|
+| 3 | System health: the newest run / success for agents beyond the 200-row window is answered by ONE `.in('agent', owed)` read. "Never ran" is reported only when the page provably holds every matching row (rows = exact count); otherwise per-agent reads for just the open agents (CLAUDE.md §6) | `apps/web/src/data/useAgentRuns.ts`, `apps/web/test/agentRunsBeyondWindow.test.ts` | `agent_runs` requests: empty window 35 → 2; partial window 33 → 2; covered window 1 → 1. Total on /health 43 → 10 | 8/8 pass; HEAD's file swapped in → 3 red; restored identical (re-run by peer 1) |

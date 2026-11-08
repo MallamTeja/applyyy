@@ -230,7 +230,7 @@ from applications where match_score is not null group by 1 order by 1;
 
 1. **Skill-fit jobs scoring under 30.** Teja flagged (2026-11-08 00:48 IST) four
    rows he wants to apply to: LSEG 27, FIS 22, Barclays 13 and 19. Open question
-   in `docs/handoff/2026-11-08-0045-pending-tasks.md` item 3a: is the rubric
+   in `docs/handoff/2026-11-08-1745-pending-tasks.md` item 3a: is the rubric
    under-weighting skills against experience or domain words (mainframe,
    security)? Rule: measure before changing the rubric; the floor stays 30.
 2. **No eval set yet.** `_shared/eval/gate.ts` is built to run the scorer against

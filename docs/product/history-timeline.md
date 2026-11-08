@@ -176,5 +176,5 @@ Many rules in `CLAUDE.md` come from a dated incident. A few examples:
 - [../functions/README.md](../functions/README.md)
 - [../features/web-app.md](../features/web-app.md)
 - [../ops/ci-and-workflows.md](../ops/ci-and-workflows.md)
-- [../handoff/2026-11-08-0045-orchestrator-handoff.md](../handoff/2026-11-08-0045-orchestrator-handoff.md)
+- [../handoff/2026-11-08-1745-orchestrator-handoff.md](../handoff/2026-11-08-1745-orchestrator-handoff.md)
 - [../status/2026-09-progress-log-archive.md](../status/2026-09-progress-log-archive.md)

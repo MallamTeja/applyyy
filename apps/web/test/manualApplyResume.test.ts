@@ -103,8 +103,17 @@ describe('the card shows the tailored resume, kit or no kit', () => {
     const html = renderCard(data.parseRow(raw()), { kind: 'none' });
     // The block's summary names both offers.
     assert.match(html, /<summary>Tailored resume: preview and Download PDF<\/summary>/);
-    // The shared preview's own print button, for the tailored pane (ResumePreview's accessible name shape).
-    assert.match(html, /aria-label="Download PDF, Tailored for Zomato"/);
+    // The preview itself (and its Download PDF) appears once the block is opened: see the next test.
+  });
+
+  it('Manual apply rows do not render a resume until opened', () => {
+    // Teja 2026-11-08 ("pages are slow"): a CLOSED <details> still mounted ResumePreview, so every row paid a
+    // master_profiles read, two renders and two iframes on page open (26 rows → 26 reads, 52 iframes).
+    const html = renderCard(data.parseRow(raw()), { kind: 'none' });
+    // Non-vacuous: the closed block itself IS on the card, so the row does have a resume to show.
+    assert.match(html, /<details class="kit-card__resume" id="tailored-resume-[^"]+">/);
+    // But nothing of the preview is mounted inside it: no frame, no print button, no preview section.
+    assert.deepEqual([/<iframe/.test(html), /Download PDF, Tailored/.test(html), /resume-preview/.test(html)], [false, false, false]);
   });
 
   it('a row with a skipped kit still shows its tailored resume', () => {

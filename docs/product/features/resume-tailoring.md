@@ -391,4 +391,4 @@ file; `resume_storage_path` is a record, not the source.
 - [CI and workflows](../../ops/ci-and-workflows.md)
 - `PROJECT_PLAN.md` sections 7 and 10 (template guarantee, trust boundaries)
 - `packages/resume-template/README.md`
-- Handoff: `docs/handoff/2026-11-08-0045-orchestrator-handoff.md`, `docs/handoff/2026-11-08-0045-pending-tasks.md`
+- Handoff: `docs/handoff/2026-11-08-1745-orchestrator-handoff.md`, `docs/handoff/2026-11-08-1745-pending-tasks.md`

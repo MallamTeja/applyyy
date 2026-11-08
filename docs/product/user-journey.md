@@ -221,4 +221,4 @@ worker's screenshot), manual-control coverage, and the Gemini key pool.
 - [docs/features/web-app.md](../features/web-app.md)
 - [docs/ops/ci-and-workflows.md](../ops/ci-and-workflows.md)
 - [docs/setup/gmail-tracker-apps-script.md](../setup/gmail-tracker-apps-script.md)
-- [docs/handoff/2026-11-08-0045-orchestrator-handoff.md](../handoff/2026-11-08-0045-orchestrator-handoff.md)
+- [docs/handoff/2026-11-08-1745-orchestrator-handoff.md](../handoff/2026-11-08-1745-orchestrator-handoff.md)

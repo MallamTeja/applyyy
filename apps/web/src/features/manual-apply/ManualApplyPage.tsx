@@ -289,14 +289,22 @@ const SKIP_WORDS: Readonly<Record<KitSkipCode, string>> = {
 function TailoredResume(props: { readonly row: ManualApplyRow }): ReactElement {
   // Destructured for readability.
   const { row } = props;
+  // Whether the block is open (Teja 2026-11-08, "pages are slow"): a CLOSED <details> still mounts its
+  // children, so every row paid a master_profiles read, two renders and two iframes on page open.
+  // Mirrored from the element's own toggle event, so the summary, the keyboard and the card's
+  // "Resume preview" button (which sets block.open) all mount the preview the same way.
+  const [open, setOpen] = useState(false);
   // No valid snapshot: said, never a master shown under this job's name (resumeSnapshot.ts explains why).
   if (row.resume === null) return <p className="panel__note" role="note">No tailored resume on this row, so there is nothing to download here.</p>;
   return (
-    /* Native details: keyboard-operable, and collapsible once the PDF is saved. */
-    <details className="kit-card__resume" id={resumeBlockId(row.id)}>
+    /* Native details: keyboard-operable, and collapsible once the PDF is saved. onToggle fires after every
+       open/close, whatever caused it, so `open` never disagrees with what the operator sees. */
+    <details className="kit-card__resume" id={resumeBlockId(row.id)} onToggle={(event) => setOpen(event.currentTarget.open)}>
       {/* Names both things the block offers. */}
       <summary>Tailored resume: preview and Download PDF</summary>
-      {/* The same props the Applied page and the pipeline drawer pass. */}
+      {/* Mounted only while open; once open it is the same preview as before. Closing unmounts it, so a
+          re-open re-reads the pinned master: one small read, on a human click, never at page load. */}
+      {open ? (
       <ResumePreview
         /* The row the preview belongs to, for unique element ids. */
         applicationId={row.id}
@@ -309,6 +317,7 @@ function TailoredResume(props: { readonly row: ManualApplyRow }): ReactElement {
         /* Same fallback as the title. */
         companyName={row.company ?? '—'}
       />
+      ) : null}
     </details>
   );
 }

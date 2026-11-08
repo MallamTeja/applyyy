@@ -67,7 +67,7 @@ test("a resume that already fits is returned untouched", () => {
 
 test("TRIM_ORDER is Teja's ruling (23:55): certifications, then projects over the cap, then weakest bullets", () => {
   // The order is data; this pins it so a reorder is a deliberate, visible change.
-  assert.deepEqual(TRIM_ORDER, ["certification", "project_bullet_over_cap", "weakest_bullet"]);
+  assert.deepEqual(TRIM_ORDER, ["certification", "project_bullet_over_cap", "weakest_bullet", "achievement"]);
 });
 
 test("RULING 23:55: one line over with 4 certifications and a 5-bullet project cuts the 4th certification, not a bullet", () => {
@@ -133,4 +133,28 @@ test("withoutTrimmed applies a trim item to the tailor's ref profile shape too",
   const out = withoutTrimmed(withoutTrimmed(refs, { step: "weakest_bullet", ref: "x" }), { step: "certification", ref: "c2" });
   // Exactly those two gone.
   assert.deepEqual([out.experience[0]!.bullets.map((x) => x.ref), out.certifications.map((c) => c.ref)], [["y"], ["c1"]]);
+});
+
+test("achievements trimmed to 2 when the floors overflow", () => {
+  // Every bullet already at its floor (Aczen 4, Student Tribe 1, projects 4+4, one per achievement) and 3 certifications:
+  // only whole achievements are left to cut (Cursor ce965450, 2026-11-08).
+  const atFloors = withoutTrimmed(withoutTrimmed(withoutTrimmed(withoutTrimmed(v24Like(), { step: "weakest_bullet", ref: "a4" }), { step: "weakest_bullet", ref: "st1" }), { step: "weakest_bullet", ref: "p6" }), { step: "weakest_bullet", ref: "p4" });
+  // Without the 4th certification, so the certification step has nothing either.
+  // Labelled like real achievements (the validator always resolves one), so the trim notice has text to show.
+  const resume = { ...atFloors, certifications: atFloors.certifications.slice(0, 3), achievements: atFloors.achievements.map((a) => ({ ...a, label: a.ref, description: null })) } as unknown as ResolvedResume;
+  // One unit over.
+  const out = fitToOnePage(resume, JD, (r) => units(r) <= units(resume) - 1);
+  // Fits, by removing one whole achievement: the latest zero-score one.
+  assert.deepEqual([out.fits, out.trimmed], [true, [{ step: "achievement", ref: "ach_c", text: "ach_c" }]]);
+});
+
+test("achievements never trimmed below 2", () => {
+  // A budget no floor can meet.
+  const out = fitToOnePage(v24Like(), JD, (r) => units(r) <= 3);
+  // Refused, not saved over a page.
+  assert.equal(out.fits, false);
+  // Exactly the floor of 2 entries left.
+  assert.equal(out.resume.achievements.length, 2);
+  // And named as the floor that held.
+  assert.ok(out.blockedBy.includes("achievements: keeps >= 2"), out.blockedBy.join("; "));
 });

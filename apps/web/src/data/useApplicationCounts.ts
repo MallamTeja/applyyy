@@ -29,7 +29,8 @@
  * business anywhere near it.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+// useSyncExternalStore: every caller of the hook reads ONE module-level store instead of owning its own read.
+import { useSyncExternalStore } from 'react';
 
 import { supabase, supabaseStatus } from './supabase.ts';
 import { classifyRead } from './readState.ts';
@@ -55,49 +56,121 @@ export interface ApplicationCounts {
   readonly refetch: () => void;
 }
 
-/* Read the counts on mount and on refetch. */
-export function useApplicationCounts(): ApplicationCounts {
-  const [revision, setRevision] = useState(0);
-  const refetch = useCallback(() => setRevision((r) => r + 1), []);
+/* ONE STORE FOR THE WHOLE CONSOLE (2026-11-08). Until then every caller owned its own read: the shell
+ * re-read on every sidebar click, and Pipeline and Discovered each read again on top of it, so a click
+ * there paid the RPC twice (~0.4 s each from India to the Sydney project). Now the facts live here, once,
+ * and every hook caller subscribes. WHO READS: the shell calls ensureApplicationCounts when the operator
+ * is known, and refreshApplicationCounts when data moved (a write it saw, a return to the tab); a page's
+ * Refresh button calls the same refresh through `refetch`. Mounting the hook reads nothing by itself. */
 
-  /* Raw facts, accumulated by the effect below and handed to the pure
-     classifier on every render. Held separately from the classified state so
-     the classification is never stale relative to the facts. */
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [rows, setRows] = useState<readonly StatusCountRow[] | null>(null);
-  const [signedIn, setSignedIn] = useState(false);
+/* Raw facts, handed to the pure classifier on every render. Held separately from the classified state so
+   the classification is never stale relative to the facts. Replaced whole on each change, never mutated,
+   because useSyncExternalStore re-renders only when the snapshot's identity changes. */
+interface CountFacts {
+  // True until the first read lands; a refresh keeps the last answer on screen rather than flashing.
+  readonly loading: boolean;
+  // The failed read's reason, or null.
+  readonly error: string | null;
+  // The validated RPC rows, or null before any answer.
+  readonly rows: readonly StatusCountRow[] | null;
+  // Whether the last read found a session; with none, RLS would answer "nothing", which is not "empty".
+  readonly signedIn: boolean;
+  // Bumped each time a read STARTS: the latest-wins token for in-flight reads.
+  readonly revision: number;
+}
 
-  useEffect(() => {
-    /* No client means nothing to do. The console is unconfigured, which the
-       classifier reports without any query being attempted. */
-    if (supabase === null) {
-      setLoading(false);
-      return;
-    }
+// Loading until a read lands: the shell starts one as soon as the operator is known.
+let facts: CountFacts = { loading: true, error: null, rows: null, signedIn: false, revision: 0 };
+// Every mounted hook's re-render callback.
+const listeners = new Set<() => void>();
+// The operator the counts were last read for; a different (or returning) operator means a fresh read.
+let loadedFor: string | undefined;
 
-    /* Guards against setting state after unmount, which React warns about and
-       which would also let a slow first request overwrite a faster second one.
-       Flipped in the cleanup below. */
-    let live = true;
+// Swap in the new facts and tell every subscriber; one place, so no caller can forget to notify.
+function publish(next: Partial<CountFacts>): void {
+  // A new object, so useSyncExternalStore sees the change.
+  facts = { ...facts, ...next };
+  // Each mounted hook re-renders with the new snapshot.
+  for (const listener of listeners) listener();
+}
 
-    void (async () => {
+// useSyncExternalStore's subscribe: register, and hand back the unregister it calls on unmount.
+function subscribe(listener: () => void): () => void {
+  // Registered until the component unmounts.
+  listeners.add(listener);
+  // React calls this on unmount, so a gone page is never notified.
+  return () => listeners.delete(listener);
+}
+
+// useSyncExternalStore's snapshot: the current facts object, stable between publishes.
+function getFacts(): CountFacts {
+  // Same identity until publish replaces it, which is what keeps React from looping.
+  return facts;
+}
+
+/* Read the counts for this operator once: nothing when they are already read (or being read) for this
+   operator, a fresh read for a new one. `undefined` (signed out) forgets, so signing back in re-reads
+   rather than showing the counts from before. */
+export function ensureApplicationCounts(userId: string | undefined): void {
+  // Signed out: forget whose counts these were, so the next sign-in reads again.
+  if (userId === undefined) {
+    // Cleared, not re-read: the shell shows its login gate, not the counts.
+    loadedFor = undefined;
+    // Nothing to read without an operator.
+    return;
+  }
+  // Already read, or in flight, for this operator: the whole point of the store.
+  if (loadedFor === userId) return;
+  // Claimed before the read starts, so a second caller in the same tick does not start another.
+  loadedFor = userId;
+  // The one read for this operator.
+  refreshApplicationCounts();
+}
+
+/* Re-read the counts now, for every caller at once. A newer call supersedes an older in-flight read: only
+   the read whose revision is still the latest may publish, so a slow first answer never overwrites a
+   faster second one (the job the per-effect `live` flag used to do). */
+export function refreshApplicationCounts(): void {
+  // This read's token, published before any await.
+  const revision = facts.revision + 1;
+  // Bumped now, before any await, so two refreshes in one tick get two distinct tokens.
+  publish({ revision });
+  // Whether this read is still the newest; checked after every await.
+  const current = () => facts.revision === revision;
+
+  /* No client means nothing to do. The console is unconfigured, which the
+     classifier reports without any query being attempted. */
+  if (supabase === null) {
+    // Done loading: the classifier turns a missing client into "not configured".
+    publish({ loading: false });
+    // No query to send.
+    return;
+  }
+  // Narrowed once, so the async body below needs no non-null assertions.
+  const client = supabase;
+
+  void (async () => {
       try {
         /* SESSION FIRST. With no session, RLS has nothing to scope to and the
            query would correctly return nothing - and reporting that as "no
            applications" is the exact lie this layer exists to prevent. Checking
            first means the honest state is reported without a pointless round
            trip. */
-        const { data: sessionData } = await supabase.auth.getSession();
-        if (!live) return;
+        const { data: sessionData } = await client.auth.getSession();
+        // A newer refresh owns the store now; this answer is stale.
+        if (!current()) return;
 
+        // Whether there is anyone for RLS to scope the count to.
         const hasSession = sessionData.session !== null;
-        setSignedIn(hasSession);
+        // Recorded either way, so the classifier can say "signed out" rather than "empty".
+        publish({ signedIn: hasSession });
 
         /* There is no Auth user in this system yet, so this is the branch that
            actually runs today. Not an error, and not empty. */
         if (!hasSession) {
-          setLoading(false);
+          // Done: the classifier reports no_session from signedIn false.
+          publish({ loading: false });
+          // No query without a session.
           return;
         }
 
@@ -108,16 +181,17 @@ export function useApplicationCounts(): ApplicationCounts {
            ~20 rows, which no cap can truncate, in one round trip. Defined in
            supabase/migrations/20261024113000_dashboard_read_paths.sql (SECURITY
            INVOKER, so RLS still scopes it to this user). */
-        const { data, error: queryError } = await supabase.rpc('application_status_counts');
+        const { data, error: queryError } = await client.rpc('application_status_counts');
 
-        if (!live) return;
+        // Superseded while the RPC was in flight: the newer read publishes instead.
+        if (!current()) return;
 
         if (queryError !== null) {
           /* The database's own message, passed through. Supabase reports an RLS
              refusal distinctly from a network failure, and that difference is
              exactly what someone debugging needs to see. */
-          setError(queryError.message);
-          setLoading(false);
+          publish({ error: queryError.message, loading: false });
+          // Nothing to tally.
           return;
         }
 
@@ -127,30 +201,30 @@ export function useApplicationCounts(): ApplicationCounts {
         const parsed = parseStatusCountRows(data);
         // A shape failure is reported like any failed read, with the reason.
         if (!parsed.ok) {
-          // The banner text names which row broke the contract.
-          setError(parsed.reason);
-          // The read is over; it failed.
-          setLoading(false);
+          // The banner text names which row broke the contract; the read is over, and it failed.
+          publish({ error: parsed.reason, loading: false });
           // Nothing to tally.
           return;
         }
         // Validated rows; an empty list is a real "no applications" and classifies as empty.
-        setRows(parsed.rows);
-        setLoading(false);
+        // error cleared too: a store outlives one read, so a past failure must not shadow a fresh answer.
+        publish({ rows: parsed.rows, error: null, loading: false });
       } catch (thrown) {
-        if (!live) return;
+        // A superseded read's failure is not news either.
+        if (!current()) return;
         /* A thrown error rather than a returned one - a DNS failure, an aborted
            request. Same destination: reported as a failed read, never as an
            empty one. */
-        setError(thrown instanceof Error ? thrown.message : 'unknown read error');
-        setLoading(false);
+        publish({ error: thrown instanceof Error ? thrown.message : 'unknown read error', loading: false });
       }
     })();
+}
 
-    return () => {
-      live = false;
-    };
-  }, [revision]);
+/* The counts, from the shared store. Reads nothing on mount (see the store's header): the shell has
+   already started the read for this operator, and `refetch` re-reads for every caller at once. */
+export function useApplicationCounts(): ApplicationCounts {
+  // The current facts; React re-renders this caller whenever publish replaces them.
+  const { loading, error, rows, signedIn } = useSyncExternalStore(subscribe, getFacts);
 
   /* Classified on every render from the current facts, by the pure function
      that has a test for each branch. */
@@ -177,5 +251,6 @@ export function useApplicationCounts(): ApplicationCounts {
     }
   }
 
-  return { state, counts, refetch };
+  // refetch is the module function, so its identity is stable across renders and callers.
+  return { state, counts, refetch: refreshApplicationCounts };
 }

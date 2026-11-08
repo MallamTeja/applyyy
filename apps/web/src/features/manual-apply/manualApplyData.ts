@@ -8,6 +8,8 @@
 
 // The page's shared client; null when the build has no Supabase config.
 import { supabase } from '../../data/supabase';
+// Type only: the client a test can pass in place of the module one.
+import type { SupabaseClient } from '@supabase/supabase-js';
 // Runtime list of real statuses, for the shape check on each row.
 import { APPLICATION_STATUSES } from '../../data/contract';
 // Type only: the status union.
@@ -84,11 +86,11 @@ export function parseRow(raw: unknown): ManualApplyRow | null {
 }
 
 /* The kit events, newest first, as one exact-filtered read. */
-async function readKitEvents(): Promise<{ readonly states: ReadonlyMap<string, KitState> } | { readonly error: string }> {
+async function readKitEvents(client: SupabaseClient | null): Promise<{ readonly states: ReadonlyMap<string, KitState> } | { readonly error: string }> {
   // No client: a reported failure, not an empty page.
-  if (supabase === null) return { error: 'Not connected to the database.' };
+  if (client === null) return { error: 'Not connected to the database.' };
   // Notes of kind apply_kit or apply_kit_skipped, newest first: the newest of the two decides the card.
-  const { data, error } = await supabase
+  const { data, error } = await client
     // The append-only log, under RLS ("read own events").
     .from('application_events')
     // The join key, the ordering timestamp, the payload.
@@ -109,13 +111,13 @@ async function readKitEvents(): Promise<{ readonly states: ReadonlyMap<string, K
 }
 
 /* Applications by status (the two lanes) or by id (kit rows), with the caller's column list (page or badge). */
-async function readRows(select: string, filter: { readonly statuses: readonly ApplicationStatus[] } | { readonly ids: readonly string[] }): Promise<{ readonly rows: readonly ManualApplyRow[] } | { readonly error: string }> {
+async function readRows(client: SupabaseClient | null, select: string, filter: { readonly statuses: readonly ApplicationStatus[] } | { readonly ids: readonly string[] }): Promise<{ readonly rows: readonly ManualApplyRow[] } | { readonly error: string }> {
   // No client: reported.
-  if (supabase === null) return { error: 'Not connected to the database.' };
+  if (client === null) return { error: 'Not connected to the database.' };
   // An empty id list asks for nothing; skip the round trip.
   if ('ids' in filter && filter.ids.length === 0) return { rows: [] };
   // The base read.
-  const base = supabase.from('applications').select(select);
+  const base = client.from('applications').select(select);
   // Lanes by status, kit rows by exact id.
   const { data, error } = await ('statuses' in filter ? base.in('status', [...filter.statuses]) : base.in('id', [...filter.ids]))
     // Longest-waiting first, as on System health.
@@ -154,22 +156,26 @@ export function mergeManualApplyRows(reads: {
  * badge (AppShell) calls this same loader and counts its rows, so badge and page cannot drift. */
 /* `purpose` is required, so no caller gets the cheap badge read by accident: the page needs the resumes,
  * the badge needs only the count (a badge row's resume is null). */
-export async function loadManualApply(purpose: 'page' | 'badge'): Promise<{ readonly rows: readonly ManualApplyRow[]; readonly kits: ReadonlyMap<string, KitState> } | { readonly error: string }> {
-  // The kits first: their ids decide which extra rows to read.
-  const kits = await readKitEvents();
-  // A failed kit read fails the page: showing rows without kits would read as "no kits generated".
-  if ('error' in kits) return kits;
-  // Kit ids that are real application ids.
-  const kitIds = [...kits.states.keys()].filter((id) => UUID.test(id));
+/* `client` defaults to the app's one client; the parameter exists so a node test can pass a recording fake
+ * and prove the read ORDER below (test/manualApplyLoadOrder.test.ts). */
+export async function loadManualApply(purpose: 'page' | 'badge', client: SupabaseClient | null = supabase): Promise<{ readonly rows: readonly ManualApplyRow[]; readonly kits: ReadonlyMap<string, KitState> } | { readonly error: string }> {
   // The column list for this caller.
   const select = purpose === 'page' ? ROW_SELECT : BADGE_ROW_SELECT;
-  // The three row reads in parallel; they are independent. Approved rows are read by status, so one
-  // whose kit has not landed yet is still listed (as "Kit pending").
-  const [lanes, approved, kitRows] = await Promise.all([readRows(select, { statuses: MANUAL_ACTION_STATUSES }), readRows(select, { statuses: ['approved'] }), readRows(select, { ids: kitIds })]);
-  // Either failing is said.
+  /* TWO ROUNDS, NOT THREE (2026-11-08). Only the kit-row read needs the kit ids; the two status reads
+     need nothing, so they start WITH the kit events instead of after them. That saves one serial round
+     trip (~0.3 s from India to the Sydney project) on every badge read and every page load. Approved rows
+     are read by status, so one whose kit has not landed yet is still listed (as "Kit pending"). */
+  const [kits, lanes, approved] = await Promise.all([readKitEvents(client), readRows(client, select, { statuses: MANUAL_ACTION_STATUSES }), readRows(client, select, { statuses: ['approved'] })]);
+  // A failed kit read fails the page: showing rows without kits would read as "no kits generated".
+  if ('error' in kits) return kits;
+  // Either failing is said; checked before the kit-row read so a failed load spends no third round trip.
   if ('error' in lanes) return lanes;
   // Same for the approved rows: a failed read must not look like "no approved jobs".
   if ('error' in approved) return approved;
+  // Kit ids that are real application ids.
+  const kitIds = [...kits.states.keys()].filter((id) => UUID.test(id));
+  // The one read that needs the kits: the rows they belong to (skipped, no round trip, when there are none).
+  const kitRows = await readRows(client, select, { ids: kitIds });
   // Same for the kit rows.
   if ('error' in kitRows) return kitRows;
   // One list, each row once, lanes first.

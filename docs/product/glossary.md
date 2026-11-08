@@ -220,7 +220,7 @@ Note: the DB name uses `_` (`scout_ats`), the function folder uses `-` (`scout-a
 ## Known gaps and open questions
 
 - Bot submit (stage 5) has never been proven live. Receipt-confirm (stage 6) is on hold by Teja's
-  ruling. Source: `docs/handoff/2026-11-08-0045-orchestrator-handoff.md`.
+  ruling. Source: `docs/handoff/2026-11-08-1745-orchestrator-handoff.md`.
 - The repo `CLAUDE.md` §1 says "a cap of 3 per run". That is only the default. Apply-on-approve
   runs set `APPLY_MAX_SUBMITS=25` (`.github/workflows/apply.yml`).
 - Commit rule drift: repo `CLAUDE.md` §2 says "one commit per finished task"; the memory file

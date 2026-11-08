@@ -113,10 +113,12 @@ that one function's deploys and says nothing about age.
   `-f <file>`: passed as an argument, the CLI parses it as a flag and errors.
 - **Status counts:** `select status, count(*) from applications group by 1`. Never quote an old count.
 - **Migrations applied:** the MCP `list_migrations` vs `ls supabase/migrations`.
-- **Is prod web current?** `curl` the `/assets/index-*.js` from https://applyyy.vercel.app/
-  and grep **two** sentinels: one that must be PRESENT and one that must be ABSENT. First
-  prove the ABSENT one exists in the NEW bundle's source — a sentinel that never existed
-  passes vacuously.
+- **Is prod web current?** `curl` the JS from https://applyyy.vercel.app/ and grep **two**
+  sentinels: one that must be PRESENT and one that must be ABSENT. First prove the ABSENT one
+  existed in the OLD source, or it passes vacuously. **Routes are code-split (React.lazy, since
+  2026-11-08):** page code lives in `/assets/<Page>-<hash>.js`, not `index-*.js`. Grep every
+  asset the entry chunk imports, or pick the sentinel's own page chunk; an index-only grep
+  misses page code.
 - **CI green is read by FULL sha AND workflow:** `gh run list --commit <full-40-char-sha> --workflow=ci.yml`.
   A short-SHA lookup races with newer pushes. Without `--workflow`, the lookup lists EVERY workflow at
   that SHA (keepalive, pre-gate sweep, any dispatch on `main`), and the first row is often not CI

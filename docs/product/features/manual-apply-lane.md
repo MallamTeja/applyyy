@@ -270,7 +270,7 @@ elsewhere, who moved them, why, and a Re-open (commit `2383815`).
 - **Kit-only deploy not verified here.** `2936e8c` is on `main`. Whether the `dispatch-apply` function with kit-only
   mode is deployed was not checked for this doc. Until it is, a save answers `failed` and the cron fills the kit.
 - **Uncommitted work in progress:** `worker/src/apply-one.ts` and `worker/src/assist/rehearse.ts` have uncommitted
-  edits (rehearse-assist zero-field guard, pending task 4 in `docs/handoff/2026-11-08-0045-pending-tasks.md`).
+  edits (rehearse-assist zero-field guard, pending task 4 in `docs/handoff/2026-11-08-1745-pending-tasks.md`).
   Not described here.
 - **Unattested answers still fill non-gated questions.** 15 answers inserted by CLI on 2026-11-07 have
   `attested_by_human = false`. `planFill` gates only eligibility and EEO labels on attestation, so they still fill
@@ -293,4 +293,4 @@ elsewhere, who moved them, why, and a Re-open (commit `2383815`).
 - [CI and workflows](../../ops/ci-and-workflows.md)
 - [User journey](../user-journey.md)
 - [Resume tailoring](resume-tailoring.md)
-- Handoff: `docs/handoff/2026-11-08-0045-orchestrator-handoff.md`
+- Handoff: `docs/handoff/2026-11-08-1745-orchestrator-handoff.md`

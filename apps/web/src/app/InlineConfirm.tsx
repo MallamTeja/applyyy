@@ -202,7 +202,13 @@ export function InlineConfirm(props: {
      hidden at the moment focus() runs, so focus fell to <body> (e2e test 16, measured 2026-11-02);
      on arm it stays visible and clickable under the question for the transition's length. A layout
      effect runs inside the commit, so inside cancelAndRefocus's flushSync, before its focus(). */
+  // Whether this instance has committed once. The mount commit toggles nothing (the controls start shown and
+  // stay shown), so it has no visibility transition to finish. But getAnimations() forces a style recalc,
+  // and a page draws many confirms (one per row): 68 ms of it on Answer bank alone (2026-11-08 profile).
+  const committed = useRef(false);
   useCommitEffect(() => {
+    // The mount commit: remembered, then skipped. Every later commit is an arm, cancel or confirm.
+    if (!committed.current) { committed.current = true; return; }
     // Every animation under the controls; getAnimations() flushes pending style first, so the
     // transitions this commit just started are included.
     for (const animation of controlsRef.current?.getAnimations({ subtree: true }) ?? []) {

@@ -322,4 +322,4 @@ with the single-row `apply.yml` command above.
 - [CI and workflows](../../ops/ci-and-workflows.md)
 - [Vision and why](../vision-and-why.md)
 - [User journey](../user-journey.md)
-- Newest handoff: `docs/handoff/2026-11-08-0045-orchestrator-handoff.md`
+- Newest handoff: `docs/handoff/2026-11-08-1745-orchestrator-handoff.md`

@@ -12,7 +12,7 @@
  * is displayed in the rail footer alongside a sign-out control.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 
@@ -34,6 +34,8 @@ import type { ManualApplyRow } from '../features/manual-apply/manualApplyData';
 import { useAuth } from '../data/useAuth';
 // Per-status counts from the application_status_counts RPC, read once here for the rail badge.
 import { useApplicationCounts } from '../data/useApplicationCounts';
+// The shared store's two triggers: read once per operator, and re-read when data moved.
+import { ensureApplicationCounts, refreshApplicationCounts } from '../data/useApplicationCounts';
 import { LoginPage } from '../features/auth/LoginPage';
 
 import './AppShell.css';
@@ -52,27 +54,125 @@ export function AppShell(): ReactElement {
   const { pathname } = useLocation();
   /* The "needs you" badge's source (2026-10-24). Called here, above the early returns, because the
      shell renders once for every route: one ~20-row RPC for the whole console, not one per nav item. */
-  const { state: countState, counts, refetch: refetchCounts } = useApplicationCounts();
+  const { state: countState, counts } = useApplicationCounts();
   /* Re-read on every navigation and on sign-in: the hook's first read can land before the session
      exists (it then reports no_session), and a resolve on System health changes the count. The extra
      read on mount is one tiny aggregate, cheaper than code to skip it. */
+  /* SUPERSEDED 2026-11-08: the per-navigation re-read above cost 3-5 requests in two ~0.4 s rounds on
+     EVERY sidebar click (the project is in Sydney), racing the page's own reads. Now the counts and the
+     badge are read once per operator and re-read only when data moved; the three triggers are below. */
   /* The rows the Manual apply page lists (lanes + every approved row, kit or not + open kit rows); null
      until read and null on a failed read, so the badge falls back to the lane counts instead of a 0. */
   const [pageRows, setPageRows] = useState<readonly ManualApplyRow[] | null>(null);
+  /* When the last counts+badge read started, for the tab-return and navigation freshness checks below. A ref, not state:
+     changing it must not re-render the rail. Seeded with the mount time, not 0: a fresh page can fire
+     visibilitychange before its first read is stamped, and 0 would read as "away for 56 years". */
+  const lastReadAt = useRef(Date.now());
+  /* Bumped by the shell's own data-moved triggers (2 and 3 below) to re-read the badge. Its own counter,
+     not the counts store's: a page's refetch() (Pipeline's Refresh, the run modal opening) moves no row,
+     so it re-reads the counts alone instead of paying the badge's 3-4 reads too (split 2026-11-08). */
+  const [badgeRevision, setBadgeRevision] = useState(0);
+  /* Counts and badge together: the one action every shell data-moved trigger takes. useCallback with no
+     deps because both calls are stable (a module function and a state setter), so effects that use it
+     never re-subscribe on a render. */
+  const refreshShell = useCallback(() => {
+    // Every hook caller's counts, re-read once.
+    refreshApplicationCounts();
+    // And the badge with them (the badge effect below).
+    setBadgeRevision((r) => r + 1);
+  }, []);
+  /* TRIGGER 1: the operator became known (or changed). The store skips the read when it already holds
+     this operator's counts, so a re-render or a remount never re-reads. Signed out forgets them. */
+  useEffect(() => {
+    // undefined while the stored session is read and when signed out; the store handles both.
+    ensureApplicationCounts(auth.user?.id);
+  }, [auth.user?.id]);
+  /* The badge: read when the operator becomes known (TRIGGER 1) and on each shell data-moved trigger,
+     which re-reads the counts in the same call (refreshShell above), so the two cannot drift apart on a
+     move. A page's counts-only refetch deliberately does not reach here. */
   useEffect(() => {
     /* No operator yet (the stored session is still being read, or signed out): nothing to count,
        and the shell shows its gate, not the badge. Until 2026-11-05 this ran once here AND again
        when the session arrived, so every cold load paid the Manual apply reads twice. */
     if (auth.user?.id === undefined) return;
-    // A fresh count for the page the operator just opened.
-    refetchCounts();
+    // Stamped here because this is the one effect every read passes through.
+    lastReadAt.current = Date.now();
     // Guards against a slow earlier read landing after a newer one.
     let live = true;
     // The page's own reads; a reported error or a throw both become null (unknown), never an empty list.
-    void loadManualApply('badge').then((r) => { if (live) setPageRows('error' in r ? null : r.rows); }).catch(() => { if (live) setPageRows(null); });
-    // A newer navigation supersedes this read.
+    void loadManualApply('badge').then((r) => { if (live) setPageRows('error' in r ? null : r.rows); if ('error' in r) lastReadAt.current = 0; }).catch(() => { if (live) setPageRows(null); lastReadAt.current = 0; });
+    // A failed read un-stamps itself (= 0 above), so the next click or tab return retries instead of waiting out the window.
+    // A newer read supersedes this one.
     return () => { live = false; };
-  }, [pathname, auth.user?.id, refetchCounts]);
+  }, [badgeRevision, auth.user?.id]);
+  /* TRIGGERS 2 AND 3: data moved, so re-read the counts (and with them the badge).
+   *
+   * 2. A WRITE THIS TAB MADE. Every status move in this console is a POST to /rest/v1/rpc/<fn>
+   *    (advance_application_status from Approvals, Applied, Discovered, System health and Manual apply;
+   *    track_email_as_applied from Emails), and the server-side movers (intake, pipeline runs, scouts,
+   *    gmail-sync, the kit rebuild) are /functions/v1/<fn> calls. Rather than make each of those pages
+   *    remember to say "I moved something" (five rpc call sites plus every edge call, and the one that forgets leaves a stale
+   *    badge), the shell watches the platform's own record of finished requests: a PerformanceObserver
+   *    on 'resource' entries fires after each response lands, so the write is committed before the
+   *    re-read. Fail-safe by design: ANY rpc except the counts read itself, and ANY edge function, counts
+   *    as a possible move, so a new mover is covered without touching this file. The price is an extra
+   *    read after a read-only function call (an AI resume edit), a cheap over-refresh, never a stale one.
+   *    ponytail: URL matching, because resource entries carry no HTTP method; a fetch wrapper in
+   *    data/supabase.ts would see the method and could match writes exactly, if this ever over-reads.
+   * 3. A RETURN TO THE TAB after more than a minute away: agents move rows on their own schedule (the
+   *    worker, the cron sweeps), and before 2026-11-08 the next click picked that up. Re-reading on
+   *    return keeps that freshness for the cost of one read per absence, not one per click. */
+  useEffect(() => {
+    // Nothing to keep fresh without an operator; the gate is showing.
+    if (auth.user?.id === undefined) return;
+    // Pending coalesced re-read: an "approve all" sends many moves, and one re-read after the last is enough.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // Each batch of finished requests, checked for a possible move.
+    const observer = new PerformanceObserver((list) => {
+      // Only a request that can change a status or a kit matters; the shell's own reads must not loop.
+      if (!list.getEntries().some((entry) => mayMoveData(entry.name))) return;
+      // Restart the wait, so a burst of moves costs one re-read.
+      clearTimeout(timer);
+      // 300 ms: long enough to coalesce a burst, short enough that the badge looks immediate.
+      timer = setTimeout(refreshShell, 300);
+    });
+    // Only requests that finish from now on; earlier ones were already reflected in the first read.
+    observer.observe({ type: 'resource' });
+    // The tab came back into view.
+    const onVisibility = () => {
+      // Hidden is the tab going away; only the return can show stale numbers.
+      if (document.visibilityState !== 'visible') return;
+      // Away for a minute or less: the last read is still a fair picture, so skip the round trips.
+      if (Date.now() - lastReadAt.current <= SHELL_READ_STALE_MS) return;
+      // Away longer: agents may have moved rows meanwhile.
+      refreshShell();
+    };
+    // Document-level: visibilitychange fires on document, not window.
+    document.addEventListener('visibilitychange', onVisibility);
+    // Sign-out or unmount: stop watching, and drop a re-read that has not fired yet.
+    return () => {
+      // No more entries delivered.
+      observer.disconnect();
+      // A pending re-read for a signed-out operator would be wasted.
+      clearTimeout(timer);
+      // The listener goes with the effect that added it.
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [auth.user?.id, refreshShell]);
+  /* TRIGGER 4: a navigation after the last read went stale. Background agents (the worker, the cron
+     sweeps) move statuses all day, and until 2026-11-08 every click re-read the counts, so Teja never saw
+     a number older than his last click. Re-reading only past the window keeps that promise to within a
+     minute while clicks inside it cost 0 requests (the whole point of the store). Keyed on pathname only:
+     the user id is read from the render that changed the path, and adding it would re-read on sign-in
+     on top of TRIGGER 1. The mount run is a no-op, because lastReadAt is seeded with the mount time. */
+  useEffect(() => {
+    // No operator: the gate is showing, nothing to refresh.
+    if (auth.user?.id === undefined) return;
+    // Read within the window: still a fair picture, so this click costs nothing.
+    if (Date.now() - lastReadAt.current <= SHELL_READ_STALE_MS) return;
+    // Stale: one re-read of the counts and the badge for this click; the next clicks ride on it.
+    refreshShell();
+  }, [pathname]);
   /* Jobs to apply to or check by hand: the page's row count when it was read, else the RPC's lane counts
      when THAT read succeeded, else no badge rather than a made-up zero or a stale number. */
   const needsYou = manualApplyCount(countState.kind === 'rows' ? counts : null, pageRows);
@@ -283,3 +383,22 @@ export function AppShell(): ReactElement {
 
 /* The rail item that lists every job to apply to by hand: the manual-action lanes plus open kit rows. */
 const NEEDS_YOU_ROUTE = 'manual-apply';
+
+/* How old the last counts+badge read may be before a tab return (TRIGGER 3) or a navigation (TRIGGER 4)
+   re-reads them. One constant: both answer "how stale may the rail be". A minute: shorter re-reads on
+   nearly every click again, longer lets an agent's moves sit unseen through a coffee break. */
+const SHELL_READ_STALE_MS = 60_000;
+
+/* Whether a finished request (a resource entry's absolute URL) could have moved a status or a kit
+   (TRIGGER 2 above). Any edge function, and any RPC but the counts read, which would otherwise re-trigger
+   itself forever. Plain table reads (GET /rest/v1/<table>) never match, so page loads cost nothing. */
+function mayMoveData(url: string): boolean {
+  // A non-URL entry name (none expected) cannot be a Supabase call.
+  if (!URL.canParse(url)) return false;
+  // Only the path matters; the host is the one Supabase project.
+  const { pathname } = new URL(url);
+  // Edge functions: intake, pipeline runs, scouts, gmail-sync, the kit rebuild all move data server-side.
+  if (pathname.startsWith('/functions/v1/')) return true;
+  // Every RPC except the counts read itself.
+  return pathname.startsWith('/rest/v1/rpc/') && pathname !== '/rest/v1/rpc/application_status_counts';
+}

@@ -30,7 +30,7 @@ last. The old copy was installed on 2026-09-09 by hand: the release zip was extr
 uses it now. You can remove that folder and its PATH entry when you are ready. Ask Teja
 first, because it deletes files.
 
-Upgrading v2 to v3 is an open task (`docs/handoff/2026-11-08-0045-pending-tasks.md`,
+Upgrading v2 to v3 is an open task (`docs/handoff/2026-11-08-1745-pending-tasks.md`,
 item 13). Do not upgrade in the middle of a deploy session.
 
 **Why the PATH check uses PowerShell, not Git Bash.** Git Bash adds `$HOME/bin` to its own

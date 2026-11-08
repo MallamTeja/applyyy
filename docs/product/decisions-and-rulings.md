@@ -27,7 +27,7 @@ The rulings come from four places. Read them in this order when they disagree:
 1. The code at HEAD. Code wins over any document.
 2. Teja's memory files (`~/.claude/projects/c--Users-tejam-OneDrive-myproj-applyyy/memory/`, index `MEMORY.md`).
 3. The repo `CLAUDE.md`.
-4. Handoffs in `docs/handoff/` (newest pair: `2026-11-08-0045-*`). Older ones are in git history:
+4. Handoffs in `docs/handoff/` (newest pair: `2026-11-08-1745-*`). Older ones are in git history:
    `git log --format='%h %cs %s' -- docs/handoff/`.
 
 ## How it works: the rulings
@@ -83,7 +83,7 @@ The rulings come from four places. Read them in this order when they disagree:
 | 2026-11-07 22:55 | If the bot cannot apply (Workday, robots refusal, unanswered required questions, non-ATS), the row goes to the Manual apply lane with its kit. Teja's answers there save to the answer bank, so the bank grows. The bot never ticks declarations (for example "I did not use AI") for him. | Chasing one bot-perfect row per night stalls the pipeline. | `apps/web/src/features/manual-apply/ManualApplyPage.tsx` (commit `e4ae103`); Workday refusal in `worker/src/workday.ts` (`WORKDAY_REFUSAL`). Some manual-apply files are being changed right now (uncommitted). |
 | 2026-10-09 | Answers Teja saves himself are stamped `attested_by_human`. Only those may fill eligibility and EEO questions. | A machine must not answer legal questions in his name. | `supabase/migrations/20261009160000_answer_bank_attested_by_human.sql` (the server overwrites any client value). |
 | 2026-11-07 23:02 | The orchestrator may run real bot submits itself, through `apply.yml` with `dry_run=false` and `apply_only_id`, for a row whose rehearsal exits 0. | `assist.ts` needs Teja's keyboard. Teja wants submits to happen without him. | Process rule. Workflow: `.github/workflows/apply.yml`. |
-| 2026-11-07 / 2026-11-08 | Receipt-confirm (pipeline stage 6) is ON HOLD. | Teja's ruling in the 2026-11-08 handoff. | Not built. `docs/handoff/2026-11-08-0045-pending-tasks.md` item 14. |
+| 2026-11-07 / 2026-11-08 | Receipt-confirm (pipeline stage 6) is ON HOLD. | Teja's ruling in the 2026-11-08 handoff. | Not built. `docs/handoff/2026-11-08-1745-pending-tasks.md` item 14. |
 
 ### Security and UI
 

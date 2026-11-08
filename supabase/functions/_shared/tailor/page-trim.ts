@@ -57,7 +57,7 @@ export const PAGE_FIT_FLOORS = {
 } as const;
 
 /** One unit of trimming. */
-export type TrimStep = "project_bullet_over_cap" | "weakest_bullet" | "certification";
+export type TrimStep = "project_bullet_over_cap" | "weakest_bullet" | "certification" | "achievement";
 
 /**
  * THE ORDER, as one list: the first step with a candidate is taken, one removal at a time,
@@ -67,16 +67,20 @@ export type TrimStep = "project_bullet_over_cap" | "weakest_bullet" | "certifica
  * - 2026-11-07 23:55 IST (Teja): certifications go BEFORE bullets ("lowest priority, trimmed
  *   first"), still never below PAGE_FIT_FLOORS.minCertifications. Rows tailored between the two
  *   rulings were trimmed in the old order.
+ * - 2026-11-08 (orchestrator, for Teja's achievements >= 2 floor): whole ACHIEVEMENT entries may go, down to
+ *   PAGE_FIT_FLOORS.minAchievements, least JD-relevant first, LAST: only when every bullet above its floor is
+ *   already gone. Last on purpose, so every resume that fit before this step existed trims exactly as before
+ *   (Cursor ce965450 overflowed with all three achievements locked at one bullet each).
  */
-export const TRIM_ORDER: readonly TrimStep[] = ["certification", "project_bullet_over_cap", "weakest_bullet"];
+export const TRIM_ORDER: readonly TrimStep[] = ["certification", "project_bullet_over_cap", "weakest_bullet", "achievement"];
 
 /** What was removed, in removal order: enough to show it ("Trimmed to fit one page: ...") and to record it. */
 export interface TrimItem {
   // Which step removed it.
   readonly step: TrimStep;
-  // The bullet ref, or the certification entry ref.
+  // The bullet ref, or the certification / achievement entry ref.
   readonly ref: string;
-  // What printed: the bullet text, or the certification label.
+  // What printed: the bullet text, or the certification / achievement label.
   readonly text: string;
 }
 
@@ -147,6 +151,18 @@ function candidateFor(step: TrimStep, resume: ResolvedResume, jdKeywords: readon
       return { ref: entry.ref, text, score: keywordScore(text, jdKeywords), order };
     }));
   }
+  // Achievements: whole entries, while above the entry-count floor (their bullets sit at their own floor by now).
+  if (step === "achievement") {
+    // At or below the floor: nothing to take.
+    if (resume.achievements.length <= PAGE_FIT_FLOORS.minAchievements) return null;
+    // Each entry scored on everything it prints: label, description and bullets.
+    return weakest(resume.achievements.map((entry, order) => {
+      // Its printed text, once.
+      const text = [entry.label, entry.description ?? "", ...entry.bullets.map((b) => b.text)].join(" ").trim();
+      // Shown as the label in the trim notice; scored on the whole text.
+      return { ref: entry.ref, text: entry.label, score: keywordScore(text, jdKeywords), order };
+    }));
+  }
   // Bullets: every bullet in an entry still above its level for this step.
   const candidates: Candidate[] = [];
   // Running document position across sections.
@@ -174,11 +190,13 @@ function candidateFor(step: TrimStep, resume: ResolvedResume, jdKeywords: readon
 export function withoutTrimmed<R extends {
   readonly experience: readonly { readonly bullets: readonly { readonly ref: string }[] }[];
   readonly projects: readonly { readonly bullets: readonly { readonly ref: string }[] }[];
-  readonly achievements: readonly { readonly bullets: readonly { readonly ref: string }[] }[];
+  readonly achievements: readonly { readonly ref: string; readonly bullets: readonly { readonly ref: string }[] }[];
   readonly certifications: readonly { readonly ref: string; readonly bullets: readonly { readonly ref: string }[] }[];
 }>(resume: R, item: Pick<TrimItem, "step" | "ref">): R {
   // A certification: drop the entry.
   if (item.step === "certification") return { ...resume, certifications: resume.certifications.filter((entry) => entry.ref !== item.ref) };
+  // An achievement entry: drop the entry (2026-11-08).
+  if (item.step === "achievement") return { ...resume, achievements: resume.achievements.filter((entry) => entry.ref !== item.ref) };
   // A bullet: drop it from whichever entry holds it; every other entry is the same object.
   const drop = <T extends { readonly bullets: readonly { readonly ref: string }[] }>(entries: readonly T[]): T[] =>
     // Only the entry that contains it changes.
@@ -203,6 +221,8 @@ function bindingFloors(resume: ResolvedResume): string[] {
   }
   // Certifications at their floor.
   if (resume.certifications.length <= PAGE_FIT_FLOORS.minCertifications) named.push(`certifications: keeps >= ${PAGE_FIT_FLOORS.minCertifications}`);
+  // Achievement entries at their count floor (2026-11-08).
+  if (resume.achievements.length <= PAGE_FIT_FLOORS.minAchievements) named.push(`achievements: keeps >= ${PAGE_FIT_FLOORS.minAchievements}`);
   // The list.
   return named;
 }
