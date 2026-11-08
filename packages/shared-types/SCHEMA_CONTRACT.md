@@ -1,5 +1,7 @@
 # applyy — Schema Contract
 
+_Last verified against code: 2026-11-08 (2a9ac31)._
+
 **Owner:** the schema stream (`supabase/migrations/**`, `packages/shared-types/**`).
 **Audience:** the Edge Functions, web, and worker streams.
 **Purpose:** build against the database without asking the schema owner a question.
@@ -12,37 +14,64 @@ and this file is a bug.
 
 ## 1. What exists
 
-Seven migrations in `supabase/migrations/`, applied in filename order:
+The schema is the migration files in `supabase/migrations/`, applied in filename order.
+Do not trust a count in any doc. Regenerate the facts:
+
+| Fact | Command |
+|---|---|
+| Migration files | `ls supabase/migrations` |
+| Migrations applied live | the Supabase MCP `list_migrations`, compared with the list above |
+| Tables created | `grep -hoiE 'create table (if not exists )?public\.\w+' supabase/migrations/*.sql` |
+| Row types declared | `grep -n 'export interface \w*Row ' packages/shared-types/src/tables.ts` |
+| Live tables, and RLS on each | `select relname, relrowsecurity, relforcerowsecurity from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relkind = 'r'` |
+| Live status edges | `select count(*) from public.application_status_transitions` |
+
+Run a live SELECT with `env -u SUPABASE_ACCESS_TOKEN supabase db query --linked "<select>"`
+(repo `CLAUDE.md` §4). The user env var belongs to the wrong account.
+
+**The first seven files are the base schema.** Every later file is a change on top, and
+each carries a header saying why it exists.
 
 | File | Contents |
 |---|---|
-| `…234500_enums.sql` | 15 enum types |
-| `…234600_helpers.sql` | `applyy_internal` schema, `pacific_today()`, shared trigger functions |
-| `…234700_core_tables.sql` | `system_settings`, `master_profiles`, `jobs`, `applications` |
-| `…234800_supporting_tables.sql` | the other ten tables |
-| `…234900_status_transition_guard.sql` | the transition table, its seed, and the guard trigger |
-| `…235000_rls_policies.sql` | every RLS policy |
-| `…235100_queue_and_pool_functions.sql` | the seven RPCs |
+| `20260909234500_enums.sql` | the enum types |
+| `20260909234600_helpers.sql` | `applyy_internal` schema, `pacific_today()`, shared trigger functions |
+| `20260909234700_core_tables.sql` | `system_settings`, `master_profiles`, `jobs`, `applications` |
+| `20260909234800_supporting_tables.sql` | the first set of supporting tables |
+| `20260909234900_status_transition_guard.sql` | the transition table, its seed, and the guard trigger |
+| `20260909235000_rls_policies.sql` | the first RLS policies |
+| `20260909235100_queue_and_pool_functions.sql` | the queue and key-pool RPCs |
 
-**15 physical tables: 14 domain + 1 config.** The config table is
-`application_status_transitions`, which holds rules rather than user data.
+**The tables, grouped by job.** Each has a `<Table>Row` type in `src/tables.ts`. The
+table-parity test fails if one is missing (§9).
 
-**Applied and verified against a LOCAL Postgres 17.6 on 2026-09-10:** all 7 migrations
-load cleanly, 15/15 tables present, all 7 RPCs present, 44 transition edges seeded,
-RLS enabled with at least one policy on 15/15 tables.
+| Group | Tables | Added by |
+|---|---|---|
+| Control | `system_settings` | base |
+| Rules (config, not user data) | `application_status_transitions` | base |
+| Resume | `master_profiles` | base |
+| Queue | `jobs`, `applications` | base |
+| Audit logs (append-only) | `application_events`, `resume_chat_messages`, `gemini_usage` | base, `20261101120000`, `20261104200000` |
+| Agents and Gemini pool | `agent_runs`, `gemini_key_state` | base |
+| Search settings | `search_preferences`, `filter_rules`, `company_watchlist`, `company_blocklist` | base |
+| Answers | `answer_bank`, `unanswered_questions` | base, `20261105230000` |
+| Email | `email_events` | base |
+| Evaluation | `matcher_eval_cases` | base |
+| Phase 3 outputs | `follow_up_nudges`, `skill_gap_reports`, `interview_prep_packs` | `20260918213000` |
 
-**The hosted project is now linked, and reportedly pushed.** `supabase/.temp/`
-carries `linked-project.json` and `project-ref` as of 18:40 on 2026-09-10, and Teja is
-reported to have pushed all 7 migrations at 18:45.
+Two more tables live in the private `applyy_internal` schema: `agent_key` and
+`agent_key_emergency` (`20261008160000`, `20261102210000`). They hold the machine-agent
+key state. They are not reachable over the REST API and have no Row type on purpose.
 
-**Read that with its provenance.** What is verified here is the *link state on disk*.
-Nobody has queried the remote to confirm it holds these 15 tables, 7 RPCs and 44 edges —
-so "the hosted project has this schema" is currently a second-hand claim. Re-verify
-against the remote before depending on it, and note the consequence: **type-level
-defects in this package are now live-system defects, not future ones.** The link files
-are gitignored, so no project identifier is committed (constraint #11).
+As of 2026-11-08 the live database matched the migrations: 21 public tables, RLS on all
+21, 53 status edges (queries above). Re-run the queries; do not quote these numbers.
 
-Getting to that clean load took one fix worth remembering as a *shape*: a partial index
+**The hosted project is live.** Type-level defects in this package are live-system
+defects. The link files in `supabase/.temp/` are gitignored, so no project identifier is
+committed (constraint #11).
+
+**A lesson from the first local load (2026-09-10).** Getting to a clean load took one fix
+worth remembering as a *shape*: a partial index
 on `company_blocklist` whose predicate called `now()` was rejected as not `IMMUTABLE`
 (`42P17`), which aborted the run at **file 4 of 7** — so the guard, the RLS policies and
 the RPCs (files 5, 6, 7) had never executed at all. An early failure in a numbered
@@ -116,11 +145,13 @@ strict — and it fails at the place you add it, not where you learned it.**
 | Column | Why it matters |
 |---|---|
 | `system_enabled` | **The kill switch. Defaults FALSE.** A fresh deploy cannot start submitting. |
-| `dry_run` | **Defaults TRUE.** Forms filled and screenshotted, nothing submitted. |
+| `dry_run` | **Inert. Nothing reads it.** Do not flip it to stop submission. Whether a run submits is decided by `apply.yml`: its `dry_run` input on a manual run, and the repo variable `APPLYY_CRON_LIVE` on a scheduled run (`20261105202000_system_settings_dry_run_comment_inert.sql`). |
+| `auto_apply_on_approve` | Default FALSE. When TRUE, approving a job starts the applier through `dispatch-apply` (`20261105140000_auto_apply_on_approve.sql`). |
 | `gemini_daily_call_budget` | Nullable. **NULL = uncapped.** The only number in the schema permitted to stop work. |
 | `gemini_calls_today` / `gemini_budget_date` | Self-resetting counter, **dated in US/Pacific** (§8.4). |
 | `max_applications_per_company_per_week` | Default 2. The knob only — the count is derived by query. |
-| `max_applications_per_day`, `freshness_window_days`, `claim_lease_seconds` | Operating limits. |
+| `max_applications_per_day` | **Nullable since `20261105140000`. NULL = no daily cap.** |
+| `freshness_window_days`, `claim_lease_seconds` | Operating limits. |
 
 You do not need to check `system_enabled` yourself before claiming work —
 `claim_applications()` and `claim_gemini_key()` check it internally and return nothing
@@ -182,10 +213,16 @@ board as `posted_at_source = 'unknown'`.
 
 ### The rest
 
-`answer_bank` (`needs_human` is constraint #4 made concrete), `application_events`
-(append-only, same double enforcement as `master_profiles`), `agent_runs`,
-`gemini_key_state`, `search_preferences`, `filter_rules`, `company_blocklist`,
-`email_events`, `matcher_eval_cases`.
+| Table | What to know |
+|---|---|
+| `answer_bank` | `needs_human` is constraint #4 made concrete. `attested_by_human` is set by a trigger, never by the caller: a write with no agent-key header counts as human (`20261009160000_answer_bank_attested_by_human.sql`). |
+| `unanswered_questions` | A **report** for the Answer bank page, never an answer source. The planner reads only `answer_bank`. Written through `record_unanswered_questions(p_application_id, p_items)` (`20261105230000`). |
+| `application_events` | Append-only. Triggers raise on UPDATE and DELETE, and UPDATE, DELETE and TRUNCATE are revoked from `anon` and `authenticated` (`20261101140000`). A correction is a new event. |
+| `resume_chat_messages` | One message of an AI chat about one application's resume. Append-only, same enforcement as `application_events`. |
+| `gemini_usage` | One row per Gemini attempt the key pool claimed, with token counts. Append-only. Written by `recordUsage` in `supabase/functions/_shared/gemini/client.ts`; queries in `docs/tooling/2026-11-02-gemini-usage.md`. |
+| `jobs.tombstoned_at` | A dropped job's row is slimmed and stamped, not deleted, by `tombstone_dropped_jobs()` (`20261105200000`). |
+| `follow_up_nudges`, `skill_gap_reports`, `interview_prep_packs` | Phase 3 agent outputs (`20260918213000`). |
+| `agent_runs`, `gemini_key_state`, `search_preferences`, `filter_rules`, `company_blocklist`, `email_events`, `matcher_eval_cases` | See their Row type comments in `src/tables.ts`. |
 
 **`matcher_eval_cases` is the labelling surface, not the test fixture.** The CI gate
 has no database, so the harness must export these rows to a JSON fixture committed to
@@ -248,10 +285,15 @@ column types:
 
 | Edge | Why human-only |
 |---|---|
-| `needs_verification → approved` | The only way a row re-enters the submit path. **A machine must never decide that a possibly-submitted application was not submitted.** |
+| `needs_verification → approved` | The only way a possibly-submitted row re-enters the submit path. **A machine must never decide that a possibly-submitted application was not submitted.** |
 | `audit_flagged → tailored` | An automated retry loop here would burn quota rewriting the same flagged bullet. |
-| `failed → needs_verification` | The only edge out of `failed`, and it leads to verification rather than to the queue. |
+| `failed → needs_verification` | Sends a failed row to verification rather than to the queue. |
+| `failed → passed_filters` | Re-tailors a row that failed **before** approval. A BEFORE UPDATE trigger, `applyy_internal.guard_failed_rerun`, refuses the move for a row that failed after approval, because that row may already be submitted (`20261102203000_failed_before_approval_reruns.sql`). |
 | `awaiting_approval → approved` | Constraint #15. |
+| `awaiting_approval → passed_filters`, `approved → passed_filters` | Re-run after the master resume changes. Withdraws the approval so the row is re-scored and re-tailored (`20261101173000_master_change_reruns_pipeline.sql`). |
+| `approved → applied`, `approved → failed` | "Mark applied" / "Mark failed" on the Manual apply page, for a job Teja sent by hand (`20261105121500_human_resolves_approved_from_manual_apply.sql`). |
+| `discovered → passed_filters` | The pasted-link path. No agent may take it (`20261031200000_human_pasted_link_reenters_passed_filters.sql`). |
+| `discovered → applied` | "Add to Applied" on the Emails page: a job applied to outside the portal, tracked from its email (`20261105124600_email_add_to_applied_and_read_at.sql`, RPC `track_email_as_applied`). |
 
 `applying → needs_verification` is `['sweeper', 'human']` — **not** sweeper-only.
 `human` is present deliberately: §14 says scheduled jobs die silently, so a
@@ -259,8 +301,11 @@ sweeper-only edge would leave a stuck row unresolvable by the one person who mus
 resolve it.
 
 **Two different questions, easy to conflate:** *human-only* edges
-(`allowedAgents.length === 1 && [0] === 'human'`) number **11**; *human-permitted*
-edges (`allowedAgents.includes('human')`) number **31**. A UI completeness check wants
+(`allowedAgents.length === 1 && [0] === 'human'`) and *human-permitted* edges
+(`allowedAgents.includes('human')`). Count both from `STATUS_TRANSITIONS` in
+`src/status-flow.ts`, or live with
+`select count(*) filter (where allowed_agents = '{human}'), count(*) filter (where 'human' = any(allowed_agents)) from public.application_status_transitions`.
+As of 2026-11-08 the mirror gave 19 and 40. A UI completeness check wants
 the **wider** predicate — otherwise it reports full coverage while the manual control
 for a safety-critical shared edge is missing.
 
@@ -277,18 +322,24 @@ worked on never left the status it was in. An agent that cannot get a key calls
 `release_application_claim()`; the row is picked up next run.
 
 **Corrected 2026-09-10 — this section used to be titled "There are no backward edges",
-and that is false.** Seven backward edges exist, deliberately; they are the recovery
-lanes. Ordered by `application_status` declaration order:
+and that is false.** Backward edges exist, deliberately; they are the recovery lanes.
+"Backward" means the target comes earlier in `application_status` declaration order.
+The test pins their number (eleven as of 2026-11-08, `test/enum-parity.test.ts`), so a
+new one fails the suite until the count and this table are updated:
 
-| Backward edge | Allowed agents |
-|---|---|
-| `audit_flagged → tailored` | `['human']` |
-| `interview → oa_pending` | **`['tracker', 'human']`** |
-| `blocked_needs_human → applied` | `['human']` |
-| `blocked_needs_human → dropped_filter` | `['human']` |
-| `needs_verification → applied` | `['human']` |
-| `needs_verification → approved` | `['human']` |
-| `failed → needs_verification` | `['human']` |
+| Backward edge | Allowed agents | Added by |
+|---|---|---|
+| `dropped_filter → passed_filters` | `['human']` (a pasted link overrules the filter) | `20261031200000` |
+| `audit_flagged → tailored` | `['human']` | base |
+| `awaiting_approval → passed_filters` | `['human']` | `20261101173000` |
+| `approved → passed_filters` | `['human']` | `20261101173000` |
+| `interview → oa_pending` | **`['tracker', 'human']`** | base |
+| `blocked_needs_human → applied` | `['human']` | base |
+| `blocked_needs_human → dropped_filter` | `['human']` | base |
+| `needs_verification → applied` | `['human']` | base |
+| `needs_verification → approved` | `['human']` | base |
+| `failed → needs_verification` | `['human']` | base |
+| `failed → passed_filters` | `['human']`, plus the `guard_failed_rerun` trigger | `20261102203000` |
 
 The true statement, and the one the old wording was reaching for: **no backward edge
 exists on the automated forward path, and every backward edge except one is
@@ -299,8 +350,8 @@ after an interview.
 Why the precision earns its space: a reader who believes "zero backward edges"
 concludes the actor check on reverse moves is redundant and skips it. It is not
 redundant. It is the entire safety property, and it is doing real work on exactly one
-edge. Both facts — the count of seven and the single machine-walkable exception — are
-now asserted in `test/enum-parity.test.ts`.
+edge. Both facts — the backward-edge count and the single machine-walkable exception —
+are asserted in `test/enum-parity.test.ts`.
 
 ---
 
@@ -332,10 +383,17 @@ All three surface as `AuditFinding`, which is a **discriminated union on `kind`*
 2026-09-10 (it was a single flat shape, which is why vector 3 had nowhere to live):
 
 ```ts
-type AuditFinding = MisattributedBulletFinding | GenericAuditFinding;
-// kind: 'unresolved_ref' | 'misattributed_bullet' | 'unfaithful_rewording'
-//     | 'summary_unsupported' | 'other'
+type AuditFinding = MisattributedBulletFinding | JdKeywordDroppedFinding | GenericAuditFinding;
+// every member also carries: path, ref_path?, claim, reason, confidence (AuditFindingBase)
+// MisattributedBulletFinding: kind 'misattributed_bullet'
+//                             + ref, claimed_parent_ref, actual_parent_ref (all required)
+// JdKeywordDroppedFinding:    kind 'jd_keyword_dropped' + keywords?: readonly string[]
+// GenericAuditFinding:        kind 'unresolved_ref' | 'unfaithful_rewording'
+//                             | 'summary_unsupported' | 'other'
 ```
+
+Source: `packages/shared-types/src/tables.ts:513` (kinds: `AUDIT_FINDING_KINDS` in
+`src/enums.ts`), verified 2026-11-08.
 
 `AUDIT_FINDING_KINDS` is TypeScript-only: it discriminates one element of the
 `applications.audit_findings` jsonb **array**, and a row-level enum column cannot type a
@@ -509,6 +567,14 @@ quietly reopen the hole while every test still passed.
 
 ## 6. How to write an agent
 
+**First, send the agent key.** A machine agent's client must carry the
+`x-applyy-agent-key` header, built by `agentKeyHeaders()` in
+`supabase/functions/_shared/db/agent-key.ts` from the `APPLYY_AGENT_KEY` secret.
+`advance_application_status`, `claim_applications`, `release_application_claim` and
+`sweep_stale_claims` check it through `applyy_internal.agent_key_state()` and refuse a
+machine agent without it (`42501`). Since `20261102210000` an empty key table locks every
+machine agent out (fail-closed). Repo `CLAUDE.md` §7 has the details.
+
 ```ts
 // 1. Open a run BEFORE doing work, so a crash leaves a visible stuck row.
 //    A missing row and a successful run look identical.
@@ -568,9 +634,19 @@ transitions, which is what stops an agent from bypassing the `allowed_agents` ch
 simply not mentioning itself. `advance_application_status()` sets it for you; a manual
 fix in the SQL editor must `set_config('applyy.acting_agent', …)` deliberately.
 
-**Call `bootstrap_user_defaults()` once per account.** Without a `system_settings` row
-every function fails closed and the system looks merely idle — the exact silent stop
-§14 warns about. It is idempotent.
+**Optimistic check.** `advance_application_status` also takes
+`p_expected_updated_at timestamptz default null` (`20261008160000`, the latest
+definition). Pass the `updated_at` you last read and the move is refused if the row
+changed since. NULL means "do not check". `AdvanceApplicationStatusArgs` in
+`src/tables.ts` does not declare this parameter yet (§10).
+
+**Default rows are seeded at signup.** A trigger on `auth.users`,
+`on_auth_user_created_seed_defaults`, calls `applyy_internal.seed_user_defaults(NEW.id)`
+(`20261008180000`). Without a `system_settings` row every function fails closed and the
+system looks merely idle — the exact silent stop §14 warns about. **Do not call
+`bootstrap_user_defaults()` from an agent:** EXECUTE on it was revoked from
+`authenticated` in `20261105203000`. To repair a user with missing defaults, run
+`select applyy_internal.seed_user_defaults('<user uuid>');` as `postgres` (idempotent).
 
 ---
 
@@ -609,8 +685,10 @@ across *sources*, not across *tenants*.
 ### 8.2 `previous_status` is informational only
 
 Maintained by the trigger so no agent can forget it. It exists so the UI can say "came
-from X" without joining the event log. **It is not a rollback mechanism** — there are
-no backward edges (§4). Never branch on it.
+from X" without joining the event log. **It is not a rollback mechanism** — the
+backward edges that exist are explicit recovery lanes with their own rules (§4). Never
+branch on it. One trigger reads it on purpose: `applyy_internal.guard_failed_rerun` uses
+it to tell a row that failed before approval from one that failed after (§4).
 
 ### 8.3 Worker authentication — no service-role key anywhere
 
@@ -635,11 +713,17 @@ Under this design, *"the worker cannot do anything the human could not do from t
 dashboard"* is literally true — worth having as a property on the one component that
 touches real employers.
 
-*Setup, pending and gated on Teja: create the app's SINGLE auth user (the worker and
-the dashboard share it — RLS scopes rows by `auth.uid()`, so a second user would split
-the data); set `APPLYY_APP_USER_EMAIL` / `APPLYY_APP_USER_PASSWORD` as Actions secrets.
-(Renamed from `APPLYY_WORKER_*` per the 2026-09-10 ruling in `docs/PROGRESS.md` — one
-credential, one name; the code and workflows already use the new names.)*
+**Setup, done.** The worker and the dashboard share the app's single auth user (RLS
+scopes rows by `auth.uid()`, so a second user would split the data). Its credentials
+are the `APPLYY_APP_USER_EMAIL` / `APPLYY_APP_USER_PASSWORD` secrets, read by
+`.github/workflows/apply.yml` and `apply-kit.yml`. The sign-in is in
+`worker/src/cli/apply.ts` and `supabase/functions/_shared/db/client.ts`.
+
+**The one gap this design leaves, and the control added for it (2026-10-08).** The
+browser, the Edge Functions and the worker all sign in as the same user, so `auth.uid()`
+cannot tell a person from an agent. The `x-applyy-agent-key` header is the only
+discriminator (§6). Any holder of the user's JWT who omits the header is still treated
+as human.
 
 ### 8.4 Quota counters are dated in **US/Pacific**
 
@@ -674,9 +758,8 @@ takes it from here"), and a status that shares an existing handler grows the gra
 without adding meaning. The rule of thumb: **add a STATE when the handler differs; add
 a REASON when only the explanation differs.**
 
-`block_reason` is an enum (`captcha`, `mfa`, `unanswerable_question`,
-`unsupported_form`, `login_required`, `submission_unconfirmed`, `other`) rather than
-free text, because the UI branches on it and free text is how you get three spellings
+`block_reason` is an enum (`BLOCK_REASONS` in `src/enums.ts`; `robots_refused` was added
+by `20261009233000`) rather than free text, because the UI branches on it and free text is how you get three spellings
 of one reason. It is **kept** after the block is resolved — that history is what the
 health page wants.
 
@@ -733,8 +816,9 @@ bank, so filling the gap is the wrong fix.
 - `no_answer` → **`answer_missing`** (one concept, two names — this was the drift)
 - `awaiting_human_answer` → **`answer_low_confidence`** (bank row exists, `needs_human`)
 
-As of 2026-09-10 that rename is **not yet applied in the worker** — this table is the
-agreed target, not a description of shipped code.
+As of 2026-11-08 that rename is **still not applied in the worker** —
+`worker/src/plan-fill.ts` still declares `'no_answer' | 'awaiting_human_answer'`. This
+table is the agreed target, not a description of shipped code.
 
 Open question for whoever owns the answer bank: `answer_bank.needs_human` is one
 boolean trying to express three states. Either it becomes the storage for the sub-kind,
@@ -815,22 +899,34 @@ Policies use `for all` with **both** `using` and `with check`. `using` filters w
 can see; `with check` validates what you write. A policy with only `using` would let you
 update a row you can see into a row belonging to someone else.
 
-The RPCs are `security invoker`, never `security definer` — they must run with the
-caller's RLS in force. A definer function reachable over the REST API would make every
-caller act as the owner and RLS would stop meaning anything. The only definer functions
-are the two triggers, which are not API-reachable.
+The agent-facing RPCs are `security invoker` — they must run with the caller's RLS in
+force. A definer function reachable over the REST API would make every caller act as the
+owner and RLS would stop meaning anything.
 
-**Verified live 2026-09-10, as two separate assertions** (one alone would be a false
-comfort — RLS enabled with no policy is a locked table, and a policy on a table without
-RLS is dead code): **15/15** public tables have `relrowsecurity = t`, and **15/15** have
-at least one policy. Zero holes, zero locked tables.
+**The definer exceptions, and why each is safe.** Regenerate the list with
+`grep -li "security definer" supabase/migrations/*.sql` and read the latest definition
+of each function.
 
-**One documented exception to the FORCE RLS pattern.** `application_status_transitions`
-has `relrowsecurity = t` but `relforcerowsecurity = f`; the other 14 tables have force
-RLS on. It is the read-only reference seed rather than user data, so this is defensible
-— but it is the single place the pattern differs, so it is recorded here rather than
-left for someone to find and assume was an oversight. Open question, owned jointly with
-the migrations stream: make it uniform, or state the exemption in the migration itself.
+| Function | Why it is definer | Why it is safe |
+|---|---|---|
+| `applyy_internal.*` trigger and helper functions | They write rows the caller may not (event log, seed rows, attestation stamp). | Triggers cannot be called directly. EXECUTE on the trigger functions was revoked from PUBLIC (`20261008190000`); `seed_user_defaults` is granted to no one. |
+| `public.bootstrap_user_defaults()` | Wraps the private seed body. | EXECUTE revoked from `authenticated` (`20261105203000`). Nothing calls it. |
+| `public.rls_auto_enable()` | An event trigger that turns RLS on for every new table (`20261102211000`). | Returns `event_trigger`, so it cannot be called as an RPC. EXECUTE revoked in `20261105203000`. |
+
+**Re-verify RLS as two separate assertions** (one alone would be a false comfort — RLS
+enabled with no policy is a locked table, and a policy on a table without RLS is dead
+code): every public table has `relrowsecurity = t` (query in §1), and every public table
+has at least one row in `pg_policies`. First verified 2026-09-10 on 15 tables. As of
+2026-11-08 all 21 public tables had RLS on.
+
+**Exceptions to the FORCE RLS pattern.** As of 2026-11-08 two public tables have
+`relrowsecurity = t` but `relforcerowsecurity = f` (query in §1):
+
+- `application_status_transitions` — the read-only reference seed, not user data.
+  Defensible, and recorded here so nobody assumes it was an oversight.
+- `unanswered_questions` (`20261105230000`) — user data. Every other user-data table has
+  FORCE RLS on. This looks like an omission, not a decision. Open for the migrations
+  stream: add `force row level security`, or state the exemption in a migration.
 
 **A limit on the word "verified" above, because the general claim would mislead.** The
 verifying role had `rolbypassrls = TRUE`. The `SECURITY DEFINER` audit trigger did write
@@ -852,11 +948,22 @@ An enum lives in **two** places. Change one and you must change the other:
 Same for the status graph: `…_status_transition_guard.sql` (the rule) and
 `src/status-flow.ts` (the mirror the UI reads).
 
-**A TEST is the enforcement, not this checklist.** As of 2026-09-10, run:
+A table lives in two places too: the migration and its `<Table>Row` / `Insert` /
+`Update` types in `src/tables.ts`. **Add the Row type in the same change as the
+migration.** A new column goes into the Row type in the same change as well.
+
+**A TEST is the enforcement, not this checklist.** Run it from the repo root, the same
+way CI does:
 
 ```bash
-pnpm --filter @applyy/shared-types test    # test/enum-parity.test.ts
+node --test "packages/shared-types/test/**/*.test.ts"    # test/enum-parity.test.ts
 ```
+
+Read `tests`, `fail` and `cancelled` together: `tests 0` with `fail 0` is a glob that
+matched nothing (repo `CLAUDE.md` §5). **CI runs this suite** in `.github/workflows/ci.yml`,
+step "shared-types tests (node --test), and assert tests ran" (added 2026-11-01, after
+`4f53c25` landed a table without a Row type on a green main). It still pays to run it by
+hand after writing a migration, before you push.
 
 It parses `supabase/migrations/**` and diffs it against the imported TypeScript, and it
 fails in **both** directions. What it covers:
@@ -866,12 +973,17 @@ fails in **both** directions. What it covers:
   the migration would otherwise typecheck everywhere and fail as a runtime
   `22P02 invalid_text_representation` on the first insert — in production, from an
   agent, at 3am)
-- every table in the migrations has a `Row` type
-- all **44** transition edges match, including `allowed_agents` **and** the user-visible
+- **table parity:** every `create table public.X` in the migrations has a Row type
+- **column parity:** every Row type has exactly the column names its table has, both
+  directions. The parser replays `create table` and `alter table … add column` in
+  filename order. It refuses `drop column` / `rename`, so teach it those before you use
+  them. A NON-VACUITY control test proves the parser catches a missing and an extra
+  column.
+- every transition edge matches, including `allowed_agents` **and** the user-visible
   `note` text
-- the invariants: every edge into `approved` is human-only; exactly one backward edge is
-  machine-walkable; `TERMINAL_STATUSES` is exactly the no-outgoing-edge set; `applying`
-  has one in-edge
+- the invariants: every edge into `approved` is human-only; the backward-edge count is
+  pinned and exactly one backward edge is machine-walkable; `TERMINAL_STATUSES` is
+  exactly the no-outgoing-edge set; `applying` has one in-edge
 
 **Why the change matters more than it looks.** This section previously said "This
 checklist is the enforcement", and a checklist is a guard nobody runs. It had already
@@ -893,10 +1005,13 @@ database disagree about what a transition *means* to a user. Change the migratio
 then sync `status-flow.ts`. (9 of 44 differed on 2026-09-10 — 4 punctuation-only, 5
 substantive — and were converged onto the SQL text.)
 
-**What the test cannot cover, so you still must:** per-column types and nullability. A
-TypeScript `interface` is erased at runtime, so that half of the suite reads
-`tables.ts` as *text* and only checks that a `Row` type **exists**. Closing that gap is
-what `supabase gen types typescript` is for — see §10.
+**What the test cannot cover, so you still must:** per-column **types and nullability**,
+and RPC signatures. A TypeScript `interface` is erased at runtime, so the suite reads
+`tables.ts` as *text* and checks only names. Re-diff types against the live database
+with the query in the `src/tables.ts` header (`information_schema.columns`), or with
+`supabase gen types typescript` — see §10. One known, deliberate disagreement:
+`company_watchlist.first_seen_at_is_trustworthy` is nullable live and non-null in
+`tables.ts` (see that column's comment).
 
 Adding a status transition also means adding a UI control for it if any human is in
 `allowed_agents` — see §4.
@@ -905,28 +1020,28 @@ Adding a status transition also means adding a UI control for it if any human is
 
 ## 10. Not done
 
-- **Nothing is applied to the hosted project.** Gated on Teja. There is no
-  `supabase link` state on disk, and no remote database exists — never describe the
-  hosted project as migrated.
-- ~~Not yet validated against a live Postgres.~~ **DONE 2026-09-10:** all 7 migrations
-  apply cleanly to a local Postgres 17.6. It took one fix to get there — a partial index
-  on `company_blocklist` whose predicate called `now()` was rejected as not `IMMUTABLE`
-  (`42P17`), which had been aborting the run at file **4 of 7** and therefore leaving the
-  guard, the RLS policies and the RPCs unexecuted. Worth remembering as a shape: an
-  early failure in a numbered sequence does not report the files it never reached.
-- `matcher_eval_cases` is empty — ~20 labels are Teja's to write. The table and its
-  `eval_label` enum are now mirrored in `src/tables.ts` as
-  `MatcherEvalCaseRow` / `Insert` / `Update` (added 2026-09-10; they were the one
-  table and the one enum with no TypeScript twin).
-- **There is no real master resume in the repo.** The only `ResolvedResume` instance is
-  the synthetic `zomato-backend-intern` fixture in `packages/resume-template/test/`.
-  `MasterProfile` and `ResolvedResume` are built to *ingest* a real one; do not invent
-  résumé content to fill the gap, and do not read the fixture as Teja's actual history.
+- `matcher_eval_cases` is empty (0 rows live on 2026-11-08:
+  `select count(*) from public.matcher_eval_cases`). About 20 labels are Teja's to
+  write. The table and its `eval_label` enum are mirrored in `src/tables.ts` as
+  `MatcherEvalCaseRow` / `Insert` / `Update`.
+- **No real master resume is committed to the repo.** Teja's master lives in
+  `master_profiles` in the live database. The only `ResolvedResume` instance in git is
+  the synthetic `zomato-backend-intern` fixture in
+  `packages/resume-template/test/fixtures/`. Do not read the fixture as Teja's history,
+  and do not invent résumé content.
 - The JSON fixture export + CI gate for the eval set belong to the Edge Functions
   stream, not to this schema.
 - Generated types (`supabase gen types typescript`) should eventually be produced as a
   **check** on `src/tables.ts`, not a replacement: this file carries the comments, the
-  generated one carries the proof.
+  generated one carries the proof. Column **names** are now checked by the column-parity
+  test (§9); column types, nullability and RPC signatures are not.
+- **RPC types lag the SQL** (as of 2026-11-08, `src/tables.ts`):
+  `AdvanceApplicationStatusArgs` lacks `p_expected_updated_at`, and these public
+  functions have no Args/Result type: `application_status_counts`,
+  `track_email_as_applied`, `tombstone_dropped_jobs`, `set_gemini_key_pool_size`.
+  Regenerate the function list with the `create … function public.` grep over
+  `supabase/migrations/*.sql`.
+- `unanswered_questions` has RLS but not FORCE RLS (§8.8).
 
 ### Deliberately not built
 

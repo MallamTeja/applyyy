@@ -1,5 +1,8 @@
 # Runbook: a bulk revive into `passed_filters` is followed by the pre-gate sweep
 
+> **Status 2026-11-08:** Current. The commands still work as written: `.github/workflows/pregate-sweep.yml` takes `dry_count_only` (line 21) and calls `matcher?mode=pregate_only` (`supabase/functions/matcher/index.ts:199`). The auditor re-gate named below is `supabase/functions/auditor/pregate.ts`, which reuses `firstPreGateDrop` from `supabase/functions/matcher/tech-pregate.ts`.
+> The body below is the original record, unedited.
+
 Written 2026-11-06 (P1 #7). Rule for whoever moves rows back into Ready to tailor in bulk.
 
 ## The rule

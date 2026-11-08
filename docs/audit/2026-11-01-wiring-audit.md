@@ -1,5 +1,7 @@
 # Wiring audit — agents, modules, tiers (2026-11-01)
 
+> **Status 2026-11-08:** Partly superseded. Beyond the fix table below, later commits closed many P2 items: W11 (`vercel.json:4` now diffs from `$VERCEL_GIT_PREVIOUS_SHA`), W12 (`supabase/functions/scout-ats/gate.ts`), W13 (`.github/workflows/ci.yml:285` runs every `packages/*/test`), W14 (`supabase/functions/skill-gap/handler.ts`), W17 (`supabase/functions/job-link-intake/pinned-get.ts`), W18 (`supabase/migrations/20261102210000_agent_key_fail_closed.sql`), W24 (Workable not selectable, `apps/web/src/features/settings/WatchlistPage.tsx:65`), W25 (`supabase/migrations/20261102211000_capture_rls_auto_enable.sql`), W26 (`supabase/functions/job-link-intake/import-graph.test.ts`), W28 (`worker/src/apply-kit-sweep.ts:98`), W30 (`.github/workflows/apply.yml:171`), W32 (`supabase/functions/email-tracker-intake/decide.ts:134`). Still open at HEAD: `supabase/functions/matcher/freshness-queue.ts` exists and nothing imports it (W23); other items were not re-checked. Current state: `docs/SYSTEM_ARCHITECTURE.md`. The body below is the original record, unedited.
+
 **Scope:** whole repo at origin/main `8f9a2e7` (12:50 IST), plus the live Supabase project
 `xynqxekcqizwhtskzqrq` (read-only SELECTs). Seven read-only recon agents, one per seam:
 pipeline agent chain · web↔backend contract · worker + workflows · types/schema drift ·

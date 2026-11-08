@@ -1,6 +1,6 @@
-> **Historical record as of 2026-09-17.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
-
 # Two gaps in the pipeline's safety case — a proposal
+
+> **Status 2026-11-08:** Superseded. Gap 2 is closed: `20260917130000_guard_application_status_on_insert.sql` is applied and the `guard_status_insert` trigger is live. Gap 1 was closed by a different design than option B: every caller signs in as the same app user, so a JWT role check cannot tell an agent from a browser. Machine agents now prove identity with the `x-applyy-agent-key` header (`20261008160000_agent_key_header_for_machine_agents.sql`), fail-closed since `20261102210000_agent_key_fail_closed.sql`. Current truth: the repo `CLAUDE.md` §7. The body below is the original record, unedited.
 
 **Status:** Gap 1 — PROPOSAL ONLY, no SQL, target recorded for a later coordinated
 landing. Gap 2 — approach approved, SQL pending this document's review.

@@ -1,6 +1,6 @@
-> **Historical record as of 2026-09-17.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
-
 # Company watchlist — board token verification, 65 companies
+
+> **Status 2026-11-08:** Superseded. The "three adapters" premise is gone: `supabase/functions/_shared/ats/registry.ts` now maps `greenhouse`, `lever`, `ashby` and `workday`; SmartRecruiters is OFF (robots ruling 2026-11-01); a Workable adapter is written but not registered. The watchlist is far larger than these 65 rows and was re-seeded several times (`supabase/snippets/*watchlist*`). Current truth: [harvest/README.md](../harvest/README.md). The body below is the original record, unedited.
 
 **Date:** 2026-09-17
 **Account:** `tejamallam00@gmail.com`

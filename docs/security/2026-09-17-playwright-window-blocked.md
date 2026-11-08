@@ -1,5 +1,7 @@
 # Window 3 (playwright) — blocked, re-scoped, then landed without local execution
 
+> **Status 2026-11-08:** Historical. The bump landed in `b62be33`, and both `worker/package.json` and `apps/web/package.json` still pin `playwright` 1.55.1. The rule this record found (bump both manifests and the lockfile together) is kept in the repo `CLAUDE.md` §8. The 2026-11-05 re-measure corrects the "8 vulns fixed" claim: only 3 alerts were Playwright. The body below is the original record, unedited.
+
 **Date:** 2026-09-17 · **Session:** `applyyy-95`
 **Status:** **BUMPED.** Both manifests and the lockfile moved `1.49.1 -> 1.55.1`.
 **NO REGRESSION WAS ESTABLISHED LOCALLY, AND NOTHING HERE IS "VERIFIED"** — see §5.

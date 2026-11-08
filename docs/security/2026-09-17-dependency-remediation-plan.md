@@ -1,6 +1,6 @@
-> **Historical record as of 2026-09-17.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
-
 # Dependency vulnerability remediation plan
+
+> **Status 2026-11-08:** Superseded. W2 and W4, open here, shipped later: vite and vitest in `cc1cd22` (2026-10-05) and `cf8699a` (2026-10-08), and react-router-dom moved to 7.18.4 in `b4ebc70` (2026-10-09). The 2026-11-05 audit found 1 open advisory (dev-only vite), closed by `ad09e8f`. Current truth: [2026-11-05-vulnerability-remeasure.md](2026-11-05-vulnerability-remeasure.md) and `pnpm audit --json`. The body below is the original record, unedited.
 
 **Date:** 2026-09-17
 **Status:** **W1 SHIPPED** at `99c42e8` (13:00 IST). **W3 SHIPPED** at `b62be33` (17:30 IST),

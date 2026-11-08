@@ -1,6 +1,7 @@
-> **Historical record as of 2026-09-17.** Current state: [tech-gate.ts](../../supabase/functions/_shared/screen/tech-gate.ts).
-
 # Tech-only discovery — design
+
+> **Status 2026-11-08:** Superseded. The design was built and then amended (the 2026-10-09 amendments in the body). The stage-0 gate is `screenTechRole` in `supabase/functions/_shared/screen/tech-gate.ts`, run on scout insert by `_shared/screen/screen-batch.ts:204` and on the backlog by `supabase/functions/matcher/tech-pregate.ts`; its config comes from `search_preferences` (`_shared/screen/supabase-queries.ts:251`). The "Status: not implemented" line and the unknown-title default are out of date: with titles or keywords configured, an unmatched title now drops as `tech_gate_unclassified` (`tech-gate.ts:27-33`). The header comment of `tech-gate.ts` holds the current rule.
+> The body below is the original record, unedited.
 
 **Date:** 2026-09-17
 **Status:** design approved by Teja; not implemented

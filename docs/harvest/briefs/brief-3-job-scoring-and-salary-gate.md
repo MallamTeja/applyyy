@@ -1,6 +1,6 @@
-> **Historical record as of 2026-09-16.** Current state: [SYSTEM_ARCHITECTURE.md](../../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../../PROGRESS.md).
-
 # Brief 3 — Job Scoring Rubric + Salary Gate (the Scorer's logic)
+
+> **Status 2026-11-08:** Partly shipped. The rubric is `supabase/functions/_shared/match/rubric.ts` (b15d8e7), composed by `scorer.ts` and called from `supabase/functions/matcher/index.ts`; the pass floor is 30 (`_shared/match/score-threshold.ts`, Teja 2026-11-07). The salary gate is written (`_shared/match/salary-gate.ts`, `evaluateSalaryGate`, 5751184) but no runtime code calls it as of 2a9ac31. The body below is the original record, unedited.
 
 > **Attribution header to reproduce at the top of every source file you create:**
 >

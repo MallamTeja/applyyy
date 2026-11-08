@@ -1,5 +1,7 @@
 # Watchlist expansion, half B — 103 new verified-pollable boards (2026-10-23)
 
+> **Status 2026-11-08:** Historical. The boards were seeded through `supabase/snippets/2026-10-23-seed-watchlist-expansion.sql`. Later passes added more boards and, on 2026-11-01, disabled dead greenhouse rows, so the counts here are point-in-time. Re-probe live `company_watchlist` rows, not this table; the current coverage query is in [README.md](README.md). The body below is the original record, unedited.
+
 Goal served: discovery coverage toward ~20 new matching intern/new-grad/India/remote
 postings per day for the profile (2027 B.Tech, Hyderabad/Bangalore/Pune + remote;
 AI/ML, FDE, full-stack/MERN, backend, SDE intern/new-grad). Half B = NEW companies

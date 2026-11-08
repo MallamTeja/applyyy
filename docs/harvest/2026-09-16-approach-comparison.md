@@ -1,5 +1,7 @@
 # Approach comparison — `applyyy` vs. `ai-job-search` (upstream)
 
+> **Status 2026-11-08:** Partly superseded. Its "the Matcher/Scorer is not built" caveat is out of date: `supabase/functions/matcher/index.ts` scores through `_shared/match/scorer.ts` and `rubric.ts`, and the score floor is 30 (`_shared/match/score-threshold.ts`). Line references point at 2026-09-16 code and have moved. Current truth: [README.md](README.md) and [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md). The body below is the original record, unedited.
+
 **Date:** 2026-09-16 · **Scope:** areas NOT already covered by
 [`2026-09-16-ai-job-search-inventory.md`](2026-09-16-ai-job-search-inventory.md) or
 [`2026-09-16-ai-job-search-harvest-plan.md`](2026-09-16-ai-job-search-harvest-plan.md).

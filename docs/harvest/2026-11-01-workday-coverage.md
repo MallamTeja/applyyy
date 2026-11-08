@@ -1,5 +1,7 @@
 # Workday coverage — 2026-11-01
 
+> **Status 2026-11-08:** Partly superseded. The adapter shipped (1294acc) and is registered in `supabase/functions/_shared/ats/registry.ts`. Two limits listed below are closed: new title-passing Workday jobs now get a description from `_shared/scout/workday-detail.ts` (54ee8be), and the apply guard exists (`worker/src/workday.ts` parks Workday rows for Manual apply). The quirks table and re-check recipe still hold. Current truth: [README.md](README.md). The body below is the original record, unedited.
+
 **Result:** 18 Workday boards verified and read in full, live, through the real adapter
 (`supabase/functions/_shared/scout/adapters/workday.ts`). Seed:
 `supabase/snippets/2026-11-01-seed-watchlist-workday.sql` (written, not run). Accenture

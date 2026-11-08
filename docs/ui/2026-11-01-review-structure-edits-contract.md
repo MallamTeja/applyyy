@@ -1,9 +1,6 @@
 # Review page: structural resume edits: contract (2026-11-01)
 
-> **SUPERSEDED 2026-11-07.** On 2026-11-07 (10:08 IST) Teja ruled that resume edits on the Approval queue go through the
-> AI chat only. The 10:25 IST redesign removes the manual structure-edit controls this contract describes (click-to-edit,
-> move up/down, remove entry, add bullet, add back from master). The AI chat's ops still use the data shapes below. Read
-> this file as history for the UI, not as a spec.
+> **Status 2026-11-08:** Partly superseded. The manual structure-edit controls this contract describes (click-to-edit, move up/down, remove entry, add bullet, add back from master) were removed on 2026-11-07 when Teja ruled that resume edits go through the AI chat only (`7211fd7`, "the AI chat is the only edit path"). The data layer still runs as written: `tracesToMaster` replaced `onlyTextChanged` as the save gate (`apps/web/src/features/approval/tailoredEdits.ts:464`), and `resolveFullMaster`, `attestBullet.ts`, the `resume_*` edit-event kinds and the `EditAction` union (`apps/web/src/features/approval/DiffView.tsx:102-127`) still exist. The AI chat now drives these ops, and has more than listed here (`remove_entry`, `remove_skill`; see `supabase/functions/resume-assist/assist.ts` and `apps/web/src/features/approval/aiEdit.ts`). The code is the current truth. The body below is the original record, unedited.
 
 Teja asked that the review page (and its AI chat) can change **achievements and
 certifications**, **section order**, **bullet order**, and add **new bullets**. Today the

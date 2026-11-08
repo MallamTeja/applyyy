@@ -1,6 +1,6 @@
-> **Historical record as of 2026-09-17.** Current state: [README.md](./README.md).
-
 # UI audit — layout, information architecture and typography
+
+> **Status 2026-11-08:** Partly superseded. Checked at `2a9ac31`: L1 is fixed for `--surface` (now only in a comment, `apps/web/src/features/health/health.css:359`). L2 is fixed (`.move__button` is defined once, `apps/web/src/features/pipeline/pipeline.css:145`). L3 is partly fixed: `.button--disabled` is still used but never defined (`apps/web/src/features/referral/ReferralOutreachPage.tsx:335`). L4 is fixed (`apps/web/src/features/emails/EmailMonitoringPage.tsx:677` uses `.page`). L5 is fixed (`apps/web/src/features/approval/ApprovalQueuePage.tsx:764`). The Approval queue was redesigned on 2026-11-07 (`7211fd7`). Other findings were not re-checked. Current index: [README.md](./README.md). The body below is the original record, unedited.
 
 **Date:** 2026-09-17 · **Scope:** all CSS and page components under `apps/web/src`
 **Status:** findings only. Nothing here is implemented. Pick by ID.

@@ -1,5 +1,7 @@
 # Deploy drift: which edge functions run code older than `origin/main`
 
+> **Status 2026-11-08:** Current. `scripts/deploy-drift.mjs` is unchanged since it was added (`git log -- scripts/deploy-drift.mjs`) and still removes `SUPABASE_ACCESS_TOKEN` itself (`scripts/deploy-drift.mjs:38`). The per-function deploy ledger (the second half of W37) is still not built, and no workflow runs the script, so run it by hand before each deploy session. The "17 functions" and first-run figures are from 2026-11-02; count today with `ls supabase/functions/*/index.ts` and re-run the script for the current table. The body below is the original record, unedited.
+
 `scripts/deploy-drift.mjs` closes audit item **W37** (`docs/audit/2026-11-01-wiring-audit.md`).
 Nothing records the commit each edge function was deployed from. A function's code is also
 more than its own folder: it is every file its `index.ts` reaches through relative imports.

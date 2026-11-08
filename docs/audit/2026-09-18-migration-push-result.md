@@ -1,5 +1,7 @@
 # The migration push — applied, measured before and after
 
+> **Status 2026-11-08:** Historical. "18 of 18 applied" was true on 2026-09-18. As of 2026-11-08 the repo holds 60 migration files (`git ls-files supabase/migrations | wc -l`); never quote either number, re-measure with the Supabase MCP `list_migrations` against that listing. The `guard_status_insert` trigger and `bootstrap_user_defaults()` this push installed are described in `CLAUDE.md` section 7 and `docs/stack/2026-11-05-database.md`. The body below is the original record, unedited.
+
 **Applied:** 2026-09-18, ~15:55 IST, session `applyyy-b2`, authorised by Teja directly.
 **Result:** all three migrations applied, `PUSH_EXIT=0`, no partial state. The backlog is now
 **zero pending, 18 of 18 applied.**

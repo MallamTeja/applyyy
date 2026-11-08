@@ -1,5 +1,7 @@
 # `@applyy/master-ingest`
 
+_Last verified against code: 2026-11-08 (2a9ac31)._
+
 The master-profile **identity reconciler**. Pure functions over JSON: no UI, no
 network, no PDF, no database, no clock, no randomness.
 
@@ -10,6 +12,40 @@ reconcileMasterProfile({ previous, incoming, mintId }) -> { profile, report }
 Given the previously-stored `MasterProfile` and a freshly-parsed incoming one,
 it carries node ids forward for nodes that are the same thing and mints new ids
 only for genuinely new ones.
+
+---
+
+## What it exports, and who uses it
+
+Everything is exported from `src/index.ts`. Import from `@applyy/master-ingest`,
+never from a deep path.
+
+| Export | File | Used for |
+|---|---|---|
+| `reconcileMasterProfile`, `ReconciliationError` | `src/reconcile.ts` | The entry point and the one error it throws |
+| `reviewableRows`, `needsHumanReview`, `nonExactCarries` and the report types | `src/report.ts` | Rendering and gating the review list |
+| `findDuplicateNodeIds`, `collectNodeIds` | `src/node-id-uniqueness.ts` | The global `NodeId` uniqueness rule, for any profile |
+| `DEFAULT_BULLET_SIMILARITY_THRESHOLD`, `SCORE_TIE_TOLERANCE`, `diceSimilarity`, `scoresAreTied` | `src/similarity.ts` | The bullet metric and its knobs |
+| `normaliseKey`, `tokenise`, `tokenSet` | `src/normalise.ts` | The text folds; the PDF parser must use the same ones |
+| `skillKey`, `experienceKey`, `educationKey`, `projectKey`, `linkKey`, `achievementKey`, `certificationKey` | `src/match-keys.ts` | The per-kind match keys |
+| `assignDeterministically` | `src/assign.ts` | The tie-aware assignment, testable with hand-written scores |
+
+Consumers in the repo (regenerate with
+`git grep -n "@applyy/master-ingest" -- apps packages ':!packages/master-ingest'`):
+
+- **The web master upload.** `apps/web/src/features/settings/MasterUploadReview.tsx`
+  calls `reconcileMasterProfile`; `apps/web/src/features/settings/masterReview.ts`
+  builds the review list from `reviewableRows`. The web, not this package, stores
+  the result (`apps/web/src/features/settings/masterStore.ts`), because this
+  package is pure by charter.
+- **The pasted-JSON check.** `apps/web/src/features/settings/masterIngest.ts`
+  uses `findDuplicateNodeIds` for uniqueness (see "One rule, one home" below).
+- **The PDF front half.** `packages/master-pdf` turns a PDF into a
+  `MasterProfile`. It declares this package as a dependency
+  (`packages/master-pdf/package.json:26`) so both halves can fold text the same
+  way. As of 2026-11-08 its `src/` does not import any code from here yet; it
+  only reuses the report vocabulary by convention. This package stays "no PDF":
+  the parser lives there.
 
 ---
 
@@ -258,24 +294,39 @@ the whole dropped list; a `dropped.some(...)` per id would have passed.
 
 ---
 
-## Known duplication, stated rather than hidden
+## One rule, one home (the old duplication is closed)
 
-`apps/web/src/features/settings/masterIngest.ts` already implements the **global
-`NodeId` uniqueness** rule correctly, for *pasted JSON before it is stored*.
-`src/node-id-uniqueness.ts` is a second implementation for a different input — a
-reconciler *output*. Two implementations of one rule drift apart, so this is
-worth consolidating: the natural home is this package, whose name already says
-so. Not done unilaterally because `apps/web/**` belongs to another session.
+An earlier version of this README reported that the **global `NodeId`
+uniqueness** rule had two implementations: one in
+`apps/web/src/features/settings/masterIngest.ts` and one here. That is no longer
+true. `masterIngest.ts` now imports `findDuplicateNodeIds` from this package
+(`apps/web/src/features/settings/masterIngest.ts:61`), so
+`src/node-id-uniqueness.ts` is the one home for the rule.
+
+The web file still owns a different question: *presence* ("does this node have a
+usable id at all?"). That has to run over raw `unknown` JSON, interleaved with
+its own shape walk. `findDuplicateNodeIds` takes a typed `MasterProfile` and
+reads it with no guards, so the web runs uniqueness **last**, only after the walk
+has proven the shape. The reasoning is in the comment at
+`apps/web/src/features/settings/masterIngest.ts:160`.
 
 ---
 
 ## Testing bar
 
-116 tests (93 before the 2026-09-11 contract change). Every guard is
-**mutation-tested**: broken on purpose, with a check that exactly the tests naming
-it go red. Every guard is also paired with a **non-vacuity twin** — an input it
-must *accept* — because rejection-only tests cannot distinguish a correct guard
-from one that rejects everything.
+The suite runs with `node --test` (see "Running it"). Do not trust a test count
+written in a doc: read `tests`, `fail` and `cancelled` from the run itself. As of
+2026-11-08 the run reports `fail 0` and `cancelled 0`.
+
+Every guard is **mutation-tested**: broken on purpose, with a check that exactly
+the tests naming it go red. Every guard is also paired with a **non-vacuity
+twin** — an input it must *accept* — because rejection-only tests cannot
+distinguish a correct guard from one that rejects everything.
+
+The table below is the **record of the mutation runs made on 2026-09-10 and
+2026-09-11**. It has not been re-run since. Tests added later can change the
+kill counts, so treat the numbers as history and the mutations as the list of
+guards worth re-checking.
 
 | Mutation | Tests killed |
 |---|---|
@@ -350,6 +401,15 @@ pnpm --filter @applyy/master-ingest run test        # node --test "test/**/*.tes
 pnpm --filter @applyy/master-ingest run typecheck   # tsc --noEmit, checker only, never an emitter
 ```
 
+Or, with no pnpm at all, from `packages/master-ingest/`:
+
+```sh
+node --test "test/**/*.test.ts"
+```
+
+Report `tests` and `fail` together: `tests 0` with `fail 0` means the glob
+matched nothing, not that everything passed.
+
 Two things that have each cost a session:
 
 - **The test glob is required.** `node --test test` — a bare directory — fails on
@@ -367,8 +427,10 @@ lets a browser, Node and a Deno Edge Function all import the same file; a build
 step would create a second, stale copy of the function that decides whether a
 node id survives.
 
-**Setup note:** the workspace dependency on `@applyy/shared-types` needs one
-`pnpm install` at the repo root to be linked normally. That writes
-`pnpm-lock.yaml`, which is shared root config owned by another session, so it
-has not been run from here — the package is verified against a directory
-junction in its own (gitignored) `node_modules` instead.
+**Setup note:** the workspace dependency on `@applyy/shared-types` is resolved
+through the package's own (gitignored) `node_modules/@applyy/shared-types` link.
+As of 2026-11-08 that link exists and points at `packages/shared-types`. If it is
+missing, the fix is a `pnpm install` at the repo root, which writes
+`pnpm-lock.yaml`. Per the repo `CLAUDE.md` section 5, only the orchestrator
+schedules that. Deno does not need the link: `deno.json` maps
+`@applyy/shared-types` to `../shared-types/src/index.ts`.

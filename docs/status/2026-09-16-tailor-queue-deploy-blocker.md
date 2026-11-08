@@ -1,6 +1,6 @@
-> **Historical record as of 2026-09-16.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
-
 # Tailor & Queue "no acting agent" — a deploy blocker, not a code bug
+
+> **Status 2026-11-08:** Superseded. The browser fast path it diagnoses (`handleFastTailor` on the Discovered page) was deleted on 2026-09-17 (`75a75a0`, "delete the audit_clean fast path"). Web status moves now go through the `advance_application_status` RPC (for example `apps/web/src/features/discovery/rejectJob.ts:99`). Current state: `docs/SYSTEM_ARCHITECTURE.md`. The body below is the original record, unedited.
 
 **Date:** 2026-09-16
 **Reported symptom:** clicking **⚡ Tailor & Queue** on <https://applyyy.vercel.app/discovered> fails with

@@ -1,140 +1,145 @@
-# CLI auth on this machine — Vercel + Supabase (Windows 11)
+# CLI auth on this machine: Vercel and Supabase (Windows 11)
 
-Audited 2026-09-09 in repo `applyy`. Facts below came from live checks, not memory.
+_Last verified against code: 2026-11-08 (2a9ac31)._
+
+First audited 2026-09-09. Re-measured on 2026-11-08 from live checks on this PC. Every
+version below is a measurement with a date. Re-run the command next to it before you
+trust it.
 
 ## Current state
 
-| Tool | Installed? | Version | Logged in? | Credential location |
-|------|-----------|---------|-----------|---------------------|
-| Vercel CLI | Yes — global npm (`%APPDATA%\npm\vercel.cmd`) | 59.5.0 | **Yes**, as `mallamteja` | `%APPDATA%\xdg.data\com.vercel.cli\auth.json` |
-| Supabase CLI | **Yes** — `C:\Users\tejam\tools\supabase\supabase.exe` (official release binary) | 2.117.0 as of 2026-10-08 (re-check: `supabase --version`) | Authenticated as of 2026-10-08 (re-check: `supabase migration list --linked`) | `SUPABASE_ACCESS_TOKEN` env var (set), which overrides Credential Manager |
-| Node / pnpm | Yes | v24.14.0 / 11.25.0 | — | — |
+| Tool | Where it is installed | Version (as of 2026-11-08) | Re-check with |
+|------|----------------------|----------------------------|---------------|
+| Vercel CLI | global npm, `%APPDATA%\npm\vercel.cmd` | 63.1.0 | `vercel --version` |
+| Supabase CLI (the one that runs) | global npm, `%APPDATA%\npm\supabase.cmd` | 2.119.0 (v3.0.0 is offered) | `supabase --version` |
+| Supabase CLI (old, shadowed) | `C:\Users\tejam\tools\supabase\supabase.exe` | 2.117.0 | `C:\Users\tejam\tools\supabase\supabase.exe --version` |
+| Node / pnpm | system install | v24.14.0 / 11.25.0 | `node -v`, `pnpm -v` |
 
-Installed 2026-09-09 by downloading `supabase_2.117.0_windows_amd64.zip` from GitHub
-releases and extracting to `C:\Users\tejam\tools\supabase\`, then appending that directory
-to the **user** PATH.
+### Two Supabase CLIs are on PATH
 
-Why not scoop, which the Supabase docs recommend: scoop requires
-`Set-ExecutionPolicy RemoteSigned` plus a whole package manager for one binary. Why not
-`C:\Users\tejam\bin`, which Git Bash showed on PATH: **that directory does not exist and is
-not on the Windows PATH**. Git Bash synthesises `$HOME/bin` into its own PATH whether or not
-it exists, so installing there would have worked in Git Bash and silently failed in
-PowerShell. Confirm PATH entries against
-`[Environment]::GetEnvironmentVariable('Path','User')`, never against `echo $PATH` in Git Bash.
+There are two copies of the Supabase CLI. The npm copy comes first on PATH in both
+PowerShell and Git Bash, so it is the one that runs. Check the order with:
 
-Upgrading is manual: re-download the newer zip over the same directory. There is no
-`supabase upgrade` subcommand.
+```powershell
+(Get-Command supabase -All).Source
+```
 
-## The concept: two different kinds of "logged in"
+On 2026-11-08 this listed the npm shims first and `C:\Users\tejam\tools\supabase\supabase.exe`
+last. The old copy was installed on 2026-09-09 by hand: the release zip was extracted to
+`C:\Users\tejam\tools\supabase\` and that folder was added to the **user** PATH. Nobody
+uses it now. You can remove that folder and its PATH entry when you are ready. Ask Teja
+first, because it deletes files.
 
-1. **Interactive session credential** — `vercel login` / `supabase login` open a browser,
-   then persist a token to disk (Vercel) or the Windows Credential Manager (Supabase).
-   Survives reboots. Fails in any shell that can't open a browser — CI, an agent, a
+Upgrading v2 to v3 is an open task (`docs/handoff/2026-11-08-0045-pending-tasks.md`,
+item 13). Do not upgrade in the middle of a deploy session.
+
+**Why the PATH check uses PowerShell, not Git Bash.** Git Bash adds `$HOME/bin` to its own
+PATH even when that folder does not exist. A tool installed there works in Git Bash and
+fails in PowerShell. Read the real user PATH with
+`[Environment]::GetEnvironmentVariable('Path','User')`, never with `echo $PATH` in Git Bash.
+
+## The concept: two kinds of "logged in"
+
+1. **Interactive session credential.** `vercel login` and `supabase login` open a browser.
+   Then they save a token: Vercel on disk, Supabase in the Windows Credential Manager. It
+   survives reboots. It fails in any shell that cannot open a browser: CI, an agent, a
    non-interactive Claude Code session.
-2. **Ambient credential (environment variable)** — a Personal Access Token exported as an
-   env var. Every invocation of the CLI picks it up with no browser, no expiry prompt,
-   no per-session state. This is the one that is actually "permanent for the IDE".
+2. **Ambient credential (environment variable).** A Personal Access Token in an env var.
+   Every CLI call picks it up. No browser, no prompt, no per-session state.
 
-The pattern is **ambient credential injection**: move the secret out of per-process login
-state and into the environment the IDE hands to every child process. Set it once at the
-Windows *user* level and every terminal, task runner and agent inherits it.
+The pattern is called **ambient credential injection**. You move the secret out of
+per-process login state and into the environment that every child process inherits.
 
-## Vercel — permanent
+The trap is the other side of the same pattern: an ambient credential **overrides** the
+login. If the env var holds the wrong account's token, every command uses the wrong
+account, and the error does not say so.
 
-Already logged in, so nothing is required for interactive use. For agent/CI-safe access:
+## Supabase: the wrong-account token (read this first)
 
-```powershell
-# 1. Create a token: https://vercel.com/account/tokens  (scope it to your team, set an expiry you accept)
-# 2. Persist it at user level. setx writes the registry; it does NOT affect the current shell.
-setx VERCEL_TOKEN "vercel_xxxxxxxxxxxxxxxx"
+The Windows **user** env var `SUPABASE_ACCESS_TOKEN` holds a token for the **wrong**
+Supabase account. With it set, `supabase db query --linked` returns 403. With it unset, the
+CLI falls back to the `supabase login` credential, which is the right account. This is the
+"403 since ~2026-10-04" (CLAUDE.md §4, re-verified 2026-11-01).
+
+How to run a command without it:
+
+```bash
+# Bash: env -u removes the variable for this one command only
+env -u SUPABASE_ACCESS_TOKEN supabase db query --linked "select 1"
 ```
 
-The CLI reads `VERCEL_TOKEN` automatically; `vercel --token $env:VERCEL_TOKEN` is the
-explicit form. A token beats `vercel login` for anything scripted because it never has to
-be re-consented after a session expires.
-
-## Supabase — install, then permanent
-
-There is no supported global npm install for the Supabase CLI, and it is not in the
-Chocolatey community repo (checked — no results). Two workable routes:
-
-### Route A — project dev dependency (not taken: the standalone binary above was installed instead)
-
 ```powershell
-pnpm init                 # this repo has no package.json yet
-pnpm add -D supabase      # pnpm only; npm is banned in these repos
-pnpm supabase --version   # invoke through pnpm, version pinned in the lockfile
+# PowerShell: clears it for this shell only; the user env var is unchanged
+$env:SUPABASE_ACCESS_TOKEN = $null
+supabase functions list --project-ref xynqxekcqizwhtskzqrq
 ```
 
-Trade-off: pinned and reproducible per repo, but no bare `supabase` command globally.
+Tools in this repo already do this for you:
 
-### Route B — scoop (real binary on PATH, machine-wide)
+- `scripts/deploy-drift.mjs:38` deletes `SUPABASE_ACCESS_TOKEN` from the CLI's environment.
+- The deploy runbook in CLAUDE.md §3 sets it to `$null` before `supabase functions deploy`.
 
-```powershell
-# scoop is not installed on this machine yet
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
-scoop bucket add supabase https://github.com/supabase/scoop-bucket.git
-scoop install supabase
-```
+Do not "fix" this by running `setx SUPABASE_ACCESS_TOKEN` with a new token unless Teja asks.
+The token is a secret, and changing it changes every shell on the machine.
 
-Trade-off: one `supabase` everywhere, but the version is global — a second project wanting
-a different CLI version has nowhere to go. Route A is the safer default; add Route B only
-if you want the bare command in every shell.
+### SQL that starts with a comment
 
-### Login
+`supabase db query --linked "-- note ..."` fails: the CLI reads the leading `--` as a flag.
+Put such SQL in a file and pass `-f <file>` (CLAUDE.md §4).
+
+### Login (one time, real terminal only)
 
 ```powershell
-supabase login            # interactive, one time, stores in Windows Credential Manager
+supabase login   # interactive; stores the token in Windows Credential Manager
 ```
 
-**This must be run in a real terminal.** `supabase login` refuses to run in a non-TTY
-environment (an agent shell, a piped command, CI):
+`supabase login` refuses to run without a TTY (an agent shell, a pipe, CI):
 
 ```
 LegacyLoginMissingTokenError: Cannot use automatic login flow inside non-TTY environments.
 Please provide --token flag or set the SUPABASE_ACCESS_TOKEN environment variable.
 ```
 
-`--no-browser` does not work around it — verified 2026-09-09. That error is the CLI telling
-you the ambient-credential route below is the correct one for agent-driven use.
+`--no-browser` does not get around this (verified 2026-09-09). Teja must run it in his own
+terminal.
 
-Permanent / headless equivalent:
+## Vercel
 
-```powershell
-# Token from https://supabase.com/dashboard/account/tokens
-setx SUPABASE_ACCESS_TOKEN "sbp_xxxxxxxxxxxxxxxx"
-# Optional, makes `supabase db push` non-interactive:
-setx SUPABASE_DB_PASSWORD "..."
-```
+The CLI is logged in as `mallamteja` (checked 2026-09-09; re-check with `vercel whoami`).
+Interactive use needs nothing more.
 
-`SUPABASE_ACCESS_TOKEN` overrides whatever `supabase login` stored, so it is the one that
-makes agent-run commands work — and the one that breaks them. As of 2026-10-08,
-`migration list --linked` succeeds while `db query --linked` returns 403 (insufficient
-privileges); check which account the token belongs to before trusting it.
+For scripts, the CLI reads `VERCEL_TOKEN` automatically. `vercel --token <token>` is the
+explicit form. A token never has to be re-consented after a session expires. Create one at
+https://vercel.com/account/tokens, scoped to the team, with an expiry.
 
-## Making the IDE actually see the variables
+The web app deploys itself: Vercel builds on every push to `main` (CLAUDE.md §1). You rarely
+need the Vercel CLI for this repo.
 
-`setx` only affects **processes started after it runs**. A terminal panel inside
-Cursor/VS Code inherits the environment of the *editor process*, not of Windows-now.
+## Making the IDE see a changed env var
 
-1. Run the `setx` commands.
-2. **Fully quit and reopen the IDE** — closing the terminal panel is not enough.
-3. Restart the Claude Code session so it inherits the new environment.
-4. Verify without printing the secret:
+`setx` changes only **processes started after it runs**. A terminal inside VS Code or Cursor
+inherits the editor's environment, not the current Windows one.
+
+1. Run `setx`.
+2. **Quit and reopen the IDE.** Closing the terminal panel is not enough.
+3. Restart the Claude Code session.
+4. Check without printing the secret:
    ```powershell
    if ($env:SUPABASE_ACCESS_TOKEN) { "SUPABASE_ACCESS_TOKEN set" } else { "missing" }
    ```
 
 ## Things that will bite later
 
-- **CLI login is not MCP login.** The `supabase` and `vercel` MCP servers authorize separately
-  (OAuth via `/mcp` in an interactive session). As of 2026-10-08 the Supabase MCP's
-  `execute_sql` works while CLI `db query` gets 403 — the working route changes, so
-  re-enumerate routes each time. Setting
-  `SUPABASE_ACCESS_TOKEN` does not authorize the MCP server.
-- ~~This repo has no `.gitignore`~~ — fixed 2026-09-09. `.gitignore` now covers `.env`,
-  `.env.*`, `.vercel/`, `supabase/.temp/`, `supabase/.branches/` and `bash.exe.stackdump`. Verified with `git check-ignore -v .env`.
-- **Never echo the tokens.** `echo $env:VERCEL_TOKEN` puts the secret in scrollback, shell
-  history and any transcript capture.
-- `bash.exe.stackdump` in the repo root is crash debris — safe to delete, unrelated to auth.
+- **CLI login is not MCP login.** The Supabase and Vercel MCP servers authorize separately
+  (OAuth through `/mcp` in an interactive session). A running window keeps the auth state it
+  had at startup. Setting `SUPABASE_ACCESS_TOKEN` does not authorize the MCP server. See
+  `docs/tooling/mcp-vs-cli-vercel-supabase.md`.
+- **Routes change.** Before you say "the DB is unreachable", try each route: the MCP
+  `execute_sql`, then `env -u SUPABASE_ACCESS_TOKEN supabase db query --linked` (CLAUDE.md §4).
+- **Never echo a token.** `echo $env:VERCEL_TOKEN` puts the secret in scrollback, shell
+  history and any transcript.
+- **`.gitignore` covers local secrets.** It lists `.env`, `.env.*`, `.vercel/`,
+  `supabase/.temp/`, `supabase/.branches/` and `bash.exe.stackdump` (`.gitignore`). Check a
+  path with `git check-ignore -v <path>`.
+- **Never `npm install` inside the repo.** It is pnpm only. The global npm installs above
+  were made outside the repo.

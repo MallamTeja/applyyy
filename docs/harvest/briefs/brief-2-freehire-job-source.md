@@ -1,6 +1,6 @@
-> **Historical record as of 2026-09-16.** Current state: [SYSTEM_ARCHITECTURE.md](../../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../../PROGRESS.md).
-
 # Brief 2 — `freehire` job-board adapter (P6 in the harvest plan)
+
+> **Status 2026-11-08:** Historical; never executed. No `freehire` adapter, enum value or commit exists (`git log --all -i --grep=freehire` is empty). Supply grew instead through watchlist expansion and the Workday adapter (`supabase/functions/_shared/ats/registry.ts`). Current truth: [README.md](../README.md). The body below is the original record, unedited.
 
 **Read this whole file before you touch anything.** You are starting with an empty
 context window and you cannot ask the orchestrator questions. Everything you need —

@@ -1,6 +1,6 @@
-> **Historical record as of 2026-09-11.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
-
 # Orchestrator Peer Session Assignments & Status Registry
+
+> **Status 2026-11-08:** Superseded. Its "Pending" list was checked on 2026-09-16 and found stale in both directions (`docs/audit/2026-09-16-pending-task-claims-verified.md`). It also cites a `GEMINI.md` that is not in the repo and `pnpm --filter web`, which matches nothing (the package is `@applyy/web`). Current state: `docs/SYSTEM_ARCHITECTURE.md` and `docs/PROGRESS.md`. The body below is the original record, unedited.
 
 **Dispatched by:** Orchestrator (Autonomous Command Desk)  
 **Execution Directives:** Enforced via `GEMINI.md` utilizing **Loop Engineering**, **Prompt Engineering**, and **Context Engineering**.

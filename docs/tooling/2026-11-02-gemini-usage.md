@@ -1,5 +1,7 @@
 # Gemini usage log (`gemini_usage`), 2026-11-02
 
+> **Status 2026-11-08:** Current. The migration is applied and the table is live: `public.gemini_usage` holds rows from 2026-11-04 onward, with no `unknown` agent rows (checked 2026-11-08 with `select agent, count(*) from public.gemini_usage group by 1`). The writer is `recordUsage` in `supabase/functions/_shared/gemini/client.ts` (1000 ms write timeout at `USAGE_WRITE_TIMEOUT_MS`). The deploy-order section is history: that deploy is done. The body below is the original record, unedited.
+
 Gap W41. Teja asked on 2026-11-02 at 21:14 IST: "fix the gap … logging both the call count and the token counts."
 
 ## What records it

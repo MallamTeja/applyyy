@@ -1,5 +1,8 @@
 # The robots gate gets a caller — and three briefed premises that were wrong
 
+> **Status 2026-11-08:** Historical. The capture script still calls the gate (`worker/scripts/capture-fixture.ts:166`). §6.1 is closed: the gate now runs inside `supabase/functions/_shared/http/transport.ts` for every Deno caller (`111791c`), and the worker apply page is gated (`worker/src/apply-one.ts:47`, `a3b4115`). For current gate behaviour read `packages/master-robots/src/gate.ts` and the banner on [`2026-09-17-robots-gate-design.md`](./2026-09-17-robots-gate-design.md).
+> The body below is the original record, unedited.
+
 **Date:** 2026-09-17 · **Session:** `applyyy-95` · **Commit:** `65b7726`
 **Partition:** `packages/master-robots/**`, `worker/scripts/capture-fixture.ts`, new files under `worker/`
 

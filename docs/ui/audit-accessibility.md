@@ -1,6 +1,6 @@
-> **Historical record as of 2026-09-17.** Current state: [README.md](./README.md).
-
 # UI audit — accessibility and interaction
+
+> **Status 2026-11-08:** Partly superseded. Checked at `2a9ac31`: still open are A1 and A2 (focus ring overridden by a faint glow, `apps/web/src/features/settings/settings.css:2174`, `apps/web/src/features/discovery/DiscoveredJobsPage.css:40`), A3 (click-only `<div>` at `DiscoveredJobsPage.tsx:1010`), A4 (`apps/web/src/features/pipeline/DiscoveryModal.tsx` has no `role="dialog"`), A5 (dialog role still on the scrim, `DiscoveredJobsPage.tsx:1144`), A7 on the Answer Bank (`AnswerBankPage.tsx`, `AddQuestionModal.tsx` have no `aria-pressed`; `EligibilityAnswers.tsx:363` does) and A14 (no skip link). A6 no longer applies: the DiffView view toggle it described is gone, and the new controls use `aria-pressed` (`apps/web/src/features/approval/DiffView.tsx:385`). A9 is partly addressed: many pages now carry `aria-live` or `role="status"` regions (`git grep -c "aria-live" -- apps/web/src`). Other findings were not re-checked; line numbers below are from 2026-09-17. Current index: [README.md](./README.md). The body below is the original record, unedited.
 
 **Date:** 2026-09-17 · **Scope:** every `.tsx` and `.css` under `apps/web/src`
 **Status:** findings only. Nothing here is implemented. Pick by ID.

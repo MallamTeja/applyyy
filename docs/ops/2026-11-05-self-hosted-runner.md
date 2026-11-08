@@ -1,5 +1,7 @@
 # Self-hosted runner for live submits — design (2026-11-05)
 
+> **Status 2026-11-08:** Current (design only, not built). `.github/workflows/apply.yml` still has only the `apply` and `redispatch` jobs, both `runs-on: ubuntu-latest` (`apply.yml:70`, `apply.yml:278`); no `apply-home` job or `applyy-home` label exists in any workflow. No bot submit has been proven yet; the next live target is a TrueFoundry row (`docs/handoff/2026-11-08-0045-orchestrator-handoff.md`). The runner is still an open item in `docs/handoff/2026-11-08-0045-pending-tasks.md` (item 13). The body below is the original record, unedited.
+
 **Status: DECISION PENDING two proofs.** Option (c) (today's behaviour) stays until both pass;
 only then is option (a) built. Ruled by the orchestrator on 2026-11-05 ~21:10 IST.
 

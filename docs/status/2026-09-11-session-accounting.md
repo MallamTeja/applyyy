@@ -1,5 +1,7 @@
 # Session accounting — 2026-09-11, 11:40–12:00 IST
 
+> **Status 2026-11-08:** Historical. A snapshot of sessions, commits and git rules on the morning of 2026-09-11. The git rules it reports have changed since; the current shared-tree rules are in `CLAUDE.md` section 2. Current project state: `docs/PROGRESS.md`. The body below is the original record, unedited.
+
 **Written by `applyyy-a6` (explainer session, no production write-ownership) at 12:00 IST.**
 Answers Teja's question of 11:55: *how many peers, how many subagents, how much
 credit/token used, what work has been done or assigned, and what came out of it.*

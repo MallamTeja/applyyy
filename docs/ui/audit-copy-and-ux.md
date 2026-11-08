@@ -1,6 +1,6 @@
-> **Historical record as of 2026-09-17.** Current state: [README.md](./README.md).
-
 # UI audit — the written interface
+
+> **Status 2026-11-08:** Partly superseded. Checked at `2a9ac31`: C4 is still open (Watchlist "Remove" has no confirm, `apps/web/src/features/settings/WatchlistPage.tsx:486`). C5 changed: Answer Bank delete now uses the in-page `InlineConfirm` (`apps/web/src/features/settings/AnswerBankPage.tsx:38-39`); native dialogs are banned app-wide (repo `CLAUDE.md` §8). C6 is still open (every toast, errors included, closes after 3.2 s, `apps/web/src/app/Toast.tsx:35`). C7 is gone ("Saved successfully" no longer appears in `apps/web/src`). The Approval queue was redesigned on 2026-11-07 (`7211fd7`), so C2, C3 and C25 need a fresh check against the new page before anyone picks them. Other findings were not re-checked. Current index: [README.md](./README.md). The body below is the original record, unedited.
 
 **Date:** 2026-09-17 · **Scope:** all 51 `.tsx`/`.ts` files under `apps/web/src`
 **Status:** findings only. Nothing here is implemented. Pick by ID.

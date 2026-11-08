@@ -1,6 +1,6 @@
-> **Historical record as of 2026-09-16.** Current state: [SYSTEM_ARCHITECTURE.md](../../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../../PROGRESS.md).
-
 # Brief 4 — Programmatic robots.txt Gate (`@applyy/master-robots`)
+
+> **Status 2026-11-08:** Shipped (4ca08ef) as `packages/master-robots/` (`checkRobots` in `src/gate.ts`). It gates discovery (`scout-ats/poll-fetch.ts`, `scout-ats/page-fetch.ts`, `scout-web/fetch-board.ts`) and, since a3b4115, the apply page (`worker/src/apply-one.ts`). The 2026-11-01 ruling turned SmartRecruiters OFF, treats an Ashby robots 401 as no rules for board reads, and lets a pasted link skip robots. Current truth: [docs/robots/](../../robots/) and the code. The body below is the original record, unedited.
 
 **Audience:** a peer Claude session starting with an EMPTY context window.
 Everything you need is in this file. You cannot ask questions. Do not go

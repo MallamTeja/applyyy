@@ -1,5 +1,7 @@
 # Handoff verification — `applyyy-9f` → this session, 2026-09-10 21:05 IST
 
+> **Status 2026-11-08:** Historical. Every claim describes the repo and Vercel on 2026-09-10. Since then the duplicate `apps/web/vercel.json` was deleted (`d0eaa7f`, 2026-10-24), so the root `vercel.json` is the only config; `.playwright-mcp/` is still gitignored (`.gitignore:64`). The method (verify a handoff against the artifact) now lives in `CLAUDE.md` section 2. The body below is the original record, unedited.
+
 `applyyy-9f` transferred orchestration in three messages before its session was
 closed. This document records what happened when each load-bearing claim in that
 handoff was checked against the artifact rather than accepted.

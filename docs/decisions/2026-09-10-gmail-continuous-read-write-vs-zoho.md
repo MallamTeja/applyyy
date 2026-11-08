@@ -1,5 +1,8 @@
 # Gmail continuous read *and write*, and whether Zoho is a better base
 
+> **Status 2026-11-08:** Current. The decision stands: Gmail through Apps Script, read and label only. `supabase/functions/_shared/apps-script/email-tracker.gs` reads with `GmailApp.search` (:198), writes a label (:302-305), installs an hourly trigger (:601), and has no send call; mail is ingested by `supabase/functions/email-tracker-intake/`. Referral drafts are `application_events` rows written by `supabase/functions/referral/index.ts`, not Gmail drafts. Operating doc: [`docs/setup/gmail-tracker-apps-script.md`](../setup/gmail-tracker-apps-script.md).
+> The body below is the original record, unedited.
+
 **Date:** 2026-09-10 · **Status:** adopted — see the 2026-10-23 status update at the end (original line read "recommendation, not yet ratified by Teja")
 **Question asked:** can the system read Gmail continuously *and write back*, and
 would Zoho Mail be a better foundation than Gmail?

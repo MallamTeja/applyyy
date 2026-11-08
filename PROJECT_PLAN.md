@@ -1,8 +1,38 @@
 # applyy — Job Application Automation: Full Plan
 
-> **STALE as of 2026-11-07:** this file contradicts the current state (its status line is from 2026-10-23; no bot submit has been proven yet). See [docs/handoff/](docs/handoff/) for current facts.
+_Last verified against code: 2026-11-08 (2a9ac31)._
 
-**Status (2026-10-23):** every agent in §7 exists as code; automated post-approval submission landed 2026-10-09 (`c557533`, human approval still required for every application), but nothing schedules the middle of the pipeline — see §5. Regenerate numbers, never quote them: applied migrations — `supabase migration list --linked`; tables and RLS — `select relname, relrowsecurity from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and relkind = 'r'`. Live state: the "Current state" section of [`docs/PROGRESS.md`](docs/PROGRESS.md). The system as built: [`docs/SYSTEM_ARCHITECTURE.md`](docs/SYSTEM_ARCHITECTURE.md).
+**How to read this file.** It is the design plan plus its history. The design and the
+"why" are kept. Each section now carries a short **Status 2026-11-08** note that says
+what the code does today, with a file path. Where the code and an old sentence here
+disagree, the code wins. For live work in progress, read the newest pair in
+[docs/handoff/](docs/handoff/). The system as built: [`docs/SYSTEM_ARCHITECTURE.md`](docs/SYSTEM_ARCHITECTURE.md).
+Regenerate numbers, never quote them: applied migrations — `supabase migration list --linked`;
+tables and RLS — `select relname, relrowsecurity from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and relkind = 'r'`.
+
+## State at 2026-11-08
+
+The product goal is one human-approved pipeline that runs end to end for real:
+discover → screen → tailor → approve → **submit by the bot** → confirm → track.
+
+| Stage | State | Evidence |
+|---|---|---|
+| Discover | done, scheduled | `scout.yml` (ATS boards, `worker/src/cli/scout.ts`), `scout-remote.yml` (RemoteOK, Jobicy, Arbeitnow); pasted links via `job-link-intake` and `ingest-links.yml` |
+| Screen | done | scouts screen at insert; `experience_ceiling` fires since migration `20261104193000` (`_shared/screen/required-experience.ts`); work-auth gate `_shared/screen/work-auth-gate.ts` |
+| Score, tailor, audit | done, **manual trigger only** | `matcher/`, `tailor/`, `auditor/`; started by `postscreen-drain.yml`, `run-one.yml` or the dashboard. No schedule, by Teja's ruling of 2026-11-05 (header of `.github/workflows/postscreen-drain.yml`) |
+| Approve | done | `apps/web/src/features/approval/`; every resume fits one page (`_shared/tailor/page-trim.ts`) |
+| Submit by the bot | built, **not yet proven** | `SUBMISSION_IMPLEMENTED = true` (`worker/src/playwright-page.ts:21`). Every `applied` row so far was moved by a human. Check: `select agent, count(*) from application_events where to_status = 'applied' group by 1` (on 2026-11-08 every row says `human`) |
+| Manual lane | done | rows the bot cannot apply go to Manual apply with a kit (`apps/web/src/features/manual-apply/`, `worker/src/cli/apply-kit.ts`, `apply-kit.yml`) |
+| Track | done | Apps Script pushes mail to `email-tracker-intake` hourly (`supabase/functions/_shared/apps-script/email-tracker.gs:601`) |
+
+Switches that decide what runs (read them live, they change):
+
+- `system_settings.system_enabled` — the kill switch (`_shared/agent/kill-switch.ts`).
+- `system_settings.auto_apply_on_approve` — approve starts a live apply drain. Default false (migration `20261105140000`). It was false on 2026-11-08.
+- Repo variable `APPLYY_CRON_LIVE` — a scheduled `apply.yml` run submits only when it is `true`.
+- Repo variable `APPLYY_SATELLITES_LIVE` — gates the daily `satellites.yml` run.
+
+Check the live status counts with `select status, count(*) from applications group by 1`.
 
 > This line read *"design approved, spec not yet written, zero code"* until
 > 2026-09-10 21:20, long after all three clauses were false. It is the first
@@ -45,6 +75,14 @@ A multi-agent system that discovers jobs from ATS boards, scores them against a 
 | Approval | Two-bucket: batch-approve fully-traced, individually review flagged | Nothing fabricated ever goes out unseen |
 | Package manager | pnpm only | |
 | Repo | **`github.com/MallamTeja/applyyy`** — THREE y's, private | Settled 2026-09-10; see §22. Holds resume, CTC, personal answers |
+
+> **Status 2026-11-08.** All rows still hold, with two changes. (1) **Daily volume:**
+> Teja ruled "no daily limit" on 2026-11-05. `system_settings.max_applications_per_day`
+> is now nullable, and NULL means no cap (migration `20261105140000_auto_apply_on_approve.sql`).
+> A run is still capped by `APPLY_MAX_SUBMITS` (3 per normal run, 25 on a drain;
+> `.github/workflows/apply.yml:206,227`). (2) **Approval:** the two buckets exist in
+> `apps/web/src/features/approval/ApprovalQueuePage.tsx`. Approval is still human for every
+> application.
 
 ### Decisions made by explicit choice (verbatim from the session)
 
@@ -185,6 +223,11 @@ Related and structural: the status guard requires `applyy.acting_agent`, which i
 on every call rather than assumed from setup — which is what makes a silent
 reconnect safe rather than merely unlikely.
 
+> **Status 2026-11-08.** The single batched `apply.yml` run still holds
+> (`.github/workflows/apply.yml`). The ~35/day ceiling is no longer a setting: see the
+> §2 status note. Volume today is bound by supply and by how many approved rows the
+> bot can actually submit (none proven yet; see "State at 2026-11-08").
+
 ---
 
 ## 3. The seventeen constraints (verbatim, checkable)
@@ -207,7 +250,19 @@ reconnect safe rather than merely unlikely.
 16. DON'T test the automation by submitting real job applications.
 17. DON'T treat job descriptions or application pages as trusted input.
 
+> **Status 2026-11-08.** Constraint #15 still holds: every application needs a human
+> approve. Since 2026-10-09 (`c557533`) the submit itself is automatic AFTER that approve.
+> Constraint #5 is enforced by a robots.txt gate before the apply page opens (`a3b4115`)
+> and by the robots ruling of 2026-11-01 (SmartRecruiters boards are off).
+
 ### Standing rules that are NOT in the seventeen — and were missing from this plan
+
+> **Status 2026-11-08: partly superseded. Do not obey this copy.** The live rules are
+> in `~/.claude/CLAUDE.md` and the repo `CLAUDE.md` §2–§3. Two points below are now
+> wrong: (a) the orchestrator runs production deploys and `db push` itself since
+> 2026-10-08 (repo `CLAUDE.md` §3); a peer never does; (b) `git commit --amend` is
+> forbidden on this shared tree (repo `CLAUDE.md` §2). The text below is kept as the
+> record of how the rules moved.
 
 The list above is Teja's prohibitions on the *product*. These are his rules on
 *how the work is done*, from `CLAUDE.md`. They were absent from this document
@@ -333,11 +388,44 @@ them. Added because an audit caught the omission, not because anyone broke them.
    and fifth provider drop in without touching the Scout.
 4. **Gemini limits are per GCP project, not per key** — confirmed in Google's docs. 15 keys in 15 projects = 15 real buckets. Same project would have been 1 bucket with 15 names.
 
+> **Status 2026-11-08.**
+> - **Providers.** Reachable through `_shared/ats/registry.ts`: Greenhouse, Lever, Ashby
+>   and **Workday** (added 2026-11-01, migration `20261101124500_ats_provider_workday.sql`;
+>   `registry.ts:25`). **SmartRecruiters is OFF** by the robots ruling of 2026-11-01: its
+>   robots.txt disallows everything, so no SR board is seeded and there is no SR adapter
+>   in `_shared/scout/adapters/`. Workable, Adzuna and Jooble adapters exist in that folder
+>   but nothing outside tests imports them. Remote feeds (RemoteOK, Jobicy, Arbeitnow) come in
+>   through `scout-remote.yml`.
+> - **`pg_cron` is still not installed** (re-checked live 2026-11-08 with
+>   `select extname from pg_extension`). Bounded batches are re-fired by GitHub Actions
+>   workflows instead (§5).
+> - **Database size is now a real limit.** On 2026-11-05 the database hit 514 MB against
+>   the 500 MB quota. The weekly `jobs-tombstone.yml` (`scripts/jobs-tombstone.mjs`,
+>   migration `20261105200000_jobs_tombstone.sql`) purges the text of rejected jobs.
+
 ---
 
 ## 5. Orchestration topology — database-as-queue
 
 One `applications` table whose `status` column **is** the workflow. Each agent is stateless, claims rows in one status, does one job, writes the next status. The design: `pg_cron` fires Edge Functions; the Actions worker polls for `approved` rows.
+
+**Status 2026-11-08 — who runs what.** `pg_cron` is still absent, so GitHub Actions is the scheduler.
+
+| Trigger | Workflow / caller | What it runs |
+|---|---|---|
+| schedule | `scout.yml` | ATS scout, screener in-process (`worker/src/cli/scout.ts`) |
+| schedule | `scout-remote.yml` | remote-feed scout (`worker/src/cli/scout-remote.ts`) |
+| schedule | `apply.yml` | applier; DRY unless `APPLYY_CRON_LIVE` is `true` |
+| schedule + after approve | `apply-kit.yml` | manual-apply kits (`worker/src/cli/apply-kit.ts`) |
+| schedule, gated | `satellites.yml` | skill-gap, follow-up, cover-letter, interview-prep, referral; runs on schedule only when `APPLYY_SATELLITES_LIVE` is `true` |
+| schedule | `keepalive.yml`, `jobs-tombstone.yml` | §14 keepalive; weekly DB space purge |
+| manual only | `prescreen-drain.yml`, `pregate-sweep.yml`, `postscreen-drain.yml`, `run-one.yml`, `ingest-links.yml` | normalizer + screener; matcher pre-gate; matcher → tailor → auditor; one row; a list of links |
+| approve click | `dispatch-apply` edge function | always dispatches `apply-kit.yml`; dispatches a live `apply.yml` drain only when `system_settings.auto_apply_on_approve` is true (`supabase/functions/dispatch-apply/handler.ts`) |
+
+Matcher, tailor and auditor have **no schedule on purpose**: Teja ruled on 2026-11-05 that
+the post-screen drain runs only when a human starts it. A test holds that rule
+(`apps/web/test/postscreenDrainManualOnly.test.ts`). The paragraph below is the 2026-10-23
+record; its workflow list is incomplete.
 
 **As built (2026-10-23), the middle edge agents still never run unattended.** `pg_cron` is not installed (`select extname from pg_extension`; Teja ruled no cron — migration `20261009220000`), so normalizer, screener, matcher, tailor, auditor and the Phase 2/3 functions run only when called: `run-one.yml` pushes one row through matcher → tailor → auditor (`worker/src/cli/run-one.ts`), and the dashboard invokes `scout-ats` and `scout-web`. Scheduled discovery is `scout.yml` (`worker/src/cli/scout.ts`, screener run in-process). The Actions half CAN now run unattended: submission is implemented (`SUBMISSION_IMPLEMENTED = true` in `worker/src/playwright-page.ts`, since 2026-10-09), capped per run (`APPLY_MAX_SUBMITS`, default 3) with a circuit breaker and a robots.txt gate. `DRY_RUN` defaults true, and a scheduled `apply.yml` run submits only while the repo variable `APPLYY_CRON_LIVE` is `true`; a deliberate single submit is `gh workflow run apply.yml` with `dry_run=false` + `apply_only_id`. `worker/src/cli/assist.ts` remains the headed route where the human clicks Submit.
 
@@ -379,6 +467,15 @@ Claiming is one atomic `UPDATE … RETURNING` picking the eligible key with the 
 
 If free Flash gives even 100 requests/day per project, **two keys covers it.** Build the pool anyway — cheap, absorbs bursts, gives the observability panel — but expect to run on 2–3 keys and never touch the other 12.
 
+> **Status 2026-11-08.** Pool built: `_shared/gemini/pool.ts` finds keys by the
+> `GEMINI_API_KEY_` prefix (`pool.ts:40`), so the rename is done. Only live keys are seeded
+> (migration `20261009150000_seed_only_live_gemini_keys.sql`); read the size with
+> `select count(*) filter (where enabled), count(*) from gemini_key_state`. The daily budget
+> breaker reads `gemini_daily_call_budget` in `pool.ts`. Calls are logged in the
+> `gemini_usage` table (migration `20261104200000_gemini_usage_log.sql`).
+> `scripts/probe-quota.ts` was **never written** (not started). The live model is the
+> `GEMINI_MODEL` secret, not the code default.
+
 **Grey area, stated honestly:** creating 15 GCP projects specifically to stack free-tier quota is against Google's API terms in spirit. The consequence would be losing API or project access — not the mailbox. At 35/day the pool is largely unnecessary anyway, which also keeps you nowhere near anything that looks like abuse.
 
 ---
@@ -389,7 +486,9 @@ If free Flash gives even 100 requests/day per project, **two keys covers it.** B
 |---|---|---|
 | **Scout-ATS** | Edge Fn (dashboard) + `scout.yml` via `worker/src/cli/scout.ts` | watchlist → `passed_filters` / `dropped_filter` (screened at insert); `discovered` only if the screener is unavailable |
 | **Scout-Web** | Edge Fn, Gemini web search (dashboard) | model-proposed Greenhouse/Lever/Ashby URLs, verified against the live board |
-| **Scout-Aggregator** | — **built, not reachable** | Adzuna/Jooble/Workable/SmartRecruiters adapters in `_shared/scout/adapters/`; `_shared/scout/tiers.ts` has no importer |
+| **Scout-Remote** | `scout-remote.yml` via `worker/src/cli/scout-remote.ts` | RemoteOK, Jobicy, Arbeitnow feeds → same insert path as Scout-ATS |
+| **Job-link intake** | Edge Fn `job-link-intake` (dashboard "Add a job by link") + `ingest-links.yml` | one pasted link → `discovered` → `passed_filters` as `human` (migration `20261031200000`); a pasted link skips robots because a human asked for it |
+| **Scout-Aggregator** | — **built, not reachable** | Adzuna/Jooble/Workable adapters in `_shared/scout/adapters/`; `_shared/scout/tiers.ts` has no importer outside its test. (SmartRecruiters was removed: robots ruling 2026-11-01. Workday moved out of this row: it is reachable through `_shared/ats/registry.ts:25`.) |
 | **Normalizer** | Edge Fn | `discovered` → `deduped` / `dropped_duplicate` |
 | **Screener** | Edge Fn, **no LLM** | `deduped` → `passed_filters` / `dropped_filter` |
 | **Matcher** | Edge Fn, Gemini | `passed_filters` → `scored` |
@@ -397,9 +496,13 @@ If free Flash gives even 100 requests/day per project, **two keys covers it.** B
 | **Auditor** | Edge Fn, Gemini | `tailored` → `audit_clean` / `audit_flagged` |
 | **Approval gate** | human, in dashboard | `audit_clean` \| `audit_flagged` → `awaiting_approval` → `approved` |
 | **Applier** | `apply.yml` (submits post-approval; capped + breaker, robots-gated; `DRY_RUN` default true, scheduled-live only with `APPLYY_CRON_LIVE`) and `worker/src/cli/assist.ts` (headed; human clicks Submit) | `approved` → `applying` → `applied` / `blocked_needs_human` |
-| **Tracker** | Edge Fn, **push** | Apps Script POST → advances post-apply statuses |
+| **Kit builder** | `apply-kit.yml` via `worker/src/cli/apply-kit.ts` (daily sweep + on every approve) | builds a manual-apply kit for rows waiting on Teja; never submits, writes no status |
+| **Apply dispatcher** | Edge Fn `dispatch-apply` (approve click) | dispatches `apply-kit.yml`; dispatches a live `apply.yml` drain only when `auto_apply_on_approve` is true |
+| **Rehearsal** | `worker/src/cli/rehearse-assist.ts` | read-only dry run of an assisted submit, up to the click; writes nothing |
+| **Tracker** | Edge Fn `email-tracker-intake`, **push** | Apps Script POST (hourly trigger) → advances post-apply statuses; can confirm `applied` (migration `20261009235000_tracker_confirms_applied.sql`). `gmail-sync` only proxies the dashboard's "sync now" click to the Apps Script |
 | **Sweeper** | `sweep_stale_claims()` RPC, called by the agent loop and the worker gateway | reclaims expired claim leases; `applying` → `needs_verification` |
-| **Phase 2/3 agents** | Edge Fn | `cover-letter`, `follow-up`, `interview-prep`, `referral`, `skill-gap` — detail in `docs/architecture/agents.md` |
+| **Phase 2/3 agents** | Edge Fn, run daily by `satellites.yml` (gated by `APPLYY_SATELLITES_LIVE`) | `cover-letter`, `follow-up`, `interview-prep`, `referral`, `skill-gap` — detail in `docs/architecture/agents.md` |
+| **Resume assist** | Edge Fn `resume-assist` | AI edits to a tailored resume in the approval editor; the web keeps the chat in `resume_chat_messages` (`apps/web/src/features/approval/resumeChat.ts`) |
 
 Three corrections applied 2026-09-09 23:47 after this table drifted from the
 shipped schema — recorded rather than silently fixed, because the drift itself
@@ -445,7 +548,7 @@ The pattern is a **cascade** (short-circuit / cheap-test-first): order tests by 
 
 | Filter | Drops |
 |---|---|
-| Experience ceiling | ~~JD says "5+ years", you want ≤ 1~~ — **INERT, see below** |
+| Experience ceiling | JD has a HARD minimum above `max_years` (1) — **LIVE since 2026-11-04**, see status note below |
 | Title blocklist | Senior, Staff, Principal, Lead, Manager, Architect |
 | Location allowlist | Hyderabad, Bangalore, Remote — nothing else |
 | Employment type | intern / full-time / both |
@@ -478,6 +581,22 @@ example "is built on `experience_ceiling`", and it is not; only this table's fir
 row and the settings claim were wrong. **Correcting one over-broad claim with
 another over-broad claim is not a correction.**
 
+> **Status 2026-11-08.**
+> - **`experience_ceiling` now fires.** `_shared/screen/required-experience.ts` is the missing
+>   producer: it reads a HARD minimum from the JD text, and "preferred" years never count.
+>   Intern and junior roles are kept. Migration `20261104193000` sets `max_years` to 1 in
+>   the rule's config. The matcher pre-gate re-checks re-run rows
+>   (`supabase/functions/matcher/tech-pregate.ts`).
+> - **`degree_mismatch` is still inert.** Nothing writes `jobs.requires_advanced_degree`;
+>   the screener only reads it (`_shared/screen/screen-batch.ts:136`).
+> - **Location** is now two checks: the `location_allowlist` rule, plus a work-authorization
+>   gate on `search_preferences.work_authorized_countries` (`_shared/screen/work-auth-gate.ts`,
+>   migration `20261024190000`) and `search_preferences.remote_location_policy` for remote
+>   jobs (migration `20261104193000`). Teja ruled on 2026-11-05 that an unknown location passes.
+> - **Matcher score floor is 30** (Teja, 2026-11-07; `_shared/match/score-threshold.ts`).
+>   Rows below it are dropped. Fix leaks upstream in the screener; never remove the floor.
+> - The nine cascade rules are named in `_shared/filter/cascade.ts:344-352`.
+
 ---
 
 ## 9. Data model
@@ -494,7 +613,7 @@ answer_bank                   -- standing answers, grows itself
 gemini_key_state              -- the key pool
 application_events            -- append-only audit log
 agent_runs                    -- powers the health page
-system_settings               -- kill switch, DRY_RUN, budgets, caps (singleton)
+system_settings               -- kill switch, budgets, caps, auto_apply_on_approve (dry_run column is INERT, see note)
 matcher_eval_cases            -- the §18.3 golden eval set
 search_preferences
 filter_rules
@@ -504,9 +623,19 @@ email_events
 follow_up_nudges              -- Phase 2 follow-up agent
 interview_prep_packs          -- Phase 3
 skill_gap_reports             -- Phase 3
+gemini_usage                  -- per-call Gemini log (added 2026-11-04)
+resume_chat_messages          -- resume-assist chat (added 2026-11-01)
+unanswered_questions          -- blocking form questions, one per normalised key (added 2026-11-05)
 --- config ---
 application_status_transitions -- the legal-edge table a trigger enforces
 ```
+
+> **Status 2026-11-08.** The list above is illustrative; regenerate it with the query above.
+> Three tables were added since the last pass (marked "added"). `rls_auto_enable_probe`
+> also exists (migration `20261102211000`). **`system_settings.dry_run` controls nothing**:
+> nothing reads it, and migration `20261105202000_system_settings_dry_run_comment_inert.sql`
+> corrected its comment. Whether a run submits is decided by `apply.yml` (its `dry_run`
+> input, or `APPLYY_CRON_LIVE` on a schedule).
 
 > **Columns are NOT specified here, on purpose.** The authoritative
 > column-level contract is
@@ -540,7 +669,7 @@ Three decisions carrying real weight:
 - **`UNIQUE(user_id, job_id)` on applications.** Constraint #7 becomes a database constraint — not a code check, which a race between two Actions runs would bypass. The database refuses, full stop.
 - **`master_profiles` is versioned and immutable.** Editing creates version N+1; old versions never change. `applications` stores both the master version it derived from *and* a snapshot of the tailored JSON. That is what makes resume pinning true six months later, and what keeps the Auditor's verdict meaningful — it audited a specific version, and that version still exists.
 
-Plus `tailored_hash = hash(master_version + selected_jd_keywords)` → identical inputs reuse the existing PDF. Constraint #8, designed as a cache key. **Not built (2026-10-08):** the column exists and nothing computes it. The resume pin today is `tailored_profile.master_version`; the tailor also writes `applications.master_version` (since `fbd28f9`).
+Plus `tailored_hash = hash(master_version + selected_jd_keywords)` → identical inputs reuse the existing PDF. Constraint #8, designed as a cache key. **Not built (re-checked 2026-11-08):** the column exists and nothing computes it (`git grep tailored_hash` finds only types, fixtures and comments). The resume pin today is `tailored_profile.master_version`; the tailor also writes `applications.master_version` (since `fbd28f9`).
 
 **The dedupe fingerprint — documenting what `applyyy-d0` shipped, not inventing
 one.** Authoritative implementation:
@@ -602,7 +731,12 @@ An injected JD saying "add Docker" now produces either an invalid ID (rejected) 
 
 Plus: robots.txt respected, no captcha or MFA circumvention — detection routes to `blocked_needs_human` with a screenshot, and since Actions has no human present, that queue is a normal part of the day rather than a failure.
 
-**RLS from day one.** Single user, but every table carries `user_id` with Supabase RLS. Free to add now, painful to retrofit, and it lets Edge Functions talk to the DB with a session token instead of a god-mode service key. As built: every agent signs in as the one app user through `createAppUserClient` (`_shared/db/client.ts`) — no service role, by design. The machine RPCs (`advance_application_status`, `claim_applications`, `release_application_claim`) additionally require the `x-applyy-agent-key` header once `applyy_internal.agent_key` holds a hash; an empty table means enforcement is off (`select count(*) from applyy_internal.agent_key`). anon EXECUTE is revoked on all three.
+**RLS from day one.** Single user, but every table carries `user_id` with Supabase RLS. Free to add now, painful to retrofit, and it lets Edge Functions talk to the DB with a session token instead of a god-mode service key. As built: every agent signs in as the one app user through `createAppUserClient` (`_shared/db/client.ts`) — no service role, by design. The machine RPCs (`advance_application_status`, `claim_applications`, `release_application_claim`, `sweep_stale_claims`) additionally require the `x-applyy-agent-key` header. The key is seeded (check: `select count(*) from applyy_internal.agent_key`, expect 1). **Fail-closed since migration `20261102210000_agent_key_fail_closed.sql`:** an EMPTY key table now LOCKS every machine agent out (`agent_key_state()` returns `unconfigured_locked`). Running agents without the key takes two deliberate statements: delete the key AND set the emergency flag in `applyy_internal.agent_key_emergency`. Never "fix" a lockout by deleting the key. anon EXECUTE is revoked on all four. Remaining gap: anyone holding Teja's JWT who omits the header is treated as a human.
+
+> **Status 2026-11-08.** Defense 1 (references into the master) is built:
+> `_shared/tailor/validator.ts`. Robots.txt is checked before the apply page opens
+> (`a3b4115`). Encrypted `storageState` is still **not started**: nothing in `worker/src`
+> persists browser state.
 
 ---
 
@@ -661,6 +795,13 @@ Pattern: **generator–critic separation** — never let the model that produced
 - **Gmail API + OAuth in "Testing" mode issues refresh tokens that expire after 7 days.** The Tracker would work for a week, silently stop, and need re-authorizing every Monday forever. `gmail.readonly` is a *restricted* scope, so publishing to production wants a verification review you do not want for a personal tool.
 - **IMAP + app password is out.** Since 14 March 2025 Google Workspace requires OAuth for third-party Gmail access. `campushub@mlrit.ac.in` is a Workspace account, so that door is closed — and a college admin can block third-party OAuth apps anyway.
 
+> **Status 2026-11-08: built.** The script is `supabase/functions/_shared/apps-script/email-tracker.gs`
+> (pushed by `scripts/push-apps-script.sh`; setup in `docs/setup/gmail-tracker-apps-script.md`).
+> It is much longer than 15 lines, and its trigger is **hourly**, not every 15 minutes
+> (`email-tracker.gs:601`, `everyHours(1)`). It posts to the `email-tracker-intake` edge function.
+> The dashboard's "sync now" goes through the `gmail-sync` edge function, which keeps the
+> shared secret server-side. There is still no Gmail API and no OAuth app.
+
 **The path that dodges all of it: Google Apps Script.** ~15 lines bound to your own account on a 15-minute time trigger:
 
 ```javascript
@@ -702,7 +843,7 @@ So every job carries `posted_at` **plus** `posted_at_source ∈ {exact, derived,
 
 **The bug, and it is the kind that quietly wastes a week of applications.** The natural fallback for an unknown date is `first_seen_at` — if you poll daily, anything you have never seen must be new. That reasoning is sound *in steady state* and wrong on **day one of any new board.** The moment you add a company to the watchlist, its entire back catalogue arrives with `first_seen_at = today`, and all 80 of its jobs — including one open since March — look three days old. You would spend a day's quota on stale postings.
 
-**Fix — cold-start guard:** the first poll of any new board marks everything `posted_at_source = unknown` and *excludes* it from the 3-day filter, so the freshness rule only applies to jobs whose newness you actually observed. Boards become trustworthy from their second poll onward.
+**Fix — cold-start guard:** the first poll of any new board marks everything `posted_at_source = unknown` and *excludes* it from the 3-day filter, so the freshness rule only applies to jobs whose newness you actually observed. Boards become trustworthy from their second poll onward. *(Status 2026-11-08: built. The staleness rule documents it at `_shared/filter/cascade.ts:282`; the guard is set in `_shared/ats/registry.ts`.)*
 
 **Supply consequence:** 3-day window + fresher-only + a 50-company watchlist produces **single digits per day**, not 35. Freshness and volume trade directly against each other. Sustaining ~35/day inside a 3-day window needs roughly **200–400 ATS boards** plus the aggregators. Seed that watchlist in Phase 1. *(Note 2026-10-24: seeding underway — 158 verified boards live since 2026-10-23, first expanded harvest +921 `passed_filters`; regenerate with `select ats_provider, count(*) from company_watchlist group by 1`.)*
 
@@ -721,6 +862,12 @@ So every job carries `posted_at` **plus** `posted_at_source ∈ {exact, derived,
 
 Neither errors. They just stop. The health page must be able to say "Scout hasn't run in 9 days", because otherwise you believe the automation is working while getting no interviews.
 
+> **Status 2026-11-08: done.** `keepalive.yml` runs every 3 days and pushes to
+> `automation-keepalive`. The health page is `apps/web/src/features/health/HealthPage.tsx`;
+> stuck rows have a recovery queue there (`RecoveryQueue.tsx`). Claims use
+> `for update skip locked` (migration `20260909235100_queue_and_pool_functions.sql`).
+> A third silent death was found: the 500 MB database quota (§4 status note).
+
 ---
 
 ## 15. Settings dashboard — nine pages
@@ -736,6 +883,13 @@ Neither errors. They just stop. The health page must be able to say "Scout hasn'
 | **Approval Queue** | The diff view — master vs tailored, side by side, changes highlighted. Approve / edit / reject |
 | **Pipeline** | Kanban: discovered → approved → applied → `employer_screening` → interview → offer/rejected, auto-advanced by the email Tracker (was ~~`screening`~~; **third copy of the 2026-09-09 rename, found 2026-09-18** — see §9) |
 | **System Health** | Gemini pool status, last successful run per agent, keepalive status, `blocked_needs_human` queue with screenshots |
+
+> **Status 2026-11-08: all nine built, plus more.** Routes are in `apps/web/src/app/routes.ts`;
+> pages are under `apps/web/src/features/`. Settings pages live in `features/settings/`
+> (Search preferences, Master profile, Answer bank, Filters, Watchlist, Blocklist). Added
+> since the plan: Applied jobs, Discovered jobs, **Manual apply** (rows the bot cannot apply,
+> with a kit), Email monitoring, Referral queue, Follow-up nudges, Skill gap analytics. The
+> Answer bank also shows blocking form questions from `unanswered_questions`.
 
 ---
 
@@ -781,6 +935,15 @@ Measured rather than assumed: the real golden resume was rendered in two columns
 **3. Freshness priority queue.** Recruiters review in arrival order and frequently stop reading around the 50th. Applying within 24 hours of posting is worth more than resume tweaks. Same applications, materially better position in every pile — the highest return per line of code on the list.
 
 **4. Skill-Gap Aggregator.** Across every scored JD, count what you were missing: *"of 400 jobs, 172 wanted Docker, 130 wanted AWS, 88 wanted system design."* Nothing else in a job search tells you this, and it converts a month of rejections into a ranked list of what to learn next. The feedback loop that makes the system compound instead of churn.
+
+> **Status 2026-11-08.**
+>
+> | Multiplier | State | Evidence |
+> |---|---|---|
+> | 1. Referral outreach | built; drafts only, Teja sends | `supabase/functions/referral/`, run by `satellites.yml`; page `features/referral/` |
+> | 2. ATS parse simulator | built | `worker/src/ats-parse-check.ts` (called from `worker/src/render-resume-pdf.ts`); tailor-side `_shared/tailor/ats-simulator.ts`; ATS keyword panel in the approval view |
+> | 3. Freshness priority | built inside the matcher, although the table below calls it superseded | `supabase/functions/matcher/freshness-queue.ts` orders <24 h jobs first; the 3-day filter (§13) also stands |
+> | 4. Skill-gap aggregator | built | `supabase/functions/skill-gap/`, run by `satellites.yml`; page `features/analytics/` |
 
 ### ⚠️ UNAPPROVED — needs Teja before any peer builds these
 
@@ -840,6 +1003,19 @@ and all seven §18 items.
 7. **ATS keyword coverage %** displayed on the diff view, so you can see whether the tailoring actually did anything.
 8. **Cover letters need no human approval** — but the **Auditor still gates them**. Prose invents more freely than bullet points; a cover letter is exactly where a model writes *"during my time leading a team of five…"* about something that never happened. Anything flagged goes to the queue instead of out the door.
 
+> **Status 2026-11-08.**
+>
+> | Item | State | Evidence |
+> |---|---|---|
+> | 1. Kill switch | done | `system_settings.system_enabled`, read by `_shared/agent/kill-switch.ts` and `_shared/db/gates.ts`; the kit sweep honours it too |
+> | 2. Gemini budget breaker | done | `_shared/gemini/pool.ts` (`gemini_daily_call_budget`, Pacific-dated) |
+> | 3. Golden eval set | done, all three parts | table `matcher_eval_cases`; fixture `_shared/eval/fixtures/matcher-eval-set.json`; gate `_shared/eval/gate.test.ts`, run by CI's edge-function `node --test` step (`.github/workflows/ci.yml`) |
+> | 4. Reposted-job signal | done | `scout-ats` bumps `jobs.repost_count` when a vanished job returns (`_shared/scout/liveness.ts`) |
+> | 5. Per-company cap | done | `per_company_weekly_cap` rule, `_shared/filter/cascade.ts` |
+> | 6. Dry-run period | done; still the default | `apply.yml` is DRY unless dispatched with `dry_run=false` or `APPLYY_CRON_LIVE` is `true`. NOT controlled by `system_settings.dry_run` (inert, §9) |
+> | 7. ATS keyword coverage % | done | ATS chip and keyword panel in `apps/web/src/features/approval/` |
+> | 8. Cover letters audited | partly | `supabase/functions/cover-letter/run.ts` writes `applications.cover_letter` from the pinned master (it reuses the auditor's pin resolver). No Auditor verdict on the letter text itself was found in code on 2026-11-08 |
+
 ---
 
 ## 19. Testing strategy
@@ -891,6 +1067,13 @@ so no one mistakes it for evidence about Lever's actual DOM.
 - **An injection regression suite.** JDs carrying injection payloads must produce byte-identical Tailor output to the same JD without them.
 - Table-driven unit tests for the filter cascade and fingerprint normalization — pure functions, cheap, high coverage.
 
+> **Status 2026-11-08.** The tests exist and CI runs them (`.github/workflows/ci.yml`: edge
+> `node --test` over `supabase/functions/**/*.test.ts`, package tests, worker vitest, web tsc +
+> vite build, and an assertion that each suite ran). The Tailor validator test is
+> `_shared/tailor/validator.test.ts`. Constraint #16 still holds: fixtures test the applier.
+> A real submit (since `c557533`) is a real application Teja approved, never a test. A read-only rehearsal of a real form, up to the click, is
+> `worker/src/cli/rehearse-assist.ts`.
+
 ---
 
 ## 20. Build order — Phase 1, TDD throughout
@@ -909,6 +1092,15 @@ so no one mistakes it for evidence about Lever's actual DOM.
 | 9 | First real application, watched by you | One, manually, eyes open |
 | 10 | Pipeline kanban + health page | Observability |
 
+> **Status 2026-11-08 per step:** 0 done (`packages/resume-template/` is shared by web and
+> worker). 1 done (`supabase/migrations/`). 2 partly: the pool is done, `probe-quota.ts` was
+> never written. 3 done (`features/settings/`, `packages/master-ingest/`). 4 done, plus Workday
+> and remote feeds (§4 status). 5 done (`_shared/filter/cascade.ts`). 6 done (`matcher/`,
+> `tailor/`, `_shared/tailor/validator.ts`, `auditor/`). 7 done (`features/approval/`).
+> 8 done (fixture tests, DRY default). **9 partly:** applications have gone out, but every
+> `applied` row so far was moved by a human; the first bot submit is still pending (see
+> "State at 2026-11-08"). 10 done (`features/pipeline/`, `features/health/`).
+
 ### Feature phasing (~22 features — nothing dropped, order matters)
 
 | Phase | Contents |
@@ -916,6 +1108,15 @@ so no one mistakes it for evidence about Lever's actual DOM.
 | **1 — The loop** | Master profile, 9 settings pages, ATS + aggregator discovery, dedupe, filter cascade, Matcher, Tailor, Auditor, diff view + batch approval, Playwright applier, pipeline kanban, resume version pinning, answer bank, blocklist, Gemini pool, health page |
 | **2 — Rate multipliers** | Freshness priority, ATS parse simulator, referral outreach queue, cover letters, email tracker, follow-up nudges |
 | **3 — Compounding** | Skill-gap aggregator, interview prep packs. *(Company briefs, A/B resume testing, calendar sync, assessment detector and portfolio selector removed from this phase — see the UNAPPROVED table in §17. Do not schedule them.)* |
+
+> **Status 2026-11-08 per phase.** Phase 1: done, except the aggregator part of discovery
+> (Adzuna/Jooble/Workable adapters are built but not wired; §7) and a proven bot submit.
+> Phase 2: all built (freshness `matcher/freshness-queue.ts`, ATS parse check, `referral`,
+> `cover-letter`, email tracker, `follow-up`). Phase 3: built (`skill-gap`, `interview-prep`).
+> The Phase 2/3 agents run daily only while `APPLYY_SATELLITES_LIVE` is `true`. None of the
+> UNAPPROVED items in §17 was found built. (The email classifier spots assessment invitations
+> for `oa_pending`, `_shared/email/classifier.ts`; that is tracker work, not the pre-apply
+> assessment detector.)
 
 Deferral reasoning: each v2 item adds either a Gemini call per job or a whole new agent, and none helps until the core loop — *discover → score → tailor → approve → apply → track* — actually runs. Shipping a half-working loop with cover letters attached is worse for a job search than a working loop without them. **YAGNI** — build it when you feel its absence, not when you can imagine wanting it.
 
@@ -952,7 +1153,7 @@ Types live with the schema owner because types *derive* from schema — splittin
 
 ## 22. Current infrastructure state (verified 2026-09-09 23:20 IST)
 
-> **Historical snapshot (note 2026-10-08) — do not quote as current.** Pushes to `origin` succeed; `.github/workflows/` now holds `apply.yml`, `ci.yml`, `keepalive.yml`, `run-one.yml`, `scout.yml` (`ls .github/workflows`); key pool size is `select count(*) filter (where enabled) from gemini_key_state`.
+> **Historical snapshot (note 2026-10-08) — do not quote as current.** Pushes to `origin` succeed; list the workflows with `ls .github/workflows` (on 2026-11-08 there are many more than the five named in the 10-08 note; §5 has the table); key pool size is `select count(*) filter (where enabled) from gemini_key_state`.
 
 | Item | State |
 |---|---|
@@ -978,6 +1179,20 @@ Types live with the schema owner because types *derive* from schema — splittin
 ## 23. Open items
 
 > **Note 2026-10-08:** blocker 1 no longer blocks git (pushes work); `scripts/probe-quota.ts` (task 6) was never written; the spec named under "Next artifact" does not exist — design lives here and in `docs/SYSTEM_ARCHITECTURE.md`. Live open work: `docs/PROGRESS.md`.
+>
+> **Status 2026-11-08, item by item.**
+> 1. `gh auth` — done: `gh` works (workflow dispatches and run lookups use it; repo `CLAUDE.md` §4).
+> 2. Token rotation — not verifiable from code. Note the user env var `SUPABASE_ACCESS_TOKEN`
+>    belongs to the wrong account; unset it before CLI use (repo `CLAUDE.md` §3–§4).
+> 3. Peer for worker + Actions — obsolete; the orchestrator assigns peers per task.
+> 4. Watchlist — partly: seeded and growing; the 200–400 target is still open. Read it with
+>    `select ats_provider, count(*) from company_watchlist group by 1`.
+> 5. Key rename — done (`_shared/gemini/pool.ts:40`, prefix `GEMINI_API_KEY_`).
+> 6. `probe-quota.ts` — not started.
+> - Naming table — nothing has been renamed: the remote is still `github.com/MallamTeja/applyyy`
+>   (`git remote -v`). The "use `applyy` in new names only" practice is what sessions follow.
+>   The conflict below is still Teja's call.
+> - Live open work now lives in the newest pair in [docs/handoff/](docs/handoff/).
 
 ### Blocking
 

@@ -1,5 +1,7 @@
 # Audit — coverage of §18 locked logic in PROJECT_PLAN.md
 
+> **Status 2026-11-08:** Superseded. All seven items now have a schema home: `system_settings.system_enabled`, `dry_run` and `gemini_budget_date` (`supabase/migrations/20260909234700_core_tables.sql:33,38,54`), `jobs.disappeared_at` and `jobs.repost_count` (`:242`, `:246`), `applications.ats_keyword_coverage` (`:369`), and the golden-set table `matcher_eval_cases` (`supabase/migrations/20260909234800_supporting_tables.sql:481`, still with no writer per `docs/audit/2026-11-01-wiring-audit.md` W23). Current schema: `docs/stack/2026-11-05-database.md`. The body below is the original record, unedited.
+
 **Date:** 2026-09-09 23:40 IST
 **Auditor:** session `applyyy-b3` (root-config + docs stream)
 **Target:** `PROJECT_PLAN.md` (525 lines)

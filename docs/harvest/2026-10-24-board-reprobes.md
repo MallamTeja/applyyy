@@ -1,5 +1,7 @@
 # Board re-probes — 2026-10-24 (~11:00 IST)
 
+> **Status 2026-11-08:** Partly superseded. The PhonePe verdict (SmartRecruiters `PHONEPELIMITED`) no longer leads to polling: SmartRecruiters is OFF by the 2026-11-01 robots ruling (its robots.txt is `Disallow: /`); the adapter was unregistered (fc5097f) and deleted (2fe0264), and every live `smartrecruiters` watchlist row is disabled. The Redpanda, Fi and Dream11 verdicts are point-in-time. Current truth: [README.md](README.md). The body below is the original record, unedited.
+
 Re-probe of the 4 dead/empty boards flagged "re-probe later" in
 the 00:36 orchestrator handoff (deleted as stale 2026-10-24; read it with
 `git show f44e209:docs/handoff/2026-10-24-0036-orchestrator-handoff.md`) and

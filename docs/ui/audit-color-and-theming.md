@@ -1,6 +1,6 @@
-> **Historical record as of 2026-09-17.** Current state: [theming-convention.md](./theming-convention.md).
-
 # UI audit — colour and theming
+
+> **Status 2026-11-08:** Partly superseded. Checked at `2a9ac31`: K1 is fixed (`--text-muted` is now `light-dark(#5b6675, #818b9b)`, `apps/web/src/styles/tokens.css:98`, 5.10:1 on `--sheet` in dark) and the false "AA certified" label is gone (`tokens.css:77`). K6 is fixed (dark `--accent` is `#787cf5`, `tokens.css:133`, 5.02:1 on `--sheet`). K4 is fixed for `--surface` (now only in a comment, `apps/web/src/features/health/health.css:359`). K2 is softened, not gone: status hexes still appear as literal `light-dark()` pairs outside the token file (e.g. `apps/web/src/styles/base.css:449`, `apps/web/src/features/settings/settings.css:1013`). K14 still holds (`--traced-ink` equals `--traced`, `tokens.css:106` and `:140`). Other findings were not re-checked. The current rule is in [theming-convention.md](./theming-convention.md). The body below is the original record, unedited.
 
 **Date:** 2026-09-17 · **Scope:** all 16 `.css` files under `apps/web/src`, plus inline `style={{}}` in all 27 `.tsx`
 **Status:** findings only. Nothing here is implemented. Pick by ID.

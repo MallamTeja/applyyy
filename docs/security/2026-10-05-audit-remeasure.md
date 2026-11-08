@@ -1,6 +1,6 @@
-> **Historical record as of 2026-10-05.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
-
 # Dependency audit — re-measure (2026-10-05)
+
+> **Status 2026-11-08:** Superseded. All 20 advisories measured here were fixed after it: `cc1cd22` (2026-10-05), `cf8699a` (2026-10-08) and `b4ebc70` (2026-10-09). The newer measurement is [2026-11-05-vulnerability-remeasure.md](2026-11-05-vulnerability-remeasure.md). The body below is the original record, unedited.
 
 **Measured:** 2026-10-05 ~20:50 IST at HEAD `1938f82`, by `applyyy-d3`.
 **Compared against:** [`2026-09-17-dependency-remediation-plan.md`](2026-09-17-dependency-remediation-plan.md)

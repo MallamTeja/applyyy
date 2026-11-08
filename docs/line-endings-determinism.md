@@ -1,7 +1,25 @@
 # Line endings are a correctness control, not a formatting preference
 
-**Status:** fixed and verified 2026-09-10. Root `.gitattributes` committed as
-`088f938`; `packages/resume-template/.gitattributes` in `10b0336`.
+_Last verified against code: 2026-11-08 (2a9ac31)._
+
+**Status:** fixed 2026-09-10 and still in force. Root `.gitattributes` was
+committed as `088f938` and is unchanged since (`git log --oneline -- .gitattributes`);
+`packages/resume-template/.gitattributes` came in `10b0336`. Every blob in the
+index is LF: `git ls-files --eol | grep -v 'i/lf\|i/none\|i/-text'` prints nothing
+(checked 2026-11-08). Some *working copies* are CRLF; see
+[Working copies today](#working-copies-today).
+
+## The three layers, and where each lives
+
+| Layer | File | What it covers |
+|---|---|---|
+| Root rule | [`.gitattributes`](../.gitattributes) | Every path: LF in the repo and in every checkout |
+| Package rule | [`packages/resume-template/.gitattributes`](../packages/resume-template/.gitattributes) | The renderer package, even if the root rule is loosened |
+| Renderer normalisation | `packages/resume-template/src/print-styles.ts:277`, `packages/resume-template/src/render-resume-html.ts:544` | Runtime: `replace(/\r\n/g, '\n')` on the stylesheet and the whole rendered document |
+
+The third layer is the one that protects the product guarantee at runtime,
+whatever git did. The first two protect fresh clones, CI and the golden fixture
+`packages/resume-template/test/fixtures/zomato-backend-intern.golden.html`.
 
 ## Why this is not a style question
 
@@ -17,6 +35,11 @@ bytes differ per platform breaks them silently rather than loudly.
 2. **Constraint #8 — `tailored_hash`.** That hash is a `sha256` over the
    rendered text and is used as a **cache key**. A per-platform hash means the
    cache never hits, and the same resume is billed to Gemini twice.
+   As of 2026-11-08 the column exists (`supabase/migrations/20260909234700_core_tables.sql:355`,
+   `packages/shared-types/src/tables.ts:559`), but no committed edge function
+   writes it yet. Re-check with
+   `git grep -n tailored_hash -- supabase/functions worker/src ':!*.test.ts'`.
+   The exposure applies the day a writer lands.
 
 Anything else that hashes rendered text has identical exposure: the job
 fingerprint, and §19's byte-identical injection suite.
@@ -32,7 +55,9 @@ compares. A green suite on both machines is exactly what this bug looks like.
 
 `core.autocrlf=true` is set in this machine's **system** gitconfig
 (`C:/Program Files/Git/etc/gitconfig`) — not the repo's, not the user's, so it
-applies to every clone here and is easy to miss.
+applies to every clone here and is easy to miss. Still true on 2026-11-08:
+`git config --show-origin --get-all core.autocrlf`. The `eol=lf` attribute
+overrides it inside this repo.
 
 `autocrlf=true` converts **CRLF → LF on check-in** and **LF → CRLF on
 check-out**. Two consequences that together explain why this hid so well:
@@ -120,7 +145,22 @@ writers and produce exactly the tangled diff that write-ownership partitioning
 exists to prevent. It is scheduled for when peers are idle and Teja is at the
 keyboard.
 
-Still deferred as of 2026-10-08; list the affected working copies with `git ls-files --eol | grep w/crlf`.
+Still deferred as of 2026-11-08; list the affected working copies with `git ls-files --eol | grep w/crlf`.
+
+### Working copies today
+
+On 2026-11-08 that command listed a few dozen files in `apps/web/`,
+`supabase/functions/` and `worker/` (none in `packages/resume-template/`).
+Every one of them shows `i/lf` and `attr/text eol=lf`. So:
+
+- The **committed bytes are LF.** Git converts CRLF to LF when the file is
+  staged, because the attribute says `text`.
+- The CRLF is only in this machine's working copy. The root rule forces LF on
+  checkout, so these files most likely got CRLF from a Windows editor or script
+  that rewrote them after checkout. That cause is an inference, not a measurement.
+- It matters for tooling, not for the product. Git Bash `grep` and edit scripts
+  that match on `\n` can miss or corrupt CRLF lines. Measure EOL with `node`,
+  and make edit scripts EOL-aware.
 
 In the meantime the exposure is cosmetic: the repository blobs are LF, fresh
 clones and CI get LF, and the renderer performs its own normalisation at its

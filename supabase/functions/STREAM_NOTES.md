@@ -1,5 +1,7 @@
 # Edge Functions stream — findings, open questions, and things not to re-derive
 
+> **Status 2026-11-08:** Partly superseded. The findings in sections 1, 3, 4 and 8 still hold; sections 5 and 6 were not re-checked in this pass. Changed since: the `bundle-probe` cleanup in section 1 is done (no `supabase/functions/bundle-probe/` exists); the section 2 test is now `_shared/ats/adapters.test.ts`; section 7 is fixed (`email_events.thread_id` added in migration `20260918213000`, and `email-tracker-intake/index.ts` stores it); section 9 is stale, because no migration schedules a function with pg_cron and the drains run from GitHub Actions (`prescreen-drain.yml`, `postscreen-drain.yml`, `satellites.yml`); section 10's key count is stale (the pool prefix-scans `GEMINI_API_KEY_*`, `_shared/gemini/pool.ts`). The current per-function reference is `docs/functions/README.md`. The body below is the original record, unedited.
+
 **Scope:** `supabase/functions/**` only. Written here rather than in `docs/` because
 `docs/` belongs to another stream and this file must live beside the code it describes.
 

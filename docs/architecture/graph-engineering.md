@@ -1,5 +1,7 @@
 # Graph engineering, taught against `applyyy`'s own code
 
+> **Status 2026-11-08:** Partly superseded. The teaching (reification, invariant-as-query, "not a graph database") still holds, and `approved -> applying` is still the only edge into `applying` (live `application_status_transitions`, read 2026-11-08); the §4.1 live-table contract test is still not built (`packages/shared-types/test/enum-parity.test.ts` checks the migration files only). Edge counts, agent lists and the session-era measurements here are dated: [`agents.md`](agents.md) holds the current per-agent edges and the queries that regenerate them. The body below is the original record, unedited.
+
 **Written 2026-09-11 by session `applyyy-a6` (explainer role — no code ownership).**
 Context gathered live from the orchestrator `applyyy-d8` and peers `applyyy-ff`,
 `applyyy-6f` and `applyyy-76`, plus direct reads of the repo. Where a claim came

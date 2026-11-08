@@ -1,6 +1,6 @@
-> **Historical record as of 2026-09-16.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
-
 # Harvest plan — `MadsLorentzen/ai-job-search` → `applyyy`
+
+> **Status 2026-11-08:** Partly superseded. Of the eight parcels: P1 shipped as `supabase/functions/_shared/http/` (23d9abf), P2 as `packages/master-robots/` (4ca08ef), P3 as `supabase/functions/_shared/match/rubric.ts` + `scorer.ts` (b15d8e7); the salary gate exists (`_shared/match/salary-gate.ts`) but has no runtime caller; P6 (freehire) was never built; P7 shipped only in part (see `briefs/brief-5-resume-node-selection.md`). Current truth: [README.md](README.md) and [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md). The body below is the original record, unedited.
 
 **Date:** 2026-09-16 · **Status:** proposed, nothing executed yet
 **Evidence:** [`2026-09-16-ai-job-search-inventory.md`](2026-09-16-ai-job-search-inventory.md)

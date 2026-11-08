@@ -1,4 +1,4 @@
-> **Historical — moved verbatim (unedited) from `docs/PROGRESS.md` on 2026-10-24; nothing below is live. Dated Sept 2026 log with in-place correction notes through 2026-10-23.**
+> **Status 2026-11-08:** Historical. Moved verbatim from `docs/PROGRESS.md` on 2026-10-24, with in-place correction notes through 2026-10-23; nothing here is live. Counts in it (7 migrations, 15 tables) are long outgrown: re-count with `git ls-files supabase/migrations`. Current state: `docs/PROGRESS.md` and `docs/SYSTEM_ARCHITECTURE.md`. The body below is the original record, unedited.
 
 ## THE HEADLINE: the SQL has been executed
 

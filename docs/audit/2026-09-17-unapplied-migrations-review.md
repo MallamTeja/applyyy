@@ -1,6 +1,6 @@
-> **Historical record as of 2026-09-17.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
-
 # Unapplied migrations — pre-apply review
+
+> **Status 2026-11-08:** Superseded. The backlog this review gated was applied on 2026-09-18 (`docs/audit/2026-09-18-migration-push-result.md`). The re-run warnings (bare `create policy` has no `if not exists`) still apply and are kept as a rule in `CLAUDE.md` section 7. To re-measure the backlog today, compare the Supabase MCP `list_migrations` with `ls supabase/migrations`. The body below is the original record, unedited.
 
 **Date:** 2026-09-17 · **Author:** `applyyy-5c` · **Target:** the live Supabase project
 `xynqxekcqizwhtskzqrq` (Postgres 17.6.1, `aws-0-ap-southeast-2`)

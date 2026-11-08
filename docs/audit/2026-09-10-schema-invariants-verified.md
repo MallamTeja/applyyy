@@ -1,5 +1,7 @@
 # Schema verification — the SQL has now been executed
 
+> **Status 2026-11-08:** Partly superseded. The three invariants still exist in code: `applications_user_job_key` (`supabase/migrations/20260909234700_core_tables.sql:427`), the status transition guard, and RLS on every table. But the schema has grown far past 7 migrations and 15 tables (re-count with `git ls-files supabase/migrations`), and the "two migrations have never run" addendum was closed by the 2026-09-18 push (`docs/audit/2026-09-18-migration-push-result.md`). Current schema: `docs/stack/2026-11-05-database.md`. The body below is the original record, unedited.
+
 **Date:** 2026-09-10, ~18:30 IST
 **Verified by:** `applyyy-8c` (Stream 0 — verification + foundation)
 **Environment:** local Supabase CLI 2.117.0, `public.ecr.aws/supabase/postgres:17.6.1.167`, Docker Desktop 28.5.1

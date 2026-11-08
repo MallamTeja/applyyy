@@ -1,5 +1,7 @@
 # Verification traps
 
+_Last verified against code: 2026-11-08 (2a9ac31)._
+
 **One family of bug, many instances** (count: `grep -c '^## Instance' docs/verification-traps.md`). Every entry here is a check that
 **reported success for a reason other than the one you believed**. None of them
 were caught by a failing test, because in every case the test passed.
@@ -7,6 +9,41 @@ were caught by a failing test, because in every case the test passed.
 This page exists because `applyy` is built on layered defences — §10 alone
 stacks four — and layering has a real, non-obvious cost that this document
 names. Read it before writing a test for a guard, and before believing a green.
+
+Instances 1-23 are records of real incidents. Their stories are kept as written.
+Instances 24-34 are the tooling traps listed in `CLAUDE.md` §4 and §5, added on
+2026-11-08 so the full list lives in one place.
+
+### Status of each trap against current tooling (2026-11-08)
+
+"Live" means the trap can still fire today. "Guarded in CI" means `ci.yml` now
+fails loudly on it, but a local run can still be fooled. No instance is fully
+obsolete: each one still teaches the rule, even where the specific cause is gone.
+
+| # | Trap | Status 2026-11-08 | Evidence |
+|---|---|---|---|
+| 1 | Test passes with its guard removed | Live (a rule, not a tool bug) | — |
+| 2 | Guard in a module nobody imports | Cause fixed; rule live | `grep -rn "data/supabase" apps/web/src`; `resolveSubmissionMode` called in `worker/src/apply-one.ts`, `worker/src/claim-loop.ts`, `worker/src/cli/apply.ts` |
+| 3 | `pnpm rebuild` false green | Live | — |
+| 4, 16 | `supabase db reset` exit code wrong both ways | Live (not re-measured) | — |
+| 5 | `$?` after a pipe | Guarded in CI; live locally | `.github/workflows/ci.yml:83` sets `shell: bash -eo pipefail {0}` |
+| 6 | Empty linter output | Live | — |
+| 7 | Tool writes into the tree + sweeping `git add` | Half fixed: `.playwright-mcp/` is ignored | `.gitignore:64` |
+| 8 | Accurate error, wrong cause | Live | — |
+| 9 | Fail-closed checked in prod | Positive record | — |
+| 10 | Invariant held by the caller | Live (a rule) | `supabase/functions/_shared/normalize/posted-at.ts` |
+| 11 | Migration files vs live DB | The two named migrations are applied; rule live | `supabase migration list --linked` |
+| 12 | Old dev server still listening | Live | — |
+| 13 | Vacuous expectation, twin | Live (a rule) | — |
+| 14 | Guard reports instead of prevents | Fixed by a build-time refusal | `apps/web/vite.config.ts:52`, `apps/web/src/data/supabaseConfig.ts`, `apps/web/src/data/keyRole.ts` |
+| 15 | "Tree stopped changing" means "done" | Live | — |
+| 17 | plpgsql body not parsed at `CREATE` | Live (Postgres behaviour) | — |
+| 18 | Validate the rollback harness | Live (a rule) | — |
+| 19 | `&&` hides later reports | Fixed in the root script; rule live | `package.json:16` runs `test:functions` first |
+| 20, 21 | Composite guards, per-section uniqueness | Live (rules) | — |
+| 22 | Count field invites skipping the list | Live (design rule) | — |
+| 23 | A "reader" command writes the lockfile | Live | `package.json:15` (`pnpm -r ... typecheck`) |
+| 24-34 | Tooling traps from `CLAUDE.md` §4-§5 | See each entry | — |
 
 ---
 
@@ -116,7 +153,9 @@ Measuring a command's exit status after piping it reports the **last** stage of
 the pipeline, not the command you cared about. A failing command piped into a
 successful `tail` looks like success.
 
-Use `${PIPESTATUS[0]}`, or do not pipe. This produced a real
+Use `${PIPESTATUS[0]}`, or do not pipe. In CI every `run:` step uses
+`shell: bash -eo pipefail {0}` (`.github/workflows/ci.yml:83`), so a failing
+first stage fails the step there. Your local shell has no such default. This produced a real
 mis-measurement earlier in this project: `supabase start` was briefly believed
 to have exited 0 on a migration failure — which would have been a serious CI
 trap worth reporting — when it had correctly exited 1 and the 0 belonged to the
@@ -343,6 +382,9 @@ copying:
   **not** fail the build, because an unconfigured preview is legitimate. Only a
   *present and wrong-role* key fails.
 
+That refusal now lives in `apps/web/vite.config.ts` (the "applyy build refused"
+errors at lines 52-81). It calls `resolveSupabaseConfig` from `apps/web/src/data/supabaseConfig.ts`, which reads the role claim with `readRoleClaim` from `apps/web/src/data/keyRole.ts`.
+
 **Generalised:** **a guard that reports an incident is not a guard that prevents
 one, and the difference only appears at the boundary where the artifact escapes.**
 When auditing a guard, ask *where* it runs relative to the point of no return.
@@ -481,7 +523,11 @@ printed — hiding exactly what the change existed to reveal.
 **`&&` masks whatever follows it precisely when something is already wrong**,
 which is the moment you least want a safety-critical guard to go quiet. Fixed by
 running the fast, safety-critical half **first**, so it always reports; the chain
-still returns one non-zero exit for CI.
+still returns one non-zero exit for CI. Today the root `test` script is
+`pnpm run test:functions && pnpm run test:api && pnpm run test:workspace`
+(`package.json:16`). CI does not use this chain: each suite is its own step,
+gated on `!cancelled()`, so one red step does not hide the next
+(`.github/workflows/ci.yml`).
 
 **Generalised:** ordering inside a `&&` chain is not cosmetic — it decides *what
 you still learn on a bad day.* Put the check whose silence would mislead you
@@ -607,10 +653,126 @@ writer that reads as a reader. The tell here was benign; the general case is a
 concurrent write nobody was watching for, in the one file everybody agreed to be
 careful with.
 
-Related and already recorded: `deno.json` warns that Deno, walking up the tree
+Related and already recorded: `supabase/functions/deno.json` warns that Deno, walking up the tree
 looking for a workspace root, will **rewrite the repo's root `package.json`** to
 add a `workspaces` key. Same mechanism — a tool writing a file that belongs to
 someone else, as a side effect of being run for another reason.
+
+---
+
+## Tooling traps (from `CLAUDE.md` §4 and §5)
+
+These are short. Each one names the trap, the check that is fooled, and the
+command or guard that catches it today. The commands to run are in `CLAUDE.md` §5.
+
+## Instance 24 — `pnpm run typecheck` does not check the edge functions
+
+`typecheck` is `pnpm -r --if-present run typecheck` (`package.json:15`). It runs
+only in workspace packages. `supabase/functions/` is a separate Deno project with
+no `package.json`, so it is never visited. A green typecheck says nothing about
+the edge functions. Check them with `deno check` (Instance 26). The same command
+can also rewrite `pnpm-lock.yaml` (Instance 23). Typecheck one package at a time.
+
+## Instance 25 — `pnpm --filter web` matches nothing
+
+The web package is named `@applyy/web` (`apps/web/package.json:2`). A filter on
+`web` matches no package. pnpm then runs nothing and can still look like it
+succeeded. Use the full name, or run the tool from `apps/web/` directly.
+
+## Instance 26 — `deno check` over zero files exits 0
+
+An empty file list, or a glob that matches nothing, gives exit 0 and no output.
+So does naming only `*.test.ts` files, because `supabase/functions/deno.json`
+excludes `**/*.test.ts` (it prints "No matching files found"). Count what was
+checked:
+
+```bash
+deno check --reload <paths> 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -c "^Check"
+```
+
+The count must **equal** the number of files, not just be above zero.
+**Guarded in CI:** `.github/workflows/ci.yml` (step "deno check --reload, and
+assert it checked files") fails on an empty list and on any count mismatch.
+Test files are checked only by `node --test`.
+
+## Instance 27 — `tests 0` with `fail 0` is a glob that matched nothing
+
+`node --test "<glob>"` from the wrong directory matches no files and reports
+`tests 0`, `fail 0`, exit 0. Always read the two numbers together. Two more
+silent cases:
+
+- **`cancelled`**: a `before()` hook that cannot import cancels its tests. They
+  neither pass nor fail. Read the `cancelled` line.
+- **A `describe()` body that throws** before its first test drops those tests
+  with `fail 0`, `cancelled 0` and exit 0 (measured on Node 24). Its only trace
+  is a line starting with `✖`.
+
+**Guarded in CI:** every `node --test` step in `ci.yml` fails on `tests 0`, on
+`cancelled > 0`, and on any `✖` line. A local run has none of these checks.
+For vitest, CI relies on vitest itself: it exits non-zero on a failure and on
+"no test files found" (`ci.yml`, step "worker vitest run").
+
+## Instance 28 — `deno check` writes `deno.lock`
+
+Running `deno check` can modify `supabase/functions/deno.lock`, which is a tracked
+file. A verification run therefore leaves a diff. Never commit that diff as a
+side effect of a check. Same family as Instance 23: a reader that writes.
+
+## Instance 29 — `--lockfile-only` leaves the old version installed
+
+`pnpm install --lockfile-only` updates `pnpm-lock.yaml` but not `node_modules`.
+A green local run after it tested the **old** version. Verify a dependency or
+supply-chain fix on CI, which runs `pnpm install --frozen-lockfile` from scratch
+(`ci.yml`, step "pnpm install --frozen-lockfile").
+
+## Instance 30 — a test double that throws when the real client returns
+
+supabase-js does not throw on a database or network error. It returns
+`{ data, error }`, and a dropped connection shows as status 0. A fake that throws
+instead certifies an error path that never runs in production, while the real
+`{ error }` path stays untested. Make every double return what the real
+dependency returns.
+
+## Instance 31 — test counts are timestamps
+
+Peers land tests while you work. A total that changed between two runs does not
+mean your change added or lost tests. Compare only `fail 0` (plus the checks in
+Instance 27), never the total, unless no one else is writing.
+
+## Instance 32 — reading "CI green" from the wrong run
+
+Three ways to read the wrong verdict:
+
+- **Short SHA:** it can match a newer push. Use the full 40-character SHA.
+- **No `--workflow`:** the lookup lists every workflow at that SHA (keepalive,
+  pre-gate sweep, dispatches). The first row is often not CI.
+- **Docs-only push:** `ci.yml` has `paths-ignore` for `docs/**` and `**/*.md`
+  (`ci.yml:36-55`). Such a push runs no CI. An empty result then means "not
+  triggered", not "pending" or "failed". Read the newest code commit at or
+  before it instead.
+
+```bash
+gh run list --commit <full-40-char-sha> --workflow=ci.yml
+```
+
+`worker/test/ci-workflow.test.ts` checks that the `push` and `pull_request`
+ignore lists stay identical.
+
+## Instance 33 — a sentinel that never existed passes "absent"
+
+To check that production web runs the new bundle, fetch `/assets/index-*.js`
+from https://applyyy.vercel.app/ and grep for **two** strings: one that must be
+present and one that must be absent. First prove the "absent" string really is
+in the old bundle and really is gone from the new source. A string that was
+never there passes the "absent" check without proving anything.
+
+## Instance 34 — prove the gate ran
+
+The general form of most entries above. Before you trust a green, see the same
+gate go red: inject an error and watch it get caught, or revert the fix and
+watch a **named** test fail. A test that stays green when the fix is reverted
+guards nothing. Report "written, not run" rather than a green on a command that
+never executed your code.
 
 ---
 

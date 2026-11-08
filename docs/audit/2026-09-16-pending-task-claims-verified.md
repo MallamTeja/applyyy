@@ -1,5 +1,7 @@
 # Audit — the four "pending" claims, checked against the tree
 
+> **Status 2026-11-08:** Superseded. Claim 3 is closed: `normalizer`, `screener` and `scout-ats` all exist as edge functions in `supabase/functions/`. Claim 2 (master resume ingest) was rebuilt as `packages/master-ingest/` with the page routed at `/master-profile` (`apps/web/src/App.tsx:100`); this pass did not re-test the junk-write defect described below. The `/emails` page is still routed (`apps/web/src/App.tsx:90`). Current state: `docs/SYSTEM_ARCHITECTURE.md`. The body below is the original record, unedited.
+
 **Date:** 2026-09-16
 **Auditor:** session `applyyy-e0` worker (Parcels E, E2, F)
 **Subject:** the four items under *Pending Tasks 🟡* in

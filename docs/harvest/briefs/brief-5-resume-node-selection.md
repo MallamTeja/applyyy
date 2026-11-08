@@ -1,6 +1,6 @@
-> **Historical record as of 2026-09-16.** Current state: [SYSTEM_ARCHITECTURE.md](../../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../../PROGRESS.md).
-
 # Brief 5 — Relevance-weighted node selection + four anti-fabrication auditor rules
+
+> **Status 2026-11-08:** Partly shipped, not as specified. No standalone node-relevance scorer exists; relevance is posting-keyword matching (`keywordAppearsIn`, `supabase/functions/_shared/tailor/jd-keywords.ts`), used for skills-group order (`tailorer.ts`, 5a3009b) and for the one-page trim (`page-trim.ts`). The four auditor rules in Part B were not built: `_shared/audit/detector.ts` emits `unresolved_ref`, `unfaithful_rewording`, `misattributed_bullet`, `jd_keyword_dropped` and `summary_unsupported` only. The body below is the original record, unedited.
 
 > `Ported from MadsLorentzen/ai-job-search @ 968fb1bd (MIT, © 2026 Mads Lorentzen).`
 >

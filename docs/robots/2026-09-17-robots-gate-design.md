@@ -1,5 +1,8 @@
 # The robots.txt compliance gate — design, deviations and evidence
 
+> **Status 2026-11-08:** Partly superseded. The gate design here still matches the code: `RobotsPolicy` (`packages/master-robots/src/gate.ts:60`), `verdictFor` (`gate.ts:125`) and `checkRobots` (`gate.ts:261`). Since then the gate runs inside the shared Deno transport (`supabase/functions/_shared/http/transport.ts:47`, commit `111791c`) and before the worker opens an apply page (`worker/src/apply-one.ts:47`, `a3b4115`); the §10 follow-ups are closed (`worker/scripts/capture-fixture.ts:166`, `pnpm-lock.yaml:94`, `.github/workflows/ci.yml:270`). Two §4 caller claims are stale: `supabase/functions/scout-ats/page-fetch.ts:70` is a fourth `'scouting'` caller, and `job-link-intake` does not gate a pasted page at all (Teja, 2026-11-01; `supabase/functions/job-link-intake/handler.test.ts:525`), only its ATS-board path through scout-web's fetcher.
+> The body below is the original record, unedited.
+
 **Package:** `packages/master-robots` (`@applyy/master-robots`)
 **Written:** 2026-09-17 by `applyyy-85`, under orchestration by `applyyy-e3`.
 **Ported from:** `github.com/MadsLorentzen/ai-job-search` @ `968fb1bd`, MIT, © 2026

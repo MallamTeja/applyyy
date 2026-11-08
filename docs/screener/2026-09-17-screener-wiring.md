@@ -1,6 +1,7 @@
-> **Historical record as of 2026-09-17.** Current state: [SYSTEM_ARCHITECTURE.md](../SYSTEM_ARCHITECTURE.md) · [PROGRESS.md](../PROGRESS.md).
-
 # Wiring the screener into the scout pipeline
+
+> **Status 2026-11-08:** Partly superseded. The born-at-verdict design still holds: `supabase/functions/_shared/screen/screen-batch.ts` runs the tech gate (:204), the work-auth gate (:244), then `screenJob` (:265). The "What this does not yet do" list is mostly closed: seed columns fixed (`supabase/migrations/20260917124500_fix_bootstrap_filter_rule_seed_columns.sql`), the Filters page writes `enabled` (`apps/web/src/features/settings/filtersStore.ts:247`), the experience ceiling reads years from the job text (`_shared/screen/required-experience.ts`, migration `20261104193000`), and unscreened revived rows meet the pre-gate sweep ([`2026-11-06-bulk-revive-needs-pregate-sweep.md`](./2026-11-06-bulk-revive-needs-pregate-sweep.md)); `degree_mismatch` is still inert because nothing writes `requires_advanced_degree`. Stage 0's "matches neither = pass" row changed: with titles or keywords configured it now drops as `tech_gate_unclassified` (`_shared/screen/tech-gate.ts:27-33`).
+> The body below is the original record, unedited.
 
 **Date:** 2026-09-17
 **Author:** applyyy-c8

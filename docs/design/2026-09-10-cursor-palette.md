@@ -1,6 +1,7 @@
-> **Historical record as of 2026-09-10.** Current state: [theming-convention.md](../ui/theming-convention.md).
-
 # The Cursor-style palette — what changed, and the two catches worth keeping
+
+> **Status 2026-11-08:** Partly superseded. The palette still lives in `apps/web/src/styles/tokens.css`, now written once per colour as `light-dark()` (`tokens.css:26`), and `--ink-on-fill` from §4 is still defined there. The theme toggle is `apps/web/src/app/theme.ts`. §8 lists 7 CSS files; list today's with `git ls-files 'apps/web/src/*.css'`. Current rules: [`docs/ui/theming-convention.md`](../ui/theming-convention.md).
+> The body below is the original record, unedited.
 
 **Date:** 2026-09-10 · **Built by:** `applyyy-20` · **Written up by:** `applyyy-da`
 **State:** shipped. The 7 CSS files landed as `6aa0136`; the appearance toggle

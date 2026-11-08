@@ -1,5 +1,8 @@
 # Referral outreach — research before building (2026-11-02)
 
+> **Status 2026-11-08:** Current. Drafting is built: `supabase/functions/referral/index.ts` drafts with Gemini only for `awaiting_approval`/`approved` rows (`supabase/functions/referral/eligible-queue.ts`), stores each draft as an `application_events` row, runs from `.github/workflows/satellites.yml:78`, and shows on `apps/web/src/features/referral/ReferralOutreachPage.tsx`. No send path exists yet (no `MailApp` or `sendEmail` call in `supabase/functions` or `apps/web/src`), so the channel research below is still the open input for automatic sending.
+> The body below is the original record, unedited.
+
 **Status:** research only; nothing built. Teja (2026-11-02 20:58 IST): "lets research first about the feature, later lets build that."
 **Update 2026-11-05:** drafting shipped in `30283d3` (drafts for `awaiting_approval` / `approved` jobs only). Automatic SENDING, the email channel below, is still unbuilt, and this doc is its research. Teja chose to keep it.
 **Already ruled:** referral drafts only for jobs at `awaiting_approval` / `approved` (parcel G, 2026-11-02 ~20:50 IST).
