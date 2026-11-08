@@ -130,6 +130,16 @@ export interface AgentRunRow extends AgentRunFacts {
  * newest success read. If either read for an agent fails, none of its lookup
  * rows are kept: a newest run without its success would pose as the whole story.
  *
+ * ONE READ FIRST, PER-AGENT ONLY FOR WHAT IT LEAVES OPEN (2026-11-08). The
+ * per-agent reads cost up to two requests per roster agent (35 on one Health
+ * load with an empty window, at 0.3-0.5 s each from India to Sydney). So the
+ * agents still owed an answer are first read together in ONE request
+ * (`readOwedAgents`). That read answers an agent's question when it holds a
+ * matching row, and answers "none" only when it PROVES it returned every
+ * matching row (row count equals the exact count). Anything it leaves open
+ * falls back to the per-agent read below, so a bounded read never turns
+ * "not in this page" into "never ran" (CLAUDE.md section 6).
+ *
  * Exported so a unit test can drive it with a fake client. */
 export async function readNewestBeyondWindow(
   /* The configured client; the caller has already ruled out null. */
@@ -145,16 +155,22 @@ export async function readNewestBeyondWindow(
   const seen = new Set(windowRows.map((row) => row.agent));
   // The agents with a success in hand need no success read.
   const succeeded = new Set(windowRows.filter((row) => row.status === 'succeeded').map((row) => row.agent));
-  // Every roster agent, all at once; an agent the window fully answers makes no read.
+  // Owed = no success in hand; a seen-set agent without one is owed too (seen is a superset of succeeded).
+  const owed = HEALTH_ROSTER.filter((agent) => !succeeded.has(agent));
+  // The window covers every agent: no further request at all.
+  if (owed.length === 0) return { rows, failed };
+  // One request for every owed agent; what it settles needs no per-agent read.
+  const bulk = await readOwedAgents(client, owed);
+  // Every owed agent, all at once; only questions the bulk read left open make a read.
   await Promise.all(
-    // The roster drives this, like the table: an agent never listed is never checked.
-    HEALTH_ROSTER.map(async (agent) => {
-      // Both reads in parallel; null where the window already answers that question.
+    // The owed list drives this; it is the roster minus agents the window fully answers.
+    owed.map(async (agent) => {
+      // Both questions in parallel; null where the window already answers that question.
       const [newest, success] = await Promise.all([
-        // Its newest run of any outcome, only when the window missed it.
-        seen.has(agent) ? null : readNewestRun(client, agent, false),
-        // Its newest success, only when none is in hand.
-        succeeded.has(agent) ? null : readNewestRun(client, agent, true),
+        // Its newest run of any outcome, only when the window missed it; the bulk answer if it has one.
+        seen.has(agent) ? null : (bulk.newest.get(agent) ?? readNewestRun(client, agent, false)),
+        // Its newest success (none in hand by construction); the bulk answer if it has one.
+        bulk.success.get(agent) ?? readNewestRun(client, agent, true),
       ]);
       // Either read failing makes the agent unknown, and drops both (see above).
       if (newest?.ok === false || success?.ok === false) {
@@ -173,10 +189,78 @@ export async function readNewestBeyondWindow(
   return { rows, failed };
 }
 
-/* One agent's newest run, or its newest SUCCEEDED run, as a closed result:
- * `ok: false` for a read that could not answer, else the row or null for none.
- * A closed union rather than null-vs-undefined, so "failed" and "no rows" can
- * never be confused by a truthiness check (CLAUDE.md section 6). */
+/* One lookup's closed result: `ok: false` for a read that could not answer,
+ * else the row or null for none. A closed union rather than null-vs-undefined,
+ * so "failed" and "no rows" can never be confused by a truthiness check
+ * (CLAUDE.md section 6). Named because the bulk read and the per-agent read
+ * both produce it. */
+type RunLookup = { ok: true; row: AgentRunRow | null } | { ok: false };
+
+/* The owed agents' answers from ONE request, keyed by agent; an agent ABSENT
+ * from a map is an open question the caller must still read on its own.
+ *
+ * WHY IT CAN SAY "NONE" AT ALL: an agent with no row in this page has no row at
+ * all only if the page is every matching row. That is proven, not assumed: the
+ * request asks for the exact count, and only `rows === count` closes the
+ * absent agents as `row: null`. A short page is NOT proof (a server-side row
+ * cap looks the same), and a failed or thrown read settles nothing, so every
+ * question falls back to the per-agent read rather than to "never ran".
+ *
+ * ponytail: one page of RUN_WINDOW rows across the owed agents; an owed agent
+ * that fails every tick can fill that page and push the others back to
+ * per-agent reads (correct, just slower). Narrow the filter to
+ * "succeeded OR unseen agent" if that is ever measured. */
+async function readOwedAgents(
+  /* The configured client, as above. */
+  client: NonNullable<typeof supabase>,
+  /* The agents with no success in the window; never empty (the caller returns first). */
+  owed: readonly AgentName[],
+): Promise<{ newest: Map<AgentName, RunLookup>; success: Map<AgentName, RunLookup> }> {
+  // Settled newest-run answers; absent = still open.
+  const newest = new Map<AgentName, RunLookup>();
+  // Settled newest-success answers; absent = still open.
+  const success = new Map<AgentName, RunLookup>();
+  try {
+    // Same columns as the window, owed agents only, with the exact count that can prove completeness.
+    const { data, error, count } = await client
+      // The same table as the window.
+      .from('agent_runs')
+      // Exact count so "every matching row is in hand" is measured, never inferred from a short page.
+      .select(AGENT_RUN_COLUMNS, { count: 'exact' })
+      // Only the agents still owed an answer; the window's busy agents cannot crowd them out.
+      .in('agent', [...owed])
+      // Newest first, so the first row per agent is its newest (same crashed-run reason as the window).
+      .order('started_at', { ascending: false })
+      // Bounded like the window; the count check below decides whether that bound hid anything.
+      .limit(RUN_WINDOW);
+    // supabase-js reports failures as { error }; leave every question open for the per-agent read.
+    if (error !== null || !Array.isArray(data)) return { newest, success };
+    // Newest-first rows: the first row seen per agent is its newest, the first success its newest success.
+    for (const row of data as AgentRunRow[]) {
+      // First row for this agent is its newest run.
+      if (!newest.has(row.agent)) newest.set(row.agent, { ok: true, row });
+      // First succeeded row for this agent is its newest success.
+      if (row.status === 'succeeded' && !success.has(row.agent)) success.set(row.agent, { ok: true, row });
+    }
+    // Only a proven-complete page may close the remaining questions as "none".
+    if (typeof count === 'number' && data.length === count) {
+      // Each owed agent the page did not answer truly has no such row.
+      for (const agent of owed) {
+        // No row at all: it never ran.
+        if (!newest.has(agent)) newest.set(agent, { ok: true, row: null });
+        // No succeeded row: it never succeeded.
+        if (!success.has(agent)) success.set(agent, { ok: true, row: null });
+      }
+    }
+  } catch {
+    // A thrown network failure settles nothing; the per-agent reads still run.
+  }
+  // Whatever was settled; the caller reads the rest per agent.
+  return { newest, success };
+}
+
+/* One agent's newest run, or its newest SUCCEEDED run, as a `RunLookup`.
+ * Now the fallback for questions the bulk read left open. */
 async function readNewestRun(
   /* The configured client, as above. */
   client: NonNullable<typeof supabase>,
@@ -184,7 +268,7 @@ async function readNewestRun(
   agent: AgentName,
   /* True to read the newest `succeeded` run instead of the newest of any outcome. */
   onlySucceeded: boolean,
-): Promise<{ ok: true; row: AgentRunRow | null } | { ok: false }> {
+): Promise<RunLookup> {
   try {
     // Same columns as the window, for one agent only.
     let query = client.from('agent_runs').select(AGENT_RUN_COLUMNS).eq('agent', agent);
@@ -311,7 +395,9 @@ export function useAgentRuns(): AgentRunsRead {
            loading rather than as a conclusive empty. */
         const windowRows = data as readonly AgentRunRow[] | null;
         /* W9: the agents the window missed, each read on its own. Skipped for
-           a null window, which stays "still loading" as explained above. */
+           a null window, which stays "still loading" as explained above.
+           Since 2026-11-08 they are read together in one request first, and
+           on their own only where that request could not settle them. */
         const beyond =
           windowRows === null ? null : await readNewestBeyondWindow(supabase, windowRows);
         // The lookups were awaited; the component may have unmounted meanwhile.

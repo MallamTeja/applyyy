@@ -174,6 +174,18 @@ export function laneCountsFrom(kind: string, counts: Readonly<Partial<Record<str
   return { discovered: counts['discovered'] ?? 0, ready: counts['passed_filters'] ?? 0, filteredOut: counts['dropped_filter'] ?? 0 };
 }
 
+/* The lane's exact total, read from the same status-count RPC instead of its own HEAD count
+ * (2026-11-08: the HEAD count was a second Sydney round trip, ~300-730 ms from India, for a number
+ * the RPC already returned). Same set: the RPC is count(*) grouped by status for user_id = auth.uid(),
+ * and RLS "own applications" scopes the HEAD count to the same user, so counts[status] equals
+ * `.eq('status', status)` with count:'exact'. Null until the read answers, exactly like laneCountsFrom. */
+export function laneTotalFrom(kind: string, counts: Readonly<Partial<Record<string, number>>>, status: string): number | null {
+  // Loading, failed, signed out or unconfigured: no answer, so no number (never a 0 that reads as "empty lane").
+  if (kind !== 'rows' && kind !== 'empty') return null;
+  // A successful read omits a status with no rows, so absent here really is zero.
+  return counts[status] ?? 0;
+}
+
 /* The lane the page opens on, every time (2026-11-01, Teja: "whenever I open discovered jobs from the
  * nav bar it needs to show and stay in Ready to tailor"). Since the prescreen drain and the scout's
  * own screening path (both 2026-10-24) `discovered` sits near empty, so Ready is where the work is.

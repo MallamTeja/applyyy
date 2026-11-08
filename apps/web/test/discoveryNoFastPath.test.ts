@@ -152,9 +152,11 @@ describe('what the page must still do', () => {
 });
 
 describe('lane queries and paging', () => {
-  it("list and HEAD count both filter on the selected lane's status", () => {
-    // Two .eq calls on laneSpec.status: the list and the count describe the same set.
-    assert.equal(source.match(/\.eq\('status', laneSpec\.status\)/g)?.length, 2, 'both queries must filter on laneSpec.status');
+  it("list and lane total both read the selected lane's status", () => {
+    // One .eq on laneSpec.status, the list's; the HEAD count that was the second one is gone (2026-11-08).
+    assert.equal(source.match(/\.eq\('status', laneSpec\.status\)/g)?.length, 1, 'the list query must filter on laneSpec.status');
+    // The total reads the same lane's status from the counts RPC, so list and total describe the same set.
+    assert.ok(source.includes('laneTotalFrom(countsState.kind, statusCounts, laneSpec.status)'), 'the lane total must read laneSpec.status');
     // No hard-coded status filter left over from the single-lane page.
     assert.equal(source.includes(".eq('status', 'discovered')"), false, 'a hard-coded discovered filter would ignore the lane switch');
   });
@@ -183,13 +185,16 @@ describe('lane queries and paging', () => {
     assert.ok(source.includes('laneRef.current = key;'), 'the lane switch must update laneRef synchronously');
   });
 
-  it('a full load clears the old lane\'s total and rows before its first await', () => {
+  it('a full load clears the old lane\'s rows before its first await, and the total is per lane', () => {
     // The loadData text up to its first await.
     const start = source.indexOf('const loadData = useCallback(');
     // Everything before the first await as code (`= await `), so "every await" in a comment cannot end it early.
     const head = source.slice(start, source.indexOf('= await ', start));
-    // Without these, the old lane's total and cards show under the new label, and stay on a failed read.
-    assert.ok(head.includes('setLaneTotal(null);') && head.includes('setItems([]);'), 'a full load must clear total and items before awaiting');
+    // Without this, the old lane's cards show under the new label, and stay on a failed read.
+    assert.ok(head.includes('setItems([]);'), 'a full load must clear items before awaiting');
+    // The total is no longer state a load must clear (2026-11-08): it is derived from the counts RPC
+    // for the lane on screen, so the old lane's number cannot render under the new label at all.
+    assert.match(source, /const laneTotal = laneTotalFrom\(countsState\.kind, statusCounts, laneSpec\.status\);/, 'laneTotal must be derived per lane from the counts read');
   });
 
   it('Load more renders only while hasMoreRows says rows remain', () => {
@@ -277,5 +282,56 @@ describe('loadData request-sequence guard', () => {
     const finallyBlock = body.match(/finally \{([\s\S]*)$/)?.[1] ?? '';
     // A stale call ending first must not hide the spinner of the load still running.
     assert.match(finallyBlock, /if \(!stale\(\)\) setLoading\(false\);/, 'setLoading(false) in finally must be guarded by !stale()');
+  });
+});
+
+/* 2026-11-08: Supabase is in Sydney, so every serial browser request costs ~300 ms warm and ~730 ms
+ * cold from India, while the database answers in 8-28 ms. The Discovered page loaded the lane total
+ * with its own exact HEAD count although its counts RPC (application_status_counts) already returned
+ * it, and the "Run pipeline" modal made five exact HEAD counts the same RPC answers in one call.
+ * The RPC counts the same rows: count(*) grouped by status WHERE user_id = auth.uid(), and RLS "own
+ * applications" scoped the HEAD counts to that same user. These pin the round trips out, and pin the
+ * honesty rule that came with the HEAD counts: no answer means null ("unknown"), never 0.
+ */
+describe('counts come from the status-count RPC, not exact HEAD counts', () => {
+  // The modal's source, read beside the page's.
+  let modal = '';
+  // Loaded once like `source`, so every case sees the same snapshot.
+  before(async () => {
+    // Resolved from this file, like PAGE_PATH.
+    modal = await readFile(fileURLToPath(new URL('../src/features/discovery/PipelineRunModal.tsx', import.meta.url)), 'utf8');
+  });
+  // Code only: block and line comments dropped, so prose that names the old query cannot trip a check.
+  const code = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  it('discovered lane total comes from the counts RPC, not an exact count', () => {
+    // The removed request: a HEAD count is the only thing this page would ask for with count:'exact'.
+    assert.equal(/count: 'exact'/.test(code(source)), false, 'the Discovered page must not make its own exact count; read laneTotal from useApplicationCounts');
+    // Non-vacuity: the page still reads the counts hook the total now comes from.
+    assert.match(code(source), /useApplicationCounts\(\)/, 'the page must read the counts RPC');
+  });
+
+  it('laneTotalFrom is null until the counts read answers, and 0 only when it proved none', async () => {
+    // The pure rule, imported by relative path (discoveredList.ts imports no client).
+    const { laneTotalFrom } = await import('../src/features/discovery/discoveredList.ts');
+    // Loading, failed, signed out and unconfigured prove nothing, so the counter says "total unknown".
+    for (const kind of ['loading', 'failed', 'no_session', 'unconfigured']) assert.equal(laneTotalFrom(kind, { passed_filters: 7 }, 'passed_filters'), null, `${kind} must not yield a number`);
+    // A successful read's own count for the lane's status.
+    assert.equal(laneTotalFrom('rows', { passed_filters: 7, discovered: 2 }, 'passed_filters'), 7);
+    // A successful read that omits the status: the GROUP BY found none, so 0 is the answer.
+    assert.equal(laneTotalFrom('rows', { passed_filters: 7 }, 'discovered'), 0);
+    // No applications at all is also a real answer.
+    assert.equal(laneTotalFrom('empty', {}, 'passed_filters'), 0);
+  });
+
+  it('pipeline run modal makes no exact HEAD counts', () => {
+    // The five per-agent HEAD counts are gone; one RPC replaces them.
+    assert.equal(/count: 'exact'|head: true/.test(code(modal)), false, 'the modal must read the counts RPC, not one HEAD count per agent');
+    // Non-vacuity: the counts still come from somewhere.
+    assert.match(code(modal), /useApplicationCounts\(\)/, 'the modal must read the counts RPC');
+    // While loading the counts are null (Run locked, "Counting…").
+    assert.match(code(modal), /countsState\.kind === 'loading'\s*\?\s*null/, 'counts must be null while the read is loading');
+    // Only an answered read becomes numbers; a failed one is null per agent ("count unknown"), never 0.
+    assert.match(code(modal), /answered \? [^\n]+ : null/, 'an unanswered read must give null per agent, never 0');
   });
 });

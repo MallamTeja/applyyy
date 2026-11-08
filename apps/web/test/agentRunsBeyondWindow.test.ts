@@ -78,6 +78,15 @@ function fakeClient(answer: (filters: Record<string, string>) => Answer) {
           // Chainable.
           return builder;
         },
+        /* The one-request read (2026-11-08) filters with in(). Recorded under its own key, so
+           these answers (which key on `agent`) give it no count; with no count it cannot prove
+           completeness, and these tests keep exercising the per-agent fallback they were written for. */
+        in: (column: string, values: readonly string[]) => {
+          // Stored joined, e.g. agent.in -> 'scout_ats,screener,...'.
+          filters[`${column}.in`] = values.join(',');
+          // Chainable.
+          return builder;
+        },
         // Order is not under test; the fake answers newest-first itself.
         order: () => builder,
         // Same for the limit.
@@ -93,6 +102,142 @@ function fakeClient(answer: (filters: Record<string, string>) => Answer) {
   // Cast once: the helper only reaches the methods faked above.
   return { client: client as unknown as Parameters<typeof runs.readNewestBeyondWindow>[0], reads };
 }
+
+/* A fake client backed by a whole `agent_runs` table, answering like PostgREST would:
+ * eq()/in() filter, order() sorts newest-first, limit() caps the page, and `count` is the
+ * EXACT number of matching rows before the cap (what `{ count: 'exact' }` returns).
+ * Needed for the one-request read, whose "none" verdict rests on rows === count. */
+function tableClient(table: ReturnType<typeof row>[]) {
+  // Every read's filters, so a test can count requests and see which agents were read alone.
+  const reads: Record<string, string>[] = [];
+  // Only `.from()` is reached by the helper.
+  const client = {
+    // A fresh builder per read, as above.
+    from: () => {
+      // This read's filters, recorded for the test.
+      const filters: Record<string, string> = {};
+      // Recorded now; filled by the builder before the read resolves.
+      reads.push(filters);
+      // Row predicates accumulated by eq()/in().
+      const keep: ((r: ReturnType<typeof row>) => boolean)[] = [];
+      // The page cap; unlimited until limit() sets it.
+      let cap = Infinity;
+      // The chainable builder.
+      const builder = {
+        // Columns are not under test.
+        select: () => builder,
+        // Equality filter on one column.
+        eq: (column: 'agent' | 'status', value: string) => {
+          // Recorded for assertions.
+          filters[column] = value;
+          // Applied to the table.
+          keep.push((r) => r[column] === value);
+          // Chainable.
+          return builder;
+        },
+        // Membership filter, as `.in('agent', [...])` sends.
+        in: (column: 'agent', values: readonly string[]) => {
+          // Recorded for assertions.
+          filters[`${column}.in`] = values.join(',');
+          // Applied to the table.
+          keep.push((r) => values.includes(r[column]));
+          // Chainable.
+          return builder;
+        },
+        // The helper always orders newest-first; the answer below sorts that way.
+        order: () => builder,
+        // The page cap.
+        limit: (n: number) => {
+          // Remembered for the answer.
+          cap = n;
+          // Chainable.
+          return builder;
+        },
+        // Awaiting the builder runs the read, asynchronously, returning { data, error, count } like supabase-js.
+        then: (resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) =>
+          Promise.resolve()
+            .then(() => {
+              // Every matching row, newest first.
+              const matched = table.filter((r) => keep.every((k) => k(r))).sort((a, b) => b.started_at.localeCompare(a.started_at));
+              // The capped page plus the exact pre-cap count.
+              return { data: matched.slice(0, cap), error: null, count: matched.length };
+            })
+            .then(resolve, reject),
+      };
+      // Handed back for chaining.
+      return builder;
+    },
+  };
+  // Cast once, as above.
+  return { client: client as unknown as Parameters<typeof runs.readNewestBeyondWindow>[0], reads };
+}
+
+describe('Health reads agent_runs in one request, not one per agent (2026-11-08)', () => {
+  before(async () => {
+    // Loaded after the hooks so extensionless imports inside resolve.
+    runs = await import('../src/data/useAgentRuns.ts');
+    // Same.
+    fresh = await import('../src/data/agentFreshness.ts');
+  });
+
+  it('health reads agent_runs once when the window covers every agent', async () => {
+    // Every roster agent is in the window; the first two only with a failure there.
+    const roster = fresh.HEALTH_ROSTER;
+    // One window row per agent: failed for the first two, succeeded for the rest.
+    const windowRows = roster.map((agent, i) => row(agent, i < 2 ? 'failed' : 'succeeded', 1));
+    // The table behind the window holds an older success for the two failing agents.
+    const { client, reads } = tableClient([...windowRows, row(roster[0]!, 'succeeded', 5), row(roster[1]!, 'succeeded', 7)]);
+    // The beyond-window lookups.
+    const beyond = await runs.readNewestBeyondWindow(client, windowRows);
+    // ONE request answers both missing successes (the per-agent path made two, one per failing agent).
+    assert.equal(reads.length, 1, `expected one agent_runs read beyond the window, got ${reads.length}`);
+    // And it found both successes, so neither agent reads "never succeeded".
+    const summary = fresh.summarizeAgentRuns([...windowRows, ...beyond.rows], NOW, beyond.failed);
+    // First failing agent: succeeding (5 h ago is within every cadence).
+    assert.equal(summary.find((e) => e.agent === roster[0])?.successAgeMs, 5 * HOUR - 60_000);
+    // Second failing agent: same.
+    assert.equal(summary.find((e) => e.agent === roster[1])?.successAgeMs, 7 * HOUR - 60_000);
+    // Non-vacuity of the zero-read branch: a window with a success for EVERY agent makes no read at all.
+    const all = tableClient(roster.map((agent) => row(agent, 'succeeded', 1)));
+    // The window is the whole table here.
+    await runs.readNewestBeyondWindow(all.client, roster.map((agent) => row(agent, 'succeeded', 1)));
+    // Nothing owed, nothing read.
+    assert.equal(all.reads.length, 0);
+  });
+
+  it('an empty window costs one request, and a complete page proves "never ran" for the agents it lacks', async () => {
+    // The table holds only a screener success; the window came back empty.
+    const { client, reads } = tableClient([row('screener', 'succeeded', 3)]);
+    // The lookups.
+    const beyond = await runs.readNewestBeyondWindow(client, []);
+    // One request, not two per roster agent.
+    assert.equal(reads.length, 1, `expected one read, got ${reads.length}`);
+    // Summarised as the hook does.
+    const summary = fresh.summarizeAgentRuns(beyond.rows, NOW, beyond.failed);
+    // The agent with a row is found.
+    assert.equal(summary.find((e) => e.agent === 'screener')?.verdict, 'succeeding');
+    // rows === count proved the page complete, so an absent agent truly never ran.
+    assert.equal(summary.find((e) => e.agent === 'matcher')?.verdict, 'never_run');
+  });
+
+  it('an agent missing from the window is still looked up', async () => {
+    // Matcher fails more often than one page holds, so the one-request page is all matcher.
+    const flood = Array.from({ length: 250 }, (_, i) => row('matcher', 'failed', 1 + i * 0.01));
+    // Screener's only run is older than every matcher failure, so the capped page cannot hold it.
+    const { client, reads } = tableClient([...flood, row('screener', 'succeeded', 10)]);
+    // An empty window: every agent is owed.
+    const beyond = await runs.readNewestBeyondWindow(client, []);
+    // The page was capped (count > rows), so screener was read on its own, not declared never-run.
+    assert.ok(reads.some((f) => f['agent'] === 'screener'), 'screener must get its own lookup');
+    // And that lookup found it.
+    assert.equal(
+      fresh.summarizeAgentRuns(beyond.rows, NOW, beyond.failed).find((e) => e.agent === 'screener')?.verdict,
+      'succeeding',
+    );
+    // Matcher's newest run came from the page, so it needed no newest-run read of its own.
+    assert.equal(reads.some((f) => f['agent'] === 'matcher' && f['status'] === undefined), false);
+  });
+});
 
 describe('Health finds an agent\'s newest success beyond the window (finding #4)', () => {
   before(async () => {

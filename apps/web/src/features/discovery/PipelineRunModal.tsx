@@ -3,17 +3,21 @@
  * take and that the Matcher and Tailor spend Gemini calls. Every start goes through
  * startIfConfirmed (pipelineRunConfirm.ts), which test/pipelineRunConfirm.test.ts proves invokes
  * nothing on empty or mismatched text. */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { runFullPipeline } from '../../data/pipelineRunner';
 // The whole result, not just the steps: `ok` is what decides success vs failure framing.
 import type { PipelineRunResult } from '../../data/pipelineRunner';
-// The browser client, or null when unconfigured; used only for the read-only HEAD counts.
-import { supabase } from '../../data/supabase.ts';
-// The typed-confirmation gate, the count reader, and the sentences the confirm step shows.
-import { CONFIRM_PHRASE, GEMINI_WARNING, canStartRun, confirmSummary, readWaitingCounts, startIfConfirmed } from './pipelineRunConfirm.ts';
+/* Every status's count in ONE RPC (application_status_counts), replacing five exact HEAD counts, one
+   Sydney round trip each (2026-11-08). Same numbers: the RPC is count(*) per status for user_id =
+   auth.uid(), and RLS "own applications" scoped the HEAD counts to that same user. */
+import { useApplicationCounts } from '../../data/useApplicationCounts.ts';
+// Which statuses each agent's queue selects: the same table pipelineRunConfirm.ts and the runner use.
+import { STEP_INPUT_STATUS } from '../pipeline/rowPipeline.ts';
+// The typed-confirmation gate and the sentences the confirm step shows.
+import { CONFIRM_PHRASE, GEMINI_WARNING, canStartRun, confirmSummary, startIfConfirmed } from './pipelineRunConfirm.ts';
 // Type only: the per-agent waiting counts record.
 import type { WaitingCounts } from './pipelineRunConfirm.ts';
 
@@ -35,40 +39,31 @@ export function PipelineRunModal({ onClose, onRefresh }: PipelineRunModalProps):
   const steps = result?.steps ?? [];
   // What the operator has typed into the confirmation box; the run unlocks only on CONFIRM_PHRASE.
   const [typed, setTyped] = useState<string>('');
-  // Rows waiting at each agent's input statuses, from HEAD counts; null until the first read lands
-  // (the Run button stays locked until then), and null per agent when that agent's count is unknown.
-  const [counts, setCounts] = useState<WaitingCounts | null>(null);
-  // False after unmount, so a slow count cannot write into a closed dialog.
-  const mounted = useRef(true);
-
-  // Reads every agent's waiting count. Read-only; never hard-coded, because the queues change with
-  // every scout and every sweep. readWaitingCounts contains each failure to its own agent (null).
-  const loadCounts = useCallback(async (): Promise<void> => {
-    // One HEAD count per agent, through the tested reader.
-    const next = await readWaitingCounts(async (statuses) => {
-      // No client: the count is unknown, and the summary says so.
-      if (supabase === null) return null;
-      // head:true returns only the count; the same statuses that agent's queue selects.
-      const { count, error } = await supabase.from('applications').select('id', { count: 'exact', head: true }).in('status', [...statuses]);
-      // A failed count is null, never 0: "nothing waiting" would be a false claim.
-      return error ? null : count;
-    });
-    // The dialog closed meanwhile; nothing to update.
-    if (mounted.current) setCounts(next);
-  }, []);
-
-  // On open: read the counts; on close: stop later reads from writing.
+  // The shared per-status counts; loadCounts re-reads them for every caller (the store drops superseded reads).
+  const { state: countsState, counts: statusCounts, refetch: loadCounts } = useApplicationCounts();
+  /* On open: one fresh read. The dialog confirms a bulk Gemini spend, so it must not settle for a count
+     the store read minutes ago; one RPC here replaces the five HEAD counts the open used to make. */
   useEffect(() => {
-    // Re-arms after a StrictMode remount, which runs the cleanup once in development.
-    mounted.current = true;
-    // The first read; the Run button unlocks when it lands.
-    void loadCounts();
-    // Cleanup marks this dialog closed.
-    return () => {
-      // Read by loadCounts before it writes.
-      mounted.current = false;
-    };
+    // Re-reads for every caller; a superseded read never overwrites a newer one (the store's own guard).
+    loadCounts();
   }, [loadCounts]);
+  // Only these two states are the database's answer; in them a status absent from the RPC has zero rows.
+  const answered = countsState.kind === 'rows' || countsState.kind === 'empty';
+  // Widened to string keys: STEP_INPUT_STATUS lists statuses as plain strings (shared with Deno), not the web's union.
+  const byStatus: Readonly<Partial<Record<string, number>>> = statusCounts;
+  /* Rows waiting at each agent's input statuses: null while the read is loading (the Run button stays
+     locked until it lands). Failed, signed out or unconfigured: every agent is null, which the summary
+     says as "count unknown" and never as 0 ("nothing waiting" would be a false claim). Never hard-coded,
+     because the queues change with every scout and every sweep. */
+  const counts: WaitingCounts | null = countsState.kind === 'loading'
+    ? null
+    // One entry per agent, keyed like STEP_INPUT_STATUS so the record names every PipelineStep.
+    : Object.fromEntries(Object.entries(STEP_INPUT_STATUS).map(([step, statuses]) => [
+      // The agent id the summary looks up.
+      step,
+      // The sum over that agent's statuses equals the old .in('status', statuses) exact count.
+      answered ? statuses.reduce((sum, status) => sum + (byStatus[status] ?? 0), 0) : null,
+    ])) as WaitingCounts;
 
   const handleStart = async (): Promise<void> => {
     // A retry is another bulk Gemini spend, so the phrase must be typed again for it.

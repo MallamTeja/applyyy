@@ -84,7 +84,7 @@ import type { PipelineStep } from '../pipeline/rowPipeline.ts';
 // The real invoke/read deps, or null on an unconfigured machine (the button then explains itself).
 import { liveRowPipelineDeps } from '../pipeline/rowPipelineDeps.ts';
 // The tested list logic: lanes, paging, sort, the date marker and the honest counter text.
-import { DISCOVERED_LIST_SELECT, LANES, SORT_OPTIONS, appendUnique, emptyListMessage, hasMoreRows, OPENING_LANE, isCurrentLane, keysetFilter, laneCountsFrom, loadedOfText, pageLimit, postedDate, sortItems } from './discoveredList.ts';
+import { DISCOVERED_LIST_SELECT, LANES, SORT_OPTIONS, appendUnique, emptyListMessage, hasMoreRows, OPENING_LANE, isCurrentLane, keysetFilter, laneCountsFrom, laneTotalFrom, loadedOfText, pageLimit, postedDate, sortItems } from './discoveredList.ts';
 // Every status's count in one RPC (application_status_counts), reused rather than a new per-lane query.
 import { useApplicationCounts } from '../../data/useApplicationCounts.ts';
 // Type only: the job row as the narrowed select delivers it, derived from DISCOVERED_JOB_COLUMNS.
@@ -142,11 +142,26 @@ export function DiscoveredJobsPage(): ReactElement {
     setLane(key);
   };
   // Every status's exact count in one existing RPC: where screened rows went, for the empty-lane sentence.
-  const { state: countsState, counts: statusCounts } = useApplicationCounts();
+  // refetch too: a write on this page (Send, Reject, Undo) moves rows between lanes, so the totals must re-read.
+  const { state: countsState, counts: statusCounts, refetch: refetchCounts } = useApplicationCounts();
   // Lane-shaped counts, or null until the read actually answers (the tested rule in discoveredList.ts).
   const laneCounts = useMemo(() => laneCountsFrom(countsState.kind, statusCounts), [countsState.kind, statusCounts]);
   // The lane's status and step list, from the one tested mapping.
   const laneSpec = LANES[lane];
+  /* The exact number of rows at the lane's status. The list holds only the loaded pages, so its length
+     undercounts; this is the honest total. From the counts RPC above, not a second HEAD count (2026-11-08,
+     one Sydney round trip fewer per load); null while that read is loading or failed, never 0. Derived
+     per render from the lane, so the old lane's total can never sit under the new lane's label. */
+  const laneTotal = laneTotalFrom(countsState.kind, statusCounts, laneSpec.status);
+  /* The refetch, readable inside loadData without becoming a dependency: if the hook ever hands out a new
+     function per render, a dependency would rebuild loadData and rerun the full load on every render. */
+  const refetchCountsRef = useRef(refetchCounts);
+  // Kept current each render; loadData reads it only when it runs.
+  refetchCountsRef.current = refetchCounts;
+  /* False until the first load: the counts store already holds (or is fetching) a read when the page
+     opens (the shell starts it), so the first load must not ask again; that duplicate is the round trip
+     this change removed. Every later load re-reads them. */
+  const countsPrimedRef = useRef(false);
   /* The Matched / Filtered Out split is this page's local preview of the screener. On the ready lane
      the DEPLOYED screener has already passed every row, so re-judging them locally could only show a
      second, weaker opinion as "Filtered Out". The ready lane therefore shows "All" only. */
@@ -169,9 +184,7 @@ export function DiscoveredJobsPage(): ReactElement {
   /* Why the last load failed, or null. A THIRD state beside "loading" and "rows":
      an outage must not render as an empty list or as somebody else's rows. */
   const [loadError, setLoadError] = useState<string | null>(null);
-  /* The exact number of rows at the lane's status, from a count query. The list holds only the
-     loaded pages, so its length undercounts; this is the honest total. */
-  const [laneTotal, setLaneTotal] = useState<number | null>(null);
+  // laneTotal is derived from the counts RPC beside laneSpec above; it is no longer state set by loadData.
   /* Outcomes of "Send through pipeline", newest first. Held HERE, not on the card: a settled
      row has left its lane, so the reload removes its card and the card's own note with it.
      Without this, "Dropped by the screener" would flash and vanish. Each entry keeps the step list
@@ -225,6 +238,14 @@ export function DiscoveredJobsPage(): ReactElement {
     const limit = pageLimit(mode, itemsRef.current.length);
     // The last loaded row in server order: Load more continues strictly after it.
     const last = itemsRef.current[itemsRef.current.length - 1];
+    /* The lane total now comes from the counts RPC, so a reload re-reads it there, in parallel with the
+       list below. Not on Load more: paging moves no rows, so the total it shows is still the answer. */
+    if (mode !== 'more') {
+      // Every load after the first: a Send/Reject/Undo settle or a lane switch, where counts may have moved.
+      if (countsPrimedRef.current) refetchCountsRef.current();
+      // The first load rides on the read the store already has.
+      countsPrimedRef.current = true;
+    }
     try {
       // Load more keeps the grid and only marks its own button busy.
       if (mode === 'more') setLoadingMore(true);
@@ -234,9 +255,8 @@ export function DiscoveredJobsPage(): ReactElement {
         setLoading(true);
         // A retry starts clean; a stale banner over fresh rows would be its own lie.
         setLoadError(null);
-        // The old lane's total must not sit under the new lane's label, nor survive a failed read.
-        setLaneTotal(null);
-        // Same for the old lane's cards.
+        // The old lane's total cannot linger: laneTotal is derived per lane from the counts RPC.
+        // The old lane's cards must not sit under the new lane's label, nor survive a failed read.
         setItems([]);
       }
       // The keyset cursor for Load more; null for every other mode (they start at the top).
@@ -263,10 +283,11 @@ export function DiscoveredJobsPage(): ReactElement {
         .eq('status', laneSpec.status);
       // Load more: only rows after the last loaded one, so rows that left the lane cannot shift a page.
       if (cursor !== null) query = query.or(cursor);
-      // All three reads in parallel (2026-10-24): the rules were awaited alone first, adding a full
+      // Both reads in parallel (2026-10-24): the rules were awaited alone first, adding a full
       // browser round trip (~250 ms measured) before the list even started, though the cascade only
-      // needs them at render time, after the list arrives anyway.
-      const [rules, listResult, countResult] = await Promise.all([
+      // needs them at render time, after the list arrives anyway. The third read, the lane's exact
+      // HEAD count, is gone (2026-11-08): laneTotal reads the counts RPC the page already loads.
+      const [rules, listResult] = await Promise.all([
         // The filter cascade's rules; evaluated in the browser over the loaded rows.
         loadFilterRules(),
         query
@@ -276,12 +297,6 @@ export function DiscoveredJobsPage(): ReactElement {
           .order('id', { ascending: true })
           // One page (or the loaded window); browser-side evaluation needs the rows, the page bounds payload.
           .limit(limit),
-        supabase
-          .from('applications')
-          // head:true returns only the count, so the total costs no row payload.
-          .select('id', { count: 'exact', head: true })
-          // Same predicate as the list, so the two numbers describe the same set.
-          .eq('status', laneSpec.status),
       ]);
       // The out-of-order case this guard exists for: drop a response a newer load superseded.
       if (stale()) return;
@@ -322,8 +337,6 @@ export function DiscoveredJobsPage(): ReactElement {
       setLoadError(null);
       // Load more appends (appendUnique is a belt-and-braces check; the cursor already excludes loaded rows); every other mode replaces.
       setItems(mode === 'more' ? appendUnique(itemsRef.current, mapped) : mapped);
-      // A failed count is not fatal to the list; fall back to "unknown" rather than the loaded length.
-      setLaneTotal(countResult.error ? null : countResult.count);
       // Surface the rules failure after the list loaded, so the reason is visible beside the rows.
       if (rulesError !== null) {
         // States the consequence: the Matched/Filtered split is not trustworthy.
