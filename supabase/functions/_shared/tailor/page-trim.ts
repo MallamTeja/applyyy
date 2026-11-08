@@ -33,14 +33,24 @@ import { fitsOnePage } from "../../../../packages/resume-template/src/index.ts";
  */
 export const PAGE_FIT_FLOORS = {
   // Bullets each entry keeps at least, by section. Education is never trimmed at all.
-  minBullets: { experience: 1, projects: 3, achievements: 1, certifications: 0 },
+  // Projects 4 since Teja's content rules (2026-11-08 15:46 IST: "each project at least 4 bullets"; was 3).
+  minBullets: { experience: 1, projects: 4, achievements: 1, certifications: 0 },
   // Per-entry overrides. exp_aczen = "the Aczen internship keeps >= 4 bullets"; Student Tribe
   // ("Technical Coordinator", Teja's "1-2 bullets") is the experience default of 1.
   minBulletsByRef: { exp_aczen: 4 } as Readonly<Record<string, number>>,
-  // "Each project keeps 3-4 bullets": above 4 is trimmed FIRST, before any other bullet.
+  // Bullets above 4 on a project are trimmed FIRST, before any other bullet (with the floor at 4, a project ends at exactly 4 when space is short).
   projectSoftCap: 4,
-  // Certification entries kept at least ("2-3").
-  minCertifications: 2,
+  // Certification entries kept at least: 3 since 2026-11-08 15:46 IST ("certifications at least 3"; was 2).
+  minCertifications: 3,
+  // ENTRY COUNTS for the content rules (Teja, 2026-11-08 15:36 + 15:46 IST), enforced at selection by content-rules.ts.
+  // Never page-trimmed (the trimmer removes bullets and certifications only), so here only so every floor has one home.
+  // A tailored resume holds AT MOST this many projects ("never and ever 3 projects, only 2"), and exactly this many
+  // when the master has them.
+  maxProjects: 2,
+  // Achievement entries kept at least ("achievements at least 2").
+  minAchievements: 2,
+  // Education entries kept at least ("both educations; the diploma counts").
+  minEducation: 2,
 } as const;
 
 /** One unit of trimming. */

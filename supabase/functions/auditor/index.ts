@@ -42,7 +42,7 @@ import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 import { parseApplicationIdParam } from "../_shared/http/application-id.ts";
 
 // The matcher's pre-gate, re-run as the last check before a human sees the row (leak 1, 2026-11-05)
-import { auditorPreGateDrop, type AuditorJobEmbed } from "./pregate.ts";
+import { auditorContentRulesDrop, auditorPreGateDrop, type AuditorJobEmbed } from "./pregate.ts";
 
 // The one config loader the matcher calls too, so both stages read the gate config identically
 import { loadPreGatePreferences, type ConfigReader } from "../_shared/pregate-config-loader.ts";
@@ -399,6 +399,33 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
         // Counted as failed, separately from transient errors
         else failedCount += 1;
         // Never audit this row against anything
+        continue;
+      }
+
+      // THE CONTENT-RULES GATE (Teja, 2026-11-08): a resume that breaks the content rules (3 projects, a thin
+      // Aczen entry, too few certifications...) never reaches a human. It runs HERE, not with the job pre-gate
+      // above, because every floor is min(rule, master) and the pinned master only exists from this line on;
+      // it still runs before auditApplication and before any `awaiting_approval` hop below. A malformed resume
+      // or master throws inside it, which the catch below turns into a reported per-row failure, never a pass.
+      const contentDrop = auditorContentRulesDrop(resume, pinned.master);
+      // Broken rules: off the queue through the auditor's one non-audit exit, like the pre-gate.
+      if (contentDrop !== null) {
+        // `tailored -> failed` is the auditor's only non-audit edge (live graph, 2026-11-05); no new transition.
+        const contentMove = await db.rpc("advance_application_status", {
+          // Application ID
+          p_application_id: row.id,
+          // Off the queue; a human can send it back (failed -> passed_filters) after a re-tailor
+          p_to_status: "failed",
+          // Acting agent identity
+          p_agent: "auditor",
+          // The pre-gate's detail shape; its own stage name, because this judged the resume, not the job
+          p_detail: { reason: contentDrop.code, stage: "auditor_content_rules", detail: contentDrop.reason },
+        });
+        // A refused move leaves the row in place; report it rather than count it
+        if (contentMove.error) failures.push({ applicationId: row.id, error: contentMove.error.message });
+        // Counted with the other permanent failures; the drain reads `failed` as advanced
+        else failedCount += 1;
+        // Never audited, never shown to Teja
         continue;
       }
 

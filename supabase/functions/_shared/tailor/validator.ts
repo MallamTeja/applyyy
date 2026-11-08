@@ -36,6 +36,10 @@ import type {
   TailoredProfile,
 } from "../contracts/shared-types.ts";
 
+// The only shape a header role title may have (2026-11-08): starts with a letter; letters, digits, spaces and
+// & + # . / - after it; 2-60 characters. Exported so cleanRoleTitle (content-rules.ts) emits exactly what this accepts.
+export const ROLE_TITLE_SHAPE = /^[A-Za-z][A-Za-z0-9 &+#./-]{1,59}$/;
+
 // Every way a tailoring can be dishonest or malformed. A discriminated union so the
 // dashboard can render each kind differently and the compiler catches a new case.
 export type TailorViolation =
@@ -67,7 +71,11 @@ export type TailorViolation =
   // floors that held, so the fix (lower a floor, or shorten the master) is readable from the event.
   // Produced by the tailorer, not by validateTailoredProfile: the validator answers "is it honest",
   // and a two-page resume is honest but still must not be stored.
-  | { readonly kind: "page_overflow"; readonly blockedBy: readonly string[] };
+  | { readonly kind: "page_overflow"; readonly blockedBy: readonly string[] }
+  // The content rules (Teja, 2026-11-08: 2 projects x >= 4 bullets, Aczen >= 4, certifications >= 3, achievements >= 2,
+  // education >= 2) still broken after the tailor topped up from the master and fitted the page. `blockedBy` names each
+  // broken rule (content-rules.ts checkContentRules). Produced by the tailorer, like page_overflow.
+  | { readonly kind: "content_floor"; readonly blockedBy: readonly string[] };
 
 // Success carries the render input; failure carries every reason. A union rather than
 // a throw, because the caller must persist the violations for the dashboard rather
@@ -763,6 +771,10 @@ export function validateTailoredProfile(
   const variant = variantId === null ? undefined : (master.summary_variants ?? []).find((candidate) => candidate.id === variantId);
   // A picked id the master does not hold is a fabricated ref, never quietly read as the default.
   if (variantId !== null && variant === undefined) violations.push({ kind: "unresolved_ref", ref: variantId, where: "summary_variant" });
+  // The header role title (2026-11-08): when present it must be the cleaned shape cleanRoleTitle produces (words,
+  // digits and & + # . / - only, 2-60 characters). Anything else (markup, a sentence, an empty string) is refused,
+  // never printed: a free-text header would be the one line of the resume nobody traced (CLAUDE.md section 6).
+  if (tailored.headline_title !== undefined && !ROLE_TITLE_SHAPE.test(tailored.headline_title)) violations.push({ kind: "unresolved_ref", ref: String(tailored.headline_title), where: "headline_title" });
 
   // --- Summary ------------------------------------------------------------
   // aa names this the weakest point in the contract, and states why: prose cannot be
@@ -831,8 +843,9 @@ export function validateTailoredProfile(
         // Name, email and links, exactly as stored.
         ...master.identity,
         // Absent becomes null for each optional line (see nullIfAbsent).
-        // The picked variant's headline (2026-11-07), else the master's own, exactly as before.
-        headline: variant !== undefined ? variant.headline : nullIfAbsent(master.identity.headline),
+        // The role applied for (2026-11-08, headline_title, shape-checked above), else the picked variant's headline
+        // (2026-11-07), else the master's own, exactly as before.
+        headline: tailored.headline_title ?? (variant !== undefined ? variant.headline : nullIfAbsent(master.identity.headline)),
         phone: nullIfAbsent(master.identity.phone),
         location: nullIfAbsent(master.identity.location),
       },

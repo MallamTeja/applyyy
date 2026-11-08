@@ -166,6 +166,8 @@ export async function persistTailorOutcome(
       // The one-page rule (2026-11-07): every bullet or certification removed to fit one page, in
       // removal order with its printed text, so a trim is never silent. Absent when nothing went.
       ...(outcome.pageFitTrimmed.length > 0 ? { page_fit_trimmed: outcome.pageFitTrimmed } : {}),
+      // What the content rules capped or topped up (2026-11-08), only when anything changed: a repair is reported, never silent.
+      ...((outcome.contentRuleChanges ?? []).length > 0 ? { content_rules_applied: outcome.contentRuleChanges } : {}),
     },
   });
   // A failure here leaves the profile written and the status unmoved — recoverable by

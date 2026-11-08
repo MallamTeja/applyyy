@@ -1732,7 +1732,9 @@ export function ApprovalQueuePage(): ReactElement {
       // attest_* write the master on their own paths, so the simulation leaves the resume as it is.
       action.kind === 'attest_skill' || action.kind === 'attest_bullet' ? { ok: false } : pureEdit(action, resume, original, master, full),
       // The row's JD keywords, as every save uses.
-      source.application.selected_jd_keywords);
+      source.application.selected_jd_keywords,
+      // The pinned master, so the batch is held back on the content rules its saves would refuse.
+      master);
   }
 
   async function editRow(applicationId: string, action: PageEditAction, editSource: EditSource): Promise<EditResult> {
@@ -1782,7 +1784,8 @@ export function ApprovalQueuePage(): ReactElement {
        BEFORE the save, and the fitted one is what is saved, so no save ever stores page two. The
        same pure trimmer the tailor runs; a cut is announced below and recorded in the history note.
        Floors that overflow, or a resume the check cannot measure, refuse the edit (fail closed). */
-    const fitted = fitEditToOnePage(outcome.resume, source.application.selected_jd_keywords);
+    // Content rules judged against the stored resume (only a newly broken rule refuses) and the pinned master.
+    const fitted = fitEditToOnePage(outcome.resume, source.application.selected_jd_keywords, { previous: current, master: source.master });
     // Refused before any write, in the check's own words.
     if (!fitted.ok) return notSaved(fitted.reason);
 

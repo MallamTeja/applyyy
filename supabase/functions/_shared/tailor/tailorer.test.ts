@@ -162,7 +162,8 @@ test("an honest tailoring carries its raw refs for the Auditor", async () => {
   if (outcome.kind !== "tailored") return;
   // The raw ref-based output, before resolution. The Auditor's summary-ref check
   // (detector.ts:503) reads `tailor_refs` and could never fire while nothing kept these.
-  assert.deepEqual(outcome.refs, HONEST_TAILORING);
+  // Plus the header role title the tailor adds from the posting (rule 5, 2026-11-08), so the rebuild prints it too.
+  assert.deepEqual(outcome.refs, { ...HONEST_TAILORING, headline_title: "Backend Engineer Intern" });
 });
 
 test("a tailoring citing a ref absent from the master is refused, not thrown", async () => {
@@ -732,7 +733,7 @@ test("D2: one relevant group is topped up to three with the model's groups, in t
 });
 
 // ---- summary variants end to end (pending #11, 2026-11-07) ---------------------------------------------
-test("summary variant: a picked variant flows through the tailorer into the stored refs and the printed headline", async () => {
+test("summary variant: a picked variant flows through the tailorer into the stored refs; the role title wins the headline", async () => {
   // The fixture master plus one variant.
   const master: MasterProfile = { ...MASTER, summary_variants: [{ id: "variant-swe", label: "Software engineering", headline: "Software Engineer", summary: { id: "summary-swe", text: "Software engineer who ships Node.js services." } }] };
   // A model that picks it.
@@ -744,8 +745,8 @@ test("summary variant: a picked variant flows through the tailorer into the stor
   if (outcome.kind !== "tailored") return;
   // The pick is stored as held, so tailor_refs rebuilds this resume.
   assert.equal(outcome.refs.summary_variant, "variant-swe");
-  // And the variant's headline prints.
-  assert.equal(outcome.resume.identity.headline, "Software Engineer");
+  // The header names the role applied for (rule 5, 2026-11-08), over the variant's own headline.
+  assert.equal(outcome.resume.identity.headline, "Backend Engineer Intern");
 });
 
 // The control: a reply whose summary_variant is not a string is malformed, not quietly the default.

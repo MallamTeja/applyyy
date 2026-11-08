@@ -8,7 +8,9 @@ import { describe, test } from "node:test";
 // Strict deep equality, so a changed verdict shape fails here.
 import assert from "node:assert/strict";
 // The verdict the auditor calls (its config loader is tested in _shared/pregate-config-loader.test.ts).
-import { auditorPreGateDrop, type AuditorJobEmbed } from "./pregate.ts";
+import { auditorContentRulesDrop, auditorPreGateDrop, type AuditorJobEmbed } from "./pregate.ts";
+// The two shapes the content-rules fixtures are cast to.
+import type { MasterProfile, ResolvedResume } from "../_shared/contracts/shared-types.ts";
 // The preference shape, so the fixture is checked against the real type.
 import type { PreGatePreferences } from "../matcher/tech-pregate.ts";
 
@@ -85,3 +87,73 @@ describe("auditorPreGateDrop", () => {
   });
 });
 
+
+// Content rules (Teja, 2026-11-08): live rows reached the approval queue with 3 projects. The auditor now
+// runs the tailor's checkContentRules against the PINNED master before any human sees the row.
+// Only the five sections the gate counts are built; the cast is the narrowest way to a typed fixture.
+type Entry = { ref: string; bullets: { ref: string; text: string }[] };
+// A master node with n bullets, in the master's id/text shape.
+const masterNode = (id: string, n: number) => ({ id, bullets: Array.from({ length: n }, (_, i) => ({ id: `${id}_b${i}`, text: `${id} bullet ${i}` })) });
+// A resolved entry printing n bullets of that node.
+const resumeEntry = (ref: string, n: number): Entry => ({ ref, bullets: Array.from({ length: n }, (_, i) => ({ ref: `${ref}_b${i}`, text: `${ref} bullet ${i}` })) });
+
+// A master with 3 projects of 4 bullets, the Aczen entry, 3 certifications, 2 achievements, 2 educations.
+const MASTER = {
+  // Three projects: the case where the cap of 2 binds.
+  projects: [masterNode("proj_a", 4), masterNode("proj_b", 4), masterNode("proj_c", 4)],
+  // The floor-named experience.
+  experience: [masterNode("exp_aczen", 4)],
+  // Enough certifications for the floor of 3.
+  certifications: [masterNode("cert_a", 0), masterNode("cert_b", 0), masterNode("cert_c", 0)],
+  // Enough achievements for the floor of 2.
+  achievements: [masterNode("ach_a", 1), masterNode("ach_b", 1)],
+  // Both educations.
+  education: [masterNode("edu_a", 0), masterNode("edu_b", 0)],
+  // A summary to print, so "every tailored resume prints a summary" (2026-11-08 16:06 IST) binds here too.
+  summary: { id: "summary_master", text: "Engineer." },
+} as unknown as MasterProfile;
+
+// A resume meeting every rule against MASTER.
+const COMPLIANT = {
+  // Exactly 2 projects, 4 bullets each.
+  projects: [resumeEntry("proj_a", 4), resumeEntry("proj_b", 4)],
+  // Aczen at its floor.
+  experience: [resumeEntry("exp_aczen", 4)],
+  // 3 certifications.
+  certifications: [resumeEntry("cert_a", 0), resumeEntry("cert_b", 0), resumeEntry("cert_c", 0)],
+  // 2 achievements.
+  achievements: [resumeEntry("ach_a", 1), resumeEntry("ach_b", 1)],
+  // 2 educations.
+  education: [resumeEntry("edu_a", 0), resumeEntry("edu_b", 0)],
+  // The summary prints: text, and its section in the order.
+  summary: "Engineer.",
+  // Every section the resume prints, summary first.
+  section_order: ["summary", "experience", "projects", "education", "achievements", "certifications"],
+} as unknown as ResolvedResume;
+
+describe("auditorContentRulesDrop", () => {
+  test("auditor never passes a resume with 3 projects to a human", () => {
+    // The live leak: every project the master holds, one over the cap.
+    const resume = { ...COMPLIANT, projects: [resumeEntry("proj_a", 4), resumeEntry("proj_b", 4), resumeEntry("proj_c", 4)] } as unknown as ResolvedResume;
+    // The verdict index.ts acts on.
+    const drop = auditorContentRulesDrop(resume, MASTER);
+    // A drop, with the content-rules code, naming the projects rule.
+    assert.equal(drop?.code, "content_rules", JSON.stringify(drop));
+    // The detail the human reads names the broken rule.
+    assert.match(drop!.reason, /projects: 3, at most 2/);
+  });
+
+  test("a compliant resume is not dropped by the content rules", () => {
+    // Every floor met, the cap respected.
+    assert.equal(auditorContentRulesDrop(COMPLIANT, MASTER), null);
+  });
+
+  test("a missing resume or master is refused, never read as compliant", () => {
+    // Fail closed (CLAUDE.md section 6): no resume to judge.
+    assert.throws(() => auditorContentRulesDrop(null, MASTER), /no resolved resume/);
+    // No master: every floor would read 0.
+    assert.throws(() => auditorContentRulesDrop(COMPLIANT, null), /no pinned master/);
+    // A section missing from the stored resume is damaged data, not "zero, fine".
+    assert.throws(() => auditorContentRulesDrop({ ...COMPLIANT, certifications: undefined } as unknown as ResolvedResume, MASTER), /resume.certifications is not an array/);
+  });
+});

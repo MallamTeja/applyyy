@@ -8,11 +8,54 @@
    already shows the smaller type when one is needed. This module only removes content when even
    the smallest type overflows, and refuses when the floors themselves overflow.
 
+   Then the content rules (2026-11-08, supabase/functions/_shared/tailor/content-rules.ts): an edit
+   that newly breaks one (above all, a 3rd project) is refused before the save, like an overflow.
+
    Pure: no React, no network, no Supabase. The page wires it; the tests drive it directly. */
 // The same trimmer as the tailor, by relative path (the rowPipeline.ts precedent): one rule, one file.
-import { fitToOnePage, type TrimItem } from '../../../../../supabase/functions/_shared/tailor/page-trim.ts';
-// The resume type, from the web's own contract module.
-import type { ResolvedResume } from '../../data/contract';
+import { fitToOnePage, PAGE_FIT_FLOORS, type TrimItem } from '../../../../../supabase/functions/_shared/tailor/page-trim.ts';
+// The content rules' gate (Teja, 2026-11-08), the same file the tailor and the auditor run: one rule, one file.
+import { checkContentRules } from '../../../../../supabase/functions/_shared/tailor/content-rules.ts';
+// The resume and master types, from the web's own contract module.
+import type { MasterProfile, ResolvedResume } from '../../data/contract';
+
+/* What the content-rule check needs beyond the edited resume. One named object, not two more
+   positional params: `previous` and `next` share a type, so positional order could be swapped silently. */
+export interface ContentRuleContext {
+  // The resume as stored BEFORE this edit, so a row tailored before the rules can still be fixed.
+  readonly previous: ResolvedResume;
+  // The master the row is pinned to: every floor is min(rule, what this master holds).
+  readonly master: MasterProfile;
+}
+
+/* One broken rule's identity: the section/ref before ":" plus its direction (cap or floor). The
+   direction matters: an old row breaking "projects: 3, at most 2" must not license an edit down to
+   "projects: 1, needs 2", which shares the prefix "projects" but is a different rule. */
+function ruleKey(broken: string): string {
+  // "projects: 3, at most 2" -> "projects|max"; "exp_aczen: 1 bullets, needs 4" -> "exp_aczen|min".
+  return `${broken.split(':')[0]}|${broken.includes('at most') ? 'max' : 'min'}`;
+}
+
+/* THE "MAKES WORSE" RULE. Every rule `next` breaks that `previous` did not, plus the project cap when
+   the count rises past it. Why not simply refuse whatever `next` breaks: a row tailored before the
+   rules (live: 3 projects, 1 Aczen bullet) would then refuse EVERY edit, including the one that fixes
+   it (removing the 3rd project). So a rule the stored row already broke stays tolerated, and only a
+   newly broken rule refuses. The cap is checked by count too, because "projects|max" is already broken
+   on such a row and adding a 4th project must still be refused (the ruling that started this).
+   ponytail: a floor already broken may sink further (certifications 2 -> 1 on an old row); compare
+   per-rule counts if that ever matters. */
+function newlyBroken(previous: ResolvedResume, next: ResolvedResume, master: MasterProfile): string[] {
+  // The rules the stored row already broke, by identity.
+  const before = new Set(checkContentRules(previous, master).map(ruleKey));
+  // Rules `next` breaks that were not broken before.
+  const broken = checkContentRules(next, master).filter((rule) => !before.has(ruleKey(rule)));
+  // Over the cap and growing: refused even when the cap was already broken (an old 3-project row adding a 4th).
+  const capRise = next.projects.length > PAGE_FIT_FLOORS.maxProjects && next.projects.length > previous.projects.length;
+  // Named once: when the cap is newly broken, the filter above already holds it.
+  if (capRise && !broken.some((rule) => ruleKey(rule) === 'projects|max')) broken.push(`projects: ${next.projects.length}, at most ${PAGE_FIT_FLOORS.maxProjects}`);
+  // Empty = the edit makes no rule worse.
+  return broken;
+}
 
 /* What an edit becomes after the fit: a resume to save (with what was cut), or a refusal. */
 export type PageFitEdit =
@@ -41,8 +84,11 @@ export function trimNotice(trimmed: readonly TrimItem[]): string | null {
 }
 
 /* Fit one edited resume on one page. Fails CLOSED: a resume the check cannot measure is refused,
-   never saved (CLAUDE.md section 6: unmeasurable is not "fits"). */
-export function fitEditToOnePage(next: ResolvedResume, jdKeywords: readonly string[]): PageFitEdit {
+   never saved (CLAUDE.md section 6: unmeasurable is not "fits"). Then the content rules (Teja,
+   2026-11-08: at most 2 projects, Aczen/project/cert/achievement/education floors) on the FITTED
+   resume, the one that would be saved. `rules` is required, not optional: a default would let a
+   caller skip the gate by omission (CLAUDE.md section 6). */
+export function fitEditToOnePage(next: ResolvedResume, jdKeywords: readonly string[], rules: ContentRuleContext): PageFitEdit {
   // The trimmer's answer, or nothing when it threw.
   let fit: ReturnType<typeof fitToOnePage>;
   // A throw here is a measuring failure, and a measuring failure must not become a save.
@@ -58,6 +104,10 @@ export function fitEditToOnePage(next: ResolvedResume, jdKeywords: readonly stri
     // The floors in plain words, joined.
     return { ok: false, reason: `this would make the resume longer than one page, and nothing more can be cut automatically (${fit.blockedBy.join('; ')}). Remove something first.` };
   }
+  // The content rules this save would newly break, judged on what would actually be stored.
+  const broken = newlyBroken(rules.previous, fit.resume, rules.master);
+  // Any: refuse before the save, naming each rule in the gate's own words.
+  if (broken.length > 0) return { ok: false, reason: `this breaks the resume content rules (${broken.join('; ')}).` };
   // One page: save this resume, and say what was cut.
   return { ok: true, resume: fit.resume, trimmed: fit.trimmed, notice: trimNotice(fit.trimmed) };
 }
@@ -70,7 +120,8 @@ export type EditStep<A> = (resume: ResolvedResume, action: A) => { readonly ok: 
    on the floors, or null when every op would save on one page. So a batch never lands half-applied
    because op 3 hit the floors. An op the edit itself refuses is not this check's business (its own
    save reports it), so the simulation skips it exactly as a refused save changes nothing. */
-export function preflightBatch<A>(current: ResolvedResume, actions: readonly A[], step: EditStep<A>, jdKeywords: readonly string[]): string | null {
+// `master` is required for the same reason fitEditToOnePage's `rules` is: the batch must hit the content rules its saves will.
+export function preflightBatch<A>(current: ResolvedResume, actions: readonly A[], step: EditStep<A>, jdKeywords: readonly string[], master: MasterProfile): string | null {
   // The resume as it would stand after each save.
   let resume = current;
   // Each op in order, as the real loop applies them.
@@ -80,8 +131,9 @@ export function preflightBatch<A>(current: ResolvedResume, actions: readonly A[]
     // A refused edit saves nothing, so the resume is unchanged for the next op.
     if (!edited.ok) continue;
     // The fit its save would run.
-    const fitted = fitEditToOnePage(edited.resume, jdKeywords);
-    // This op would be refused on the floors: the whole batch is held back, with the reason.
+    // Judged against the resume this op starts from, exactly as its real save compares with the stored row.
+    const fitted = fitEditToOnePage(edited.resume, jdKeywords, { previous: resume, master });
+    // This op would be refused (floors or content rules): the whole batch is held back, with the reason.
     if (!fitted.ok) return fitted.reason;
     // What would be stored before the next op.
     resume = fitted.resume;

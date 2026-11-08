@@ -37,6 +37,8 @@ import { extractJdKeywords, keywordAppearsIn } from "./jd-keywords.ts";
 // Stored postings may be raw HTML; every reader here sees the text (N1, 2026-11-07).
 import { postingText } from "./posting-text.ts";
 // The one-page rule: the same pure trimmer the web runs live after every edit.
+// The content rules: cap/top-up before the gate, the check after the fit, the cited-variant pick (2026-11-08).
+import { checkContentRules, cleanRoleTitle, enforceContentRules, pickCitedVariant, type ContentRuleChange } from "./content-rules.ts";
 import { fitToOnePage, withoutTrimmed, type TrimItem } from "./page-trim.ts";
 // The contract, reached through this stream's single re-export module. Nothing here
 // redefines one of these — a redefined type does not fail, it drifts.
@@ -93,7 +95,7 @@ export type TailorOutcome =
   // top-ups) or removed (a model pick in a group the posting never touches); both persisted in the event
   // so the reshaping is never silent.
   // `skillsInvented` (D1, 2026-11-07) lists every skill ref the model invented, dropped before the gate.
-  | { readonly kind: "tailored"; readonly resume: ResolvedResume; readonly refs: TailoredProfile; readonly jdKeywords: readonly string[]; readonly dedupedRefs: readonly DedupedRef[]; readonly skillsAdded: readonly string[]; readonly skillsDropped: readonly string[]; readonly skillsInvented: readonly string[]; readonly retry: null | { readonly firstViolations: readonly TailorViolation[]; readonly rewrittenRefs: readonly string[] }; readonly pageFitTrimmed: readonly TrimItem[] }
+  | { readonly kind: "tailored"; readonly resume: ResolvedResume; readonly refs: TailoredProfile; readonly jdKeywords: readonly string[]; readonly dedupedRefs: readonly DedupedRef[]; readonly skillsAdded: readonly string[]; readonly skillsDropped: readonly string[]; readonly skillsInvented: readonly string[]; readonly retry: null | { readonly firstViolations: readonly TailorViolation[]; readonly rewrittenRefs: readonly string[] }; readonly pageFitTrimmed: readonly TrimItem[]; readonly contentRuleChanges: readonly ContentRuleChange[] }
   // Never persisted as a profile; the reasons go to the dashboard and the row fails.
   // `retry` (2026-11-05): null when no retry ran; else the first attempt's violations and how the retry ended.
   | { readonly kind: "refused"; readonly violations: readonly TailorViolation[]; readonly retry: null | { readonly firstViolations: readonly TailorViolation[]; readonly result: "still_invalid" | "reply_unusable" } };
@@ -524,7 +526,20 @@ export function createTailorer(deps: TailorDeps): Tailorer {
     // The answer without them (the same object when there are none, so nothing else changes).
     const honest = skillsInvented.length === 0 ? deduplicated : { ...deduplicated, skills: deduplicated.skills.filter(({ ref }) => masterSkillIds.has(ref)) };
     // The shape runs on the honest answer.
-    const { profile: tailored, added: skillsAdded, dropped: skillsDropped } = shapeSkillGroups(honest, deps.master, input.jobDescription);
+    const { profile: shaped, added: skillsAdded, dropped: skillsDropped } = shapeSkillGroups(honest, deps.master, input.jobDescription);
+
+    // The posting's keywords, once: content top-ups and page-fit rank by them, and they are stored with the resume.
+    const jdKeywords = extractJdKeywords(input.jobDescription);
+    // THE CONTENT RULES (Teja, 2026-11-08 15:36 + 15:46 IST), in code because a prompt is not a control: exactly
+    // min(2, master) projects, and every floor topped up from master text verbatim. On the REFS and BEFORE the gate,
+    // so every added ref is resolved by the unchanged validator and the stored refs re-validate to the stored resume.
+    // The cited summary variant is picked first (LSEG 2b7db9a2), so the gate accepts the summary it cites.
+    const { profile: enforced, changes: contentRuleChanges } = enforceContentRules(pickCitedVariant(shaped, deps.master), deps.master, jdKeywords);
+    // Rule 5 (2026-11-08): the header names the role applied for, cleaned of seniority; stored in the refs so the
+    // rebuild prints the same title. No usable title: the refs stay as they were and the headline falls back as before.
+    const roleTitle = cleanRoleTitle(input.jobTitle);
+    // The profile the gate sees and the row stores.
+    const tailored: TailoredProfile = roleTitle === null ? enforced : { ...enforced, headline_title: roleTitle };
 
     // The honesty gate. This is the only call in the codebase that can produce a
     // `ResolvedResume`, which is what makes "the renderer cannot resolve a ref even by
@@ -567,27 +582,31 @@ export function createTailorer(deps: TailorDeps): Tailorer {
       const second = validateTailoredProfile(merged, deps.master, deps.masterVersion);
       // Still failing: refused, with both attempts on record.
       if (!second.ok) return { kind: "refused", violations: second.violations, retry: { firstViolations: validation.violations, result: "still_invalid" } };
-      // The posting's keywords, once: page-fit ranks bullets by them, and they are stored with the resume.
-      const jdKeywords = extractJdKeywords(input.jobDescription);
       // One page (Teja, 2026-11-07), by the same trimmer the web runs on every edit.
       const fittedRetry = fitTailoredToOnePage(merged, second.resume, jdKeywords, revalidate);
       // Over one page at every floor: refused, the retry still on record.
       if (fittedRetry.kind === "overflow") return { kind: "refused", violations: [fittedRetry.violation], retry: { firstViolations: validation.violations, result: "still_invalid" } };
+      // The content rules on what will be stored: broken (a master too short is never broken; see content-rules.ts) = refused.
+      const brokenRetry = checkContentRules(fittedRetry.resume, deps.master);
+      // Named, never stored.
+      if (brokenRetry.length > 0) return { kind: "refused", violations: [{ kind: "content_floor", blockedBy: brokenRetry }], retry: { firstViolations: validation.violations, result: "still_invalid" } };
       // Passed: the (possibly trimmed) merged profile is what is stored, so tailor_refs re-validates to this resume.
-      return { kind: "tailored", resume: fittedRetry.resume, refs: fittedRetry.refs, jdKeywords, dedupedRefs: deduped, skillsAdded, skillsDropped, skillsInvented, retry: { firstViolations: validation.violations, rewrittenRefs: [...rewrites.keys()] }, pageFitTrimmed: fittedRetry.trimmed };
+      return { kind: "tailored", resume: fittedRetry.resume, refs: fittedRetry.refs, jdKeywords, dedupedRefs: deduped, skillsAdded, skillsDropped, skillsInvented, retry: { firstViolations: validation.violations, rewrittenRefs: [...rewrites.keys()] }, pageFitTrimmed: fittedRetry.trimmed, contentRuleChanges };
     }
 
     // Clean. The resume is safe to persist and to hand to the Auditor, when one exists.
     // `tailored` is the parsed model output that passed validation — the refs, unresolved.
     // `jdKeywords` comes from the SAME posting the model was given, never re-read later,
     // so the keywords and the resume can never describe two different versions of a job.
-    // The posting's keywords, once: page-fit ranks bullets by them, and they are stored with the resume.
-    const jdKeywords = extractJdKeywords(input.jobDescription);
     // One page (Teja, 2026-11-07), by the same trimmer the web runs on every edit.
     const fitted = fitTailoredToOnePage(tailored, validation.resume, jdKeywords, revalidate);
     // Over one page at every floor: refused with the floors that held, never stored as two pages.
     if (fitted.kind === "overflow") return { kind: "refused", violations: [fitted.violation], retry: null };
+    // The content rules on what will be stored (the trimmer stops at the same floors, so this holds unless the master changed).
+    const broken = checkContentRules(fitted.resume, deps.master);
+    // Named, never stored.
+    if (broken.length > 0) return { kind: "refused", violations: [{ kind: "content_floor", blockedBy: broken }], retry: null };
     // The (possibly trimmed) pair, and what was trimmed, for the event.
-    return { kind: "tailored", resume: fitted.resume, refs: fitted.refs, jdKeywords, dedupedRefs: deduped, skillsAdded, skillsDropped, skillsInvented, retry: null, pageFitTrimmed: fitted.trimmed };
+    return { kind: "tailored", resume: fitted.resume, refs: fitted.refs, jdKeywords, dedupedRefs: deduped, skillsAdded, skillsDropped, skillsInvented, retry: null, pageFitTrimmed: fitted.trimmed, contentRuleChanges };
   };
 }

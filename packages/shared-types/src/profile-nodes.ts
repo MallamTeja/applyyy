@@ -524,6 +524,14 @@ export interface TailoredProfile {
    * before still re-validates to its stored resume (rebuildOriginal). An id the master lacks is refused.
    */
   summary_variant?: NodeId | null;
+  /**
+   * The header's role title: the role being applied for, cleaned from the job title (Teja, 2026-11-08 15:46 IST:
+   * "header role title = the role being applied for"; seniority words removed, never invented). Set by the tailor
+   * (content-rules.ts cleanRoleTitle), printed by the validator as `identity.headline` over the variant's and the
+   * master's. Optional and copied AS HELD: absent = the headline exactly as before, so every stored tailor_refs
+   * from before re-validates to its stored resume (rebuildOriginal). A value outside the cleaned shape is refused.
+   */
+  headline_title?: string;
   skills: DocumentOrdered<TailoredSkill>;
   experience: DocumentOrdered<TailoredExperience>;
   projects: DocumentOrdered<TailoredProject>;

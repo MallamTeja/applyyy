@@ -7,7 +7,7 @@
 import './support/registerTsxHooks.ts';
 import assert from 'node:assert/strict';
 import { before, describe, it } from 'node:test';
-import type { ResolvedResume } from '../src/data/contract';
+import type { MasterProfile, ResolvedResume } from '../src/data/contract';
 
 // Loaded after the hooks so the resolve hook applies to the module's own imports.
 let fit: typeof import('../src/features/approval/pageFitEdit.ts');
@@ -60,6 +60,79 @@ function withSkills(resume: ResolvedResume, count: number): ResolvedResume {
   return { ...resume, skills: [...resume.skills, ...added] };
 }
 
+// A master with nothing in it: every content floor is min(rule, 0) = 0, so only the 2-project cap can bind.
+// Cast: checkContentRules reads only these five lists, and the page-fit tests are not about the rules.
+const EMPTY_MASTER = { projects: [], experience: [], certifications: [], achievements: [], education: [] } as unknown as MasterProfile;
+
+/** The content-rule context for a page-fit test: the edit compared with itself, against the empty master. */
+function noRules(resume: ResolvedResume) {
+  // Nothing newly broken by construction, so these tests measure the page fit alone.
+  return { previous: resume, master: EMPTY_MASTER };
+}
+
+/** One synthetic project, shaped like the fixture's own, with one short bullet (fits easily). */
+function project(ref: string) {
+  // A distinct ref and bullet ref, so the rules count it as its own entry.
+  return { ref, name: `Project ${ref}`, links: [], start_display: null, end_display: null, bullets: [{ ref: `bul_${ref}`, text: `Shipped ${ref}.`, master_text: `Shipped ${ref}.` }] };
+}
+
+/** The fixture holding exactly these project refs (prj_applyy is the fixture's own). */
+function withProjects(refs: readonly string[]): ResolvedResume {
+  // The committed fixture, unchanged otherwise.
+  const base = grown(0);
+  // The fixture's own project kept as-is; the rest synthetic.
+  const projects = refs.map((ref) => (ref === 'prj_applyy' ? base.projects[0]! : project(ref)));
+  // Cast: the synthetic projects use the fixture's shape.
+  return { ...base, projects } as unknown as ResolvedResume;
+}
+
+/** A master holding three projects (one bullet each) and nothing else, so the 2-project cap is what binds. */
+const THREE_PROJECT_MASTER = {
+  // Empty, so their floors bind nothing (min(rule, 0) = 0).
+  experience: [], certifications: [], achievements: [], education: [],
+  // Three projects, one bullet each: min(2, 3) = 2 is both the floor and the cap.
+  projects: ['prj_applyy', 'prj_two', 'prj_three'].map((id) => ({ id, bullets: [{ id: `bul_${id}`, text: id }] })),
+} as unknown as MasterProfile;
+
+describe('content rules in the editor (Teja, 2026-11-08)', () => {
+  it('editor save never keeps 3 projects', () => {
+    // The stored row: two projects, compliant.
+    const previous = withProjects(['prj_applyy', 'prj_two']);
+    // The edit: an add_master_entry of a third project.
+    const next = withProjects(['prj_applyy', 'prj_two', 'prj_three']);
+    // The save's fit.
+    const out = fit.fitEditToOnePage(next, [], { previous, master: THREE_PROJECT_MASTER });
+    // Refused, naming the projects rule.
+    assert.ok(!out.ok && out.reason.includes('content rules') && out.reason.includes('projects: 3, at most 2'), out.ok ? 'saved' : out.reason);
+    // An old row already over the cap may not grow either (3 -> 4).
+    const fourth = { ...next, projects: [...next.projects, project('prj_four')] } as unknown as ResolvedResume;
+    // Refused on the count rising, though "projects" was already broken.
+    const grownOut = fit.fitEditToOnePage(fourth, [], { previous: next, master: THREE_PROJECT_MASTER });
+    // Named.
+    assert.ok(!grownOut.ok && grownOut.reason.includes('projects: 4, at most 2'), grownOut.ok ? 'saved' : grownOut.reason);
+  });
+
+  it('editor allows removing a 3rd project from an old row', () => {
+    // A row tailored before the rules: three projects.
+    const previous = withProjects(['prj_applyy', 'prj_two', 'prj_three']);
+    // The fix Teja wants: the third removed.
+    const next = withProjects(['prj_applyy', 'prj_two']);
+    // The save's fit.
+    const out = fit.fitEditToOnePage(next, [], { previous, master: THREE_PROJECT_MASTER });
+    // Saved.
+    assert.equal(out.ok, true, out.ok ? '' : out.reason);
+  });
+
+  it('an AI batch that would add a 3rd project is held back before its first save', () => {
+    // Each op adds the named project.
+    const addProject = (resume: ResolvedResume, ref: string) => ({ ok: true as const, resume: { ...resume, projects: [...resume.projects, project(ref)] } as unknown as ResolvedResume });
+    // From one project: op 1 is fine, op 2 makes three.
+    const reason = fit.preflightBatch(withProjects(['prj_applyy']), ['prj_two', 'prj_three'], addProject, [], THREE_PROJECT_MASTER);
+    // Held back with the rule.
+    assert.match(reason ?? '', /projects: 3, at most 2/);
+  });
+});
+
 describe('fitEditToOnePage (live, per save)', () => {
   it('an add_skill that overflows is SAVED on one page: bullets are cut, every skill stays, and the cut is announced', () => {
     // The edit's raw result: near-full plus new skills, over one page.
@@ -67,7 +140,7 @@ describe('fitEditToOnePage (live, per save)', () => {
     // Precondition: the raw edit does not fit.
     assert.equal(template.fitsOnePage(edited), false);
     // The fit the save runs.
-    const out = fit.fitEditToOnePage(edited, ['caching']);
+    const out = fit.fitEditToOnePage(edited, ['caching'], noRules(edited));
     // Saved, not refused.
     assert.equal(out.ok, true);
     // Narrowed.
@@ -88,7 +161,7 @@ describe('fitEditToOnePage (live, per save)', () => {
     // The fixture as committed fits.
     const resume = grown(0);
     // The fit.
-    const out = fit.fitEditToOnePage(resume, []);
+    const out = fit.fitEditToOnePage(resume, [], noRules(resume));
     // Same object, nothing cut, nothing to say.
     assert.ok(out.ok && out.resume === resume && out.trimmed.length === 0 && out.notice === null);
   });
@@ -99,7 +172,7 @@ describe('fitEditToOnePage (live, per save)', () => {
     // Printed first, so it counts.
     const edited = { ...base, section_order: ['summary', ...base.section_order], summary: 'Long summary sentence about systems. '.repeat(400) } as ResolvedResume;
     // The fit.
-    const out = fit.fitEditToOnePage(edited, []);
+    const out = fit.fitEditToOnePage(edited, [], noRules(edited));
     // Refused.
     assert.equal(out.ok, false);
     // In plain words, naming the summary floor.
@@ -110,7 +183,7 @@ describe('fitEditToOnePage (live, per save)', () => {
     // A schema the renderer refuses: fitsOnePage answers false at every step, so the floors "overflow".
     const stale = { ...grown(0), schema_version: 2 } as unknown as ResolvedResume;
     // The fit.
-    const out = fit.fitEditToOnePage(stale, []);
+    const out = fit.fitEditToOnePage(stale, [], noRules(stale));
     // Not saved.
     assert.equal(out.ok, false);
   });
@@ -122,14 +195,14 @@ describe('preflightBatch (AI batch, before the first save)', () => {
 
   it('a batch whose every op saves on one page passes (trims are fine, they happen in each save)', () => {
     // Three single-skill adds on a near-full resume: each save trims, none hits the floors.
-    assert.equal(fit.preflightBatch(nearFull(), [1, 1, 1], step, []), null);
+    assert.equal(fit.preflightBatch(nearFull(), [1, 1, 1], step, [], EMPTY_MASTER), null);
   });
 
   it('a batch whose op 3 would hit the floors is held back with the reason, before any op saves', () => {
     // A step whose third op makes the never-trimmed summary huge.
     const summaryStep = (resume: ResolvedResume, op: string) => ({ ok: true as const, resume: op === 'huge' ? ({ ...resume, section_order: ['summary', ...resume.section_order], summary: 'Long summary. '.repeat(900) } as ResolvedResume) : withSkills(resume, 1) });
     // Ops 1 and 2 fine, op 3 over the floors.
-    const reason = fit.preflightBatch(grown(0), ['a', 'b', 'huge'], summaryStep, []);
+    const reason = fit.preflightBatch(grown(0), ['a', 'b', 'huge'], summaryStep, [], EMPTY_MASTER);
     // The batch is refused as a whole.
     assert.match(reason ?? '', /longer than one page/);
   });
@@ -138,7 +211,7 @@ describe('preflightBatch (AI batch, before the first save)', () => {
     // A refusing step.
     const refusing = (_resume: ResolvedResume, _op: number) => ({ ok: false as const });
     // Nothing would change, so nothing overflows.
-    assert.equal(fit.preflightBatch(grown(0), [1, 2], refusing, []), null);
+    assert.equal(fit.preflightBatch(grown(0), [1, 2], refusing, [], EMPTY_MASTER), null);
   });
 });
 

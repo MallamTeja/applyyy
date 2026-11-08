@@ -374,6 +374,13 @@ const TAILOR_POLICY = [
   "  vocabulary to prefer when rewording them.",
   // Section separator.
   "",
+  // THE SELECTION RULE (Teja, 2026-11-08 15:36 + 15:46 IST). A HINT ONLY, like the wording rule below:
+  // content-rules.ts enforces every number in code after the answer, so a model that ignores this is corrected.
+  "SELECTION RULE: pick EXACTLY 2 projects (the 2 most relevant; never 3), each with at least 4 bullets;",
+  // Part 2: the experience and count floors.
+  "  the Aczen experience with at least 4 bullets; at least 3 certifications, 2 achievements, 2 educations.",
+  // Section separator.
+  "",
   // THE WORDING HINT (2026-11-05). 97 of 130 tailor violations in 30 days were words the validator could not
   // trace (robust, ensure, alongside, auditing). This states the validator's own rule up front. A HINT ONLY:
   // the validator still checks every word, and the bullet rewrite retry handles what slips through.

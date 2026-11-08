@@ -214,7 +214,8 @@ export async function attestSkill(client: Client, args: AttestArgs): Promise<Att
      stored. Skills are never trimmed, so the new skill stays; something else may be cut, and is
      announced. Floors that overflow refuse here, after the master version (if made) was inserted:
      that version stays (immutable), and the row is untouched, like every other post-insert refusal. */
-  const fitted = fitEditToOnePage(added.resume, args.jdKeywords);
+  // Content rules against the stored resume and the NEW pin's master (the one the row will be pinned to).
+  const fitted = fitEditToOnePage(added.resume, args.jdKeywords, { previous: args.current, master: target });
   // Refused before the write, in the check's own words.
   if (!fitted.ok) return { ok: false, message: fitted.reason, masterInserted };
 

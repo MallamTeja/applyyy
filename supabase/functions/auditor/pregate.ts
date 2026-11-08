@@ -19,6 +19,10 @@
 import { firstPreGateDrop, type PreGateDropCode, type PreGatePreferences } from "../matcher/tech-pregate.ts";
 // "Teja pasted this himself": such rows skip every automatic gate (the matcher's rule).
 import { isHumanPicked } from "../_shared/match/score-threshold.ts";
+// Teja's content rules (2026-11-08): the tailor's own gate, reused so the auditor and the tailor cannot disagree.
+import { checkContentRules } from "../_shared/tailor/content-rules.ts";
+// The two shapes that gate reads, checked against the real contract.
+import type { MasterProfile, ResolvedResume } from "../_shared/contracts/shared-types.ts";
 
 // The embedded `jobs(...)` the auditor's queue read selects for each row.
 export interface AuditorJobEmbed {
@@ -55,4 +59,33 @@ export function auditorPreGateDrop(job: AuditorJobEmbed | null, preferences: Pre
     // Absent years: the experience gate falls back to the JD parser.
     minExperienceYears: job.min_experience_years,
   }, preferences);
+}
+
+// The content-rules verdict: its own code, because it judges the RESUME, not the job, so it is not a PreGateDropCode.
+export type AuditorContentRulesDrop = { readonly code: "content_rules"; readonly reason: string } | null;
+
+// Content rules (Teja, 2026-11-08): at most 2 projects (exactly min(2, master)), each >= min(4, master bullets),
+// exp_aczen >= 4, certifications >= 3, achievements >= 2, education >= 2. The tailor enforces them, but live rows
+// already held 3 projects, and the web editor can save any resume, so the auditor (the last agent before a human)
+// asks once more. Needs the PINNED master, because every floor is min(rule, what that master holds).
+export function auditorContentRulesDrop(resume: ResolvedResume | null, master: MasterProfile | null): AuditorContentRulesDrop {
+  // No resume: there is nothing to judge, which is not "compliant" (CLAUDE.md section 6). Throwing makes it a per-row
+  // failure (reported, left in place); index.ts fails a missing profile with its own reason before this runs.
+  if (resume === null || resume === undefined) throw new Error("auditor content rules: no resolved resume for this row");
+  // No master: every floor would read as 0 and pass. Same fail-closed answer.
+  if (master === null || master === undefined) throw new Error("auditor content rules: no pinned master for this row");
+  // Every section the gate counts must be an array on both sides; a missing one would throw a bare TypeError or, worse,
+  // read `.length` off a non-array object as undefined and compare false (a silent pass). Name the broken shape instead.
+  for (const section of ["projects", "experience", "certifications", "achievements", "education"] as const) {
+    // The resume side: a stored profile missing a section is damaged data, never "0 of them, fine".
+    if (!Array.isArray(resume[section])) throw new Error(`auditor content rules: resume.${section} is not an array`);
+    // The master side: an empty floor here would wave every resume through.
+    if (!Array.isArray(master[section])) throw new Error(`auditor content rules: master.${section} is not an array`);
+  }
+  // The tailor's own gate; each string names one broken rule.
+  const broken = checkContentRules(resume, master);
+  // Compliant: no objection.
+  if (broken.length === 0) return null;
+  // Broken: the code the dashboard filters on, and every rule named for the human who reads the event.
+  return { code: "content_rules", reason: broken.join("; ") };
 }

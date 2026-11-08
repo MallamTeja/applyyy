@@ -243,7 +243,8 @@ export async function attestBullet(client: Client, args: AttestBulletArgs): Prom
   /* One page (2026-11-07): fitted BEFORE the write; the fitted resume is what is stored. The trimmer
      may cut the very line just vouched for if it is the weakest; the notice then says so. Floors that
      overflow refuse here: the master version stays (immutable), the row is untouched. */
-  const fitted = fitEditToOnePage(proven.resume, args.jdKeywords);
+  // Content rules against the stored resume and the NEW pin's master (the one the row will be pinned to).
+  const fitted = fitEditToOnePage(proven.resume, args.jdKeywords, { previous: args.current, master: target });
   // Refused before the write, in the check's own words.
   if (!fitted.ok) return { ok: false, message: fitted.reason, masterInserted: true };
 
