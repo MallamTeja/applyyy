@@ -52,7 +52,7 @@ import { ResumePreview } from '../resume-preview/ResumePreview';
 // The page's reads.
 import { loadManualApply } from './manualApplyData';
 // Why the bot cannot apply, and the open questions the card offers inputs for (pure, unit tested).
-import { botCantApplyReasons, isBanked, openQuestionToBankQuestion, openQuestions } from './botCantApply';
+import { botCantApplyReasons, isBanked, openQuestionToBankQuestion, openQuestions, savedLine } from './botCantApply';
 // Type only: one open question.
 import type { OpenQuestion } from './botCantApply';
 // The Answer bank's own read and browser save: no agent key, so the trigger stamps the answer as Teja's (attested).
@@ -352,8 +352,9 @@ function OpenQuestions(props: { readonly rowId: string; readonly questions: read
     try {
       // The Answer bank page's own save path and row shape.
       const res = await saveBankAnswer(openQuestionToBankQuestion(question), value);
-      // The store's own words on a failure (a blocked read, a sync error).
-      setSaid((s) => ({ ...s, [question.key]: res.ok ? 'Saved to your answer bank. The next kit fills it.' : res.error ?? 'Save failed.' }));
+      // The store's own words on a failure (a blocked read, a sync error); on success, whether the kit rebuild
+      // the save asked for actually started (peer 4, 2026-11-08), so Teja knows when to press Refresh kits.
+      setSaid((s) => ({ ...s, [question.key]: res.ok ? savedLine(res.kitRefresh) : res.error ?? 'Save failed.' }));
       // Landed: the page re-reads the bank, and the question shows as banked.
       if (res.ok) answers?.onSaved();
     } finally {

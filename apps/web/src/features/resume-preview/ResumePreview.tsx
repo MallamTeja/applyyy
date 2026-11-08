@@ -276,6 +276,9 @@ function ResumePane({ heading, frameTitle, fileStem, preview }: ResumePaneProps)
           </button>
         </span>
       </div>
+      {/* Told, not hidden: the renderer shrank the type to keep this resume on one page (P1 #5, 2026-11-08).
+          The status class keeps it on the semantic secondary-text token, so it themes in light and dark. */}
+      {preview.smallerType && <p className="resume-preview__status">Fitted to one page (smaller type)</p>}
       <iframe
         ref={frameRef}
         className="resume-preview__frame"

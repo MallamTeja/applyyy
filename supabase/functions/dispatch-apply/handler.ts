@@ -11,6 +11,10 @@
 // kit until the 12:00 UTC cron and Manual apply showed nothing. apply-kit.yml's concurrency group
 // coalesces rapid approves into one queued run. Only the applier's LIVE drain stays behind the switch.
 //
+// KIT-ONLY ON ANSWER SAVE (peer 4, 2026-11-08): a body of exactly {"kit_only": true}, sent by the web's
+// saveBankAnswer after an answer lands, dispatches the apply-kit.yml sweep and NOTHING else: no switch
+// read, no approved count (Manual apply rows are mostly blocked_needs_human, not approved), never apply.yml.
+//
 // WHAT CAN STOP IT, in order, each answering WITHOUT touching GitHub:
 //   1. a caller who is not the app user: refused BEFORE any sign-in (W15, createAuthorizedAppUserClient
 //      in index.ts), so a visitor holding the public anon key cannot make it spend a password grant;
@@ -91,6 +95,26 @@ export async function handleDispatchApply(req: Request, deps: DispatchDeps): Pro
   // 401 or 403, as the verdict says.
   if (!caller.ok) return json(caller.status, { status: "error", message: caller.error });
 
+  // KIT-ONLY MODE (peer 4, 2026-11-08): an answer saved in Manual apply or the Answer bank asks for a kit
+  // rebuild here. The sweep already treats every kit older than the newest answer as due (K1, 2026-11-06);
+  // what was missing is a run STARTING when the answer lands, so the card waited for the next applier run
+  // or the 12:00 UTC cron. Read AFTER both caller checks, so a stranger's body is never even parsed.
+  if (await wantsKitOnly(req)) {
+    // The same PAT rule as below: blank or missing is a named 503, never a silent 200.
+    const kitToken = deps.token()?.trim() ?? "";
+    // Said by name, so the card can say why no rebuild started.
+    if (kitToken === "") return json(503, { status: "error", message: "dispatch_token_missing" });
+    // The sweep only (blank application_id). NEVER apply.yml: saving an answer must not start a submit,
+    // whatever the switch says, which is also why the switch and the approved count are not read here.
+    // A burst of saves costs at most one running + one pending run: apply-kit.yml's concurrency group
+    // (cancel-in-progress: false) replaces an older PENDING run with the newer one.
+    const kitOnly = await dispatch(deps, kitToken, KIT_DISPATCH_URL, { ref: "main" }, "apply-kit.yml");
+    // Refused or unreachable: the 502 naming the workflow.
+    if (kitOnly !== null) return kitOnly;
+    // Started; dispatched:false because no applier run was started, by design.
+    return json(200, { status: "ok", dispatched: false, reason: "answer_saved", kit_dispatched: true });
+  }
+
   // GATE 2: the switch, read from his own settings row (RLS: auth.uid() = user_id).
   const settings = await conn.db.from("system_settings").select("auto_apply_on_approve").eq("user_id", conn.userId).maybeSingle();
   // An unreadable switch is never read as "on" (CLAUDE.md §6).
@@ -136,6 +160,26 @@ export async function handleDispatchApply(req: Request, deps: DispatchDeps): Pro
   if (drain !== null) return drain;
   // Started. The count tells the browser how many rows the run will try.
   return json(200, { status: "ok", dispatched: true, approved: counted.count, kit_dispatched: true });
+}
+
+/* True only for a JSON body whose kit_only is exactly true. Closed on purpose (CLAUDE.md §6): no body (the
+   approve path sends none), unparseable text, "true" as a string or any other shape all keep the approve
+   behaviour, so a malformed request can never silently skip the approve path's gates. */
+async function wantsKitOnly(req: Request): Promise<boolean> {
+  // The raw text: an empty body is "" here, where req.json() would throw.
+  const raw = await req.text().catch(() => "");
+  // Nothing sent: the approve path.
+  if (raw.trim() === "") return false;
+  // Parsed inside a try, because a bad body is "not kit-only", never a 500.
+  try {
+    // The body as sent.
+    const parsed: unknown = JSON.parse(raw);
+    // An object (not an array or null) whose flag is the boolean true and nothing looser.
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) && (parsed as Record<string, unknown>).kit_only === true;
+  } catch {
+    // Unparseable: the approve path.
+    return false;
+  }
 }
 
 /* One workflow dispatch. Null when GitHub accepted it; otherwise the 502 to answer with, naming the

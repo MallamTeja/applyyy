@@ -101,6 +101,8 @@ describe('Manual apply open questions in a browser (fake session, every Supabase
   let guardError: Error | undefined;
   // Every write to answer_bank: method, headers, body.
   const bankWrites: { method: string; headers: Record<string, string>; body: unknown }[] = [];
+  // Every kit-rebuild request a save sends to dispatch-apply: its body (peer 1, 2026-11-08, kit_only).
+  const kitCalls: unknown[] = [];
 
   // A guard failure marks each test FAILED with the named reason.
   beforeEach(() => {
@@ -137,6 +139,13 @@ describe('Manual apply open questions in a browser (fake session, every Supabase
         bankWrites.push({ method: req.method(), headers: await req.allHeaders(), body: req.postDataJSON() });
         // Accepted, as PostgREST answers an upsert with return=minimal.
         return route.fulfill({ status: 201, body: '' });
+      }
+      // The kit rebuild a landed save asks for: recorded, and answered as the deployed function answers kit_only.
+      if (url.pathname === '/functions/v1/dispatch-apply') {
+        // Kept for the assertion that the body is exactly the closed kit_only shape.
+        kitCalls.push(req.postDataJSON());
+        // The function's own success shape (handler.ts kit-only branch); kit_dispatched:true is what the store reads.
+        return json(200, { status: 'ok', dispatched: false, reason: 'answer_saved', kit_dispatched: true });
       }
       // The kit notes.
       if (url.pathname === '/rest/v1/application_events') return json(200, [KIT]);
@@ -195,13 +204,15 @@ describe('Manual apply open questions in a browser (fake session, every Supabase
     if (process.env['MANUAL_APPLY_SHOT']) await page.screenshot({ path: join(process.env['MANUAL_APPLY_SHOT'], 'manual-apply-questions.png'), fullPage: true });
   });
 
-  it('2. Save writes one answer_bank upsert under the planner key, with no agent key header', async () => {
+  it('2. Save writes one answer_bank upsert under the planner key, with no agent key header, then asks for a kit-only rebuild', async () => {
     // Typed as Teja would.
     await card('Software Engineer at Canonical').getByLabel(FACT).fill('  CGPA out of 10  ');
     // The save.
     await card('Software Engineer at Canonical').getByRole('button', { name: 'Save answer' }).click();
-    // The outcome line.
-    await card('Software Engineer at Canonical').getByText('Saved to your answer bank. The next kit fills it.').waitFor();
+    // The outcome line: the save landed AND the kit rebuild it asked for started.
+    await card('Software Engineer at Canonical').getByText('Saved to your answer bank. Kit rebuild started; press Refresh kits in about 3 minutes.').waitFor();
+    // Exactly one rebuild request, with the closed body the function reads as kit-only (never the approve path).
+    assert.deepEqual(kitCalls, [{ kit_only: true }]);
     // Exactly one write.
     assert.equal(bankWrites.length, 1);
     // The write, unpacked.

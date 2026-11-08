@@ -250,6 +250,64 @@ test("switch on + approved rows + token: the kit run, then exactly one dispatch 
   assert.deepEqual(JSON.parse(String(call.init.body)), { ref: "main", inputs: { dry_run: "false", drain_approved: "true" } });
 });
 
+// KIT-ONLY (peer 4, 2026-11-08): an answer save asks for a kit rebuild. The body of that request.
+const postBody = (raw: string) => new Request("https://x.supabase.co/functions/v1/dispatch-apply", { method: "POST", headers: { authorization: "Bearer user-jwt", "content-type": "application/json" }, body: raw });
+
+test("kit_only never reaches DISPATCH_URL with auto_apply=true and approved>0", async () => {
+  // The worst case for this mode: everything the approve path needs to start a live drain is ready.
+  const { deps: d, calls } = deps({ switchOn: true, count: 5 });
+  // The save's request.
+  const res = await handleDispatchApply(postBody('{"kit_only":true}'), d);
+  // Started, said by name; dispatched:false because no applier run was started.
+  assert.deepEqual(await body(res), { status: "ok", dispatched: false, reason: "answer_saved", kit_dispatched: true });
+  // Exactly one GitHub call, the kit sweep; the drain URL is never touched.
+  assert.deepEqual(calls.map((c) => c.url), [KIT_DISPATCH_URL]);
+  // A sweep (blank application_id), so every row the K1 staleness rule marks due is rebuilt.
+  assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), { ref: "main" });
+});
+
+test("kit_only works with NOTHING approved (Manual apply rows are blocked_needs_human)", async () => {
+  // Zero approved rows: the approve path would answer nothing_approved and dispatch nothing.
+  const { deps: d, calls } = deps({ count: 0, switchOn: false });
+  // The save's request.
+  const res = await handleDispatchApply(postBody('{"kit_only":true}'), d);
+  // Still started.
+  assert.equal((await body(res)).kit_dispatched, true);
+  // The kit sweep only.
+  assert.deepEqual(calls.map((c) => c.url), [KIT_DISPATCH_URL]);
+});
+
+test("kit_only is closed: a loose or malformed body keeps the approve path (CLAUDE.md §6)", async () => {
+  // A string "true", a number, an array, broken JSON: none is the boolean true.
+  for (const raw of ['{"kit_only":"true"}', '{"kit_only":1}', "[true]", "{kit_only:true", "null"]) {
+    // Nothing approved, so the approve path answers nothing_approved and sends nothing.
+    const { deps: d, calls } = deps({ count: 0 });
+    // Asked.
+    const res = await handleDispatchApply(postBody(raw), d);
+    // The approve path's answer, not answer_saved.
+    assert.equal((await body(res)).reason, "nothing_approved", raw);
+    // Nothing sent.
+    assert.equal(calls.length, 0, raw);
+  }
+});
+
+test("kit_only still refuses a stranger before any sign-in, and names a missing token", async () => {
+  // A stranger with the kit body.
+  const stranger = deps({ caller: "stranger" });
+  // Asked.
+  const refused = await handleDispatchApply(postBody('{"kit_only":true}'), stranger.deps);
+  // The pre-sign-in verdict.
+  assert.equal(refused.status, 403);
+  // No grant, no call.
+  assert.equal(stranger.signIns() + stranger.calls.length, 0);
+  // The app user, but no PAT.
+  const noToken = deps({ token: "" });
+  // Asked.
+  const missing = await handleDispatchApply(postBody('{"kit_only":true}'), noToken.deps);
+  // Named, never a silent 200.
+  assert.equal((await body(missing)).message, "dispatch_token_missing");
+});
+
 test("OPTIONS answers the preflight without signing in; other methods are 405", async () => {
   // A preflight.
   const { deps: d, calls } = deps();

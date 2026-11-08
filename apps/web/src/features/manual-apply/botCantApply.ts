@@ -24,7 +24,7 @@ import { cardToBankQuestion, inputFor, isAnswered, savedAnswerWouldClear } from 
 // Types only: the input kinds the card renders.
 import type { CardInput } from '../settings/unansweredQuestionsView.ts';
 // Type only: the bank's question shape.
-import type { BankQuestion } from '../settings/answerBankStore.ts';
+import type { BankQuestion, KitRefresh } from '../settings/answerBankStore.ts';
 // Types only: the shared enums for the save type, the park reason and the planner's field kind.
 import type { AnswerType, BlockReason, UnansweredFieldKind } from '@applyy/shared-types';
 // Types only: the parsed kit.
@@ -158,4 +158,15 @@ export function isBanked(bank: readonly BankQuestion[], question: OpenQuestion):
 export function openQuestionToBankQuestion(question: OpenQuestion): BankQuestion {
   // Same row shape as an Unanswered-questions save, marked as answered on Manual apply.
   return cardToBankQuestion({ key: question.key, text: question.label, answerType: question.answerType }, 'Manual apply');
+}
+
+/** The card's line after a Save that landed, saying whether the kit rebuild it asked for started (peer 4, 2026-11-08).
+ *  `undefined` is a local-only save (no Supabase client): the worker never reads it, so no rebuild was asked. */
+export function savedLine(kitRefresh: KitRefresh | undefined): string {
+  // Started: the sweep rebuilds every stale kit; a run takes 1-2.5 min (apply-kit.yml runs, 2026-11-07).
+  if (kitRefresh === 'requested') return 'Saved to your answer bank. Kit rebuild started; press Refresh kits in about 3 minutes.';
+  // Not started: the answer is stored, and the next scheduled sweep still uses it.
+  if (kitRefresh === 'failed') return 'Saved to your answer bank, but the kit rebuild could not be started; the next scheduled kit run fills it.';
+  // Local only: say what is true and no more.
+  return 'Saved in this browser only. The bot reads your answer bank, so sign in and save again.';
 }

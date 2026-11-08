@@ -20,6 +20,8 @@
 
 // The one renderer the worker also uses, and its escaper, reached by path (see header).
 import { escapeHtml, renderResumeHtml, ResumeRenderError } from '../../../../../packages/resume-template/src/index.ts';
+// The renderer's own rung picker and ladder, so the preview names the rung the PDF will print at instead of guessing it.
+import { articleOf, flowOf, pickStepIndex, TYPOGRAPHY_LADDER } from '../../../../../packages/resume-template/src/index.ts';
 // The snapshot type stored in `applications.tailored_profile`, and the master's type.
 import type { MasterProfile, ResolvedResume } from '../../data/contract';
 
@@ -27,7 +29,9 @@ import type { MasterProfile, ResolvedResume } from '../../data/contract';
 // render before it can reach the HTML, so a failure cannot be painted as a blank frame.
 export type ResumePreview =
   // The full HTML document, ready for an iframe's srcdoc and for a download.
-  | { readonly kind: 'rendered'; readonly html: string }
+  // smallerType: the renderer shrank the FONT to fit one page (a ladder rung with fontScale < 1, body never under
+  // 9.5pt; dc8ac5c). Spacing-only rungs do not count, so the hint never claims smaller type that is not there.
+  | { readonly kind: 'rendered'; readonly html: string; readonly smallerType: boolean }
   // The renderer refused this snapshot; `message` says why in the renderer's words.
   | { readonly kind: 'refused'; readonly message: string };
 
@@ -56,8 +60,11 @@ export function buildResumePreview(resume: ResolvedResume, documentTitle: string
     ? html.replace(TITLE_ELEMENT, `<title>${escapeHtml(documentTitle)}</title>`)
     // No title element to replace: the default filename is a nicety, not a reason to fail.
     : html;
-  // Rendered and named.
-  return { kind: 'rendered', html: titled };
+  // The rung renderResumeHtml picked, re-derived by its own exported picker over the same article, so this can
+  // never disagree with the CSS it embedded (P1 #5, 2026-11-08). The ladder's first rung is the full-size type.
+  const smallerType = TYPOGRAPHY_LADDER[pickStepIndex(flowOf(articleOf(html)))]!.fontScale < 1;
+  // Rendered and named, with the fit fact the pane shows.
+  return { kind: 'rendered', html: titled, smallerType };
 }
 
 // The template's sheet, A4 (its `@page { size: A4 }`), in CSS px at 96 per inch: 210mm.

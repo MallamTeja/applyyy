@@ -11,6 +11,8 @@ import type { AnswerType } from '../../data/contract.ts';
 import { supabase } from '../../data/supabase.ts';
 // Type-only: lets tests inject a client whose read fails, without a network.
 import type { SupabaseClient } from '@supabase/supabase-js';
+// The one edge-call path (refresh once on a revoked session), for the kit rebuild after a save.
+import { invokeEdge } from '../../data/edgeCall.ts';
 
 export type QuestionCategory = 'all' | 'compensation' | 'auth' | 'eeo' | 'written' | 'general';
 
@@ -637,7 +639,9 @@ export async function saveBankAnswer(
   newValue: unknown,
   // Injectable for tests, same as loadAnswerBank.
   client: SupabaseClient | null = supabase,
-): Promise<{ ok: boolean; error?: string }> {
+  // kitRefresh: present only after a remote write landed (peer 4, 2026-11-08), so a caller can say whether
+  // the kit rebuild started; absent for a local-only save or a failure.
+): Promise<{ ok: boolean; error?: string; kitRefresh?: KitRefresh }> {
   // Refuse before ANY write, local included, while the last read stands failed.
   if (lastReadError !== null) return blockedWrite();
   // Update local storage first
@@ -682,9 +686,35 @@ export async function saveBankAnswer(
     } catch (err) {
       return { ok: false, error: `Saved locally; remote error: ${String(err)}` };
     }
+    // The answer is in the remote bank, so ask for the kits to be rebuilt now (peer 4, 2026-11-08).
+    // Only after a remote write that landed: a local-only save changes nothing the worker reads.
+    return { ok: true, kitRefresh: await requestKitRebuild(client) };
   }
 
   return { ok: true };
+}
+
+/* Whether the kit rebuild was asked for after a save: started, or why not. */
+export type KitRefresh = 'requested' | 'failed';
+
+/* Ask dispatch-apply for a kit-only sweep after an answer lands (peer 4, 2026-11-08).
+ * WHY: the sweep already treats every kit older than the newest answer as due (K1, worker
+ * apply-kit-sweep.ts), but nothing STARTED a sweep on a save, so a card kept "needs your answer" until
+ * the next applier run or the 12:00 UTC cron. Here, in the one save path, so the Manual apply card and
+ * the Answer bank page both trigger it. The function dispatches apply-kit.yml only, never the applier.
+ * A burst of saves is coalesced by apply-kit.yml's concurrency group (one running + one pending).
+ * NEVER throws and never fails the save: the answer is already stored, and the daily sweep still runs. */
+async function requestKitRebuild(client: SupabaseClient): Promise<KitRefresh> {
+  // A thrown invoke (network drop) is "failed", never an exception out of a save that worked.
+  try {
+    // The exact body the function reads as kit-only; anything looser keeps its approve path.
+    const answer = await invokeEdge(client, 'dispatch-apply', { body: { kit_only: true } });
+    // Started only when the function said so in its own shape; a signed-out tab or any error is "failed".
+    return answer.kind === 'answered' && !answer.error && typeof answer.data === 'object' && answer.data !== null && (answer.data as { kit_dispatched?: unknown }).kit_dispatched === true ? 'requested' : 'failed';
+  } catch {
+    // Said to the caller, who shows it; the answer itself is saved.
+    return 'failed';
+  }
 }
 
 /** Delete a custom question from the answer bank */
