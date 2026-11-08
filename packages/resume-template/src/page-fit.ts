@@ -50,6 +50,10 @@ export interface TypographyStep {
  * body font may not go below 9.5pt, so the dense rungs tighten only leading, gaps, margins and
  * the summary's paragraph margin. No multi-column skills: a column is exactly what this template
  * forbids for ATS reading order (print-styles.ts, .resume).
+ * ONE exception since 2026-11-08 (Teja): achievements and certifications may sit side by side in a
+ * single `.resume__split` flex block (ATS order for flex was measured to be DOM order, see
+ * PROJECT_PLAN.md ~:850). The model reads it as the MAX of the two column heights, each laid out at
+ * half width ((content width - 5mm gap) / 2), never as the two sections stacked at full width.
  */
 export const TYPOGRAPHY_LADDER: readonly TypographyStep[] = [
   // Today's stylesheet, untouched.
@@ -138,7 +142,12 @@ type FlowItem =
   // The flex entry head: a title and a no-wrap date on one row.
   | { readonly kind: 'head'; readonly title: string; readonly dates: string }
   // A vertical margin in mm at gapScale 1 (scaled by the step), or in em of the body font.
-  | { readonly kind: 'margin'; readonly mm: number; readonly bodyEm?: number };
+  | { readonly kind: 'margin'; readonly mm: number; readonly bodyEm?: number }
+  // The .resume__split flex row: each column is its own flow, laid out side by side at an equal share of the width.
+  | { readonly kind: 'columns'; readonly columns: readonly (readonly FlowItem[])[] };
+
+// The .resume__split flex gap: a FIXED 5mm in print-styles.ts, not scaled by the rung's gapScale.
+const SPLIT_GAP_MM = 5;
 
 /** Decode the five entities escapeHtml writes, so widths are measured on the printed text. */
 function decodeEntities(text: string): string {
@@ -288,6 +297,30 @@ export function flowOf(articleHtml: string): readonly FlowItem[] {
       // Handed back to the caller.
       return inner;
     };
+    // The two-column split: a nested-div container a first-`</div>` leaf scan would cut short, so it is read whole.
+    if (cls === 'resume__split') {
+      // Every div open/close after the split's own open tag, to find ITS close by depth, not the first </div>.
+      const divs = /<(\/?)div\b[^>]*>/gi;
+      // Start right after the split's open tag.
+      divs.lastIndex = tag.lastIndex;
+      // The split itself is open.
+      let depth = 1;
+      // The div tag being matched.
+      let d: RegExpExecArray | null = null;
+      // Walk until the split's own close.
+      while (depth > 0 && (d = divs.exec(articleHtml)) !== null) depth += d[1] ? -1 : 1;
+      // An unclosed split cannot be measured; a partial read could under-count, so fail closed.
+      if (depth > 0 || d === null) throw new Error('page-fit: unclosed resume__split');
+      // The split's inner HTML: its sections.
+      const inner = articleHtml.slice(tag.lastIndex, d.index);
+      // Resume the outer scan after the split's close.
+      tag.lastIndex = divs.lastIndex;
+      // One column per section (sections never nest), in DOM order; any stray non-blank markup is a column too, so it is counted, never skipped.
+      const columns = inner.split(/(?<=<\/section>)/).filter((chunk) => chunk.trim() !== '').map((chunk) => flowOf(chunk));
+      // One flow item for the whole row.
+      flow.push({ kind: 'columns', columns });
+      continue;
+    }
     // Containers: remember them; the section/entry margins come on close, the list's on open.
     if (cls === 'resume__section' || cls === 'resume__entry' || name === 'article') { stack.push(cls); continue; }
     // .resume__bullets: margin-top 1.2mm, then the items.
@@ -331,10 +364,11 @@ export function flowOf(articleHtml: string): readonly FlowItem[] {
   return flow;
 }
 
-/** The content height in pt the flow occupies at one step, margins collapsed as CSS does. */
-export function flowHeight(flow: readonly FlowItem[], step: TypographyStep): number {
-  // Usable width between the @page margins.
-  const width = A4_WIDTH_PT - 2 * step.pageMarginMm * MM;
+/**
+ * The content height in pt the flow occupies at one step, margins collapsed as CSS does.
+ * `width` defaults to the usable width between the @page margins; a split column passes its own.
+ */
+export function flowHeight(flow: readonly FlowItem[], step: TypographyStep, width: number = A4_WIDTH_PT - 2 * step.pageMarginMm * MM): number {
   // Height so far.
   let height = 0;
   // Adjacent positive margins collapse to their maximum; held until the next box.
@@ -354,6 +388,15 @@ export function flowHeight(flow: readonly FlowItem[], step: TypographyStep): num
     height += pending;
     // Reset for the next run.
     pending = 0;
+    // The split row: as tall as its tallest column, each at an equal share of the width minus the fixed gaps.
+    if (item.kind === 'columns') {
+      // flex: 1 1 0 with min-width: 0 gives every column exactly this width.
+      const columnWidth = (width - (item.columns.length - 1) * SPLIT_GAP_MM * MM) / item.columns.length;
+      // Each column measured alone, its own leading and trailing margins INSIDE its height: a flex item's
+      // margins never collapse with the row's neighbours, so counting them in full is exact, never short.
+      height += Math.max(0, ...item.columns.map((column) => flowHeight(column, step, columnWidth)));
+      continue;
+    }
     // The entry head: the title wraps beside the no-wrap dates.
     if (item.kind === 'head') {
       // Sizes at this step.

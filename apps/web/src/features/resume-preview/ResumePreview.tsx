@@ -34,7 +34,7 @@ import type { ResolvedResume } from '../../data/contract';
 // The browser client; RLS scopes every read to the signed-in user.
 import { supabase } from '../../data/supabase';
 // Pure helpers: the shared render, the master mapping, the filename title.
-import { buildResumePreview, clampZoom, DEFAULT_PREVIEW_ZOOM, masterAsResume, PAGE_WIDTH_PX, previewDocumentTitle, zoomedPreviewHtml } from './renderPreview';
+import { buildResumePreview, clampZoom, DEFAULT_PREVIEW_ZOOM, masterAsResume, PAGE_WIDTH_PX, previewDocumentTitle, previewLinksOpenOutside, zoomedPreviewHtml } from './renderPreview';
 import type { ResumePreview as RenderedPreview } from './renderPreview';
 
 import './ResumePreview.css';
@@ -283,11 +283,13 @@ function ResumePane({ heading, frameTitle, fileStem, preview }: ResumePaneProps)
         ref={frameRef}
         className="resume-preview__frame"
         title={frameTitle}
-        /* See the header: same-origin for print(), modals for the dialog, never scripts. */
-        sandbox="allow-same-origin allow-modals"
-        /* The shared renderer's document plus a screen-only zoom style; the downloads use
-           preview.html untouched, and print media ignores the style (see zoomedPreviewHtml). */
-        srcDoc={zoomedPreviewHtml(preview.html, zoom)}
+        /* See the header: same-origin for print(), modals for the dialog, never scripts.
+           Popups (2026-11-08) so a resume link opens in a new tab; escaping the sandbox so
+           that tab is a normal page, since GitHub/LinkedIn break when opened sandboxed. */
+        sandbox="allow-same-origin allow-modals allow-popups allow-popups-to-escape-sandbox"
+        /* The shared renderer's document, its links set to open in a new tab, plus a screen-only
+           zoom style; the downloads use preview.html untouched, and print media ignores the style. */
+        srcDoc={zoomedPreviewHtml(previewLinksOpenOutside(preview.html), zoom)}
       />
     </section>
   );

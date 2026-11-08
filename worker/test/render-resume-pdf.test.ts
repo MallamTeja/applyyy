@@ -25,6 +25,8 @@ import { extractPdfText } from '../src/ats-parse-check.ts';
 // never accepted — which failed all three tests below at runtime while
 // `tsc --noEmit` and the workspace build both exited 0. See the fixture's header.
 import { syntheticResume } from './resolved-resume-fixture.ts';
+// Type-only: the link-annotation test widens the fixture to every section kind.
+import type { ResolvedResume } from '@applyy/shared-types';
 
 let browser: Browser;
 
@@ -63,6 +65,82 @@ test('renders a PDF whose text layer carries the resume content', async () => {
     expect(extracted.text).toContain('Ada Placeholder');
     expect(extracted.text).toContain('Node.js');
   } finally {
+    await page.close();
+  }
+}, 120_000);
+
+/** One clickable link as pdf.js reads it off the page: the target and where it sits. */
+interface PdfLink {
+  // The URI the reader opens; mailto: included, because the email is a link too.
+  readonly url: string;
+  // [x1, y1, x2, y2] in PDF points, so a test can tell the left column from the right.
+  readonly rect: readonly number[];
+}
+
+/** Every /Link annotation with a URI on page 1, read by pdf.js, the same parser the ATS checks use. */
+async function pdfLinks(bytes: Uint8Array): Promise<{ links: PdfLink[]; pageWidth: number }> {
+  // A variable specifier, as ats-parse-check.ts does, so tsc does not chase pdf.js's own types.
+  const specifier = 'pdfjs-dist/legacy/build/pdf.mjs';
+  // Only the two calls used here are typed; the rest of pdf.js is not this test's business.
+  const pdfjs = (await import(specifier)) as {
+    getDocument(src: unknown): { promise: Promise<{ getPage(n: number): Promise<{ view: number[]; getAnnotations(): Promise<Array<{ subtype?: string; url?: string; rect?: number[] }>> }>; destroy(): Promise<void> }> };
+  };
+  // A fresh copy: pdf.js detaches the buffer it is given, and the caller may still need the bytes.
+  const document = await pdfjs.getDocument({ data: new Uint8Array(bytes), useSystemFonts: true }).promise;
+  try {
+    // The resume is one page by contract (renderResumePdf throws otherwise).
+    const page = await document.getPage(1);
+    // Link annotations only, and only those with a URL: an internal jump is not a link Teja asked for.
+    const links = (await page.getAnnotations())
+      .filter((a) => a.subtype === 'Link' && typeof a.url === 'string')
+      .map((a) => ({ url: a.url as string, rect: a.rect ?? [] }));
+    // view is [x0, y0, x1, y1]; the width splits the page into the two columns.
+    // A missing view entry is NaN, never 0, so a bad page box fails the column check instead of passing it.
+    return { links, pageWidth: (page.view[2] ?? Number.NaN) - (page.view[0] ?? Number.NaN) };
+  } finally {
+    // pdf.js keeps a worker-side document alive until told otherwise.
+    await document.destroy();
+  }
+}
+
+test('PDF keeps the applyyy project link (every resume link is a clickable annotation)', async () => {
+  // Teja 2026-11-08: every link must stay clickable in the PDF that is actually submitted.
+  // The URLs are the real kinds the master holds: project, certification, achievement, header, email.
+  const applyyyGithub = 'https://github.com/MallamTeja/applyyy';
+  // A certification credential, the shape the live master stores (credly/cognitiveclass).
+  const certUrl = 'https://www.credly.com/badges/example/public_url';
+  // An achievement profile link, as the live master's LeetCode entry carries.
+  const achUrl = 'https://leetcode.com/example';
+  // The fixture, plus the two undated sections in the order and links on every kind.
+  // Typed as the contract, not as the fixture: the fixture's own section_order is inferred as its four kinds.
+  const linked: ResolvedResume = {
+    ...resume,
+    // Achievements and certifications present, so the side-by-side section is on the page.
+    section_order: [...resume.section_order, 'achievements', 'certifications'],
+    // The project carries the applyyy repo link next to its existing ones.
+    projects: resume.projects.map((p, i) => (i === 0 ? { ...p, links: [...p.links, { id: 'lnk_applyyy', label: 'GitHub', url: applyyyGithub }] } : p)),
+    // One achievement with a link, so the LEFT column has an annotation to locate.
+    achievements: resume.achievements.map((a) => ({ ...a, links: [{ id: 'lnk_ach', label: 'Profile', url: achUrl }] })),
+    // One certification with a link, so the RIGHT column has an annotation to locate.
+    certifications: resume.certifications.map((c) => ({ ...c, links: [{ id: 'lnk_cert', label: 'Credential', url: certUrl }] })),
+  };
+  // A page of its own, closed whatever happens.
+  const page = await browser.newPage();
+  try {
+    // The production path: the same function the worker submits with.
+    const result = await renderResumePdf({ resume: linked, page });
+    // Every annotation pdf.js can see.
+    const { links, pageWidth } = await pdfLinks(result.bytes);
+    // The URL set, normalised for a trailing slash only (Chromium may append one to a bare origin).
+    const urls = links.map((l) => l.url.replace(/\/$/, ''));
+    // THE POINT: each link kind survives into the submitted PDF as a real, clickable annotation.
+    for (const expected of [applyyyGithub, certUrl, achUrl, 'https://github.com/example', 'mailto:ada.placeholder@example.com']) expect(urls).toContain(expected);
+    // Where each column's link landed: x1 of its rect.
+    const x = (url: string) => links.find((l) => l.url.replace(/\/$/, '') === url)?.rect[0] ?? Number.NaN;
+    // Side by side on the REAL page: the achievement link in the left half, the certification link in the right.
+    expect([x(achUrl) < pageWidth / 2, x(certUrl) > pageWidth / 2]).toEqual([true, true]);
+  } finally {
+    // No page leaks into the next test.
     await page.close();
   }
 }, 120_000);

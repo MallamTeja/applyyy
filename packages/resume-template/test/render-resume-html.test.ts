@@ -663,3 +663,172 @@ describe('renderResumeHtml — a nullable key that is ABSENT means the same as n
     assert.notEqual(nulled, renderResumeHtml(zomatoBackendIntern), 'clearing the nullable keys changed nothing; this test would be vacuous');
   });
 });
+
+// A deep copy of the fixture with section_order and the two undated lists overridden.
+// JSON round-trip for the same reason as withEntryLinks: plain data, like a jsonb read.
+function withLayout(patch: {
+  readonly section_order?: readonly string[];
+  readonly achievements?: readonly unknown[];
+  readonly certifications?: readonly unknown[];
+}): ResolvedResume {
+  // Untyped clone so the test can set any of the three keys without a cast per key.
+  const clone = JSON.parse(JSON.stringify(zomatoBackendIntern)) as Record<string, any>;
+  // Each key replaced only when the caller names it, so the rest stays the fixture.
+  for (const [key, value] of Object.entries(patch)) clone[key] = value;
+  // Back to the contract type for the call under test.
+  return clone as unknown as ResolvedResume;
+}
+
+// One whole <section> by its data-section, from its opening tag to its closing tag.
+// Used to prove the split wraps the SAME bytes the section prints without it.
+function sectionHtml(html: string, kind: string): string {
+  // The opening tag the renderer's wrapSection emits.
+  const start = html.indexOf(`<section class="resume__section" data-section="${kind}">`);
+  // A missing section would make the comparison vacuous, so fail here instead.
+  assert.ok(start >= 0, `section ${kind} not rendered; the slice would be vacuous`);
+  // Sections never nest, so the first close after the open is this section's own.
+  const end = html.indexOf('</section>', start);
+  // Inclusive of the closing tag.
+  return html.slice(start, end + '</section>'.length);
+}
+
+// The split wrapper's opening tag, written once so every test names the same markup.
+const SPLIT_OPEN = '<div class="resume__split">';
+
+describe('renderResumeHtml — achievements | certifications side by side (2026-11-08)', () => {
+  it('certifications render in the right column', () => {
+    // The fixture has both kinds, each with entries, adjacent in section_order.
+    const html = renderResumeHtml(zomatoBackendIntern);
+    // The wrapper exists exactly once.
+    const open = html.indexOf(SPLIT_OPEN);
+    assert.ok(open >= 0, 'no split wrapper was emitted for a resume with both sections');
+    assert.equal(html.indexOf(SPLIT_OPEN, open + 1), -1, 'the split wrapper was emitted twice');
+    // Both sections sit after the wrapper opens.
+    const ach = html.indexOf('data-section="achievements"');
+    const cert = html.indexOf('data-section="certifications"');
+    // Achievements is LEFT, which in a row flex box means FIRST in DOM order.
+    assert.ok(open < ach && ach < cert, 'achievements must precede certifications inside the split');
+    // The wrapper closes right after the certifications section, so both are inside it.
+    const certEnd = html.indexOf('</section>', cert);
+    assert.equal(html.slice(certEnd, certEnd + '</section>\n</div>'.length), '</section>\n</div>', 'certifications is not the last child of the split');
+  });
+
+  it('wraps the sections byte-identically to how each prints alone', () => {
+    // Split render: both kinds present.
+    const split = renderResumeHtml(zomatoBackendIntern);
+    // Each kind alone: the other dropped from section_order, so no split is possible.
+    const achOnly = renderResumeHtml(withLayout({ section_order: ['skills', 'experience', 'projects', 'education', 'achievements'] }));
+    // The mirror case.
+    const certOnly = renderResumeHtml(withLayout({ section_order: ['skills', 'experience', 'projects', 'education', 'certifications'] }));
+    // The wrapper adds layout only; it must not change a byte of either section.
+    assert.equal(sectionHtml(split, 'achievements'), sectionHtml(achOnly, 'achievements'));
+    assert.equal(sectionHtml(split, 'certifications'), sectionHtml(certOnly, 'certifications'));
+  });
+
+  it('renders a single kind with no split wrapper', () => {
+    // Certifications not asked for: achievements prints as a normal full-width section.
+    const achOnly = renderResumeHtml(withLayout({ section_order: ['skills', 'achievements'] }));
+    // Non-vacuity: the remaining section did render.
+    assert.ok(achOnly.includes('data-section="achievements"'), 'achievements did not render; test is vacuous');
+    // And nothing wrapped it.
+    assert.equal(achOnly.includes(SPLIT_OPEN), false, 'a lone achievements section was wrapped in a split');
+    // Mirror: achievements not asked for.
+    const certOnly = renderResumeHtml(withLayout({ section_order: ['certifications', 'skills'] }));
+    // Non-vacuity again.
+    assert.ok(certOnly.includes('data-section="certifications"'), 'certifications did not render; test is vacuous');
+    // No wrapper.
+    assert.equal(certOnly.includes(SPLIT_OPEN), false, 'a lone certifications section was wrapped in a split');
+  });
+
+  it('renders no split when one listed section has no entries', () => {
+    // Both listed, certifications empty: the hostile fixture's shape on the real fixture.
+    const noCerts = renderResumeHtml(withLayout({ certifications: [] }));
+    // Achievements still renders, full width.
+    assert.ok(noCerts.includes('data-section="achievements"'), 'achievements did not render; test is vacuous');
+    // No half-empty two-column box.
+    assert.equal(noCerts.includes(SPLIT_OPEN), false, 'an empty certifications list still produced a split');
+    // Mirror: achievements empty.
+    const noAch = renderResumeHtml(withLayout({ achievements: [] }));
+    // Certifications still renders.
+    assert.ok(noAch.includes('data-section="certifications"'), 'certifications did not render; test is vacuous');
+    // No wrapper.
+    assert.equal(noAch.includes(SPLIT_OPEN), false, 'an empty achievements list still produced a split');
+  });
+
+  it('places one split at the FIRST of the two kinds when they are not adjacent', () => {
+    // Certifications early, achievements last: the split goes where certifications was.
+    const html = renderResumeHtml(withLayout({
+      section_order: ['skills', 'certifications', 'projects', 'experience', 'education', 'achievements'],
+    }));
+    // Exactly one wrapper.
+    const open = html.indexOf(SPLIT_OPEN);
+    assert.ok(open >= 0, 'no split for non-adjacent sections');
+    assert.equal(html.indexOf(SPLIT_OPEN, open + 1), -1, 'the split was emitted twice');
+    // It sits after skills and before projects: certifications' slot.
+    assert.ok(html.indexOf('data-section="skills"') < open, 'split printed before skills');
+    assert.ok(open < html.indexOf('data-section="projects"'), 'split printed after projects, not at the first slot');
+    // Achievements still LEFT (first in DOM) inside it.
+    assert.ok(html.indexOf('data-section="achievements"') < html.indexOf('data-section="certifications"'), 'achievements is not left');
+    // And each section printed once: the second slot printed nothing.
+    assert.equal(html.split('data-section="achievements"').length - 1, 1, 'achievements printed twice');
+    assert.equal(html.split('data-section="certifications"').length - 1, 1, 'certifications printed twice');
+  });
+});
+
+describe('print stylesheet — links are blue (Teja, 2026-11-08)', () => {
+  // Every rule whose selector targets an anchor, as [selector, body] pairs.
+  const anchorRules = [...RESUME_STYLESHEET.matchAll(/([^{}]*\sa)\s*\{([^}]*)\}/g)]
+    // Selector trimmed so a failure message prints it readably; CSS comments stripped
+    // from the body so the rule's own prose ("never a background") is not read as a declaration.
+    .map((match) => [match[1]!.trim(), match[2]!.replace(/\/\*[\s\S]*?\*\//g, '')] as const);
+
+  it('colours every resume link #1155cc with an underline', () => {
+    // Non-vacuity: both link rules (contact line and entry link line) were found.
+    const selectors = anchorRules.map(([selector]) => selector);
+    assert.ok(selectors.some((s) => s.endsWith('.resume__contact a')), 'no contact link rule found; test is vacuous');
+    assert.ok(selectors.some((s) => s.endsWith('.resume__entry-subtitle a')), 'no entry link rule found; test is vacuous');
+    // Each one blue and underlined.
+    for (const [selector, body] of anchorRules) {
+      assert.match(body, /color:\s*#1155cc\s*;/i, `${selector} is not blue`);
+      assert.match(body, /text-decoration:\s*underline\s*;/, `${selector} is not underlined`);
+    }
+  });
+
+  it('gives no link a background (printBackground is off in page.pdf)', () => {
+    // Non-vacuity: there are anchor rules to inspect.
+    assert.ok(anchorRules.length >= 2, 'no anchor rules found; test is vacuous');
+    // A background would vanish in the PDF and only show in the preview.
+    for (const [selector, body] of anchorRules) {
+      assert.equal(/background/i.test(body), false, `${selector} sets a background`);
+    }
+  });
+});
+
+describe('renderContact — the email is a working mailto link', () => {
+  it('prints href="mailto:<email>" for a real address', () => {
+    // The bug: safeHref saw the bare address, which is not http(s)/mailto, and gave '#'.
+    const html = renderResumeHtml(zomatoBackendIntern);
+    // The whole anchor, so a broken href and a broken label both fail.
+    assert.ok(html.includes('<a href="mailto:tejamallam00@gmail.com">tejamallam00@gmail.com</a>'), 'the email link is not a working mailto');
+    // The broken shape is gone.
+    assert.equal(html.includes('href="mailto:#"'), false, 'the email still renders as mailto:#');
+  });
+
+  it('escapes a hostile email inside the mailto href', () => {
+    // The hostile fixture's email carries a quote meant to break out of the attribute.
+    const html = renderResumeHtml(injectionAttempt);
+    // Escaped once, kept inside the attribute.
+    assert.ok(html.includes('href="mailto:a&quot;onmouseover=&quot;alert(1)@example.com"'), 'hostile email not escaped in href');
+    // No live attribute was injected.
+    assert.equal(html.includes('"onmouseover="'), false, 'the quote broke out of the href');
+  });
+
+  it('still collapses a javascript: link to "#"', () => {
+    // The mailto fix must not loosen safeHref for the other links.
+    const html = renderResumeHtml(injectionAttempt);
+    // The hostile fixture's Portfolio link is javascript:.
+    assert.ok(html.includes('<a href="#">Portfolio</a>'), 'javascript: link was not collapsed');
+    // Nowhere in the document.
+    assert.equal(/javascript:/i.test(html), false, 'a javascript: URL survived');
+  });
+});

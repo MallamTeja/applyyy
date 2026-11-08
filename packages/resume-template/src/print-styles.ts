@@ -17,6 +17,13 @@
  * gibberish, so the machine never sees the skills and a human never sees the
  * resume. That is the single most common silent fresher killer, so the layout
  * primitives that cause it are avoided on purpose, not merely unused.
+ *
+ * ONE FLEX SPLIT IS ALLOWED (2026-11-08): achievements | certifications, via
+ * .resume__split below. PROJECT_PLAN.md ("PREMISE CORRECTED 2026-09-10") and
+ * worker/test/ats-parse-real-pdf.test.ts measured flex and grid as DOM order in
+ * Chromium's PDF text layer, so the left column (first in the DOM) is read whole
+ * before the right. `order:` and flex-direction: row-reverse DO move that text
+ * layer while looking correct, and remain forbidden (test/ats-parse.test.ts).
  */
 
 /**
@@ -64,7 +71,10 @@ body {
    A text extractor walks the PDF in content order; multi-column layout makes
    that order interleave two unrelated streams. Anything that could reintroduce
    columns is neutralised here so a future edit has to remove a rule on purpose
-   rather than merely add one by habit. */
+   rather than merely add one by habit.
+   The page as a whole stays one column. The single exception is .resume__split
+   (achievements | certifications), a flex row whose children stay in DOM order,
+   which the 2026-09-10 Chromium measurement showed is the order a parser reads. */
 .resume {
   /* One column, full measure. */
   width: 100%;
@@ -115,7 +125,11 @@ body {
 /* Links print as their visible label; the URL is preserved in the href for the
    PDF's link annotation. Underlined so a printed copy still signals a link. */
 .resume__contact a {
-  color: #000;
+  /* Blue, by Teja's ruling of 2026-11-08: a reader on screen must see at a glance
+     which words are clickable. Text colour only, never a background, because
+     page.pdf() drops backgrounds unless printBackground is set. */
+  color: #1155cc;
+  /* Kept with the colour so a greyscale print still marks the link. */
   text-decoration: underline;
 }
 
@@ -198,12 +212,38 @@ body {
   padding: 0 1.5mm;
 }
 
-/* Project links print as their label in black with an underline. The UA default
-   is blue, which costs ink on a printed copy and reads as a web page rather
-   than a document; the URL survives in the href for the PDF link annotation. */
+/* Project, certification and achievement links print as their label, blue and
+   underlined. They were black until 2026-11-08 to save ink; Teja then ruled every
+   resume link blue, because the PDF is read on screen and an unmarked link is
+   one nobody clicks. The URL survives in the href for the PDF link annotation. */
 .resume__entry-subtitle a {
-  color: #000;
+  /* The same blue as the contact line, so every link in the document reads alike.
+     Text colour only: a background would vanish with printBackground off. */
+  color: #1155cc;
+  /* Underline as well, so the link still shows on a greyscale print. */
   text-decoration: underline;
+}
+
+/* THE ONE SIDE-BY-SIDE ROW: achievements (left) | certifications (right).
+   Two short undated lists, each wasting half the line at full width. Safe for a
+   parser only because the renderer emits achievements FIRST in the DOM and flex
+   paints in DOM order -- never reorder the columns here with the flex order
+   property or a reversed flex direction (test/ats-parse.test.ts bans both). */
+.resume__split {
+  /* A row of two columns; flex rather than grid so no column-count rule is needed. */
+  display: flex;
+  /* Gutter between the columns, close to the entry-head gap so it reads as one design. */
+  gap: 5mm;
+  /* Each column as tall as its own content; stretched columns would add no text. */
+  align-items: flex-start;
+}
+
+/* Each column takes an equal share of the row. */
+.resume__split > .resume__section {
+  /* Equal halves from a zero basis, so a long column cannot widen itself. */
+  flex: 1 1 0;
+  /* Lets a long label wrap inside its half instead of overflowing into the other. */
+  min-width: 0;
 }
 
 /* Date range. Pre-formatted upstream and printed verbatim -- the renderer does

@@ -82,6 +82,19 @@ test('the real resume PDF extracts in reading order with its skills intact', asy
         'job application automation',
         'EDUCATION',
         'B.Tech, Computer Science and Engineering',
+        // THE SIDE-BY-SIDE SECTION (2026-11-08): achievements LEFT, certifications RIGHT. The whole left
+        // column must read before the right column's heading, or the split interleaved on the real PDF.
+        'ACHIEVEMENTS',
+        // The first achievement, so the left column is entered.
+        'Smart India Hackathon 2025',
+        // The LAST achievement, so the left column is read to its end before the right one starts.
+        'CodeChef Starters 98',
+        // The right column's heading, only after the whole left column.
+        'CERTIFICATIONS',
+        // Both certifications, in their own order.
+        'Meta Back-End Developer',
+        // The last certification: the right column read to its end.
+        'NPTEL Database Management',
       ],
     });
 

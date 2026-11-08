@@ -317,3 +317,43 @@ test('ATS parse — the two new sections are read where the tailoring put them',
   assert.ok(educationIndex < achievementsIndex, 'Achievements was read before Education, against section_order');
   assert.ok(achievementsIndex < certificationsIndex, 'Certifications was read before Achievements, against section_order');
 });
+
+test('ATS parse — the achievements | certifications split reads left column first', () => {
+  // THE SIDE-BY-SIDE CASE (2026-11-08). The two sections now sit in one flex row,
+  // achievements left. Flex is safe ONLY because the left column is first in the DOM and
+  // nothing reorders it (see the reordering test above). This asserts the consequence a
+  // parser sees: the whole left column, then the whole right column, never a mix.
+  // One credential link per cert, so each label must extract as its own line.
+  const clone = JSON.parse(JSON.stringify(resume)) as Record<string, any>;
+  // Distinct labels, so a match cannot come from the contact line's links.
+  clone['certifications'][0]['links'] = [{ id: 'lnk_c1', label: 'Meta credential', url: 'https://example.com/c1' }];
+  // The second cert gets its own link too, so every cert is checked.
+  clone['certifications'][1]['links'] = [{ id: 'lnk_c2', label: 'NPTEL credential', url: 'https://example.com/c2' }];
+  // Extracted exactly as the main document is.
+  const html = renderResumeHtml(clone as typeof resume);
+  // Non-vacuity: this really is a split render.
+  assert.ok(html.includes('<div class="resume__split">'), 'the resume did not split; the case under test is absent');
+  // The lines a dumb reader gets.
+  const splitLines = extractLines(html);
+  // The right column's heading.
+  const certHeading = splitLines.indexOf('Certifications');
+  assert.notEqual(certHeading, -1, 'the Certifications heading does not survive extraction');
+  // Every achievement line: label, description when present, and each bullet.
+  const achievementLines = resume.achievements.flatMap((entry) => [
+    entry.label,
+    ...(entry.description === null ? [] : [entry.description]),
+    ...entry.bullets.map((bullet) => bullet.text),
+  ]);
+  // Non-vacuity: there are achievement lines to check.
+  assert.ok(achievementLines.length > 0, 'the fixture has no achievement lines; this assertion would be vacuous');
+  // Each one is read, and read before the right column starts.
+  for (const line of achievementLines) {
+    const at = splitLines.indexOf(line);
+    assert.ok(at !== -1 && at < certHeading, `"${line}" is not read before the Certifications heading`);
+  }
+  // Each cert link label lands on its own line, after the right column's heading.
+  for (const label of ['Meta credential', 'NPTEL credential']) {
+    const at = splitLines.indexOf(label);
+    assert.ok(at > certHeading, `the link label "${label}" is not its own line under Certifications`);
+  }
+});

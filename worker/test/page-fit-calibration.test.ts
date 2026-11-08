@@ -86,6 +86,27 @@ function grown(extra: number): ResolvedResume {
   return resume;
 }
 
+/**
+ * The fixture with `extra` synthetic achievements and certifications, alternating, so BOTH columns of the
+ * .resume__split row grow (Teja, 2026-11-08: those two sections print side by side). Long labels, a detail
+ * line, a link line and bullets, so each half-width column wraps hard: the axis the split model must hold on.
+ */
+function grownSplit(extra: number): ResolvedResume {
+  // A deep copy, so one size never leaks into the next.
+  const resume = structuredClone(zomatoBackendIntern) as unknown as ResolvedResume;
+  // Writable views of the two lists the split holds.
+  const lists = [resume.achievements, resume.certifications] as unknown as { ref: string; label: string; description: string | null; bullets: { ref: string; text: string; master_text: string }[]; links?: { id: string; label: string; url: string }[] }[][];
+  // Alternate left and right, so neither column is always the tall one.
+  for (let i = 0; i < extra; i += 1) {
+    // Bullets 0..2 by seed, so entries differ in height.
+    const bullets = Array.from({ length: i % 3 }, (_, b) => { const text = syntheticBullet(i * 3 + b + 101); return { ref: `spb_${i}_${b}`, text, master_text: text }; });
+    // A long label: a half-width column wraps it to two or three lines.
+    lists[i % 2]!.push({ ref: `spl_${i}`, label: `Recognised award or professional certificate number ${i} in distributed systems engineering`, description: `issued by an independent body, cohort ${i}`, bullets, links: [{ id: `lnk_${i}_a`, label: 'Credential', url: `https://example.com/c/${i}` }, { id: `lnk_${i}_b`, label: 'Verify', url: `https://example.com/v/${i}` }] });
+  }
+  // The grown resume.
+  return resume;
+}
+
 // The Times override: what a machine without Georgia resolves (Liberation Serif has its metrics).
 const TIMES = "body{font-family:'Times New Roman','Liberation Serif',serif !important}";
 
@@ -104,7 +125,8 @@ async function realPages(resume: ResolvedResume, step: number, fontCss: string):
 // The ladder of sizes: 0 extra bullets (well under a page) to 36 (well over, even at the minimum).
 const SIZES = [0, 4, 8, 12, 16, 20, 24, 28, 32, 36];
 
-test('the model never says fits when the real PDF is two pages (every step, both fonts)', async () => {
+/** Every size of one growth axis, at every rung and both fonts: the unsafe verdicts and the two non-vacuity counts. */
+async function sweep(sizes: readonly number[], grow: (extra: number) => ResolvedResume): Promise<{ unsafe: string[]; fitsChecked: number; overflowsSeen: number }> {
   // Every unsafe case, collected so one failure names them all.
   const unsafe: string[] = [];
   // How many "fits" verdicts were actually checked, so the assertion cannot pass vacuously.
@@ -112,9 +134,9 @@ test('the model never says fits when the real PDF is two pages (every step, both
   // How many cases the real PDF overflowed, same reason.
   let overflowsSeen = 0;
   // Each size.
-  for (const extra of SIZES) {
+  for (const extra of sizes) {
     // The resume and its flow (the model reads the markup once).
-    const resume = grown(extra);
+    const resume = grow(extra);
     // The modelled flow.
     const flow = flowOf(articleOf(renderResumeHtml(resume)));
     // Each rung.
@@ -134,11 +156,34 @@ test('the model never says fits when the real PDF is two pages (every step, both
       }
     }
   }
+  // Handed to the axis's test.
+  return { unsafe, fitsChecked, overflowsSeen };
+}
+
+test('the model never says fits when the real PDF is two pages (every step, both fonts)', async () => {
+  // The bullet axis: experience and projects grow.
+  const { unsafe, fitsChecked, overflowsSeen } = await sweep(SIZES, grown);
   // No unsafe verdict.
   expect(unsafe).toEqual([]);
   // The ladder really crossed the boundary in both directions.
   expect(fitsChecked).toBeGreaterThan(10);
   // Same, the overflowing side.
+  expect(overflowsSeen).toBeGreaterThan(10);
+}, 240_000);
+
+// The split axis: 0 extra achievements/certifications (under a page) to 30 (over, even at the minimum).
+const SPLIT_SIZES = [0, 4, 8, 12, 16, 20, 24, 30];
+
+test('SPLIT AXIS: the model never says fits when the real PDF is two pages as achievements + certifications grow side by side', async () => {
+  // Precondition: the renderer really emits the split row, or this axis exercises nothing new.
+  expect(renderResumeHtml(grownSplit(SPLIT_SIZES[1]!))).toContain('<div class="resume__split">');
+  // The split axis.
+  const { unsafe, fitsChecked, overflowsSeen } = await sweep(SPLIT_SIZES, grownSplit);
+  // No unsafe verdict: a two-column model that is optimistic would show up here as a two-page PDF.
+  expect(unsafe).toEqual([]);
+  // The axis crossed the boundary from the fitting side.
+  expect(fitsChecked).toBeGreaterThan(10);
+  // And from the overflowing side.
   expect(overflowsSeen).toBeGreaterThan(10);
 }, 240_000);
 

@@ -98,3 +98,127 @@ test('a dense rung shrinks the summary paragraph margin too (the browser default
   // And the old rungs do not emit it, so their output is unchanged.
   for (let i = 0; i <= OLD_MINIMUM; i += 1) assert.equal(stepStylesheet(i).includes('.resume__summary'), false, `rung ${i}`);
 });
+
+/*
+ * THE TWO-COLUMN SPLIT (Teja, 2026-11-08): achievements and certifications may print side by side
+ * in one `<div class="resume__split">` (flex, 5mm gap, two equal columns). The model must read that
+ * block as max(column heights at half width), never as the two sections stacked at full width:
+ * a half-width column wraps MORE, so the stacked reading can be the optimistic one. The markup below
+ * is hand-built from the renderer's contract, so these tests do not depend on renderResumeHtml.
+ */
+
+// One millimetre in points, the same conversion the stylesheet's mm values go through.
+const MM_PT = 72 / 25.4;
+// A4 width in points: the paper @page declares.
+const A4_W_PT = 595.276;
+
+/** One column's width at a rung: (content width - the fixed 5mm flex gap) / 2. An independent oracle, not the model's own helper. */
+function halfWidth(rung: number): number {
+  // The rung's page margin decides the content width.
+  const step = TYPOGRAPHY_LADDER[rung]!;
+  // Content width between the @page margins, minus the gap, halved.
+  return (A4_W_PT - 2 * step.pageMarginMm * MM_PT - 5 * MM_PT) / 2;
+}
+
+/** An undated entry exactly as renderUndatedEntry emits it: head, detail line, link line, bullets. */
+function undatedEntry(i: number, bullets: number): string {
+  // Long bullets so a half-width column visibly wraps more than a full-width one.
+  const items = Array.from({ length: bullets }, (_, b) => `<li class="resume__bullet" data-ref="b_${i}_${b}">Led a team of engineers building distributed ingestion, caching and observability for item ${i} bullet ${b} across regions.</li>`).join('\n');
+  // The entry, with the nested entry-head div that a first-`</div>` leaf scan would cut short.
+  return `<div class="resume__entry" data-ref="e_${i}">
+<div class="resume__entry-head">
+<h3 class="resume__entry-title">Award or certificate number ${i} with a fairly long label</h3>
+</div>
+<div class="resume__entry-detail">issuer ${i}</div>
+<div class="resume__entry-subtitle"><a href="https://example.com/${i}">Credential</a><span class="resume__link-sep">•</span><a href="https://example.com/p/${i}">Profile</a></div>
+${bullets === 0 ? '' : `<ul class="resume__bullets">\n${items}\n</ul>`}
+</div>`;
+}
+
+/** A section of `entries` undated entries, each with `bullets` bullets. */
+function undatedSection(kind: string, entries: number, bullets: number): string {
+  // The section wrapper and title, as wrapSection emits them.
+  return `<section class="resume__section" data-section="${kind}">
+<h2 class="resume__section-title">${kind}</h2>
+${Array.from({ length: entries }, (_, i) => undatedEntry(i, bullets)).join('\n')}
+</section>`;
+}
+
+/** The split block per the contract: left = achievements, right = certifications. */
+function split(left: string, right: string): string {
+  // The flex wrapper around exactly two sections.
+  return `<div class="resume__split">\n${left}\n${right}\n</div>`;
+}
+
+/** Wrapped in the article the scan expects (the article is a container, so its close adds nothing). */
+function article(body: string): string {
+  // Same open tag as the renderer.
+  return `<article class="resume">\n${body}\n</article>`;
+}
+
+test('SPLIT: a long left column is measured at HALF width: the block is at least the left column alone at half width, which exceeds it at full width', () => {
+  // A long left column and a short right one.
+  const left = undatedSection('achievements', 4, 3);
+  // One short certification.
+  const right = undatedSection('certifications', 1, 0);
+  // Every rung, because the column width changes with the page margin.
+  for (let rung = 0; rung < TYPOGRAPHY_LADDER.length; rung += 1) {
+    // The rung.
+    const step = TYPOGRAPHY_LADDER[rung]!;
+    // The modelled height of the whole split block.
+    const block = flowHeight(flowOf(article(split(left, right))), step);
+    // The left section alone, at half width.
+    const leftHalf = flowHeight(flowOf(article(left)), step, halfWidth(rung));
+    // The left section alone, at full width (the default width).
+    const leftFull = flowHeight(flowOf(article(left)), step);
+    // Precondition (non-vacuity): half width really wraps more, else the test proves nothing.
+    assert.ok(leftHalf > leftFull, `rung ${rung}: half ${leftHalf} vs full ${leftFull}`);
+    // The property: the block is never shorter than its longer column.
+    assert.ok(block >= leftHalf, `rung ${rung}: split ${block.toFixed(1)}pt < left column at half width ${leftHalf.toFixed(1)}pt`);
+  }
+});
+
+test('SPLIT: never lower than the max of each column modelled alone at half width (generated sizes, every rung)', () => {
+  // Small grid of left/right sizes: entries x bullets per side.
+  const sizes = [[1, 0], [2, 1], [3, 2], [1, 4], [5, 3]] as const;
+  // Every pairing, so both "left taller" and "right taller" occur.
+  for (const [le, lb] of sizes) {
+    // Right side sizes.
+    for (const [re, rb] of sizes) {
+      // The two sections.
+      const left = undatedSection('achievements', le, lb);
+      // Right one.
+      const right = undatedSection('certifications', re, rb);
+      // Each rung.
+      for (let rung = 0; rung < TYPOGRAPHY_LADDER.length; rung += 1) {
+        // The rung.
+        const step = TYPOGRAPHY_LADDER[rung]!;
+        // The block as the model reads it.
+        const block = flowHeight(flowOf(article(split(left, right))), step);
+        // Each column alone at half width.
+        const hL = flowHeight(flowOf(article(left)), step, halfWidth(rung));
+        // Same, right.
+        const hR = flowHeight(flowOf(article(right)), step, halfWidth(rung));
+        // Never optimistic.
+        assert.ok(block >= Math.max(hL, hR), `L${le}x${lb} R${re}x${rb} rung ${rung}: ${block} < max(${hL}, ${hR})`);
+      }
+    }
+  }
+});
+
+test('SPLIT: the nested <div>s inside the split are not mis-parsed: one columns item, every entry head counted in its column', () => {
+  // Three achievements, two certifications.
+  const flow = flowOf(article(split(undatedSection('achievements', 3, 2), undatedSection('certifications', 2, 1))));
+  // The whole block is ONE flow item, not a flattened leaf or a stacked run.
+  const blocks = flow.filter((item) => item.kind === 'columns');
+  // Exactly one.
+  assert.equal(blocks.length, 1, `flow kinds: ${flow.map((i) => i.kind).join(',')}`);
+  // Nothing outside it: the article holds only the split.
+  assert.equal(flow.length, 1, `flow kinds: ${flow.map((i) => i.kind).join(',')}`);
+  // Narrowed for the type checker.
+  const block = blocks[0] as { kind: 'columns'; columns: readonly (readonly { kind: string }[])[] };
+  // Two columns, in DOM order.
+  assert.equal(block.columns.length, 2);
+  // Every entry head is in its column: 3 left, 2 right.
+  assert.deepEqual(block.columns.map((col) => col.filter((i) => i.kind === 'head').length), [3, 2]);
+});

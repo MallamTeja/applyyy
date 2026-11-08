@@ -18,7 +18,7 @@ import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 // The module under test, by path with its extension, as node's ESM resolver requires.
-import { buildResumePreview, masterAsResume, previewDocumentTitle } from '../src/features/resume-preview/renderPreview.ts';
+import { buildResumePreview, masterAsResume, previewDocumentTitle, previewLinksOpenOutside } from '../src/features/resume-preview/renderPreview.ts';
 // The renderer itself, to prove the preview's body IS its output.
 import { renderResumeHtml } from '../../../packages/resume-template/src/index.ts';
 // The template's own fixtures: a real resume, and one with hostile strings.
@@ -168,6 +168,36 @@ describe('the preview frame cannot run scripts', () => {
     for (const value of sandboxes) assert.doesNotMatch(value, /allow-scripts/);
     // And the frame content is srcdoc, not a URL that could load something else. The preview
     // html now passes through the screen-only zoom wrapper first; it is still inline markup.
-    assert.match(frame, /srcDoc=\{zoomedPreviewHtml\(preview\.html, zoom\)\}/);
+    // 2026-11-08: the links are rewritten to open outside the frame first (previewLinksOpenOutside).
+    assert.match(frame, /srcDoc=\{zoomedPreviewHtml\(previewLinksOpenOutside\(preview\.html\), zoom\)\}/);
+  });
+
+  it('lets a resume link open in a new tab: popups allowed and escaping the sandbox, scripts still not', () => {
+    // Teja 2026-11-08: a link clicked in the preview must open GitHub/LinkedIn, which refuse to be framed,
+    // so the click has to leave the frame as a popup. Every sandbox attribute in the file.
+    const sandboxes = [...frame.matchAll(/sandbox="([^"]*)"/g)].map((m) => m[1]?.split(/\s+/) ?? []);
+    // At least one, so this cannot pass on a file with no iframe.
+    assert.ok(sandboxes.length > 0, 'no sandbox attribute found');
+    // Each frame grants the popup and lets that popup escape the sandbox (else GitHub opens sandboxed and breaks).
+    for (const tokens of sandboxes) assert.deepEqual(['allow-popups', 'allow-popups-to-escape-sandbox'].filter((t) => !tokens.includes(t)), []);
+  });
+});
+
+describe('previewLinksOpenOutside', () => {
+  it('gives every resume link target="_blank" rel="noopener noreferrer", and nothing else changes', () => {
+    // The real renderer output: the same anchors the PDF carries.
+    const html = renderResumeHtml(zomatoBackendIntern);
+    // How many anchors the renderer emits, so the check below cannot pass on a link-free document.
+    const before = [...html.matchAll(/<a\s/g)].length;
+    // Non-vacuous: the fixture has contact and project links.
+    assert.ok(before > 0, 'fixture rendered no links');
+    // The preview's copy.
+    const out = previewLinksOpenOutside(html);
+    // Every anchor opens a new tab, with no opener handle back into the preview and no referrer.
+    const rewritten = [...out.matchAll(/<a target="_blank" rel="noopener noreferrer" href="/g)].length;
+    // All of them, not some: one missed anchor is a link that dies in the frame.
+    assert.equal(rewritten, before);
+    // Removing the two attributes gives back the renderer's document byte for byte: the hrefs are untouched.
+    assert.equal(out.replaceAll(' target="_blank" rel="noopener noreferrer"', ''), html);
   });
 });

@@ -112,6 +112,17 @@ export function zoomedPreviewHtml(html: string, zoom: number): string {
   return html.includes(HEAD_CLOSE) ? html.replace(HEAD_CLOSE, `${style}${HEAD_CLOSE}`) : html;
 }
 
+// THE PREVIEW'S LINKS OPEN IN A NEW TAB (Teja 2026-11-08). A click inside the sandboxed frame would
+// navigate the frame itself, and GitHub/LinkedIn refuse to be framed, so the link looked dead.
+// Preview-only: the downloads and the worker's PDF keep the renderer's anchors untouched, because a
+// target attribute means nothing in a PDF and the golden render must not change for a screen concern.
+// `noopener noreferrer`: the new tab gets no handle back into the app and no referrer URL.
+export function previewLinksOpenOutside(html: string): string {
+  // The shared renderer writes every anchor as `<a href="` (escapeHtml turns any `<` in resume
+  // text into `&lt;`), so this literal matches only real links, never content that looks like one.
+  return html.replaceAll('<a href="', '<a target="_blank" rel="noopener noreferrer" href="');
+}
+
 // "<Name> - <Company> - tailored", the default filename for a download. Characters that
 // file systems refuse are dropped here, because the browser derives the name from it.
 export function previewDocumentTitle(fullName: string, companyName: string, variant: 'tailored' | 'master'): string {

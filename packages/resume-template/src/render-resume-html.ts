@@ -16,9 +16,14 @@
  *    cache key (constraint 8) collapse if this slips — a hash that varies by
  *    host silently defeats the cache, and one that varies by run means the
  *    approved preview and the submitted PDF are not provably the same document.
- * 3. SINGLE COLUMN. See print-styles.ts. Section 17.2: a two-column resume
- *    parses into interleaved gibberish, so the machine never sees the skills and
- *    a human never sees the resume.
+ * 3. SINGLE COLUMN, WITH ONE EXCEPTION. See print-styles.ts. Section 17.2: a
+ *    two-column resume parses into interleaved gibberish, so the machine never
+ *    sees the skills and a human never sees the resume. The one allowed split is
+ *    achievements | certifications in a single flex row (2026-11-08): PROJECT_PLAN.md
+ *    ("PREMISE CORRECTED 2026-09-10") and worker/test/ats-parse-real-pdf.test.ts
+ *    measured flex and grid as DOM order in Chromium's PDF text layer, so the left
+ *    column, first in the DOM, is read whole before the right. `order:` and
+ *    row-reverse DO move that layer and stay forbidden.
  *
  * WHAT IT DELIBERATELY CANNOT DO: it takes a ResolvedResume, which carries no
  * master profile and no raw dates. It therefore cannot resolve a node ref even
@@ -450,7 +455,11 @@ function renderContact(identity: ResolvedResume['identity']): string {
   // Collected as markup fragments so absent optional fields leave no separator.
   const parts: string[] = [];
   // Email first — it is the field an ATS most needs to extract.
-  parts.push(`<a href="mailto:${safeHref(identity.email)}">${escapeHtml(identity.email)}</a>`);
+  // The scheme goes INSIDE safeHref's argument (fixed 2026-11-08): safeHref allow-lists
+  // by prefix, so a bare address failed the check and every resume shipped
+  // href="mailto:#", a dead link. Passing the whole URL keeps the allow-list and the
+  // escaping (a quote in the address still becomes &quot;) in the one shared gate.
+  parts.push(`<a href="${safeHref(`mailto:${identity.email}`)}">${escapeHtml(identity.email)}</a>`);
   // Phone and location are nullable; push only when genuinely present.
   const phone = optionalText(identity.phone);
   // Pushed only when present, so an absent phone leaves no separator behind.
@@ -491,10 +500,43 @@ export function renderResumeHtml(resume: ResolvedResume): string {
       `Unsupported resume schema_version ${String(resume.schema_version)}; this renderer supports ${SUPPORTED_SCHEMA_VERSION}.`,
     );
   }
+  // THE ONE SIDE-BY-SIDE PAIR (Teja, 2026-11-08): achievements LEFT, certifications
+  // RIGHT. Both are short undated lists, so a full-width section each wastes half the
+  // line and pushes a resume onto page two. Rendered once here, through the ordinary
+  // switch, so the wrapped sections are byte-identical to how each prints alone.
+  const achievementsHtml = renderSection('achievements', resume);
+  // The right column, rendered the same way.
+  const certificationsHtml = renderSection('certifications', resume);
+  // Where the pair goes: the slot of whichever of the two the tailoring listed FIRST.
+  // -1 when neither is listed, which the guard below also covers.
+  const firstSplitIndex = resume.section_order.findIndex(
+    // Either kind claims the slot; the other kind's own slot then prints nothing.
+    (kind) => kind === 'achievements' || kind === 'certifications',
+  );
+  // Split ONLY when the tailoring asked for both AND both rendered something. One kind
+  // alone, or one with no entries, prints exactly as before: a half-empty two-column
+  // box would read as a missing section.
+  const split = resume.section_order.includes('achievements')
+    // Both kinds listed...
+    && resume.section_order.includes('certifications')
+    // ...and both non-empty (wrapSection returns '' for an empty list).
+    && achievementsHtml !== ''
+    // The right column needs content too.
+    && certificationsHtml !== '';
   // Sections render in the order the tailoring decided — order is data, never
   // recovered by sorting here.
   const sections = resume.section_order
-    .map((kind) => renderSection(kind, resume))
+    .map((kind, index) => {
+      // Any kind outside the pair, or no split at all: the ordinary path.
+      if (!split || (kind !== 'achievements' && kind !== 'certifications')) return renderSection(kind, resume);
+      // The pair's second slot (and any duplicate) prints nothing; the filter drops it.
+      if (index !== firstSplitIndex) return '';
+      // ACHIEVEMENTS FIRST IN THE DOM, ALWAYS, whichever kind claimed the slot: a row
+      // flex box paints in DOM order, and Chromium's PDF text layer follows paint order
+      // (measured 2026-09-10, worker/test/ats-parse-real-pdf.test.ts), so a parser reads
+      // the whole left column before the right one. Never swap them with CSS `order:`.
+      return `<div class="resume__split">\n${achievementsHtml}\n${certificationsHtml}\n</div>`;
+    })
     // Drop sections that rendered empty so no bare heading survives.
     .filter((html) => html !== '')
     .join('\n');
