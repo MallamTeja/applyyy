@@ -101,6 +101,10 @@ export function makeJobRow(overrides: Partial<JobRow> = {}): JobRow {
     employment_type: "internship",
     // UNTRUSTED, and the single highest-risk value in the database.
     description_raw: "Build REST APIs in Node.js and Express. 0-1 years experience.",
+    // GENERATED in Postgres as left(description_raw, 600); the short raw text above fits whole, so it equals it.
+    description_preview: "Build REST APIs in Node.js and Express. 0-1 years experience.",
+    // GENERATED degree flag: the raw text names no Master's/PhD requirement, so false, as Postgres would compute.
+    description_requires_degree: false,
     description_hash: "hash-1",
     // UNTRUSTED, and also the canonical submit target — which is why a LinkedIn
     // sighting can never become a submit path.

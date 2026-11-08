@@ -257,6 +257,18 @@ export interface JobRow {
    * block. Never concatenate it into an instruction.
    */
   description_raw: Untrusted | null;
+  /**
+   * GENERATED (stored) = left(description_raw, 600); NULL exactly when description_raw is NULL. Read-only:
+   * Postgres computes it, no writer sets it (migration 20261108170000). Exists so list views (/discovered)
+   * can show a card preview without detoasting ~6 KB per row. Same trust level as description_raw: UNTRUSTED.
+   */
+  description_preview: Untrusted | null;
+  /**
+   * GENERATED (stored): description_raw names a Master's/PhD requirement (the exact regex the web's degree rule
+   * used, ported to Postgres; false when description_raw is NULL). Read-only, migration 20261108170000. The one
+   * copy of that rule: the web cascade reads this instead of regexing the full text.
+   */
+  description_requires_degree: boolean;
   /** Digest of description_raw, so a re-poll that changed nothing does not re-trigger tailoring. */
   description_hash: string | null;
   /** The canonical submission target. UNTRUSTED as a string; the Applier routes on `ats_provider`, never by parsing this. */
