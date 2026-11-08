@@ -29,6 +29,25 @@ test("pay band: Prefect's metro-area band carries the warning", () => {
   assert.equal(payBandRegionWarning(remote("San Francisco Bay Area & NYC Metro: $149,000–$176,000")), PAY_BAND_UK_US_ONLY);
 });
 
+test("N2 matches amount-first salary like \"$125k (US)\"", () => {
+  // Amount first, place after: the mirror of Circuithub's "US $125k".
+  assert.equal(payBandRegionWarning(remote("Base pay: $125k (US)")), PAY_BAND_UK_US_ONLY);
+  // The comma form of the same amount, place after.
+  assert.equal(payBandRegionWarning(remote("Base pay: $125,000 (US)")), PAY_BAND_UK_US_ONLY);
+  // Currency code before the digits ("USD 125k"), then the place.
+  assert.equal(payBandRegionWarning(remote("Salary: USD 125k for the US")), PAY_BAND_UK_US_ONLY);
+  // A currency code is not a place: "(USD)" alone names no UK/US region, as Sourcegraph's zones show.
+  assert.equal(payBandRegionWarning(remote("Base pay: $125,000 (USD)")), null);
+});
+
+test("N2 amount-first: a malformed amount never becomes a pay band", () => {
+  // Each string has a UK/US place after a broken amount; none is salary-sized, so no chip.
+  for (const broken of ["$k (US)", "$-5k (US)", "$ (US)", "$125kk (US)", "$ k (US)", "$ US", "USD k (US)", "USD (US)"]) {
+    // Named in the message so a failure says which shape leaked.
+    assert.equal(payBandRegionWarning(remote(`Pay: ${broken}`)), null, broken);
+  }
+});
+
 test("pay band: noise is not a pay band (learning budget, funding round, global zones)", () => {
   // Canonical: a small dollar budget with no place word; it chipped 10 rows under a looser rule.
   assert.equal(payBandRegionWarning({ locationRaw: "Home based - Worldwide", description: "A personal development budget of USD 2,000 per year." }), null);

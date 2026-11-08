@@ -397,6 +397,20 @@ export interface FormShapeBlocker {
   readonly reason: 'no_form_fields';
 }
 
+/**
+ * THE EMPTY-PAGE GATE (W5) as one predicate, shared by the applier and the rehearsal.
+ * Shared, not copied: on 2026-11-08 the rehearsal CLI passed a 0-field page as "ready"
+ * because only apply-one carried this check, and the first real submit is gated on that CLI.
+ */
+export function formShapeBlockersFor(id: string, fields: readonly unknown[]): FormShapeBlocker[] {
+  // Checked on the RAW extraction, before any planner skips a kind (planFill skips files).
+  return fields.length === 0
+    // The row id, because no control is at fault; the label reaches the log, the queue and the rehearsal table.
+    ? [{ id, label: 'No application form fields were found on the opened page', reason: 'no_form_fields' }]
+    // A form with at least one field is judged by the planners, not here.
+    : [];
+}
+
 /** What happened. A discriminated union so no caller can ignore a case. */
 export type ApplyOutcome =
   // Filled and screenshotted, nothing submitted, row untouched at `approved`.
@@ -591,11 +605,8 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
   // ponytail: emptiness only. A page whose one field is a search box still passes; an
   // "is there an email field" check is the upgrade, once the profile synonym table is
   // exported (profile-answers.ts) rather than copied here.
-  const formShapeBlockers: FormShapeBlocker[] =
-    // Checked on the RAW extraction, before any planner skips a kind (planFill skips files).
-    fields.length === 0
-      ? [{ id: row.id, label: 'No application form fields were found on the opened page', reason: 'no_form_fields' }]
-      : [];
+  // The predicate lives in formShapeBlockersFor so the rehearsal (assist/rehearse.ts) refuses the same page.
+  const formShapeBlockers = formShapeBlockersFor(row.id, fields);
   // All four gates. Each one alone can only say "no", so a missing gate fails closed.
   let wouldSubmit = detected === null && formShapeBlockers.length === 0 && plan.canProceed && attachment.canProceed;
 

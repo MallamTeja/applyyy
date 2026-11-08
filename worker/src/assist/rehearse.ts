@@ -16,6 +16,8 @@
 import type { AnswerBankRow, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 // Type-only: the full page port (only so readOnlyPage can narrow it) and the robots port.
 import type { ApplicationPage, RobotsCheck } from '../apply-one.ts';
+// The applier's empty-page gate, so a page apply-one would park cannot rehearse as ready.
+import { formShapeBlockersFor } from '../apply-one.ts';
 // Type-only: the resolver port, the same one assist takes.
 import type { FormUrlResolver } from '../form-url.ts';
 // Type-only: the robots answer, reported as is.
@@ -122,6 +124,11 @@ export async function rehearseAssisted(input: RehearsalInput): Promise<Rehearsal
   const attachment = planResumeAttachment(fields, { hasResumeSnapshot: true });
   // Everything except the render.
   report = { ...report, blocker, fields, plan, resumeTarget: attachment.target?.label ?? null, attachBlockers: attachment.blockers.map((b) => b.label) };
+  // The applier's empty-page gate, the same predicate (2026-11-08). Without it 0 fields gave an empty plan
+  // and no upload box, every check PASSed, and the CLI said "ready" for a page with no form at all.
+  const [emptyPage] = formShapeBlockersFor(input.applicationId, fields);
+  // A stop, which the CLI prints as a FAIL row: absence of a form is never a form that is done.
+  if (emptyPage !== undefined) return { ...report, stoppedAt: emptyPage.label };
   // No upload box: a legitimate shape, nothing to render.
   if (attachment.target === null) return report;
   // The exact bytes assist would attach.

@@ -98,6 +98,20 @@ describe('rehearseAssisted', () => {
     expect(page.goto).not.toHaveBeenCalled();
   });
 
+  it('rehearse-assist fails closed when the page or kit has 0 fields', async () => {
+    // A page that opens fine but extracts NOTHING: a job description, an iframe shell, a form that never rendered.
+    const { page, writes } = fullPage();
+    // Zero fields, the exact shape that made the CLI print exit 0 before the guard (2026-11-08).
+    (page.extractFields as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+    const report = await rehearseAssisted(input(page));
+    // THE POINT: a stop, which the CLI turns into a FAIL row and exit 1, never "ready".
+    expect(report.stoppedAt).toMatch(/no application form fields/i);
+    // Stopped before the resume render: there is no form to attach it to.
+    expect(report.resume).toBeNull();
+    // Still read-only on the way out.
+    expect([writes.fill.mock.calls.length, writes.attachFile.mock.calls.length, writes.submit.mock.calls.length]).toEqual([0, 0, 0]);
+  });
+
   it('a renderer that does not return a PDF is reported, not passed', async () => {
     // HTML bytes where a PDF should be.
     const { page } = fullPage();

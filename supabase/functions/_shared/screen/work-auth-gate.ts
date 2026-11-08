@@ -461,10 +461,18 @@ export const PAY_BAND_UK_US_ONLY = "Pay band UK/US only" as const;
 // CASE-SENSITIVE on purpose: lower-case "us" is the English word ("join us: $120,000").
 // Salary-sized means "80k" or "97,600" (2-3 digits then k or ,ddd): "USD 2,000" (a learning budget),
 // "$500M" and "$1B" (funding) never match. [^.\n] keeps the pair inside one sentence or line.
-// ponytail: place-then-amount only. "$125k (US)" (amount first) is missed; add the mirrored order
-// if a real row shows it. A missed chip costs nothing: the job is kept either way.
-const PAY_BAND_PLACE_THEN_AMOUNT =
-  /\b(?:UK|U\.K\.|US|U\.S\.|USA|United States|United Kingdom|London|San Francisco|Bay Area|NYC|New York|Seattle)\b[^.\n]{0,60}?(?:[£$]\s?\d{2,3}(?:,\d{3}|k)\b|\d{2,3}(?:,\d{3}|k)\s?(?:USD|GBP)\b)/;
+// The amount-first order ("$125k (US)") is matched too, by the mirrored regex below.
+// The place, kept as its own regex so both orders share one list and cannot drift apart.
+const PAY_BAND_PLACE = /\b(?:UK|U\.K\.|US|U\.S\.|USA|United States|United Kingdom|London|San Francisco|Bay Area|NYC|New York|Seattle)\b/;
+// The salary-sized amount: "$125k", "£80,000", "125k USD", "USD 125k". Every form demands 2-3 digits
+// then ",ddd" or "k" then a word boundary, so "$k", "$-5k", "$125kk" and a lone "$" or "USD" never
+// match (CLAUDE.md §6: a malformed amount must not become a pay band). A currency CODE is never a place:
+// "USD" is not "US" because \bUS\b needs a boundary after the S.
+const PAY_BAND_AMOUNT = /(?:[£$]\s?\d{2,3}(?:,\d{3}|k)\b|\d{2,3}(?:,\d{3}|k)\s?(?:USD|GBP)\b|\b(?:USD|GBP)\s?\d{2,3}(?:,\d{3}|k)\b)/;
+// Place, then the amount in the same sentence ("UK £80k").
+const PAY_BAND_PLACE_THEN_AMOUNT = new RegExp(String.raw`${PAY_BAND_PLACE.source}[^.\n]{0,60}?${PAY_BAND_AMOUNT.source}`);
+// The amount, then the place in the same sentence ("$125k (US)"). The same 60-char, one-sentence window.
+const PAY_BAND_AMOUNT_THEN_PLACE = new RegExp(String.raw`${PAY_BAND_AMOUNT.source}[^.\n]{0,60}?${PAY_BAND_PLACE.source}`);
 
 // Any India pay or place in the JD: then the band is not UK/US ONLY, so no chip.
 const PAY_BAND_INDIA = /₹|\bINR\b|\bLPA\b|\bIndia\b/i;
@@ -480,6 +488,6 @@ export function payBandRegionWarning(job: { readonly locationRaw: string | null;
   if (text === null) return null;
   // India pay or place anywhere: the band is not UK/US only.
   if (PAY_BAND_INDIA.test(text)) return null;
-  // The chip when a UK/US place leads a salary-sized amount; otherwise nothing.
-  return PAY_BAND_PLACE_THEN_AMOUNT.test(text) ? PAY_BAND_UK_US_ONLY : null;
+  // The chip when a UK/US place and a salary-sized amount share a sentence, in either order.
+  return PAY_BAND_PLACE_THEN_AMOUNT.test(text) || PAY_BAND_AMOUNT_THEN_PLACE.test(text) ? PAY_BAND_UK_US_ONLY : null;
 }
