@@ -146,6 +146,85 @@ export interface ApplicationPage {
      as strict and the filler's dial-code rule ("India" picks "India +91") would stop matching.
      Optional for the same reason as postingClosed; the real page always has it. */
   readMenuOptions?(id: string): Promise<string[] | null>;
+  /* Task 2 (2026-11-09): the page's own pre-click facts, read WITHOUT clicking, so a dry run and a rehearsal
+     can ask the exact question submit() asks before its click. `coveredIds` (rehearsal only, where nothing
+     is typed): controls whose id, or an ancestor's id, a planned fill or attachment targets are not
+     reported as required-but-empty. Optional only so the test fakes need not grow it; the real page
+     always has it (pinned by dry-run-would-submit.test.ts), and every reader treats its absence as a
+     refusal (`presubmit_unavailable`), never as a pass. */
+  presubmitFacts?(coveredIds?: readonly string[]): Promise<PresubmitFacts>;
+}
+
+/** What the page shows right before a click, read without clicking. Raw facts; verdictFromFacts judges them. */
+export interface PresubmitFacts {
+  // Visible submit controls inside a form. Exactly one, or the click could send the wrong thing.
+  readonly submitControls: number;
+  // Labels the form or the browser already marks invalid.
+  readonly invalid: readonly string[];
+  // Labels of REQUIRED controls still holding no value (the P2-17 guard, Lever's ✱ included).
+  readonly requiredEmpty: readonly string[];
+}
+
+/**
+ * THE NAME OF EVERY CHECK that can stop an application before the click, as one closed set.
+ * A dry run, the rehearsal and the live path all report a refusal by one of these names, so a log
+ * line or a test can say WHICH gate said no, and a new gate must be added here before it can report.
+ */
+export type PresubmitCheck =
+  // A captcha, login wall or anti-bot page (detectBlocker).
+  | 'page_blocker'
+  // No form, or no email box (formShapeBlockersFor).
+  | 'form_shape'
+  // The planner left a required question for the human (human_only, unanswered, no option match).
+  | 'fill_plan'
+  // The resume has nowhere to go, or the snapshot is missing.
+  | 'attachment'
+  // The live page refused a planned value while typing.
+  | 'fill_rejected'
+  // Today's matcher gates would drop the row (recheckBeforeSubmit).
+  | 'pre_gate'
+  // The opened posting says it is closed (recheckBeforeSubmit).
+  | 'posting_closed'
+  // Today's gate config could not be loaded, so the re-check could not run: never read as a pass.
+  | 'recheck_unavailable'
+  // The page cannot report its pre-click facts, so they could not be checked: never read as a pass.
+  | 'presubmit_unavailable'
+  // Not exactly one visible submit control in a form.
+  | 'submit_control'
+  // A field the form already marks invalid.
+  | 'invalid_fields'
+  // A required control still blank (Lever's uncovered radio card lands here).
+  | 'required_empty'
+  // The rehearsal stopped before the form (no master, robots, form shape).
+  | 'rehearsal_stopped'
+  // The rendered resume is not a PDF.
+  | 'resume_not_pdf';
+
+/**
+ * Whether the REAL submit would have gone ahead: a closed union, never a boolean beside a reason
+ * (CLAUDE.md §6). `would_submit` carries nothing because it may only be produced after EVERY check ran;
+ * `would_block` names the FIRST check that said no and what it saw.
+ */
+export type SubmitVerdict =
+  // Every pre-click check passed.
+  | { readonly kind: 'would_submit' }
+  // The first refusal, by name, with the evidence the human needs.
+  | { readonly kind: 'would_block'; readonly check: PresubmitCheck; readonly detail: string };
+
+/**
+ * The pre-click facts judged in submit()'s order: the submit control, then invalid fields, then blank
+ * required ones. ONE judge for submit(), the dry run and the rehearsal, so the three cannot drift apart
+ * the way the rehearsal's own verdict did (it said "ready" on checks the live path never skipped).
+ */
+export function verdictFromFacts(facts: PresubmitFacts): SubmitVerdict {
+  // Two controls could send a draft; zero means this is not the form that was filled.
+  if (facts.submitControls !== 1) return { kind: 'would_block', check: 'submit_control', detail: `expected 1 visible submit control in a form, found ${facts.submitControls}` };
+  // A flagged field makes the click a rejection at best.
+  if (facts.invalid.length > 0) return { kind: 'would_block', check: 'invalid_fields', detail: `invalid before submit: ${facts.invalid.join('; ')}` };
+  // A blank required question, which a `novalidate` form never flags itself.
+  if (facts.requiredEmpty.length > 0) return { kind: 'would_block', check: 'required_empty', detail: `required but empty before submit: ${facts.requiredEmpty.join('; ')}` };
+  // Nothing on the page stops the click.
+  return { kind: 'would_submit' };
 }
 
 /**
@@ -331,6 +410,61 @@ export async function recheckBeforeSubmit(row: ClaimedApplication, page: Applica
   return null;
 }
 
+/**
+ * A dry run's answer to "would the real submit have gone ahead?" (task 2, 2026-11-09).
+ *
+ * Every check the live path runs after the dry-run exit, in the live order, minus their writes and the
+ * click: first the planner-time gates already folded into `wouldSubmit` (named, not merely counted), then
+ * recheckBeforeSubmit, then submit()'s own pre-click facts. A check that cannot run (no config, a page
+ * that cannot report) is a `would_block` under its own name: an unrun check is never a pass (§6).
+ */
+async function dryRunVerdict(input: {
+  // The planner-time gates' combined answer, including a fill the page refused.
+  readonly wouldSubmit: boolean;
+  // detectBlocker's answer.
+  readonly detected: BlockReason | null;
+  // formShapeBlockersFor's answer.
+  readonly formShapeBlockers: readonly ApplicationBlocker[];
+  // The planner's refusals.
+  readonly plan: { readonly blockers: readonly ApplicationBlocker[] };
+  // The attachment planner's refusals.
+  readonly attachment: { readonly blockers: readonly ApplicationBlocker[] };
+  // Every blocker so far; its last entry is a fill the page refused, when that is what flipped wouldSubmit.
+  readonly blockers: readonly ApplicationBlocker[];
+  // The row, for the re-check's pre-gate.
+  readonly row: ClaimedApplication;
+  // The page, already filled when wouldSubmit held.
+  readonly page: ApplicationPage;
+  // Today's gate config, or undefined when it could not be loaded.
+  readonly recheck: SubmitRecheck | undefined;
+}): Promise<SubmitVerdict> {
+  // Labels joined for the human, the same way the park writes them.
+  const named = (list: readonly ApplicationBlocker[]): string => list.map((blocker) => blocker.label).join('; ');
+  // The planner-time gates, in the order the live park explains them.
+  if (!input.wouldSubmit) {
+    // A wall hides the real form, so it explains everything after it.
+    if (input.detected !== null) return { kind: 'would_block', check: 'page_blocker', detail: input.detected };
+    // No form at all.
+    if (input.formShapeBlockers.length > 0) return { kind: 'would_block', check: 'form_shape', detail: named(input.formShapeBlockers) };
+    // Questions left for the human (human_only, unanswered, no option match).
+    if (input.plan.blockers.length > 0) return { kind: 'would_block', check: 'fill_plan', detail: named(input.plan.blockers) };
+    // Nowhere to put the resume.
+    if (input.attachment.blockers.length > 0) return { kind: 'would_block', check: 'attachment', detail: named(input.attachment.blockers) };
+    // Only a refused fill is left: it is the last blocker pushed. `?? 'unknown'` keeps the detail non-empty.
+    return { kind: 'would_block', check: 'fill_rejected', detail: input.blockers.at(-1)?.label ?? 'a planned value was refused by the page' };
+  }
+  // No config: the live path throws rather than submit unjudged, so the dry run must not say "would submit".
+  if (input.recheck === undefined) return { kind: 'would_block', check: 'recheck_unavailable', detail: "today's gate config was not loaded, so the pre-submit re-check could not run" };
+  // The re-check itself: pure on config, then the page's posting-closed read (a GET, nothing sent to the form).
+  const refused = await recheckBeforeSubmit(input.row, input.page, input.recheck);
+  // `recheck` is already a check name ('pre_gate' | 'posting_closed').
+  if (refused !== null) return { kind: 'would_block', check: refused.recheck, detail: refused.reason };
+  // A page that cannot report its facts cannot be judged: refuse by name.
+  if (input.page.presubmitFacts === undefined) return { kind: 'would_block', check: 'presubmit_unavailable', detail: 'the page cannot report its pre-click facts' };
+  // submit()'s own judge, on the filled page.
+  return verdictFromFacts(await input.page.presubmitFacts());
+}
+
 // The Workday predicate and its refusal line live in workday.ts (zero imports) since 2026-11-07, so the
 // rehearse CLI and the web's Manual apply card ask the very same question this guard does (imported at the top).
 // Re-exported: apply-one-workday.test.ts and any relative importer still reach it here.
@@ -442,8 +576,9 @@ export type ApplyOutcome =
   // Filled and screenshotted, nothing submitted, row untouched at `approved`.
   | {
       readonly kind: 'dry_run_complete';
-      // Whether a real run would have submitted this one, or blocked instead.
-      readonly wouldSubmit: boolean;
+      // Whether the real submit would have gone ahead, or the first check that would have stopped it.
+      // A union, not a boolean: "would submit" is only representable after every live check ran (task 2).
+      readonly verdict: SubmitVerdict;
       // Surfaced so the run summary can name the questions that would have
       // blocked, letting the answer bank grow during the trust period without
       // moving any rows.
@@ -792,10 +927,15 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
   if (!mode.submits) {
     // Hand the row back still `approved`, so the next run — or the first run
     // after the flag is flipped — picks up exactly the same queue.
+    // THE LIVE PATH'S REMAINING CHECKS, run here without their writes or the click (task 2, 2026-11-09).
+    // Before this, a dry run reported the planner's view alone, so a row the re-check or submit()'s own
+    // pre-click guard would park still read as "would submit". Read before the release, while the page
+    // still holds what was typed; every one of them is a read.
+    const verdict = await dryRunVerdict({ wouldSubmit, detected, formShapeBlockers, plan, attachment, blockers, row, page, recheck: input.recheck });
     await gateway.releaseClaim(row.id, `dry_run: ${mode.reason}`);
     return {
       kind: 'dry_run_complete',
-      wouldSubmit,
+      verdict,
       // Both layers' blockers, so the trust-period log names every reason this
       // application would not have gone out — not just the answer-bank ones.
       blockers,

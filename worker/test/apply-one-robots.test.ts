@@ -529,12 +529,12 @@ describe('runApplierBatch and robots', () => {
     expect(calls).toContain('advance:app-later:applied');
   });
 
-  it('a dry run logs wouldSubmit and each blocker label', async () => {
+  it('a dry run logs its verdict and each blocker label', async () => {
     // The line itself, from the pure formatter: verdict, count, then "label: reason" pairs.
     expect(
       formatDryRunLine('app-x', {
         kind: 'dry_run_complete',
-        wouldSubmit: false,
+        verdict: { kind: 'would_block', check: 'fill_plan', detail: 'Visa status; Start date' },
         blockers: [
           // H2: blockers carry key and kind; the formatter reads neither.
           { id: 'q1', label: 'Visa status', reason: 'no_matching_option', key: 'visa_status', kind: 'text' },
@@ -545,19 +545,19 @@ describe('runApplierBatch and robots', () => {
         resumeSha256: null,
         reason: 'dry',
       }),
-    ).toBe('[applyy] dry run app-x: wouldSubmit=false blockers=2 [Visa status: no_matching_option, Start date: no_matching_option]');
+    ).toBe('[applyy] dry run app-x: verdict=would_block:fill_plan (Visa status; Start date) blockers=2 [Visa status: no_matching_option, Start date: no_matching_option]');
     // Zero blockers still prints the count and empty brackets, so "none" is stated.
     expect(
       formatDryRunLine('app-y', {
         kind: 'dry_run_complete',
-        wouldSubmit: true,
+        verdict: { kind: 'would_submit' },
         blockers: [],
         screenshotPath: 's.png',
         resumePath: null,
         resumeSha256: null,
         reason: 'dry',
       }),
-    ).toBe('[applyy] dry run app-y: wouldSubmit=true blockers=0 []');
+    ).toBe('[applyy] dry run app-y: verdict=would_submit blockers=0 []');
 
     // And through the loop: a page whose fill refuses the planned value yields a real
     // blocker (labelled by the field's question text), which the loop must log.
@@ -581,7 +581,7 @@ describe('runApplierBatch and robots', () => {
         clock: frozenClock,
       });
       // Exactly the format above, with the field's LABEL (not its id) and the reason.
-      expect(log).toHaveBeenCalledWith('[applyy] dry run app-1: wouldSubmit=false blockers=1 [First Name: no_matching_option]');
+      expect(log).toHaveBeenCalledWith('[applyy] dry run app-1: verdict=would_block:fill_rejected (First Name) blockers=1 [First Name: no_matching_option]');
     } finally {
       // Always restored, even when the assertion fails.
       log.mockRestore();

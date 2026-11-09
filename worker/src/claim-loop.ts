@@ -264,7 +264,9 @@ export function parseMaxSubmits(raw: string | undefined): number {
 }
 
 /**
- * The one log line a dry run leaves: `[applyy] dry run <id>: wouldSubmit=<bool> blockers=<n> [<label>: <reason>, …]`.
+ * The one log line a dry run leaves:
+ * `[applyy] dry run <id>: verdict=would_submit|would_block:<check> (<detail>) blockers=<n> [<label>: <reason>, …]`.
+ * The verdict names the FIRST check the real submit would have stopped on (task 2, 2026-11-09).
  *
  * Exported and pure so the format is tested directly. Reads only the verdict and each
  * blocker's label and reason: a label is the form's question text, never the answer.
@@ -276,7 +278,10 @@ export function formatDryRunLine(
   // "label: reason" per blocker, comma-separated, in the order the planner found them.
   const listed = outcome.blockers.map((blocker) => `${blocker.label}: ${blocker.reason}`).join(', ');
   // The count is printed even at zero, so "no blockers" is stated, not implied by absence.
-  return `[applyy] dry run ${applicationId}: wouldSubmit=${outcome.wouldSubmit} blockers=${outcome.blockers.length} [${listed}]`;
+  // The closed-union verdict, flattened: the check's name is what a reader greps for.
+  const verdict = outcome.verdict.kind === 'would_submit' ? 'would_submit' : `would_block:${outcome.verdict.check} (${outcome.verdict.detail})`;
+  // One line, verdict first because it is the answer the dry run exists to give.
+  return `[applyy] dry run ${applicationId}: verdict=${verdict} blockers=${outcome.blockers.length} [${listed}]`;
 }
 
 // Compile-time exhaustiveness; at runtime it throws, which the per-row catch counts as an error.
@@ -497,9 +502,20 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
     /* B2 (P1-6, 2026-11-05): today's gate config, read once before anything is claimed, for the
        re-check before every live submit. A failed read, or a gateway with no loader at all, THROWS into
        the run-level catch before anything is claimed (2026-11-05 review: fail closed, CLAUDE.md §6): a live
-       run must never submit rows it could not re-judge. A dry run submits nothing and needs no config. */
+       run must never submit rows it could not re-judge. Task 2 (2026-11-09): a dry run loads it too, READ-ONLY,
+       so its verdict can say whether the re-check would have parked the row; a dry run that cannot load it
+       keeps going, and every row then reports `would_block:recheck_unavailable`, never `would_submit`. */
     let recheck: SubmitRecheck | undefined;
-    // Live runs only: a dry run submits nothing, so it re-checks nothing.
+    // A dry run: the same read, but a failure is reported per row instead of ending the run.
+    if (!live && gateway.loadPreGatePreferences !== undefined) {
+      // A pure read of the config tables; no claim, status or event write.
+      const loaded = await gateway.loadPreGatePreferences();
+      // Loaded: the dry run re-checks exactly as a live run would.
+      if (loaded.kind !== 'error') recheck = { preferences: loaded.preferences };
+      // Unreadable: said once here, and per row through the verdict.
+      else console.warn(`[applyy] dry run: pre-submit re-check config unreadable (${loaded.code}); every row will report recheck_unavailable`);
+    }
+    // Live runs: the read is mandatory, because a live run must never submit rows it could not re-judge.
     if (live) {
       // No loader: the re-check cannot run, so neither may a live submit.
       if (gateway.loadPreGatePreferences === undefined) throw new Error('pre-submit re-check unavailable: the gateway has no loadPreGatePreferences; refusing a live run');

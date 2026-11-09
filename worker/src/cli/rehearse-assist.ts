@@ -217,12 +217,17 @@ async function main(): Promise<void> {
     record('robots (form url)', report.robots?.kind === 'allow' ? 'PASS' : 'FAIL', `${report.formUrl ?? '?'}: ${report.robots ? `${report.robots.kind}: ${report.robots.reason}` : 'not reached'}`);
     // A stop before the form is a FAIL with its reason.
     if (report.stoppedAt !== null) record('rehearsal', 'FAIL', `stopped: ${report.stoppedAt}`);
-    // A wall is the human's, so WAIT.
-    record('page blocker', report.blocker === null ? 'PASS' : 'WAIT', report.blocker ?? 'none');
+    // A wall is a FAIL since task 2 (2026-11-09): the live applier parks on it, so it can never be 'ready'.
+    record('page blocker', report.blocker === null ? 'PASS' : 'FAIL', report.blocker ?? 'none');
     // The plan: fills, and the questions assist would hand to the human.
     record('fill plan', report.plan !== null && report.plan.blockers.length === 0 ? 'PASS' : 'WAIT', report.plan === null ? 'not reached' : `${report.fields.length} fields, ${report.plan.fills.length} fills (${report.plan.fills.map((f) => f.id).join(', ')}), ${report.plan.blockers.length} for the human${report.plan.blockers.length ? `: ${report.plan.blockers.map((b) => b.label).join('; ')}` : ''}`);
     // The resume: a target, a real PDF.
     record('resume attach', report.resume?.isPdf === true || (report.resumeTarget === null && report.stoppedAt === null) ? 'PASS' : 'FAIL', report.resume ? `${report.resume.fileName} -> ${report.resumeTarget}, ${report.resume.bytes} bytes, %PDF ${report.resume.isPdf}` : `target ${report.resumeTarget ?? 'none'}`);
+    // THE ANSWER (task 2): would the live submit go ahead? The same closed-union verdict the applier's dry run
+    // reports, so exit 0 'ready' now means every check the live path runs before its click has passed.
+    // A question the planner left for Teja is WAIT (exit 2, his answer clears it); every other block is FAIL (exit 1).
+    // Neither is exit 0: only would_submit is 'ready'.
+    record('submit verdict', report.verdict.kind === 'would_submit' ? 'PASS' : report.verdict.check === 'fill_plan' ? 'WAIT' : 'FAIL', report.verdict.kind === 'would_submit' ? 'every pre-click check passed' : `would block at ${report.verdict.check}: ${report.verdict.detail}`);
   } finally {
     // Renderer page first, then the browser that owns it.
     await renderer.close();

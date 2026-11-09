@@ -926,7 +926,7 @@ describe('applyToOne — a fill the page rejects', () => {
     ).rejects.toThrow('boom');
   });
 
-  it('dry-run reports the blocker and wouldSubmit false, not a silent gap', async () => {
+  it('dry-run reports the blocker and a fill_rejected verdict, not a silent gap', async () => {
     // Same rejection, but with the dry-run default (env empty).
     const { page } = fakePage({
       // Gives the page the one field the planner will plan a fill for.
@@ -944,11 +944,12 @@ describe('applyToOne — a fill the page rejects', () => {
 
     // A dry run never moves the row, whatever happened to the fill.
     expect(transitions).toHaveLength(0);
-    // The dry-run exit is still taken; only its wouldSubmit and blockers change.
+    // The dry-run exit is still taken; only its verdict and blockers change.
     expect(outcome.kind).toBe('dry_run_complete');
     if (outcome.kind === 'dry_run_complete') {
       // The trust-period log must show this application would NOT have gone out, and why.
-      expect(outcome.wouldSubmit).toBe(false);
+      // Named by the check that stopped it and the field it stopped on (task 2: a closed union, not a boolean).
+      expect(outcome.verdict).toEqual({ kind: 'would_block', check: 'fill_rejected', detail: 'Country' });
       expect(outcome.blockers.map((b) => b.label)).toEqual(['Country']);
     }
   });
@@ -1157,7 +1158,8 @@ describe('applyToOne — the employer name reaches the planner', () => {
 
   it('applyToOne: employerName "GitLab" lets the previously-worked question be answered', async () => {
     // The only field on the form, so any blocker below can only be this one.
-    const { page } = fakePage({ extractFields: async () => [workedQ, EMAIL_FIELD] });
+    // presubmitFacts: the page's pre-click read comes back clean, so every live check passes (task 2).
+    const { page } = fakePage({ extractFields: async () => [workedQ, EMAIL_FIELD], presubmitFacts: async () => ({ submitControls: 1, invalid: [], requiredEmpty: [] }) });
     // Dry run (env unset): the outcome reports viability without moving the row.
     const outcome = await applyToOne({
       row: { ...row, employerName: 'GitLab' },
@@ -1169,7 +1171,7 @@ describe('applyToOne — the employer name reaches the planner', () => {
       renderResume: fakeRenderer().render,
     });
     // Viable, with nothing blocking: the employer reached the planner.
-    expect(outcome).toMatchObject({ kind: 'dry_run_complete', wouldSubmit: true, blockers: [] });
+    expect(outcome).toMatchObject({ kind: 'dry_run_complete', verdict: { kind: 'would_submit' }, blockers: [] });
   });
 
   it('applyToOne: a null employerName refuses the previously-worked question', async () => {
@@ -1186,7 +1188,7 @@ describe('applyToOne — the employer name reaches the planner', () => {
       renderResume: fakeRenderer().render,
     });
     // Not viable: the question went to a human because the employer was unknown.
-    expect(outcome).toMatchObject({ kind: 'dry_run_complete', wouldSubmit: false });
+    expect(outcome).toMatchObject({ kind: 'dry_run_complete', verdict: { kind: 'would_block', check: 'fill_plan' } });
   });
 });
 
@@ -1387,7 +1389,7 @@ describe('applyToOne — a page with no form fields (W5)', () => {
     expect(outcome).toMatchObject({ kind: 'blocked', reason: 'unsupported_form' });
   });
 
-  it('W5 dry run: zero extracted fields reports wouldSubmit=false with a no_form_fields blocker', async () => {
+  it('W5 dry run: zero extracted fields reports a form_shape verdict with a no_form_fields blocker', async () => {
     // Same empty page as the live test.
     const { page, submit } = fakePage({ extractFields: async () => [] });
     // Dry runs write no status, so only the release is asserted.
@@ -1403,7 +1405,7 @@ describe('applyToOne — a page with no form fields (W5)', () => {
     // Handed back untouched.
     expect(released).toEqual(['app-1']);
     // The log line reads "would NOT submit" and names why, instead of "would submit".
-    expect(outcome).toMatchObject({ kind: 'dry_run_complete', wouldSubmit: false });
+    expect(outcome).toMatchObject({ kind: 'dry_run_complete', verdict: { kind: 'would_block', check: 'form_shape' } });
     // The blocker is named, so the dry-run log says what is wrong with the page.
     expect(outcome.kind === 'dry_run_complete' ? outcome.blockers.map((blocker) => blocker.reason) : []).toEqual(['no_form_fields']);
   });
@@ -1452,7 +1454,7 @@ describe('applyToOne — a page with no form fields (W5)', () => {
     expect(outcome).toMatchObject({ kind: 'blocked', reason: 'unsupported_form' });
   });
 
-  it('no_email_field dry run: the same page reports wouldSubmit=false with a no_email_field blocker naming the controls', async () => {
+  it('no_email_field dry run: the same page reports a form_shape verdict with a no_email_field blocker naming the controls', async () => {
     // The jobicy shape again.
     const { page } = fakePage({ extractFields: async () => aggregatorPage });
     // Dry runs write no status.
@@ -1464,7 +1466,7 @@ describe('applyToOne — a page with no form fields (W5)', () => {
     // Nothing moved.
     expect(advances).toEqual([]);
     // Would NOT submit.
-    expect(outcome).toMatchObject({ kind: 'dry_run_complete', wouldSubmit: false });
+    expect(outcome).toMatchObject({ kind: 'dry_run_complete', verdict: { kind: 'would_block', check: 'form_shape' } });
     // The one blocker, named, with the labels the page showed instead of a form.
     expect(outcome.kind === 'dry_run_complete' ? outcome.blockers.map((blocker) => [blocker.reason, blocker.label]) : []).toEqual([
       ['no_email_field', expect.stringMatching(/2 field\(s\): Job title, company or skill, Dark mode/)],

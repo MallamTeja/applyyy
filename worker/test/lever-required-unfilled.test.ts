@@ -118,7 +118,7 @@ test('control: the same form with the required card answered is sent (the option
     // Answer the required question; the optional one stays blank on purpose.
     await raw.check('input[value="Yes"]');
     // Nothing required is empty now.
-    expect(await raw.evaluate(readUnfilledRequiredLabels)).toEqual([]);
+    expect(await raw.evaluate(readUnfilledRequiredLabels, [])).toEqual([]);
     // The click happens; its outcome is not this file's concern.
     await port.submit();
     // Proof the guard does not over-block: the form was sent exactly once.
@@ -136,12 +136,12 @@ test('the first bot submit is not over-blocked: TrueFoundry\'s required controls
     // Loaded straight from the fixture server; this test never submits.
     await raw.goto(`${server.url}/greenhouse/truefoundry-5126892008-backend-interns.html`);
     // Before any fill, the guard names the empty required text boxes (non-vacuity: it reads this form).
-    expect(await raw.evaluate(readUnfilledRequiredLabels)).toEqual(expect.arrayContaining(['First Name', 'Email']));
+    expect(await raw.evaluate(readUnfilledRequiredLabels, [])).toEqual(expect.arrayContaining(['First Name', 'Email']));
     // The four required text boxes the bot types, with invented values.
     for (const [id, value] of [['first_name', 'Asha'], ['last_name', 'Rao'], ['email', 'asha@example.com'], ['phone', '9999900000']] as const) await raw.fill(`#${id}`, value);
     // Comboboxes (react-select) and their aria-hidden sentinels are verified by the filler's own readback,
     // so the guard skips them; with the text boxes filled, nothing required reads as empty.
-    expect(await raw.evaluate(readUnfilledRequiredLabels)).toEqual([]);
+    expect(await raw.evaluate(readUnfilledRequiredLabels, [])).toEqual([]);
   } finally {
     // Always closed.
     await raw.close();
@@ -155,7 +155,7 @@ test('a CAPTURED Lever form is not over-blocked: Netomi names exactly its ✱ qu
     // Straight from the fixture server; no adapter, because only the guard's reading is under test.
     await raw.goto(`${server.url}/lever/netomi-apply-form.html`);
     // Blank form: every ✱ question is named, by its Lever label, in DOM order (non-vacuity: the guard reads Lever markup).
-    expect(await raw.evaluate(readUnfilledRequiredLabels)).toEqual([
+    expect(await raw.evaluate(readUnfilledRequiredLabels, [])).toEqual([
       // Required by the ✱ alone: the file input has no `required` attribute.
       'Resume/CV',
       // Native `required` plus ✱.
@@ -176,7 +176,7 @@ test('a CAPTURED Lever form is not over-blocked: Netomi names exactly its ✱ qu
     // The resume, attached as setInputFiles does in the applier.
     await raw.setInputFiles('#resume-upload-input', { name: 'resume.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4') });
     // Filled: nothing required is empty, and the OPTIONAL Linux card (still blank) never stops the submit.
-    expect(await raw.evaluate(readUnfilledRequiredLabels)).toEqual([]);
+    expect(await raw.evaluate(readUnfilledRequiredLabels, [])).toEqual([]);
   } finally {
     // Always closed.
     await raw.close();

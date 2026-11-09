@@ -1330,6 +1330,47 @@ describe('B2: pre-submit re-check config', () => {
     // Nothing sent.
     expect(calls).not.toContain('advance:applying');
   });
+
+  // Task 2 (2026-11-09): a dry run loads the same config so its verdict can name the re-check, and loading it
+  // must stay READ-ONLY. Proved by running the SAME dry run with and without the loader: the gateway's write
+  // record must be identical, and must hold no status write at all.
+  it('task 2: a DRY run loads the config read-only; its verdict names the pre_gate drop; zero added writes', async () => {
+    /** One dry run over the dropping row; returns the gateway's ordered record and the dry-run log lines. */
+    const dry = async (withLoader: boolean) => {
+      // One dropping row, then an empty page.
+      const batches = [[seniorRow('app-1')], []];
+      // The shared recording fake, serving the batches, with today's ceiling config.
+      const { gateway, calls } = fakeGateway({
+        // Serves the batches (recorded like the default claim).
+        claimApplications: async () => { calls.push('claim'); return batches.shift() ?? []; },
+        // The ceiling that drops the row.
+        loadPreGatePreferences: async () => ({ kind: 'ok', preferences: CEILING_2 }),
+      });
+      // The control run: no loader, as a gateway that cannot read the config.
+      if (!withLoader) delete (gateway as { loadPreGatePreferences?: unknown }).loadPreGatePreferences;
+      // Captured, so the line is asserted and nothing is printed.
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        // DRY_RUN 'true': nothing may be sent or moved.
+        await runApplierBatch({ gateway, openPage: async () => stubPage(), env: { DRY_RUN: 'true' }, clock: frozenClock, renderResume });
+        // The gateway's record and the dry-run lines.
+        return { calls: [...calls], lines: log.mock.calls.map((args) => String(args[0])).filter((line) => line.startsWith('[applyy] dry run app-1')) };
+      } finally {
+        // Always restored.
+        log.mockRestore();
+      }
+    };
+    // With the config, and the control without it.
+    const [loaded, control] = [await dry(true), await dry(false)];
+    // The verdict names today's gate: the re-check ran in the dry run.
+    expect(loaded.lines).toEqual([expect.stringContaining('verdict=would_block:pre_gate')]);
+    // Without the config the row is never "would submit": the unrun re-check is named instead.
+    expect(control.lines).toEqual([expect.stringContaining('verdict=would_block:recheck_unavailable')]);
+    // THE CONDITION: loading the config added nothing to the gateway's record (claims, releases, notes, writes).
+    expect(loaded.calls).toEqual(control.calls);
+    // And neither run wrote a status (non-vacuity: the record is not empty, the row WAS claimed and released).
+    expect([loaded.calls.filter((call) => call.startsWith('advance:')), loaded.calls.includes('claim'), loaded.calls.includes('release')]).toEqual([[], true, true]);
+  });
 });
 
 describe('B2: a live run without the re-check loader is refused (2026-11-05 review, fail closed)', () => {

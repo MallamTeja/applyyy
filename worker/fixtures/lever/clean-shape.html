@@ -1,0 +1,31 @@
+<!doctype html>
+<!-- HAND-BUILT SHAPE FIXTURE, CLEAN TWIN (peer 2, 2026-11-09, task 2). required-radio-card-shape.html with its
+     REQUIRED multiple-choice card removed, nothing else changed: same novalidate form, same ✱ text questions, same
+     resume input, and the OPTIONAL card still blank. What it proves: with no required question the bot cannot
+     see, a dry run and a rehearsal report would_submit, so the guard's refusal on the twin is the card and
+     nothing else (the control half of dry-run-would-submit.test.ts). Not a capture: Lever robots bars ClaudeBot. -->
+<html lang="en">
+<head>
+  <!-- Plain document; nothing here runs. -->
+  <meta charset="utf-8">
+  <!-- A Lever-style title. -->
+  <title>Example Co - Application</title>
+</head>
+<body>
+  <!-- novalidate: Lever validates in script, so the browser's :invalid check never fires on submit. -->
+  <form method="POST" action="/lever/example/apply/submit" enctype="multipart/form-data" novalidate>
+    <ul>
+      <!-- The resume upload: the only control with an id, required only by the ✱ (as on Netomi). -->
+      <li class="application-question resume"><label><div class="application-label">Resume/CV <span class="required">✱</span></div><div class="application-field"><input class="application-file-input invisible-resume-upload" id="resume-upload-input" name="resume" type="file"></div></label></li>
+      <!-- A standard text question, verbatim Netomi shape. -->
+      <li class="application-question"><label><div class="application-label">Full name<span class="required">✱</span></div><div class="application-field"><input type="text" name="name" required></div></label></li>
+      <!-- The email box, verbatim Netomi shape. -->
+      <li class="application-question"><label><div class="application-label">Email<span class="required">✱</span></div><div class="application-field"><input name="email" type="email" required></div></label></li>
+      <!-- An OPTIONAL multiple-choice card (no ✱): left blank, it must never stop a submit. -->
+      <li class="application-question custom-question"><div><div class="application-label full-width multiple-choice"><div class="text">How did you hear about us?</div></div><div class="application-field full-width"><ul data-qa="multiple-choice"><li><label><input type="radio" name="cards[22222222-2222-4222-8222-222222222222][field0]" value="Referral"><span class="application-answer-alternative">Referral</span></label></li><li><label><input type="radio" name="cards[22222222-2222-4222-8222-222222222222][field0]" value="Job board"><span class="application-answer-alternative">Job board</span></label></li></ul></div></div></li>
+    </ul>
+    <!-- Exactly one visible submit control in the form, which submit() requires before any click. -->
+    <button type="submit">Submit application</button>
+  </form>
+</body>
+</html>

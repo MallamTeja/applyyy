@@ -60,8 +60,14 @@ describe('rehearseAssisted', () => {
   it('the port it is handed carries NO write method at runtime (structural, not a flag)', () => {
     // Built from a full page that does have them.
     const { page } = fullPage();
-    // Exactly the three reads, nothing else on the object.
-    expect(Object.keys(readOnlyPage(page)).sort()).toEqual(['detectBlocker', 'extractFields', 'goto']);
+    // Exactly the reads, nothing else on the object: the three form reads, plus postingClosed since task 2
+    // (2026-11-09; the live path asks it before the click, and this fake page has it). This fake has no
+    // presubmitFacts, so it is absent here too: copied only when present (dry-run-would-submit.test.ts pins the real page).
+    const keys = Object.keys(readOnlyPage(page)).sort();
+    // The reads, by name.
+    expect(keys).toEqual(['detectBlocker', 'extractFields', 'goto', 'postingClosed']);
+    // And, stated directly, no write method: the property this test exists for.
+    expect(keys.filter((key) => ['fill', 'attachFile', 'submit', 'screenshot'].includes(key))).toEqual([]);
   });
 
   it('runs to the end on a fillable form and never touches fill, attachFile or submit', async () => {

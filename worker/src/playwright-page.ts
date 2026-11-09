@@ -17,6 +17,8 @@ import type { AttachedFile, SubmitResult } from './apply-one.ts';
 // A VALUE import: fill() throws it when a no-match left the control provably empty, the one
 // case the caller may degrade to "left blank". No cycle: apply-one.ts never imports this file.
 import { OptionNotFoundError } from './apply-one.ts';
+// One judge of the pre-click facts, shared with the dry run and the rehearsal (task 2), and the facts' shape.
+import { verdictFromFacts, type PresubmitFacts } from './apply-one.ts';
 
 // Exported so the composition root can say at startup whether this build can
 // send anything. One constant, so the page and the log can never disagree.
@@ -347,9 +349,17 @@ function readInvalidFieldLabels(): string[] {
  * own script, never by us); role="combobox" (react-select's search box is empty AFTER a pick; the
  * filler verifies those by readback); disabled (barred from submission, as native validation agrees).
  */
-export function readUnfilledRequiredLabels(): string[] {
+export function readUnfilledRequiredLabels(covered: readonly string[] = []): string[] {
   // One label per question, in DOM order; a Set stops a radio group naming itself once per option.
   const labels = new Set<string>();
+  // Whether a planned fill targets this control: by its own id or an ancestor's (a radio group's wrapper).
+  // Only the rehearsal passes ids, because it types nothing; after a real fill the list is empty.
+  const isCovered = (el: Element): boolean => {
+    // Walked upward, because fill ids name the group wrapper as often as the control itself.
+    for (let node: Element | null = el; node !== null; node = node.parentElement) if (node.id !== '' && covered.includes(node.id)) return true;
+    // No planned fill reaches it.
+    return false;
+  };
   // Controls inside forms only: a page-level search box is never part of the application.
   for (const el of Array.from(document.querySelectorAll<HTMLInputElement>('form :is(input, select, textarea)'))) {
     // Sentinels, react-select search boxes and disabled controls: see the docstring.
@@ -360,8 +370,8 @@ export function readUnfilledRequiredLabels(): string[] {
     const question = el.closest('.application-question');
     // Required by the native attribute, by ARIA, or by Lever's ✱ mark on the enclosing question.
     const required = el.required || el.getAttribute('aria-required') === 'true' || question?.querySelector('.application-label .required') != null;
-    // Optional questions never stop a submit.
-    if (!required) continue;
+    // Optional questions never stop a submit; a control a planned fill will answer is not blank (rehearsal).
+    if (!required || isCovered(el)) continue;
     // A radio or checkbox is answered when ANY member of its group (same name, same form) is checked.
     const filled = el.type === 'radio' || el.type === 'checkbox'
       ? Array.from(document.querySelectorAll<HTMLInputElement>(`input[type="${el.type}"]`)).some(
@@ -550,6 +560,20 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
   // The URL of the last goto, for postingClosed's posting-API question. null before any goto.
   let lastUrl: string | null = null;
 
+  // A local, not only a method: submit() calls it directly, so a detached call can never lose `this`.
+  const presubmitFacts = async (coveredIds: readonly string[] = []): Promise<PresubmitFacts> => {
+    // Task 2 (2026-11-09): submit()'s pre-click questions, asked WITHOUT clicking, so the dry run and the
+    // rehearsal see what submit() would see. Reads only: a locator count and two DOM evaluations.
+    // Same scope as submit()'s click target: visible submit controls inside a form.
+    const submitControls = await page.locator('form button[type="submit"]:visible, form input[type="submit"]:visible').count();
+    // What the board or the browser already flags.
+    const invalid = await page.evaluate(readInvalidFieldLabels);
+    // Required and blank, minus what a planned fill will answer (rehearsal only).
+    const requiredEmpty = await page.evaluate(readUnfilledRequiredLabels, coveredIds);
+    // Raw facts; verdictFromFacts judges them.
+    return { submitControls, invalid, requiredEmpty };
+  };
+
   return {
     async goto(url: string) {
       // `domcontentloaded` rather than `networkidle`: ATS boards keep analytics
@@ -572,6 +596,9 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
        signals: an HTTP error status on the form page, and the closed-posting sentences the ATS boards print. ponytail: no redirect heuristic (forms legitimately redirect job page ->
        /apply on Greenhouse, Lever and Ashby, so "the URL changed" would park live postings); add one
        per board if closed postings slip through as unsupported_form. */
+    // Task 2: the pre-click facts, defined above so submit() calls the same function without `this`.
+    presubmitFacts,
+
     async postingClosed(): Promise<string | null> {
       // THE ATS FIRST (2026-11-09). Cursor's whole hosted Ashby board answers 404 while Ashby's posting API lists
       // ce965450 as open, so on a host with a posting API the API is the evidence and the page is not.
@@ -976,32 +1003,17 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
       // forms so an unrelated page-level button cannot be the one clicked, and
       // visible-only so a hidden control cannot stall the click into a timeout
       // that would read as an unknown outcome for an application never sent.
+      // The three pre-click checks (one submit control, nothing already invalid, nothing required left
+      // blank: Lever's ✱, P2-17) are read by presubmitFacts and judged by verdictFromFacts, the SAME pair a
+      // dry run and the rehearsal use (task 2), so "would submit" there means exactly "no refusal here".
+      const facts = await presubmitFacts();
+      // The judge, in submit()'s historical order.
+      const verdict = verdictFromFacts(facts);
+      // Any refusal: no click. A wrong submit-control count is a form-shape problem; the other two are
+      // questions for the human, the same reason a post-click rejection gets, so the park path is unchanged.
+      if (verdict.kind === 'would_block') return { kind: 'not_attempted', reason: verdict.check === 'submit_control' ? 'unsupported_form' : 'unanswerable_question', detail: verdict.detail };
+      // Kept for the click below, which needs the one control the count just proved exists.
       const buttons = page.locator('form button[type="submit"]:visible, form input[type="submit"]:visible');
-      // Counted, not assumed: a plain locator would click the first of several.
-      const buttonCount = await buttons.count();
-      // Not exactly one: refuse before touching anything.
-      if (buttonCount !== 1) {
-        // Nothing was clicked, so this is safe to park as a form-shape problem.
-        return { kind: 'not_attempted', reason: 'unsupported_form', detail: `expected 1 visible submit control in a form, found ${buttonCount}` };
-      }
-
-      // A field the form ALREADY marks invalid would make the click a rejection
-      // at best. Checked before the click, so no click is spent learning it.
-      const invalidBefore = await page.evaluate(readInvalidFieldLabels);
-      // Any flagged field: park without clicking, naming the fields.
-      if (invalidBefore.length > 0) {
-        // Same answer shape as a post-click rejection, but nothing was attempted.
-        return { kind: 'not_attempted', reason: 'unanswerable_question', detail: `invalid before submit: ${invalidBefore.join('; ')}` };
-      }
-
-      // A REQUIRED question still blank, which nothing above flags in a `novalidate` form or when the
-      // only required signal is Lever's ✱ (P2-17). Same park as above: the human answers it, nothing is sent.
-      const unfilledBefore = await page.evaluate(readUnfilledRequiredLabels);
-      // Any blank required question: refuse the click, naming every one.
-      if (unfilledBefore.length > 0) {
-        // Same shape as the invalid branch, so the park path and the Manual lane need no new case.
-        return { kind: 'not_attempted', reason: 'unanswerable_question', detail: `required but empty before submit: ${unfilledBefore.join('; ')}` };
-      }
 
       // Where we were, so "no navigation" can be told apart from "navigated".
       const startUrl = page.url();
