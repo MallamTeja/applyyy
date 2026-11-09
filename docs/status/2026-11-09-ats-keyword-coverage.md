@@ -130,3 +130,7 @@ reset lock_timeout;
 
 **Keeping it instead** costs nothing at runtime (a null `numeric` per row). The real cost is the
 type surface: `ApplicationPatch` advertises a field that nothing fills.
+
+## Applied
+
+Applied by the orchestrator 2026-11-09 ~17:08 IST from pinned worktree a3ef168 (dry-run listed exactly 20261109120000). Post-check: information_schema shows 0 rows for applications.ats_keyword_coverage. Teja approved the drop at 17:02 IST.

@@ -348,7 +348,7 @@ export async function saveFilterRules(
 export type CascadeJobFields = Pick<
   JobRow,
   // Each field below is read by one of the rules in evaluateJobMatch; add here when a rule reads more.
-  'title' | 'locations' | 'location_raw' | 'work_arrangement' | 'employment_type' | 'min_experience_years' | 'requires_advanced_degree' | 'description_raw'
+  'title' | 'locations' | 'location_raw' | 'work_arrangement' | 'employment_type' | 'min_experience_years' | 'requires_advanced_degree' | 'description_requires_degree'
 >;
 
 export function evaluateJobMatch(
@@ -447,12 +447,12 @@ export function evaluateJobMatch(
         dropReason: "Requires an advanced degree (Master's or PhD)",
       };
     }
-    const rawDesc = (job.description_raw || '').toLowerCase();
-    if (
-      /\b(must have a master'?s|ph\.?d\.? required|master'?s degree required|ph\.?d required)\b/i.test(
-        rawDesc,
-      )
-    ) {
+    // The description's Master's/PhD requirement, decided by Postgres over the FULL text (generated column
+    // jobs.description_requires_degree, migration 20261108170000; the exact regex that used to run here,
+    // ported, parity 7,072/7,072 live + 20/20 crafted). One copy of the rule: the list no longer carries the
+    // full description, so a regex here would see only a preview and silently pass jobs it used to drop.
+    // `=== true`: only a real true drops; the type makes the column required, so a select without it fails tsc.
+    if (job.description_requires_degree === true) {
       return {
         passed: false,
         dropReason: "Job description requires Master's or PhD degree",

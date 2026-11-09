@@ -381,6 +381,10 @@ const SAVING_SKIP_MESSAGE = 'Your edit is still saving, so this was not batch-ap
    review, so the stale wording would send the operator looking for something that is not there. */
 const GONE_MESSAGE = 'This application is no longer available to you. Reload the page to see the current queue.';
 
+/* Rows settle() moves at once (2026-11-08). 4 cuts a 10-row batch from 10 sequential row trips to 3 waves,
+   while staying far under PostgREST's connection pool; one tab's batch should not crowd out the worker. */
+const SETTLE_CONCURRENCY = 4;
+
 /* D4, in words: why the controls are missing, so it does not read as a bug. */
 const EDIT_DISABLED_REASON =
   'Editing is off for this application: the tailor’s original version could not be rebuilt from its saved references, so your edits could not be told apart from its text.';
@@ -724,8 +728,25 @@ export function ApprovalQueuePage(): ReactElement {
       try {
         setLoading(true);
 
+        /* 0. The NEWEST master, started BEFORE the applications read and awaited with it (2026-11-08).
+           The pinned-version reads below can only start once the rows say which versions they need,
+           so they were a second sequential round trip (~0.3-0.5 s to Sydney). Nearly every row is
+           pinned to the newest master, so reading it up front usually leaves nothing for that round.
+           It is only a PREFETCH: it is used for a row only when its version equals the row's pin. */
+        const newestMasterRead = supabase!
+          // The same table the per-version reads use; RLS scopes it to the signed-in user.
+          .from('master_profiles')
+          // version travels with the profile, so the cache below is keyed by what was actually read.
+          .select('profile, version')
+          // Highest version first: "newest" is the largest version number, as everywhere else here.
+          .order('version', { ascending: false })
+          // One row is the newest; nothing else is needed from this read.
+          .limit(1)
+          // No master at all is an answer (null), not an error.
+          .maybeSingle();
+
         // 1. Fetch applications at awaiting_approval
-        const { data, error } = await supabase!
+        const applicationsRead = supabase!
           .from('applications')
           /* apply_url and description_raw added 2026-09-17: the diff could not
              show the operator the job they were approving against, because the
@@ -747,6 +768,9 @@ export function ApprovalQueuePage(): ReactElement {
              awaiting_approval, served by the (user_id, status, status_changed_at desc) index. Not
              created_at, which is the discovery date. See queueOrder.ts. */
           .order('status_changed_at', { ascending: false });
+        /* Both in flight at once: Promise.all calls then() on each builder immediately, and a
+           PostgREST builder only sends its request on then(). One round trip instead of two. */
+        const [{ data, error }, newestMaster] = await Promise.all([applicationsRead, newestMasterRead]);
 
         /* `live` is a cancelled render, not a failure - a component that
            unmounted mid-fetch has nothing to report. Separated from the two
@@ -799,10 +823,20 @@ export function ApprovalQueuePage(): ReactElement {
             pinned.add(app.tailored_profile.master_version);
           }
         }
+        /* The prefetched newest master, if it is one some row is pinned to. A failed or empty prefetch
+           is NOT a page error: its version simply stays unread and is fetched below like any other,
+           so the failure is reported (or not) exactly as before this prefetch existed. */
+        const newestVersion = newestMaster.error === null ? newestMaster.data?.version : undefined;
+        // Only an integer version can be a pin; anything else is ignored rather than guessed at.
+        if (Number.isInteger(newestVersion) && pinned.has(newestVersion as number)) {
+          /* Keyed by the version the DATABASE returned with this profile, never by "the newest", so a
+             row pinned to v26 can never be resolved against a v27 that landed in between (§6). */
+          masters.set(newestVersion as number, masterFromRow(newestMaster.data?.profile));
+        }
         // One concurrent read per version; each result keeps its version so a failure can be named.
         const masterReads = await Promise.all(
-          // One read per distinct version.
-          [...pinned].map(async (version) => {
+          // One read per distinct version the prefetch did not already answer (usually none).
+          [...pinned].filter((version) => !masters.has(version)).map(async (version) => {
             // The same read the loop used to make serially.
             const read = await supabase!.from('master_profiles').select('profile').eq('version', version).maybeSingle();
             // The version travels with its answer.
@@ -830,6 +864,8 @@ export function ApprovalQueuePage(): ReactElement {
            A SHAPE check, not "is it an object": '{}' used to pass and be diffed against, so
            every claim would read as untraced against a master with no content. */
         for (const read of masterReads) masters.set(read.version, masterFromRow(read.data?.profile));
+        // FULL per pinned version, filled on first use in the row pass; one resolve per version, not per row.
+        const fullByVersion = new Map<number, ReturnType<typeof resolveFullMaster>>();
         // Re-ordered client-side too, for the id tie-break and a malformed stamp sorting last.
         for (const app of newestInReviewFirst(data)) {
           const job = app.jobs as unknown as JobRow | null;
@@ -930,7 +966,12 @@ export function ApprovalQueuePage(): ReactElement {
           };
 
           // FULL at the same pin: every master node as a tailoring would render it, for add-backs. Null = edits off.
-          const full = resolveFullMaster(master, version);
+          /* Memoised per version (2026-11-08): FULL depends only on (master, version), and the master is
+             one cached object per version, so every row on v26 got the same answer recomputed (~70% of the
+             mount's CPU). has(), not ?? : a cached null (edits off) must stay cached, not be recomputed. */
+          if (!fullByVersion.has(version)) fullByVersion.set(version, resolveFullMaster(master, version));
+          // The one shared FULL for this pin; nothing downstream mutates it (diff and edits copy from it).
+          const full = fullByVersion.get(version) ?? null;
 
           // The diff, with FULL so the add-back offers come from the same pin as everything else.
           const diff = buildResumeDiff({ application, job, resolved, master, original, full });
@@ -1120,11 +1161,21 @@ export function ApprovalQueuePage(): ReactElement {
     // Stored statuses of rows another tab or the worker settled first (item 6), named in the summary.
     const settledElsewhere: string[] = [];
     /* Whether this settle already moved focus to a refused card. A batch can refuse several rows;
-       focusing each in turn would leave focus on the LAST one and skip past the first notice. */
+       focusing each in turn would leave focus on the LAST one and skip past the first notice.
+       Rows now settle concurrently (2026-11-08), so "first" is the first refusal to FINISH, which is
+       not always the first in list order; still exactly one focus move per settle. */
     let focusedOne = false;
 
     try {
-      for (const id of mine) {
+      /* CONCURRENT, capped at SETTLE_CONCURRENCY rows in flight (2026-11-08). Each row costs two sequential
+         round trips (confirmFresh, then the RPC; ~0.3 s each to Sydney), so a 10-row batch took ~6 s one row
+         at a time. Rows are independent: each keeps its own confirm -> re-check -> RPC order inside settleOne,
+         and each writes only its own id into the outcome lists, so one failed row can never mark another.
+         The batch is still N per-row RPCs, never one bulk call (see THE DOOR above). */
+      // Narrowed once: the null check above does not reach into the closure below.
+      const client = supabase;
+      // One row, start to finish; `return` is the old loop's `continue`.
+      const settleOne = async (id: string): Promise<void> => {
         /* Fixes 2b/3, the CROSS-TAB hole, checked PER ROW, right before this row's RPC, for EVERY
            approval (batch and individual). Until 2026-10-08 one read covered a whole batch, so an
            edit landing between that read and row N's RPC was approved as clean, and individual
@@ -1136,7 +1187,7 @@ export function ApprovalQueuePage(): ReactElement {
         const stamp = latestStamps.current.get(id);
         if (to === 'approved') {
           // Never throws; a missing stamp counts as unverifiable rather than slipping through.
-          const check = stamp === undefined ? { kind: 'unverifiable' as const } : await confirmFresh(supabase, id, stamp);
+          const check = stamp === undefined ? { kind: 'unverifiable' as const } : await confirmFresh(client, id, stamp);
           // Changed elsewhere: redraw what is stored so the operator sees the other tab's words.
           if (check.kind === 'changed') {
             // Only when the re-read produced a row; a vanished row has nothing to draw.
@@ -1160,14 +1211,14 @@ export function ApprovalQueuePage(): ReactElement {
               focusedOne = true;
             }
             // Next row.
-            continue;
+            return;
           }
           // Could not ask: unverifiable means unapproved, because the promise is "what you saw".
           if (check.kind === 'unverifiable') {
             // Named in the summary so the operator retries it.
             unverified.push(id);
             // Next row.
-            continue;
+            return;
           }
         }
         // The diff as it is NOW (after any adoption above), not as it was when the button was clicked.
@@ -1186,7 +1237,7 @@ export function ApprovalQueuePage(): ReactElement {
             focusedOne = true;
           }
           // Next row.
-          continue;
+          return;
         }
         /* THE RE-CHECK (Teja, 2026-11-05: "Check on Approve, hold for a 2nd click"). The auditor ran
            once, at tailoring; an edit made since was never re-checked, and the worker submits an
@@ -1214,7 +1265,7 @@ export function ApprovalQueuePage(): ReactElement {
             // Later refusals in this settle keep focus here.
             focusedOne = true;
             // Not sent: the row stays in the queue, unlocked by the finally below.
-            continue;
+            return;
           }
         }
         /* `human` is not decoration: the guard reads it to decide whether this
@@ -1222,7 +1273,7 @@ export function ApprovalQueuePage(): ReactElement {
         // The RPC's whole result: the status is needed to tell "refused" from "no answer" (item 6).
         let result: { error: { code?: unknown } | null; status?: unknown };
         try {
-          result = await supabase.rpc(
+          result = await client.rpc(
             'advance_application_status',
             // Built in one tested place, so the stamp reaches Postgres byte-for-byte (item 4).
             buildSettleArgs(
@@ -1246,7 +1297,7 @@ export function ApprovalQueuePage(): ReactElement {
         if (result.error === null) {
           moved.push(id);
           // Next row.
-          continue;
+          return;
         }
         /* Item 6: an error is only a FAILURE when the database refused for its own reasons. Two kinds
            need the row re-read first:
@@ -1264,10 +1315,10 @@ export function ApprovalQueuePage(): ReactElement {
           // The database said no.
           failed.push(id);
           // Next row.
-          continue;
+          return;
         }
         // What the row says now.
-        const outcome = await confirmSettle(supabase, id, to);
+        const outcome = await confirmSettle(client, id, to);
         // At the asked-for status: it went through (this call or an earlier one), so it leaves the queue.
         /* At the asked-for status. After a PT409 our call is KNOWN not to have landed, so another tab
            made this move: named as settled elsewhere, never claimed as "Approved 1" by this click. */
@@ -1306,7 +1357,21 @@ export function ApprovalQueuePage(): ReactElement {
         else if (noAnswer) unconfirmed.push(id);
         // Refused, and nothing moved: a real failure, safe to retry.
         else failed.push(id);
-      }
+      };
+      // The next row a free worker takes; shared, so no row is taken twice.
+      let nextRow = 0;
+      // A worker settles rows until none are left; JS is single-threaded, so the read-and-bump is atomic.
+      const worker = async (): Promise<void> => {
+        // Take the next untaken row, in the order the operator sees them.
+        for (let id = mine[nextRow++]; id !== undefined; id = mine[nextRow++]) await settleOne(id);
+      };
+      /* allSettled, not all: a throwing row must not let the finally below unlock rows other workers still
+         have in flight. Every worker finishes first; the first throw is then re-raised, as the loop did. */
+      const runs = await Promise.allSettled(Array.from({ length: Math.min(SETTLE_CONCURRENCY, mine.length) }, worker));
+      // The first failure, if any; a clean batch has none.
+      const thrown = runs.find((run): run is PromiseRejectedResult => run.status === 'rejected');
+      // Re-raised after every row settled, so the finally runs once, with nothing still in flight.
+      if (thrown !== undefined) throw thrown.reason;
     } finally {
       /* Unlocked whatever happened (moved rows leave the queue anyway, failed ones become editable
          again) - EXCEPT unconfirmed rows: their call may still land, so Approve/Reject stay disabled

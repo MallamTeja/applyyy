@@ -100,8 +100,8 @@ describe('the stale-click notice exists and is wired to focus', () => {
 
 describe('every stale refusal produces the notice instead of silence', () => {
   it('a stale Approve (confirmFresh saw a newer row) shows the card notice instead of silence', () => {
-    // The confirmFresh "changed" branch, up to the continue that skips the RPC.
-    const branch = codeBetween("if (check.kind === 'changed') {", 'continue;');
+    // The confirmFresh "changed" branch, up to the return (the old loop's continue) that skips the RPC.
+    const branch = codeBetween("if (check.kind === 'changed') {", 'return;');
     // The notice is raised for this row before the branch gives up on it.
     assert.match(branch, /noteStale\(id\b/, 'the confirmFresh stale branch must call noteStale(id)');
   });
@@ -114,8 +114,8 @@ describe('every stale refusal produces the notice instead of silence', () => {
   });
 
   it('a batch row skipped because it changed or was still saving shows the card notice instead of silence', () => {
-    // The batch's send-time R2 re-check, up to the continue that leaves the row in the queue.
-    const branch = codeBetween('if (requireBucketA &&', 'continue;');
+    // The batch's send-time R2 re-check, up to the return (the old loop's continue) that leaves the row in the queue.
+    const branch = codeBetween('if (requireBucketA &&', 'return;');
     // The skipped card says why it was left behind, not only an aggregate toast.
     assert.match(branch, /noteStale\(id\b/, 'the batch staleness skip must call noteStale(id)');
   });
@@ -129,7 +129,7 @@ describe('the notice tells the truth about WHY the click was refused', () => {
       /^const SAVING_SKIP_MESSAGE =\s*'Your edit is still saving, so this was not batch-approved\. When it has saved, review it, then approve it\.';/m,
     );
     // The batch skip branch.
-    const branch = codeBetween('if (requireBucketA &&', 'continue;');
+    const branch = codeBetween('if (requireBucketA &&', 'return;');
     // The message is CHOSEN by the in-flight edit: saving -> SAVING_SKIP_MESSAGE, otherwise the stale words.
     assert.match(
       branch,
@@ -147,7 +147,7 @@ describe('the notice tells the truth about WHY the click was refused', () => {
       /^const GONE_MESSAGE =\s*'This application is no longer available to you\. Reload the page to see the current queue\.';/m,
     );
     // The confirmFresh changed branch.
-    const branch = codeBetween("if (check.kind === 'changed') {", 'continue;');
+    const branch = codeBetween("if (check.kind === 'changed') {", 'return;');
     // Every stale-wording note in it.
     const staleCalls = branch.match(/noteStale\(id, STALE_CLICK_MESSAGE\b/g) ?? [];
     // Exactly one, so no second unguarded call can hide beside the guarded one.

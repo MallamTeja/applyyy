@@ -345,11 +345,11 @@ describe('approval page wiring: per-row freshness (fixes 2b/3) and missing maste
   it('every approval re-reads its row with confirmFresh inside the per-row loop, before the RPC', () => {
     // The body of settle(), where every approve and reject is sent.
     const settle = between('async function settle(', 'function approveReviewed(');
-    // The per-row loop.
-    const loop = settle.slice(settle.indexOf('for (const id of mine)'));
+    // The per-row body; since 2026-11-08 one settleOne per row, run by a capped worker pool.
+    const loop = settle.slice(settle.indexOf('const settleOne = async (id: string)'));
     // The check is in the loop, so each row is checked at its own send time, not once per batch.
-    const check = loop.search(/await confirmFresh\(supabase, id, stamp\)/);
-    assert.ok(check >= 0, 'confirmFresh(supabase, id, stamp) is not awaited inside the per-row loop');
+    const check = loop.search(/await confirmFresh\(client, id, stamp\)/);
+    assert.ok(check >= 0, 'confirmFresh(client, id, stamp) is not awaited inside the per-row body');
     // And it precedes the one RPC that approves.
     assert.ok(check < loop.indexOf("rpc('advance_application_status'"), 'the freshness check must run before the RPC');
     // Gated on approval only, never on requireBucketA, so individual approvals are checked too.
@@ -357,8 +357,8 @@ describe('approval page wiring: per-row freshness (fixes 2b/3) and missing maste
   });
 
   it('item 4: the RPC is gated on the SAME stamp, and a PT409 redraws the row as changed elsewhere', () => {
-    // The per-row loop.
-    const loop = between('for (const id of mine) {', 'finally {');
+    // The per-row body (settleOne, 2026-11-08).
+    const loop = between('const settleOne = async (id: string)', 'finally {');
     // The arguments come from the tested builder, with the hoisted stamp: no Date, no second read.
     assert.match(loop, /rpc\('advance_application_status', buildSettleArgs\(id, to, [\s\S]*?, stamp \?\? ''\)\)/);
     // No Date anywhere in the loop that could reformat the stamp.
@@ -378,12 +378,12 @@ describe('approval page wiring: per-row freshness (fixes 2b/3) and missing maste
   it('a changed or unverifiable row is skipped, never approved', () => {
     // From the changed branch to the unverifiable branch.
     const changed = between("if (check.kind === 'changed') {", "if (check.kind === 'unverifiable') {");
-    // The changed branch ends the row's turn.
-    assert.match(changed, /continue;/);
+    // The changed branch ends the row's turn (`return` from settleOne, the old loop's `continue`).
+    assert.match(changed, /return;/);
     // From the unverifiable branch to the bucket re-check that follows.
     const unverifiable = between("if (check.kind === 'unverifiable') {", 'const latest = latestDiffs.current.get(id);');
     // So does the unverifiable one.
-    assert.match(unverifiable, /continue;/);
+    assert.match(unverifiable, /return;/);
   });
 
   it('a missing pinned master refuses ONLY its own row, through the shape check', () => {
@@ -408,9 +408,9 @@ describe('approval page wiring: per-row freshness (fixes 2b/3) and missing maste
     // No answer is classified by the shared predicate.
     assert.match(result, /const noAnswer = isNoAnswer\(result\.status, result\.error\);/);
     // Only an error that is neither no-answer nor a guard refusal fails without a re-read.
-    assert.match(result, /if \(!noAnswer && !guardRefused\) \{\s*failed\.push\(id\);\s*continue;/);
+    assert.match(result, /if \(!noAnswer && !guardRefused\) \{\s*failed\.push\(id\);\s*return;/);
     // Both of those go to the re-read.
-    assert.match(result, /const outcome = await confirmSettle\(supabase, id, to\);/);
+    assert.match(result, /const outcome = await confirmSettle\(client, id, to\);/);
     // Landed counts as moved, so the row leaves the queue instead of inviting a retry.
     assert.match(result, /if \(outcome\.kind === 'landed'\) \{\s*if \(staleStamp\)\s*settledElsewhere\.push\(to\);\s*else\s*moved\.push\(id\);/);
     // Settled elsewhere: the stored row is adopted and its status named, never "not approved".
@@ -420,7 +420,7 @@ describe('approval page wiring: per-row freshness (fixes 2b/3) and missing maste
     // And unconfirmed rows stay locked past the finally.
     assert.match(page, /for \(const id of mine\)\s*if \(!unconfirmed\.includes\(id\)\)\s*settlingRef\.current\.delete\(id\);/);
     // A thrown call takes the same path as a status-0 return.
-    assert.match(between('result = await supabase.rpc(', 'if (result.error === null) {'), /catch \{\s*result = \{ error: \{ code: '' \}, status: 0 \};/);
+    assert.match(between('result = await client.rpc(', 'if (result.error === null) {'), /catch \{\s*result = \{ error: \{ code: '' \}, status: 0 \};/);
   });
 
   it('7b: an unpinned or malformed pin refuses its own row before any master is fetched', () => {
@@ -430,8 +430,12 @@ describe('approval page wiring: per-row freshness (fixes 2b/3) and missing maste
     assert.match(pin, /reason: 'no_pin'[\s\S]*continue;/);
     // ...and never turned into a page-wide error.
     assert.doesNotMatch(pin, /setLoadError\(/);
-    // The pin check precedes the master fetch, so no "latest" or other version is ever asked for.
-    assert.ok(page.indexOf('classifyTailored(') < page.indexOf(".from('master_profiles')"), 'the pin must be checked before any master is fetched');
+    /* The pin check precedes the per-version master fetch. Since 2026-11-08 the NEWEST master is also prefetched
+       alongside the rows, but only as a cache entry keyed by the version it came back with, used only when a row
+       is pinned to exactly that version: a row is never resolved against "latest" or any other version. */
+    assert.ok(page.indexOf('classifyTailored(') < page.indexOf(".eq('version', version)"), 'the pin must be checked before any per-version master is fetched');
+    // The prefetch enters the cache only under its own returned version, and only when some row is pinned to it.
+    assert.match(page, /if \(Number\.isInteger\(newestVersion\) && pinned\.has\(newestVersion as number\)\) \{\s*masters\.set\(newestVersion as number, masterFromRow\(newestMaster\.data\?\.profile\)\);/);
     // The diff shows the snapshot's own pin, with no fallback to the never-written column.
     const adapter = ts.createPrinter({ removeComments: true }).printFile(ts.createSourceFile('a.ts', readFileSync(fileURLToPath(new URL('../src/features/approval/diffAdapter.ts', import.meta.url)), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS));
     // Shape, not prose: the property assignment names only the snapshot.
@@ -445,7 +449,7 @@ describe('approval page wiring: per-row freshness (fixes 2b/3) and missing maste
     assert.doesNotMatch(rowPass, /from\('master_profiles'\)/);
     // The loop only looks the master up; a never-fetched version refuses (null), never diffs.
     assert.match(rowPass, /const master = masters\.get\(version\) \?\? null;/);
-    // The read sits inside one Promise.all over the distinct pinned versions.
-    assert.match(page, /await Promise\.all\(\s*\[\.\.\.pinned\]\.map\(async \(version\) => \{\s*const read = await supabase!\.from\('master_profiles'\)/);
+    // The read sits inside one Promise.all over the distinct pinned versions the newest-master prefetch did not answer.
+    assert.match(page, /await Promise\.all\(\s*\[\.\.\.pinned\]\.filter\(\(version\) => !masters\.has\(version\)\)\.map\(async \(version\) => \{\s*const read = await supabase!\.from\('master_profiles'\)/);
   });
 });

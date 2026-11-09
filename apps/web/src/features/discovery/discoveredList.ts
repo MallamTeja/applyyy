@@ -8,6 +8,8 @@
 
 // Type only: the full jobs row, which DiscoveredJob narrows; erased at runtime, so node --test needs no loader.
 import type { JobRow } from '../../data/contract.ts';
+// Type only: the client the description search is given (the page passes its own; a test passes a fake).
+import type { SupabaseClient } from '@supabase/supabase-js';
 // The engine's two step lists; the lane mapping must point at THESE, never at a local copy. The id
 // shape check validates the keyset cursor before it is interpolated into a filter.
 import { DISCOVERED_STEPS, PASSED_FILTERS_STEPS, isApplicationId } from '../pipeline/rowPipeline.ts';
@@ -60,8 +62,12 @@ export const DISCOVERED_JOB_COLUMNS = [
   'work_arrangement',
   // Pill, type filter, cascade.
   'employment_type',
-  // Preview, search, JD modal, and the cascade's degree regex.
-  'description_raw',
+  // The card preview and the instant local search (first 600 characters, generated; 2026-11-08). The full
+  // description_raw is NOT selected: ~6 KB per row and cold TOAST reads (peer 2: up to 6.2 s) for a 220-char
+  // preview. The JD modal fetches the full text on open; search covers the rest with a server match.
+  'description_preview',
+  // The cascade's degree rule, computed by Postgres from the full description (the same regex, one copy).
+  'description_requires_degree',
   // The card's and the modal's "open posting" link.
   'apply_url',
   // The provider filter.
@@ -103,6 +109,51 @@ export interface DiscoveredListRow {
   readonly created_at: string;
   // The embedded job, or null when the job row is missing; the page skips those.
   readonly job: DiscoveredJob | null;
+}
+
+/* A search term made literal for PostgREST's ilike: `\`, `%` and `_` are LIKE wildcards/escapes, so each is
+ * escaped; `*` is PostgREST's own wildcard alias, so it is escaped too. Without this, "100%" would match everything. */
+export function ilikeLiteral(term: string): string {
+  // Each special character prefixed with a backslash, the escape LIKE uses by default.
+  return term.replace(/[\\%_*]/g, (ch) => `\\${ch}`);
+}
+
+/* The server half of the Discovered search (2026-11-08, Teja's option B): which LOADED rows' full description
+ * contains the term. The list carries only a 600-char preview, so a word further down the posting is matched
+ * here, by Postgres, over exactly the loaded window: the lane, and created_at no older than the oldest loaded
+ * row. That bound keeps it to the ~300 rows on screen, not the lane's 35k. Returns the matching application
+ * ids, or an error to SAY (never an empty set that would read as "no match"; CLAUDE.md section 6). */
+export async function searchLoadedDescriptions(
+  // The supabase client (injected so a test can record the request).
+  client: SupabaseClient,
+  // The lane's status: the same filter the list used.
+  status: string,
+  // The oldest loaded row's created_at: the window's lower bound.
+  oldestCreatedAt: string,
+  // The typed term, trimmed by the caller.
+  term: string,
+  // How many rows are loaded: no more matches can exist on screen, so no more are asked for.
+  loadedCount: number,
+): Promise<{ readonly ids: ReadonlySet<string> } | { readonly error: string }> {
+  // Inner join so the ilike on the job's description filters the applications themselves.
+  const { data, error } = await client
+    .from('applications')
+    // Ids only: the rows are already on screen; the server only answers "does it match".
+    .select('id, job:job_id!inner(id)')
+    // The lane.
+    .eq('status', status)
+    // The loaded window, so the scan is bounded by what is shown.
+    .gte('created_at', oldestCreatedAt)
+    // Case-insensitive substring on the FULL text, literal (wildcards escaped).
+    .ilike('job.description_raw', `%${ilikeLiteral(term)}%`)
+    // Never more than the loaded window can hold.
+    .limit(Math.max(1, loadedCount));
+  // supabase-js returns errors as data: said to the caller, which shows it.
+  if (error) return { error: String(error.message ?? error) };
+  // An answer that is not a list is not "no matches".
+  if (!Array.isArray(data)) return { error: 'the description search returned no list' };
+  // The matching application ids.
+  return { ids: new Set(data.map((row: { id: string }) => row.id)) };
 }
 
 // The list query's PostgREST select, built from the tuple so the two cannot drift apart.

@@ -84,7 +84,7 @@ import type { PipelineStep } from '../pipeline/rowPipeline.ts';
 // The real invoke/read deps, or null on an unconfigured machine (the button then explains itself).
 import { liveRowPipelineDeps } from '../pipeline/rowPipelineDeps.ts';
 // The tested list logic: lanes, paging, sort, the date marker and the honest counter text.
-import { DISCOVERED_LIST_SELECT, LANES, SORT_OPTIONS, appendUnique, emptyListMessage, hasMoreRows, OPENING_LANE, isCurrentLane, keysetFilter, laneCountsFrom, laneTotalFrom, loadedOfText, pageLimit, postedDate, sortItems } from './discoveredList.ts';
+import { DISCOVERED_LIST_SELECT, LANES, searchLoadedDescriptions, SORT_OPTIONS, appendUnique, emptyListMessage, hasMoreRows, OPENING_LANE, isCurrentLane, keysetFilter, laneCountsFrom, laneTotalFrom, loadedOfText, pageLimit, postedDate, sortItems } from './discoveredList.ts';
 // Every status's count in one RPC (application_status_counts), reused rather than a new per-lane query.
 import { useApplicationCounts } from '../../data/useApplicationCounts.ts';
 // Type only: the job row as the narrowed select delivers it, derived from DISCOVERED_JOB_COLUMNS.
@@ -178,6 +178,15 @@ export function DiscoveredJobsPage(): ReactElement {
   const [selectedType, setSelectedType] = useState<string>('all');
   const [selectedCompany, setSelectedCompany] = useState<string>('all');
   const [activeJdModal, setActiveJdModal] = useState<DiscoveredJob | null>(null);
+  /* The open modal's FULL description (2026-11-08): the list carries only a 600-char preview, so the modal
+     reads description_raw for its one job on open. A union, so "still loading", "failed" and "no text" are
+     three different things on screen, never one blank. Keyed by job id so a stale answer is ignored. */
+  const [jdFull, setJdFull] = useState<{ readonly jobId: string; readonly state: 'loading' } | { readonly jobId: string; readonly state: 'text'; readonly text: string | null } | { readonly jobId: string; readonly state: 'error'; readonly message: string } | null>(null);
+  // Full descriptions already read, so reopening a modal costs no request.
+  const jdCacheRef = useRef<Map<string, string | null>>(new Map());
+  /* The server half of the search (Teja's option B, 2026-11-08): which loaded rows' FULL description holds the
+     typed term. Tagged with the term it answers, so a reply for an older term is never applied to a newer one. */
+  const [descSearch, setDescSearch] = useState<{ readonly term: string; readonly ids: ReadonlySet<string> } | { readonly term: string; readonly error: string } | null>(null);
   const [discoveryModalMode, setDiscoveryModalMode] = useState<'remote' | 'watchlist' | null>(null);
   const [pipelineModalOpen, setPipelineModalOpen] = useState<boolean>(false);
 
@@ -436,6 +445,92 @@ export function DiscoveredJobsPage(): ReactElement {
     setTechOnlyPreference(next);
   };
 
+  /* The description search's server half: debounced, bounded to the loaded window, one request per settled term.
+     Runs only while a term is typed; clearing the box clears the answer. */
+  useEffect(() => {
+    // The term as the filter reads it.
+    const term = search.trim().toLowerCase();
+    // Nothing typed, nothing loaded, or no backend: no server match to ask for.
+    if (term === '' || items.length === 0 || supabase === null) {
+      // A stale answer for an old term must not linger.
+      setDescSearch(null);
+      // Nothing to schedule.
+      return;
+    }
+    // The window's lower bound: the oldest loaded row (the list is newest first, so the minimum is safest).
+    const oldest = items.reduce((min, item) => (item.createdAt < min ? item.createdAt : min), items[0]!.createdAt);
+    // Set when the term changes or the page leaves, so a late answer is dropped.
+    let cancelled = false;
+    // 300 ms after the last keystroke: one request per settled term, not one per letter.
+    const timer = setTimeout(() => {
+      // The narrowed client, captured for the closure.
+      const client = supabase!;
+      // Asked; the answer is tagged with the term it is for.
+      void searchLoadedDescriptions(client, laneSpec.status, oldest, term, items.length).then((answer) => {
+        // A newer term or a left page: ignored.
+        if (cancelled) return;
+        // Stored with its term, as matches or as an error to say.
+        setDescSearch('ids' in answer ? { term, ids: answer.ids } : { term, error: answer.error });
+      });
+    }, 300);
+    // Cleanup: no stale request scheduled or applied.
+    return () => {
+      // Late answers dropped.
+      cancelled = true;
+      // An unsent request never goes.
+      clearTimeout(timer);
+    };
+  }, [search, items, laneSpec.status]);
+
+  /* The open modal's full description, read once per job (cache) on open. */
+  useEffect(() => {
+    // No modal: nothing to read.
+    if (activeJdModal === null) return;
+    // The job this read is for.
+    const jobId = activeJdModal.id;
+    // Already read: shown at once, no request.
+    if (jdCacheRef.current.has(jobId)) {
+      // From the cache.
+      setJdFull({ jobId, state: 'text', text: jdCacheRef.current.get(jobId) ?? null });
+      // Done.
+      return;
+    }
+    // No backend: said, not shown as "no description".
+    if (supabase === null) {
+      // The reason.
+      setJdFull({ jobId, state: 'error', message: 'Supabase is not configured.' });
+      // Done.
+      return;
+    }
+    // Loading, so the modal never shows the preview as if it were the whole posting.
+    setJdFull({ jobId, state: 'loading' });
+    // Set when the modal closes or switches job, so a late answer is dropped.
+    let cancelled = false;
+    // One row, one column.
+    void supabase.from('jobs').select('description_raw').eq('id', jobId).maybeSingle().then(({ data, error }) => {
+      // A closed or switched modal: ignored.
+      if (cancelled) return;
+      // supabase-js returns errors as data: said in the modal.
+      if (error) {
+        // The reason, in the library's words.
+        setJdFull({ jobId, state: 'error', message: error.message });
+        // Nothing cached: the next open retries.
+        return;
+      }
+      // The text, or null when the posting has none (or the row is gone): validated, never assumed.
+      const raw = data !== null && typeof (data as { description_raw?: unknown }).description_raw === 'string' ? (data as { description_raw: string }).description_raw : null;
+      // Cached for the next open.
+      jdCacheRef.current.set(jobId, raw);
+      // Shown.
+      setJdFull({ jobId, state: 'text', text: raw });
+    });
+    // Cleanup on close or switch.
+    return () => {
+      // Late answer dropped.
+      cancelled = true;
+    };
+  }, [activeJdModal]);
+
   /* Evaluate each job against Tech constraint and Filter Cascade */
   const evaluatedItems: readonly EvaluatedDiscoveredItem[] = useMemo(() => {
     return items.map((item) => {
@@ -499,7 +594,11 @@ export function DiscoveredJobsPage(): ReactElement {
       if (q.length > 0) {
         const titleMatch = job.title?.toLowerCase().includes(q) ?? false;
         const companyMatch = job.company_name?.toLowerCase().includes(q) ?? false;
-        const descMatch = job.description_raw?.toLowerCase().includes(q) ?? false;
+        // The opening of the description, locally and at once; the rest of it from the server's answer for this
+        // exact term (descSearch), which arrives ~one round trip after typing stops (option B, 2026-11-08).
+        const serverMatch = descSearch !== null && descSearch.term === q && 'ids' in descSearch && item.applicationId !== undefined && descSearch.ids.has(item.applicationId);
+        // Either half matching is a description match.
+        const descMatch = (job.description_preview?.toLowerCase().includes(q) ?? false) || serverMatch;
         const locMatch = (job.locations || []).some((l) => l.toLowerCase().includes(q));
         if (!titleMatch && !companyMatch && !descMatch && !locMatch) {
           return false;
@@ -528,7 +627,7 @@ export function DiscoveredJobsPage(): ReactElement {
 
       return true;
     });
-  }, [evaluatedItems, viewTab, search, selectedProvider, selectedArrangement, selectedType, selectedCompany]);
+  }, [evaluatedItems, viewTab, search, descSearch, selectedProvider, selectedArrangement, selectedType, selectedCompany]);
 
   // The visible order: the filtered rows sorted by the chosen key (a copy; 'newest' keeps server order).
   const sortedItems = useMemo(() => sortItems(filteredItems, sortKey), [filteredItems, sortKey]);
@@ -820,6 +919,14 @@ export function DiscoveredJobsPage(): ReactElement {
           {/* The sort's scope, stated: it reorders only what is loaded. */}
           <span className="discovery__sort-scope">Sorts the {loadedOfText(items.length, laneTotal)} rows</span>
 
+          {/* A failed server description search is SAID: without it, results matching deep in a description would
+              silently vanish and the list would read as complete (CLAUDE.md section 6). */}
+          {descSearch !== null && 'error' in descSearch && descSearch.term === search.trim().toLowerCase() && (
+            <span className="discovery__sort-scope" role="status">
+              {/* The fallback's honest scope, with the server's reason. */}
+              Searching titles, companies, locations and the opening of each description only: the full-description search failed ({descSearch.error}).
+            </span>
+          )}
           <span className="discovery__meta-count">
             {/* Counter is hidden on a failed load: "Showing 0" would assert zero jobs during an outage.
                 Every branch ends with the loaded-of-total text, so no count reads as complete. */}
@@ -1018,14 +1125,15 @@ export function DiscoveredJobsPage(): ReactElement {
               </div>
 
               {/* Job Description Excerpt */}
-              {job.description_raw && (
+              {job.description_preview && (
                 <div
                   className="job-card__description"
                   onClick={() => setActiveJdModal(job)}
                   title="Click to view full job description"
                 >
                   {/* Plain text first, THEN slice: slicing raw HTML could cut a tag in half and leave entities visible. */}
-                  {jdPlainText(job.description_raw).slice(0, 220)}...
+                  {/* The generated preview (first 600 characters of description_raw) holds more than the 220 shown. */}
+                  {jdPlainText(job.description_preview).slice(0, 220)}...
                 </div>
               )}
 
@@ -1173,9 +1281,14 @@ export function DiscoveredJobsPage(): ReactElement {
             </header>
 
             <div className="jd-modal__body">
-              {activeJdModal.description_raw ? (
+              {/* The full text, read on open (the list holds only a preview): loading, failed and empty are each said. */}
+              {jdFull === null || jdFull.jobId !== activeJdModal.id || jdFull.state === 'loading' ? (
+                <p>Loading the full description…</p>
+              ) : jdFull.state === 'error' ? (
+                <p role="alert">Could not load the full description: {jdFull.message}</p>
+              ) : jdFull.text ? (
                 // A text node, never innerHTML: jdPlainText's "\n" breaks render via .jd-modal__text's pre-line.
-                <div className="jd-modal__text">{jdPlainText(activeJdModal.description_raw)}</div>
+                <div className="jd-modal__text">{jdPlainText(jdFull.text)}</div>
               ) : (
                 <p>No description text provided for this posting.</p>
               )}
