@@ -52,6 +52,40 @@ const NEVER_FRAGMENTS: readonly string[] = [
 // "essex"), so they refuse only as a separate word.
 const NEVER_TOKENS: readonly string[] = ['dob', 'sex'];
 
+// DECLARATIONS (Teja's standing ruling, 2026-11-07: the bot never ticks a declaration). A label that
+// makes Teja agree, confirm, acknowledge, accept, declare, affirm or swear to something is a signature,
+// and a bank row, attested or not, must never sign it. Live evidence (2026-11-09, all three Canonical
+// forms): "During this application process I agree to use only my own words... the use of AI... will
+// disqualify my application" and "Please confirm that you have read and agree to ... Privacy Notice"
+// were both filled from attested rows, because 'consent'/'certify'/'attest' above did not catch them.
+// WHOLE-TOKEN, so "agreements" (the answerable employment-restrictions question) stays answerable.
+// Over-matching ("Do you accept remote work?") only sends a question to Teja, the safe side.
+// "I understand" is deliberately NOT here: Teja ruled (2026-10-24, OPINION_FRAGMENTS) that "I understand
+// this is an in-person role" is answered from his attested row, and plan-fill-standard-questions.test.ts
+// pins it. The Canonical no-AI declaration is still caught, by its "agree".
+// Singular "agreement" is deliberately NOT here: ELIGIBILITY_TEMPLATES answers "Are you subject to any
+// employment agreement..." from Teja's attested row, and declaration-canonical.test.ts pins it.
+const DECLARATION_TOKENS: readonly string[] = [
+  // Agreement and confirmation, in the verb forms seen on forms.
+  'agree', 'agreed', 'confirm', 'confirmed',
+  // Acknowledgement in both spellings, singular and plural (a section headed "Acknowledgements").
+  'acknowledge', 'acknowledged', 'acknowledgement', 'acknowledgment', 'acknowledgements', 'acknowledgments',
+  // Formal declarations and oaths, including the legal "I hereby state...".
+  'declare', 'declaration', 'accept', 'affirm', 'swear', 'hereby',
+  // Signing: "Signature", "Sign here", "Signed by". (Whole tokens: "design" and "assign" stay answerable.)
+  'sign', 'signed', 'signature',
+  // "Certification of Accuracy". NEVER_FRAGMENTS' 'certify' is not a substring of it. Over-blocks
+  // "AWS Certification", which only sends that question to Teja.
+  'certification',
+  // Read-and-accept documents: "I have read...", "Terms and Conditions", "Recruitment Privacy Notice".
+  'i_have_read', 'terms', 'conditions', 'privacy',
+];
+
+// An option that only prompts a choice ("Select...", "-- Choose --", "Please select"): not a real answer.
+// A native select's placeholder with value="-1" survives extraction (only value="" is dropped), so a
+// one-answer declaration would otherwise count 2 options and slip past the single-option rule below.
+const PLACEHOLDER_OPTION = /^\s*(?:-+|select\b|choose\b|please\s+(?:select|choose)\b)/i;
+
 // Voluntary self-identification (EEO): gender, race, veteran status and their relatives.
 // Until 2026-10-09 these were NEVER answered. Teja then ruled (14:19, via the orchestrator)
 // that they may be answered, but ONLY from his own browser-attested answers, never guessed
@@ -446,12 +480,20 @@ export function planFill(
     // to meet the label and refuses as no_answer: the safe direction.
     const key = questionKey(formField.label);
 
-    // NEVER FIRST: EEO, criminal, pay-history and consent questions are only ever answered
-    // by Teja himself, so nothing below (attested or not) may reach them.
+    // NEVER FIRST: criminal, pay-history, age, consent and declaration questions are only ever
+    // answered by Teja himself, so nothing below (attested or not) may reach them.
     if (
       NEVER_FRAGMENTS.some((fragment) => key.includes(fragment)) ||
       // Whole tokens only for the short ones ("dob", "sex"): see NEVER_TOKENS.
-      NEVER_TOKENS.some((token) => containsTokens(key, token))
+      NEVER_TOKENS.some((token) => containsTokens(key, token)) ||
+      // Declarations: checked here, BEFORE the exact-label attested row below, which would otherwise
+      // sign "I agree ... I understand ..." from Teja's attested "Yes" (its "i_understand" makes it OPINION).
+      DECLARATION_TOKENS.some((token) => containsTokens(key, token)) ||
+      // The SHAPE of a signature, whatever the wording: a choice control offering exactly one option
+      // ("Acknowledge/Confirm") is not a choice. Only where options were read (native select, radio);
+      // a react-select's options are unknown here, so its label carries the check above. Placeholders
+      // ("Select...") are not counted: they are not answers.
+      formField.options?.filter((option) => !PLACEHOLDER_OPTION.test(option)).length === 1
     ) {
       refuse('human_only');
       continue;

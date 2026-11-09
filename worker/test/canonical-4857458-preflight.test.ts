@@ -8,7 +8,8 @@
 //      The filler picks only an EXACT option, so a live run parks at the first one.
 //   2. DECLARATIONS: two REQUIRED dropdowns are declarations ("I agree to use only my own words...",
 //      "confirm that you have read and agree to... Privacy Notice"). The planner's consent rule (consent/
-//      certify/attest) does not catch "agree"/"confirm", so attested bank rows would let the bot sign them.
+//      certify/attest) missed "agree"/"confirm", so attested bank rows signed them; DECLARATION_TOKENS (2026-11-09)
+//      now refuses both as human_only before any bank lookup, and this file pins that.
 //   3. The first declaration forbids AI-generated content, so the essays cannot be agent-drafted.
 // With the declarations left to Teja (needs_human) the form can never plan clean: the row is Manual-lane.
 //
@@ -150,25 +151,33 @@ test('extracts the form exactly, and it passes the form-shape gate', () => {
   expect(formShapeBlockersFor(FORM.rowId, fields)).toEqual([]);
 });
 
-test('GAP: the live bank leaves the essays unanswered, and its dropdown answers are mostly not options', () => {
+test('GAP: the live bank leaves the essays unanswered and the declarations for Teja, and its dropdown answers are mostly not options', () => {
   // The applier's call shape, with the posting's company.
   const plan = planFill(fields, liveBank(), profile, 'Canonical');
-  // The plan's own blockers are only the essays: everything else LOOKS answered.
-  expect(plan.blockers.map((b) => [b.id, b.reason])).toEqual(FORM.essays.map((id) => [id, 'no_answer']));
+  // The plan's own blockers are the essays (no bank row) and both declarations, refused even with attested "yes"
+  // rows (Teja's ruling: the bot never signs a declaration). Everything else LOOKS answered. Sorted: DOM order interleaves them.
+  expect(plan.blockers.map((b) => [b.id, b.reason]).sort()).toEqual([
+    ...FORM.essays.map((id) => [id, 'no_answer']),
+    [FORM.declarations.ownWords, 'human_only'], [FORM.declarations.privacy, 'human_only'],
+  ].sort());
   // FILL-TIME: every live dropdown answer that is not an exact option (each parks a live run).
-  // That is: the case/wording misses, the picks only Teja can make, and both declarations ("yes" is no option).
-  expect(notAnOption(plan)).toEqual([...Object.keys(FORM.corrected), ...FORM.tejaPicks, FORM.declarations.ownWords, FORM.declarations.privacy].sort());
+  // That is: the case/wording misses and the picks only Teja can make. The declarations are no longer fills at all.
+  expect(notAnOption(plan)).toEqual([...Object.keys(FORM.corrected), ...FORM.tejaPicks].sort());
   // The education picks from the profile are not options either.
   expect([EDU.degrees.includes('B.Tech'), EDU.disciplines.includes('Computer Science & Data Science (CSD)')]).toEqual([false, false]);
 });
 
-test('POLICY GAP: the planner would sign both required declarations from attested bank rows', () => {
+test('POLICY: the planner refuses both required declarations as human_only, even from attested bank rows', () => {
   // Same live bank.
   const plan = planFill(fields, liveBank(), profile, 'Canonical');
   // id -> source.
   const source = Object.fromEntries(plan.fills.map((f) => [f.id, f.source]));
-  // Both declarations are FILLED, not refused: "agree"/"confirm" are outside the consent/certify/attest rule.
-  expect([source[FORM.declarations.ownWords], source[FORM.declarations.privacy]]).toEqual(['answer_bank', 'answer_bank']);
+  // Neither declaration is filled: "agree"/"confirm" are declaration tokens, refused before any bank lookup.
+  expect([source[FORM.declarations.ownWords], source[FORM.declarations.privacy]]).toEqual([undefined, undefined]);
+  // Both go to Teja as human_only, so the row parks for him instead of submitting.
+  const reason = Object.fromEntries(plan.blockers.map((b) => [b.id, b.reason]));
+  // id -> reason for each declaration.
+  expect([reason[FORM.declarations.ownWords], reason[FORM.declarations.privacy]]).toEqual(['human_only', 'human_only']);
 });
 
 test('FIX (partial): same-statement option texts + declarations kept for Teja still cannot plan clean', () => {
@@ -183,7 +192,8 @@ test('FIX (partial): same-statement option texts + declarations kept for Teja st
   // Blocked for Teja: the essays (his own words) and the two declarations (his own signature).
   expect(plan.blockers.map((b) => [b.id, b.reason]).sort()).toEqual([
     ...FORM.essays.map((id) => [id, 'no_answer']),
-    [FORM.declarations.ownWords, 'awaiting_human_answer'], [FORM.declarations.privacy, 'awaiting_human_answer'],
+    // human_only, not awaiting_human_answer: the declaration gate refuses before the bank row is read.
+    [FORM.declarations.ownWords, 'human_only'], [FORM.declarations.privacy, 'human_only'],
   ].sort());
   // Left unpickable: exactly the dropdowns only Teja can choose an option for.
   expect(notAnOption(plan)).toEqual([...FORM.tejaPicks].sort());
