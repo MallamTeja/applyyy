@@ -16,6 +16,8 @@ import type { AnswerBankRow, MasterProfile } from '@applyy/shared-types';
 import type { FormField } from './extract-fields.ts';
 // One shared normaliser (defined beside the profile table that also needs it).
 import { normaliseKey, resolveProfileAnswer } from './profile-answers.ts';
+// The one option matcher (case/whitespace/separators only, closed union): planner and filler share its rule.
+import { matchOption } from './option-match.ts';
 
 // Re-exported so existing and future callers can reach the normaliser from the planner.
 export { normaliseKey };
@@ -224,7 +226,8 @@ export function isEeoQuestion(label: string): boolean {
 export interface PlannedFill {
   // DOM id, used to build the selector at fill time.
   readonly id: string;
-  // The value copied (trimmed) from the answer bank or a profile field. Never composed or inferred.
+  // The value copied (trimmed) from the answer bank or a profile field. Never composed or inferred. When the
+  // field's options are known, it is the form's own option text for the same statement (option-match.ts).
   readonly value: string;
   // The extracted control kind, carried so planning, tests and reports can see which fill
   // method applies. The live filler re-detects the element itself, because the page
@@ -288,6 +291,19 @@ function answerText(value: unknown): string | null {
   const trimmed = value.trim();
   // Empty collapses to null: one "not an answer" shape for the caller.
   return trimmed === '' ? null : trimmed;
+}
+
+/**
+ * The value to plan for a field: the FORM's own option text when its options are known, the value itself
+ * when they are not (a react-select is matched at fill time), or null when no single option is the same text.
+ */
+function pickOption(options: readonly string[] | undefined, value: string): string | null {
+  // Unknown options: nothing to compare here, the filler checks the live list.
+  if (options === undefined) return value;
+  // Exact, or exactly one option equal after case/whitespace/separator folding (never fuzzy, never contains).
+  const match = matchOption(value, options);
+  // Only the two success kinds carry an option; ambiguous and none park the row as before.
+  return match.kind === 'exact' || match.kind === 'normalized' ? match.option : null;
 }
 
 /** The text with accents removed ("é" → "e"), so normaliseKey keeps the letter. */
@@ -526,14 +542,16 @@ export function planFill(
         refuse('invalid_answer');
         continue;
       }
-      // A select or radio must offer it verbatim.
-      if (formField.options !== undefined && !formField.options.includes(text)) {
-        // Never the nearest option: a statement must be made exactly as Teja wrote it.
+      // A select or radio must offer the same text: exact, or equal after case/whitespace/separator folding.
+      // Matched, not exact-only: Teja types console answers in lowercase ("male"), and "Male" is the same
+      // statement. Never the NEAREST option: a different word ("Indian" for "india") still refuses.
+      const picked = pickOption(formField.options, text);
+      if (picked === null) {
         refuse('no_matching_option');
         continue;
       }
-      // Copied exactly as Teja saved and attested it.
-      fills.push({ id: formField.id, value: text, kind: formField.kind, source: 'answer_bank' });
+      // Teja's attested statement, in the form's own spelling of it.
+      fills.push({ id: formField.id, value: picked, kind: formField.kind, source: 'answer_bank' });
       continue;
     }
 
@@ -560,14 +578,15 @@ export function planFill(
         refuse('invalid_answer');
         continue;
       }
-      // Verbatim, and it must be one of the form's own options when they're known here
-      // (a react-select's options are checked strictly at fill time instead).
-      if (formField.options !== undefined && !formField.options.includes(text)) {
+      // One of the form's own options when they're known here, matched by pickOption
+      // (a react-select's options are checked at fill time instead).
+      const picked = pickOption(formField.options, text);
+      if (picked === null) {
         refuse('no_matching_option');
         continue;
       }
-      // Copied exactly as Teja saved it.
-      fills.push({ id: formField.id, value: text, kind: formField.kind, source: 'answer_bank' });
+      // Teja's saved answer, in the form's own spelling of it.
+      fills.push({ id: formField.id, value: picked, kind: formField.kind, source: 'answer_bank' });
       continue;
     }
 
@@ -593,13 +612,14 @@ export function planFill(
         refuse(answer);
         continue;
       }
-      // Same exact-option rule as every other fill: a select must offer "Yes"/"No" verbatim.
-      if (formField.options !== undefined && !formField.options.includes(answer.value)) {
+      // Same option rule as every other fill: the select must offer "Yes"/"No" (or "YES"/"yes").
+      const picked = pickOption(formField.options, answer.value);
+      if (picked === null) {
         refuse('no_matching_option');
         continue;
       }
-      // Copied from Teja's own answer or his own profile; nothing composed.
-      fills.push({ id: formField.id, value: answer.value, kind: formField.kind, source: answer.source });
+      // Derived from Teja's own answer or his own profile; only the spelling is the form's.
+      fills.push({ id: formField.id, value: picked, kind: formField.kind, source: answer.source });
       continue;
     }
 
@@ -655,11 +675,14 @@ export function planFill(
       source = 'profile';
     }
 
-    // A select/radio can only take one of its own options, exactly; never approximate.
-    if (formField.options !== undefined && !formField.options.includes(value)) {
+    // A select/radio can only take one of its own options: the same text, never an approximation.
+    const picked = pickOption(formField.options, value);
+    if (picked === null) {
       refuse('no_matching_option');
       continue;
     }
+    // The form's own spelling of the same statement.
+    value = picked;
 
     // Copied, trimmed, never composed: the planner never rewords, rounds or reformats,
     // because any transformation could change the meaning of a statement Teja signs.

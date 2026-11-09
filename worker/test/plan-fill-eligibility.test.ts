@@ -292,9 +292,16 @@ describe('cross-cutting eligibility rules', () => {
     expect(r).toMatchObject({ fill: null, reason: 'human_only' });
   });
 
-  test('a radio whose options lack exact "Yes" refuses no_matching_option', () => {
-    // Lowercase options: "Yes" is not among them, and the planner never approximates.
+  test('a radio that spells "Yes" in lowercase gets the form\'s own "yes" (option-match, case only)', () => {
+    // Lowercase options: "yes" IS "Yes" in another case, so the planner plans the form's own text.
     const r = one(yesNo('Are you located in India?', true, ['yes', 'no']), [india]);
+    // The form's spelling, from Teja's attested country.
+    expect(r).toMatchObject({ fill: { value: 'yes', source: 'answer_bank' }, reason: null });
+  });
+
+  test('a radio whose options are a different word ("Y"/"N") refuses no_matching_option, never approximated', () => {
+    // "Y" is not "Yes" with different case or separators: option-match has no prefix or abbreviation rule.
+    const r = one(yesNo('Are you located in India?', true, ['Y', 'N']), [india]);
     // The option check still runs after an eligibility answer.
     expect(r).toMatchObject({ fill: null, reason: 'no_matching_option' });
   });
@@ -614,9 +621,16 @@ describe('H1: the exact-label attested row', () => {
     expect(r).toMatchObject({ fill: null, reason: 'human_only' });
   });
 
-  test('an exact-label answer that is not one of the form options is refused, never approximated', () => {
-    // "man" is not "Man".
+  test('an exact-label answer that differs from an option only in case plans the form\'s option ("man" -> "Man")', () => {
+    // "man" is "Man" in lowercase: the same statement, in the form's own spelling.
     const r = one(yesNo('How do you identify your gender?', true, ['Man', 'Woman']), [row('how_do_you_identify_your_gender', 'man')]);
+    // The option text, from Teja's attested row.
+    expect(r).toMatchObject({ fill: { value: 'Man', source: 'answer_bank' }, reason: null });
+  });
+
+  test('an exact-label answer that is a different word from every option is refused, never approximated', () => {
+    // "male" is not "Man": a synonym, not a spelling, and option-match has no synonym rule.
+    const r = one(yesNo('How do you identify your gender?', true, ['Man', 'Woman']), [row('how_do_you_identify_your_gender', 'male')]);
     // Named.
     expect(r).toMatchObject({ fill: null, reason: 'no_matching_option' });
   });
