@@ -79,7 +79,10 @@ column and every paste fails.
 - **What:** it runs `node scripts/jobs-tombstone.mjs`, which needs no install because it uses native
   `fetch`.
 - **Who:** the script signs in as the app user, the same identity and secrets as keepalive.yml.
-- **How:** it calls `tombstone_dropped_jobs(7, 1000)` until the function returns 0, capped at 50 calls.
+- **How:** it calls `tombstone_dropped_jobs(7, 250)` until the function returns 0, capped at 50 calls.
+  On a statement timeout (SQLSTATE `57014`) it halves the batch, never below 25, and the timed-out
+  call counts toward the cap. A cancelled call rolls back completely, so a retry is safe. Batch 1000
+  overran the API role's 8 s `statement_timeout` on 2026-11-08 (run 42486953107); the fix is `ae2d1bb`.
 - **Logging:** each run writes an `agent_runs` row as agent `jobs_tombstone` (migration
   `20261105201000`). A capped run is still `succeeded`, with `error_detail` saying more rows remain.
 - **Health page:** `apps/web/src/data/agentFreshness.ts` has no `AGENT_CADENCE` entry for

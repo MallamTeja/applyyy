@@ -140,7 +140,6 @@ export interface ApplicationPatch {
   readonly tailored_hash?: string;
   // Auditor output.
   readonly audit_findings?: readonly unknown[];
-  readonly ats_keyword_coverage?: number;
   // Why a row was dropped or could not be processed. Free text for the dashboard.
   readonly drop_reason?: string;
   readonly failure_reason?: string;

@@ -48,7 +48,6 @@ export function makeApplicationRow(overrides: Partial<ApplicationRow> = {}): App
     // No findings yet. An EMPTY ARRAY, not null: an empty findings list is the Bucket A
     // signal, so the distinction between "clean" and "not audited" lives in `status`.
     audit_findings: [],
-    ats_keyword_coverage: null,
     // Nothing rendered or screenshotted.
     resume_storage_path: null,
     screenshot_storage_path: null,

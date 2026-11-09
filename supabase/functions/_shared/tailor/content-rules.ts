@@ -251,17 +251,58 @@ export function enforceContentRules(
 // approved on 2026-11-08 (Senior/Sr/Lead/Staff/Principal/II/III); "Intern" and "Junior" are roles he holds, so they stay.
 const SENIORITY_WORDS = /\b(senior|sr|lead|staff|principal|ii|iii)\b\.?/gi;
 
+// The nouns that make a phrase a ROLE (2026-11-09). A closed list on purpose: it decides which title segment is the
+// role, and it is the only thing ever singularised, so "Sales", "Analytics", "Business", "DevOps" and "Kubernetes"
+// keep their s. Trailing (s)? = the plural a posting uses for "we hire several"; the candidate applies for one.
+const ROLE_NOUN = /\b(engineer|developer|intern|internship|analyst|scientist|architect|designer|programmer|consultant|researcher|tester|administrator|sde|swe|sre)(s)?\b/gi;
+
+// Words that date or frame an internship but never name the role (2026-11-09): a season, a year, "Co-op".
+// Removed from the headline, and ignored when deciding whether a later segment is ONLY an intern marker.
+const INTERN_FILLER = /\b(summer|winter|spring|fall|autumn|(?:19|20)\d{2}|co-?op)\b/gi;
+
+// A segment that, once filler and punctuation are gone, is nothing but the intern word.
+const INTERN_ONLY = /^(interns?|internship)$/i;
+
+// Any intern word, to know whether the chosen role already says it (no "Intern Intern").
+const HAS_INTERN = /\bintern(s|ship)?\b/i;
+
 /**
  * Rule 5 (Teja, 2026-11-08 15:46 IST): the header's role title is the role applied for, from the job title,
- * cleaned: the qualifier after " - ", "|", ",", "(" or ":" goes (team, location, req id), seniority and level
- * words go (never a seniority he lacks), anything outside the validator's ROLE_TITLE_SHAPE goes. "Intern" stays:
- * it is the role, not a seniority. Null when nothing usable is left, so the headline falls back as before.
+ * cleaned: the title is split at " - ", "|", ",", "(", "[", ":" and at " with " / " for " (team, location, req id,
+ * stack tail), and the FIRST segment holding a role noun is the role (2026-11-09: "GTSM - Site Reliability
+ * Engineer" printed "GTSM"). Seniority and level words go (never a seniority he lacks), a plural role noun becomes
+ * singular, anything outside the validator's ROLE_TITLE_SHAPE goes. "Intern" stays: it is the role, not a seniority.
+ * Null when no segment names a role, so the headline falls back as before (never a fragment).
  */
 export function cleanRoleTitle(jobTitle: string): string | null {
-  // The part before the first qualifier separator.
-  const head = jobTitle.split(/\s[-–—|:]\s|[,(\[|:]/)[0] ?? "";
-  // Seniority words removed, characters outside the accepted shape removed, spaces collapsed.
-  const cleaned = head.replace(SENIORITY_WORDS, " ").replace(/[^A-Za-z0-9 &+#./-]/g, " ").replace(/\s+/g, " ").trim();
+  // Every qualifier-separated segment, in title order; " with " / " for " start a stack or team tail.
+  const segments = jobTitle.split(/\s[-–—|:]\s|[,(\[|:]|\s(?:with|for)\s/i);
+  // The first segment that names a role; a team, org, year or stack segment never becomes the headline.
+  // `.search`, not `.test`: ROLE_NOUN is global, and `.test` would carry lastIndex between segments; search ignores it.
+  const roleIndex = segments.findIndex((segment) => segment.search(ROLE_NOUN) !== -1);
+  // No role anywhere in the title: the variant's or the master's headline stands.
+  if (roleIndex === -1) return null;
+  // The role segment itself (findIndex proved it exists).
+  const role = segments[roleIndex]!;
+  // Teja, 2026-11-09 17:02 IST, "Keep 'Intern'": "Software Engineer, Intern" is an internship, so a LATER segment
+  // that is only an intern word (season/year/co-op aside) is carried onto a role that does not already say it.
+  const internAfter = !HAS_INTERN.test(role) && segments.slice(roleIndex + 1)
+    // Filler and punctuation stripped, so "Winter Intern" and "CPD) - Intern" reduce to the bare word.
+    .some((segment) => INTERN_ONLY.test(segment.replace(INTERN_FILLER, " ").replace(/[^A-Za-z]+/g, " ").trim()));
+  // Seniority words removed, plural role nouns made singular, characters outside the shape removed, spaces collapsed.
+  const cleaned = (internAfter ? `${role} Intern` : role)
+    // Never a seniority he lacks.
+    .replace(SENIORITY_WORDS, " ")
+    // A season, year or "Co-op" dates the posting; it is not the role.
+    .replace(INTERN_FILLER, " ")
+    // "Interns" -> "Intern": only a listed role noun loses its s, and only when the s is the plural.
+    .replace(ROLE_NOUN, (_match, noun: string) => noun)
+    // Markup, emoji, brackets: anything the validator would refuse.
+    .replace(/[^A-Za-z0-9 &+#./-]/g, " ")
+    // Collapsed so removed words leave no double spaces.
+    .replace(/\s+/g, " ")
+    // No edge whitespace, and no "/" or "-" a removed word left dangling ("Internship/Co-op" -> "Internship").
+    .replace(/^[\s/-]+|[\s/-]+$/g, "");
   // Only a title the validator will print; otherwise the old headline stands.
   return ROLE_TITLE_SHAPE.test(cleaned) ? cleaned : null;
 }

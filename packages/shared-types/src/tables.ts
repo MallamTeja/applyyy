@@ -577,8 +577,6 @@ export interface ApplicationRow {
   match_reasoning: string | null;
   /** Everything the Auditor could not trace. Empty array means Bucket A, one-click batch approval. */
   audit_findings: AuditFinding[];
-  /** Percentage of JD keywords present in the tailored resume, shown on the diff view so you can see whether tailoring did anything. */
-  ats_keyword_coverage: number | null;
   /** Supabase Storage path of the generated PDF. */
   resume_storage_path: string | null;
   /** Supabase Storage path of the blocked-page or dry-run screenshot. */
@@ -665,7 +663,6 @@ export type ApplicationUpdate = Partial<
     | 'match_score'
     | 'match_reasoning'
     | 'audit_findings'
-    | 'ats_keyword_coverage'
     | 'resume_storage_path'
     | 'screenshot_storage_path'
     | 'drop_reason'

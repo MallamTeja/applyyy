@@ -275,8 +275,51 @@ test("header role title is the role applied for, cleaned of seniority, never inv
   assert.equal(cleanRoleTitle("Lead"), null);
   // Only the approved seniority words go: "Junior" is a level he holds, so it stays.
   assert.equal(cleanRoleTitle("Junior Data Scientist"), "Junior Data Scientist");
-  // Markup can never reach the header.
-  assert.equal(cleanRoleTitle("<script>x</script>"), "script x /script");
+  // Markup can never reach the header: no role noun in it, so nothing prints (it was "script x /script" before 2026-11-09).
+  assert.equal(cleanRoleTitle("<script>x</script>"), null);
+});
+
+test("header role title is singular, a whole role phrase, never a fragment (2026-11-09 QA rows)", () => {
+  // d0a7d313: a plural posting title still names ONE role for this candidate.
+  assert.equal(cleanRoleTitle("Backend Interns"), "Backend Intern");
+  // d45c3ba6: the role is the noun phrase; the "with <stack>" tail is a qualifier, not part of the role.
+  assert.equal(cleanRoleTitle("Java Developer with Angular , Spring Hibernate"), "Java Developer");
+  // 4bd46605: the first segment names a team, not a role; the segment that holds the role noun wins.
+  assert.equal(cleanRoleTitle("Models Infrastructure Platform Enablement (Python + React), Multi-Asset  Strategies & Solutions (MASS), Analyst"), "Analyst");
+  // Same failure, live: a team or org prefix before " - " used to become the whole headline.
+  assert.equal(cleanRoleTitle("GTSM - Site Reliability Engineer"), "Site Reliability Engineer");
+  // A year before the role is not the role either.
+  assert.equal(cleanRoleTitle("2027 - Software Engineering Intern, AMER"), "Software Engineering Intern");
+  // No role noun anywhere: null, so the variant's or the master's headline prints as before.
+  assert.equal(cleanRoleTitle("Python full stack + AWS (ETL)"), null);
+});
+
+test("header keeps a trailing Intern segment, without its season or year (Teja, 2026-11-09 17:02 IST)", () => {
+  // The intern word sat after a comma, so the role alone printed "Software Engineer" for an internship.
+  assert.equal(cleanRoleTitle("Software Engineer, Intern"), "Software Engineer Intern");
+  // A season beside the intern word is not part of the role; the team code in brackets is dropped as before.
+  assert.equal(cleanRoleTitle("Software Engineer (CPD) - Winter Intern"), "Software Engineer Intern");
+  // Year, season and "Co-op" go; "Internship" stays as is (the closed list does not map it to "Intern").
+  assert.equal(cleanRoleTitle("Summer 2027 Software Engineering Internship/Co-op"), "Software Engineering Internship");
+  // Already an intern title: nothing appended twice.
+  assert.equal(cleanRoleTitle("Backend Intern"), "Backend Intern");
+  // No intern word anywhere: nothing appended, ever.
+  assert.equal(cleanRoleTitle("Software Engineer"), "Software Engineer");
+  // A later segment that holds MORE than an intern word is a qualifier, not the intern marker.
+  assert.equal(cleanRoleTitle("Software Engineer - Intern Platform Team"), "Software Engineer");
+});
+
+test("header singularising touches only the closed list of role nouns", () => {
+  // Words that END in s but are not plurals survive untouched beside a role noun.
+  assert.equal(cleanRoleTitle("Sales Engineer"), "Sales Engineer");
+  // "Analytics" is a field, not "Analytic"s.
+  assert.equal(cleanRoleTitle("Analytics Engineer"), "Analytics Engineer");
+  // Only the role noun is singularised; "Business" keeps its s.
+  assert.equal(cleanRoleTitle("Business Analysts"), "Business Analyst");
+  // "DevOps" keeps its s; the plural role noun after it does not.
+  assert.equal(cleanRoleTitle("DevOps Engineers"), "DevOps Engineer");
+  // "Kubernetes" keeps its s.
+  assert.equal(cleanRoleTitle("Kubernetes Developer"), "Kubernetes Developer");
 });
 
 test("tailor header names the role applied for (rule 5)", async () => {

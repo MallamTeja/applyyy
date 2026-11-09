@@ -504,7 +504,9 @@ test('status graph parity — the TS mirror matches the transitions seeded into 
  * table has, so meeting one must fail loudly instead of leaving a stale column set that
  * makes the comparison below quietly wrong.
  */
-const UNMODELLED_COLUMN_CHANGES = /\bdrop\s+column\b|\brename\b|\bdrop\s+table\b/i;
+// `drop column` left this list on 2026-11-09 (migration 20261109120000 drops
+// applications.ats_keyword_coverage): the replay below now removes the column, so it is modelled.
+const UNMODELLED_COLUMN_CHANGES = /\brename\b|\bdrop\s+table\b/i;
 
 /**
  * The first word of a CREATE TABLE element that marks a table CONSTRAINT, not a column.
@@ -595,17 +597,25 @@ function parseSqlColumns(sql: string): Map<string, Set<string>> {
     // A verb this replay ignores would leave a stale column set; refuse to guess.
     assert.ok(
       !UNMODELLED_COLUMN_CHANGES.test(body!),
-      `alter table public.${table} uses drop/rename, which the column parser does not model. Teach it before trusting column parity.`,
+      `alter table public.${table} uses rename or drop table, which the column parser does not model. Teach it before trusting column parity.`,
     );
-    // `add column` clauses can be several per statement, comma-separated.
+    // `add column` / `drop column` clauses can be several per statement, comma-separated.
     for (const clause of splitTopLevel(body!)) {
       const add = /^add\s+column\s+(?:if\s+not\s+exists\s+)?"?(\w+)"?/i.exec(clause);
+      // The drop form, `drop column [if exists] name [cascade|restrict]`; the trailing words change nothing here.
+      const drop = /^drop\s+column\s+(?:if\s+exists\s+)?"?(\w+)"?/i.exec(clause);
       // Non-column clauses (add constraint, enable rls, ...) change no column set.
-      if (add === null) continue;
-      // Adding to a table no migration creates means the replay is out of order or wrong.
+      if (add === null && drop === null) continue;
+      // The column this clause names, from whichever form matched.
+      const name = (add ?? drop)![1]!;
+      // Touching a table no migration creates means the replay is out of order or wrong.
       const columns = tables.get(table!);
-      assert.ok(columns !== undefined, `alter table public.${table} adds column ${add[1]} to a table never created`);
-      columns.add(add[1]!);
+      assert.ok(columns !== undefined, `alter table public.${table} changes column ${name} on a table never created`);
+      // An add puts the column in the set.
+      if (add !== null) columns.add(name);
+      // A drop takes it out. STRICT even under `if exists`: dropping a column the replay never saw
+      // means the replay and the migrations disagree, which is exactly what this test exists to catch.
+      else assert.ok(columns.delete(name), `alter table public.${table} drops column ${name}, which the replay never added`);
     }
   }
   return tables;
@@ -689,4 +699,23 @@ test('column parity — NON-VACUITY CONTROL: the parser and comparison catch a m
   // A Row type missing `colour` and inventing `weight` must produce both drift lines.
   const rows = parseRowFields('export interface WidgetsRow {\n  id: string;\n  tags: string[];\n  price: number | null;\n  weight: number;\n}');
   assert.deepEqual(columnDrift(sqlTables, rows).sort(), ['WidgetsRow lacks widgets.colour', 'WidgetsRow.weight has no column in widgets']);
+});
+
+test('column parity — NON-VACUITY CONTROL: drop column removes the column, and a drop the replay never saw fails', () => {
+  // A table, then a later migration dropping one column (the 20261109120000 shape: if exists, own statement).
+  const sql =
+    'create table public.gadgets (id uuid primary key, size int, colour text);\n' +
+    'alter table public.gadgets drop column if exists size;';
+  // The replay must end with the dropped column gone and the others kept.
+  assert.deepEqual([...parseSqlColumns(sql).get('gadgets')!].sort(), ['colour', 'id']);
+  // Dropping a column that was never added is a replay/migration disagreement, refused loudly.
+  assert.throws(
+    () => parseSqlColumns('create table public.gadgets (id uuid);\nalter table public.gadgets drop column ghost;'),
+    /drops column ghost, which the replay never added/,
+  );
+  // rename is still unmodelled and must still refuse, so a future rename cannot slip through silently.
+  assert.throws(
+    () => parseSqlColumns('create table public.gadgets (id uuid);\nalter table public.gadgets rename column id to key;'),
+    /does not model/,
+  );
 });
