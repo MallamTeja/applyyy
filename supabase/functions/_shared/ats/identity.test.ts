@@ -106,6 +106,40 @@ test("a board whose reported identity names a different company persists nothing
   assert.deepEqual(verdict, { verdict: "mismatch", reported: "Thornbury Community Services" });
 });
 
+// xAI's own greenhouse board (token "xai") began reporting "SpaceXSI" after the xAI/SpaceX merger: 253 of
+// the 291 stored job ids were live on it on 2026-11-09, so it is the same board. The alias is pinned to
+// that ONE board (provider + token + watchlist name), so the poll persists again.
+test("the xai board reporting its post-merger name SpaceXSI is accepted", () => {
+  // The exact watchlist row and the live reported name.
+  const verdict = evaluateBoardIdentity(greenhouseAdapter, greenhousePayload("SpaceXSI"), "xAI", "xai");
+  // A match carrying the name the board really reported, so logs show the alias was used.
+  assert.deepEqual(verdict, { verdict: "match", reported: "SpaceXSI" });
+});
+
+// The alias is not a name rule: another token claiming SpaceXSI is exactly the wrong-board case the guard catches.
+test("another board token reporting SpaceXSI is still an identity mismatch", () => {
+  // Same names, different token: a stranger's board must not ride the xai alias.
+  const verdict = evaluateBoardIdentity(greenhouseAdapter, greenhousePayload("SpaceXSI"), "xAI", "xai-careers");
+  // Refused, so nothing from it persists.
+  assert.deepEqual(verdict, { verdict: "mismatch", reported: "SpaceXSI" });
+});
+
+// The alias admits one reported name, not any name: the xai board reporting someone else is still refused.
+test("the xai board reporting an unrelated company is still an identity mismatch", () => {
+  // The tcs-style failure on the aliased board itself.
+  const verdict = evaluateBoardIdentity(greenhouseAdapter, greenhousePayload("Thornbury Community Services"), "xAI", "xai");
+  // Refused.
+  assert.deepEqual(verdict, { verdict: "mismatch", reported: "Thornbury Community Services" });
+});
+
+// A caller that does not pass the token (the worker CLI until it is updated) gets no alias: fail closed.
+test("without a board token the SpaceXSI alias does not apply", () => {
+  // No token: only the plain name comparison runs.
+  const verdict = evaluateBoardIdentity(greenhouseAdapter, greenhousePayload("SpaceXSI"), "xAI");
+  // Refused, exactly as before the alias existed.
+  assert.deepEqual(verdict, { verdict: "mismatch", reported: "SpaceXSI" });
+});
+
 // The brief's second named gate: leniency on healthy boards. A qualifier the board
 // adds to its own name must not take the board down.
 test("minor name variants still pass", () => {

@@ -97,12 +97,25 @@ export type BoardIdentityVerdict =
   // The check is inapplicable — this is NOT a failure and must not count as one.
   | { readonly verdict: "no_signal"; readonly reason: string };
 
+// Boards whose provider reports a name the comparator cannot link to the watchlist row, verified by hand to be
+// the SAME board. Keyed by BOARD (provider + token + watchlist name), never by name alone: a name-only alias
+// would let any other board claiming that name through, which is the wrong-board case this guard exists for.
+// xai: greenhouse token "xai" reports "SpaceXSI" since the xAI/SpaceX merger; 253 of the 291 stored job ids were
+// live on it (probe 2026-11-09). The watchlist name stays "xAI" because the fingerprint is built from it.
+const BOARD_IDENTITY_ALIASES: readonly { readonly provider: string; readonly boardToken: string; readonly watchlistName: string; readonly reportedName: string }[] = [
+  // The one verified case; add a row only with the same evidence (stored ids live on the board).
+  { provider: "greenhouse", boardToken: "xai", watchlistName: "xAI", reportedName: "SpaceXSI" },
+];
+
 // Evaluate one board's response against its watchlist row. Pure and synchronous,
 // like `parse`: no network, no clock, so it is testable against saved fixtures.
 export function evaluateBoardIdentity(
   adapter: AtsAdapter,
   payload: unknown,
   watchlistCompanyName: string,
+  // The watchlist row's token, which the board aliases need. Optional so a caller that does not pass it
+  // (worker/src/cli/scout.ts until updated) gets no alias: it fails closed, exactly as before.
+  boardToken?: string,
 ): BoardIdentityVerdict {
   // Ask the adapter what its provider says this board is. Null is the adapter's
   // declared "my provider offers no identity signal" (or "none in this payload").
@@ -114,7 +127,11 @@ export function evaluateBoardIdentity(
   }
   // Signal present: the lenient comparison decides, and its two outcomes map onto
   // the two actionable verdicts.
-  return companyIdentityMatches(watchlistCompanyName, reported)
-    ? { verdict: "match", reported }
-    : { verdict: "mismatch", reported };
+  if (companyIdentityMatches(watchlistCompanyName, reported)) return { verdict: "match", reported };
+  // A verified board alias: every field must match exactly, so one board and one reported name, nothing wider.
+  const aliased = BOARD_IDENTITY_ALIASES.some((alias) =>
+    // Same provider, same token, same watchlist row, and the exact name the board was verified to report.
+    alias.provider === adapter.provider && alias.boardToken === boardToken && alias.watchlistName === watchlistCompanyName && alias.reportedName === reported);
+  // The reported name is kept in the verdict either way, so a log shows what the board actually said.
+  return aliased ? { verdict: "match", reported } : { verdict: "mismatch", reported };
 }

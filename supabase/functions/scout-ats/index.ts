@@ -424,7 +424,8 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
       // failure it really is.
       const refusal = boardRefusal(
         // The provider's own identity claim, compared with the row's company name.
-        evaluateBoardIdentity(adapter, parseResult.firstPayload, board.company_name),
+        // The token too, so a verified board alias (identity.ts BOARD_IDENTITY_ALIASES) can apply to THIS board only.
+        evaluateBoardIdentity(adapter, parseResult.firstPayload, board.company_name, board.board_token),
         // The row's name and its last successful posting count.
         board,
         // This poll's count across every page.
