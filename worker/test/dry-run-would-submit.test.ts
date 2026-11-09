@@ -20,7 +20,7 @@ import { applyToOne, verdictFromFacts, type ApplicationPage, type ApplierGateway
 // The rehearsal and its read-only port.
 import { readOnlyPage, rehearseAssisted } from '../src/assist/rehearse.ts';
 // Open gates, so the re-check passes and only the page decides.
-import { OPEN_RECHECK } from './open-pregate.ts';
+import { OPEN_PREGATE_PREFERENCES, OPEN_RECHECK } from './open-pregate.ts';
 // A real-shaped approved resume.
 import { syntheticResume } from './resolved-resume-fixture.ts';
 // Shapes for the profile and the bank.
@@ -151,6 +151,8 @@ async function rehearse(fixture: string) {
       checkRobots: async () => ({ kind: 'allow', reason: 'test', crawlDelayMs: null }),
       resolveFormUrl: async (row) => row.applyUrl,
       renderResume,
+      // Task 3: open gates and a job they keep, so only the page decides these cases.
+      preGate: { job: { title: 'Software Engineer', description_raw: 'Build web services.', location_raw: 'Remote', min_experience_years: null, discovered_via: null }, config: { kind: 'ok', preferences: OPEN_PREGATE_PREFERENCES } },
     });
   } finally {
     // Always closed.

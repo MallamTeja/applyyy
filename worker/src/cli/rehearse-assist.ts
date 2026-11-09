@@ -38,6 +38,10 @@ import { createRobotsCheck } from '../apply-one.ts';
 import { createFormUrlResolver, fetchJson, type GreenhouseBoard } from '../form-url.ts';
 // The rehearsal and its read-only page adapter.
 import { readOnlyPage, rehearseAssisted } from '../assist/rehearse.ts';
+// Task 3: the job's five gate fields, shape-checked, and the read-only SQL port for today's gate config.
+import { preGateJobFromRow, sqlConfigReader } from '../assist/rehearse.ts';
+// The SAME loader the claim loop's gateway runs, so the rehearsal maps config exactly as the live re-check does.
+import { loadPreGatePreferences } from '../../../supabase/functions/_shared/pregate-config-loader.ts';
 // The password check, which ends only its own session.
 import { signInCheck, type SignInClient } from '../assist/sign-in-check.ts';
 // The client for that one check only; nothing else in this CLI talks to the DB through supabase-js.
@@ -125,7 +129,9 @@ async function main(): Promise<void> {
 
   // 2. Everything the checks and the rehearsal read, in one SELECT, owner-scoped (system_settings
   // holds two accounts; an unfiltered read once answered for the wrong one, CLAUDE.md §6).
+  // Task 3: plus the five job fields the live re-check judges (title, JD, location, experience, discovered_via).
   const [row] = select(`select a.status, a.user_id, a.tailored_profile, j.apply_url, j.company_name, j.ats_provider,
+      j.title, j.description_raw, j.location_raw, j.min_experience_years, j.discovered_via,
       (select count(*) from system_settings s where s.user_id = a.user_id) n_settings,
       (select system_enabled from system_settings s where s.user_id = a.user_id) sys_on,
       (select auto_apply_on_approve from system_settings s where s.user_id = a.user_id) auto_on,
@@ -210,6 +216,9 @@ async function main(): Promise<void> {
       resolveFormUrl: createFormUrlResolver(async () => board, fetchJson),
       // Bound to its owner.
       renderResume: renderer.render,
+      // Task 3: today's gates, read-only. The job's fields from the SELECT above (the join guarantees the job row),
+      // and the config through the gateway's own loader over owner-scoped SELECTs (db query bypasses RLS).
+      preGate: { job: preGateJobFromRow(row), config: await loadPreGatePreferences(sqlConfigReader(select, String(row['user_id']))) },
     });
     // Identity drift is a FAIL: assist would attach a resume with facts Teja did not approve.
     record('resume identity', report.identityDrift.length === 0 ? 'PASS' : 'FAIL', report.identityDrift.length === 0 ? 'tailored = latest master' : report.identityDrift.join('; '));

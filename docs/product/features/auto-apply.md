@@ -178,8 +178,16 @@ is still `approved`. The row enters `applying` only for the click itself.
 6. **Plan the resume attachment.** A form that cannot carry the resume is not viable.
 7. **Fill, attach, screenshot.** The screenshot goes to the Supabase Storage bucket
    `screenshots`.
-8. **Dry run stops here.** It logs one line (`[applyy] dry run <id>: wouldSubmit=...`) and
-   releases the claim. A dry run never writes a status.
+8. **Dry run stops here.** It first runs every check the live path runs before its click (the
+   re-check `recheckBeforeSubmit`, which applies today's matcher gates and asks whether the
+   posting has closed, and `submit()`'s pre-click guard), without their writes and without
+   clicking. Then it logs one line and releases the claim. A dry run never writes a status.
+   The line is
+   `[applyy] dry run <id>: verdict=would_submit|would_block:<check> (<detail>) blockers=<n> [...]`,
+   where `<check>` names the first check that would have stopped the real submit (for
+   example `required_empty`, `pre_gate` or `fill_plan`). `would_submit` appears only when
+   every check passed. The rehearsal (`rehearse-assist`) reports the same verdict as its
+   `submit verdict` row.
 9. **Any blocker:** park `approved -> blocked_needs_human` with a `block_reason` and the list of
    unanswered labels.
 10. **The non-idempotent window.** `approved -> applying`, then `page.submit()`.
