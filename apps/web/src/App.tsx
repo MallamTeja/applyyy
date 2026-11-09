@@ -12,6 +12,14 @@ import { AppShell } from './app/AppShell';
 import { DEFAULT_ROUTE } from './app/routes';
 // Per-page crash containment, so one page's render error cannot blank the whole app.
 import { ErrorBoundary } from './app/ErrorBoundary';
+// The Approval queue's first read, startable before its lazy chunk arrives (2026-11-09).
+import { startQueuePrefetch } from './features/approval/queuePrefetch';
+
+/* Kicked once, at module load: before React renders, before the session gate, before the lazy chunk is
+   even requested. The queue read then rides the same ~1 s Sydney hop as the chunk download instead of
+   waiting behind it (measured: the read left ~115 ms after the shell's first request, right after the
+   chunk). It does nothing unless this load opens /approvals (or "/") with a stored session. */
+startQueuePrefetch(window.location.pathname);
 
 /* The daily screens. */
 const ApprovalQueuePage = lazyPage(() => import('./features/approval/ApprovalQueuePage'), 'ApprovalQueuePage');

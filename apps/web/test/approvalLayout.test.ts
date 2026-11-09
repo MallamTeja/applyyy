@@ -39,6 +39,8 @@ before(async () => {
 
 // The page source, for the wiring checks that rendering cannot reach.
 const source = readFileSync(fileURLToPath(new URL('../src/features/approval/ApprovalQueuePage.tsx', import.meta.url)), 'utf8');
+// The queue's first read, moved here on 2026-11-09 (shared with the shell-side prefetch); select checks read it.
+const queueRead = readFileSync(fileURLToPath(new URL('../src/features/approval/queuePrefetch.ts', import.meta.url)), 'utf8');
 
 // The text between two anchors, failing by name if either is missing (an empty slice guards nothing).
 function between(start: string, end: string): string {
@@ -101,7 +103,8 @@ describe('queue row chips', () => {
 describe('queue row wiring', () => {
   it('asks the database for jobs.location_raw', () => {
     // The chip reads it; without it in the select, payBandRegionWarning would always see null.
-    assert.match(source, /jobs:job_id\([^)]*\blocation_raw\b[^)]*\)/);
+    // The select moved to queuePrefetch.ts on 2026-11-09 (shared with the shell-side prefetch).
+    assert.match(queueRead, /jobs:job_id\([^)]*\blocation_raw\b[^)]*\)/);
   });
 
   it('draws no source badge, no master version and no queued-at chip on any row', () => {

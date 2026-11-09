@@ -9,6 +9,8 @@ import { newestInReviewFirst } from '../src/features/approval/queueOrder.ts';
 
 // The page's source, for the one wiring check.
 const page = readFileSync(new URL('../src/features/approval/ApprovalQueuePage.tsx', import.meta.url), 'utf8');
+// The queue's first read, moved here on 2026-11-09 (shared with the shell-side prefetch); its order lives in it.
+const queueRead = readFileSync(new URL('../src/features/approval/queuePrefetch.ts', import.meta.url), 'utf8');
 
 describe('approval queue order', () => {
   it('given rows with three different review-entry times, the newest renders first', () => {
@@ -37,8 +39,11 @@ describe('approval queue order', () => {
 
   it('the page orders the query and the rows by entry into review, not by discovery date', () => {
     // The database order uses the same key (index-backed: user_id, status, status_changed_at desc).
-    assert.match(page, /\.order\('status_changed_at', \{ ascending: false \}\)/);
-    // The created_at order (discovery date) is gone.
+    // The query moved to queuePrefetch.ts on 2026-11-09 (shared with the shell-side prefetch).
+    assert.match(queueRead, /\.order\('status_changed_at', \{ ascending: false \}\)/);
+    // The created_at order (discovery date) is gone from the query.
+    assert.doesNotMatch(queueRead, /\.order\('created_at'/);
+    // Nor in the page, should a second read ever be added back there.
     assert.doesNotMatch(page, /\.order\('created_at'/);
     // Every fetched row goes through the pure order before the queue is built.
     assert.match(page, /for \(const app of newestInReviewFirst\(data\)\)/);

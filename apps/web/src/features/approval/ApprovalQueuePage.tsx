@@ -99,6 +99,8 @@ import { attestBullet } from './attestBullet';
 // so every row can be SEEN before it is approved. Shared with the pipeline history page.
 import { ResumePreview } from '../resume-preview/ResumePreview';
 import { supabase } from '../../data/supabase';
+// The queue's first read, shared with the shell-side prefetch App.tsx kicks before this chunk loads (2026-11-09).
+import { readQueue, takeQueuePrefetch } from './queuePrefetch';
 // The AI box's ask: the resume-assist edge function, never-throwing (2026-10-31).
 import { requestAssist } from './aiEdit';
 // The AI chat's memory: resume_chat_messages over the page's client (2026-11-01).
@@ -731,52 +733,12 @@ export function ApprovalQueuePage(): ReactElement {
       try {
         setLoading(true);
 
-        /* 0. The NEWEST master, started BEFORE the applications read and awaited with it (2026-11-08).
-           The pinned-version reads below can only start once the rows say which versions they need,
-           so they were a second sequential round trip (~0.3-0.5 s to Sydney). Nearly every row is
-           pinned to the newest master, so reading it up front usually leaves nothing for that round.
-           It is only a PREFETCH: it is used for a row only when its version equals the row's pin. */
-        const newestMasterRead = supabase!
-          // The same table the per-version reads use; RLS scopes it to the signed-in user.
-          .from('master_profiles')
-          // version travels with the profile, so the cache below is keyed by what was actually read.
-          .select('profile, version')
-          // Highest version first: "newest" is the largest version number, as everywhere else here.
-          .order('version', { ascending: false })
-          // One row is the newest; nothing else is needed from this read.
-          .limit(1)
-          // No master at all is an answer (null), not an error.
-          .maybeSingle();
-
-        // 1. Fetch applications at awaiting_approval
-        const applicationsRead = supabase!
-          .from('applications')
-          /* apply_url and description_raw added 2026-09-17: the diff could not
-             show the operator the job they were approving against, because the
-             query never asked for it. Everything here is an explicit column
-             list rather than jobs:job_id(*) so that adding a column to the
-             jobs table does not silently start shipping it to the browser. */
-          /* No raw_payload key any more (2026-11-05). raw_payload->>application_deadline made Postgres
-             de-TOAST every job's whole board JSON (~387 KB for 39 rows, ~95% of the query's executor
-             time) for a deadline that was null on all 39. The deadline chip went with it. */
-          /* The applications columns are explicit too, for the same reason as the jobs list: `*` also
-             shipped match_reasoning, claim and failure fields this page never reads. These are the
-             fields read here, by queueOrder.ts and by diffAdapter.ts. tailor_refs stays: original
-             and attest are rebuilt from it. */
-          /* location_raw added 2026-11-07: the row shows the board's own location, and the "Pay band UK/US
-             only" chip (finding N2) reads it with description_raw, exactly as the screener's gate does. */
-          /* description_raw is NOT in this read any more (2026-11-09). It was 438 KB of the 1.67 MB this
-             select returned for 86 rows, and nothing on the first paint shows it: only the pay-band chip
-             and the AI chat read it. loadJobDescriptions fetches it once the queue is on screen. */
-          .select('id, status, status_changed_at, created_at, updated_at, master_version, tailored_profile, tailor_refs, selected_jd_keywords, match_score, audit_findings, cover_letter, jobs:job_id(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, location_raw)')
-          .eq('status', 'awaiting_approval')
-          /* Newest entry into review first (2026-10-24): status_changed_at is when the row reached
-             awaiting_approval, served by the (user_id, status, status_changed_at desc) index. Not
-             created_at, which is the discovery date. See queueOrder.ts. */
-          .order('status_changed_at', { ascending: false });
-        /* Both in flight at once: Promise.all calls then() on each builder immediately, and a
-           PostgREST builder only sends its request on then(). One round trip instead of two. */
-        const [{ data, error }, newestMaster] = await Promise.all([applicationsRead, newestMasterRead]);
+        /* Both first-paint reads (applications + newest master), from queuePrefetch.ts since 2026-11-09.
+           App.tsx kicks them while this chunk is still downloading; take that in-flight read when there is
+           one, so the page does not send a second copy. null = none kicked, taken already, too old, or
+           skipped (signed out at boot): read here, exactly as before. The select lives in readQueue, so the
+           prefetched read and this one cannot drift apart. */
+        const [{ data, error }, newestMaster] = (await takeQueuePrefetch()) ?? (await readQueue(supabase!));
 
         /* `live` is a cancelled render, not a failure - a component that
            unmounted mid-fetch has nothing to report. Separated from the two
