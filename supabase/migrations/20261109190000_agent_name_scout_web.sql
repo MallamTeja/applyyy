@@ -1,0 +1,23 @@
+-- 20261109190000_agent_name_scout_web.sql: an agent identity for the scout-web edge function.
+--
+-- WHY THIS EXISTS. scout-web (Gemini web-search discovery) logged its agent_runs rows as
+-- 'scout_aggregator' because no 'scout_web' value existed (scout-web/index.ts said so). But
+-- 'scout_aggregator' is ALSO the worker's daily remote-feeds scout (worker/src/scout/remote-run.ts),
+-- which makes no Gemini calls. One name meaning two jobs means the Health page cannot tell them
+-- apart: a live scout-web run masks a dead remote-feeds scout, and its Gemini spend hides among
+-- that scout's true zeros (docs/status/2026-11-09-matcher-stall.md, task 8 audit). Identities stay
+-- one-to-one with real agents, as for 'jobs_tombstone' (20261105201000).
+--
+-- HISTORY IS LEFT AS IT IS. agent_runs is a record. Checked 2026-11-09: none of the 20
+-- 'scout_aggregator' rows is attributable to scout-web. 16 carry the worker's rule_warnings note,
+-- 10-28 07:14 matches a scheduled scout-remote.yml run, 10-24 05:22 read 167 rows (the worker
+-- feed's size), and the two 09-18 rows predate scout-web (added 2026-10-04).
+--
+-- ADD ONLY, NEVER USE, IN THIS FILE: Postgres (>= 12; live is 17.6) allows ADD VALUE inside the
+-- migration's transaction, but forbids USING a value in the same transaction that added it. So
+-- nothing here writes 'scout_web'. The scout-web deploy that writes it ships AFTER this migration.
+--
+-- APPENDED LAST (no BEFORE/AFTER): Postgres orders an enum by declaration, and AGENT_NAMES in
+-- packages/shared-types/src/enums.ts must match that order (enum-parity.test.ts compares sequences).
+-- `if not exists` makes a re-run a no-op.
+alter type public.agent_name add value if not exists 'scout_web';

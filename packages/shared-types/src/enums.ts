@@ -270,6 +270,12 @@ export const AGENT_NAMES = [
    * migration 20261105201000.
    */
   'jobs_tombstone',
+  /**
+   * The scout-web edge function (Gemini web-search discovery). Its own identity since 2026-11-09:
+   * it used to log as 'scout_aggregator', which is the worker's Gemini-free remote-feeds scout, so
+   * one name meant two jobs. Appended last, matching migration 20261109190000.
+   */
+  'scout_web',
 ] as const;
 /** Union of every legal agent identity. */
 export type AgentName = (typeof AGENT_NAMES)[number];

@@ -436,8 +436,8 @@ export function AiEditPanel({
   async function ask(): Promise<void> {
     // The operator's words, trimmed.
     const text = instruction.trim();
-    // Blank, mid-ask, mid-load or mid-save: nothing to send.
-    if (text === '' || asking || loading || busy) return;
+    // Blank, mid-ask, mid-load, mid-save, or the job description not loaded yet: nothing to send.
+    if (text === '' || asking || loading || busy || jdPending) return;
     // Locks the composer.
     setAsking(true);
     // A new ask clears the old failure.
@@ -593,6 +593,11 @@ export function AiEditPanel({
   const threads = groupThreads(messages);
   // Every control waits while anything is in flight.
   const locked = busy || asking || applyingAll || loading;
+  /* The job description has not reached this diff yet (2026-11-09: the queue reads it after the first
+     paint). Only SENDING waits on it: the AI tailors against the JD, and an ask built now would go out
+     with an empty one that looks, to the model, like a job with no description. undefined = not loaded;
+     null = loaded, none stored, which may be sent. */
+  const jdPending = diff.jobDescription === undefined;
 
   // A labelled region, so a screen reader can jump to the chat by name.
   return (
@@ -805,8 +810,10 @@ export function AiEditPanel({
             {instruction.length}/{MAX_MESSAGE}
           </span>
         ) : null}
+        {/* Why Send is off while the description loads, so a disabled button is never unexplained. */}
+        {jdPending ? <span className="ai-chat__meta" role="status">Loading the job description…</span> : null}
         {/* Primary: the one action the composer exists for. */}
-        <button type="submit" className="button button--primary button--small" disabled={locked || instruction.trim() === ''}>
+        <button type="submit" className="button button--primary button--small" disabled={locked || jdPending || instruction.trim() === ''}>
           {/* The label says when an ask is in flight. */}
           {asking ? 'Sending…' : 'Send'}
         </button>

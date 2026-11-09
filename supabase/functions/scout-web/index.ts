@@ -123,8 +123,9 @@ Deno.serve(withErrorBoundary("scout-web", async (req: Request): Promise<Response
         },
         // Telemetry open.
         async openRun() {
-          // 'scout_aggregator' is the closest existing agent_name enum value (no 'scout_web' exists).
-          const { data } = await db.from("agent_runs").insert({ agent: "scout_aggregator", status: "running", started_at: new Date().toISOString() }).select("id").single();
+          // Its own identity (migration 20261109190000). It used to borrow 'scout_aggregator', the worker's
+          // Gemini-free remote-feeds scout, so the Health page could not tell the two apart.
+          const { data } = await db.from("agent_runs").insert({ agent: "scout_web", status: "running", started_at: new Date().toISOString() }).select("id").single();
           // Null tells the handler there is no row to close.
           return data?.id ?? null;
         },

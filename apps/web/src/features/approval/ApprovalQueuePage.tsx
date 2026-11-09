@@ -678,6 +678,9 @@ export function ApprovalQueuePage(): ReactElement {
   /* Each row's chip facts (fit, location, pay-band warning), from the same load pass as the queue. State,
      not a ref: only the render reads it, and no async path ever writes it after the load. */
   const [chipFacts, setChipFacts] = useState<ReadonlyMap<string, RowChipFacts>>(() => new Map());
+  /* The rows' job descriptions, read after the first paint (loadJobDescriptions). A closed union, so
+     "still loading", "failed" and "loaded" are three different things on screen, never one blank. */
+  const [jobDescriptions, setJobDescriptions] = useState<{ readonly state: 'loading' } | { readonly state: 'error'; readonly message: string } | { readonly state: 'ready'; readonly byApplication: ReadonlyMap<string, string | null> }>({ state: 'loading' });
 
   /* Put a stale-refusal notice on one row's card and move focus there, so a refused click is never
      silent. Functional update: settle() runs across awaits, and its render closure is stale.
@@ -762,7 +765,10 @@ export function ApprovalQueuePage(): ReactElement {
              and attest are rebuilt from it. */
           /* location_raw added 2026-11-07: the row shows the board's own location, and the "Pay band UK/US
              only" chip (finding N2) reads it with description_raw, exactly as the screener's gate does. */
-          .select('id, status, status_changed_at, created_at, updated_at, master_version, tailored_profile, tailor_refs, selected_jd_keywords, match_score, audit_findings, cover_letter, jobs:job_id(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, description_raw, location_raw)')
+          /* description_raw is NOT in this read any more (2026-11-09). It was 438 KB of the 1.67 MB this
+             select returned for 86 rows, and nothing on the first paint shows it: only the pay-band chip
+             and the AI chat read it. loadJobDescriptions fetches it once the queue is on screen. */
+          .select('id, status, status_changed_at, created_at, updated_at, master_version, tailored_profile, tailor_refs, selected_jd_keywords, match_score, audit_findings, cover_letter, jobs:job_id(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, location_raw)')
           .eq('status', 'awaiting_approval')
           /* Newest entry into review first (2026-10-24): status_changed_at is when the row reached
              awaiting_approval, served by the (user_id, status, status_changed_at desc) index. Not
@@ -1021,15 +1027,82 @@ export function ApprovalQueuePage(): ReactElement {
         /* Published in the same pass, so the banner and the buckets can
            never disagree about what this read found. */
         setUnreviewable(refused);
+        /* The descriptions, AFTER the queue is published and NOT awaited, so the cards paint without
+           them. The ids only decide whether there is anything to read (an empty queue skips the request). */
+        void loadJobDescriptions(diffs.map((diff) => diff.applicationId));
       } finally {
         if (live) setLoading(false);
       }
+    }
+    /* The loaded rows' job descriptions, read after the first paint (2026-11-09). One request, filtered like
+       the queue read (status), NOT by an id list: 36 characters per id would put a 400-row queue's URL near
+       the gateways' limits, and a refused URL would switch off every chip and chat at once. A row that left
+       the queue in between gets no text; it can no longer be approved here anyway. The answer feeds the
+       pay-band chips and the AI chat; until it lands, the chat is locked (AiEditPanel), so the AI never
+       answers from a description that was simply not loaded yet. */
+    async function loadJobDescriptions(applicationIds: readonly string[]): Promise<void> {
+      // No rows, nothing to read: an empty answer is complete.
+      if (applicationIds.length === 0) {
+        // Ready with nothing in it, so no notice and no lock.
+        setJobDescriptions({ state: 'ready', byApplication: new Map() });
+        // Done.
+        return;
+      }
+      // Each application with its job's text only; the inner fields stay out of the first paint's read.
+      const { data, error } = await supabase!.from('applications').select('id, jobs:job_id(description_raw)').eq('status', 'awaiting_approval');
+      // The page was left (or StrictMode remounted it): this answer belongs to no one.
+      if (!live) return;
+      // supabase-js returns failures as data. A failure is said on the page, never read as "no description".
+      if (error !== null || !Array.isArray(data)) {
+        // The page-level notice names it; the chips stay off and the chats stay locked.
+        setJobDescriptions({ state: 'error', message: error?.message ?? 'the job descriptions came back in an unexpected shape' });
+        // Nothing to fill.
+        return;
+      }
+      // Application id -> its job's description, or null when the job has none stored.
+      const byApplication = new Map<string, string | null>();
+      // Each returned row, shape-checked: the client is untyped.
+      for (const row of data as readonly { readonly id?: unknown; readonly jobs?: unknown }[]) {
+        // A row without a string id cannot be matched to a card.
+        if (typeof row.id !== 'string') continue;
+        // The embed may come back as one object or a one-element array, depending on the client's inference.
+        const job: unknown = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
+        // Only a real string is a description; anything else is "none stored".
+        byApplication.set(row.id, job !== null && typeof job === 'object' ? textOrNull((job as { readonly description_raw?: unknown }).description_raw) : null);
+      }
+      // Published: the chats unlock and render reads the text from here.
+      setJobDescriptions({ state: 'ready', byApplication });
+      /* The pay-band chip, now that its second input exists: the screener's own rule over the location the
+         load pass stored and this text. A row with no answer keeps its chip off, as a missing JD always did. */
+      setChipFacts((previous) => {
+        // A copy, so React sees a change and the old map stays valid.
+        const next = new Map(previous);
+        // Only rows this answer covered.
+        for (const [applicationId, facts] of previous) {
+          // Not returned: leave its facts as they are.
+          if (!byApplication.has(applicationId)) continue;
+          // The same pure gate the screener runs, with the same two inputs.
+          next.set(applicationId, { ...facts, payBand: payBandRegionWarning({ locationRaw: facts.location, description: byApplication.get(applicationId) ?? null }) });
+        }
+        // Handed back as the new state.
+        return next;
+      });
     }
     void loadQueue();
     return () => {
       live = false;
     };
   }, []);
+
+  /* The diff a card hands to DiffView, with its job description laid over it once loaded (2026-11-09).
+     The queue's diffs never carry it (the first read does not select it), so `undefined` keeps meaning
+     "not loaded yet" and AiEditPanel stays locked; null means "loaded, the job has none". */
+  function withJobDescription(diff: ResumeDiff): ResumeDiff {
+    // Not loaded, failed, or this row not answered: the diff as it is.
+    if (jobDescriptions.state !== 'ready' || !jobDescriptions.byApplication.has(diff.applicationId)) return diff;
+    // A copy with the text; the queue's own diff is never mutated.
+    return { ...diff, jobDescription: jobDescriptions.byApplication.get(diff.applicationId) ?? null };
+  }
 
   /* Partition by bucket. Derived from the findings on each row, never stored -
      a row carrying a stored bucket alongside its findings will eventually
@@ -2145,6 +2218,16 @@ export function ApprovalQueuePage(): ReactElement {
         </div>
       ) : null}
 
+      {/* The deferred description read failed (2026-11-09). Said once, above the buckets: without it the
+          pay-band chips cannot be computed and every AI chat stays locked, and both would otherwise look
+          like "no warning" and "not ready" with no reason given (CLAUDE.md section 6). */}
+      {jobDescriptions.state === 'error' ? (
+        <p className="queue__failed" role="alert">
+          {/* The cause, then the two things it switches off, then the fix. */}
+          Could not load the job descriptions ({jobDescriptions.message}). Pay-band warnings are not shown and the AI chat is unavailable. Reload the page to try again.
+        </p>
+      ) : null}
+
       {/* REFUSED ROWS FIRST, above even Bucket B. They are not a third bucket
           and carry no approve button: this screen cannot form a verdict on
           them, and offering an action would imply it had.
@@ -2348,7 +2431,8 @@ export function ApprovalQueuePage(): ReactElement {
                       its rows open fresh; a Bucket B row may be mid-review when folded. */}
                   <div id={reviewId} hidden={isFolded}>
                   <DiffView
-                    diff={diff}
+                    /* The row's diff with its job description laid over once loaded (withJobDescription). */
+                    diff={withJobDescription(diff)}
                     /* The shared approval path; see approveReviewed for why the
                        decisions are forwarded and how they are serialised. */
                     onApprove={(decisions, acknowledged) => approveReviewed(diff.applicationId, decisions, 'bucket_b_review', acknowledged)}
@@ -2526,7 +2610,8 @@ export function ApprovalQueuePage(): ReactElement {
                   {isReviewing ? (
                     <div id={reviewId} className="queue__detail">
                       <DiffView
-                        diff={diff}
+                        /* Same overlay as Bucket B: the AI chat unlocks once the description is in. */
+                        diff={withJobDescription(diff)}
                         /* Same path as Bucket B, tagged so the audit log shows this
                            clean row was opened and read, not batch-approved. */
                         onApprove={(decisions, acknowledged) => approveReviewed(diff.applicationId, decisions, 'bucket_a_review', acknowledged)}
