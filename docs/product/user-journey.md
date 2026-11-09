@@ -103,7 +103,8 @@ Code: `apps/web/src/features/discovery/DiscoveredJobsPage.tsx`.
   (`apps/web/src/features/discovery/AddJobLinkPanel.tsx`). The `job-link-intake` function inserts the row
   at `passed_filters` (it skips the filters) and runs matcher, tailor and auditor on the server, so closing
   the tab is safe (Teja ruled 2026-11-01). A pasted link skips the robots.txt check, because a human chose it.
-- **Bulk run.** For many rows, the orchestrator dispatches `postscreen-drain.yml` (manual only, see above).
+- **Bulk run.** `postscreen-drain.yml` drains every queued row on its own after each scout finishes and once a day
+  (Teja ruling 2026-11-09). The orchestrator can also dispatch it by hand, e.g. `from_stage=tailor` for a re-run.
 
 What runs in between: matcher (scores; rows below the floor of 30 are dropped, Teja ruled 2026-11-07),
 tailor (writes a one-page tailored resume), auditor (flags claims the master does not back, then moves the

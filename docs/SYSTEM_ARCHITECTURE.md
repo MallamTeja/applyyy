@@ -176,9 +176,10 @@ Gates that decide whether a run does anything real:
   re-dispatches itself (the `redispatch` job), so leftovers go to the next run.
 - **`satellites.yml`**. The scheduled job runs only while the repo variable
   `APPLYY_SATELLITES_LIVE` is exactly `true`. A manual dispatch always runs.
-- **The drains** (`prescreen-drain`, `postscreen-drain`, `pregate-sweep`) are manual only
-  (Teja ruling 2026-11-05; pinned by `apps/web/test/postscreenDrainManualOnly.test.ts` for
-  `postscreen-drain`). They call edge functions with the app-user secrets and fail closed.
+- **The drains:** `prescreen-drain` and `pregate-sweep` are manual only. `postscreen-drain` runs
+  after each scout finishes, once a day at 04:30 UTC, and on manual dispatch. That is Teja's ruling of
+  2026-11-09, which reversed the 2026-11-05 manual-only ruling; the trigger set is pinned by
+  `apps/web/test/postscreenDrainTriggers.test.ts`. They call edge functions with the app-user secrets and fail closed.
 - **`jobs-tombstone.yml`** runs weekly. It purges the heavy payload (`description_raw`,
   `raw_payload`) of old `dropped_filter` jobs through `public.tombstone_dropped_jobs` and logs
   to `agent_runs` as `jobs_tombstone`. The row stays, so its fingerprint still dedupes the

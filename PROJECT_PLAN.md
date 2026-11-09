@@ -419,12 +419,14 @@ One `applications` table whose `status` column **is** the workflow. Each agent i
 | schedule + after approve | `apply-kit.yml` | manual-apply kits (`worker/src/cli/apply-kit.ts`) |
 | schedule, gated | `satellites.yml` | skill-gap, follow-up, cover-letter, interview-prep, referral; runs on schedule only when `APPLYY_SATELLITES_LIVE` is `true` |
 | schedule | `keepalive.yml`, `jobs-tombstone.yml` | §14 keepalive; weekly DB space purge |
-| manual only | `prescreen-drain.yml`, `pregate-sweep.yml`, `postscreen-drain.yml`, `run-one.yml`, `ingest-links.yml` | normalizer + screener; matcher pre-gate; matcher → tailor → auditor; one row; a list of links |
+| scout completion + daily 04:30 UTC + manual | `postscreen-drain.yml` | matcher → tailor → auditor (Teja ruling 2026-11-09) |
+| manual only | `prescreen-drain.yml`, `pregate-sweep.yml`, `run-one.yml`, `ingest-links.yml` | normalizer + screener; matcher pre-gate; one row; a list of links |
 | approve click | `dispatch-apply` edge function | always dispatches `apply-kit.yml`; dispatches a live `apply.yml` drain only when `system_settings.auto_apply_on_approve` is true (`supabase/functions/dispatch-apply/handler.ts`) |
 
-Matcher, tailor and auditor have **no schedule on purpose**: Teja ruled on 2026-11-05 that
-the post-screen drain runs only when a human starts it. A test holds that rule
-(`apps/web/test/postscreenDrainManualOnly.test.ts`). The paragraph below is the 2026-10-23
+Matcher, tailor and auditor run **automatically** through the post-screen drain: after every scout,
+once a day, and on manual dispatch. Teja ruled this on 2026-11-09 ~17:20 IST, reversing his 2026-11-05
+manual-only ruling after 55 rows stalled 11-02 to 11-09 (`docs/status/2026-11-09-pipeline-stall.md`).
+A test pins the trigger set (`apps/web/test/postscreenDrainTriggers.test.ts`). The paragraph below is the 2026-10-23
 record; its workflow list is incomplete.
 
 **As built (2026-10-23), the middle edge agents still never run unattended.** `pg_cron` is not installed (`select extname from pg_extension`; Teja ruled no cron — migration `20261009220000`), so normalizer, screener, matcher, tailor, auditor and the Phase 2/3 functions run only when called: `run-one.yml` pushes one row through matcher → tailor → auditor (`worker/src/cli/run-one.ts`), and the dashboard invokes `scout-ats` and `scout-web`. Scheduled discovery is `scout.yml` (`worker/src/cli/scout.ts`, screener run in-process). The Actions half CAN now run unattended: submission is implemented (`SUBMISSION_IMPLEMENTED = true` in `worker/src/playwright-page.ts`, since 2026-10-09), capped per run (`APPLY_MAX_SUBMITS`, default 3) with a circuit breaker and a robots.txt gate. `DRY_RUN` defaults true, and a scheduled `apply.yml` run submits only while the repo variable `APPLYY_CRON_LIVE` is `true`; a deliberate single submit is `gh workflow run apply.yml` with `dry_run=false` + `apply_only_id`. `worker/src/cli/assist.ts` remains the headed route where the human clicks Submit.

@@ -87,6 +87,8 @@ import { settleModelFailures, withUsableJob, type MatcherFailureReason, type Mod
 import { nextSweepCursor, parseMatcherMode, PREGATE_ONLY_MAX_BATCH, selectScorer, withTechPreGate, type MatcherMode } from "./tech-pregate.ts";
 // The one loader of the gate config (search_preferences + experience_ceiling), shared with the auditor.
 import { loadPreGatePreferences, type ConfigReader } from "../_shared/pregate-config-loader.ts";
+// The matcher-scoped 5 s Gemini pacer (2026-11-09): the shared 500 ms default let a page burst past ~15 RPM.
+import { matcherPacer } from "./pacer.ts";
 
 // Default batch limit for one invocation to preserve key pool quota.
 // Controls how many application rows are processed per function call.
@@ -427,6 +429,9 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
         },
         // Spread only when set: exactOptionalPropertyTypes forbids passing `undefined`.
         ...(callBudget ? { timeoutMs: callBudget.timeoutMs, maxRetries: callBudget.maxRetries } : {}),
+        // The matcher's 5 s pacer, not the shared 500 ms default: 10 calls back to back ran at
+        // 18-26 calls/min and drew 429 on every key (matcher/pacer.ts has the measurement).
+        pacer: matcherPacer,
       });
       // Check if Gemini API call execution or key claim failed.
       if (!outcome.ok) {

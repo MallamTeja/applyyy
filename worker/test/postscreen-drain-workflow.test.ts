@@ -1,10 +1,12 @@
-// postscreen-drain.yml is MANUAL ONLY (Teja ruling 2026-11-05). The `workflow_run` trigger that
-// ran it after both scouts (P1-4, commit 10e4e63) was removed the same day. The workflow still
-// skips green, calling no agent, when nothing is eligible. These tests hold both halves:
-// - the trigger: the `on:` block holds workflow_dispatch and nothing else, so an automatic
-//   trigger (workflow_run, schedule) cannot come back unnoticed;
+// postscreen-drain.yml's own script, run with a fake fetch. Its TRIGGERS (scout completion, one daily
+// cron, manual dispatch: Teja ruling 2026-11-09, reversing the 2026-11-05 manual-only ruling) are
+// pinned in ONE place, apps/web/test/postscreenDrainTriggers.test.ts. The copy this file used to hold
+// was removed so the two cannot drift apart. These tests hold the run's behaviour:
 // - the gate: 0 eligible rows means no agent call; any count it cannot read EXACTLY stops the
-//   run red instead of being taken as 0 (CLAUDE.md §6), because a wrong 0 skips real rows.
+//   run red instead of being taken as 0 (CLAUDE.md §6), because a wrong 0 skips real rows;
+// - the page loop's stop rules;
+// - stage isolation (2026-11-09): a page-cap or stall stop ends only its stage, the later stages
+//   still drain, and the run still ends red. Everything else still ends the whole run.
 //
 // WHY THIS RUNS THE WORKFLOW'S OWN SCRIPT, not a copy: the step text IS the control. Same
 // approach as pregate-sweep-log.test.ts: the Node heredoc is cut out of the yml and run with a
@@ -148,25 +150,6 @@ function agentCalls(stdout: string): string[] {
   // Only the edge-function calls, never sign-in or the count.
   return stdout.split('\n').filter((line) => line.startsWith('FETCH ') && line.includes('/functions/v1/'));
 }
-
-describe('postscreen-drain.yml trigger', () => {
-  test('runs on workflow_dispatch only (manual-only ruling 2026-11-05, no workflow_run)', () => {
-    // Full-line comments dropped, so the ruling note that NAMES workflow_run is never read as a trigger.
-    const lines = drain.split('\n').filter((line) => !/^\s*#/.test(line));
-    // The anchor: the top-level `on:` key, asserted present so the check cannot pass over nothing.
-    const start = lines.indexOf('on:');
-    // A restructured file fails loudly (§6).
-    expect(start, 'no top-level `on:` line').toBeGreaterThanOrEqual(0);
-    // The block ends at the next top-level key.
-    const end = lines.findIndex((line, index) => index > start && /^\S/.test(line));
-    // Same rule: no end, no test.
-    expect(end, 'no top-level key after `on:`').toBeGreaterThan(start);
-    // Trigger names sit at exactly two spaces of indent; deeper lines are their settings.
-    const triggers = lines.slice(start + 1, end).flatMap((line) => /^ {2}([a-z_]+):/.exec(line)?.[1] ?? []);
-    // The exact allowed set: a positive shape, so ANY added trigger goes red.
-    expect(triggers).toEqual(['workflow_dispatch']);
-  });
-});
 
 describe('postscreen-drain.yml count gate', () => {
   test('0 eligible rows: green, SKIP logged, and no agent is called', () => {
@@ -363,5 +346,53 @@ describe('postscreen-drain.yml page loop', () => {
     expect(agentNames(run.stdout)).toEqual(['auditor']);
     // No pause.
     expect(sleeps(run.stdout)).toEqual([]);
+  });
+});
+
+// STAGE ISOLATION (2026-11-09, docs/status/2026-11-09-pipeline-stall.md). Every full drain from 11-02 to
+// 11-05 died in the matcher stage (page cap or stall), and its tailor stage never started: 55 scored
+// rows waited 4-7 days. These cases are red if a backlog stop ends the whole run again (the tailor
+// is never called), or if the run that stopped a stage early reports green.
+describe('postscreen-drain.yml stage isolation', () => {
+  // Rows exist, so the count gate lets the agents run.
+  const ELIGIBLE = { status: 200, contentRange: '0-22/23' };
+
+  test('a matcher page-cap stop still runs the tailor and auditor, then exits red with INCOMPLETE', () => {
+    // A matcher queue that never empties within its cap of 40: 40 full, clean pages.
+    const run = runDrain(ELIGIBLE, '', { matcher: Array.from({ length: 40 }, () => matcherPage(10)) });
+    // Red: the matcher stage did not drain.
+    expect(run.code, run.stdout).toBe(1);
+    // The stage stop is named, as a stage stop, not a run abort.
+    expect(run.stdout).toContain('::error::STAGE ABORT: matcher: page cap 40 reached before the queue emptied');
+    // THE POINT: the later stages still ran (40 matcher reads, then one each).
+    expect(agentNames(run.stdout).filter((name) => name !== 'matcher')).toEqual(['tailor', 'auditor']);
+    // The red summary lists the stop.
+    expect(run.stdout).toContain('::error::INCOMPLETE: 1 stage(s) stopped early: matcher: page cap 40');
+    // And the run never claims it was clean.
+    expect(run.stdout).not.toContain('CLEAN:');
+  });
+
+  test('a matcher stall stop (3 pages, 0 advanced) still runs the tailor and auditor, then exits red', () => {
+    // Gemini down: every row errors in place, page after page (10 read, 10 errored, 0 advanced).
+    const run = runDrain(ELIGIBLE, '', { matcher: [matcherPage(10, 10), matcherPage(10, 10), matcherPage(10, 10)] });
+    // Red.
+    expect(run.code, run.stdout).toBe(1);
+    // Named as a stage stop.
+    expect(run.stdout).toContain('::error::STAGE ABORT: matcher: 3 consecutive pages advanced 0 rows');
+    // The later stages ran anyway.
+    expect(agentNames(run.stdout)).toEqual(['matcher', 'matcher', 'matcher', 'tailor', 'auditor']);
+    // Listed in the red summary.
+    expect(run.stdout).toContain('::error::INCOMPLETE: 1 stage(s) stopped early');
+  });
+
+  test('the kill switch still ends the WHOLE run: no later stage is called', () => {
+    // The pipeline is disabled; the matcher answers the kill-switch body.
+    const run = runDrain(ELIGIBLE, '', { matcher: [okPage({ status: 'skipped_disabled' })] });
+    // Red.
+    expect(run.code).toBe(1);
+    // A run abort, not a stage stop.
+    expect(run.stdout).toContain('::error::ABORT: matcher: pipeline is disabled (skipped_disabled)');
+    // Nothing after the matcher: isolation must never route around the kill switch.
+    expect(agentNames(run.stdout)).toEqual(['matcher']);
   });
 });

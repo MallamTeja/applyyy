@@ -1,8 +1,8 @@
-# Drains the post-screen queues on demand (manual dispatch only): pages the whole `passed_filters` queue through the
+# Drains the post-screen queues (after every scout, daily, and on demand): pages the whole `passed_filters` queue through the
 # matcher (?limit=10), then the whole `scored` queue through the tailor (?limit=3), then the
 # whole `tailored` queue through the auditor (?limit=5), pausing between pages for Gemini's RPM. The sibling of prescreen-drain.yml,
 # which drains the two stages BEFORE this one (normalizer, screener).
-# Exists because nothing calls these three agents on a schedule: only run-one.yml (one row
+# Exists because nothing else calls these three agents on a schedule: only run-one.yml (one row
 # per dispatch, ~1 billed Actions minute each), job-link-intake (one pasted link) and the web
 # runner (10 rows per click) do. Measured 2026-11-01 17:13 IST: 190 rows had waited at
 # passed_filters since 2026-09-18, and Teja asked for the whole Approval queue to be re-run
@@ -11,16 +11,31 @@
 # Actions secrets. The matcher DROPS rows below the score threshold and drops are one-way, so
 # every abort below fails CLOSED: any response we cannot read exactly stops the run.
 #
-# MANUAL ONLY (Teja ruling 2026-11-05). The `workflow_run` trigger that ran this drain after
-# every scout (P1-4, commit 10e4e63, Teja 00:40 IST) was REMOVED the same day: Teja ruled the
-# drain runs manually only, so a human starts every run. The trigger itself is gone rather
-# than disabled by a flag, because a flag is not a control. Do not re-add an automatic trigger
-# (workflow_run, schedule) without a new ruling; apps/web/test/postscreenDrainManualOnly.test.ts
-# holds `on:` to workflow_dispatch alone. pregate-sweep and prescreen-drain are manual too.
+# AUTOMATIC (Teja ruling 2026-11-09 ~17:20 IST). This reverses the 2026-11-05 manual-only ruling, made
+# after 55 rows stalled 11-02 -> 11-09: every full manual drain in that window died in the matcher
+# stage, and no human re-ran one (docs/status/2026-11-09-pipeline-stall.md). Teja's standing rule
+# applies: per-row work is triggered by the system at the state change, plus a scheduled sweep.
+# So the drain runs (1) when a scout finishes, because scouts create the passed_filters rows,
+# (2) once a day as the sweep, and (3) on manual dispatch. The concurrency group below queues
+# overlapping runs instead of racing them. Stage isolation (below) stops one stage's backlog
+# from starving the later stages. apps/web/test/postscreenDrainTriggers.test.ts pins exactly
+# this trigger set. pregate-sweep and prescreen-drain are still manual.
 name: applyy post-screen drain
 
 on:
-  # The only trigger: the manual drain, for full runs, re-runs (from_stage) and rehearsals (dry_count_only).
+  # STATE-CHANGE TRIGGER: the scouts insert the passed_filters rows, so the drain starts when either
+  # one finishes. `workflows:` matches each workflow's `name:` exactly (scout.yml, scout-remote.yml).
+  workflow_run:
+    # The two scouts that insert at passed_filters.
+    workflows: ['applyy scout (ats discovery)', 'applyy scout (remote feeds)']
+    # After the scout finishes, never while it is still inserting. A failed scout may still have inserted rows.
+    types: [completed]
+  # SCHEDULED SWEEP: the safety net for a missed or failed trigger. 04:30 UTC is after both scout crons
+  # (scout.yml 00:17/04:17/12:17, scout-remote.yml 01:30). GitHub cron starts late; that is harmless here.
+  schedule:
+    - cron: '30 4 * * *'
+  # Manual runs: full drains, re-runs (from_stage) and rehearsals (dry_count_only). On the two automatic
+  # triggers `inputs.*` is empty, so FROM_STAGE '' runs the full drain and DRY_COUNT_ONLY '' is a real run.
   workflow_dispatch:
     # The one input: rehearse without touching anything.
     inputs:
@@ -133,6 +148,24 @@ jobs:
           // page head: without this cap the loop would re-spend quota on them forever.
           const STALL_CAP = 3;
 
+          // STAGE ISOLATION (2026-11-09, docs/status/2026-11-09-pipeline-stall.md). Two stop rules are
+          // about ONE queue's backlog, not about the run being unsafe: the page cap and the stall cap.
+          // Before this, either one ended the whole run, so every full drain from 11-02 to 11-05 died
+          // in the matcher stage (page cap 40, or 3 Gemini-error pages) and its tailor stage never
+          // started: 55 already-scored rows waited 4-7 days behind new matcher work. Now those two end
+          // only their own stage; the later stages still drain, and the run still exits RED at the end,
+          // listing every stage that stopped early. Everything that makes the RUN unsafe (kill switch,
+          // non-2xx, non-JSON, a changed response shape, bad credentials) still calls abort() and ends
+          // the whole run at once, exactly as before.
+          class StageAbort extends Error {}
+          // Stops the CURRENT stage only. Thrown, never exiting, so the stage loop decides what follows.
+          function stageAbort(reason) {
+            // Same ::error:: annotation as abort(), so the run summary shows it the moment it happens.
+            console.log(`::error::STAGE ABORT: ${reason}`);
+            // Caught by the stage loop below; any other catcher would be a bug, so nothing else catches it.
+            throw new StageAbort(reason);
+          }
+
           // Abort: one place that prints the reason and exits red. Never prints a secret,
           // because no caller passes one in.
           function abort(reason) {
@@ -173,11 +206,11 @@ jobs:
             console.log(`plan: POST ${base || '<SUPABASE_URL>'}/functions/v1/${stage.name}?limit=${stage.limit}, page cap ${stage.pageCap}`);
           }
           // The stop rules, verbatim, so a reader of the log can check the run against them.
-          console.log(`plan: a stage ends when a page reads 0 rows or on a clean page shorter than its limit that no deadline cut; ${STALL_CAP} consecutive pages that read rows but advance none abort the run`);
+          console.log(`plan: a stage ends when a page reads 0 rows or on a clean page shorter than its limit that no deadline cut; ${STALL_CAP} consecutive pages that read rows but advance none, or the page cap, stop THAT stage; later stages still run and the run ends red`);
           // The pacing, likewise, so the run's length in the log is explained by its rules.
           console.log(`plan: ${GAP_MS / 1000}s pause after each page, ${QUOTA_BACKOFF_MS / 1000}s after a page with errors (Gemini ~15 RPM free tier)`);
           // The abort rules, likewise.
-          console.log('plan: abort on non-2xx, non-JSON, missing/ill-typed fields, or a kill-switch halt (skipped_disabled)');
+          console.log('plan: abort the WHOLE run on non-2xx, non-JSON, missing/ill-typed fields, or a kill-switch halt (skipped_disabled)');
           // The skip rule, so a run that did nothing says why in its log.
           console.log(`plan: skip green, calling no agent, when 0 applications are at ${RUN_STAGES.flatMap((s) => s.reads).join(', ')}`);
           // The rehearsal ends here, before sign-in.
@@ -375,6 +408,8 @@ jobs:
           let totalAdvanced = 0;
           // Rows read across the whole run, for the same line.
           let totalProcessed = 0;
+          // Every stage that stopped early this run, in order; non-empty means the run ends red.
+          const stageAborts = [];
 
           // Stages run strictly in order: each stage's output IS the next stage's input.
           for (const stage of RUN_STAGES) {
@@ -383,11 +418,13 @@ jobs:
             // Consecutive stalled pages (processed > 0, advanced 0); reset by any progress.
             let stalled = 0;
 
+            // The stage body, wrapped so a backlog stop (StageAbort) ends THIS stage only.
+            try {
             // Page loop: each page re-reads the head of the queue, because advanced rows
             // leave the input status - there is no cursor to carry.
             while (true) {
-              // Hard cap: stop red rather than spin on a queue that never ends.
-              if (pages >= stage.pageCap) abort(`${stage.name}: page cap ${stage.pageCap} reached before the queue emptied`);
+              // Hard cap: stop this stage red rather than spin on a queue that never ends; later stages still run.
+              if (pages >= stage.pageCap) stageAbort(`${stage.name}: page cap ${stage.pageCap} reached before the queue emptied`);
               // Counted before the request so a failing request still counts.
               pages += 1;
               // Never send a token within reach of its 1-hour expiry.
@@ -426,8 +463,8 @@ jobs:
               if (page.advanced === 0) {
                 // One more stalled page.
                 stalled += 1;
-                // Cap reached: the head of the queue is stuck; a human must look at it.
-                if (stalled >= STALL_CAP) abort(`${stage.name}: ${STALL_CAP} consecutive pages advanced 0 rows; head of queue is stuck`);
+                // Cap reached: this queue's head is stuck and a human must look at it; later stages still run.
+                if (stalled >= STALL_CAP) stageAbort(`${stage.name}: ${STALL_CAP} consecutive pages advanced 0 rows; head of queue is stuck`);
               } else {
                 // Any progress resets the window: only CONSECUTIVE stalls count.
                 stalled = 0;
@@ -437,6 +474,24 @@ jobs:
             }
             // Stage boundary line, so the log shows where each stage ended.
             console.log(`${stage.name}: queue drained in ${pages} page(s)`);
+            } catch (err) {
+              // Anything that is not a backlog stop (a thrown fetch timeout, a bug) still ends the run, fail closed.
+              if (!(err instanceof StageAbort)) throw err;
+              // Recorded for the red summary at the end.
+              stageAborts.push(err.message);
+              // Says plainly that the run goes on, so the log does not read like a crash.
+              console.log(`${stage.name}: stopped early after ${pages} page(s); continuing to the next stage`);
+              // Pace before the next stage's first page, like any page boundary: the same Gemini window applies.
+              await sleep(QUOTA_BACKOFF_MS);
+            }
+          }
+
+          // Any stage stopped early: the run did useful work but did NOT drain everything, so it must not look green.
+          if (stageAborts.length > 0) {
+            // Every early stop on the run summary, one annotation, so the operator sees all of them at once.
+            console.log(`::error::INCOMPLETE: ${stageAborts.length} stage(s) stopped early: ${stageAborts.join(' | ')}; processed=${totalProcessed} advanced=${totalAdvanced}`);
+            // Red, with the later stages' work already done.
+            process.exit(1);
           }
 
           // The summary line the orchestrator reads.

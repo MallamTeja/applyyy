@@ -626,7 +626,7 @@ SmartRecruiters boards cannot be added (robots ruling, 2026-11-01).
 ## Tests not tied to one feature
 
 `apiContracts.test.ts` (web call shapes vs `src/data/contract.ts`),
-`postscreenDrainManualOnly.test.ts` (`.github/workflows/postscreen-drain.yml`), `e2eSuite.test.ts` (Playwright
+`postscreenDrainTriggers.test.ts` (`.github/workflows/postscreen-drain.yml` trigger set), `e2eSuite.test.ts` (Playwright
 suite), `vercelIgnoreCommand.test.ts` (Vercel build skip rule),
 `noEmoji.test.ts`, `noJsxCommentText.test.ts` (a `//` between JSX tags renders as
 text). Fixtures live in `test/fixtures/`, helpers in `test/support/`.

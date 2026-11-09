@@ -42,7 +42,7 @@ Times are UTC in the cron line. IST is UTC + 5:30.
 | `run-one.yml` | manual only | none | Yes (one row) | Never submits |
 | `prescreen-drain.yml` | manual only | none | Yes (drops rows) | `dry_count_only` checkbox |
 | `pregate-sweep.yml` | manual only | none | Yes (drops rows) | `dry_count_only` checkbox |
-| `postscreen-drain.yml` | manual only | none | Yes (drops and tailors rows) | `dry_count_only` checkbox |
+| `postscreen-drain.yml` | after either scout completes, daily 04:30 UTC, manual (Teja ruling 2026-11-09) | none | Yes (drops and tailors rows) | `dry_count_only` checkbox |
 | `ingest-links.yml` | manual only | none | Yes (new rows) | `dry_run` defaults to ON |
 
 All jobs run on `runs-on: ubuntu-latest`. No workflow uses a self-hosted runner at this commit
@@ -432,10 +432,17 @@ then `tailored` through `auditor` (`?limit=5`), pausing between pages for Gemini
 - `from_stage` (choice `matcher` / `tailor` / `auditor`, default `matcher`): later stages
   always follow.
 
-**Manual only, by ruling (2026-11-05).** An automatic `workflow_run` trigger was added and
-removed the same day. Do not add a schedule or `workflow_run` without a new ruling.
-`apps/web/test/postscreenDrainManualOnly.test.ts` fails if `on:` has anything except
-`workflow_dispatch`.
+**Automatic, by ruling (2026-11-09 ~17:20 IST).** This reverses the 2026-11-05 manual-only ruling, made
+after 55 rows stalled 11-02 to 11-09 (`docs/status/2026-11-09-pipeline-stall.md`). The drain runs:
+- on `workflow_run` when either scout (`applyy scout (ats discovery)`, `applyy scout (remote feeds)`) completes;
+- on one daily `schedule` (04:30 UTC);
+- on manual dispatch.
+
+The `postscreen-drain` concurrency group queues overlapping runs instead of racing them.
+
+A page-cap or stall stop now ends only that stage. Later stages still drain, and the run ends red with
+`INCOMPLETE`. `apps/web/test/postscreenDrainTriggers.test.ts` pins three things: the exact trigger set,
+the scout names, and the concurrency guard.
 
 **Fail-closed:** the matcher drops rows below the score threshold, and drops are one-way.
 
@@ -475,7 +482,7 @@ git grep -l "\.github/workflows" -- '*.test.ts'
 | `worker/test/run-window.test.ts` | The worker run window fits inside `apply.yml` timeout-minutes |
 | `worker/test/postscreen-drain-workflow.test.ts` | `postscreen-drain.yml` script behaviour |
 | `worker/test/pregate-sweep-log.test.ts` | `pregate-sweep.yml` log output |
-| `apps/web/test/postscreenDrainManualOnly.test.ts` | `postscreen-drain.yml` stays manual only |
+| `apps/web/test/postscreenDrainTriggers.test.ts` | `postscreen-drain.yml` triggers exactly on scout completion, one daily cron and manual dispatch, with the concurrency guard |
 | `apps/web/test/scoutScheduleFreshness.test.ts` | Health threshold matches `scout.yml` cron |
 | `apps/web/test/remoteDiscoveryRetired.test.ts` | Remote feeds run only via `scout-remote.yml` |
 | `supabase/functions/job-link-intake/handler.test.ts` | `job-link-intake` contract used by `ingest-links.yml` |
