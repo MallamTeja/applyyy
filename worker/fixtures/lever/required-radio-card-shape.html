@@ -1,0 +1,38 @@
+<!doctype html>
+<!-- HAND-BUILT SHAPE FIXTURE (peer 4, 2026-11-09). NOT a capture: jobs.lever.co's robots.txt says
+     "User-agent: ClaudeBot / Disallow: /", so no Lever page is fetched by this project.
+     Modelled on: (1) the verbatim Lever question markup in netomi-apply-form.html (captured 2026-11-05
+     while robots still allowed it): li.application-question, .application-label carrying a
+     <span class="required">✱</span> mark, controls with NO id, NO aria-label, NO <label for>;
+     (2) Lever's public "multiple-choice" custom card shape: ul[data-qa="multiple-choice"] > li > label >
+     input[type=radio] + span.application-answer-alternative, as rendered on Lever apply pages.
+     The radios carry NO `required` attribute and the form is `novalidate`: the worst case, where the
+     ✱ mark is the ONLY signal and the browser's own validation never runs.
+     What it proves: a required radio card the extractor cannot see must still stop the submit. -->
+<html lang="en">
+<head>
+  <!-- Plain document; nothing here runs. -->
+  <meta charset="utf-8">
+  <!-- A Lever-style title. -->
+  <title>Example Co - Application</title>
+</head>
+<body>
+  <!-- novalidate: Lever validates in script, so the browser's :invalid check never fires on submit. -->
+  <form method="POST" action="/lever/example/apply/submit" enctype="multipart/form-data" novalidate>
+    <ul>
+      <!-- The resume upload: the only control with an id, required only by the ✱ (as on Netomi). -->
+      <li class="application-question resume"><label><div class="application-label">Resume/CV <span class="required">✱</span></div><div class="application-field"><input class="application-file-input invisible-resume-upload" id="resume-upload-input" name="resume" type="file"></div></label></li>
+      <!-- A standard text question, verbatim Netomi shape. -->
+      <li class="application-question"><label><div class="application-label">Full name<span class="required">✱</span></div><div class="application-field"><input type="text" name="name" required></div></label></li>
+      <!-- The email box, verbatim Netomi shape. -->
+      <li class="application-question"><label><div class="application-label">Email<span class="required">✱</span></div><div class="application-field"><input name="email" type="email" required></div></label></li>
+      <!-- THE GAP: a REQUIRED multiple-choice card. No fieldset, no role, no id, no `required`: only the ✱. -->
+      <li class="application-question custom-question"><div><div class="application-label full-width multiple-choice"><div class="text">Are you available to join within 30 days?<span class="required">✱</span></div></div><div class="application-field full-width required-field"><ul data-qa="multiple-choice"><li><label><input type="radio" name="cards[11111111-1111-4111-8111-111111111111][field0]" value="Yes"><span class="application-answer-alternative">Yes</span></label></li><li><label><input type="radio" name="cards[11111111-1111-4111-8111-111111111111][field0]" value="No"><span class="application-answer-alternative">No</span></label></li></ul></div></div></li>
+      <!-- An OPTIONAL multiple-choice card (no ✱): left blank, it must never stop a submit. -->
+      <li class="application-question custom-question"><div><div class="application-label full-width multiple-choice"><div class="text">How did you hear about us?</div></div><div class="application-field full-width"><ul data-qa="multiple-choice"><li><label><input type="radio" name="cards[22222222-2222-4222-8222-222222222222][field0]" value="Referral"><span class="application-answer-alternative">Referral</span></label></li><li><label><input type="radio" name="cards[22222222-2222-4222-8222-222222222222][field0]" value="Job board"><span class="application-answer-alternative">Job board</span></label></li></ul></div></div></li>
+    </ul>
+    <!-- Exactly one visible submit control in the form, which submit() requires before any click. -->
+    <button type="submit">Submit application</button>
+  </form>
+</body>
+</html>

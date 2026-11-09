@@ -246,8 +246,8 @@ naming the recon split — the natural partitions are `supabase/functions/<fn>/`
 `supabase/functions/_shared/`, `apps/web/src/features/<area>/`, `apps/web/src/data/`,
 `worker/src/`. **Peers may or may not have the Supabase MCP** (a peer read live rows
 through it on 2026-10-24; others lacked it): put every live-DB fact in the brief anyway,
-let a peer run SELECTs if it can, and route every live WRITE to the orchestrator (§2). Budget default: ≤4 recon subagents
-per worker (raised from 3 on 2026-10-24: Teja asked for more fan-out for speed), measure
+let a peer run SELECTs if it can, and route every live WRITE to the orchestrator (§2). Budget: **no subagent cap** for the orch or
+peers (Teja, 2026-11-09 22:56; was ≤4 per worker since 2026-10-24). Fan out wide, parallel; writers stay disjoint; measure
 before fixing.
 
 **Ponytail when writing, editing or refactoring code (asked for 2026-10-24).** The

@@ -156,6 +156,17 @@ async function openForm(timeoutMs: number): Promise<{ raw: Page; port: ReturnTyp
   const port = createPlaywrightPage(raw, { submitOutcomeTimeoutMs: timeoutMs });
   // Loaded at the job path, as the worker loads it.
   await port.goto(`${origin}${JOB_PATH}`);
+  // FILLED, as the bot leaves it before a click: every required text box gets an invented value. Without
+  // this the pre-click guard (readUnfilledRequiredLabels) refuses the blank form, and no "what happens
+  // after a send" case below could ever reach the click. Comboboxes and aria-hidden sentinels are skipped,
+  // as the guard skips them; tests about native validation still see the empty sentinels.
+  await raw.evaluate(() => {
+    // Required text controls only; the value is a valid email so type=email boxes pass too.
+    for (const el of Array.from(document.querySelectorAll<HTMLInputElement>('form :is(input[type="text"], input[type="email"], input[type="tel"], textarea)'))) {
+      // Same skip rules as the guard, so the test fills exactly what the bot would have filled.
+      if ((el.required || el.getAttribute('aria-required') === 'true') && el.getAttribute('aria-hidden') !== 'true' && el.getAttribute('role') !== 'combobox') el.value = 'asha@example.com';
+    }
+  });
   // The page, the adapter, and the POST log.
   return { raw, port, posts };
 }

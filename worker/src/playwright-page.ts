@@ -331,6 +331,60 @@ function readInvalidFieldLabels(): string[] {
 }
 
 /**
+ * The labels of every REQUIRED control that holds no value, whatever the form's validation mode.
+ * Runs in the browser. Exported for its tests (lever-required-unfilled.test.ts).
+ *
+ * THE GAP IT CLOSES (P2-17, 2026-11-09). readInvalidFieldLabels sees only what the browser or the
+ * board's script already flagged. Lever's form validates in script (`novalidate`), and its custom
+ * multiple-choice cards mark required-ness ONLY with a ✱ in `.application-label`: no `required`, no
+ * id, no fieldset. The extractor drops such a card, so the planner never sees it and raises no
+ * blocker, and the old pre-click check let the click send the application with the answer blank.
+ * This reads required-ness the three ways boards declare it and refuses on any empty one. It does
+ * not care WHY a control is empty (an extraction gap, a fill that silently missed), which is the
+ * point: a required question nobody planned for is caught here too, not only radios.
+ *
+ * Skipped, each for a reason: aria-hidden (Greenhouse's react-select sentinels, filled by the board's
+ * own script, never by us); role="combobox" (react-select's search box is empty AFTER a pick; the
+ * filler verifies those by readback); disabled (barred from submission, as native validation agrees).
+ */
+export function readUnfilledRequiredLabels(): string[] {
+  // One label per question, in DOM order; a Set stops a radio group naming itself once per option.
+  const labels = new Set<string>();
+  // Controls inside forms only: a page-level search box is never part of the application.
+  for (const el of Array.from(document.querySelectorAll<HTMLInputElement>('form :is(input, select, textarea)'))) {
+    // Sentinels, react-select search boxes and disabled controls: see the docstring.
+    if (el.getAttribute('aria-hidden') === 'true' || el.getAttribute('role') === 'combobox' || el.disabled) continue;
+    // Machinery, not questions (`type` is the tag-appropriate value for select and textarea too).
+    if (el.type === 'hidden' || el.type === 'submit' || el.type === 'button') continue;
+    // Lever's question wrapper, when there is one: it holds both the ✱ and the human's label.
+    const question = el.closest('.application-question');
+    // Required by the native attribute, by ARIA, or by Lever's ✱ mark on the enclosing question.
+    const required = el.required || el.getAttribute('aria-required') === 'true' || question?.querySelector('.application-label .required') != null;
+    // Optional questions never stop a submit.
+    if (!required) continue;
+    // A radio or checkbox is answered when ANY member of its group (same name, same form) is checked.
+    const filled = el.type === 'radio' || el.type === 'checkbox'
+      ? Array.from(document.querySelectorAll<HTMLInputElement>(`input[type="${el.type}"]`)).some(
+          // Unnamed: the control is its own group.
+          (other) => other.checked && (el.name ? other.name === el.name && other.form === el.form : other === el),
+        )
+      // A file input is answered when something is attached.
+      : el.type === 'file'
+        ? (el.files?.length ?? 0) > 0
+        // Everything else by its value; whitespace alone is not an answer.
+        : el.value.trim() !== '';
+    // Answered: nothing to report.
+    if (filled) continue;
+    // Lever's question text first (never an option's "Yes"), with its ✱ stripped as the extractor does.
+    const leverLabel = question?.querySelector('.application-label')?.textContent?.replace(/\s*[*✱]\s*$/, '').trim();
+    // Then the usual accessible names, and finally the id or name so a label is never blank.
+    labels.add(leverLabel || el.getAttribute('aria-label')?.trim() || (el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.textContent?.trim() : '') || el.closest('label')?.textContent?.trim() || el.id || el.name || el.tagName.toLowerCase());
+  }
+  // In DOM order, deduplicated.
+  return [...labels];
+}
+
+/**
  * A selector for one element by id, built without `CSS.escape`.
  *
  * THIS FIXED A LIVE BUG, and the bug is worth recording because the shape
@@ -938,6 +992,15 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
       if (invalidBefore.length > 0) {
         // Same answer shape as a post-click rejection, but nothing was attempted.
         return { kind: 'not_attempted', reason: 'unanswerable_question', detail: `invalid before submit: ${invalidBefore.join('; ')}` };
+      }
+
+      // A REQUIRED question still blank, which nothing above flags in a `novalidate` form or when the
+      // only required signal is Lever's ✱ (P2-17). Same park as above: the human answers it, nothing is sent.
+      const unfilledBefore = await page.evaluate(readUnfilledRequiredLabels);
+      // Any blank required question: refuse the click, naming every one.
+      if (unfilledBefore.length > 0) {
+        // Same shape as the invalid branch, so the park path and the Manual lane need no new case.
+        return { kind: 'not_attempted', reason: 'unanswerable_question', detail: `required but empty before submit: ${unfilledBefore.join('; ')}` };
       }
 
       // Where we were, so "no navigation" can be told apart from "navigated".
