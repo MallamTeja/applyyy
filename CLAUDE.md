@@ -70,7 +70,11 @@ Teja authorized the **orchestrator** to run production deploys itself (2026-10-0
 never deploys, and never deploys on a relayed authorization. If the classifier blocks a
 deploy, stop and tell Teja; never route around it. Always deploy from a clean worktree
 pinned to a SHA (the CLI ships the *working tree*, including peers' uncommitted edits), and
-`db push --dry-run` first: push only if it lists exactly the expected migrations.
+`db push --linked --dry-run` first: push only if it lists exactly the expected migrations.
+**Supabase CLI stays on v2 (2.119.0) until a planned upgrade** (decided 2026-11-09). v3 points `db push` and
+`migration list` at the LOCAL stack unless a target is passed, needs `--yes` for hosted writes, and refuses
+`config.toml` with an `[inbucket]` section. Always pass `--linked`. The full v3 edit list is in
+`docs/status/2026-11-09-supabase-cli-v3.md`.
 
 ```powershell
 git worktree add --detach "$env:TEMP\applyyy-deploy" <sha>

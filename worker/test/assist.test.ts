@@ -315,6 +315,17 @@ describe('runAssisted flow', () => {
     expect(t.events.at(-1)).toBe('advance:failed:human');
   });
 
+  it('n -> failed carries p_detail.reason, which the RPC requires and copies to failure_reason', async () => {
+    // The human reports it did not go through.
+    const t = setup({ answer: 'n' });
+    // Execute the whole flow.
+    await runAssisted(t.deps);
+    // The failed call: advanceStatus(id, to, agent, detail).
+    const failCall = t.advance.mock.calls.find((c) => c[1] === 'failed');
+    // Migration 20261109180000 refuses a move to failed without p_detail.reason.
+    expect((failCall as unknown[] | undefined)?.[3]).toEqual({ reason: 'human_did_not_submit', source: 'assisted_submit' });
+  });
+
   // Garbage, a near-miss and EOF all share one expectation: write nothing more.
   it.each([['garbage'], ['yes'], [null]])('unsure answer %s writes nothing after the park', async (answer) => {
     // The parametrised answer.

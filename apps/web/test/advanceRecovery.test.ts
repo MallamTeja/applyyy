@@ -135,6 +135,13 @@ describe('buildRecoveryArgs', () => {
     // The log names the screen the operator actually used.
     assert.deepEqual(args.p_detail, { source: 'manual_apply', from: 'applying' });
   });
+
+  it('a move to failed carries p_detail.reason, which the database requires and copies to failure_reason', () => {
+    // The health page's "mark failed" on a stuck row.
+    const args = mod.buildRecoveryArgs({ ...MOVE, to: 'failed' });
+    // Migration 20261109180000 refuses a move to failed without p_detail.reason; the reason names the human decision.
+    assert.deepEqual(args.p_detail, { source: 'health_recovery', from: 'applying', reason: 'human_marked_failed' });
+  });
 });
 
 describe('advanceRecovery outcomes', () => {

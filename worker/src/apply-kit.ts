@@ -22,6 +22,8 @@
 import type { AnswerBankRow, ApplicationStatus, MasterIdentity, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 // The pre-submit port this kit narrows, the renderer port, and the robots port: reused, not forked.
 import type { ApplicationPage, ResumeRenderer, RobotsCheck } from './apply-one.ts';
+// The applier's own form-shape gate (2026-11-09): the kit and the applier must agree on what is "not a form".
+import { formShapeBlockersFor } from './apply-one.ts';
 // The applier's own form-URL resolver port, so the kit opens the same form the applier would.
 import type { FormUrlResolver } from './form-url.ts';
 // The control shape the extractor returns.
@@ -306,28 +308,27 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
   // the form, so 0 fields means the page never rendered one we can read (an iframe-only company page, a
   // client app slower than the wait). Closed only when the page itself says so; otherwise (K2) a
   // resume-only kit that says the form could not be read, never a skip that would call it closed.
-  if (fields.length === 0) {
+  // NOT A FORM IS NOT CLOSED (2026-11-09). The applier's form-shape gate decides "is this a form", and the
+  // page's own evidence alone decides "is it closed". Leak 3 (2026-11-05) once named every page without an
+  // email box posting_closed; on 2026-11-09 all 4 live posting_closed notes came from that guess and none from
+  // evidence: jobicy's open Supabase listing (validThrough 2026-12-06) and two rows Teja then applied to by hand.
+  const [notAForm] = formShapeBlockersFor(row.id, fields);
+  // An empty page (no_form_fields) or a page with controls but no email box (no_email_field).
+  if (notAForm !== undefined) {
     // The page's own evidence: an HTTP error status or a closed-posting sentence. Absent method = none.
     const closed = page.postingClosed === undefined ? null : await page.postingClosed();
-    // The page said it: a closed posting, quoted.
+    // The page said it: a closed posting, quoted. The only way to posting_closed.
     if (closed !== null) throw new KitSkip('posting_closed', `apply kit: posting_closed: ${formUrl}: ${closed}`);
-    // No evidence either way: unreadable, never closed. K2: a resume-only kit, written once, instead of a
-    // failure retried on every run (L&T 7890ff1b's peoplestrong form sat at "Kit pending" this way).
-    const unreadable = `could not read the form at ${formUrl} (no form fields appeared within the wait, and the page does not say the posting is closed); open it and fill it by hand with this resume`;
+    // No evidence: open as far as we can tell, but no form the bot can read. K2: a resume-only kit, written
+    // once, instead of a failure retried every run (L&T 7890ff1b's peoplestrong form sat at "Kit pending").
+    // The two shapes get their own sentence, because Teja acts differently on each.
+    const reason = notAForm.reason === 'no_form_fields'
+      // Nothing rendered: a slow client app or an iframe-only page.
+      ? `could not read the form at ${formUrl} (no form fields appeared within the wait, and the page does not say the posting is closed); open it and fill it by hand with this resume`
+      // Controls but no email box: an aggregator's job page or a careers index (a closed posting can redirect there too).
+      : `no bot-usable application form at ${formUrl}: ${notAForm.label}. The page does not say the posting is closed; it is likely a job board or careers page, so open it, follow its apply link and fill the form by hand with this resume`;
     // The note, with the wall if one was seen.
-    return writeResumeOnlyKit(input, row, master, formUrl, wall === null ? [unreadable] : [unreadable, `the form page shows a ${wall} wall; expect to clear it by hand`]);
-  }
-  // THE CLOSED-POSTING BACKSTOP (leak 3, 2026-11-05). GitLab 267dcfcd closed in September; its link
-  // redirected to the careers index, and the kit listed "Search" and "Department" as the form. Every
-  // application form asks for an email, so a page without one is not a form. Matched by kind OR by
-  // label: Greenhouse renders its email box as type="text" (fixtures/greenhouse/*), so a kind-only
-  // check would refuse real Greenhouse forms. Thrown before any upload or note, so nothing is written.
-  // ponytail: a label heuristic; read the goto's final URL/status if a real form without email appears.
-  if (!fields.some((field) => field.kind === 'email' || /\be-?mail\b/i.test(field.label))) {
-    // The labels found, so the log shows what page was opened instead of a form.
-    const found = fields.map((field) => field.label).slice(0, 5).join(', ');
-    // Named posting_closed: the usual cause, stated with its evidence rather than asserted.
-    throw new KitSkip('posting_closed', `apply kit: posting_closed: ${formUrl} shows no email field (${fields.length} field(s): ${found || 'none'}); a closed posting usually redirects to the careers index`);
+    return writeResumeOnlyKit(input, row, master, formUrl, wall === null ? [reason] : [reason, `the form page shows a ${wall} wall; expect to clear it by hand`]);
   }
 
   // THE SAME PLAN the bot would have typed: latest master for identity facts, the bank for

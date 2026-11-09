@@ -431,6 +431,9 @@ export async function runAssisted(deps: AssistDeps): Promise<AssistOutcome> {
         to: transition.to,
         // Human-only edges: the graph refuses these for any automated actor.
         agent: HUMAN_AGENT,
+        // A move to failed must name its cause: migration 20261109180000 refuses failed without p_detail.reason
+        // and copies it to failure_reason. 'n' means the human did not get the application submitted.
+        ...(transition.to === 'failed' ? { detail: { reason: 'human_did_not_submit', source: 'assisted_submit' } } : {}),
       });
     } catch (error) {
       // The row simply stays blocked; the human can fix it in the dashboard.

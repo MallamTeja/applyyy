@@ -88,8 +88,10 @@ export function buildRecoveryArgs(move: RecoveryMove): Record<string, unknown> {
     p_to_status: move.to,
     // 'human' is the only agent a browser may honestly claim.
     p_agent: 'human',
-    // Recorded on the status event, so the log says which screen made the move and from where.
-    p_detail: { source: move.source, from: move.from },
+    // Recorded on the status event, so the log says which screen made the move and from where. A move to failed
+    // also names its cause: migration 20261109180000 refuses failed without p_detail.reason and copies it to
+    // applications.failure_reason. Only for failed, so every other move logs exactly what it did before.
+    p_detail: { source: move.source, from: move.from, ...(move.to === 'failed' ? { reason: 'human_marked_failed' } : {}) },
     // ALWAYS sent (see the header): a stale stamp is refused with PT409 under the row lock.
     p_expected_updated_at: move.stamp,
   };

@@ -38,7 +38,8 @@ function page(closed: string | null | 'absent' = null) {
   const p: ApplicationPage = {
     goto: async () => {},
     // One answerable field, so the row would otherwise submit.
-    extractFields: async () => [{ id: 'first_name', label: 'First Name', kind: 'text', required: true }] as never,
+    // An optional Email field too: the form-shape gate (no_email_field, 2026-11-09) refuses a page without one.
+    extractFields: async () => [{ id: 'first_name', label: 'First Name', kind: 'text', required: true }, { id: 'email', label: 'Email', kind: 'email', required: false }] as never,
     fill: async () => {},
     attachFile: async () => {},
     screenshot: async () => new Uint8Array([1, 2, 3]),

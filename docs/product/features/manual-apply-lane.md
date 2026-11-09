@@ -151,6 +151,15 @@ a row.
 note and not retried until the status changes (commit `b248a18`). Since K2 (2026-11-06, commit `5a5d9b9`), a
 robots refusal or an unreadable form gets a **resume-only kit** instead of a skip.
 
+**"Not a form" is not "closed"** (2026-11-09). `posting_closed` needs the page's own evidence: an HTTP status of
+400 or more on the form page, or a closed-posting sentence (`postingClosed()`). A page with controls but no email
+box (a job aggregator such as jobicy.com, or a careers index) gets a resume-only kit whose first warning says
+"no bot-usable application form". The kit, the applier and the rehearsal share one predicate for this,
+`formShapeBlockersFor` in `worker/src/apply-one.ts`. It returns `no_form_fields` or `no_email_field`, and the
+applier parks either one as `unsupported_form`, never a submit. Before this, the kit labelled every no-email page
+`posting_closed`. All 4 live `posting_closed` notes on 2026-11-09 came from that guess, including an open jobicy
+posting and two rows Teja then applied to by hand.
+
 **When a kit is due** (`apply-kit-sweep.ts`): the row waits on Teja and has no kit newer than its last status
 change. Since K1 (2026-11-06, commit `07df623`), a kit is also due when an answer was edited or a master version
 saved after it. Rows parked with `no_apply_url` or `posting_closed` are never due (rule W29).

@@ -51,7 +51,9 @@ const LIVE_ENV = { DRY_RUN: 'false' } as const;
 const DRY_ENV = {} as const;
 
 /** One field the bank answers, so a test only blocks when it means to. */
-const answerableForm: FormField[] = [{ id: 'first_name', label: 'First Name', kind: 'text', required: true }];
+// The optional Email field: every real form asks for one, and the form-shape gate (no_email_field, 2026-11-09)
+// refuses a page without it. Optional, so the planner never blocks on it.
+const answerableForm: FormField[] = [{ id: 'first_name', label: 'First Name', kind: 'text', required: true }, { id: 'email', label: 'Email', kind: 'email', required: false }];
 
 /** The matching bank row. Real rows carry more columns; the planner reads these four. */
 const answers = [

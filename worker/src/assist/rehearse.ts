@@ -124,11 +124,12 @@ export async function rehearseAssisted(input: RehearsalInput): Promise<Rehearsal
   const attachment = planResumeAttachment(fields, { hasResumeSnapshot: true });
   // Everything except the render.
   report = { ...report, blocker, fields, plan, resumeTarget: attachment.target?.label ?? null, attachBlockers: attachment.blockers.map((b) => b.label) };
-  // The applier's empty-page gate, the same predicate (2026-11-08). Without it 0 fields gave an empty plan
+  // The applier's form-shape gate, the same predicate (2026-11-08). Without it 0 fields gave an empty plan
   // and no upload box, every check PASSed, and the CLI said "ready" for a page with no form at all.
-  const [emptyPage] = formShapeBlockersFor(input.applicationId, fields);
+  // Since 2026-11-09 it also stops a page with controls but no email box (an aggregator, a careers index).
+  const [notAForm] = formShapeBlockersFor(input.applicationId, fields);
   // A stop, which the CLI prints as a FAIL row: absence of a form is never a form that is done.
-  if (emptyPage !== undefined) return { ...report, stoppedAt: emptyPage.label };
+  if (notAForm !== undefined) return { ...report, stoppedAt: notAForm.label };
   // No upload box: a legitimate shape, nothing to render.
   if (attachment.target === null) return report;
   // The exact bytes assist would attach.

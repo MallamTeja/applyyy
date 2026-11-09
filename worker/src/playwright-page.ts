@@ -6,6 +6,10 @@
 import type { Page } from 'playwright';
 import type { BlockReason } from '@applyy/shared-types';
 import { extractFields } from './extract-fields.ts';
+// The ATS posting-API check postingClosed() asks before trusting a page's status (2026-11-09).
+import { createListingCheck, type ListingCheck } from './posting-listing.ts';
+// The production JSON GET (timeout, non-JSON reads as null), the same one the form-URL resolver uses.
+import { fetchJson } from './form-url.ts';
 import type { ClosableApplicationPage } from './claim-loop.ts';
 // The one document shape that crosses into a real employer's form, and the one
 // answer shape that comes back from submitting it.
@@ -461,9 +465,14 @@ export interface PlaywrightPageOptions {
   // How long goto waits for a fillable control; FORM_RENDER_TIMEOUT_MS by default. The
   // never-renders test sets it low so it does not sit through 15 real seconds.
   readonly formRenderTimeoutMs?: number;
+  // Asks the ATS's own posting API whether the opened job is still listed (2026-11-09); the production
+  // Ashby check by default. Tests inject a verdict, so no test reaches the network.
+  readonly listingCheck?: ListingCheck;
 }
 
 export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions = {}): ClosableApplicationPage {
+  // The posting-API check postingClosed() consults first: the test override, or the production one.
+  const listingCheck = options.listingCheck ?? createListingCheck(fetchJson);
   // The deadline submit() uses: the test override, or the production constant.
   const submitOutcomeTimeoutMs = options.submitOutcomeTimeoutMs ?? SUBMIT_OUTCOME_TIMEOUT_MS;
   // The settle window submit() uses: the test override, or the production constant.
@@ -484,6 +493,8 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
   // B2 (P1-6): the HTTP status of the last goto, for postingClosed. null before any goto, or when
   // Playwright returned no response (a same-document navigation).
   let lastStatus: number | null = null;
+  // The URL of the last goto, for postingClosed's posting-API question. null before any goto.
+  let lastUrl: string | null = null;
 
   return {
     async goto(url: string) {
@@ -493,6 +504,8 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
       const response = await page.goto(url, { waitUntil: 'domcontentloaded' });
       // Kept for postingClosed: a 404/410 form page is a closed posting, not a form to fill.
       lastStatus = response?.status() ?? null;
+      // The requested URL (not the final one): the posting API is asked about the job the row names.
+      lastUrl = url;
       // T1: wait (bounded) for the first fillable control, so a client-rendered form is read
       // after it exists, not before. Attached, not visible: Lever hides its real file input.
       // A timeout is not an error here: the page is handed over as it is, and the caller's
@@ -500,12 +513,22 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
       await page.waitForSelector(FORM_CONTROL_SELECTOR, { state: 'attached', timeout: formRenderTimeoutMs }).catch(() => undefined);
     },
 
-    /* B2 (P1-6, 2026-11-05): does the OPENED page say the posting is closed? The evidence string, or
-       null. Two signals only: an HTTP error status on the form page, and the closed-posting sentences
-       the ATS boards print. ponytail: no redirect heuristic (forms legitimately redirect job page ->
+    /* B2 (P1-6, 2026-11-05): is the OPENED posting closed? The evidence string, or null. Since 2026-11-09
+       the ATS's own posting API decides where one exists (posting-listing.ts, Ashby); elsewhere two page
+       signals: an HTTP error status on the form page, and the closed-posting sentences the ATS boards print. ponytail: no redirect heuristic (forms legitimately redirect job page ->
        /apply on Greenhouse, Lever and Ashby, so "the URL changed" would park live postings); add one
        per board if closed postings slip through as unsupported_form. */
     async postingClosed(): Promise<string | null> {
+      // THE ATS FIRST (2026-11-09). Cursor's whole hosted Ashby board answers 404 while Ashby's posting API lists
+      // ce965450 as open, so on a host with a posting API the API is the evidence and the page is not.
+      const listing = lastUrl === null ? ({ kind: 'no_api' } as const) : await listingCheck(lastUrl);
+      // The ATS lists it: open, whatever the page's status or text says.
+      if (listing.kind === 'listed') return null;
+      // The ATS no longer lists it: closed, quoting the API.
+      if (listing.kind === 'absent') return listing.evidence;
+      // The API could not be read: no trusted evidence on this host (its page status is the unreliable part), so not closed.
+      if (listing.kind === 'unknown') return null;
+      // 'no_api': a host without a known posting API keeps the page's own signals below.
       // A 4xx/5xx form page: closed, moved or gone.
       if (lastStatus !== null && lastStatus >= 400) return `the form page answered HTTP ${lastStatus}`;
       // The visible text, bounded: closed notices sit at the top of the page.

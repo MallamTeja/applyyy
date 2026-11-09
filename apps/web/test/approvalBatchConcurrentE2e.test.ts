@@ -5,7 +5,7 @@
  *
  * WHAT IT PROVES, in the built bundle with every Supabase call answered by page routes, each confirmFresh
  * read and each RPC held DELAY_MS so the calls genuinely overlap or don't:
- *   1. more than one row's call is in flight at once, and the batch beats the serial floor (rows x 2 x DELAY);
+ *   1. more than one row's call is in flight at once (overlap only: a wall-time bound flaked under suite load);
  *   2. one row the database refuses is reported as the one failure, every other row is approved exactly once,
  *      and the summary toasts say so (the per-row outcome lists never bleed into each other).
  * RED-ON-REVERT: the one-row-at-a-time loop fails test 1 at "more than one call in flight".
@@ -216,11 +216,12 @@ describe('Approve all settles rows concurrently (2026-11-08)', () => {
     // Every row accepted.
     refuseOne = false;
     // Click and wait for the summary.
-    const took = await approveAll(`Approved ${ROW_COUNT} applications and queued for submission.`);
+    await approveAll(`Approved ${ROW_COUNT} applications and queued for submission.`);
     // The property itself: rows overlapped.
     assert.ok(maxInFlight > 1, `more than one call in flight at once (saw ${maxInFlight})`);
-    // And it shows in wall time: one row at a time is at least rows x 2 calls x DELAY_MS.
-    assert.ok(took < ROW_COUNT * 2 * DELAY_MS, `batch took ${took} ms, not under the serial floor ${ROW_COUNT * 2 * DELAY_MS} ms`);
+    /* No wall-time assert (removed 2026-11-09): "took < rows x 2 x DELAY_MS" failed at 4,026 ms inside a loaded
+       1,539-test run while the overlap above held, so it measured the machine, not the code. The overlap is the
+       property, and it is what goes red on revert. */
     // Every row written exactly once.
     assert.deepEqual([...writes].sort(), [...IDS].sort());
   });

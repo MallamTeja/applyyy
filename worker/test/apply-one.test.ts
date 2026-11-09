@@ -45,8 +45,18 @@ import { OPEN_RECHECK } from './open-pregate.ts';
 
 
 /** A form the answer bank can fully satisfy, so nothing blocks by accident. */
+/**
+ * Every real application form asks for an email; without one the form-shape gate (no_email_field, 2026-11-09)
+ * refuses the page before any planner runs. Each fake form below carries this one, OPTIONAL so the planner
+ * never blocks on it and no test's blocker list changes. Explicit per form, never appended by fakePage, so
+ * the gate stays visible to every test that drops it on purpose.
+ */
+const EMAIL_FIELD: FormField = { id: 'email', label: 'Email', kind: 'email', required: false };
+
 const answerableForm: FormField[] = [
   { id: 'first_name', label: 'First Name', kind: 'text', required: true },
+  // The form-shape gate's email box (see EMAIL_FIELD).
+  EMAIL_FIELD,
 ];
 
 /** The matching bank. Real rows carry more columns; the planner reads four. */
@@ -150,6 +160,8 @@ const formWithResumeUpload: FormField[] = [
   // see attach-resume-real-form.test.ts, which measures it against the live DOM.
   { id: 'resume', label: 'Attach', kind: 'file', required: false },
   { id: 'cover_letter', label: 'Attach', kind: 'file', required: false },
+  // The form-shape gate's email box (see EMAIL_FIELD).
+  EMAIL_FIELD,
 ];
 
 describe('applyToOne', () => {
@@ -291,6 +303,8 @@ describe('applyToOne', () => {
     const { page, submit } = fakePage({
       extractFields: async () => [
         { id: 'ctc', label: 'Expected CTC', kind: 'text', required: true },
+        // The form-shape gate's email box (see EMAIL_FIELD).
+        EMAIL_FIELD,
       ],
     });
     const { gateway, transitions } = fakeGateway();
@@ -321,6 +335,8 @@ describe('applyToOne', () => {
     const { page, submit } = fakePage({
       extractFields: async () => [
         { id: 'ctc', label: 'Expected CTC', kind: 'text', required: true },
+        // The form-shape gate's email box (see EMAIL_FIELD).
+        EMAIL_FIELD,
       ],
     });
     const { gateway, transitions } = fakeGateway();
@@ -807,7 +823,7 @@ describe('applyToOne — recording where the artifacts went', () => {
 // the row for the human, not escape to the claim loop and fail identically on every run.
 describe('applyToOne — a fill the page rejects', () => {
   // A form whose one field has a bank answer, so the planner plans a fill that the page then rejects.
-  const countryForm: FormField[] = [{ id: 'q1', label: 'Country', kind: 'combobox', required: true }];
+  const countryForm: FormField[] = [{ id: 'q1', label: 'Country', kind: 'combobox', required: true }, EMAIL_FIELD];
   // The bank answer the page will refuse to select.
   const countryAnswers = [
     // A plausible-looking value the page rejects, as a near-miss option would be.
@@ -865,7 +881,7 @@ describe('applyToOne — a fill the page rejects', () => {
   // report is best-effort: a failed report must never skip the status write.
   it('reports the refused fields, and a rejected report still parks the row at blocked_needs_human', async () => {
     // One required question nothing can answer.
-    const { page, submit } = fakePage({ extractFields: async () => [{ id: 'q9', label: 'Notice period?', kind: 'text', required: true }] });
+    const { page, submit } = fakePage({ extractFields: async () => [{ id: 'q9', label: 'Notice period?', kind: 'text', required: true }, EMAIL_FIELD] });
     // The recording gateway for the park.
     const { gateway, advances } = detailGateway();
     // What was reported, before the report fails.
@@ -1141,7 +1157,7 @@ describe('applyToOne — the employer name reaches the planner', () => {
 
   it('applyToOne: employerName "GitLab" lets the previously-worked question be answered', async () => {
     // The only field on the form, so any blocker below can only be this one.
-    const { page } = fakePage({ extractFields: async () => [workedQ] });
+    const { page } = fakePage({ extractFields: async () => [workedQ, EMAIL_FIELD] });
     // Dry run (env unset): the outcome reports viability without moving the row.
     const outcome = await applyToOne({
       row: { ...row, employerName: 'GitLab' },
@@ -1158,7 +1174,7 @@ describe('applyToOne — the employer name reaches the planner', () => {
 
   it('applyToOne: a null employerName refuses the previously-worked question', async () => {
     // Same form and profile; only the employer is unknown.
-    const { page } = fakePage({ extractFields: async () => [workedQ] });
+    const { page } = fakePage({ extractFields: async () => [workedQ, EMAIL_FIELD] });
     // Dry run again, so the comparison with the test above is like for like.
     const outcome = await applyToOne({
       row: { ...row, employerName: null },
@@ -1188,6 +1204,8 @@ describe('applyToOne — optional EEO option mismatch', () => {
       { id: 'gender', label: 'Gender', kind: 'combobox', required: genderRequired },
       // Placed AFTER gender so a recorded fill proves the loop continued past the skip.
       { id: 'first_name', label: 'First Name', kind: 'text', required: true },
+      // The form-shape gate's email box (see EMAIL_FIELD); optional and unanswered, so it is never filled.
+      EMAIL_FIELD,
     ];
   }
 
@@ -1292,6 +1310,8 @@ describe('applyToOne — optional EEO option mismatch', () => {
     const countryForm: FormField[] = [
       // Optional combobox with no options, so the fill is planned and rejected at fill time.
       { id: 'country', label: 'Country', kind: 'combobox', required: false },
+      // The form-shape gate's email box (see EMAIL_FIELD).
+      EMAIL_FIELD,
     ];
     // A plain bank row is enough: non-EEO answers need no attestation.
     const countryAnswers = [
@@ -1398,6 +1418,69 @@ describe('applyToOne — a page with no form fields (W5)', () => {
     await applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
 
     // A guard that parked every form would pass both tests above; this one would catch it.
+    expect(submit).toHaveBeenCalledTimes(1);
+    // The full legal path.
+    expect(advances.map((advance) => advance.to)).toEqual(['applying', 'applied']);
+  });
+
+  // 2026-11-09, Supabase 8f20a220: jobicy.com's job page (an aggregator) had two controls, a site search box and
+  // a dark-mode toggle. Neither is required, so both planners answered "nothing to refuse", and the dry run
+  // logged wouldSubmit=true with zero blockers. A LIVE run would have clicked a submit on a page with no form.
+  const aggregatorPage: FormField[] = [
+    // The site's search box, as the extractor reads it.
+    { id: 'q', label: 'Job title, company or skill', kind: 'text', required: false },
+    // The theme switch.
+    { id: 'theme', label: 'Dark mode', kind: 'checkbox', required: false },
+  ];
+
+  it('no_email_field live: an aggregator page with controls but no email box parks unsupported_form, never submits', async () => {
+    // The jobicy shape.
+    const { page, submit } = fakePage({ extractFields: async () => aggregatorPage });
+    // Records every status write.
+    const { gateway, advances } = recordingGateway();
+
+    // A LIVE run, the case that would have clicked.
+    const outcome = await applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+
+    // THE assertion: no click on a page that is not an application form.
+    expect(submit).not.toHaveBeenCalled();
+    // Straight to the human lane, never through `applying`.
+    expect(advances.map((advance) => advance.to)).toEqual(['blocked_needs_human']);
+    // A form-shape gap, not a question Teja can answer, so the Manual apply lane picks it up.
+    expect(advances[0]?.detail).toMatchObject({ block_reason: 'unsupported_form' });
+    // The outcome says the same.
+    expect(outcome).toMatchObject({ kind: 'blocked', reason: 'unsupported_form' });
+  });
+
+  it('no_email_field dry run: the same page reports wouldSubmit=false with a no_email_field blocker naming the controls', async () => {
+    // The jobicy shape again.
+    const { page } = fakePage({ extractFields: async () => aggregatorPage });
+    // Dry runs write no status.
+    const { gateway, advances } = recordingGateway();
+
+    // Unset DRY_RUN: the trust-period dry run that reported wouldSubmit=true on 2026-11-09.
+    const outcome = await applyToOne({ row, page, gateway, answers, env: {}, renderResume: fakeRenderer().render });
+
+    // Nothing moved.
+    expect(advances).toEqual([]);
+    // Would NOT submit.
+    expect(outcome).toMatchObject({ kind: 'dry_run_complete', wouldSubmit: false });
+    // The one blocker, named, with the labels the page showed instead of a form.
+    expect(outcome.kind === 'dry_run_complete' ? outcome.blockers.map((blocker) => [blocker.reason, blocker.label]) : []).toEqual([
+      ['no_email_field', expect.stringMatching(/2 field\(s\): Job title, company or skill, Dark mode/)],
+    ]);
+  });
+
+  it('no_email_field non-vacuity: a Greenhouse email box typed "text" but labelled "Email" is a form, and submits', async () => {
+    // Greenhouse renders its email input as type="text" (fixtures/greenhouse/*): the label must carry it.
+    const { page, submit } = fakePage({ extractFields: async () => [answerableForm[0]!, { id: 'email', label: 'Email', kind: 'text', required: false }] });
+    // Fresh recorder.
+    const { gateway, advances } = recordingGateway();
+
+    // Live run.
+    await applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+
+    // A kind-only check would park every real Greenhouse form; this catches it.
     expect(submit).toHaveBeenCalledTimes(1);
     // The full legal path.
     expect(advances.map((advance) => advance.to)).toEqual(['applying', 'applied']);

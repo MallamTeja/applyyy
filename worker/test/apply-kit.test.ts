@@ -4,6 +4,10 @@
 // what the bot would have typed (same planner), never invent an answer, take contact
 // identity from the LATEST master (one-email ruling, 2026-10-24), and send nothing.
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+// A throwaway server for the one test that needs a 404 status with a body (the fixture server's 404 is empty).
+import { createServer } from 'node:http';
+// The listening address's type, to read the OS-picked port.
+import type { AddressInfo } from 'node:net';
 import { chromium, type Browser } from 'playwright';
 import type { AnswerBankRow, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 import { startFixtureServer, type FixtureServer } from '../src/fixture-server.ts';
@@ -242,39 +246,117 @@ describe('the manual apply kit on the real GitLab form', () => {
   }, 60_000);
 
   // Leak 3 (2026-11-05): GitLab 267dcfcd closed in September; its link redirected to the careers
-  // index, and the kit listed "Search" and "Department" as the form for Teja to fill by hand.
-  // B2 (2026-11-05): refused with a TYPED KitSkip, so the sweep reports it instead of turning the run red.
-  test('a page with no email field (a closed posting redirected to the careers index) is refused as posting_closed, writing nothing', async () => {
-    const { raw, page, forbidden } = await openKitPage();
-    // The row points at the index page, as GitLab's closed link did after its redirect.
-    const { gateway, calls } = recordingGateway({ ...application, applyUrl: `${server.url}/synthetic/careers-index-after-closed-posting.html` });
+  // index, and the kit listed "Search" and "Department" as the form for Teja to fill by hand. It was then
+  // refused as posting_closed on "no email field" alone. 2026-11-09: that guess labelled an OPEN jobicy
+  // posting and two rows Teja later applied to by hand as closed, so "not a form" no longer means "closed".
+  // Without the page's own evidence, an index page is a resume-only kit that says why, never a closed skip.
+  test('a careers index with no email field and no closed evidence gets a resume-only kit; it is NOT posting_closed', async () => {
+    // The index page, as GitLab's closed link showed after its redirect: 200, no closed sentence.
+    const { kit, error, calls } = await kitOn('/synthetic/careers-index-after-closed-posting.html');
+    // No skip of any kind: the page never said it is closed.
+    expect(error).toBeNull();
+    // No form answers: the search box and the department filter are not questions to answer.
+    expect(kit?.fields).toEqual([]);
+    // The reason names the shape, so Teja knows to look for the real form.
+    expect(kit?.warnings[0]).toMatch(/no bot-usable application form.*No email field.*Search, Department/);
+    // The resume and the one note, so the sweep counts it as current and stops retrying.
+    expect(calls.filter((call) => call === 'uploadResume' || call === 'appendApplicationNote')).toEqual(['uploadResume', 'appendApplicationNote']);
+  }, 60_000);
+
+  // 2026-11-09, Supabase 8f20a220: jobicy.com's page for an OPEN posting (200, validThrough in the future,
+  // an off-site Apply link) has only a search box and a dark-mode toggle. The kit wrote posting_closed.
+  test('an aggregator job page with no email field (jobicy shape) gets a resume-only kit; it is NOT posting_closed', async () => {
+    // The synthetic jobicy shape.
+    const { kit, error, calls } = await kitOn('/synthetic/aggregator-job-page.html');
+    // Never a KitSkip: the posting is open as far as the page says.
+    expect(error).toBeNull();
+    // Non-vacuity: the page DID have controls, so this exercised the no-email branch, not the empty-page one.
+    expect(kit?.warnings[0]).toMatch(/No email field on the opened page.*2 field\(s\): Job title, company or skill/);
+    // No answers for a search box.
+    expect(kit?.fields).toEqual([]);
+    // Written once, like every resume-only kit.
+    expect(calls.filter((call) => call === 'uploadResume' || call === 'appendApplicationNote')).toEqual(['uploadResume', 'appendApplicationNote']);
+  }, 60_000);
+
+  // The other half: real evidence still closes. A posting removed from its board answers 404, and the
+  // board's 404 page still carries the site's search box, so it reaches the no-email branch with evidence.
+  test('a 404 page that has a search box but no email field is posting_closed, quoting the HTTP status, writing nothing', async () => {
+    // A one-route server: every path answers 404 with a page that has one search box.
+    const gone = createServer((_request, response) => {
+      // The status is the evidence; the body is what a board's not-found page looks like.
+      response.writeHead(404, { 'content-type': 'text/html; charset=utf-8' }).end('<!doctype html><title>Not found</title><form role="search"><label for="q">Search jobs</label><input id="q" type="text"></form>');
+    });
+    // Port 0: the OS picks a free one, so parallel suites never collide.
+    await new Promise<void>((resolve) => gone.listen(0, '127.0.0.1', resolve));
     try {
-      await expect(
-        buildApplyKit({
-          applicationId: application.id,
-          gateway,
-          page,
-          renderResume: recordingRenderer().render as never,
-          checkRobots: async () => ({ kind: 'allow' }) as never,
-          runId: null,
-          now: () => new Date(),
-        }),
-      ).rejects.toMatchObject({ name: 'KitSkip', code: 'posting_closed' });
-      // No resume uploaded and no kit note written for a page that is not a form.
+      // The address the OS picked.
+      const { port } = gone.address() as AddressInfo;
+      // The posting's old URL.
+      const { kit, error, calls } = await kitOn(`http://127.0.0.1:${port}/jobs/removed`);
+      // The typed skip, with the page's own evidence quoted.
+      expect(error).toMatchObject({ name: 'KitSkip', code: 'posting_closed', message: expect.stringMatching(/answered HTTP 404/) });
+      // No kit was built.
+      expect(kit).toBeNull();
+      // Nothing uploaded and no note: a skip writes nothing here (the sweep records it).
       expect(calls.filter((call) => call === 'uploadResume' || call === 'appendApplicationNote')).toEqual([]);
-      // And nothing typed.
-      expect(forbidden).toEqual([]);
     } finally {
-      await raw.close();
+      // Closed either way, so the suite exits.
+      await new Promise<void>((resolve) => gone.close(() => resolve()));
     }
   }, 60_000);
 
-  /** Builds one kit against a synthetic page; the result or the rejection, plus what was written. */
+  // 2026-11-09, Cursor ce965450: Cursor's whole hosted Ashby board answers HTTP 404 (and its 404 page renders no
+  // form), while Ashby's public posting API lists the job with isListed: true. The kit called it posting_closed
+  // on the status alone. On Ashby the posting API decides; the page's status and text are not evidence there.
+  /** Serves every path as HTTP 404 with an empty body, as Cursor's hosted Ashby board did, for one test. */
+  async function withHosted404<T>(run: (url: string) => Promise<T>): Promise<T> {
+    // The 404 shape: status only, no controls.
+    const hosted = createServer((_request, response) => {
+      // The status the adapter's goto records.
+      response.writeHead(404, { 'content-type': 'text/html; charset=utf-8' }).end('<!doctype html><title>Jobs</title><p>Page not found</p>');
+    });
+    // Port 0: the OS picks a free one.
+    await new Promise<void>((resolve) => hosted.listen(0, '127.0.0.1', resolve));
+    try {
+      // The posting's apply URL on that host.
+      return await run(`http://127.0.0.1:${(hosted.address() as AddressInfo).port}/cursor/166c3951-1d2a-4e61-b79b-bedefe96073b/application`);
+    } finally {
+      // Closed either way.
+      await new Promise<void>((resolve) => hosted.close(() => resolve()));
+    }
+  }
+
+  test('a 404 hosted page whose ATS posting API still LISTS the job is NOT posting_closed: a resume-only kit (Cursor ce965450)', async () => {
+    // The listing check answers as Ashby's API did for Cursor.
+    const { kit, error } = await withHosted404((url) => kitOn(url, { formRenderTimeoutMs: 300, listingCheck: async () => ({ kind: 'listed' }) }));
+    // No skip: the ATS says the posting is open.
+    expect(error).toBeNull();
+    // Unreadable, so the hand-fill kit.
+    expect(kit?.warnings[0]).toMatch(/could not read the form/);
+  }, 60_000);
+
+  test('the same 404 page whose ATS posting API no longer lists the job IS posting_closed, quoting the API', async () => {
+    // The listing check answers "absent".
+    const { error } = await withHosted404((url) => kitOn(url, { formRenderTimeoutMs: 300, listingCheck: async () => ({ kind: 'absent', evidence: "Ashby's public posting API no longer lists the job" }) }));
+    // Closed, and the evidence is the API's, not the status.
+    expect(error).toMatchObject({ name: 'KitSkip', code: 'posting_closed', message: expect.stringMatching(/posting API no longer lists/) });
+  }, 60_000);
+
+  test('an Ashby posting API that cannot be read gives no verdict: the 404 is still not posting_closed', async () => {
+    // The listing check could not ask.
+    const { kit, error } = await withHosted404((url) => kitOn(url, { formRenderTimeoutMs: 300, listingCheck: async () => ({ kind: 'unknown', reason: 'timeout' }) }));
+    // No skip: "could not ask" is never "gone".
+    expect(error).toBeNull();
+    // The hand-fill kit.
+    expect(kit?.fields).toEqual([]);
+  }, 60_000);
+
+  /** Builds one kit against a synthetic page (a fixture path, or a full URL); the result or the rejection, plus what was written. */
   async function kitOn(path: string, pageOptions: Parameters<typeof createPlaywrightPage>[1] = {}) {
     // The production adapter over a fresh tab.
     const { raw, page } = await openKitPage(pageOptions);
-    // The row points at the fixture.
-    const { gateway, calls } = recordingGateway({ ...application, applyUrl: `${server.url}${path}` });
+    // The row points at the fixture, or at the full URL a test serves itself.
+    const { gateway, calls } = recordingGateway({ ...application, applyUrl: path.startsWith('http') ? path : `${server.url}${path}` });
     try {
       // Settled either way, so each test asserts on the outcome it expects.
       const outcome = await buildApplyKit({

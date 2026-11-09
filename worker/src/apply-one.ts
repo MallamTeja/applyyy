@@ -393,22 +393,48 @@ export interface FormShapeBlocker {
   readonly id: string;
   // Human-readable, because this string reaches the dry-run log and Teja's queue.
   readonly label: string;
-  // One value today. A closed union so a new page-level stop has to be named here.
-  readonly reason: 'no_form_fields';
+  // A closed union so a new page-level stop has to be named here. 'no_email_field' (2026-11-09): the page has
+  // controls, but none asks for an email, so it is a search bar or a job board, not an application form.
+  readonly reason: 'no_form_fields' | 'no_email_field';
 }
 
 /**
- * THE EMPTY-PAGE GATE (W5) as one predicate, shared by the applier and the rehearsal.
+ * Is this control the email box? By kind OR by label: Greenhouse renders its email box as type="text"
+ * (fixtures/greenhouse/*), so a kind-only check would refuse real Greenhouse forms. Moved here from the
+ * apply kit (2026-11-09) so the kit, the applier and the rehearsal ask ONE question, not three copies.
+ */
+function isEmailField(field: Pick<FormField, 'kind' | 'label'>): boolean {
+  // The extractor's own email kind, or an "Email" / "E-mail" label on any text-like control.
+  return field.kind === 'email' || /\be-?mail\b/i.test(field.label);
+}
+
+/**
+ * THE FORM-SHAPE GATE, one predicate shared by the applier, the rehearsal and the apply kit.
  * Shared, not copied: on 2026-11-08 the rehearsal CLI passed a 0-field page as "ready"
  * because only apply-one carried this check, and the first real submit is gated on that CLI.
+ *
+ * Two stops, both "this is not an application form", never "this posting is closed":
+ * - no_form_fields (W5): nothing was extracted at all.
+ * - no_email_field (2026-11-09): every application form asks for an email. jobicy.com's job page for
+ *   Supabase 8f20a220 had two controls (a site search box and a dark-mode toggle); the applier's dry run
+ *   reported wouldSubmit=true with zero blockers there, so a LIVE run would have clicked a submit on a
+ *   page with no form. Closed-ness needs the page's own evidence (postingClosed), which this does not read.
  */
-export function formShapeBlockersFor(id: string, fields: readonly unknown[]): FormShapeBlocker[] {
+export function formShapeBlockersFor(id: string, fields: readonly Pick<FormField, 'kind' | 'label'>[]): FormShapeBlocker[] {
   // Checked on the RAW extraction, before any planner skips a kind (planFill skips files).
-  return fields.length === 0
+  if (fields.length === 0) {
     // The row id, because no control is at fault; the label reaches the log, the queue and the rehearsal table.
-    ? [{ id, label: 'No application form fields were found on the opened page', reason: 'no_form_fields' }]
-    // A form with at least one field is judged by the planners, not here.
-    : [];
+    return [{ id, label: 'No application form fields were found on the opened page', reason: 'no_form_fields' }];
+  }
+  // Controls, but no email box: a page that is not an application form (an aggregator, a careers index).
+  if (!fields.some(isEmailField)) {
+    // The first labels found, so the log shows what page was opened instead of a form.
+    const found = fields.map((field) => field.label).slice(0, 5).join(', ');
+    // Same row-level shape as the empty page: no single control is at fault.
+    return [{ id, label: `No email field on the opened page, so it is not an application form (${fields.length} field(s): ${found || 'unlabelled'})`, reason: 'no_email_field' }];
+  }
+  // A real form shape: the planners judge its questions, not this gate.
+  return [];
 }
 
 /** What happened. A discriminated union so no caller can ignore a case. */

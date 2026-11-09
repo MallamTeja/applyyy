@@ -54,22 +54,20 @@
       }
     </script>
 
-    <!-- Preconnect before the stylesheet request so the font files start
-         downloading a round trip earlier; type is the first paint that matters. -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <!-- Three faces with distinct jobs: Inter for machine chrome, IBM Plex Serif
          for resume prose (it is a document, so it is set like one), IBM Plex Mono
-         only for literal identifiers a human might copy. (Comment corrected
-         2026-10-23: it said "IBM Plex Sans" while the page has loaded Inter.)
-         Inter is requested as the VARIABLE range 400..700, not four fixed cuts:
-         the CSS uses the in-between weights 450/550/650 in seventeen places, and
-         fixed cuts made the browser snap them to 500/600/700 — the calibrated
-         weights never actually rendered until this range. -->
-    <link
-      rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap"
-    />
+         only for literal identifiers a human might copy. They are SELF-HOSTED
+         since 2026-11-09: the @font-face rules live in src/styles/tokens.css and
+         the files in public/fonts. Until then a render-blocking third-party
+         stylesheet sat here, before the module script, so the app's JS on every
+         page waited one extra round trip for it (~180 ms measured). Nothing on
+         this page may load from another origin: the CSP (vercel.json) allows
+         fonts from 'self' only. -->
+    <!-- Preload ONLY the face the first paint needs most: Inter latin, the body
+         text of every page. The browser would otherwise discover it only after
+         the CSS bundle is parsed. crossorigin is required for a font preload,
+         even same-origin, or the browser downloads the file twice. -->
+    <link rel="preload" href="/fonts/Inter-400-700-latin.woff2" as="font" type="font/woff2" crossorigin />
   </head>
   <body>
     <!-- Single mount point; the shell and router take over from main.tsx. -->

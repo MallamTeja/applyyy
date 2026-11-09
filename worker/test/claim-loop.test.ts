@@ -39,6 +39,9 @@ function stubPage(): ApplicationPage & { close(): Promise<void> } {
     goto: async () => {},
     extractFields: async () => [
       { id: 'first_name', label: 'First Name', kind: 'text', required: true },
+      // Every real application form asks for an email; without one the form-shape gate (no_email_field,
+      // 2026-11-09) refuses the page. Optional, so the planner never blocks on it.
+      { id: 'email', label: 'Email', kind: 'email', required: false },
     ],
     fill: async () => {},
     // Present because the port requires it; these tests never reach it, since
