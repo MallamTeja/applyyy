@@ -321,8 +321,9 @@ async function main(): Promise<void> {
       // payload is still recorded as the read failure it is; before toJobInsert so a
       // refused board's postings never reach jobs, applications, or the screener.
       const refusal = boardRefusal(
-        // Page one's payload answers for the board: one board is one company.
-        evaluateBoardIdentity(adapter, parseResult.firstPayload, board.company_name),
+        // Page one's payload answers for the board: one board is one company. The token too, so a verified
+        // board alias (identity.ts BOARD_IDENTITY_ALIASES, e.g. xai reporting "SpaceXSI") applies here as in scout-ats.
+        evaluateBoardIdentity(adapter, parseResult.firstPayload, board.company_name, board.board_token),
         // The row's name and its last successful posting count.
         board,
         // This poll's count across every page.
