@@ -151,6 +151,9 @@ function pgrst(accept: string | undefined, row: unknown): string {
 /* The saved resume, typed just enough for the assertions. */
 type Saved = { skills: { name: string }[]; section_order: string[]; experience: { bullets: { text: string }[] }[] };
 
+// What the owner types while turn 1 is in flight; it must still be in the box afterwards (2026-11-09).
+const NEXT_DRAFT = 'and now make the summary shorter';
+
 describe('AI resume chat, end to end (2026-11-05)', () => {
   // The static server.
   let server: Server;
@@ -166,6 +169,35 @@ describe('AI resume chat, end to end (2026-11-05)', () => {
   let guardError: Error | undefined;
   // Every resume-assist request body, in order.
   const assistBodies: AssistBody[] = [];
+  /* Requests held mid-flight, by name (2026-11-09: Teja could not type the next prompt while an edit was being applied).
+     Test 1 arms both for its first turn: the AI's answer, then the first save it auto-applies. Each is held ONCE. */
+  type Hold = { taken: boolean; held: () => void; heldP: Promise<void>; release: () => void; releaseP: Promise<void> };
+  // The armed holds; a name not here passes straight through.
+  const holds = new Map<'assist' | 'save', Hold>();
+  // Arms one hold: the route signals heldP when the request arrives, then waits for release().
+  function arm(name: 'assist' | 'save'): void {
+    // Filled synchronously by the two Promise executors below.
+    const hold = { taken: false } as Hold;
+    // Resolved by the route when it starts holding.
+    hold.heldP = new Promise<void>((resolve) => { hold.held = resolve; });
+    // Resolved by the test to let the request finish.
+    hold.releaseP = new Promise<void>((resolve) => { hold.release = resolve; });
+    // Armed.
+    holds.set(name, hold);
+  }
+  // Called by the route: holds the request once if armed, else returns at once.
+  async function waitIfHeld(name: 'assist' | 'save'): Promise<void> {
+    // The armed hold, if any.
+    const hold = holds.get(name);
+    // Not armed, or already used: the request goes through.
+    if (hold === undefined || hold.taken) return;
+    // Used once only, so the later saves of the same turn are not held.
+    hold.taken = true;
+    // Tells the test the request is in flight now.
+    hold.held();
+    // Until the test has checked the composer.
+    await hold.releaseP;
+  }
   // Every accepted PATCH body on applications, in order.
   const patches: Record<string, unknown>[] = [];
   // PATCHes refused for a stale stamp; the page must never send one.
@@ -221,6 +253,8 @@ describe('AI resume chat, end to end (2026-11-05)', () => {
         const turn = assistBodies.length < TURNS.length ? TURNS[assistBodies.length] : assistBodies.length === TURNS.length ? REMOVE_TURN : undefined;
         // Recorded after the lookup, so the index above is this request's.
         assistBodies.push(body);
+        // Held while test 1 types into the composer during the ask.
+        await waitIfHeld('assist');
         // A sixth request is a test bug, said by name.
         if (turn === undefined) return json(500, { status: 'error', message: 'e2e: unexpected extra resume-assist call' });
         // The server's ok shape (assist.ts handleResumeAssist).
@@ -228,6 +262,8 @@ describe('AI resume chat, end to end (2026-11-05)', () => {
       }
       // THE RESUME WRITE: saveTailoredEdit's guarded update.
       if (url.pathname.endsWith('/rest/v1/applications') && request.method() === 'PATCH') {
+        // Held while test 1 types into the composer during the auto-applied save.
+        await waitIfHeld('save');
         // The optimistic lock the database applies: id, status and the stamp the page last read.
         const matches = url.searchParams.get('id') === `eq.${APP_ID}` && url.searchParams.get('status') === 'eq.awaiting_approval' && url.searchParams.get('updated_at') === `eq.${String(ROW.updated_at)}`;
         // A stale write matches no row, exactly as PostgREST answers it.
@@ -401,7 +437,33 @@ describe('AI resume chat, end to end (2026-11-05)', () => {
       // Enabled.
       await send.waitFor({ timeout: 10_000 });
       // Clicked.
+      // Turn 1 holds its answer and its first save, so the composer can be checked mid-flight.
+      if (index === 0) {
+        // The AI's answer.
+        arm('assist');
+        // The first save the answer auto-applies.
+        arm('save');
+      }
       await send.click();
+      // While the AI is asked, then while its edit is saved, the next prompt can be typed and is kept.
+      if (index === 0) {
+        // The ask is in flight.
+        await holds.get('assist')!.heldP;
+        // Typing is open mid-ask (it used to be disabled for the whole ask).
+        assert.equal(await input.isEnabled(), true, 'the prompt box must stay enabled while the AI is asked');
+        // The owner starts the next message.
+        await input.fill(NEXT_DRAFT);
+        // The answer arrives.
+        holds.get('assist')!.release();
+        // Its first auto-applied save is in flight.
+        await holds.get('save')!.heldP;
+        // Still typable while the edit is being applied.
+        assert.equal(await input.isEnabled(), true, 'the prompt box must stay enabled while an edit is applied');
+        // The reply did not wipe the draft typed during the ask.
+        assert.equal(await input.inputValue(), NEXT_DRAFT, 'the reply must not clear a message typed while it was pending');
+        // The save finishes.
+        holds.get('save')!.release();
+      }
       // This turn's answer: the (index+1)-th AI message carrying the stub's note.
       const answer = chat.locator('li.ai-chat__msg--ai').filter({ hasText: `Done: ${turn.prompt}` });
       // Rendered.
@@ -422,6 +484,8 @@ describe('AI resume chat, end to end (2026-11-05)', () => {
       const expected = turn.ops(assistBodies[index]!).length;
       // Each one applied.
       for (let i = 0; i < expected; i += 1) await ops.nth(i).locator('.ai-chat__done').waitFor({ timeout: 10_000 });
+      // Every save landed and the draft typed mid-flight is still there for the owner to send.
+      if (index === 0) assert.equal(await input.inputValue(), NEXT_DRAFT, 'the draft typed while the edit was applied must survive it');
     }
     // Four requests, one per prompt, each carrying its instruction.
     assert.deepEqual(assistBodies.map((b) => b.instruction), TURNS.map((t) => t.prompt), 'each prompt must reach resume-assist once');

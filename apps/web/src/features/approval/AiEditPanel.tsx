@@ -67,6 +67,12 @@ import type { ChatMessage, ChatStore, NewChatMessage } from './resumeChat';
 import './AiEditPanel.css';
 
 /* An Apply in flight or refused; applied state itself is derived from the resume. */
+/* Unsent drafts by application, kept OUTSIDE the component (2026-11-09). An auto-applied edit can move the card to
+   another bucket, which remounts this panel and would reset its state: a next prompt typed while the edit was being
+   applied vanished with it (the chat e2e caught exactly that). Module scope lives as long as the tab, like the page's
+   own row cache; nothing is persisted, so a reload still starts empty. */
+const drafts = new Map<string, string>();
+
 type OpState = { readonly status: 'applying' } | { readonly status: 'failed'; readonly reason: string };
 
 // The edge function's instruction cap (resume-assist MAX_INSTRUCTION); longer is refused there.
@@ -370,7 +376,15 @@ export function AiEditPanel({
   // The stored chats are loading; the composer waits so a first ask cannot land in a stale chat.
   const [loading, setLoading] = useState<boolean>(chat !== undefined);
   // What the operator is typing.
-  const [instruction, setInstruction] = useState<string>('');
+  const [instruction, setInstruction] = useState<string>(() => drafts.get(diff.applicationId) ?? '');
+  /* Every change mirrored into drafts, so a remount picks up what was typed. Empty removes the entry, so a sent
+     message never comes back after a remount. */
+  useEffect(() => {
+    // Nothing typed: no draft to keep.
+    if (instruction === '') drafts.delete(diff.applicationId);
+    // Otherwise the latest text, for whichever instance mounts next.
+    else drafts.set(diff.applicationId, instruction);
+  }, [instruction, diff.applicationId]);
   // An ask is in flight.
   const [asking, setAsking] = useState<boolean>(false);
   // The last failure (an ask, a load or a save), in plain words.
@@ -481,8 +495,10 @@ export function AiEditPanel({
     setMessages((current) => [...current, ...shown]);
     // Said, so the operator knows this exchange will not be remembered.
     if (saved !== null && saved.kind === 'error') setError(saved.message);
-    // The composer empties for the next message.
-    setInstruction('');
+    /* The composer empties for the next message, unless the owner already started that next message while this
+       ask was in flight (2026-11-09: the box no longer freezes, so typed text must survive the reply). Only the
+       sent text, untouched, is cleared. */
+    setInstruction((current) => (current.trim() === text ? '' : current));
     // The reply whose ops are applied now.
     const reply = shown.find((m) => m.role === 'assistant');
     /* THE AI PERFORMS THE ACTIONS (2026-11-01): each op that shouldAutoApply allows is applied in
@@ -801,8 +817,9 @@ export function AiEditPanel({
               void ask();
             }
           }}
-          /* Frozen while asking, so the text shown is the text that was sent. */
-          disabled={asking}
+          /* Never disabled (2026-11-09, Teja): it used to freeze for the whole ask, auto-applied saves included,
+             so the next prompt could not be typed while an edit landed. Typing stays open; SENDING still waits
+             (the Send button's `locked`, and ask()'s own guard on Enter), and the typed text is kept, never dropped. */
         />
         {/* The length near the cap: maxLength cuts a paste silently, so the count makes the cut visible. */}
         {instruction.length >= SHOW_COUNT_FROM ? (

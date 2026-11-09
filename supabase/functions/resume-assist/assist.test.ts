@@ -46,6 +46,14 @@ function request(): AssistRequest {
   return parsed.request;
 }
 
+/* The same request with the owner NAMING these skills (2026-11-09). Since parseAssistOps refuses a skill the master
+   lacks unless the owner named it, the tests below that use invented names to exercise grouping, caps and labels name
+   them first, so they keep testing what they were written for, not provenance. */
+function naming(req: AssistRequest, ...names: string[]): AssistRequest {
+  // Appended to the owner's own words, which is where the guard reads names from.
+  return { ...req, instruction: `${req.instruction} Add ${names.join(", ")}.` };
+}
+
 test("parseAssistRequest accepts the browser's projection", () => {
   // The whole body.
   const parsed = parseAssistRequest(body());
@@ -136,8 +144,8 @@ test("parseAssistOps files skills under the master's own group and drops printed
     ],
     note: "",
   });
-  // Validated.
-  const parsed = parseAssistOps(answer, request());
+  // Validated, with the owner naming gRPC (Kafka is already in the default instruction).
+  const parsed = parseAssistOps(answer, naming(request(), "gRPC"));
   // Narrowed.
   assert.ok(parsed.ok);
   // Kafka, filed under the master's spelling "Tools"; gRPC's "Frameworks" is not one of the owner's groups
@@ -150,7 +158,7 @@ test("parseAssistOps caps the ops and refuses non-JSON", () => {
   // Twenty distinct skills, all valid.
   const many = Array.from({ length: 20 }, (_, i) => ({ op: "add_skill", name: `Skill${i}`, category: "Tools" }));
   // Validated.
-  const parsed = parseAssistOps(JSON.stringify({ ops: many, note: "" }), request());
+  const parsed = parseAssistOps(JSON.stringify({ ops: many, note: "" }), naming(request(), ...many.map((op) => op.name)));
   // Narrowed.
   assert.ok(parsed.ok);
   // Capped.
@@ -556,9 +564,9 @@ test("an add_skill with no name is rejected with a reason, and a name in text or
 // used to be a rejection that asked the owner. Now the group is decided: the skill's kind, else a catch-all.
 test("an add_skill under a group the master lacks, or under none, is filed by the skill's kind, never refused", () => {
   // Rust is a language: the owner's "Languages", whatever the model wrote.
-  assert.equal(rejectedFor({ op: "add_skill", name: "Rust", category: "Programming" }), null);
+  assert.equal(rejectedFor({ op: "add_skill", name: "Rust", category: "Programming" }, naming(request(), "Rust")), null);
   // The same with no group at all.
-  const parsed = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Rust" }], note: "" }), request());
+  const parsed = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Rust" }], note: "" }), naming(request(), "Rust"));
   // Filed under Languages.
   assert.deepEqual(parsed.ok ? parsed.ops : null, [{ op: "add_skill", name: "Rust", category: "Languages" }]);
   // Six groups, none named for a language and no catch-all: the first group, deterministically.
@@ -566,7 +574,7 @@ test("an add_skill under a group the master lacks, or under none, is filed by th
   // Valid fixture.
   assert.ok(six.ok);
   // Filed under "A".
-  const sixParsed = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Rust", category: "Programming" }], note: "" }), six.request);
+  const sixParsed = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Rust", category: "Programming" }], note: "" }), naming(six.request, "Rust"));
   // The first group.
   assert.deepEqual(sixParsed.ok ? sixParsed.ops : null, [{ op: "add_skill", name: "Rust", category: "A" }]);
   // Already printed: named in the resume's own spelling.
@@ -683,7 +691,7 @@ test("every failing check names its own reason", () => {
   // Past the op cap, the reason says to ask for fewer.
   const many = Array.from({ length: MAX_OPS + 1 }, (_, i) => ({ op: "add_skill", name: `Skill${i}`, category: "Tools" }));
   // Validated.
-  const capped = parseAssistOps(JSON.stringify({ ops: many, note: "" }), request());
+  const capped = parseAssistOps(JSON.stringify({ ops: many, note: "" }), naming(request(), ...many.map((op) => op.name)));
   // The thirteenth, named.
   assert.deepEqual(capped.ok ? capped.rejected : null, [{ what: `Add skill "Skill${MAX_OPS}"`, why: `More than ${MAX_OPS} changes in one answer; ask for fewer at once.` }]);
 });
@@ -716,7 +724,8 @@ test("the rejected list stops at 20 while dropped keeps counting, and every labe
       ],
       note: "",
     }),
-    groups.request,
+    // The owner names the near-cap skill, so it reaches the group rule this test is about.
+    naming(groups.request, "n".repeat(59)),
   );
   // Narrowed.
   assert.ok(long.ok);
@@ -730,7 +739,8 @@ test("the rejected list stops at 20 while dropped keeps counting, and every labe
 
 test("printedSkills drives the duplicate check and the grouped SKILLS line", () => {
   // The request with printed skills; its old skills string says "TypeScript, Postgres".
-  const req = printedRequest();
+  // Postgres named by the owner, so the add below is judged on the duplicate rule alone.
+  const req = naming(printedRequest(), "Postgres");
   // "c" is printed under Languages, so adding it is a duplicate.
   assert.deepEqual(rejectedFor({ op: "add_skill", name: "c", category: "Languages" }, req), { what: 'Add skill "c"', why: '"C" is already on the resume.' });
   // Postgres is only in the stale string, which printedSkills overrides: the add passes.
@@ -1082,7 +1092,8 @@ function v20Request(): AssistRequest {
 // The kept ops for one answer.
 function keptOps(ops: unknown[]): unknown {
   // The real parser over the v20 request.
-  const parsed = parseAssistOps(JSON.stringify({ ops, note: "" }), v20Request());
+  // The owner names every skill the fixture adds, so a non-master one is judged on its group alone.
+  const parsed = parseAssistOps(JSON.stringify({ ops, note: "" }), naming(v20Request(), ...ops.map((op) => String((op as { name?: unknown }).name))));
   // Narrowed; a refused answer is a broken fixture.
   assert.ok(parsed.ok);
   // Every rejection would be a "could not be done" card: there must be none.
@@ -1129,4 +1140,66 @@ test("add_skill: the system prompt makes category required and names its source"
   assert.match(system, /add_skill ALWAYS carries "category"/);
   // The groups themselves reach the model in the resume block.
   assert.match(buildAssistPrompt(v20Request()).userContent, /SKILL GROUPS: AI \| Languages \| Frameworks \| Databases \| DevOps & Cloud/);
+});
+
+/* EXPLICIT ADDS (Teja, 2026-11-09, TrueFoundry "Frontend Intern" row): "add tailwind css to , anguar js too ,even
+   though i dont have them in my master" came back "No changes made", twice. Ruling: a skill the OWNER NAMES is added
+   even when the master lacks it (Apply still vouches for it into the master, attestSkill.ts); a skill nobody named
+   and the master lacks is never added. The second half used to be prompt-only; the validator now enforces it.
+   RED-ON-REVERT: without the ownerNamed guard in parseAssistOps, the "improve my skills" test keeps Kubernetes and C;
+   without the Rules-line exception, the prompt test fails. */
+test("explicit add: a skill the owner names is kept though the master lacks it, typo and split spelling included", () => {
+  // Teja's live prompt, typos kept: "tailwind css" and "anguar js".
+  const parsed = parseAssistRequest(body({ instruction: "add tailwind css to , anguar js too ,even though i dont have them in my master", availableSkills: LIVE_AVAILABLE }));
+  // Valid fixture.
+  assert.ok(parsed.ok);
+  // The model's two adds, in its own spelling.
+  const ops = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Tailwind CSS", category: "Tools" }, { op: "add_skill", name: "AngularJS", category: "Tools" }], note: "" }), parsed.request);
+  // Narrowed.
+  assert.ok(ops.ok);
+  // Both kept: "tailwind css" is the name split in two, "anguar js" is one letter off "AngularJS".
+  assert.deepEqual(ops.ops, [{ op: "add_skill", name: "Tailwind CSS", category: "Tools" }, { op: "add_skill", name: "AngularJS", category: "Tools" }]);
+  // Nothing refused.
+  assert.deepEqual(ops.rejected, []);
+});
+
+test("explicit add: a skill the owner named in an EARLIER chat turn counts, so \"yes, do it\" works", () => {
+  // The name is in the owner's earlier message, not in this one.
+  const parsed = parseAssistRequest(body({ instruction: "yes, do it", history: [{ role: "user", text: "can you add Tailwind CSS?" }, { role: "assistant", text: "Tailwind CSS is not in your master." }] }));
+  // Valid fixture.
+  assert.ok(parsed.ok);
+  // Kept.
+  assert.equal(rejectedFor({ op: "add_skill", name: "Tailwind CSS", category: "Tools" }, parsed.request), null);
+  // The AI's own turn never counts as the owner naming it.
+  const aiOnly = parseAssistRequest(body({ instruction: "yes, do it", history: [{ role: "assistant", text: "Shall I add Tailwind CSS?" }] }));
+  // Valid fixture.
+  assert.ok(aiOnly.ok);
+  // Refused: only the AI said it.
+  assert.equal(rejectedFor({ op: "add_skill", name: "Tailwind CSS", category: "Tools" }, aiOnly.request)?.what, 'Add skill "Tailwind CSS"');
+});
+
+test("unprompted: \"improve my skills\" adds master skills only; a skill nobody named is refused with its reason", () => {
+  // A vague ask, with real master skills on offer.
+  const parsed = parseAssistRequest(body({ instruction: "can you improve my skills section", availableSkills: LIVE_AVAILABLE }));
+  // Valid fixture.
+  assert.ok(parsed.ok);
+  // One master skill, one invented tool, one one-letter language the word "can" must not unlock.
+  const ops = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Postman", category: "Tools" }, { op: "add_skill", name: "Kubernetes", category: "Tools" }, { op: "add_skill", name: "C", category: "Languages" }], note: "" }), parsed.request);
+  // Narrowed.
+  assert.ok(ops.ok);
+  // Only the master's own skill survives.
+  assert.deepEqual(ops.ops, [{ op: "add_skill", name: "Postman", category: "Tools" }]);
+  // Each invention is a card with the reason, never silently dropped.
+  assert.deepEqual(ops.rejected.map((r) => r.what), ['Add skill "Kubernetes"', 'Add skill "C"']);
+  // The reason says how to get it: name it.
+  assert.match(ops.rejected[0]!.why, /not in your master profile/);
+});
+
+test("the Rules line itself carries the owner-named exception, so \"never invent tools\" cannot outrank it", () => {
+  // The fixed system text.
+  const system = String(buildAssistPrompt(request()).systemInstruction);
+  // The Rules line, found by its own label.
+  const rules = system.split("\n").find((line) => line.startsWith("Rules:")) ?? "";
+  // The exception sits in the same sentence as the ban it qualifies.
+  assert.match(rules, /Never invent .*tools.*except a skill or tool the owner names/);
 });

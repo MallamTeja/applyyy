@@ -516,7 +516,11 @@ const SYSTEM_INSTRUCTION = [
      "text" or "id". parseAssistOps refuses that rather than guessing a name, and now SAYS so on a card,
      so the next occurrence names its cause. "Databases" is only an example; the category rule binds. */
   'Ops, each with exactly these fields: {"op":"edit","id":"b0","text":"..."} replaces bullet b0, or the summary when id is "summary". {"op":"remove","id":"b0"} drops a bullet. {"op":"add_skill","name":"Redis","category":"Databases"} adds a skill; category must be one of SKILL GROUPS (the owner can change it before applying); when none fits well, pick the closest and say in note that none fits well. {"op":"remove_skill","name":"Redis"} removes a skill, named exactly as SKILLS prints it; when that name prints under two groups, add "category" with the group to remove it from. A skill\'s name goes in "name", never in "id" or "text".',
-  "Rules: keep every fact true to the given text and the instruction. Never invent employers, dates, metrics, numbers, tools or results. Use a job keyword only where the existing text already supports it.",
+  /* 2026-11-09 (Teja, TrueFoundry row): "add tailwind css ... even though i dont have them in my master" got "No
+     changes made" twice. This line banned inventing tools with no exception, and the model obeyed it over the
+     edge-case line far below. The exception now sits in the SAME sentence as the ban. The ban itself stays: a skill
+     nobody named is still never added, and parseAssistOps refuses one (ownerNamed), so this is not "anything goes". */
+  "Rules: keep every fact true to the given text and the instruction. Never invent employers, dates, metrics, numbers, tools or results, except a skill or tool the owner names in the INSTRUCTION or their own CHAT SO FAR messages: add that one with add_skill even when MASTER SKILLS NOT ON RESUME lacks it, spelled as the owner meant it (the app asks them to confirm it). Use a job keyword only where the existing text already supports it.",
   `A bullet is one sentence, starts with a past-tense verb, at most 220 characters. At most ${MAX_OPS} ops.`,
   /* The auditor flags any bullet word that is not in the bullet's original, a skill name, or this
      list (2026-10-31). A preference, not a ban: the operator's instruction may need a new word, and
@@ -550,7 +554,7 @@ const SYSTEM_INSTRUCTION = [
      JD-relevant groups, 3-5 of them, at least 4 skills each, ranked by the JD) and "more bullet points". */
   "Tailoring for JOB, whenever the instruction asks to improve, tailor or match the job (\"make it better for this JD\" counts): prefer master skills the DESCRIPTION or MISSING KEYWORDS name, and their groups; aim for 3-5 skill groups relevant to the job with at least 4 skills each, filled from MASTER SKILLS NOT ON RESUME; remove_skill a printed skill only when the owner asks or it crowds out a job-relevant one; to add bullets, add_back AVAILABLE mN items that support the job before writing anything new; edit a bullet to use a job keyword only where its own text already supports it.",
   /* The edge cases, each with its one right answer (2026-11-07), so none falls through to a refusal card. */
-  "Edge cases: a skill SKILLS already prints is never re-added (say it is already there); a group the resume does not print yet is fine for add_skill (it appears with its first skill); a skill in neither SKILLS nor MASTER SKILLS NOT ON RESUME may be added only when the owner names it in the instruction, otherwise say it is not in their master and that it is added on the Master profile page; a remove or reorder request uses remove, remove_skill, remove_entry, move or move_section; a vague request still gets concrete ops chosen by the job rules above; a request beyond the master (a new employer, a degree, a metric the text lacks) gets no op and an honest note saying why and where it can be done.",
+  "Edge cases: a skill SKILLS already prints is never re-added (say it is already there); a group the resume does not print yet is fine for add_skill (it appears with its first skill); a skill in neither SKILLS nor MASTER SKILLS NOT ON RESUME that the owner names IS added with add_skill (never answer that it is missing from their master), and one they did not name is not added: say it is not in their master and that it is added on the Master profile page; a remove or reorder request uses remove, remove_skill, remove_entry, move or move_section; a vague request still gets concrete ops chosen by the job rules above; a request beyond the master (a new employer, a degree, a metric the text lacks) gets no op and an honest note saying why and where it can be done.",
 ].join("\n");
 
 // Gemini's structured-output schema: the model can only answer in this shape.
@@ -847,6 +851,56 @@ function masterSkillNamed(name: string, available: readonly PrintedSkill[]): Pri
   return available.find((skill) => skillKey(skill.name) === skillKey(name) || (term !== null && canonicalSkillTerm(skill.name) === term));
 }
 
+/* Did the OWNER name this skill (2026-11-09)? Read from the instruction and the owner's own earlier chat turns, never
+   the AI's (an AI that offered "Shall I add X?" has not been asked for X). Matched on runs of 1-4 consecutive words,
+   so "tailwind css" names "Tailwind CSS" and "angular js" names "AngularJS". Whole runs only, never a substring: "can"
+   must not name "C", "good" must not name "Go". One typo is forgiven on names of 6+ characters ("anguar js" is
+   Teja's live wording); a short name must match exactly, because one edit away from "C" or "Go" is half the language.
+   No alias matching: a looser match only widens what an unasked add can slip through. */
+function ownerNamed(name: string, request: AssistRequest): boolean {
+  // The name with case, spaces and punctuation gone; + and # stay, so "C++" and "C#" are not "C".
+  const target = compactName(name);
+  // Nothing left to match (a name of pure punctuation): never "named".
+  if (target === "") return false;
+  // Only the owner's words: this message and their earlier ones.
+  const said = [request.instruction, ...request.history.filter((message) => message.role === "user").map((message) => message.text)];
+  // Every message, word by word.
+  for (const text of said) {
+    // Split on spaces and punctuation that never sits inside a skill name; "." "+" "#" stay for "node.js", "c++".
+    const words = text.toLowerCase().split(/[\s,;:!?()"'\/]+/).filter((word) => word !== "");
+    // Each run of 1-4 words starting at each word.
+    for (let start = 0; start < words.length; start += 1) {
+      // Runs longer than 4 words are sentences, not skill names.
+      for (let end = start + 1; end <= Math.min(start + 4, words.length); end += 1) {
+        // The run compacted the same way as the name.
+        const compact = compactName(words.slice(start, end).join(""));
+        // Exact, or one typo on a long name.
+        if (compact === target || (target.length >= 6 && withinOneEdit(compact, target))) return true;
+      }
+    }
+  }
+  // Nobody named it.
+  return false;
+}
+
+// Lower case, letters, digits, "+" and "#" only: the form two spellings of one skill name share.
+function compactName(text: string): string {
+  // Everything else is spacing or punctuation.
+  return text.toLowerCase().replace(/[^a-z0-9+#]/g, "");
+}
+
+// True when a and b differ by at most one insertion, deletion or substitution.
+function withinOneEdit(a: string, b: string): boolean {
+  // Two or more letters apart in length cannot be one edit.
+  if (Math.abs(a.length - b.length) > 1) return false;
+  // Walk both until the first difference.
+  let i = 0;
+  // The shared prefix.
+  while (i < a.length && i < b.length && a[i] === b[i]) i += 1;
+  // After it, the rest must match with one letter substituted, dropped from a, or dropped from b.
+  return a.slice(i + 1) === b.slice(i + 1) || a.slice(i + 1) === b.slice(i) || a.slice(i) === b.slice(i + 1);
+}
+
 /* Which KIND of skill a vocabulary term is, for filing a skill the master does not hold (2026-11-07).
    Keyed by the vocabulary's canonical terms (jd-keywords.ts), so "Postgres" and "PostgreSQL" are one
    entry. A term absent here has no kind and falls to the catch-all group. */
@@ -1060,6 +1114,10 @@ export function parseAssistOps(
       // Already printed: checked BEFORE the group (2026-11-05 live bug: a group-less add of a printed
       // skill said "did not say which skill group", hiding the real reason; the model then claimed it).
       if (spelling !== undefined) return `"${clip(spelling, 40)}" is already on the resume.`;
+      /* A skill the master lacks needs the OWNER's naming (2026-11-09). The prompt asks for this, but a prompt
+         is not a control (CLAUDE.md §6): "improve my skills" must never come back with an invented Kubernetes.
+         Checked after "already printed", so a printed skill keeps its more useful reason. */
+      if (master === undefined && !ownerNamed(finalName, request)) return `"${clip(finalName, 40)}" is not in your master profile and you did not name it. Name it in your message to add it.`;
       // No groups at all: nothing to file a skill under (the prompt says so too).
       if (request.categories.length === 0) return `The AI's answer did not say which skill group. Say which one: ${groupList}.`;
       /* THE GROUP IS DECIDED HERE, NEVER ASKED FOR (Teja, 2026-11-07 10:10 IST: "make everything automatic").
