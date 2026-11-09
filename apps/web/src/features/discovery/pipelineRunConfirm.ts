@@ -57,22 +57,8 @@ const AGENTS: readonly { readonly id: PipelineStep; readonly name: string; reado
 ];
 
 // Waiting rows per agent, or null where that agent's count is unknown.
+// Built by PipelineRunModal from the one application_status_counts RPC (a failed read makes every entry null).
 export type WaitingCounts = Readonly<Record<PipelineStep, number | null>>;
-
-// Reads every agent's waiting count with an injected counter (the modal passes a HEAD count). Each
-// agent is contained on its own: a rejection or a null becomes null for THAT agent, so one failed
-// query can neither reject the whole read (leaving "Counting…" forever) nor blank the others.
-export async function readWaitingCounts(countOne: (statuses: readonly string[]) => Promise<number | null>): Promise<WaitingCounts> {
-  // allSettled, not all: one rejection must not discard the other four counts.
-  const settled = await Promise.allSettled(AGENTS.map((a) => countOne(STEP_INPUT_STATUS[a.id])));
-  // Rebuilt as a record keyed by agent, in the same order; a rejected count is unknown, not zero.
-  return Object.fromEntries(AGENTS.map((a, i) => {
-    // This agent's outcome.
-    const r = settled[i];
-    // Only a fulfilled number is a count.
-    return [a.id, r !== undefined && r.status === 'fulfilled' ? r.value : null];
-  })) as Record<PipelineStep, number | null>;
-}
 
 // The agents that may spend Gemini calls, for the warning line.
 const GEMINI_AGENTS = AGENTS.filter((a) => a.gemini);

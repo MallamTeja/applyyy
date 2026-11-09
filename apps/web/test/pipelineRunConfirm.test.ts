@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
 // The gate and the confirm text, imported directly: the module has no supabase or React import.
-import { CONFIRM_PHRASE, GEMINI_WARNING, RUN_BATCH_LIMIT, canStartRun, confirmSummary, readWaitingCounts, startIfConfirmed } from '../src/features/discovery/pipelineRunConfirm.ts';
+import { CONFIRM_PHRASE, GEMINI_WARNING, RUN_BATCH_LIMIT, canStartRun, confirmSummary, startIfConfirmed } from '../src/features/discovery/pipelineRunConfirm.ts';
 
 // The modal source, for the wiring checks; relative to apps/web, where node --test runs.
 const modal = readFileSync('src/features/discovery/PipelineRunModal.tsx', 'utf8');
@@ -105,24 +105,6 @@ describe('what the confirm step states', () => {
     assert.match(GEMINI_WARNING, /up to 20 rows of Gemini calls/);
     // Rendered on its own, so it shows while the counts load or after they fail.
     assert.ok(modal.includes('{GEMINI_WARNING}'), 'the modal must render GEMINI_WARNING outside confirmSummary');
-  });
-
-  it('a failed or rejected count becomes null for that agent, never a hang or a rejection', async () => {
-    // Matcher's count rejects (a network throw), auditor's returns null (a returned error).
-    const counts = await readWaitingCounts(async (statuses) => {
-      // Throw for the matcher's queue.
-      if (statuses.includes('passed_filters')) throw new Error('network down');
-      // Error-as-null for the auditor's queue.
-      if (statuses.includes('tailored')) return null;
-      // Every other queue has 3 rows.
-      return 3;
-    });
-    // The rejection is contained to its agent.
-    assert.equal(counts.matcher, null);
-    // The returned error stays null.
-    assert.equal(counts.auditor, null);
-    // The others are real counts.
-    assert.equal(counts.normalizer, 3);
   });
 });
 

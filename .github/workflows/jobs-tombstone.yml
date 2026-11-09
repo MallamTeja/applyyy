@@ -25,11 +25,12 @@ on:
         description: 'Tombstone dropped_filter jobs whose verdict is older than this many days'
         required: false
         default: '7'
-      # Rows per RPC call; small, because the API role's statement_timeout is short.
+      # Rows per RPC call; small, because the API role's statement_timeout is 8 s. 1000 overran
+      # it on 2026-11-08 (run 42486953107); the script also halves this on a timeout.
       batch_size:
-        description: 'Rows per tombstone_dropped_jobs call (1-5000)'
+        description: 'Starting rows per tombstone_dropped_jobs call (1-5000); halved on a statement timeout'
         required: false
-        default: '1000'
+        default: '250'
       # Calls per run; the hard stop on a runaway loop.
       max_batches:
         description: 'Maximum calls this run'
@@ -71,7 +72,7 @@ jobs:
           APPLYY_APP_USER_EMAIL: ${{ secrets.APPLYY_APP_USER_EMAIL }}
           # Its password.
           APPLYY_APP_USER_PASSWORD: ${{ secrets.APPLYY_APP_USER_PASSWORD }}
-          # Empty on a scheduled run, so the script's defaults (7 / 1000 / 50) apply.
+          # Empty on a scheduled run, so the script's defaults (7 / 250 / 50) apply.
           MIN_AGE_DAYS: ${{ inputs.min_age_days }}
           # Same: empty means the default.
           BATCH_SIZE: ${{ inputs.batch_size }}

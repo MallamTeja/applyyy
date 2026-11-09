@@ -182,6 +182,13 @@ Greenhouse is **one row** with three entries in `source_refs`.
 - `disappeared_at` / `repost_count` carry the reposted-job signal: a job that vanished
   and came back means they are still hiring and the last batch did not work out — a
   *stronger* signal than a fresh posting.
+- `description_preview` and `description_requires_degree` are **generated stored
+  columns** derived from `description_raw` (migration `20261108170000`, live
+  2026-11-08). **No writer sets them; Postgres computes them.** `description_preview` =
+  `left(description_raw, 600)`, so list views show a card without detoasting the whole
+  description; it is as untrusted as its source (§7). `description_requires_degree` is
+  the degree_mismatch regex ported to Postgres (`false` when `description_raw` is null),
+  the one copy of that rule. Types: `JobRow` in `src/tables.ts`.
 
 ### `applications` — **this table is the queue**
 
@@ -551,6 +558,17 @@ lookups. The template *cannot* resolve a ref even by accident, which is what mak
 **`ref` is non-optional everywhere. Keep it that way** — an optional `ref` would
 quietly reopen the hole while every test still passed.
 
+**Two optional `TailoredProfile` fields, both copied AS HELD.** Absent means the
+output from before the field existed, so every stored `tailor_refs` still re-validates
+to its frozen resume (`rebuildOriginal`). Never write a default (`?? null`) into a copy
+that gets stored: an absent field must stay absent.
+- `summary_variant?: NodeId | null` — which master summary variant prints; null or
+  absent = the default. An id the master lacks is refused.
+- `headline_title?: string` (2026-11-08) — the header's role title: the job title with
+  seniority words removed, never invented. The tailor sets it (`cleanRoleTitle` in
+  `_shared/tailor/content-rules.ts`); the validator prints it as `identity.headline`
+  ahead of the variant's and the master's. A value outside the cleaned shape is refused.
+
 ### Two rendering contracts
 
 - **`DisplayDate`** — every rendered date is a pre-formatted string decided upstream.
@@ -655,7 +673,8 @@ system looks merely idle — the exact silent stop §14 warns about. **Do not ca
 **Job descriptions, ATS page DOM, and inbound email are untrusted** (constraint #17).
 Marked `Untrusted` in the types and flagged in `COMMENT ON COLUMN`:
 
-`jobs.description_raw` ← *the highest-risk column in the database* · `jobs.title` ·
+`jobs.description_raw` ← *the highest-risk column in the database* (and its generated
+prefix `jobs.description_preview`) · `jobs.title` ·
 `jobs.company_name` · `jobs.location_raw` · `jobs.apply_url` · `jobs.raw_payload` ·
 `answer_bank.question_text` · `email_events.{from_address, subject, snippet}`
 

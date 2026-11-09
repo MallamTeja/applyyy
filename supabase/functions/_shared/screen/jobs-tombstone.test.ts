@@ -193,7 +193,7 @@ test("edge 4: job-link-intake's description fill also clears tombstoned_at", () 
 // --- The weekly runner, scripts/jobs-tombstone.mjs (driven with fakes; no network) -------
 
 // The loop and the input parser, imported from the script the workflow runs.
-import { runBatches, positiveInt } from "../../../../scripts/jobs-tombstone.mjs";
+import { runBatches, positiveInt, isStatementTimeout, StatementTimeoutError, MIN_BATCH_SIZE } from "../../../../scripts/jobs-tombstone.mjs";
 // The identity list the Health page derives its roster from.
 import { AGENT_NAMES } from "../../../../packages/shared-types/src/enums.ts";
 
@@ -202,25 +202,80 @@ test("runner: keeps calling after a short batch and stops only on 0", async () =
   // Batches as the database might return them: full, short (locked rows skipped), empty.
   const answers = [1000, 37, 0];
   // Each call takes the next answer.
-  const result = await runBatches(async () => answers.shift(), 50);
+  const result = await runBatches(async () => answers.shift(), 50, 1000);
   // All three calls made, every row counted, and the run reports it drained the backlog.
-  assert.deepEqual(result, { total: 1037, calls: 3, drained: true });
+  assert.deepEqual(result, { total: 1037, calls: 3, drained: true, batch: 1000 });
 });
 
 // The cap is a hard stop, reported as "not drained" rather than as a clean finish.
 test("runner: stops at the batch cap and reports more may remain", async () => {
   // A backlog that never empties within the cap.
-  const result = await runBatches(async () => 1000, 3);
+  const result = await runBatches(async () => 1000, 3, 1000);
   // Exactly the cap, and the run says it did not finish.
-  assert.deepEqual(result, { total: 3000, calls: 3, drained: false });
+  assert.deepEqual(result, { total: 3000, calls: 3, drained: false, batch: 1000 });
 });
 
 // A malformed RPC answer is a broken contract, never a "0 rows, done" (CLAUDE.md §6).
 test("runner: a non-integer RPC answer throws instead of ending the run as drained", async () => {
   // null is what a lenient reader would turn into 0.
-  await assert.rejects(runBatches(async () => null, 5), /not a row count/);
+  await assert.rejects(runBatches(async () => null, 5, 250), /not a row count/);
   // A string that looks numeric is still not the integer the function returns.
-  await assert.rejects(runBatches(async () => "5", 5), /not a row count/);
+  await assert.rejects(runBatches(async () => "5", 5, 250), /not a row count/);
+});
+
+// The 2026-11-08 failure (run 42486953107): a 1000-row call hit the API role's 8 s
+// statement_timeout and the run died on its first call. Now a timeout halves the batch.
+test("runner: a statement timeout halves the batch and the run continues", async () => {
+  // The sizes each call asked for, to prove the halving.
+  const asked: number[] = [];
+  // A database that times out above 250 rows and drains after two good batches.
+  const answers = [250, 0];
+  // Fake RPC: too big times out, small enough answers.
+  const result = await runBatches(async (size: number) => {
+    // Record the request.
+    asked.push(size);
+    // The same rejection the real caller throws for SQLSTATE 57014.
+    if (size > 250) throw new StatementTimeoutError("HTTP 500 57014");
+    // A good batch.
+    return answers.shift();
+  }, 50, 1000);
+  // 1000 timed out, 500 timed out, 250 worked twice: the halving path and the drain both ran.
+  assert.deepEqual(asked, [1000, 500, 250, 250]);
+  // Timed-out calls count toward the cap; the size it settled on is reported.
+  assert.deepEqual(result, { total: 250, calls: 4, drained: true, batch: 250 });
+});
+
+// The floor: a database that times out even on tiny batches is sick, and the run must fail.
+test("runner: a timeout at the minimum batch fails the run instead of shrinking forever", async () => {
+  // Every call times out.
+  await assert.rejects(
+    runBatches(async () => { throw new StatementTimeoutError("HTTP 500 57014"); }, 50, MIN_BATCH_SIZE * 4),
+    /timed out even at batch 25/,
+  );
+});
+
+// Only a timeout shrinks; any other failure (auth, permission, a 502) still ends the run.
+test("runner: a non-timeout error is rethrown, not retried", async () => {
+  // A plain Error, like the one the caller throws for any other HTTP failure.
+  await assert.rejects(runBatches(async () => { throw new Error("HTTP 401"); }, 50, 1000), /HTTP 401/);
+});
+
+// A missing start size would turn the halving into NaN batches; refuse it up front.
+test("runner: refuses a missing or non-integer starting batch size", async () => {
+  // The old two-argument call shape.
+  await assert.rejects(runBatches(async () => 0, 50, undefined as unknown as number), /positive integer batch size/);
+});
+
+// The timeout check reads the PostgREST error SHAPE, not a substring (CLAUDE.md §6).
+test("runner: isStatementTimeout matches code 57014 only on a parsed error object", () => {
+  // The exact body from the failed run's log.
+  assert.equal(isStatementTimeout('{"code":"57014","details":null,"hint":null,"message":"canceling statement due to statement timeout"}'), true);
+  // Another SQLSTATE that mentions 57014 in its message is not a timeout.
+  assert.equal(isStatementTimeout('{"code":"42501","message":"see 57014"}'), false);
+  // A gateway HTML page is not JSON.
+  assert.equal(isStatementTimeout("<html>502 Bad Gateway</html>"), false);
+  // JSON null parses but carries no code.
+  assert.equal(isStatementTimeout("null"), false);
 });
 
 // Workflow inputs: blank uses the default; anything that is not plain digits >= 1 is refused.
