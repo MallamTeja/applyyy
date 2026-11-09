@@ -316,6 +316,13 @@ test("an honest tailoring against the same master is still accepted", () => {
 // The prompt must be deterministic: the same input produces the same bytes. Without
 // this, "byte-identical" cannot be asserted about anything, and §18's tailored_hash
 // cache key (constraint #8) would miss on every call.
+test("the selection hint states Teja's 2026-11-09 counts: at least 5 certifications and every achievement", () => {
+  // A normal build; the hint sits in the trusted instruction region.
+  const { systemInstruction } = buildTailorPrompt({ master: MASTER, masterVersion: PINNED_VERSION, jobDescription: CLEAN_JD, jobTitle: "Backend Intern", company: "Zomato" });
+  // The sentence the model reads. content-rules.ts enforces the numbers anyway; this keeps the hint from contradicting it.
+  assert.ok(systemInstruction.includes("at least 5 certifications (all of them if fewer), EVERY achievement, 2 educations."), systemInstruction.slice(0, 200));
+});
+
 test("prompt assembly is deterministic for identical input", () => {
   // Two builds of the same request.
   const first = buildTailorPrompt({ master: MASTER, masterVersion: PINNED_VERSION, jobDescription: CLEAN_JD, jobTitle: "Backend Intern", company: "Zomato" });

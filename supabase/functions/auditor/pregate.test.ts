@@ -103,9 +103,9 @@ const MASTER = {
   projects: [masterNode("proj_a", 4), masterNode("proj_b", 4), masterNode("proj_c", 4)],
   // The floor-named experience.
   experience: [masterNode("exp_aczen", 4)],
-  // Enough certifications for the floor of 3.
+  // 3 certifications: below the floor of 5 (2026-11-09), so min(5, 3) = 3 binds; a short master still passes.
   certifications: [masterNode("cert_a", 0), masterNode("cert_b", 0), masterNode("cert_c", 0)],
-  // Enough achievements for the floor of 2.
+  // 2 achievements: ALL of them are required since 2026-11-09, which here is both.
   achievements: [masterNode("ach_a", 1), masterNode("ach_b", 1)],
   // Both educations.
   education: [masterNode("edu_a", 0), masterNode("edu_b", 0)],
@@ -146,6 +146,21 @@ describe("auditorContentRulesDrop", () => {
   test("a compliant resume is not dropped by the content rules", () => {
     // Every floor met, the cap respected.
     assert.equal(auditorContentRulesDrop(COMPLIANT, MASTER), null);
+  });
+
+  test("2026-11-09 ruling: a resume missing one master achievement, or under 5 certifications, is dropped by name", () => {
+    // A bigger master: 6 certifications and 3 achievements, so both new floors bind (5, and all 3).
+    const big = { ...MASTER, certifications: ["a", "b", "c", "d", "e", "f"].map((x) => masterNode(`cert_${x}`, 0)), achievements: [masterNode("ach_a", 1), masterNode("ach_b", 1), masterNode("ach_c", 1)] } as unknown as MasterProfile;
+    // The old floors' resume: 4 certifications and 2 of the 3 achievements.
+    const old = { ...COMPLIANT, certifications: ["a", "b", "c", "d"].map((x) => resumeEntry(`cert_${x}`, 0)) } as unknown as ResolvedResume;
+    // The verdict index.ts acts on.
+    const drop = auditorContentRulesDrop(old, big);
+    // Dropped under the content-rules code.
+    assert.equal(drop?.code, "content_rules", JSON.stringify(drop));
+    // Both new floors named, so the human sees which rule held.
+    assert.match(drop!.reason, /certifications: 4, needs 5/);
+    // Every achievement the master holds.
+    assert.match(drop!.reason, /achievements: 2, needs 3/);
   });
 
   test("a missing resume or master is refused, never read as compliant", () => {

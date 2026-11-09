@@ -1,7 +1,8 @@
 // The content rules for every tailored resume (Teja, 2026-11-08 15:36 + 15:46 IST):
 //   - projects: EXACTLY 2 (at most 2 always; fewer only when the master holds fewer), each >= 4 bullets;
 //   - the Aczen experience >= 4 bullets (PAGE_FIT_FLOORS.minBulletsByRef);
-//   - certifications >= 3, achievements >= 2, education >= 2.
+//   - certifications >= 5 and EVERY achievement (Teja, 2026-11-09 20:41 IST; were 3 and 2), education >= 2;
+//     each floor is min(rule, what the master holds), so a short master is never padded.
 //
 // WHY TWO FUNCTIONS. The page trimmer's floors only stop it REMOVING content; they never stopped the
 // model SELECTING too little (live 8794f52f: 1 Aczen bullet, 0 certifications) or too much (10 rows with 3
@@ -370,9 +371,9 @@ export function checkContentRules(resume: ResolvedResume, master: MasterProfile)
   }
   // The three entry counts, each against min(rule, master).
   const counts: readonly [keyof Pick<ResolvedResume, "certifications" | "achievements" | "education">, number][] = [
-    // Certifications >= 3.
+    // Certifications >= 5 (2026-11-09).
     ["certifications", PAGE_FIT_FLOORS.minCertifications],
-    // Achievements >= 2.
+    // Achievements: all of them (Infinity, so min(rule, master) is the master's count; 2026-11-09).
     ["achievements", PAGE_FIT_FLOORS.minAchievements],
     // Education >= 2.
     ["education", PAGE_FIT_FLOORS.minEducation],

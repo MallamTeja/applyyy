@@ -1,6 +1,7 @@
 /**
  * The content rules (Teja, 2026-11-08 15:36 + 15:46 IST): exactly min(2, master) projects each with
- * >= 4 bullets, Aczen >= 4 bullets, certifications >= 3, achievements >= 2, education >= 2; and the
+ * >= 4 bullets, Aczen >= 4 bullets, certifications >= 5 and EVERY achievement (2026-11-09 20:41 IST; were 3 and 2),
+ * education >= 2, each capped at what the master holds; and the
  * cited-summary-variant seam (LSEG 2b7db9a2). Each rule's test is named after the rule, and the
  * tailorer tests run the REAL createTailorer + validator + page fit, so reverting the one call in
  * tailorer.ts turns them red.
@@ -151,17 +152,32 @@ test("tailor tops up Aczen to 4 bullets when the model picks 1", () => {
   assert.deepEqual(profile.experience.find((e) => e.ref === "exp_aczen")!.bullets.map((b) => b.ref), ["az1", "az2", "az4", "az3"]);
 });
 
-test("certifications topped up to 3, achievements to 2, education to 2, and their sections printed", () => {
+test("certifications topped up to min(5, master) = 3, EVERY achievement, education to 2, and their sections printed", () => {
   // Enforced.
   const { profile } = enforceContentRules(greedyAnswer(), master(), JD);
-  // All three master certifications (the master holds exactly 3).
+  // All three master certifications: the master holds only 3, so a 3-cert master still tailors (never padded).
   assert.equal(profile.certifications.length, 3);
-  // The model's achievement, then the most relevant missing one (ach_a names TypeScript).
-  assert.deepEqual(profile.achievements.map((a) => a.ref), ["ach_c", "ach_a"]);
+  // The model's achievement, then EVERY missing one, most relevant first (ach_a names TypeScript), master order on a tie.
+  assert.deepEqual(profile.achievements.map((a) => a.ref), ["ach_c", "ach_a", "ach_b"]);
   // Both educations; the diploma counts.
   assert.deepEqual(profile.education.map((e) => e.ref), ["edu_mlrit", "edu_diploma"]);
   // The model left certifications out of section_order; an added section must print.
   assert.ok(profile.section_order.includes("certifications"));
+});
+
+test("a 6-certification master gets exactly 5 certifications (the 2026-11-09 floor), and the gate names the 5", () => {
+  // Teja's master after his additions, plus one more: 6 certifications.
+  const six = { ...master(), certifications: [...master().certifications, ...["cert_aws", "cert_gcp", "cert_k8s"].map((id) => ({ id, label: id, description: null, bullets: [] }))] } as MasterProfile;
+  // Enforced on the answer that chose none.
+  const { profile } = enforceContentRules(greedyAnswer(), six, JD);
+  // Topped up to the floor of 5, not to all 6: the floor is a minimum, not "copy the section".
+  assert.equal(profile.certifications.length, 5);
+  // And the gate on the un-enforced answer names the floor of 5 (min(5, 6)).
+  const verdict = validateTailoredProfile(greedyAnswer(), six, VERSION);
+  // Honest, so it resolves.
+  assert.equal(verdict.ok, true);
+  // The count rule, by name.
+  if (verdict.ok) assert.ok(checkContentRules(verdict.resume, six).includes("certifications: 0, needs 5"));
 });
 
 test("a short master is never padded: the floor binds at what the master holds", () => {
@@ -209,7 +225,8 @@ test("checkContentRules names 3 projects and every floor broken", () => {
     // The Aczen floor.
     assert.ok(broken.includes("exp_aczen: 1 bullets, needs 4"));
     // The counts.
-    assert.ok(broken.includes("certifications: 0, needs 3") && broken.includes("achievements: 1, needs 2") && broken.includes("education: 1, needs 2"));
+    // Certifications min(5, 3 held); achievements ALL 3 held (2026-11-09); education 2.
+    assert.ok(broken.includes("certifications: 0, needs 3") && broken.includes("achievements: 1, needs 3") && broken.includes("education: 1, needs 2"), broken.join("; "));
   }
 });
 

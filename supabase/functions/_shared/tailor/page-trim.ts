@@ -3,7 +3,9 @@
 // THE RULE (Teja, 2026-11-07 22:43 IST): "the tailored resume and the resumes after applying
 // edits need to be in 1 page only, this is rule." HOW (his 23:00 ruling, order revised 23:55):
 // first shrink the typography, then remove certifications, then the weakest bullets, never below the floors;
-// never remove skills; fail closed when the floors themselves do not fit. And (23:18): it runs
+// never remove skills; fail closed when the floors themselves do not fit. REVISED 2026-11-09 20:41 IST (Teja, via the
+// orchestrator): every resume keeps >= 5 certifications and EVERY achievement, so neither entry is ever removed here
+// any more; only bullets go, and a page the bullet floors cannot fit is refused. And (23:18): it runs
 // LIVE in the approval preview as he edits, deterministically, not by AI.
 //
 // PURE, on the RESOLVED resume, with no Deno or DOM API, so the SAME function runs in three
@@ -18,7 +20,7 @@
 // REMOVAL ONLY, NEVER SHORTENING. Shortening a bullet deterministically means cutting words,
 // and no rule can promise a cut keeps the claim's meaning ("reduced latency by 40% for 2M
 // users" minus a clause is a different claim). A removed bullet is still true; a shortened one
-// may not be. So the trimmer drops whole bullets and whole certification entries.
+// may not be. So the trimmer drops whole bullets, nothing else.
 
 import type { ResolvedResume } from "../contracts/shared-types.ts";
 // The same keyword test the skills shape and the ATS panel use, so "relevant" means one thing.
@@ -40,24 +42,29 @@ export const PAGE_FIT_FLOORS = {
   minBulletsByRef: { exp_aczen: 4 } as Readonly<Record<string, number>>,
   // Bullets above 4 on a project are trimmed FIRST, before any other bullet (with the floor at 4, a project ends at exactly 4 when space is short).
   projectSoftCap: 4,
-  // Certification entries kept at least: 3 since 2026-11-08 15:46 IST ("certifications at least 3"; was 2).
-  minCertifications: 3,
+  // Certification entries every resume carries: 5 since 2026-11-09 20:41 IST (Teja: "at least 5 certifications"; was 3,
+  // was 2). Topped up by content-rules.ts to min(5, what the master holds), so a 3-cert master still tailors. Never
+  // page-trimmed since the same ruling.
+  minCertifications: 5,
   // ENTRY COUNTS for the content rules (Teja, 2026-11-08 15:36 + 15:46 IST), enforced at selection by content-rules.ts.
-  // Never page-trimmed (the trimmer removes bullets and certifications only), so here only so every floor has one home.
+  // Never page-trimmed (the trimmer removes bullets only), so here only so every floor has one home.
   // A tailored resume holds AT MOST this many projects ("never and ever 3 projects, only 2"), and exactly this many
   // when the master has them.
   maxProjects: 2,
   // Projects that ALWAYS take one of those slots when the master holds them (Teja, 2026-11-08 ruling G(a):
   // "proj_applyy is always one of the 2 projects"). The other slot goes by relevance. Ids, so a rename is one edit here.
   alwaysProjects: ["proj_applyy"] as readonly string[],
-  // Achievement entries kept at least ("achievements at least 2").
-  minAchievements: 2,
+  // Achievement entries: ALL of them since 2026-11-09 20:41 IST (Teja: "every achievement in the master"; was 2).
+  // Infinity, not a count, because every reader takes min(rule, master count): that min IS "all", with no second code
+  // path for "all" and no number to bump when Teja adds an achievement.
+  minAchievements: Number.POSITIVE_INFINITY,
   // Education entries kept at least ("both educations; the diploma counts").
   minEducation: 2,
 } as const;
 
 /** One unit of trimming. */
-export type TrimStep = "project_bullet_over_cap" | "weakest_bullet" | "certification" | "achievement";
+// Bullets only: the "certification" and "achievement" entry steps were removed on 2026-11-09 (see TRIM_ORDER).
+export type TrimStep = "project_bullet_over_cap" | "weakest_bullet";
 
 /**
  * THE ORDER, as one list: the first step with a candidate is taken, one removal at a time,
@@ -71,16 +78,19 @@ export type TrimStep = "project_bullet_over_cap" | "weakest_bullet" | "certifica
  *   PAGE_FIT_FLOORS.minAchievements, least JD-relevant first, LAST: only when every bullet above its floor is
  *   already gone. Last on purpose, so every resume that fit before this step existed trims exactly as before
  *   (Cursor ce965450 overflowed with all three achievements locked at one bullet each).
+ * - 2026-11-09 20:41 IST (Teja, heard by the orchestrator): >= 5 certifications and every achievement on every
+ *   resume. Both entry steps are GONE, not merely floored: only bullets are trimmed, and a page the bullet floors
+ *   cannot fit is refused (blockedBy names "certifications: never removed" / "achievements: never removed").
  */
-export const TRIM_ORDER: readonly TrimStep[] = ["certification", "project_bullet_over_cap", "weakest_bullet", "achievement"];
+export const TRIM_ORDER: readonly TrimStep[] = ["project_bullet_over_cap", "weakest_bullet"];
 
 /** What was removed, in removal order: enough to show it ("Trimmed to fit one page: ...") and to record it. */
 export interface TrimItem {
   // Which step removed it.
   readonly step: TrimStep;
-  // The bullet ref, or the certification / achievement entry ref.
+  // The bullet ref.
   readonly ref: string;
-  // What printed: the bullet text, or the certification / achievement label.
+  // What printed: the bullet text.
   readonly text: string;
 }
 
@@ -131,38 +141,8 @@ function bulletFloor(section: (typeof BULLET_SECTIONS)[number], ref: string): nu
   return PAGE_FIT_FLOORS.minBulletsByRef[ref] ?? PAGE_FIT_FLOORS.minBullets[section];
 }
 
-/** The printed text of a certification entry (what it is scored on and shown as). */
-function certificationText(entry: ResolvedResume["certifications"][number]): string {
-  // Label plus description, when there is one.
-  return entry.description ? `${entry.label} ${entry.description}` : entry.label;
-}
-
 /** The next removal for one step, or null when that step has nothing above its floor. */
 function candidateFor(step: TrimStep, resume: ResolvedResume, jdKeywords: readonly string[]): Candidate | null {
-  // Certifications: whole entries, while above the floor.
-  if (step === "certification") {
-    // At or below the floor: nothing to take.
-    if (resume.certifications.length <= PAGE_FIT_FLOORS.minCertifications) return null;
-    // Each entry scored on its printed text.
-    return weakest(resume.certifications.map((entry, order) => {
-      // Its text, once.
-      const text = certificationText(entry);
-      // Scored like a bullet.
-      return { ref: entry.ref, text, score: keywordScore(text, jdKeywords), order };
-    }));
-  }
-  // Achievements: whole entries, while above the entry-count floor (their bullets sit at their own floor by now).
-  if (step === "achievement") {
-    // At or below the floor: nothing to take.
-    if (resume.achievements.length <= PAGE_FIT_FLOORS.minAchievements) return null;
-    // Each entry scored on everything it prints: label, description and bullets.
-    return weakest(resume.achievements.map((entry, order) => {
-      // Its printed text, once.
-      const text = [entry.label, entry.description ?? "", ...entry.bullets.map((b) => b.text)].join(" ").trim();
-      // Shown as the label in the trim notice; scored on the whole text.
-      return { ref: entry.ref, text: entry.label, score: keywordScore(text, jdKeywords), order };
-    }));
-  }
   // Bullets: every bullet in an entry still above its level for this step.
   const candidates: Candidate[] = [];
   // Running document position across sections.
@@ -186,18 +166,14 @@ function candidateFor(step: TrimStep, resume: ResolvedResume, jdKeywords: readon
   return weakest(candidates);
 }
 
-/** A resume (resolved, or the ref profile the tailor stores) without one bullet or one certification entry. */
+/** A resume (resolved, or the ref profile the tailor stores) without one bullet. */
 export function withoutTrimmed<R extends {
   readonly experience: readonly { readonly bullets: readonly { readonly ref: string }[] }[];
   readonly projects: readonly { readonly bullets: readonly { readonly ref: string }[] }[];
   readonly achievements: readonly { readonly ref: string; readonly bullets: readonly { readonly ref: string }[] }[];
   readonly certifications: readonly { readonly ref: string; readonly bullets: readonly { readonly ref: string }[] }[];
 }>(resume: R, item: Pick<TrimItem, "step" | "ref">): R {
-  // A certification: drop the entry.
-  if (item.step === "certification") return { ...resume, certifications: resume.certifications.filter((entry) => entry.ref !== item.ref) };
-  // An achievement entry: drop the entry (2026-11-08).
-  if (item.step === "achievement") return { ...resume, achievements: resume.achievements.filter((entry) => entry.ref !== item.ref) };
-  // A bullet: drop it from whichever entry holds it; every other entry is the same object.
+  // A bullet (the only thing ever trimmed): drop it from whichever entry holds it; every other entry is the same object.
   const drop = <T extends { readonly bullets: readonly { readonly ref: string }[] }>(entries: readonly T[]): T[] =>
     // Only the entry that contains it changes.
     entries.map((entry) => (entry.bullets.some((b) => b.ref === item.ref) ? { ...entry, bullets: entry.bullets.filter((b) => b.ref !== item.ref) } : entry));
@@ -207,8 +183,8 @@ export function withoutTrimmed<R extends {
 
 /** The floors at their limit, named for the refusal ("which floor blocked it"). */
 function bindingFloors(resume: ResolvedResume): string[] {
-  // Always binding: what is never trimmed at all.
-  const named = ["skills: never removed", "summary: never removed", "education: never removed"];
+  // Always binding: what is never trimmed at all. Certifications and achievements joined on 2026-11-09 (Teja's ruling).
+  const named = ["skills: never removed", "summary: never removed", "education: never removed", "certifications: never removed", "achievements: never removed"];
   // Each bullet entry sitting at its floor with something on it.
   for (const section of BULLET_SECTIONS) {
     // Each entry.
@@ -219,10 +195,6 @@ function bindingFloors(resume: ResolvedResume): string[] {
       if (floor > 0 && entry.bullets.length <= floor) named.push(`${entry.ref}: keeps >= ${floor} bullets`);
     }
   }
-  // Certifications at their floor.
-  if (resume.certifications.length <= PAGE_FIT_FLOORS.minCertifications) named.push(`certifications: keeps >= ${PAGE_FIT_FLOORS.minCertifications}`);
-  // Achievement entries at their count floor (2026-11-08).
-  if (resume.achievements.length <= PAGE_FIT_FLOORS.minAchievements) named.push(`achievements: keeps >= ${PAGE_FIT_FLOORS.minAchievements}`);
   // The list.
   return named;
 }

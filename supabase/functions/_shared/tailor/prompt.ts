@@ -377,8 +377,10 @@ const TAILOR_POLICY = [
   // THE SELECTION RULE (Teja, 2026-11-08 15:36 + 15:46 IST). A HINT ONLY, like the wording rule below:
   // content-rules.ts enforces every number in code after the answer, so a model that ignores this is corrected.
   "SELECTION RULE: pick EXACTLY 2 projects (the 2 most relevant; never 3), each with at least 4 bullets;",
-  // Part 2: the experience and count floors.
-  "  the Aczen experience with at least 4 bullets; at least 3 certifications, 2 achievements, 2 educations.",
+  // Part 2: the experience and count floors. Certifications 5 and EVERY achievement since Teja's 2026-11-09 20:41 IST
+  // ruling (were 3 and 2); "all of them if fewer" matches content-rules' min(rule, master), so the hint never asks for
+  // a certification the master does not hold.
+  "  the Aczen experience with at least 4 bullets; at least 5 certifications (all of them if fewer), EVERY achievement, 2 educations.",
   // Section separator.
   "",
   // THE WORDING HINT (2026-11-05). 97 of 130 tailor violations in 30 days were words the validator could not
