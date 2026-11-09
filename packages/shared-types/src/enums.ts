@@ -276,6 +276,14 @@ export const AGENT_NAMES = [
    * one name meant two jobs. Appended last, matching migration 20261109190000.
    */
   'scout_web',
+  /**
+   * The job-link-intake edge function (a pasted link read by Gemini). It spent Gemini calls with
+   * no agent_runs row until 2026-11-09, so its quota use was invisible. Appended last, matching
+   * migration 20261109210000.
+   */
+  'job_link_intake',
+  /** The resume-assist edge function (the AI resume editor), unmeasured for the same reason. Same migration, second value. */
+  'resume_assist',
 ] as const;
 /** Union of every legal agent identity. */
 export type AgentName = (typeof AGENT_NAMES)[number];

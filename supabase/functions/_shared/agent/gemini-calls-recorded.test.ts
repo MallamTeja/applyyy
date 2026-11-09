@@ -48,6 +48,12 @@ const SHARED_GEMINI_CALLERS = sources(join(FUNCTIONS_DIR, "_shared"))
   // Kept as a path suffix like "follow-up/nudge", which is how importers name it.
   .map(([path]) => path.replace(/\\/g, "/").split("/_shared/")[1]!.replace(/\.ts$/, ""));
 
+// The per-request Gemini meter (2026-11-09). A function that imports it writes its run row and
+// gemini_calls THROUGH it, the way follow-up calls Gemini through _shared, so the importer inherits both.
+const METER_PATH = "job-link-intake/gemini-meter";
+// The meter's own code: the inheritance below is only sound while the meter really writes both.
+const METER_CODE = code(readFileSync(join(FUNCTIONS_DIR, `${METER_PATH}.ts`), "utf8"));
+
 /** Each function directory (not _shared) with whether it calls Gemini, writes agent_runs, writes gemini_calls. */
 function functionDirs(): Array<{ name: string; gemini: boolean; runs: boolean; recorded: boolean }> {
   // Every top-level directory except the shared library.
@@ -60,10 +66,12 @@ function functionDirs(): Array<{ name: string; gemini: boolean; runs: boolean; r
       const text = sources(join(FUNCTIONS_DIR, name)).map(([, t]) => code(t)).join("\n");
       // Calls Gemini directly, or imports a _shared module that does.
       const gemini = text.includes("generateGeminiContent(") || SHARED_GEMINI_CALLERS.some((suffix) => text.includes(`_shared/${suffix}`));
+      // Imports the meter, so it writes both through it.
+      const metered = text.includes(METER_PATH);
       // Opens or closes an agent_runs row.
-      const runs = text.includes('"agent_runs"') || text.includes("'agent_runs'");
+      const runs = metered || text.includes('"agent_runs"') || text.includes("'agent_runs'");
       // Writes the call count: `gemini_calls:` as an object key in code, the shape of an agent_runs write.
-      const recorded = /\bgemini_calls\s*:/.test(text);
+      const recorded = metered || /\bgemini_calls\s*:/.test(text);
       // The summary.
       return { name, gemini, runs, recorded };
     });
@@ -84,6 +92,29 @@ test("every function that calls Gemini and writes agent_runs also writes gemini_
   }
   // The rule: none may leave gemini_calls to the column default.
   assert.deepEqual(subject.filter((dir) => !dir.recorded).map((dir) => dir.name), []);
+});
+
+// Functions allowed to call Gemini with no agent_runs row, each with the reason it is exempt.
+// Empty on purpose (2026-11-09): every Gemini caller is measured. An entry needs a reason a reviewer can argue with.
+const UNMEASURED_ALLOWED: Readonly<Record<string, string>> = {};
+
+test("every function that calls Gemini writes an agent_runs row at all", () => {
+  // The hole the first test leaves: it only judges functions that already write agent_runs, so a
+  // Gemini caller with NO run row (job-link-intake, resume-assist until 2026-11-09) was invisible to it.
+  const all = functionDirs();
+  // Non-vacuity: the two that were unmeasured must still be detected as Gemini callers; a detection
+  // miss would otherwise pass this test over nothing.
+  for (const known of ["job-link-intake", "resume-assist"]) {
+    // Each is seen calling Gemini.
+    assert.ok(all.some((dir) => dir.name === known && dir.gemini), `${known} was not detected as a Gemini-calling function`);
+  }
+  // The rule: a Gemini caller with no run row, unless allowlisted with a reason.
+  assert.deepEqual(all.filter((dir) => dir.gemini && !dir.runs && !(dir.name in UNMEASURED_ALLOWED)).map((dir) => dir.name), []);
+});
+
+test("the Gemini meter writes agent_runs AND gemini_calls, so its importers may inherit both", () => {
+  // Without this, a meter that stopped writing gemini_calls would still pass every importer above.
+  assert.ok(METER_CODE.includes('"agent_runs"') && /\bgemini_calls\s*:/.test(METER_CODE), `${METER_PATH}.ts no longer writes agent_runs.gemini_calls`);
 });
 
 test("the shared-helper detection finds Gemini calls made outside a function's own directory", () => {

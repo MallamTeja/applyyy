@@ -23,6 +23,8 @@ import { fetchPublicPage } from "./fetch-page.ts";
 import { fetchPinnedHop } from "./pinned-get.ts";
 // scout-web's robots-gated board fetch, reused for the ATS path.
 import { makeFetchBoard } from "../scout-web/fetch-board.ts";
+// Counts this request's Gemini calls into one agent_runs row (gemini-meter.ts says why).
+import { geminiMeter } from "./gemini-meter.ts";
 // The decisions and the seam types.
 import { handleJobLinkIntake, type IntakeStore } from "./handler.ts";
 // The screener's shape checks for the work-auth list and the remote policy (the work-auth gate's config).
@@ -186,9 +188,11 @@ function makeStore(db: SupabaseClient): IntakeStore {
 }
 
 // Entry point.
-Deno.serve(withErrorBoundary("job-link-intake", (req) =>
+Deno.serve(withErrorBoundary("job-link-intake", async (req) => {
+  // This request's Gemini meter: without it the function spent quota with no agent_runs row (2026-11-09).
+  const meter = geminiMeter("job_link_intake");
   // Real seams into the tested handler.
-  handleJobLinkIntake(req, {
+  const response = await handleJobLinkIntake(req, {
     // The wall clock.
     now: () => new Date(),
     // Robots-gated board fetch.
@@ -233,7 +237,8 @@ Deno.serve(withErrorBoundary("job-link-intake", (req) =>
     // The browser render service's POST; page-readers.ts builds the request and shape-checks the answer.
     renderFetch: fetch,
     // One JSON-mode call; a short budget, since a human is waiting on the response.
-    extract: (db, prompt) => generateGeminiContent(db as SupabaseClient, { prompt, timeoutMs: 20_000, maxRetries: 2 }),
+    // Counted by the meter, which writes gemini_calls into this request's run row.
+    extract: (db, prompt) => meter.call(db, () => generateGeminiContent(db as SupabaseClient, { prompt, timeoutMs: 20_000, maxRetries: 2 })),
     // Lazy sign-in per request.
     async connect() {
       // The caller first, then the sign-in: a refused caller costs no password grant (W15, 2026-11-05).
@@ -243,5 +248,9 @@ Deno.serve(withErrorBoundary("job-link-intake", (req) =>
       // Client for the gates and Gemini, store for the writes, and the server pipeline run.
       return { ok: true, userId: client.userId, db: client.db, store: makeStore(client.db), runPipeline: (id) => startServerPipeline(client.db, id) };
     },
-  })
-));
+  });
+  // The run row in the background, so the person waiting pays no extra round trip; no call, no row.
+  EdgeRuntime.waitUntil(meter.record());
+  // The handler's answer, untouched by the telemetry.
+  return response;
+}));
