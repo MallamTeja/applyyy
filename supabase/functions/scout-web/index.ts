@@ -48,9 +48,13 @@ function groundingUris(meta: unknown): string[] {
 }
 
 // Grounded Gemini search. The model is never named here: the client owns the default.
-function makeSearch(db: Parameters<typeof generateGeminiContent>[0]): SearchFn {
+// `onCall` is told about every Gemini call BEFORE it is made, so the run can write agent_runs.gemini_calls
+// (2026-11-09: scout-web closed its run without it, so the column read 0 whatever was spent).
+function makeSearch(db: Parameters<typeof generateGeminiContent>[0], onCall: () => void): SearchFn {
   // The seam signature core.ts expects.
   return async (query) => {
+    // Counted first, as in the matcher and tailor: a call that fails still spent quota.
+    onCall();
     // Search grounding is what turns recalled URLs into current ones. NEVER add
     // responseSchema here: the client refuses tools + responseSchema as invalid_request.
     const options: GenerateGeminiOptions = {
@@ -104,6 +108,8 @@ Deno.serve(withErrorBoundary("scout-web", async (req: Request): Promise<Response
       if (!client.ok) return client.kind === "refused" ? client : { ok: false, reason: client.reason };
       // The RLS-bound client.
       const { db } = client;
+      // This request's Gemini calls; makeSearch below increments it and closeRun writes it.
+      let geminiCalls = 0;
       // The real Store over the signed-in client.
       const store: Store = {
         // Read the profile that seeds the search.
@@ -125,7 +131,8 @@ Deno.serve(withErrorBoundary("scout-web", async (req: Request): Promise<Response
         // Telemetry close.
         async closeRun(runId, patch) {
           // Telemetry failure must not change the HTTP answer, so the result is not inspected.
-          await db.from("agent_runs").update({ ...patch, finished_at: new Date().toISOString() }).eq("id", runId);
+          // gemini_calls added here (not in the handler's patch) because only this wiring sees the real calls.
+          await db.from("agent_runs").update({ ...patch, gemini_calls: geminiCalls, finished_at: new Date().toISOString() }).eq("id", runId);
         },
         // Names for boards the user already tracks, so fingerprints match scout-ats's rows.
         async loadWatchlistNames(boards) {
@@ -208,7 +215,8 @@ Deno.serve(withErrorBoundary("scout-web", async (req: Request): Promise<Response
         },
       };
       // Everything the handler needs, with search bound to the same session.
-      return { ok: true, userId: client.userId, db, store, search: makeSearch(db) };
+      // The search counts each Gemini call into this request's geminiCalls.
+      return { ok: true, userId: client.userId, db, store, search: makeSearch(db, () => { geminiCalls += 1; }) };
     },
   });
 }));

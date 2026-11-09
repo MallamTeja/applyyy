@@ -63,3 +63,70 @@ description. That 0 is real, not a regex that matches nothing: the deleted JS re
 `5f1cb2c`, line 452) agreed with the column on 861/861 live rows (all 361 that mention "PhD" or "Master's", plus
 500 random). The JS regex returns true on 4/4 crafted positives. The Postgres regex returns true on a literal
 "PhD required.", and an independent `ilike` for the same phrases finds 0. No fix migration.
+
+## After all fixes: live site, and the Mumbai what-if (2026-11-09, cb58582)
+
+For Teja's region decision ("ship fixes first, check how fast pages feel, move only if still slow", 2026-11-08).
+
+### How it was measured
+- **Boot and rounds, on the LIVE site.** https://applyyy.vercel.app (cb58582: lazy routes, counts RPC, Approval
+  parallel master + pool, Discovered option B, self-hosted fonts) in headless Chromium from Teja's machine (India), with a
+  fake session. Every `supabase.co` call is answered locally after 300 ms, so no live data is read or written. "Waves" =
+  serial REST rounds: a request that starts after an earlier response ended opens a new wave. 5 cold contexts per
+  route, medians. `/approvals` got 86 fixture rows (the live queue size); the other routes got empty fixtures, so a
+  round that only fires when rows exist is not counted there.
+- **Real Supabase hop, measured.** Chromium `fetch` to the project's REST with the public anon key (an RLS-empty GET
+  that still runs a Postgres query in Sydney). The app's `apikey` header makes these CORS requests, as in the app.
+  5 fresh contexts × (1 cold + 5 warm).
+- **Network RTT, Sydney vs Mumbai.** TCP connect time (= 1 RTT) from the same machine to `s3.` and
+  `ec2.ap-southeast-2.amazonaws.com` vs `s3.` and `ec2.ap-south-1.amazonaws.com`, 7 each.
+
+### Measured
+| | Sydney (today) | Mumbai (ap-south-1) |
+|---|---|---|
+| Network RTT (TCP connect, median) | **~265 ms** (252-288) | **~30 ms** (26-55) |
+| Supabase warm hop (browser, 25 samples) | **354 ms** median; spikes to 0.8-1.06 s | est. **~55 ms** |
+| Supabase COLD first request (browser, 5) | **1,145 ms** median (908-1,315) | est. **~240 ms** |
+
+Supabase is fronted by Cloudflare (edge 31 ms away), so DNS/TCP/TLS are local. The cold cost is ~3.8 Sydney round
+trips (CORS preflight + the edge's leg to the origin), paid on the first request of every fresh page load. Model:
+warm = 1.28 × RTT + 15 ms; cold = 110 ms local + 3.8 × RTT + 15 ms. The Mumbai column is that model at RTT 30 ms,
+an estimate, not a measurement of a Mumbai project.
+
+### Per route (live boot + measured rounds + modelled real hops)
+Boot = first REST request start on the live site (JS, route chunk, fonts). Render = data → painted (~30 ms; 65-105 ms
+for 86 approval rows, measured in the page).
+
+| Route | FCP | Boot (first REST) | Waves | Requests | Fresh load, Sydney | Fresh load, Mumbai | In-app nav, Sydney | In-app nav, Mumbai |
+|---|---|---|---|---|---|---|---|---|
+| /approvals (86 rows) | 168 ms | 226 ms | 1 | 6 | **~1.47 s** | ~0.57 s | ~0.45 s | ~0.16 s |
+| /discovered | 260 ms | 369 ms | 1 | 6 | **~1.54 s** | ~0.64 s | ~0.38 s | ~0.09 s |
+| /pipeline | 196 ms | 268 ms | 1 | 4 | **~1.44 s** | ~0.54 s | ~0.38 s | ~0.09 s |
+| /health | 204 ms | 249 ms | 2 | 10 | **~1.78 s** | ~0.57 s | ~0.74 s | ~0.14 s |
+| /manual-apply | 240 ms | 346 ms | 1 | 9 | **~1.52 s** | ~0.62 s | ~0.38 s | ~0.09 s |
+| /filters (settings) | 204 ms | 234 ms | 1 | 5 | **~1.41 s** | ~0.50 s | ~0.38 s | ~0.09 s |
+| /search-preferences (settings) | 192 ms | 224 ms | 2 | 6 | **~1.75 s** | ~0.55 s | ~0.74 s | ~0.14 s |
+
+Fresh load = boot + cold first hop + (waves − 1) × warm hop + render. In-app navigation reuses the open connection and
+the cached shell: waves × warm hop + render. Spreads were under 2× the median except `/approvals` run 1 (cold
+FCP 1,072 ms), which was re-run: FCP 160-300 ms across those 5.
+
+Not modelled: transfer size. The live 86-row approval read is ~1.67 MB of JSON before compression: `tailored_profile`
+852 KB, `description_raw` 438 KB, `tailor_refs` 382 KB. Over the Sydney leg that can add round trips of TCP growth.
+`description_raw` is read only for the pay-band chip (`ApprovalQueuePage.tsx:527`), so it is the next cut (a lead, not
+built).
+
+### Recommendation: move to Mumbai
+**Threshold:** time-to-usable under **1 s** on a fresh load, the classic limit for keeping the user's flow of thought
+(Nielsen).
+- **Fresh loads miss it on every route: 1.41-1.78 s.** About 1.1 s of that is the single cold first request to Sydney.
+  Client fixes can't remove it: everything left is ≤ 2 serial waves, the DB answers in 8-28 ms, and a `preconnect` would
+  save only the ~110 ms of local DNS/TCP/TLS, not the Sydney round trips.
+- **In-app navigation passes it:** 0.38-0.74 s.
+- **Mumbai would put every fresh load at ~0.5-0.65 s** (−0.9 s each) and navigation at ~0.1-0.15 s (−0.3 to −0.6 s).
+
+So the pages are still slow by this threshold, and what remains is the region. Per Teja's 2026-11-08 ruling, that means
+move. The cost, for Teja to weigh: a NEW Supabase project in `ap-south-1`, plus a data migration, every edge function
+redeployed, and the secrets in all three places (Supabase, GitHub, the Windows env). A region cannot be changed in place.
+If Teja keeps Sydney, the cheaper partial win is the `description_raw` cut above, plus starting the first Supabase
+request before the route chunk loads (that overlaps up to the ~0.25-0.37 s boot with the cold hop).

@@ -58,7 +58,7 @@ export class GeminiPacer {
   private readonly clock: PacerClock;
 
   constructor(options?: { minIntervalMs?: number; clock?: PacerClock }) {
-    // Default 500ms spacing between calls (safely within 15-60 RPM limits).
+    // Default 500 ms spacing = up to 120 calls/min, ABOVE the ~15 RPM free tier; kept short for interactive callers. Batch callers pass their own (matcher/pacer.ts: 5 s, measured 2026-11-09).
     this.minIntervalMs = Math.max(0, options?.minIntervalMs ?? 500);
     this.clock = options?.clock ?? systemClock;
   }

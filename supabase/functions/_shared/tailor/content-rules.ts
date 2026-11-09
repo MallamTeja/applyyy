@@ -216,8 +216,11 @@ export function enforceContentRules(
   let summary = tailored.summary;
   // The variant pick, changed only when the summary comes from a variant.
   let summaryVariant = tailored.summary_variant ?? null;
-  // Only when the model wrote none.
-  if (summary === null) {
+  // When the model wrote none, or wrote one citing nothing (2026-11-09: 9 drain rows refused as summary_without_refs).
+  // Uncited prose is untraceable, so it is treated exactly like a missing summary and replaced by the owner's own.
+  if (summary === null || summary.refs.length === 0) {
+    // Start from none, so the uncited paragraph is never kept when no owner text exists to replace it.
+    summary = null;
     // The master's variants (an absent list = none).
     const variants = master.summary_variants ?? [];
     // The picked variant first (its headline framing was the model's choice), else the most JD-matched one,

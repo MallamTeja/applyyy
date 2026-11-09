@@ -253,6 +253,30 @@ test("tailor stores every floor met and the changes recorded", async () => {
   if (outcome.kind === "tailored") assert.deepEqual([checkContentRules(outcome.resume, master()), outcome.contentRuleChanges.length > 0], [[], true]);
 });
 
+test("an uncited model summary is replaced by the owner's cited paragraph, not refused (2026-11-09 drain, 9 rows)", async () => {
+  // The live failure: the model wrote its own paragraph and cited nothing (summary_without_refs on 060162ca and 8 more).
+  const reply = { ...greedyAnswer(), section_order: ["summary", ...greedyAnswer().section_order], summary: { text: "Engineer who ships full-stack products.", refs: [] } } as unknown as TailoredProfile;
+  // Through the real tailorer, so the repair and the validator both run.
+  const outcome = await tailorerReplying(reply)(POSTING);
+  // Stored, not refused.
+  assert.equal(outcome.kind, "tailored", JSON.stringify(outcome));
+  // The owner's own variant paragraph, cited by its id; the uncited text is gone from the stored refs.
+  if (outcome.kind === "tailored") assert.deepEqual(outcome.refs.summary, { text: "Engineer building LLM features with TypeScript.", refs: ["summary-ai"] });
+});
+
+test("with no owner summary at all, an uncited model summary is dropped, never kept", () => {
+  // A master with neither variants nor its own summary: there is no owner text to put in its place.
+  const bare = { ...master(), summary: null, summary_variants: [] } as unknown as MasterProfile;
+  // The uncited reply.
+  const reply = { ...greedyAnswer(), section_order: ["summary", ...greedyAnswer().section_order], summary: { text: "Engineer who ships full-stack products.", refs: [] } } as unknown as TailoredProfile;
+  // The repair alone, so the assertion is about what it keeps.
+  const { profile, changes } = enforceContentRules(reply, bare, JD);
+  // No summary: untraceable prose is never printed, even when nothing can replace it.
+  assert.equal(profile.summary, null);
+  // And no "added summary" change with an undefined ref was recorded.
+  assert.equal(changes.some((c) => c.section === "summary"), false);
+});
+
 test("tailor picks the cited summary variant instead of failing (LSEG 2b7db9a2)", async () => {
   // The reply cites the AI variant's paragraph verbatim without picking it.
   const reply = { ...greedyAnswer(), section_order: ["summary", ...greedyAnswer().section_order], summary: { text: "Engineer building LLM features with TypeScript.", refs: ["summary-ai"] } } as unknown as TailoredProfile;

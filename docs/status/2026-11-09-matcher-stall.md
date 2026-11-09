@@ -67,3 +67,28 @@ Rows that fail for row-specific reasons (an unreadable model answer) already hav
 Expected effect: the 429 walls should largely disappear. The 503 share remains, and so does the ~50% loss when the model is overloaded; that part is Teja's call.
 
 **Deploy target:** the `matcher` edge function only. No migration and no shared-file change.
+
+## After the fix (matcher deployed from 7fcc6ed at ~12:09 UTC; drain 42612204208, matcher stage 12:25-12:31 UTC)
+
+| Page | Read | Advanced | Errored | Calls | Duration | Calls/min | Errors |
+|---|---|---|---|---|---|---|---|
+| 1 | 10 | 8 | 1 | 10 | 55 s | 11.0 | 1× 503 |
+| 2 | 9 | 6 | 2 | 9 | 86 s | 6.3 | 1× timeout, 1× 429 (0 retries left in a deadline-shortened budget) |
+| 3 | 2 | 2 | 0 | 2 | 10 s | 12.3 | none |
+
+- Every page is now at or under 12.3 calls/min. Before the fix, 429 pages ran at a median of 18.3. The spacing does what it was built for.
+- Error rate: 3 of 21 (14%), against about 50% in the 11-02 to 11-05 drains. The run drained the queue in 3 pages and went green: `CLEAN: matcher -> tailor -> auditor`.
+- **Caveat: 3 pages is a small sample.** The one 429 came on the slowest page (6.3/min), so it was not a burst. A shared quota spent by other callers is the likely cause.
+- Re-measure on the next few auto-drains with the same query: `agent_runs` where `agent='matcher'`, `calls/min = gemini_calls / (duration_ms/60000)`, split by error kind.
+
+## Tailor: measured, no pacer needed (2026-11-09)
+
+- **Since 2026-11-01:** 203 tailor runs. 1 run with a 429 (11-04 18:56, a single-row run), 4 with a 503, 5 with network timeouts.
+- **Drain 42612050212** (tailor stage, 11:49-12:10 UTC, old 500 ms default pacing): 20 pages × 3 rows, 15 runs logged in the window, 0 with a 429. One 503 and one timeout, each costing 1 row. It drained 55 rows and went green.
+- **Why it doesn't burst like the matcher:** 3 rows a page, then the drain's 45 s pause.
+- **Decision:** no tailor pacer.
+- **Telemetry gap:** the tailor writes `agent_runs.gemini_calls = 0` on all 203 runs, so its calls/min cannot be computed. The 429 count is the evidence used instead. Fixing that counter would let the tailor be measured the same way as the matcher.
+
+## Comment corrected
+
+`_shared/gemini/client.ts:61` used to say the 500 ms default was "safely within 15-60 RPM limits". 500 ms is up to 120 calls/min. The comment now says so, says the short default is kept for interactive callers, and points batch callers to their own pacer (`matcher/pacer.ts`).

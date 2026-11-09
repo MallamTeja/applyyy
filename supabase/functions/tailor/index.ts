@@ -34,6 +34,10 @@ import { planTailorBatch } from "../_shared/tailor/tailor-batch.ts";
 import { allLivenessUnknown, classifyJobLiveness, LIVENESS_UNKNOWN_DETAIL } from "../_shared/scout/liveness.ts";
 // The runner: prompt -> model -> validate -> verdict.
 import { createTailorer } from "../_shared/tailor/tailorer.ts";
+// The prompt shape callLlm receives, to type the counted wrapper below.
+import type { TailorPrompt } from "../_shared/tailor/prompt.ts";
+// Counts this run's Gemini calls for agent_runs.gemini_calls (it was never written before 2026-11-09).
+import { countCalls } from "./call-counter.ts";
 // The write: payload first, status second, never the reverse.
 import { failTailorApplication, persistTailorOutcome } from "../_shared/tailor/persist.ts";
 // The master shape, so the stored JSON is cast against the contract rather than inferred.
@@ -239,12 +243,9 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
   // by callLlm below. Undefined until the first row, which falls back to the client defaults.
   let callBudget: CallOptions | undefined;
 
-  // Bind the model to this master and version once, rather than per row.
-  const tailor = createTailorer({
-    master,
-    masterVersion,
-    // The seam the runner's tests replace. Here it is the real transport.
-    callLlm: async (prompt) => {
+  // The run's Gemini call counter, written to agent_runs.gemini_calls at close (2026-11-09: it was
+  // never written, so all 203 runs read 0). One per generateGeminiContent call, as in the matcher.
+  const gemini = countCalls(async (prompt: TailorPrompt): Promise<string> => {
       const outcome = await generateGeminiContent(db, {
         // The fenced prompt, passed through unchanged — the trust boundary was built in
         // prompt.ts and this function must not reshape it.
@@ -269,7 +270,14 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
       // than hand the runner an empty string it would report as malformed JSON.
       if (typeof text !== "string") throw new Error("gemini_returned_no_text");
       return text;
-    },
+  });
+
+  // Bind the model to this master and version once, rather than per row.
+  const tailor = createTailorer({
+    master,
+    masterVersion,
+    // The seam the runner's tests replace. Here it is the real transport, counted (see `gemini` above).
+    callLlm: gemini.call,
   });
 
   // Counters, reported separately because they answer different questions: how many were
@@ -387,6 +395,8 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
         // Transport, quota and write failures, so a run that wrote nothing because every
         // call failed does not read as a clean, idle success.
         error_count: failures.length,
+        // Gemini calls this run made (2026-11-09: never written before, so it read 0 on every run).
+        gemini_calls: gemini.count(),
       })
       .eq("id", runId);
   }
