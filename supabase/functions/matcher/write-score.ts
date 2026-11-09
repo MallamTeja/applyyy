@@ -15,6 +15,10 @@
 // refuses a stale stamp under the row lock with PT409 (migration 20261008130000), so only
 // the run whose payload is actually in the row can move it.
 
+// The closed set of matcher failure codes, required by the `failed` overload of advanceScoredRow.
+// Type-only: fail-exit.ts imports values from here, and a type import is erased, so there is no cycle.
+import type { MatcherFailureReason } from "./fail-exit.ts";
+
 // The matcher's input status: index.ts reads its queue with exactly this filter, so a row
 // at any other status was taken by someone else and is not ours to write.
 export const MATCHER_INPUT_STATUS = "passed_filters";
@@ -98,6 +102,25 @@ export type MatchScoreAdvance =
   | { kind: "skipped_stale" }
   | { kind: "error"; message: string };
 
+// A move to `failed` must name its reason: the overload requires `detail.reason` from the closed
+// MatcherFailureReason set (2026-11-09). Before, this helper took any detail for any edge and left
+// the database's blank-reason refusal as the only control. Type-only import: fail-exit.ts imports
+// this file's values, so a value import back would be a cycle; a type import is erased.
+export function advanceScoredRow(
+  db: MatchScoreClient,
+  applicationId: string,
+  toStatus: "failed",
+  detail: Record<string, unknown> & { readonly reason: MatcherFailureReason },
+  expectedUpdatedAt: string,
+): Promise<MatchScoreAdvance>;
+// The two score edges keep their free-form event detail.
+export function advanceScoredRow(
+  db: MatchScoreClient,
+  applicationId: string,
+  toStatus: Exclude<MatcherTargetStatus, "failed">,
+  detail: Record<string, unknown>,
+  expectedUpdatedAt: string,
+): Promise<MatchScoreAdvance>;
 // Move one scored row, only if nobody has written it since this run's own score write.
 export async function advanceScoredRow(
   // The same client as the write, so RLS and the agent key apply identically.
@@ -111,6 +134,12 @@ export async function advanceScoredRow(
   // The stamp writeMatchScore returned. Required, so an unguarded move cannot be written.
   expectedUpdatedAt: string,
 ): Promise<MatchScoreAdvance> {
+  // The overload closes the type; this refuses what a cast sneaks past it, BEFORE the RPC, so the
+  // matcher never relies on the database to name its own failure (CLAUDE.md §6). Shape, not truthiness.
+  if (toStatus === "failed" && (typeof detail.reason !== "string" || detail.reason.trim() === "")) {
+    // An error the caller records against the row; the row stays where it is.
+    return { kind: "error", message: "refused: move to failed without a non-blank detail.reason" };
+  }
   const { error } = await db.rpc("advance_application_status", {
     // Target application row identifier parameter.
     p_application_id: applicationId,

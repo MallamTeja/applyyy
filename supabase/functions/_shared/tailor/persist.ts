@@ -75,8 +75,9 @@ export async function failTailorApplication(
     p_application_id: applicationId,
     p_to_status: "failed",
     p_agent: "tailor",
-    // The code first, then what made it, structured so a UI can branch on it.
-    p_detail: { reason, ...detail },
+    // The specifics, then the code LAST, so a `reason` key inside detail can never overwrite the code
+    // failure_reason just got (2026-11-09: `{ reason, ...detail }` let it). Structured so a UI can branch on it.
+    p_detail: { ...detail, reason },
   });
   // Carried through rather than absorbed, so a caller can tell "failed cleanly" from
   // "could not even record the failure".

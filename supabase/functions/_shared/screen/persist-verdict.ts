@@ -25,6 +25,13 @@ export interface ScreenPersistClient {
   rpc(fn: string, args: Record<string, unknown>): PromiseLike<{ error: { message: string } | null }>;
 }
 
+// The closed set of reasons the screener fails a row for (2026-11-09). Was `string`, which admits
+// '' — and the payload write below lands failure_reason BEFORE the RPC refuses a blank reason, so a
+// blank would have reached the row. A const list, so the runtime check below reads the same set the type does.
+export const SCREEN_FAILURE_REASONS = ["missing_job_record"] as const;
+// One of the codes above; nothing else type-checks.
+export type ScreenFailureReason = (typeof SCREEN_FAILURE_REASONS)[number];
+
 // The three verdicts the screener can reach from `deduped` — a closed union so an edge
 // the graph does not hold is a compile error rather than a 42501 at runtime.
 export type ScreenVerdict =
@@ -33,7 +40,7 @@ export type ScreenVerdict =
   // A rule rejected it; `reason` is the rule (or `tech_gate`), stored in drop_reason.
   | { readonly status: "dropped_filter"; readonly reason: string | null }
   // The row could not be evaluated at all; `reason` is stored in failure_reason.
-  | { readonly status: "failed"; readonly reason: string };
+  | { readonly status: "failed"; readonly reason: ScreenFailureReason };
 
 // The caller learns whether the row moved. A union, not a throw, so one bad row never
 // unwinds a batch of good ones.
@@ -45,6 +52,12 @@ export async function persistScreenVerdict(
   applicationId: string,
   verdict: ScreenVerdict,
 ): Promise<ScreenPersistOutcome> {
+  // The type closes the set; this refuses what a cast or an untyped caller sneaks past it, BEFORE
+  // any write, so a failed row can never carry a blank or invented failure_reason (CLAUDE.md §6).
+  if (verdict.status === "failed" && !(SCREEN_FAILURE_REASONS as readonly unknown[]).includes(verdict.reason)) {
+    // Named, so the batch log says which reason was refused.
+    return { ok: false, message: `refused: failed verdict with reason ${JSON.stringify(verdict.reason)} outside SCREEN_FAILURE_REASONS` };
+  }
   // Which column carries the reason. passed_filters CLEARS drop_reason: a previous run
   // may have written one and then failed its RPC, and a passed row must not keep it.
   const payload = verdict.status === "failed"

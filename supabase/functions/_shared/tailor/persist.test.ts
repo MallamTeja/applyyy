@@ -378,3 +378,16 @@ test("one-page: trimmed bullets are recorded in the tailored event as page_fit_t
   // Only the new key beside the reason.
   assert.deepEqual(args.p_detail, { reason: "tailored_profile_written", page_fit_trimmed: [item] });
 });
+
+test("failure_reason: a `reason` key inside detail can never overwrite the failure code in the event", async () => {
+  // Imported here, as the test above does, so earlier tests do not depend on the export.
+  const { failTailorApplication } = await import("./persist.ts");
+  // The recorder.
+  const { client, calls } = recordingClient();
+  // A detail that carries its own `reason` (e.g. a future caller passing a raw skip object through).
+  await failTailorApplication(client, APPLICATION_ID, "tailor_input_unusable", { reason: "", skip_reason: "missing_description" });
+  // The event's reason is the closed-union code the column got, not the detail's blank one.
+  const args = calls[1].payload.args as Record<string, unknown>;
+  // Equal to the code written to failure_reason.
+  assert.equal((args.p_detail as Record<string, unknown>).reason, "tailor_input_unusable");
+});

@@ -132,3 +132,17 @@ test("a refused transition is reported, not swallowed", async () => {
   // The caller counts this as a failure; a silent success is how 0 rows moved unnoticed.
   assert.deepEqual(result, { ok: false, message: "transition refused" });
 });
+
+test("a failed verdict with a blank or unknown reason is refused before ANY write", async () => {
+  // Each shape a lenient caller could produce: empty, whitespace, undefined, a code outside the closed set.
+  for (const reason of ["", "   ", undefined, "made_up_reason"]) {
+    // A fresh recorder per case, so one case's calls never satisfy another's assert.
+    const { client, calls } = recordingClient();
+    // Cast: the type already forbids these; this proves the runtime refuses what a cast or a JS caller sneaks past it.
+    const result = await persistScreenVerdict(client, APPLICATION_ID, { status: "failed", reason } as never);
+    // Refused, never a silent success.
+    assert.equal(result.ok, false, `reason ${JSON.stringify(reason)} was accepted`);
+    // No payload write either: a blank failure_reason must not land on the row ahead of the RPC's own refusal.
+    assert.deepEqual(calls, [], `reason ${JSON.stringify(reason)} reached the database`);
+  }
+});

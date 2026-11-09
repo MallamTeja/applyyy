@@ -232,3 +232,17 @@ test("matcher race: a write landing between another run's write and its RPC leav
   assert.equal(row.status, "dropped_filter");
   assert.equal(row.drop_reason, "below floor");
 });
+
+test("advance-scored: a move to failed with no non-blank reason is refused before the RPC", async () => {
+  // Each shape a lenient caller could hand over: no reason key, empty, whitespace, a non-string.
+  for (const detail of [{}, { reason: "" }, { reason: "  " }, { reason: 42 }]) {
+    // A fresh fake per case, so one case's RPC never satisfies another's assert.
+    const { db, rpcArgs } = fakeRow();
+    // Cast: the overload already forbids these; this proves the runtime refuses what a cast sneaks past it.
+    const res = await advanceScoredRow(db, "a1", "failed", detail as never, "t0");
+    // Refused as an error the caller records against the row.
+    assert.equal(res.kind, "error", `detail ${JSON.stringify(detail)} was accepted`);
+    // The RPC never ran: the matcher does not lean on the database to name its own failure.
+    assert.equal(rpcArgs.length, 0, `detail ${JSON.stringify(detail)} reached the RPC`);
+  }
+});
