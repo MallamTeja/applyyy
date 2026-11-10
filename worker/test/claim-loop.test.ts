@@ -32,6 +32,10 @@ const runApplierBatch = (input: Omit<ClaimLoopInput, 'checkRobots'> & Partial<Pi
   runApplierBatchRequired({ checkRobots: async () => ({ kind: 'allow', reason: 'test default', crawlDelayMs: null }), ...input });
 import type { ApplicationPage } from '../src/apply-one.ts';
 import type { AnswerBankRow } from '@applyy/shared-types';
+// Every claimed row carries this snapshot since the form-shape gate (2026-11-10): the stub form now has a
+// resume upload, and a row with a null snapshot would block on no_resume_snapshot instead of reaching the
+// claim/pacing behaviour each test is about. Synthetic content, so nothing real is ever "rendered".
+import { syntheticResume } from './resolved-resume-fixture.ts';
 
 /** A page that always presents one answerable field and never blocks. */
 function stubPage(): ApplicationPage & { close(): Promise<void> } {
@@ -42,10 +46,15 @@ function stubPage(): ApplicationPage & { close(): Promise<void> } {
       // Every real application form asks for an email; without one the form-shape gate (no_email_field,
       // 2026-11-09) refuses the page. Optional, so the planner never blocks on it.
       { id: 'email', label: 'Email', kind: 'email', required: false },
+      // Every real application form asks for a resume; without a file field the form-shape gate
+      // (no_resume_field, 2026-11-10) refuses the page. id/label 'resume' so the attachment planner
+      // places the tailored PDF here rather than blocking on an unplaceable document field.
+      { id: 'resume', label: 'Resume', kind: 'file', required: true },
     ],
     fill: async () => {},
-    // Present because the port requires it; these tests never reach it, since
-    // the stub form below carries no file input.
+    // Reached since 2026-11-10: the stub form above carries a resume upload, so every row that
+    // would submit (live or dry) attaches the rendered PDF here. A no-op is enough: these tests
+    // assert on claiming and pacing, not on what was attached.
     attachFile: async () => {},
     screenshot: async () => new Uint8Array([1]),
     detectBlocker: async () => null,
@@ -75,17 +84,17 @@ function fakeGateway(overrides: Partial<RunGateway> = {}) {
       id: string;
       status: 'approved';
       applyUrl: string;
-      // Carried on the claim because `claim_applications` returns `a.*`. Null
-      // here is honest and harmless: the stub form asks for no document, so the
-      // attachment planner proceeds without one — which is also the case these
-      // tests want, since they are about pacing and not about resumes.
-      tailoredProfile: null;
+      // Carried on the claim because `claim_applications` returns `a.*`. It was
+      // null until 2026-11-10, when the stub form had no upload. The form-shape gate
+      // now needs a resume field, and a null snapshot on a form that asks for one
+      // blocks as no_resume_snapshot, so every row carries the synthetic resume.
+      tailoredProfile: typeof syntheticResume;
       // Unknown employer: the stub form never asks "previously worked at", so null is harmless.
       employerName: null;
       atsProvider: null; // Not a Workday row: the Workday guard stays out of the way.
     }>
   > = [
-    [{ id: 'app-1', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null, atsProvider: null }],
+    [{ id: 'app-1', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: syntheticResume, employerName: null, atsProvider: null }],
     [],
   ];
   const closed: Array<Record<string, unknown>> = [];
@@ -158,16 +167,23 @@ function fakeGateway(overrides: Partial<RunGateway> = {}) {
 }
 
 /**
- * A renderer that throws if anything calls it.
+ * A renderer that returns fixed fake PDF bytes.
  *
- * Deliberately hostile rather than a no-op. None of these tests presents a form
- * with an upload, so a render here would mean the applier had started producing
- * PDFs for forms that never asked for one — and a stub returning fake bytes
- * would absorb that regression silently.
+ * It used to throw ("claim-loop tests must not reach the resume renderer"),
+ * because no test here presented a form with an upload and a render would have
+ * meant PDFs for forms that never asked for one. Since 2026-11-10 the form-shape
+ * gate refuses a page with no resume upload (no_resume_field), so the stub form
+ * must carry one and every row that would submit now renders. When rendering may
+ * happen stays guarded in apply-one.test.ts ("does not render for an application
+ * it is about to park"), where the renderer is the subject. These tests
+ * are about claiming and looping, so the renderer only has to resolve.
  */
-const renderResume = async (): Promise<never> => {
-  throw new Error('claim-loop tests must not reach the resume renderer');
-};
+const renderResume = async () => ({
+  // '%PDF-' magic, so anything sniffing the bytes sees a PDF-shaped buffer.
+  bytes: new Uint8Array([37, 80, 68, 70, 45]),
+  // A well-formed 64-hex digest; its value is never compared here.
+  sha256: 'a'.repeat(64),
+});
 
 /** A clock that never moves, so wall-clock budget never triggers by accident. */
 const frozenClock = () => 1_000_000;
@@ -357,7 +373,8 @@ describe('runApplierBatch', () => {
           id,
           status: 'approved' as const,
           applyUrl: 'http://127.0.0.1:1/a.html',
-          tailoredProfile: null,
+          // A snapshot so the stub form's resume upload attaches instead of blocking (form-shape gate, 2026-11-10).
+          tailoredProfile: syntheticResume,
           // No employer: these tests are about pacing, never about eligibility questions.
           employerName: null,
           atsProvider: null, // Not a Workday row: the Workday guard stays out of the way.
@@ -400,8 +417,8 @@ describe('runApplierBatch', () => {
         return reads <= 2;
       },
       claimApplications: async () => [
-        { id: 'app-1', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null, atsProvider: null },
-        { id: 'app-2', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null, atsProvider: null },
+        { id: 'app-1', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: syntheticResume, employerName: null, atsProvider: null },
+        { id: 'app-2', status: 'approved', applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: syntheticResume, employerName: null, atsProvider: null },
       ],
       releaseClaim: async (id, reason) => {
         releases.push({ id, reason });
@@ -465,7 +482,7 @@ describe('APPLY_ONLY_ID', () => {
         // Leased on hand-out, exactly as the RPC does.
         for (const id of picked) leased.add(id);
         // Each row's applyUrl names it, so page navigations identify the row.
-        return picked.map((id) => ({ id, status: 'approved' as const, applyUrl: `http://127.0.0.1:1/${id}`, tailoredProfile: null, employerName: null, atsProvider: null }));
+        return picked.map((id) => ({ id, status: 'approved' as const, applyUrl: `http://127.0.0.1:1/${id}`, tailoredProfile: syntheticResume, employerName: null, atsProvider: null }));
       },
       // Recorded per row so the assertions can say WHICH row moved.
       advanceStatus: async (id, to) => {
@@ -671,7 +688,7 @@ describe('submit cap and circuit breaker', () => {
         // Leased on hand-out, exactly as the RPC does.
         for (const id of picked) leased.add(id);
         // applyUrl names the row, so page navigations identify which row was worked on.
-        return picked.map((id) => ({ id, status: 'approved' as const, applyUrl: `http://127.0.0.1:1/${id}`, tailoredProfile: null, employerName: null, atsProvider: null }));
+        return picked.map((id) => ({ id, status: 'approved' as const, applyUrl: `http://127.0.0.1:1/${id}`, tailoredProfile: syntheticResume, employerName: null, atsProvider: null }));
       },
       // Per row, so the assertions can say WHICH rows moved.
       advanceStatus: async (id, to) => {
@@ -1082,7 +1099,7 @@ describe('runApplierBatch — unusable rows at the head of the queue (W4)', () =
         return picked.map((row) =>
           row.unusable
             ? { id: row.id, unusable: 'no_apply_url' as const, reason: `no apply_url on job job-${row.id}; not attempted` }
-            : { id: row.id, status: 'approved' as const, applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null, atsProvider: null },
+            : { id: row.id, status: 'approved' as const, applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: syntheticResume, employerName: null, atsProvider: null },
         );
       },
       // A status write moves the row out of `approved` and ends the lease, as the RPC does.
@@ -1160,7 +1177,7 @@ describe('runApplierBatch — the Settings daily cap (W10)', () => {
   /** Three workable rows, then an empty claim; enough to exceed any cap below 3. */
   function threeRowGateway(fetchDailyCap: RunGateway['fetchDailyCap']) {
     // One claimable row per id.
-    const row = (id: string) => ({ id, status: 'approved' as const, applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null, atsProvider: null });
+    const row = (id: string) => ({ id, status: 'approved' as const, applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: syntheticResume, employerName: null, atsProvider: null });
     // Batches served in order; the trailing [] ends the run.
     const batches = [[row('app-1'), row('app-2'), row('app-3')], []];
     // The shared fake, with the claim and the cap under test overridden.
@@ -1286,7 +1303,7 @@ describe('runApplierBatch — the Settings daily cap (W10)', () => {
 // B2 (P1-6, 2026-11-05): the re-check before every live submit, as the claim loop wires it.
 describe('B2: pre-submit re-check config', () => {
   // A row whose job today's experience ceiling (2 years) drops.
-  const seniorRow = (id: string) => ({ id, status: 'approved' as const, applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: null, employerName: null, atsProvider: null, preGateJob: { title: 'Software Engineer', description_raw: 'Requires 8+ years.', location_raw: null, min_experience_years: 8, discovered_via: null } });
+  const seniorRow = (id: string) => ({ id, status: 'approved' as const, applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: syntheticResume, employerName: null, atsProvider: null, preGateJob: { title: 'Software Engineer', description_raw: 'Requires 8+ years.', location_raw: null, min_experience_years: 8, discovered_via: null } });
   // Every gate open except the ceiling.
   const CEILING_2 = { titles: [], keywords: [], excludedKeywords: [], workAuthorizedCountries: null, remoteLocationPolicy: 'any' as const, experienceMaxYears: 2 };
 

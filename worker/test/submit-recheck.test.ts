@@ -39,7 +39,9 @@ function page(closed: string | null | 'absent' = null) {
     goto: async () => {},
     // One answerable field, so the row would otherwise submit.
     // An optional Email field too: the form-shape gate (no_email_field, 2026-11-09) refuses a page without one.
-    extractFields: async () => [{ id: 'first_name', label: 'First Name', kind: 'text', required: true }, { id: 'email', label: 'Email', kind: 'email', required: false }] as never,
+    // And a Resume file input: the no_resume_field gate (2026-11-10) refuses a form with nowhere to attach the resume;
+    // the row carries tailoredProfile and the deps fake renderResume/uploadResume/attachFile, so the attach resolves.
+    extractFields: async () => [{ id: 'first_name', label: 'First Name', kind: 'text', required: true }, { id: 'email', label: 'Email', kind: 'email', required: false }, { id: 'resume', label: 'Resume', kind: 'file', required: true }] as never,
     fill: async () => {},
     attachFile: async () => {},
     screenshot: async () => new Uint8Array([1, 2, 3]),

@@ -17,6 +17,10 @@
     <label for="email">Email</label>
     <!-- type=text, as Greenhouse renders its email box. -->
     <input id="email" type="text" aria-required="true">
+    <!-- A resume upload (2026-11-10): without one the no_resume_field gate calls this a signup form, not an application. -->
+    <label for="resume">Resume</label>
+    <!-- type=file, the only shape the gate accepts as "this page takes a resume". -->
+    <input id="resume" type="file">
 
     <!-- A static-list combobox: its options render on open. -->
     <div class="select__container">

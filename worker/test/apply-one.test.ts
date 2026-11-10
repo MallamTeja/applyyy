@@ -53,10 +53,22 @@ import { OPEN_RECHECK } from './open-pregate.ts';
  */
 const EMAIL_FIELD: FormField = { id: 'email', label: 'Email', kind: 'email', required: false };
 
+/**
+ * Every real application form also shows a resume upload; without one the form-shape gate (no_resume_field,
+ * 2026-11-10) reads the page as a job-alerts or newsletter signup and refuses it before any planner runs.
+ * Same contract as EMAIL_FIELD: listed explicitly in each fake form meant to be a real application, never
+ * appended by fakePage, so the tests that drop it on purpose still read as dropping it.
+ */
+// id 'resume' matches the attachment planner's resume pattern, so the box is placeable rather than an
+// unplaceable_document_field blocker; OPTIONAL, as the real Greenhouse wrapper reads (aria-required="false").
+const RESUME_FIELD: FormField = { id: 'resume', label: 'Resume', kind: 'file', required: false };
+
 const answerableForm: FormField[] = [
   { id: 'first_name', label: 'First Name', kind: 'text', required: true },
   // The form-shape gate's email box (see EMAIL_FIELD).
   EMAIL_FIELD,
+  // The form-shape gate's resume upload (see RESUME_FIELD); planFill skips files, so the fills are unchanged.
+  RESUME_FIELD,
 ];
 
 /** The matching bank. Real rows carry more columns; the planner reads four. */
@@ -305,6 +317,8 @@ describe('applyToOne', () => {
         { id: 'ctc', label: 'Expected CTC', kind: 'text', required: true },
         // The form-shape gate's email box (see EMAIL_FIELD).
         EMAIL_FIELD,
+        // The form-shape gate's resume upload (see RESUME_FIELD), so the park is for the CTC question alone.
+        RESUME_FIELD,
       ],
     });
     const { gateway, transitions } = fakeGateway();
@@ -337,6 +351,8 @@ describe('applyToOne', () => {
         { id: 'ctc', label: 'Expected CTC', kind: 'text', required: true },
         // The form-shape gate's email box (see EMAIL_FIELD).
         EMAIL_FIELD,
+        // The form-shape gate's resume upload (see RESUME_FIELD), so 'Expected CTC' stays the only blocker.
+        RESUME_FIELD,
       ],
     });
     const { gateway, transitions } = fakeGateway();
@@ -669,32 +685,6 @@ describe('applyToOne — the resume', () => {
       expect(outcome.blockers.map((blocker) => blocker.reason)).toContain('no_resume_snapshot');
     }
   });
-
-  it('submits a form with no upload control without rendering anything', async () => {
-    // NON-VACUITY TWIN for every "did not render" assertion above, and for the
-    // missing-snapshot guard. Without it, an implementation that never rendered
-    // at all — the exact bug this whole change fixes — would pass all of them.
-    // It also pins the behaviour on a form asking for no document: proceed,
-    // rather than park on a resume the employer never wanted.
-    const renderer = fakeRenderer();
-    const { page, submit } = fakePage();
-    const { gateway, transitions } = fakeGateway();
-
-    const outcome = await applyToOne({
-      // No snapshot AND no upload control: this must still go out.
-      row: { ...row, tailoredProfile: null },
-      page,
-      gateway,
-      answers,
-      env: { DRY_RUN: 'false' },
-      renderResume: renderer.render,
-    });
-
-    expect(renderer.rendered).toHaveLength(0);
-    expect(submit).toHaveBeenCalledTimes(1);
-    expect(transitions).toEqual(['applying', 'applied']);
-    expect(outcome.kind).toBe('submitted');
-  });
 });
 
 /**
@@ -781,7 +771,10 @@ describe('applyToOne — recording where the artifacts went', () => {
     // an earlier run of the same application may have recorded a real path.
     // Pinned here as well as in the gateway because this is where the null is
     // MANUFACTURED; the gateway test proves what is done with it.
-    const { page } = fakePage();
+    // Pinned to an explicit no-upload form, because the default answerableForm now carries RESUME_FIELD
+    // (2026-11-10). Since the no_resume_field gate, this shape is refused in dry run before any render, so the
+    // null here comes from a blocked dry run, still the path that manufactures it.
+    const { page } = fakePage({ extractFields: async () => [answerableForm[0]!, EMAIL_FIELD] });
     const { gateway, artifactWrites } = fakeGateway();
 
     await applyToOne({ row, page, gateway, answers, env: {}, renderResume: fakeRenderer().render });
@@ -823,7 +816,8 @@ describe('applyToOne — recording where the artifacts went', () => {
 // the row for the human, not escape to the claim loop and fail identically on every run.
 describe('applyToOne — a fill the page rejects', () => {
   // A form whose one field has a bank answer, so the planner plans a fill that the page then rejects.
-  const countryForm: FormField[] = [{ id: 'q1', label: 'Country', kind: 'combobox', required: true }, EMAIL_FIELD];
+  // EMAIL_FIELD and RESUME_FIELD make it a real form shape, so the fill rejection is what stops it, not the gate.
+  const countryForm: FormField[] = [{ id: 'q1', label: 'Country', kind: 'combobox', required: true }, EMAIL_FIELD, RESUME_FIELD];
   // The bank answer the page will refuse to select.
   const countryAnswers = [
     // A plausible-looking value the page rejects, as a near-miss option would be.
@@ -880,8 +874,8 @@ describe('applyToOne — a fill the page rejects', () => {
   // H2 (2026-11-06): the refused fields are reported to unanswered_questions before the park, and the
   // report is best-effort: a failed report must never skip the status write.
   it('reports the refused fields, and a rejected report still parks the row at blocked_needs_human', async () => {
-    // One required question nothing can answer.
-    const { page, submit } = fakePage({ extractFields: async () => [{ id: 'q9', label: 'Notice period?', kind: 'text', required: true }, EMAIL_FIELD] });
+    // One required question nothing can answer, plus the gate's email box and resume upload (a real form shape).
+    const { page, submit } = fakePage({ extractFields: async () => [{ id: 'q9', label: 'Notice period?', kind: 'text', required: true }, EMAIL_FIELD, RESUME_FIELD] });
     // The recording gateway for the park.
     const { gateway, advances } = detailGateway();
     // What was reported, before the report fails.
@@ -994,7 +988,8 @@ describe('applyToOne — the submit result', () => {
           // Numbered path, so the test can tell WHICH upload a detail points at.
           return `screens/app-1-${uploads}.png`;
         }),
-      // The resume upload is not under test; the default form asks for none.
+      // The resume upload is not under test here. Since 2026-11-10 the default form carries RESUME_FIELD, so this
+      // IS called on the live path; it records nothing into `ordered`, so the sequence assertions are unchanged.
       uploadResume: async () => 'resumes/app-1.pdf',
       // Recorded into the same sequence as the advances.
       setArtifactPaths: async () => {
@@ -1159,7 +1154,8 @@ describe('applyToOne — the employer name reaches the planner', () => {
   it('applyToOne: employerName "GitLab" lets the previously-worked question be answered', async () => {
     // The only field on the form, so any blocker below can only be this one.
     // presubmitFacts: the page's pre-click read comes back clean, so every live check passes (task 2).
-    const { page } = fakePage({ extractFields: async () => [workedQ, EMAIL_FIELD], presubmitFacts: async () => ({ submitControls: 1, invalid: [], requiredEmpty: [] }) });
+    // RESUME_FIELD beside EMAIL_FIELD: the form-shape gate passes, so the verdict is the planner's alone.
+    const { page } = fakePage({ extractFields: async () => [workedQ, EMAIL_FIELD, RESUME_FIELD], presubmitFacts: async () => ({ submitControls: 1, invalid: [], requiredEmpty: [] }) });
     // Dry run (env unset): the outcome reports viability without moving the row.
     const outcome = await applyToOne({
       row: { ...row, employerName: 'GitLab' },
@@ -1176,7 +1172,8 @@ describe('applyToOne — the employer name reaches the planner', () => {
 
   it('applyToOne: a null employerName refuses the previously-worked question', async () => {
     // Same form and profile; only the employer is unknown.
-    const { page } = fakePage({ extractFields: async () => [workedQ, EMAIL_FIELD] });
+    // The same form shape as above, resume upload included, so only the employer differs.
+    const { page } = fakePage({ extractFields: async () => [workedQ, EMAIL_FIELD, RESUME_FIELD] });
     // Dry run again, so the comparison with the test above is like for like.
     const outcome = await applyToOne({
       row: { ...row, employerName: null },
@@ -1208,6 +1205,8 @@ describe('applyToOne — optional EEO option mismatch', () => {
       { id: 'first_name', label: 'First Name', kind: 'text', required: true },
       // The form-shape gate's email box (see EMAIL_FIELD); optional and unanswered, so it is never filled.
       EMAIL_FIELD,
+      // The form-shape gate's resume upload (see RESUME_FIELD); planFill skips files, so `filled` is unchanged.
+      RESUME_FIELD,
     ];
   }
 
@@ -1314,6 +1313,8 @@ describe('applyToOne — optional EEO option mismatch', () => {
       { id: 'country', label: 'Country', kind: 'combobox', required: false },
       // The form-shape gate's email box (see EMAIL_FIELD).
       EMAIL_FIELD,
+      // The form-shape gate's resume upload (see RESUME_FIELD), so the fill rejection is what parks it.
+      RESUME_FIELD,
     ];
     // A plain bank row is enough: non-EEO answers need no attestation.
     const countryAnswers = [
@@ -1473,9 +1474,56 @@ describe('applyToOne — a page with no form fields (W5)', () => {
     ]);
   });
 
+  it('refuses a form with no upload control (no_resume_field) without rendering anything', async () => {
+    // REWRITTEN 2026-11-10 (T5, the no_resume_field gate). This test used to pin "a form asking for no document:
+    // proceed". That shape (an email box, no file input) is exactly the job-alerts / newsletter form the gate now
+    // refuses, so a live run there would POST Teja's email to a signup. The old non-vacuity role ("rendering does
+    // happen somewhere") is carried by the formWithResumeUpload live-submit tests above, which assert the render.
+    // What stays from the old test: nothing is rendered, and a missing snapshot is NOT what stops this row.
+    const renderer = fakeRenderer();
+    // Pinned to an explicit no-upload form: the default answerableForm carries RESUME_FIELD (2026-11-10).
+    const { page, submit } = fakePage({ extractFields: async () => [answerableForm[0]!, EMAIL_FIELD] });
+    // Records every status write with its detail, as the no_email_field live test does.
+    const { gateway, advances } = recordingGateway();
+
+    const outcome = await applyToOne({
+      // No snapshot AND no upload control: the form-shape gate must answer first, not the snapshot check.
+      row: { ...row, tailoredProfile: null },
+      page,
+      gateway,
+      answers,
+      // A LIVE run: the case that would have clicked submit on a signup form.
+      env: { DRY_RUN: 'false' },
+      renderResume: renderer.render,
+    });
+
+    // A refused page renders no PDF: no bytes made for an application that will not happen.
+    expect(renderer.rendered).toHaveLength(0);
+    // THE assertion: no click on a page without a resume upload.
+    expect(submit).not.toHaveBeenCalled();
+    // Straight to the human lane, never through `applying`.
+    expect(advances.map((advance) => advance.to)).toEqual(['blocked_needs_human']);
+    // A form-shape gap, so the Manual apply lane picks it up (the same reason the no_email_field page gets).
+    expect(outcome).toMatchObject({ kind: 'blocked', reason: 'unsupported_form' });
+  });
+
+  it('no_resume_field dry run: an email-only form reports exactly the no_resume_field blocker', async () => {
+    // The dry-run twin: the verdict names WHY, so the reason cannot drift to no_resume_snapshot or vanish.
+    const { page } = fakePage({ extractFields: async () => [answerableForm[0]!, EMAIL_FIELD] });
+    // A plain gateway: the dry run's subject is the blocker list, not the writes.
+    const { gateway } = fakeGateway();
+
+    // Default env is a dry run; snapshot present, so only the form shape can block.
+    const outcome = await applyToOne({ row, page, gateway, answers, env: {}, renderResume: fakeRenderer().render });
+
+    // Exactly one blocker, the new one: a snapshot is present, the field is answerable, the email box exists.
+    expect(outcome.kind === 'dry_run_complete' ? outcome.blockers.map((blocker) => blocker.reason) : outcome.kind).toEqual(['no_resume_field']);
+  });
+
   it('no_email_field non-vacuity: a Greenhouse email box typed "text" but labelled "Email" is a form, and submits', async () => {
     // Greenhouse renders its email input as type="text" (fixtures/greenhouse/*): the label must carry it.
-    const { page, submit } = fakePage({ extractFields: async () => [answerableForm[0]!, { id: 'email', label: 'Email', kind: 'text', required: false }] });
+    // RESUME_FIELD too, so the no_resume_field stop is satisfied and only the email-by-label question is tested.
+    const { page, submit } = fakePage({ extractFields: async () => [answerableForm[0]!, { id: 'email', label: 'Email', kind: 'text', required: false }, RESUME_FIELD] });
     // Fresh recorder.
     const { gateway, advances } = recordingGateway();
 

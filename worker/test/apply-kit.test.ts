@@ -405,8 +405,9 @@ describe('the manual apply kit on the real GitLab form', () => {
     const { kit, error } = await kitOn('/synthetic/late-render-form.html');
     // Built.
     expect(error).toBeNull();
-    // Both questions listed.
-    expect(kit?.fields.map((field) => field.label)).toEqual(['Full Name', 'Email']);
+    // Every control listed. Resume joined on 2026-11-10: the fixture now carries the upload the no_resume_field
+    // gate requires, and the kit lists the file control like any other.
+    expect(kit?.fields.map((field) => field.label)).toEqual(['Full Name', 'Email', 'Resume']);
   }, 60_000);
 
   // T3 (2026-11-05): every combobox reached Teja with options=[] because react-select renders them
@@ -566,6 +567,10 @@ describe('buildApplyKit robots refusal (B2, K2)', () => {
       extractFields: async () => [
         { id: 'email', label: 'Email', kind: 'email', required: true },
         { id: 'q9', label: 'Notice period?', kind: 'text', required: true },
+        // A resume upload, because the no_resume_field gate (2026-11-10) calls a form without a file field
+        // "not a bot-usable form" and writes a resume-only kit, which would skip the planner this case tests.
+        // Its id/label match the resume pattern, so the planner answers it from the tailored PDF, not a blocker.
+        { id: 'resume', label: 'Resume', kind: 'file', required: true },
       ],
     } as never;
     // Allowed by robots.
@@ -574,7 +579,9 @@ describe('buildApplyKit robots refusal (B2, K2)', () => {
     expect(reported).toEqual([['notice_period']]);
     // The kit was still written.
     expect(writes).toContain('appendApplicationNote');
-    expect(kit.fields.length).toBe(2);
+    // Every field the form showed is listed: email, the notice question and the resume upload the
+    // no_resume_field gate (2026-11-10) now requires on this hand-built form. Still exact, so a dropped field fails.
+    expect(kit.fields.length).toBe(3);
   });
 
   test('robots "wait" is a plain error, writing nothing', async () => {

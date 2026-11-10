@@ -95,10 +95,12 @@ function fakePage(overrides: Partial<ApplicationPage> = {}): ApplicationPage {
     // Loads nothing.
     goto: async () => {},
     // A form the planner fully answers (email from the profile).
-    extractFields: async () => [{ id: 'email', label: 'Email', kind: 'email', required: true }],
+    // Plus a Resume file input: the no_resume_field gate (2026-11-10) refuses a form without one, so every
+    // fake-page case would stop at the form-shape gate instead of reaching the check it is about.
+    extractFields: async () => [{ id: 'email', label: 'Email', kind: 'email', required: true }, { id: 'resume', label: 'Resume', kind: 'file', required: true }],
     // Typed into nothing.
     fill: async () => {},
-    // No resume input.
+    // Resolves: the Resume field above is attached through here (no_resume_field gate, 2026-11-10).
     attachFile: async () => {},
     // Evidence bytes.
     screenshot: async () => new Uint8Array([1]),
@@ -190,6 +192,8 @@ describe('dry run (applyToOne, DRY_RUN unset)', () => {
       extractFields: async () => [
         { id: 'email', label: 'Email', kind: 'email', required: false },
         { id: 'decl', label: 'I confirm the information above is accurate', kind: 'checkbox', required: true },
+        // A Resume file input, so the no_resume_field gate (2026-11-10) passes and the declaration is what refuses.
+        { id: 'resume', label: 'Resume', kind: 'file', required: true },
       ],
     });
     // The recorded writes.

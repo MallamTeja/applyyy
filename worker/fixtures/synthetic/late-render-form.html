@@ -21,7 +21,9 @@
         // Labelled by <label for>, which the extractor reads.
         '<form><label for="_systemfield_name">Full Name</label><input id="_systemfield_name" type="text" required>' +
         // An email box, so the kit's closed-posting backstop sees a real form.
-        '<label for="_systemfield_email">Email</label><input id="_systemfield_email" type="email" required></form>';
+        '<label for="_systemfield_email">Email</label><input id="_systemfield_email" type="email" required>' +
+        // A resume upload (2026-11-10): the no_resume_field gate calls a page without one a signup form, not an application.
+        '<label for="_systemfield_resume">Resume</label><input id="_systemfield_resume" type="file"></form>';
     }, 1200);
   </script>
 </body>

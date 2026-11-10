@@ -173,7 +173,7 @@ export interface PresubmitFacts {
 export type PresubmitCheck =
   // A captcha, login wall or anti-bot page (detectBlocker).
   | 'page_blocker'
-  // No form, or no email box (formShapeBlockersFor).
+  // No form, no email box, or no resume upload (formShapeBlockersFor).
   | 'form_shape'
   // The planner left a required question for the human (human_only, unanswered, no option match).
   | 'fill_plan'
@@ -529,7 +529,8 @@ export interface FormShapeBlocker {
   readonly label: string;
   // A closed union so a new page-level stop has to be named here. 'no_email_field' (2026-11-09): the page has
   // controls, but none asks for an email, so it is a search bar or a job board, not an application form.
-  readonly reason: 'no_form_fields' | 'no_email_field';
+  // 'no_resume_field' (2026-11-09, W5 residual): an email box but no resume upload, so a job-alerts or newsletter form.
+  readonly reason: 'no_form_fields' | 'no_email_field' | 'no_resume_field';
 }
 
 /**
@@ -547,12 +548,18 @@ function isEmailField(field: Pick<FormField, 'kind' | 'label'>): boolean {
  * Shared, not copied: on 2026-11-08 the rehearsal CLI passed a 0-field page as "ready"
  * because only apply-one carried this check, and the first real submit is gated on that CLI.
  *
- * Two stops, both "this is not an application form", never "this posting is closed":
+ * Three stops, all "this is not an application form", never "this posting is closed":
  * - no_form_fields (W5): nothing was extracted at all.
  * - no_email_field (2026-11-09): every application form asks for an email. jobicy.com's job page for
  *   Supabase 8f20a220 had two controls (a site search box and a dark-mode toggle); the applier's dry run
  *   reported wouldSubmit=true with zero blockers there, so a LIVE run would have clicked a submit on a
  *   page with no form. Closed-ness needs the page's own evidence (postingClosed), which this does not read.
+ * - no_resume_field (2026-11-09, wiring-audit re-check W5 residual): a job-alerts or newsletter form has an email
+ *   box and one submit button and nothing else. The attachment planner reads "no file input" as "nothing to
+ *   attach" and the pre-click check sees one submit control, so a LIVE run would POST Teja's email to a signup.
+ *   POSITIVE shape (CLAUDE.md §6): an application form shows a resume upload. Every captured real form
+ *   (worker/fixtures greenhouse + lever, re-checked by test/form-shape-no-resume.test.ts) has one. A form that
+ *   takes a resume by URL only would land here too and go to the Manual lane: the fail-closed direction.
  */
 export function formShapeBlockersFor(id: string, fields: readonly Pick<FormField, 'kind' | 'label'>[]): FormShapeBlocker[] {
   // Checked on the RAW extraction, before any planner skips a kind (planFill skips files).
@@ -566,6 +573,12 @@ export function formShapeBlockersFor(id: string, fields: readonly Pick<FormField
     const found = fields.map((field) => field.label).slice(0, 5).join(', ');
     // Same row-level shape as the empty page: no single control is at fault.
     return [{ id, label: `No email field on the opened page, so it is not an application form (${fields.length} field(s): ${found || 'unlabelled'})`, reason: 'no_email_field' }];
+  }
+  // An email box but no resume upload: a signup form, not an application (W5 residual). Kind 'file' only: the
+  // extractor reports every <input type=file>, which is how each captured Greenhouse/Lever form takes the resume.
+  if (!fields.some((field) => field.kind === 'file')) {
+    // Same row-level shape: no single control is at fault, and the human sees why the bot stopped.
+    return [{ id, label: `No resume upload on the opened page, so it is not an application form (${fields.length} field(s))`, reason: 'no_resume_field' }];
   }
   // A real form shape: the planners judge its questions, not this gate.
   return [];

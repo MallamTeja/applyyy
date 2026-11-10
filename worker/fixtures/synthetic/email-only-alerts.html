@@ -1,0 +1,34 @@
+<!doctype html>
+<!-- 2026-11-09 (wiring-audit re-check, W5 residual): the shape of an aggregator job page whose ONLY form is a
+     "job alerts" signup. One email box, one submit button, no resume upload. Before no_resume_field, every gate
+     passed it: an email field (form-shape gate), nothing to attach (attachment planner), exactly one submit
+     control (pre-click check), so a LIVE run would have POSTed Teja's email to a newsletter. Synthetic: the
+     shape, not a copy of any real site. -->
+<html lang="en">
+<head>
+  <!-- Plain document; the extractor reads controls only. -->
+  <meta charset="utf-8">
+  <!-- Titled like an aggregator's job page for a real-looking open role. -->
+  <title>Backend Engineer at Example Co - Job Board</title>
+</head>
+<body>
+  <!-- The posting itself: text and an off-site apply link, no application form. -->
+  <main>
+    <!-- The role, as the aggregator shows it. -->
+    <h1>Backend Engineer</h1>
+    <!-- A line of description so the page reads as a job page. -->
+    <p>Build APIs in Go and Postgres. Remote, India.</p>
+    <!-- The real way to apply leaves the site. -->
+    <a href="#elsewhere">Apply on company site</a>
+  </main>
+  <!-- The trap: a job-alerts signup, a real form with one email box and one submit button. -->
+  <form action="/subscribe" method="post">
+    <!-- Labelled "Email", exactly what the form-shape gate looks for. -->
+    <label for="alert-email">Email</label>
+    <!-- A real email input, so the extractor reads kind "email". -->
+    <input id="alert-email" name="email" type="email" required>
+    <!-- The single visible submit control the pre-click check counts. -->
+    <button type="submit">Get job alerts</button>
+  </form>
+</body>
+</html>

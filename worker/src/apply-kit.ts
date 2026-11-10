@@ -23,7 +23,7 @@ import type { AnswerBankRow, ApplicationStatus, MasterIdentity, MasterProfile, R
 // The pre-submit port this kit narrows, the renderer port, and the robots port: reused, not forked.
 import type { ApplicationPage, ResumeRenderer, RobotsCheck } from './apply-one.ts';
 // The applier's own form-shape gate (2026-11-09): the kit and the applier must agree on what is "not a form".
-import { formShapeBlockersFor } from './apply-one.ts';
+import { formShapeBlockersFor, type FormShapeBlocker } from './apply-one.ts';
 // The applier's own form-URL resolver port, so the kit opens the same form the applier would.
 import type { FormUrlResolver } from './form-url.ts';
 // The control shape the extractor returns.
@@ -314,7 +314,8 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
   // email box posting_closed; on 2026-11-09 all 4 live posting_closed notes came from that guess and none from
   // evidence: jobicy's open Supabase listing (validThrough 2026-12-06) and two rows Teja then applied to by hand.
   const [notAForm] = formShapeBlockersFor(row.id, fields);
-  // An empty page (no_form_fields) or a page with controls but no email box (no_email_field).
+  // An empty page (no_form_fields), a page with controls but no email box (no_email_field), or an email box with
+  // no resume upload (no_resume_field, 2026-11-10: a job-alerts or newsletter signup).
   if (notAForm !== undefined) {
     // The page's own evidence: an HTTP error status or a closed-posting sentence. Absent method = none.
     const closed = page.postingClosed === undefined ? null : await page.postingClosed();
@@ -322,12 +323,19 @@ export async function buildApplyKit(input: BuildApplyKitInput): Promise<ApplyKit
     if (closed !== null) throw new KitSkip('posting_closed', `apply kit: posting_closed: ${formUrl}: ${closed}`);
     // No evidence: open as far as we can tell, but no form the bot can read. K2: a resume-only kit, written
     // once, instead of a failure retried every run (L&T 7890ff1b's peoplestrong form sat at "Kit pending").
-    // The two shapes get their own sentence, because Teja acts differently on each.
-    const reason = notAForm.reason === 'no_form_fields'
+    // Each shape gets its own sentence, because Teja acts differently on each. A Record over the closed union, not
+    // a ternary: on 2026-11-10 the ternary sent the new no_resume_field to the "job board" sentence by default, and a
+    // Record makes the next new reason a type error here instead of a wrong note.
+    const sentences: Record<FormShapeBlocker['reason'], string> = {
       // Nothing rendered: a slow client app or an iframe-only page.
-      ? `could not read the form at ${formUrl} (no form fields appeared within the wait, and the page does not say the posting is closed); open it and fill it by hand with this resume`
+      no_form_fields: `could not read the form at ${formUrl} (no form fields appeared within the wait, and the page does not say the posting is closed); open it and fill it by hand with this resume`,
       // Controls but no email box: an aggregator's job page or a careers index (a closed posting can redirect there too).
-      : `no bot-usable application form at ${formUrl}: ${notAForm.label}. The page does not say the posting is closed; it is likely a job board or careers page, so open it, follow its apply link and fill the form by hand with this resume`;
+      no_email_field: `no bot-usable application form at ${formUrl}: ${notAForm.label}. The page does not say the posting is closed; it is likely a job board or careers page, so open it, follow its apply link and fill the form by hand with this resume`,
+      // An email box but no resume upload: a job-alerts or newsletter signup sitting where the apply form was expected.
+      no_resume_field: `no bot-usable application form at ${formUrl}: ${notAForm.label}. It looks like a job-alerts or newsletter signup, not the application; the page does not say the posting is closed, so find the real application form and fill it by hand with this resume`,
+    };
+    // The sentence for this page's shape.
+    const reason = sentences[notAForm.reason];
     // The note, with the wall if one was seen.
     return writeResumeOnlyKit(input, row, master, formUrl, wall === null ? [reason] : [reason, `the form page shows a ${wall} wall; expect to clear it by hand`]);
   }

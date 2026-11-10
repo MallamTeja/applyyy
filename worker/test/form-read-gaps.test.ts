@@ -48,8 +48,9 @@ describe('T1: goto waits for a client-rendered form', () => {
       await createPlaywrightPage(raw).goto(`${server.url}/synthetic/late-render-form.html`);
       // Read immediately after goto returns, as the kit and the applier do.
       const fields = await extractFields(raw);
-      // Both controls, the email among them: before T1 this read 0 fields.
-      expect(fields.map((field) => field.label)).toEqual(['Full Name', 'Email']);
+      // Every control, the email among them: before T1 this read 0 fields. Resume joined on 2026-11-10 (the
+      // no_resume_field gate needs a file input for the fixture to stay a real application form).
+      expect(fields.map((field) => field.label)).toEqual(['Full Name', 'Email', 'Resume']);
     } finally {
       // Closed either way.
       await raw.close();

@@ -39,6 +39,9 @@ import { checkRobots, type RobotsFetcher, type RobotsResponse } from '../../pack
 import type { AnswerBankRow } from '@applyy/shared-types';
 // The form field type, so the stub forms below are checked against the real shape.
 import type { FormField } from '../src/extract-fields.ts';
+// A valid resume snapshot: the stub form now has a resume input (no_resume_field gate, 2026-11-10), and a row without
+// a tailored profile would stop at no_resume_snapshot before any allow case reached submit.
+import { syntheticResume } from './resolved-resume-fixture.ts';
 
 // A real Greenhouse job URL shape, so the gate derives a realistic origin and path.
 const APPLY_URL = 'https://job-boards.greenhouse.io/gitlab/jobs/8775507002';
@@ -53,19 +56,30 @@ const DRY_ENV = {} as const;
 /** One field the bank answers, so a test only blocks when it means to. */
 // The optional Email field: every real form asks for one, and the form-shape gate (no_email_field, 2026-11-09)
 // refuses a page without it. Optional, so the planner never blocks on it.
-const answerableForm: FormField[] = [{ id: 'first_name', label: 'First Name', kind: 'text', required: true }, { id: 'email', label: 'Email', kind: 'email', required: false }];
+// The Resume file input: the form-shape gate (no_resume_field, 2026-11-10) refuses a page with no file field as "not an
+// application form", so without it every allow case would block instead of submit. The id/label match the planner's
+// resume pattern, so the tailored resume is attached rather than the field left as a blocker.
+const answerableForm: FormField[] = [
+  // The one text field the bank answers.
+  { id: 'first_name', label: 'First Name', kind: 'text', required: true },
+  // Passes the no_email_field gate (2026-11-09); optional so the planner never blocks on it.
+  { id: 'email', label: 'Email', kind: 'email', required: false },
+  // Passes the no_resume_field gate (2026-11-10); filled from the row's tailored profile.
+  { id: 'resume', label: 'Resume', kind: 'file', required: true },
+];
 
 /** The matching bank row. Real rows carry more columns; the planner reads these four. */
 const answers = [
   { question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text' },
 ] as unknown as AnswerBankRow[];
 
-/** The claimed row. No tailored profile: the stub form asks for no document. */
+/** The claimed row. A real tailored profile, because the stub form asks for a resume (no_resume_field gate, 2026-11-10). */
 const row: ClaimedApplication = {
   id: 'app-1',
   status: 'approved',
   applyUrl: APPLY_URL,
-  tailoredProfile: null,
+  // Non-null: a null profile would block every allow case at no_resume_snapshot instead of reaching submit.
+  tailoredProfile: syntheticResume,
   employerName: 'GitLab',
   atsProvider: null, // Not a Workday row: the Workday guard stays out of the way.
 };
@@ -87,6 +101,7 @@ function fakePage(overrides: Partial<ApplicationPage> = {}) {
     goto,
     extractFields: async () => answerableForm,
     fill: async () => {},
+    // Resolves: an allow case attaches its resume here (no_resume_field gate, 2026-11-10).
     attachFile: async () => {},
     screenshot: async () => new Uint8Array([1, 2, 3]),
     // No captcha, so an allow verdict runs all the way to submit.
@@ -124,15 +139,19 @@ function fakeGateway() {
 }
 
 /**
- * A renderer that throws if anything calls it.
+ * A renderer that resolves with PDF-magic bytes.
  *
- * Hostile rather than a no-op: no form here has a file input, so a render would mean the
- * applier started producing PDFs it cannot use, and fake bytes would hide that.
+ * It used to throw, because no form here had a file input and a render would have meant
+ * the applier produced PDFs it could not use. Since the no_resume_field gate (2026-11-10)
+ * every applicable form has a resume input, so an allow case legitimately renders one.
+ * The refusal cases still never reach it: they stop before goto, which they assert.
  */
-const renderResume: ResumeRenderer = async () => {
-  // Loud, so an unexpected render fails the test that caused it.
-  throw new Error('renderResume must not be called in robots tests');
-};
+const renderResume: ResumeRenderer = async () => ({
+  // "%PDF-": the smallest bytes that look like a real PDF to anything that sniffs them.
+  bytes: new Uint8Array([37, 80, 68, 70, 45]),
+  // A well-formed sha256 hex string, so evidence writes carry a realistic digest.
+  sha256: 'a'.repeat(64),
+});
 
 /**
  * A fetcher that answers every request the same way, mirroring gate.test.ts.

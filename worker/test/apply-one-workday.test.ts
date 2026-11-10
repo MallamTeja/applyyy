@@ -34,6 +34,9 @@ import { runApplierBatch, type RunGateway } from '../src/claim-loop.ts';
 import type { AnswerBankRow } from '@applyy/shared-types';
 // The form field type, so the stub form is checked against the real shape.
 import type { FormField } from '../src/extract-fields.ts';
+// A valid resume snapshot: the stub form now has a resume input (no_resume_field gate, 2026-11-10), and a row without
+// a tailored profile would stop at no_resume_snapshot before the control row ever reached submit.
+import { syntheticResume } from './resolved-resume-fixture.ts';
 
 // A real Workday posting URL shape (Mastercard's verified tenant, 2026-11-01).
 const WORKDAY_URL = 'https://mastercard.wd1.myworkdayjobs.com/CorporateCareers/job/Pune-India/Senior-Software-Engineer_R-123';
@@ -47,7 +50,17 @@ const DRY_ENV = {} as const;
 // One field the bank answers, so the control row runs all the way to submit.
 // The optional Email field: every real form asks for one, and the form-shape gate (no_email_field, 2026-11-09)
 // refuses a page without it. Optional, so the planner never blocks on it.
-const answerableForm: FormField[] = [{ id: 'first_name', label: 'First Name', kind: 'text', required: true }, { id: 'email', label: 'Email', kind: 'email', required: false }];
+// The Resume file input: the form-shape gate (no_resume_field, 2026-11-10) refuses a page with no file field as "not an
+// application form", so without it the Greenhouse control would block instead of submit. The id/label match the
+// planner's resume pattern, so the tailored resume is attached rather than the field left as a blocker.
+const answerableForm: FormField[] = [
+  // The one text field the bank answers.
+  { id: 'first_name', label: 'First Name', kind: 'text', required: true },
+  // Passes the no_email_field gate (2026-11-09); optional so the planner never blocks on it.
+  { id: 'email', label: 'Email', kind: 'email', required: false },
+  // Passes the no_resume_field gate (2026-11-10); filled from the row's tailored profile.
+  { id: 'resume', label: 'Resume', kind: 'file', required: true },
+];
 // The matching bank row; the planner reads these four columns.
 const answers = [
   { question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text' },
@@ -55,8 +68,9 @@ const answers = [
 
 // A claimed row; each test overrides the URL and provider it is about.
 function claimed(applyUrl: string, atsProvider: ClaimedApplication['atsProvider']): ClaimedApplication {
-  // No tailored profile: the stub form asks for no document.
-  return { id: 'app-1', status: 'approved', applyUrl, tailoredProfile: null, employerName: 'Acme', atsProvider };
+  // A real tailored profile: the stub form asks for a resume (no_resume_field gate, 2026-11-10), and a null profile
+  // would block the Greenhouse control at no_resume_snapshot. A Workday row parks before it is ever read.
+  return { id: 'app-1', status: 'approved', applyUrl, tailoredProfile: syntheticResume, employerName: 'Acme', atsProvider };
 }
 
 // A fake page whose goto and submit are spies: the guard's promise is that neither runs.
@@ -73,7 +87,7 @@ function fakePage() {
     extractFields: async () => answerableForm,
     // Filling does nothing in a test.
     fill: async () => {},
-    // No document is asked for.
+    // Resolves: the control row attaches its resume here (no_resume_field gate, 2026-11-10); a Workday row never does.
     attachFile: async () => {},
     // Any bytes; uploads are faked.
     screenshot: async () => new Uint8Array([1, 2, 3]),
@@ -104,7 +118,7 @@ function fakeGateway() {
     releaseClaim,
     // Faked storage paths.
     uploadScreenshot: async () => 'screens/app-1.png',
-    // Faked storage paths.
+    // Faked storage paths; the control row's resume upload lands here.
     uploadResume: async () => 'resumes/app-1.pdf',
     // No-op evidence write.
     setArtifactPaths: async () => {},
@@ -113,11 +127,15 @@ function fakeGateway() {
   return { gateway, advanceStatus, releaseClaim };
 }
 
-// A renderer that throws: no form here asks for a document.
-const renderResume: ResumeRenderer = async () => {
-  // Loud, so an unexpected render fails the test that caused it.
-  throw new Error('renderResume must not be called in workday guard tests');
-};
+// A renderer that resolves with PDF-magic bytes. It used to throw because no form here asked for a document; since the
+// no_resume_field gate (2026-11-10) every applicable form has a resume input, so the Greenhouse control renders one.
+// The Workday rows still never reach it: they park before goto, which expectParked proves by goto staying uncalled.
+const renderResume: ResumeRenderer = async () => ({
+  // "%PDF-": the smallest bytes that look like a real PDF to anything that sniffs them.
+  bytes: new Uint8Array([37, 80, 68, 70, 45]),
+  // A well-formed sha256 hex string, so evidence writes carry a realistic digest.
+  sha256: 'a'.repeat(64),
+});
 
 // A spied robots check that allows: for a Workday row it must never even be asked.
 function allowingRobots() {
@@ -285,7 +303,7 @@ describe('runApplierBatch and the workday guard', () => {
       gateway,
       // A fresh page per application.
       openPage: async () => fakePage().page,
-      // Never called here.
+      // Called once, for the Greenhouse row's resume (no_resume_field gate, 2026-11-10); the Workday row parks first.
       renderResume,
       // Allows everything; the Workday row never reaches it.
       checkRobots: allowingRobots(),
