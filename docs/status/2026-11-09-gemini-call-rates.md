@@ -71,3 +71,35 @@ select status, count(*) from applications where status in ('passed_filters','sco
 - **Why both tables:** `agent_runs.gemini_calls` counts calls per run, which is the formula's input. `gemini_usage` holds one row per attempt with an `outcome`, which is the only source of 429/503 counts and of per-key minutes. The two reconcile exactly wherever both exist (the tailor 18:33 run: 2 = 2; resume_assist: 10 = 10).
 - **Tailor 503s:** they come from model overload, not our rate (memory: 503 "high demand" is per model, not per key). All 16 503s fell between 18:00 and 18:07, inside the drain burst.
 - **Re-measure** after the drain tailors the 9 rows: re-run Q1b, Q2b and Q4b. One run is not a rate.
+
+---
+
+## Addendum, 23:15 IST: the 22:53 postscreen drain (task 4)
+
+**Run:** `gh run list --workflow=postscreen-drain.yml` gives run `42664229401`, workflow_dispatch at 22:54 IST on 245aadc, **completed / success**.
+
+### The 9 rows moved back at 22:44-22:45 (`application_events` to_status='passed_filters', 22:40-22:48)
+
+| Rows | Now | Why |
+|---|---|---|
+| f4e2f35f, 060162ca, 22571d3c, db9b46ef, dc7cfdec, 800e8d08, dabb8ae2 (7) | `awaiting_approval` (22:57-22:58) | tailored and audited clean |
+| 38bb2f12 | `failed`, `tailor_validation_failed` (22:56:17) | matcher scored it 59; the tailor refused **`page_overflow`**. Its blockedBy list: skills, summary, education, **certifications, achievements: never removed**, plus bullet floors. The one-page fit had nothing left it was allowed to trim. |
+| 05b45e3f | `dropped_filter`, drop_reason `title_seniority` (22:54:37) | matcher pre-gate: the title "Customer Journey - Software Engineer - AVP" contains "AVP". Correct. Its `failure_reason` column still says `tailor_validation_failed`, carried over from the old failure (the status_change detail shows it). A dropped row keeping a stale failure_reason is cosmetic, but a reader filtering on failure_reason will miscount it. |
+
+### Certifications and achievements on the 7 tailored rows (`tailored_profile`)
+
+| master_version | Rows | certifications | achievements |
+|---|---|---|---|
+| **29** (3 certs, 3 achievements in master) | 060162ca, 800e8d08, dabb8ae2, dc7cfdec, f4e2f35f (**5 rows**) | **3** (= all of master) | 3 (all) |
+| **30** (5 certs, 3 achievements) | 22571d3c, db9b46ef (2 rows) | **5** | 3 (all) |
+
+- Master versions are from `master_profiles`: v29 at 22:45, **v30 at 22:56**.
+- The drain's first two tailor runs (22:54:55 and 22:56:02) started before v30 existed or at the same minute. So 5 rows keep every cert their master had, but carry 3, not ≥5.
+- Teja's ruling (2026-11-09 20:41) forbids re-tailoring the approval queue for this rule, so they stay as they are. Flagged for the orch only.
+- Every row keeps all achievements.
+
+### Rates for this run (Q1b / Q2b / Q4b re-run with the window `>= 22:50 IST`)
+- **Q1b:** matcher 1 run (9 in / 8 out, 8 calls, 41.3 s). Tailor 3 runs: 3 calls in 20.5 s, 3 in 19.8 s (3 in / 2 out, the overflow), 2 in 15.3 s.
+- **Q2b:** matcher **11.61** calls/min. Tailor **8.62** average, **9.09** peak per run.
+- **Q4b:** matcher 8 × ok, tailor 8 × ok. **0 × 429, 0 × 503.** The meters reconcile: 8 calls = 8 attempts for each agent.
+- **Q4:** the busiest key+model minute is **2** (keys 3 and 8, `gemini-3.5-flash-lite`, 22:54). Nowhere near RPM.

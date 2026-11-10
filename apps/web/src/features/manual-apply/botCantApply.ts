@@ -85,6 +85,8 @@ export function botCantApplyReasons(row: Pick<ManualApplyRow, 'status' | 'blockR
   if (workday) reasons.add(WORKDAY);
   // The kit worker refused to read the form for robots.txt.
   if (kit.kind === 'skipped' && kit.code === 'robots_refused') reasons.add(ROBOTS);
+  // W29: the kit worker found no form URL on the job, so the bot has nothing to open either.
+  if (kit.kind === 'skipped' && kit.code === 'no_apply_url') reasons.add('the job has no form link');
   // The open questions, counted from the kit's fields.
   const open = openFields(kit).length;
   // The park reason, only while parked (the column may outlive the park) and only a real enum value.

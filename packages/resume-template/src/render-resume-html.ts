@@ -348,7 +348,21 @@ function renderAchievement(entry: ResolvedAchievement): string {
 
 /** Render one certification. Same shape and same seam reasoning as renderAchievement. */
 function renderCertification(entry: ResolvedCertification): string {
-  return renderUndatedEntry(entry);
+  // CERT INLINE (2026-11-10, row 38bb2f12): the issuer goes on the title line as
+  // "Name (Issuer)" instead of its own detail line. Teja's rule keeps >= 5 certs on
+  // every resume, so the second line per cert made the certifications column the
+  // tallest half of the split and pushed floor-trimmed resumes past one page
+  // (measured: column 157.6pt -> 113.9pt, the refused v30 shape 791.0pt -> 767.7pt
+  // against a 778.1pt budget). A cert's description is a short issuing body, which
+  // reads naturally in parentheses; achievements keep the two-line layout because
+  // theirs is a phrase.
+  const issuer = optionalText(entry.description);
+  // No issuer: render untouched. Appending would print "Name ()", the dangling
+  // separator renderUndatedEntry's own comment warns against.
+  if (issuer === null) return renderUndatedEntry(entry);
+  // The label carries the issuer, and the description is cleared so the detail line
+  // is not printed twice. The label is still escaped once, inside renderUndatedEntry.
+  return renderUndatedEntry({ ...entry, label: `${entry.label} (${issuer})`, description: null });
 }
 
 /**

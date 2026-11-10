@@ -68,7 +68,8 @@ export type KitState =
 
 /* Why the worker skipped a kit: a CLOSED list mirroring worker/src/apply-kit.ts KitSkip['code'], so a
  * new worker code shows as "unreadable" (and gets noticed) instead of a guessed sentence. */
-export const KIT_SKIP_CODES = ['robots_refused', 'posting_closed'] as const;
+// no_apply_url (W29, 2026-11-09): listed here BEFORE the worker writes it, so the card never shows it as unreadable.
+export const KIT_SKIP_CODES = ['robots_refused', 'posting_closed', 'no_apply_url'] as const;
 // The union of the closed list above.
 export type KitSkipCode = (typeof KIT_SKIP_CODES)[number];
 

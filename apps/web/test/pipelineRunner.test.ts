@@ -133,3 +133,17 @@ describe('classifyResponse', () => {
     assert.equal(classifyResponse('auditor', { processed: 0 }).status, 'failed');
   });
 });
+
+// pipelineRunner residual (peer 4's audit recheck, 2026-11-09): the matcher's below-threshold drops (`dropped`) and its
+// pre-gate drops (`pre_gate_dropped`) are status transitions out of passed_filters, like `scored`, but the run summary
+// counted only `scored`, so a run that dropped every row read "0 advanced".
+describe('matcher moves count every transition out of passed_filters', () => {
+  it('scored + dropped + pre_gate_dropped all count as moved', () => {
+    // A real matcher 200 shape (matcher/index.ts: scored, dropped, pre_gate_dropped, failures).
+    const result = classifyResponse('matcher', { success: true, scored: 1, dropped: 3, pre_gate_dropped: 2, failures: [] });
+    // Six rows left passed_filters.
+    assert.equal(result.moved, 6);
+    // And the run is a success, not a no-op.
+    assert.equal(result.status, 'succeeded');
+  });
+});

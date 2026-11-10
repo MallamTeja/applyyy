@@ -62,8 +62,10 @@ const RESPONSE_SHAPES: Readonly<Record<PipelineAgentId, { readonly moved: readon
   normalizer: { moved: ['deduped', 'dropped_duplicate'], errors: 'errors' },
   // passed and dropped are both transitions out of `deduped`; `failed` counts rows it had to fail.
   screener: { moved: ['passed', 'dropped'], errors: 'failed' },
-  // only `scored` is a transition; failures[] rows stay at passed_filters.
-  matcher: { moved: ['scored'], errors: 'failures' },
+  // scored, dropped (below the score floor) and pre_gate_dropped (before scoring) are all transitions out of
+  // passed_filters; counting only `scored` read a run that dropped every row as "0 advanced" (audit recheck
+  // 2026-11-09). failures[] rows stay at passed_filters.
+  matcher: { moved: ['scored', 'dropped', 'pre_gate_dropped'], errors: 'failures' },
   // `refused` is an honest validator verdict, not a move and not an error, so it is neither.
   tailor: { moved: ['tailored'], errors: 'failures' },
   // `audited` counts rows that reached awaiting_approval; clean/flagged are a breakdown of it.

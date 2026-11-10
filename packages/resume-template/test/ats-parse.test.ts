@@ -287,9 +287,22 @@ test('ATS parse — every achievement and certification is readable as text', ()
   // far as the keyword matcher is concerned.
   const entries = [...resume.achievements, ...resume.certifications];
   assert.ok(entries.length > 0, 'the fixture has no achievements or certifications — this assertion would be vacuous');
+  // Which entries are certifications, by ref: the two kinds print their description differently.
+  const certRefs = new Set(resume.certifications.map((cert) => cert.ref));
 
   for (const entry of entries) {
     assert.ok(text.includes(entry.label), `"${entry.label}" does not survive text extraction`);
+    // A certification's issuer prints inline since 2026-11-10 ("Name (Issuer)", one line,
+    // to keep 5 certs on one page): it must survive as exactly that line, issuer included.
+    if (entry.description !== null && certRefs.has(entry.ref)) {
+      // The whole inline line, so a dropped or reordered issuer fails here.
+      assert.ok(
+        lines.some((line) => line === `${entry.label} (${entry.description})`),
+        `the certification line "${entry.label} (${String(entry.description)})" does not survive extraction`,
+      );
+      // Handled: the own-line check below is for achievements only.
+      continue;
+    }
     // A null description is the normal case and there is nothing to look for;
     // a present one must survive as its own readable line, not be swallowed.
     if (entry.description !== null) {

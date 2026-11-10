@@ -568,3 +568,84 @@ test("N1 control: a plain-text body is matched exactly as before", () => {
   // Kept, as it always was.
   assert.equal(verdict.drop, false, JSON.stringify(verdict));
 });
+
+// --- T4 (2026-11-10): software-role spellings the configured list does not literally contain -------------
+// MEASURED: a stratified random sample of 230 of the 11,149 live tech_gate_unclassified rows held 10 clear
+// software roles (4.3%, Wilson 95% [2.4%, 7.8%]). Each was dropped because its title spells a configured role
+// differently: "Software Development Engineer" is not "Software Developer", "SW" is not "Software", "AI Field
+// Engineer" is not "AI Engineer". These tests run against Teja's LIVE config (search_preferences, 2026-11-04),
+// so they fail for the reason the live rows failed, not for a toy list's gaps.
+const LIVE_PREFS: TechGatePreferences = {
+  // Copied from the live row; the order does not matter to the gate.
+  titles: ["Software Engineer Intern", "Junior Developer", "Graduate Engineer", "Software Engineer", "Software Developer", "Backend", "Back-end", "Frontend", "Front-end", "Full Stack", "Full-Stack", "Fullstack", "SDE", "Developer", "Junior", "Graduate", "New Grad", "Associate Software", "Forward Deployed", "FDE", "AI Engineer", "ML Engineer", "Machine Learning Engineer", "Data Engineer", "Data Analyst", "Data Scientist", "Analytics Engineer", "Web Developer", "Web Engineer", "Cloud Engineer", "DevOps", "Site Reliability", "SRE", "Platform Engineer", "Infrastructure Engineer", "AI Support Engineer", "AI Solutions Engineer", "AI Systems Engineer", "AI Reliability Engineer", "Cloud Support Engineer", "Cloud Security Engineer", "Cloud Operations Engineer", "Security Engineer", "AI Applied Scientist", "AI Research Engineer", "AI Security Research", "Distributed Systems Engineer", "Data Infrastructure", "Technical Services Engineer", "Generative AI", "Intern", "MERN", "Internship", "GenAI"],
+  // The five live keywords.
+  keywords: ["Node.js", "React", "TypeScript", "Python", "REST APIs"],
+  // The live exclusions; they still run first, so a variant cannot rescue a senior title.
+  excludedKeywords: ["Senior", "Lead", "Principal", "5+ years", "Staff Engineer", "Staff Software", "Staff Security", "Staff ML", "Staff UI", "Staff Data", "Staff Backend", "Staff Frontend", "Staff Full Stack", "Sr", "Head", "Director", "VP", "Manager", "Android", "Research Scientist", "Staff", "Designer", "II", "III", "IV", "Architect"],
+};
+
+// Pattern 1: "software"/"SW" plus an engineering role word, in any order (live: Zscaler, Parallel Wireless).
+test("T4 spelling: 'Software Development Engineer' passes (not literally 'Software Developer')", () => {
+  // The live title, description absent as it is on most dropped rows.
+  const verdict = screenTechRole("Software Development Engineer - Java + Distributed Systems", null, LIVE_PREFS);
+  // Kept, with no warning: a recognised software role.
+  assert.deepEqual(verdict, { drop: false });
+});
+
+// The abbreviation recruiters use for software.
+test("T4 spelling: 'SW Engineer' passes as a software engineer", () => {
+  // The live title.
+  const verdict = screenTechRole("AI-Driven 4G PHY SW Engineer", null, LIVE_PREFS);
+  // Kept.
+  assert.deepEqual(verdict, { drop: false });
+});
+
+// Pattern 2: an AI/ML word directly qualifying "Engineer", with at most one word between (live: Fireworks AI).
+test("T4 spelling: 'AI Field Engineer' passes as an AI engineer", () => {
+  // The live title.
+  const verdict = screenTechRole("AI Field Engineer - Enterprise", null, LIVE_PREFS);
+  // Kept.
+  assert.deepEqual(verdict, { drop: false });
+});
+
+// Pattern 3: the four engineer kinds seen live, each of them software work (Canonical, xAI, Mistral, LangChain).
+test("T4 spelling: kernel, model, research and deployed engineers pass", () => {
+  // One live title per kind.
+  for (const title of ["PC Platforms Kernel Engineer - Ubuntu Linux", "Model Engineer, Post-Training & RL", "Applied Scientist - Research Engineer (Optimisation), EMEA", "Deployed Engineer (Atlanta)"]) {
+    // Each one kept, named in the failure message.
+    assert.deepEqual(screenTechRole(title, null, LIVE_PREFS), { drop: false }, title);
+  }
+});
+
+// OVER-ADMIT GUARD: true out-of-scope titles from the same live sample, chosen because each carries a word a
+// spelling rule reads ("AI", "Engineer", "Engineering", "Software", "Systems"). Every one must still drop.
+test("T4 guard: out-of-scope titles carrying AI/engineer/software words still drop", () => {
+  // Sales, pre-sales, hardware, ops and AI-adjacent non-engineering titles, all from the 2026-11-10 sample.
+  const outOfScope = [
+    "AI Tutor - Finnish", "Strategic Account Executive, AI - San Francisco", "CPGR Growth Leader, AI Engineering, Strategic Accounts",
+    "Machine Learning Fellow - Human Frontier Collective (Canada)", "AI & Process Automation Specialist", "Specialist Seller - Enterprise Select - AI",
+    "Solution Engineer", "Solutions Engineer", "Partner Engineer", "Delivery Engineer", "Financial Systems Engineer",
+    "OT Systems Engineer, Physical Infrastructure - Memphis", "OSP Engineer - Memphis", "Hardware Engineer", "Memory Design Engineer",
+    "Emulation Engineer", "Customer Quality Engineer", "UTM Engineer - DoorDash Air", "Tech Sourcer (Contract)", "Product Marketing, Postgres",
+  ];
+  // Each one dropped; the message names the title that slipped through.
+  for (const title of outOfScope) assert.equal(screenTechRole(title, null, LIVE_PREFS).drop, true, title);
+});
+
+// The exclusions still run before any spelling rule: a senior software title is not rescued.
+test("T4 guard: an excluded seniority term still drops a software-spelled title", () => {
+  // "II" is a live exclusion; the title also matches spelling pattern 1.
+  const verdict = screenTechRole("Enterprise Software Test Engineer II", null, LIVE_PREFS);
+  // Dropped by the exclusion, with its own code.
+  assert.equal(verdict.drop && verdict.code, "tech_gate");
+});
+
+// T4 follow-up (orch, 2026-11-10): the live title "Software Engineering Manager__Electronic Trading_Java _AI" passed
+// once spelling pattern 1 recognised it, because `\bManager\b` cannot match before "_" (a regex word character).
+// An underscore separates words in a scraped title as a space does, so the exclusion must see "Manager" as a word.
+test("T4 guard: an underscore-joined title still meets its exclusion ('Manager__Electronic Trading')", () => {
+  // The exact live title.
+  const verdict = screenTechRole("Software Engineering Manager__Electronic Trading_Java _AI", null, LIVE_PREFS);
+  // Dropped by the live "Manager" exclusion, with the exclusion's code.
+  assert.equal(verdict.drop && verdict.code, "tech_gate", JSON.stringify(verdict));
+});

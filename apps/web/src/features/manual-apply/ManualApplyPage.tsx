@@ -279,6 +279,8 @@ const SKIP_WORDS: Readonly<Record<KitSkipCode, string>> = {
   robots_refused: 'Site refuses bots: apply by hand.',
   // The worker found the posting closed; it may have reopened, so the form link stays.
   posting_closed: 'Posting closed: check the form, and mark it failed if it is gone.',
+  // The job row has no form URL, so no kit could be built: find the posting by hand.
+  no_apply_url: 'No form link on this job: find the posting and apply by hand.',
 };
 
 /* The row's own tailored resume, kit or no kit (Teja, 2026-11-05: "the tailored resume must be there in

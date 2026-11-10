@@ -416,7 +416,9 @@ describe('renderResumeHtml — achievements and certifications (undated sections
     // Follows renderEducation's grade_display pattern: a detail line rather than
     // a suffix on the title, so the qualifying fact is scannable.
     assert.match(html, /<div class="resume__entry-detail">national finals, 300\+ teams<\/div>/);
-    assert.match(html, /<div class="resume__entry-detail">Coursera<\/div>/);
+    // Certifications changed on 2026-11-10: the issuer now prints inline as "Name (Issuer)"
+    // (see the CERT INLINE suite), so the present description is asserted on the title line.
+    assert.match(html, /<h3 class="resume__entry-title">Meta Back-End Developer Professional Certificate \(Coursera\)<\/h3>/);
   });
 
   it('NON-VACUITY TWIN: a null description prints no detail line and no separator', () => {
@@ -547,6 +549,39 @@ function entryHtml(html: string, ref: string): string {
   // The entry body alone.
   return html.slice(start, start + 1 + Math.min(...ends));
 }
+
+// CERT INLINE (2026-11-10, row 38bb2f12): Teja's rule keeps >= 5 certifications on every
+// tailored resume, and with the issuer on its own detail line the certifications column
+// (157.6pt) out-grew the achievements column (134.2pt) and set the split's height. A
+// v30 resume with Student Tribe at its floor then measured 791.0pt against a 778.1pt
+// budget and was refused page_overflow. One line per cert ("Name (Issuer)") cut the column
+// to 113.9pt and the same resume to 767.7pt (real Chromium 771.1pt, 1 page).
+describe('renderCertification — issuer inline on the title line (2026-11-10)', () => {
+  // The shared fixture: cert_meta_backend has issuer 'Coursera', cert_nptel_dbms has none.
+  const html = renderResumeHtml(zomatoBackendIntern);
+
+  it('prints a certification as "Name (Issuer)" on ONE line, with no separate issuer line', () => {
+    // The cert's own markup, so a detail line under another entry cannot satisfy or fail this.
+    const cert = entryHtml(html, 'cert_meta_backend');
+    // The positive shape: the issuer sits inside the title, in parentheses.
+    assert.ok(
+      cert.includes('<h3 class="resume__entry-title">Meta Back-End Developer Professional Certificate (Coursera)</h3>'),
+      'the issuer is not inline on the cert title line',
+    );
+    // And the second line is gone: that line is the height this change exists to save.
+    assert.equal(cert.includes('resume__entry-detail'), false, 'the cert still prints its issuer on a second line');
+  });
+
+  it('prints a certification with no issuer as its bare name, never "Name ()"', () => {
+    // The null-description cert from the fixture.
+    const cert = entryHtml(html, 'cert_nptel_dbms');
+    // The title exactly as the master typed it: no dangling separator or empty parentheses.
+    assert.ok(
+      cert.includes('<h3 class="resume__entry-title">NPTEL Database Management Systems — Elite</h3>'),
+      'a cert without an issuer did not print its bare name',
+    );
+  });
+});
 
 describe('renderUndatedEntry — certification and achievement links (2026-11-01)', () => {
   // (a) THE FEATURE. A credential URL on a cert must reach the PDF as a real

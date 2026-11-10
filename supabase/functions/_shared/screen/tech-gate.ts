@@ -158,7 +158,10 @@ function collapseWhitespace(text: string): string {
 // surprising verdict names its cause rather than merely asserting one.
 function firstMatch(terms: readonly string[], text: string): string | undefined {
   // The text once, normalised; every term below is tested against this same string.
-  const normalisedText = collapseWhitespace(text);
+  // UNDERSCORES ARE SEPARATORS (T4 follow-up, 2026-11-10): "_" is a regex word character, so `\bManager\b` never
+  // matched the live title "Software Engineering Manager__Electronic Trading" and the "Manager" exclusion missed it.
+  // In a scraped title "_" joins words exactly as a space does, so it becomes one before whitespace is collapsed.
+  const normalisedText = collapseWhitespace(text.replace(/_/g, " "));
   // Blank entries are skipped: an empty string compiles to a pattern matching
   // everything, which would drop or pass every posting depending on which list it sat in.
   // Each term is normalised (and trimmed) before it is compiled, so "Software  Engineer"
@@ -205,6 +208,28 @@ const LEVEL_ONLY_TERMS: ReadonlySet<string> = new Set([
 // to the matcher, which scores it. Bare "IT" is left out because /i would match the pronoun.
 const TECH_TITLE_SIGNAL =
   /\b(engineer|engineers|engineering|eng|software|developer|development|sde|data|ai|artificial intelligence|ml|machine learning|deep learning|llm|research|researcher|scientist|cloud|devops|sre|security|cyber|qa|test|testing|automation|backend|back-end|frontend|front-end|full[- ]?stack|web|mobile|platform|infrastructure|system|systems|technology|technical|tech|computer|programming|programmer|analytics|analyst|network|networking|embedded|firmware|hardware|silicon|fpga|robotics|quantitative)\b/i;
+
+// SOFTWARE-ROLE SPELLINGS (T4, 2026-11-10). The configured title list is plain text a human typed, so it
+// recognises a role only in the exact words typed. MEASURED: a stratified random sample of 230 of the 11,149
+// live tech_gate_unclassified rows held 10 clear software roles (4.3%, Wilson 95% [2.4%, 7.8%]), each a
+// different spelling of a role Teja already hunts: "Software Development Engineer" (not "Software Developer"),
+// "SW Engineer", "AI Field Engineer" (not "AI Engineer"), "Kernel Engineer". These patterns recognise those
+// spellings. They are NOT a new target role: each one is a software-engineering title.
+// DELIBERATELY NARROW: every pattern needs an engineering ROLE word next to a software word, because the same
+// sample's out-of-scope titles carry the loose words too ("AI Tutor", "Account Executive, AI", "Solutions
+// Engineer", "Hardware Engineer"). Bare "Systems Engineer" and "Product Engineer" are left out: live they were
+// as often IT, OT or hardware jobs as software (Airbnb Jira admin, xAI OT, Barclays), so they stay dropped.
+// ponytail: a fixed vocabulary; it misses spellings not seen in the 2026-11-10 sample. Re-sample to extend it.
+const SOFTWARE_ROLE_SPELLINGS: readonly RegExp[] = [
+  // "Software"/"SW" anywhere in the title AND an engineering role word anywhere ("Engineer, Software Platforms").
+  // A lookahead pair, so the two words may come in either order.
+  /^(?=.*\b(?:software|sw)\b)(?=.*\b(?:engineer|engineers|engineering|developer|programmer)\b)/i,
+  // An AI/ML word directly qualifying "Engineer", one word allowed between ("AI Field Engineer"). "Engineer\b"
+  // rejects "AI Engineering" in a sales leader's title ("Growth Leader, AI Engineering, Strategic Accounts").
+  /\b(?:ai|ml|llm|genai|machine learning)\s+(?:[\w-]+\s+)?engineer\b/i,
+  // The engineer kinds seen live, each software work: OS kernels, ML models, ML research, forward-deployed.
+  /\b(?:kernel|model|research|deployed)\s+engineer\b/i,
+];
 
 // Is this configured title term a level word rather than a discipline?
 function isLevelOnly(term: string): boolean {
@@ -367,6 +392,9 @@ export function screenTechRole(
   const matched = firstMatch(disciplineTitles, title) ?? firstMatch(preferences.keywords, haystack);
   // Recognised. No warning, so the warning below keeps meaning something.
   if (matched !== undefined) return { drop: false };
+  // A software-role spelling the configured list does not literally contain (T4): recognised the same way.
+  // After the exclusions and title rules above, so a senior or non-software title is never rescued by it.
+  if (SOFTWARE_ROLE_SPELLINGS.some((pattern) => pattern.test(collapseWhitespace(title)))) return { drop: false };
 
   // Only a level word matched. It recognises the posting when the title is technical, and
   // the drop below names the level term when it is not ("Intern, Company Secretary").
