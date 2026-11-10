@@ -141,12 +141,27 @@ describe('ci.yml single job', () => {
       'run: ./node_modules/.bin/vitest run',
       // web: the TESTS' typecheck (W36, 2026-11-10). Named, not just counted, so dropping the step fails by name.
       'run: ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json',
+      // worker: the e2e runner (T6, 2026-11-10). It rotted for five weeks while nothing ran it.
+      'run: node --experimental-strip-types test/e2e-runner.mjs',
     ]) {
       // Named in the failure, so a dropped check is obvious.
       expect(checks, `missing check: ${command}`).toContain(command);
     }
     // tsc runs three times: apps/web (src), apps/web tests (tsconfig.test.json, W36), and worker.
     expect(checks.match(/run: \.\/node_modules\/\.bin\/tsc --noEmit/g)?.length).toBe(3);
+  });
+
+  test('the worker e2e runner runs by name, after the e2e-mode web build', () => {
+    // The step's line, found by its exact name so a rename or removal fails here by name.
+    const runnerAt = lines.indexOf('      - name: worker e2e runner');
+    // The build it serves; its dist guard refuses the plain (unconfigured) build that runs before it.
+    const e2eBuildAt = lines.indexOf('      - name: web vite build (e2e mode)');
+    // Both must exist: -1 < -1 is false, but -1 vs a real index would pass the order check vacuously.
+    expect(runnerAt, 'missing step: worker e2e runner').toBeGreaterThan(-1);
+    // The build step must exist too, or the order below means nothing.
+    expect(e2eBuildAt, 'missing step: web vite build (e2e mode)').toBeGreaterThan(-1);
+    // Order: the runner reads the bundle the e2e build just wrote.
+    expect(runnerAt).toBeGreaterThan(e2eBuildAt);
   });
 
   test('every step after setup runs even when an earlier check failed', () => {

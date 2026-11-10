@@ -1,5 +1,7 @@
 // The content rules for every tailored resume (Teja, 2026-11-08 15:36 + 15:46 IST):
-//   - projects: EXACTLY 2 (at most 2 always; fewer only when the master holds fewer), each >= 4 bullets;
+//   - projects: EXACTLY 2 (at most 2 always; fewer only when the master holds fewer), each with 3-4 bullets:
+//     the tailor SELECTS 4 (PAGE_FIT_FLOORS.projectSoftCap) and the gate accepts 3 (minBullets.projects),
+//     because the trimmer's last step may cut a project to 3 to fit one page (Teja's 3-4 rule; 2026-11-10, T7);
 //   - the Aczen experience >= 4 bullets (PAGE_FIT_FLOORS.minBulletsByRef);
 //   - certifications >= 5 and EVERY achievement (Teja, 2026-11-09 20:41 IST; were 3 and 2), education >= 2;
 //     each floor is min(rule, what the master holds), so a short master is never padded.
@@ -59,9 +61,15 @@ function entryText(entry: MasterEntry & { readonly name?: string; readonly label
   return [entry.name ?? entry.label ?? entry.degree ?? "", ...entry.bullets.map((b) => b.text)].join(" ");
 }
 
-/** The floor for a project's bullets: the rule, or every bullet the master holds when it holds fewer. */
+/** The SELECTION target for a project's bullets (4): what the tailor tops up to, or every bullet the master holds when it holds fewer. */
+function projectBulletTarget(master: MasterEntry): number {
+  // The top of Teja's 3-4 rule, so a fresh tailoring prints 4 and the trimmer has one bullet to give back; never more than the master can supply.
+  return Math.min(PAGE_FIT_FLOORS.projectSoftCap, master.bullets.length);
+}
+
+/** The GATE floor for a project's bullets (3): what checkContentRules accepts after the page fit, capped at what the master holds. */
 function projectBulletFloor(master: MasterEntry): number {
-  // Never more than the master can supply.
+  // The bottom of Teja's 3-4 rule: the trimmer may cut to 3 to fit one page (2026-11-10, T7), so the gate must not refuse it.
   return Math.min(PAGE_FIT_FLOORS.minBullets.projects, master.bullets.length);
 }
 
@@ -118,10 +126,10 @@ export function enforceContentRules(
   // The model's picks by ref, so a kept pick keeps its reworded bullets.
   const pickedByRef = new Map(picked.map((p) => [p.ref, p] as const));
   // Every master project ranked: an always-shown project first (proj_applyy, ruling G(a) 2026-11-08), then a project
-  // able to meet the 4-bullet rule, then the model's judgement (its picks), then JD keyword overlap, then master order.
+  // able to meet the 4-bullet SELECTION target (projectSoftCap; the gate's floor is 3), then the model's judgement (its picks), then JD keyword overlap, then master order.
   const ranked = master.projects
     // Each with what ranks it.
-    .map((p, index) => ({ p, always: PAGE_FIT_FLOORS.alwaysProjects.includes(p.id), eligible: p.bullets.length >= PAGE_FIT_FLOORS.minBullets.projects, chosen: pickedByRef.has(p.id), score: keywordScore(entryText(p), jdKeywords), index }))
+    .map((p, index) => ({ p, always: PAGE_FIT_FLOORS.alwaysProjects.includes(p.id), eligible: p.bullets.length >= PAGE_FIT_FLOORS.projectSoftCap, chosen: pickedByRef.has(p.id), score: keywordScore(entryText(p), jdKeywords), index }))
     // Always, eligible, chosen, score: each descending; index ascending (Array sort is stable).
     .sort((a, b) => Number(b.always) - Number(a.always) || Number(b.eligible) - Number(a.eligible) || Number(b.chosen) - Number(a.chosen) || b.score - a.score || a.index - b.index);
   // The kept ids: exactly min(cap, master) of them.
@@ -138,8 +146,8 @@ export function enforceContentRules(
     const entry: RefEntry = pickedByRef.get(ref) ?? { ref, bullets: [] };
     // An added project is recorded.
     if (!pickedByRef.has(ref)) changes.push({ change: "added", section: "projects", ref });
-    // Its bullets brought up to the floor the master can supply.
-    return toppedUp(entry, masterProject, projectBulletFloor(masterProject), jdKeywords, changes, "projects");
+    // Its bullets brought up to the 4-bullet selection target the master can supply (the gate floor of 3 is for after the trim).
+    return toppedUp(entry, masterProject, projectBulletTarget(masterProject), jdKeywords, changes, "projects");
   });
   // The section prints when it holds anything.
   if (projects.length > 0) sectionOrder = withSection(sectionOrder, "projects");
@@ -351,7 +359,7 @@ export function checkContentRules(resume: ResolvedResume, master: MasterProfile)
   for (const project of resume.projects) {
     // The master node (an unknown ref is the validator's to refuse, so it binds nothing here).
     const masterProject = master.projects.find((p) => p.id === project.ref);
-    // Its floor.
+    // Its GATE floor (3, not the 4 selection target): this runs after the page fit, which may trim a project to 3.
     const floor = masterProject === undefined ? 0 : projectBulletFloor(masterProject);
     // Under it.
     if (project.bullets.length < floor) broken.push(`${project.ref}: ${project.bullets.length} bullets, needs ${floor}`);

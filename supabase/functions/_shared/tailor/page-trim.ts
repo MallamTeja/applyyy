@@ -36,11 +36,18 @@ import { fitsOnePage } from "../../../../packages/resume-template/src/index.ts";
 export const PAGE_FIT_FLOORS = {
   // Bullets each entry keeps at least, by section. Education is never trimmed at all.
   // Projects 4 since Teja's content rules (2026-11-08 15:46 IST: "each project at least 4 bullets"; was 3).
-  minBullets: { experience: 1, projects: 4, achievements: 1, certifications: 0 },
+  // Projects 3 AGAIN since 2026-11-10 (T7, the orchestrator under Teja's "3-4 bullets per project"): this is the HARD
+  // floor (the last trim step and checkContentRules). Selection still targets 4 (projectSoftCap), so a project shows 3
+  // only when the 4-bullet page overflows. 5 inline certs left the v30 shape at 767.7 of 778.1pt: this buys headroom.
+  // Never below 3: that breaks the rule.
+  minBullets: { experience: 1, projects: 3, achievements: 1, certifications: 0 },
   // Per-entry overrides. exp_aczen = "the Aczen internship keeps >= 4 bullets"; Student Tribe
   // ("Technical Coordinator", Teja's "1-2 bullets") is the experience default of 1.
   minBulletsByRef: { exp_aczen: 4 } as Readonly<Record<string, number>>,
-  // Bullets above 4 on a project are trimmed FIRST, before any other bullet (with the floor at 4, a project ends at exactly 4 when space is short).
+  // Bullets above 4 on a project are trimmed FIRST, before any other bullet (a project ends at 4 when space is short,
+  // or at 3 when even that overflows: the last step, T7).
+  // Since T7 (2026-11-10) also the project TARGET: content-rules selects up to it, and weakest_bullet keeps projects at
+  // it; only the last step (project_bullet_to_floor) goes below it, down to minBullets.projects.
   projectSoftCap: 4,
   // Certification entries every resume carries: 5 since 2026-11-09 20:41 IST (Teja: "at least 5 certifications"; was 3,
   // was 2). Topped up by content-rules.ts to min(5, what the master holds), so a 3-cert master still tailors. Never
@@ -64,7 +71,8 @@ export const PAGE_FIT_FLOORS = {
 
 /** One unit of trimming. */
 // Bullets only: the "certification" and "achievement" entry steps were removed on 2026-11-09 (see TRIM_ORDER).
-export type TrimStep = "project_bullet_over_cap" | "weakest_bullet";
+// project_bullet_to_floor (T7, 2026-11-10): a project bullet below the 4-bullet target, down to the hard floor of 3.
+export type TrimStep = "project_bullet_over_cap" | "weakest_bullet" | "project_bullet_to_floor";
 
 /**
  * THE ORDER, as one list: the first step with a candidate is taken, one removal at a time,
@@ -81,8 +89,12 @@ export type TrimStep = "project_bullet_over_cap" | "weakest_bullet";
  * - 2026-11-09 20:41 IST (Teja, heard by the orchestrator): >= 5 certifications and every achievement on every
  *   resume. Both entry steps are GONE, not merely floored: only bullets are trimmed, and a page the bullet floors
  *   cannot fit is refused (blockedBy names "certifications: never removed" / "achievements: never removed").
+ * - 2026-11-10 (T7, orchestrator, inside Teja's "3-4 bullets per project"): project_bullet_to_floor takes a project
+ *   from 4 bullets to 3, LAST: only when every other bullet is at its floor and the page still overflows. Last on
+ *   purpose (same reason as the 11-08 achievements step): every resume the first two steps could fit trims exactly as
+ *   before; the step only turns what used to be a refusal into a fit.
  */
-export const TRIM_ORDER: readonly TrimStep[] = ["project_bullet_over_cap", "weakest_bullet"];
+export const TRIM_ORDER: readonly TrimStep[] = ["project_bullet_over_cap", "weakest_bullet", "project_bullet_to_floor"];
 
 /** What was removed, in removal order: enough to show it ("Trimmed to fit one page: ...") and to record it. */
 export interface TrimItem {
@@ -141,6 +153,22 @@ function bulletFloor(section: (typeof BULLET_SECTIONS)[number], ref: string): nu
   return PAGE_FIT_FLOORS.minBulletsByRef[ref] ?? PAGE_FIT_FLOORS.minBullets[section];
 }
 
+/** How many bullets an entry keeps for one step: entries at or under this offer nothing to that step. */
+function keepFor(step: TrimStep, section: (typeof BULLET_SECTIONS)[number], ref: string): number {
+  // Every section but projects keeps its floor for weakest_bullet (as before T7) and sits out the two project-only steps.
+  if (section !== "projects") return step === "weakest_bullet" ? bulletFloor(section, ref) : Infinity;
+  // A project's hard floor, never under minBullets.projects even if a per-ref override says less: checkContentRules
+  // gates projects on minBullets.projects alone, so a lower override would print a project the gate then refuses.
+  const floor = Math.max(PAGE_FIT_FLOORS.minBullets.projects, bulletFloor(section, ref));
+  // The cap step: only bullets above the 4-bullet cap (unchanged since 41d7430).
+  if (step === "project_bullet_over_cap") return PAGE_FIT_FLOORS.projectSoftCap;
+  // weakest_bullet holds projects at the 4-bullet target, so it removes exactly what it did before T7 and the
+  // 4 -> 3 cut waits for the last step.
+  if (step === "weakest_bullet") return Math.max(PAGE_FIT_FLOORS.projectSoftCap, floor);
+  // project_bullet_to_floor, the last step: down to the hard floor (3), never below.
+  return floor;
+}
+
 /** The next removal for one step, or null when that step has nothing above its floor. */
 function candidateFor(step: TrimStep, resume: ResolvedResume, jdKeywords: readonly string[]): Candidate | null {
   // Bullets: every bullet in an entry still above its level for this step.
@@ -152,7 +180,7 @@ function candidateFor(step: TrimStep, resume: ResolvedResume, jdKeywords: readon
     // Each entry (typed loosely: only ref and bullets are read).
     for (const entry of resume[section] as readonly { readonly ref: string; readonly bullets: readonly { readonly ref: string; readonly text: string }[] }[]) {
       // The cap step offers only project bullets above the cap; the weakest step, any bullet above its floor.
-      const keep = step === "project_bullet_over_cap" ? (section === "projects" ? PAGE_FIT_FLOORS.projectSoftCap : Infinity) : bulletFloor(section, entry.ref);
+      const keep = keepFor(step, section, entry.ref);
       // Each bullet, positioned.
       for (const bullet of entry.bullets) {
         // Positions advance for every bullet, eligible or not, so ties break by real document order.

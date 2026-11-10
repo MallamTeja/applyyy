@@ -55,7 +55,10 @@ const JD = ["typescript", "postgres"];
 // Start: 5+2 + 6+4 + 3 bullets + 5 certs = 25 units.
 const START = 25;
 // Bullets left when every entry sits at its floor: Aczen 4, Student Tribe 1, projects 4+4, achievements 3.
+// Projects at 4 here: the selection target (projectSoftCap), which the old trimmer treated as the floor.
 const FLOOR_BULLETS = 4 + 1 + 4 + 4 + 3;
+// The HARD floors since 2026-11-10 (T7): projects at 3, reached only by the last trim step.
+const HARD_FLOOR_BULLETS = 4 + 1 + 3 + 3 + 3;
 // Certification entries, all of which always stay.
 const CERTS = 5;
 
@@ -68,9 +71,41 @@ test("a resume that already fits is returned untouched", () => {
   assert.deepEqual([out.fits, out.trimmed, out.resume === resume], [true, [], true]);
 });
 
-test("TRIM_ORDER (ruling 2026-11-09 20:41): only bullets: projects over the cap, then the weakest bullets", () => {
+test("TRIM_ORDER (ruling 2026-11-09 20:41): only bullets: projects over the cap, then the weakest bullets, then a project 4 -> 3 LAST", () => {
   // The order is data; this pins it so putting certifications or achievements back is a deliberate, visible change.
-  assert.deepEqual(TRIM_ORDER, ["project_bullet_over_cap", "weakest_bullet"]);
+  // The third step (2026-11-10, T7) is last on purpose: every resume the first two steps could fit trims exactly as before.
+  assert.deepEqual(TRIM_ORDER, ["project_bullet_over_cap", "weakest_bullet", "project_bullet_to_floor"]);
+});
+
+test("project floor (T7, Teja's 3-4 rule): when the 4-bullet projects cannot fit, a project goes to 3 bullets and never to 2", () => {
+  // Pinned: the hard floor is 3 and selection still targets 4 (projectSoftCap), so "3-4 bullets" is both ends of the rule.
+  assert.deepEqual([PAGE_FIT_FLOORS.minBullets.projects, PAGE_FIT_FLOORS.projectSoftCap], [3, 4]);
+  // One unit under what the old floors (projects at 4) needed: the old trimmer refused this page.
+  const one = fitToOnePage(v24Like(), JD, (r) => units(r) <= FLOOR_BULLETS + CERTS - 1);
+  // Now it fits, and the LAST removal is a project bullet taken by the new step.
+  assert.deepEqual([one.fits, one.trimmed.at(-1)?.step], [true, "project_bullet_to_floor"]);
+  // Exactly one project went to 3; the other kept 4 (one removal, one project).
+  assert.deepEqual(one.resume.projects.map((p) => p.bullets.length).sort(), [3, 4]);
+  // Both projects at 3 and one unit more: refused, never a 2-bullet project.
+  const none = fitToOnePage(v24Like(), JD, (r) => units(r) <= HARD_FLOOR_BULLETS + CERTS - 1);
+  // Not a fit: the caller refuses.
+  assert.equal(none.fits, false);
+  // Every project stopped at exactly 3: the positive shape, so a floor of 2 (or none) shows up as [2, ...].
+  assert.deepEqual(none.resume.projects.map((p) => [p.ref, p.bullets.length]), [["proj_one_on_one", 3], ["proj_applyy", 3]]);
+  // The refusal names the project floor at 3, so the operator sees which rule held.
+  assert.ok(none.blockedBy.includes("proj_applyy: keeps >= 3 bullets"), none.blockedBy.join("; "));
+});
+
+test("every budget the old floors could fit trims exactly as before: the new step never runs", () => {
+  // Each budget from no trim at all down to the old floors (projects at 4), one unit at a time.
+  for (let budget = START; budget >= FLOOR_BULLETS + CERTS; budget -= 1) {
+    // The trim at that budget.
+    const out = fitToOnePage(v24Like(), JD, (r) => units(r) <= budget);
+    // Fits with only the two old steps, so the removals are the old removals (same steps, same weakest-first ranking).
+    assert.ok(out.fits && out.trimmed.every((t) => t.step !== "project_bullet_to_floor"), `budget ${budget}: ${JSON.stringify(out.trimmed)}`);
+    // Every project still at >= 4: the 3-floor is reached only past the old refusal point.
+    assert.ok(out.resume.projects.every((p) => p.bullets.length >= PAGE_FIT_FLOORS.projectSoftCap), `budget ${budget}`);
+  }
 });
 
 test("certification floor is 5 and achievements are all of them", () => {
@@ -108,19 +143,19 @@ test("an overfull page down to every bullet floor keeps all 5 certifications and
   assert.deepEqual(out.resume.experience.find((e) => e.ref === "exp_aczen")!.bullets.map((x) => x.ref), ["a1", "a2", "a3", "a5"]);
   // Student Tribe keeps its keyword bullet.
   assert.deepEqual(out.resume.experience.find((e) => e.ref === "exp_student_tribe")!.bullets.map((x) => x.ref), ["st2"]);
-  // Every project keeps >= 4.
-  for (const p of out.resume.projects) assert.ok(p.bullets.length >= PAGE_FIT_FLOORS.minBullets.projects, p.ref);
+  // Every project keeps >= 4 (the selection target): at this budget the 4 -> 3 step is never needed.
+  for (const p of out.resume.projects) assert.ok(p.bullets.length >= PAGE_FIT_FLOORS.projectSoftCap, p.ref);
   // Skills, summary and education never change.
   assert.deepEqual([out.resume.skills, out.resume.summary, out.resume.education], [v24Like().skills, v24Like().summary, v24Like().education]);
 });
 
 test("one unit past the bullet floors is REFUSED, never a certification or achievement removed, and the refusal names both", () => {
-  // A budget one below what the floors plus every entry need.
-  const out = fitToOnePage(v24Like(), JD, (r) => units(r) <= FLOOR_BULLETS + CERTS - 1);
+  // A budget one below what the HARD floors (projects at 3 since T7) plus every entry need.
+  const out = fitToOnePage(v24Like(), JD, (r) => units(r) <= HARD_FLOOR_BULLETS + CERTS - 1);
   // Not a fit: the caller refuses instead of saving page two or cutting an entry.
   assert.equal(out.fits, false);
-  // Nothing but bullets went.
-  assert.ok(out.trimmed.every((t) => t.step === "project_bullet_over_cap" || t.step === "weakest_bullet"), JSON.stringify(out.trimmed));
+  // Nothing but bullets went (all three steps remove bullets only).
+  assert.ok(out.trimmed.every((t) => t.step === "project_bullet_over_cap" || t.step === "weakest_bullet" || t.step === "project_bullet_to_floor"), JSON.stringify(out.trimmed));
   // Every entry is still there.
   assert.deepEqual([out.resume.certifications.length, out.resume.achievements.length], [CERTS, 3]);
   // The two never-removed sections are named, so the operator sees which rule held.

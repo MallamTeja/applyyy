@@ -1,6 +1,6 @@
 /**
  * The content rules (Teja, 2026-11-08 15:36 + 15:46 IST): exactly min(2, master) projects each with
- * >= 4 bullets, Aczen >= 4 bullets, certifications >= 5 and EVERY achievement (2026-11-09 20:41 IST; were 3 and 2),
+ * 3-4 bullets (selected at 4, gated at 3 since T7 2026-11-10), Aczen >= 4 bullets, certifications >= 5 and EVERY achievement (2026-11-09 20:41 IST; were 3 and 2),
  * education >= 2, each capped at what the master holds; and the
  * cited-summary-variant seam (LSEG 2b7db9a2). Each rule's test is named after the rule, and the
  * tailorer tests run the REAL createTailorer + validator + page fit, so reverting the one call in
@@ -209,6 +209,26 @@ test("every enforced ref resolves through the unchanged validator, and the gate 
   assert.equal(verdict.ok, true, JSON.stringify(verdict));
   // And the content gate is satisfied.
   if (verdict.ok) assert.deepEqual(checkContentRules(verdict.resume, master()), []);
+});
+
+test("checkContentRules accepts a project trimmed to 3 bullets and refuses 2", () => {
+  // A compliant profile: applyy topped up to 4 (y1..y4) from a 5-bullet master, so the master can supply 4.
+  const { profile } = enforceContentRules(greedyAnswer(), master(), JD);
+  // The same profile with applyy cut to its first n bullets, as the trimmer's last step does to fit one page (T7).
+  const withApplyyBullets = (n: number) => ({ ...profile, projects: profile.projects.map((p) => (p.ref === "proj_applyy" ? { ...p, bullets: p.bullets.slice(0, n) } : p)) }) as TailoredProfile;
+  // Resolved through the real validator, then gated: the gate runs on the resolved resume, after the page fit.
+  const gate = (n: number) => {
+    // Honest (every bullet is master text), so it resolves.
+    const verdict = validateTailoredProfile(withApplyyBullets(n), master(), VERSION);
+    // A refusal here would be a fixture bug, not the rule under test.
+    assert.equal(verdict.ok, true, JSON.stringify(verdict));
+    // The broken list, or a marker that cannot match when the validator refused.
+    return verdict.ok ? checkContentRules(verdict.resume, master()) : ["<unresolved>"];
+  };
+  // 3 bullets is Teja's 3-4 rule at its floor: nothing broken at all.
+  assert.deepEqual(gate(3), []);
+  // 2 bullets is under it: exactly one break, naming the 3 floor (not the 4 selection target).
+  assert.deepEqual(gate(2), ["proj_applyy: 2 bullets, needs 3"]);
 });
 
 test("checkContentRules names 3 projects and every floor broken", () => {

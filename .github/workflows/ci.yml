@@ -353,6 +353,18 @@ jobs:
         working-directory: apps/web
         # --mode e2e selects .env.e2e; overwrites the plain build's dist/.
         run: ./node_modules/.bin/vite build --mode e2e
+      # T6 (2026-11-10): the worker e2e runner (synthetic resume -> real PDF, then a click-through of the e2e
+      # bundle). It sat red from 2026-10-04 to 2026-11-10 because nothing ran it; CI runs it now so it cannot rot
+      # again. MUST stay after the e2e-mode build: its dist guard refuses any other bundle. ~10 s.
+      - name: worker e2e runner
+        # Same gate as every check.
+        if: ${{ !cancelled() && steps.setup-done.outcome == 'success' }}
+        # The runner resolves its imports relative to worker/.
+        working-directory: worker
+        # A hang (Chromium print, pdf.js) fails in minutes, not at the 30-minute job timeout.
+        timeout-minutes: 3
+        # Plain Node with type stripping, the same command as `pnpm test:e2e`; exits 1 naming the failed stage.
+        run: node --experimental-strip-types test/e2e-runner.mjs
       # The web test suite, with the same vacuous-pass guard as the edge tests.
       - name: web tests, and assert tests ran
         # Same gate as every check.

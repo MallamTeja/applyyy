@@ -64,8 +64,9 @@ export function auditorPreGateDrop(job: AuditorJobEmbed | null, preferences: Pre
 // The content-rules verdict: its own code, because it judges the RESUME, not the job, so it is not a PreGateDropCode.
 export type AuditorContentRulesDrop = { readonly code: "content_rules"; readonly reason: string } | null;
 
-// Content rules (Teja, 2026-11-08): at most 2 projects (exactly min(2, master)), each >= min(4, master bullets),
-// exp_aczen >= 4, certifications >= 3, achievements >= 2, education >= 2. The tailor enforces them, but live rows
+// Content rules (Teja, 2026-11-08; numbers live in PAGE_FIT_FLOORS, page-trim.ts): at most 2 projects (exactly
+// min(2, master)), each >= min(3, master bullets) (selected at 4; the trim may cut to 3, T7 2026-11-10), exp_aczen >= 4,
+// certifications >= 5, every achievement, education >= 2. The tailor enforces them, but live rows
 // already held 3 projects, and the web editor can save any resume, so the auditor (the last agent before a human)
 // asks once more. Needs the PINNED master, because every floor is min(rule, what that master holds).
 export function auditorContentRulesDrop(resume: ResolvedResume | null, master: MasterProfile | null): AuditorContentRulesDrop {

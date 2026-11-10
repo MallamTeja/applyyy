@@ -72,8 +72,8 @@ export type TailorViolation =
   // Produced by the tailorer, not by validateTailoredProfile: the validator answers "is it honest",
   // and a two-page resume is honest but still must not be stored.
   | { readonly kind: "page_overflow"; readonly blockedBy: readonly string[] }
-  // The content rules (Teja, 2026-11-08: 2 projects x >= 4 bullets, Aczen >= 4, certifications >= 3, achievements >= 2,
-  // education >= 2) still broken after the tailor topped up from the master and fitted the page. `blockedBy` names each
+  // The content rules (Teja, 2026-11-08; numbers live in PAGE_FIT_FLOORS, page-trim.ts: 2 projects x 3-4 bullets, Aczen
+  // >= 4, certifications >= 5, every achievement, education >= 2) still broken after the tailor topped up from the master and fitted the page. `blockedBy` names each
   // broken rule (content-rules.ts checkContentRules). Produced by the tailorer, like page_overflow.
   | { readonly kind: "content_floor"; readonly blockedBy: readonly string[] };
 
