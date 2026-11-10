@@ -56,19 +56,30 @@ describe('fill() on choice controls', () => {
     expect(await page.locator('#country_native').inputValue()).toBe('');
   });
 
-  test('radio group: exact option is checked, near-miss throws', async () => {
+  test('radio group: exact option is checked; a different word is never approximated', async () => {
     // Radio group addressed by the fieldset id the extractor emits.
     const live = createPlaywrightPage(page);
     await live.fill('located_in_india', 'No');
     // The sibling must be unchecked, proving a real radio-group switch.
     expect(await page.locator('input[value="n"]').isChecked()).toBe(true);
     expect(await page.locator('input[value="y"]').isChecked()).toBe(false);
-    // "yes" is not "Yes"; the group must stay as it was.
-    // Wrong case: must be refused, not coerced.
-    await expect(live.fill('located_in_india', 'yes')).rejects.toThrow(/^no_matching_option/);
+    // "Ye" is a prefix of "Yes", not the same text; the group must stay as it was.
+    // A near-miss is refused, never coerced (only case/spacing/punctuation fold, via option-match.ts).
+    await expect(live.fill('located_in_india', 'Ye')).rejects.toThrow(/^no_matching_option/);
     expect(await page.locator('input[value="n"]').isChecked()).toBe(true);
     // The temporary marker must not leak into the DOM, success or failure.
     // Counting (not truthiness) so zero is asserted explicitly.
+    expect(await page.locator('[data-applyyy-pick]').count()).toBe(0);
+  });
+
+  test('radio group: a case-only difference picks the form\'s own option ("yes" checks "Yes")', async () => {
+    // Same group; the live answer bank stores lowercase "yes".
+    const live = createPlaywrightPage(page);
+    await live.fill('located_in_india', 'yes');
+    // The form's own "Yes" radio is checked, and its sibling is not.
+    expect(await page.locator('input[value="y"]').isChecked()).toBe(true);
+    expect(await page.locator('input[value="n"]').isChecked()).toBe(false);
+    // No marker left behind on the success path either.
     expect(await page.locator('[data-applyyy-pick]').count()).toBe(0);
   });
 

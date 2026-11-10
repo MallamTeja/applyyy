@@ -588,3 +588,43 @@ describe('buildApplyKit robots refusal (B2, K2)', () => {
     expect(writes).toEqual([]);
   });
 });
+
+// W29 residual (peer 4's audit recheck, 2026-11-09): an APPROVED row whose job has an empty apply_url threw a plain
+// Error in fetchApplication, so the daily sweep failed it, never stamped it, retried it every run and exited 1. It is
+// now a named KitSkip: the sweep notes it once (apply_kit_skipped, code no_apply_url) and the run stays green.
+// jobs.apply_url is NOT NULL, so '' and whitespace are the only reachable shapes; both are pinned.
+describe('W29: a job with no apply_url is a named skip, not a throw', () => {
+  // One read-only client per case: the application row reads, the job carries the given apply_url.
+  function clientWithUrl(applyUrl: unknown) {
+    // Chainable stub; every terminal read resolves by table.
+    const builder = (table: string) => {
+      // The chain object: select/eq/maybeSingle return itself.
+      const b: Record<string, unknown> = {};
+      // Each filter step keeps chaining.
+      for (const method of ['select', 'eq', 'maybeSingle']) b[method] = () => b;
+      // supabase-js awaits the builder: resolve by table.
+      b['then'] = (resolve: (value: unknown) => unknown) =>
+        // The application exists and is approved; the job has the given form URL.
+        resolve(table === 'applications' ? { data: { id: 'a1', status: 'approved', tailored_profile: {}, job_id: 'j1' }, error: null } : { data: { apply_url: applyUrl, company_name: 'Acme' }, error: null });
+      return b;
+    };
+    // Only the slice fetchApplication touches.
+    return { from: (table: string) => builder(table), rpc: async () => ({ data: null, error: null }), storage: { from: () => ({}) } };
+  }
+
+  for (const applyUrl of ['', '   ']) {
+    test(`apply_url ${JSON.stringify(applyUrl)} rejects with KitSkip no_apply_url`, async () => {
+      // The production gateway over the stub.
+      const gateway = createKitGateway(clientWithUrl(applyUrl) as never, { userId: 'user' });
+      // The read is refused as a skip the sweep records, never a bare Error it counts as failed.
+      await expect(gateway.fetchApplication('a1')).rejects.toMatchObject({ name: 'KitSkip', code: 'no_apply_url' });
+    });
+  }
+
+  test('a real apply_url still reads normally (no over-skip)', async () => {
+    // The same stub with a form URL.
+    const gateway = createKitGateway(clientWithUrl('https://job-boards.greenhouse.io/acme/jobs/1') as never, { userId: 'user' });
+    // Read, with the URL carried through.
+    await expect(gateway.fetchApplication('a1')).resolves.toMatchObject({ id: 'a1', applyUrl: 'https://job-boards.greenhouse.io/acme/jobs/1' });
+  });
+});

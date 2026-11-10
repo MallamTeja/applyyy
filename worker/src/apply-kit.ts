@@ -49,9 +49,10 @@ export class KitSkip extends Error {
   // Named for logs and for toMatchObject in tests.
   override readonly name = 'KitSkip';
   // The cause, written into the skip note.
-  readonly code: 'robots_refused' | 'posting_closed';
+  // no_apply_url (W29 residual, 2026-11-09): the job has no form URL, so no kit can open a form for it.
+  readonly code: 'robots_refused' | 'posting_closed' | 'no_apply_url';
   // A plain constructor: parameter properties are not erasable syntax (tsconfig erasableSyntaxOnly).
-  constructor(code: 'robots_refused' | 'posting_closed', message: string) {
+  constructor(code: KitSkip['code'], message: string) {
     // The message is the refusal's own text.
     super(message);
     // Kept for the sweep's note.
@@ -441,10 +442,14 @@ export function createKitGateway(client: SupabaseLike, config: GatewayConfig): K
       const job = await client.from('jobs').select('apply_url, company_name').eq('id', app.data.job_id).maybeSingle();
       // Same rule for the job read.
       if (job.error) throw new Error(`apply kit: read job failed: ${job.error.message}`);
-      // A row whose job has no form URL cannot be kitted.
-      if (job.data === null || typeof job.data.apply_url !== 'string' || job.data.apply_url === '') {
-        throw new Error(`apply kit: application ${applicationId} has no jobs.apply_url`);
-      }
+      // No job row at all is a broken reference, not a skip: it stays a failure the run reports.
+      if (job.data === null) throw new Error(`apply kit: application ${applicationId} has no jobs row`);
+      // W29 residual: a job with no form URL ('' or whitespace; the column is NOT NULL) cannot be kitted. A plain
+      // Error here failed the sweep every day for an approved row; a KitSkip is noted once and the run stays green,
+      // and the Manual apply card says why. A non-string is malformed data, so it stays a failure.
+      if (typeof job.data.apply_url !== 'string') throw new Error(`apply kit: application ${applicationId} has a malformed jobs.apply_url`);
+      // Blank after trimming: no form to open.
+      if (job.data.apply_url.trim() === '') throw new KitSkip('no_apply_url', `apply kit: no_apply_url: application ${applicationId}'s job has no form URL`);
       // Narrowed to the kit's shape.
       return {
         id: app.data.id,

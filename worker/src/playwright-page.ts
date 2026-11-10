@@ -17,6 +17,8 @@ import type { AttachedFile, SubmitResult } from './apply-one.ts';
 // A VALUE import: fill() throws it when a no-match left the control provably empty, the one
 // case the caller may degrade to "left blank". No cycle: apply-one.ts never imports this file.
 import { OptionNotFoundError } from './apply-one.ts';
+// The one same-text rule (case/whitespace/separator folding, fail-closed on ambiguity), shared with the planner.
+import { matchOption } from './option-match.ts';
 // One judge of the pre-click facts, shared with the dry run and the rehearsal (task 2), and the facts' shape.
 import { verdictFromFacts, type PresubmitFacts } from './apply-one.ts';
 
@@ -694,8 +696,10 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
         // role="combobox" is what marks a react-select, which is a text input underneath.
         role: el.getAttribute('role') ?? '',
       }));
-      // Exact-match only, everywhere below: a near-miss answer ("Ind" for "India") must fail
-      // loudly rather than submit a different true-looking answer in Teja's name (constraint #3).
+      // Exact-match everywhere below, except that a react-select or radio group also accepts the ONE option that is the
+      // same text after case/whitespace/separator folding (option-match.ts). A near-miss answer ("Ind" for
+      // "India") must still fail loudly rather than submit a different true-looking answer in Teja's name
+      // (constraint #3).
       const wanted = value.trim();
       // One message for every choice control, so callers can match on the prefix. The CLASS
       // carries the stronger claim: OptionNotFoundError only when the control was provably
@@ -788,7 +792,21 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
           // Exact text, or a dial-code label of exactly this country.
           .filter((option) => option.text === wanted || option.dial !== null);
         // EXACTLY ONE, or nothing: two qualifying options means we cannot know which is meant.
-        const picked = candidates.length === 1 ? candidates[0] : undefined;
+        let picked = candidates.length === 1 ? candidates[0] : undefined;
+        // SAME TEXT, DIFFERENT CASE/SPACING. Only when nothing above qualified: the live bank stores answers as
+        // typed ("india", "yes"), and a react-select's options exist only here, at fill time (extract-fields.ts
+        // 32-34), so the planner could not map them. matchOption accepts ONE option equal after folding case,
+        // whitespace and separator punctuation; never a prefix, substring or other word ("male" never picks
+        // "Man", "India" never "Indiana"), and two options that fold alike are ambiguous, so it parks below.
+        if (candidates.length === 0) {
+          // Against the scoped, tagged option texts, so a normalized hit maps back to a clickable position.
+          const match = matchOption(wanted, menu.texts);
+          // 'exact' cannot happen here (an exact text would have been a candidate above); only 'normalized' picks.
+          if (match.kind === 'normalized') {
+            // The form's own text, at its tagged position; dial is null so the readback demands the full text.
+            picked = { text: match.option, position: menu.texts.indexOf(match.option), dial: null };
+          }
+        }
         // No scope (neither aria link nor an isolated widget) or no single match: fail closed.
         if (!menu.resolved || picked === undefined) {
           // Leave the widget as we found it: close the menu and drop the half-typed text.
@@ -831,10 +849,11 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
         // radio inside the wrapper fieldset/radiogroup, else the lone radio) AND the option-label
         // rule (aria-label, wrapping <label>, <label for>) MIRROR extract-fields.ts's radio
         // branch. Different runtime, cannot be imported; a change to either half must land in both.
-        // The matching radio is tagged with a temporary attribute so it can be clicked even
-        // when it has no id of its own.
+        // Every member radio is tagged with its position (a temporary attribute) so the one picked
+        // below can be checked even when it has no id of its own. The PICK happens in Node, not here:
+        // matchOption is the one same-text rule, and this in-page function cannot import it.
         const found = await page.evaluate(
-          ({ groupId, exact }) => {
+          ({ groupId }) => {
             // `id` may be a radio's or the wrapper's (see extract-fields.ts).
             const el = document.getElementById(groupId) as HTMLElement;
             // Typed view for `.type`, `.name`, `.form`.
@@ -856,9 +875,12 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
                   )
                 // Unnamed: the wrapper's subtree is the group.
                 : Array.from((wrapper ?? el).querySelectorAll<HTMLInputElement>('input[type="radio"]'));
-            for (const member of members) {
+            // Each member's label, in group order; position i is tagged data-applyyy-pick="i".
+            const texts = members.map((member, position) => {
+              // Tagged now; the caller checks exactly one tag and clears them all afterwards.
+              member.setAttribute('data-applyyy-pick', String(position));
               // The option's visible label, resolved in the extractor's precedence order.
-              const text =
+              return (
                 // Explicit accessible name first.
                 member.getAttribute('aria-label')?.trim() ||
                 // Then a wrapping <label>.
@@ -867,36 +889,43 @@ export function createPlaywrightPage(page: Page, options: PlaywrightPageOptions 
                 (member.id
                   ? document.querySelector(`label[for="${CSS.escape(member.id)}"]`)?.textContent?.trim()
                   : '') ||
-                // Unlabelled option: empty string can never equal a non-empty wanted value.
-                '';
-              // Strict equality: "yes" must not select "Yes".
-              if (text === exact) {
-                // Tag it for the locator below; the first exact match wins.
-                member.setAttribute('data-applyyy-pick', '');
-                // Stop at the first exact match; labels in one group should be unique.
-                return { found: true, anyChecked: false };
-              }
-            }
-            // No option matched exactly; the caller turns this into no_matching_option, and
-            // needs to know whether a skip would submit an already-checked answer.
+                // Unlabelled option: matchOption never picks an empty label for a non-empty answer.
+                ''
+              );
+            });
+            // The labels, plus whether a skip would submit an already-checked answer.
             // ZERO members is not "none checked": a lone unnamed radio outside any group resolves
             // to no members, and may itself be checked. Unknown is reported as not-empty.
-            return { found: false, anyChecked: members.length === 0 || members.some((member) => member.checked) };
+            return { texts, anyChecked: members.length === 0 || members.some((member) => member.checked) };
           },
           // Serialisable arguments handed to the in-page function above.
-          { groupId: id, exact: wanted },
+          { groupId: id },
         );
-        // Nothing was tagged, nothing was clicked; empty only if no member was already checked.
-        if (!found.found) throw noMatch(!found.anyChecked);
-        // The single tagged radio.
-        const pick = page.locator('[data-applyyy-pick]');
+        // Removes every position tag; used on every exit path so no marker is left behind.
+        const clearPickTags = () =>
+          // Runs in the browser: one sweep over this page's tags.
+          page.evaluate(() =>
+            document.querySelectorAll('[data-applyyy-pick]').forEach((el) => el.removeAttribute('data-applyyy-pick')),
+          );
+        // Exact label first (the first exact one, as before), else the ONE label equal after case/whitespace/
+        // separator folding ("yes" -> "Yes"). Never a prefix or another word; two that fold alike are ambiguous.
+        const match = matchOption(wanted, found.texts);
+        // ambiguous / none: nothing is checked; empty only if no member was already checked.
+        if (match.kind !== 'exact' && match.kind !== 'normalized') {
+          // Leave the DOM as found.
+          await clearPickTags();
+          // Same park as before this change.
+          throw noMatch(!found.anyChecked);
+        }
+        // The picked radio by its position tag (indexOf = the first member with that exact label).
+        const pick = page.locator(`[data-applyyy-pick="${found.texts.indexOf(match.option)}"]`);
         try {
           // check() (not click) so it is idempotent and verifies the box ended up checked.
           await pick.check();
         } finally {
-          // Never leave the marker behind, even if check() throws.
+          // Never leave the markers behind, even if check() throws.
           // Swallow cleanup errors so they cannot mask the real check() failure.
-          await pick.evaluate((el) => el.removeAttribute('data-applyyy-pick')).catch(() => undefined);
+          await clearPickTags().catch(() => undefined);
         }
         // Done; nothing else applies to a radio group.
         return;
