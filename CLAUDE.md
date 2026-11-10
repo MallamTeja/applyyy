@@ -68,8 +68,10 @@ On top of the global git form:
 Teja authorized the **orchestrator** to run production deploys itself (2026-10-08 15:37,
 "do this by yourself, do not give me this type of tasks"). This is **not** delegable: a peer
 never deploys, and never deploys on a relayed authorization. If the classifier blocks a
-deploy, stop and tell Teja; never route around it. Always deploy from a clean worktree
-pinned to a SHA (the CLI ships the *working tree*, including peers' uncommitted edits), and
+deploy, stop and tell Teja; never route around it. Always deploy from a clean EXPORT
+pinned to a SHA (the CLI ships the *working tree*, including peers' uncommitted edits). Since 2026-11-10
+that is a `git archive` export, not a worktree: an export registers nothing in `.git/worktrees`, so nothing
+piles up (52 deploy/gate worktrees had accumulated by then; the classifier blocks deleting them). And
 `db push --linked --dry-run` first: push only if it lists exactly the expected migrations.
 **Supabase CLI stays on v2 (2.119.0) until a planned upgrade** (decided 2026-11-09). v3 points `db push` and
 `migration list` at the LOCAL stack unless a target is passed, needs `--yes` for hosted writes, and refuses
@@ -77,8 +79,9 @@ pinned to a SHA (the CLI ships the *working tree*, including peers' uncommitted 
 `docs/status/2026-11-09-supabase-cli-v3.md`.
 
 ```powershell
-git worktree add --detach "$env:TEMP\applyyy-deploy" <sha>
-# copy supabase/.temp/{project-ref,pooler-url,linked-project.json,postgres-version} into it
+# Bash: export exactly the committed tree of <sha> into a fresh folder (no .git, no peers' edits)
+mkdir -p "$TEMP/applyyy-export-<sha>" && git archive <sha> | tar -x -C "$TEMP/applyyy-export-<sha>"
+# copy supabase/.temp/{project-ref,pooler-url,linked-project.json,postgres-version} into it, then deploy FROM it
 $env:SUPABASE_ACCESS_TOKEN = $null   # the user env var belongs to the WRONG account
 supabase functions deploy <fn> --project-ref xynqxekcqizwhtskzqrq --use-api --import-map supabase/functions/deno.json
 ```
