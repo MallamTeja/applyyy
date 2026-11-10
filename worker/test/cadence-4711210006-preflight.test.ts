@@ -83,7 +83,11 @@ const profile = {
 const row = (question_key: string, answer_value: unknown) => ({ question_key, answer_value, needs_human: false, answer_type: 'text', attested_by_human: false });
 
 // The live bank rows this form can use: names, plus the attested visa answer (which the planner still refuses).
+// T8 (2026-11-10): the live name rows are UNATTESTED, so row() keeps attested_by_human false for them here.
 const liveRows = [row('first_name', 'Asha'), row('last_name', 'Rao'), { ...row('visa_sponsorship_required', false), attested_by_human: true }] as unknown as AnswerBankRow[];
+
+// A row after Teja clicks Save on the web Answer bank page: the only way T8 lets the planner use it.
+const attested = (r: object) => ({ ...r, attested_by_human: true });
 
 // The two custom yes/no question keys, as questionKey() derives them from the labels.
 const Q_GRADUATING = 'are_you_graduating_in_december_2027_or_may_june_2028';
@@ -109,11 +113,16 @@ test('extracts the 20-field form exactly, and it passes the form-shape gate', as
   expect(formShapeBlockersFor('526e7895', fields)).toEqual([]);
 });
 
-test('GAP: with the live bank, six controls are blocked and the education picks are not Greenhouse options', async () => {
+test('GAP: with the live bank, eight controls are blocked and the education picks are not Greenhouse options', async () => {
   // The applier's call shape, with the posting's company.
   const plan = planFill(await extractFields(page), liveRows, profile, 'Cadence Solutions');
-  // The six: three dates the planner does not take from the profile, two yes/no, and the visa question.
+  // The eight: first and last name (T8: their live rows are unattested), three dates the planner does not
+  // take from the profile, two yes/no, and the visa question.
   expect(plan.blockers.map((b) => [b.id, b.key, b.reason])).toEqual([
+    // T8: unattested → parks until Teja saves the row. Names never fall back to full_name, so no_answer.
+    ['first_name', 'first_name', 'no_answer'],
+    // T8: same for the unattested last_name row.
+    ['last_name', 'last_name', 'no_answer'],
     ['start-year--0', 'start_date_year', 'no_answer'],
     ['end-month--0', 'end_date_month', 'no_answer'],
     ['end-year--0', 'end_date_year', 'no_answer'],
@@ -150,7 +159,8 @@ test('FIX: eight bank rows leave only the human_only visa question, and every kn
     row('school', 'Other'),
     // NEW: the field "Computer Science & Data Science (CSD)" mapped to the list's exact "Computer Science".
     row('discipline', 'Computer Science'),
-  ] as unknown as AnswerBankRow[];
+    // T8: this is the state AFTER Teja saves each row on the Answer bank page; unattested, none would be used.
+  ].map(attested) as unknown as AnswerBankRow[];
   // Same call as above, now with the rows.
   const plan = planFill(await extractFields(page), bank, profile, 'Cadence Solutions');
   // id -> value.

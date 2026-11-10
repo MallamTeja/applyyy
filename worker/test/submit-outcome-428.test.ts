@@ -71,7 +71,8 @@ function run(page: ApplicationPage, gateway: ApplierGateway) {
     page,
     gateway,
     // The answer for the one field.
-    answers: [{ question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text' }] as never,
+    // T8 (2026-11-10): the planner fills only from human-attested rows, so this fixture row is attested.
+    answers: [{ question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text', attested_by_human: true }] as never,
     // Live: the submit path runs.
     env: { DRY_RUN: 'false' },
     renderResume: async () => ({ bytes: new Uint8Array([37, 80, 68, 70]), sha256: 'a'.repeat(64) }),

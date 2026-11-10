@@ -80,11 +80,17 @@ const row = (question_key: string, answer_value: unknown) => ({ question_key, an
 // The live bank's name rows; names are never derived from full_name.
 const nameRows = [row('first_name', 'Asha'), row('last_name', 'Rao')] as unknown as AnswerBankRow[];
 
+// T8: the same row shape AFTER Teja clicks Save in the web Answer bank page, the only path that attests a row.
+const attested = (question_key: string, answer_value: unknown) => ({ ...row(question_key, answer_value), attested_by_human: true });
+
 // The two question keys this form asks that the live bank (2026-11-09, 42 rows) does not hold.
 const Q_AVAILABLE = 'are_you_available_to_intern_with_hackerrank_for_a_full_time_6_month_internship_starting_from_jan_5th_2027';
 // The office question. The bank's older row (this_role_requires_working_from_our_bangalore_office_...)
 // is worded differently, so its key does not match and it is not reused.
 const Q_OFFICE = 'are_you_able_to_work_from_our_bangalore_office_full_time_for_the_entire_6_month_internship_period';
+// T8 (2026-11-10): the bank now HOLDS both answers ("Yes", saved 11-09) but neither is attested, so the planner
+// still treats them as absent; the live names are unattested too.
+const liveBank = [...nameRows, row(Q_AVAILABLE, 'Yes'), row(Q_OFFICE, 'Yes')] as unknown as AnswerBankRow[];
 
 test('extracts the 8-field form exactly, and it passes the form-shape gate', async () => {
   // The raw extraction the applier reads.
@@ -104,11 +110,17 @@ test('extracts the 8-field form exactly, and it passes the form-shape gate', asy
   expect(formShapeBlockersFor('cb64a4bf', fields)).toEqual([]);
 });
 
-test('GAP: with the live bank, the two required yes/no questions are unanswered', async () => {
+test('GAP: with the live bank, the two required yes/no questions and both names (unattested, T8) are unanswered', async () => {
   // The applier's call shape (apply-one.ts), with the posting's company.
-  const plan = planFill(await extractFields(page), nameRows, profile, 'HackerRank');
+  // T8: the live bank includes the unattested 11-09 "Yes" rows; they must not count as answers.
+  const plan = planFill(await extractFields(page), liveBank, profile, 'HackerRank');
   // Exactly the two, and for the reason "no answer" (not human_only: neither is a declaration).
+  // T8: plus both names: unattested -> parks until Teja saves the row (names are never derived from full_name).
   expect(plan.blockers.map((b) => [b.id, b.key, b.reason])).toEqual([
+    // T8: unattested first_name row.
+    ['first_name', 'first_name', 'no_answer'],
+    // T8: unattested last_name row.
+    ['last_name', 'last_name', 'no_answer'],
     ['question_69424165', Q_AVAILABLE, 'no_answer'],
     ['question_69424166', Q_OFFICE, 'no_answer'],
   ]);
@@ -116,7 +128,8 @@ test('GAP: with the live bank, the two required yes/no questions are unanswered'
 
 test('FIX: two bank rows answering "Yes" plan clean, and "Yes" is a real option for both', async () => {
   // The rows Teja confirms (his statements; the orch runs the INSERT, never an agent on its own).
-  const bank = [...nameRows, row(Q_AVAILABLE, 'Yes'), row(Q_OFFICE, 'Yes')] as unknown as AnswerBankRow[];
+  // T8: every row as it stands AFTER Teja saves it (attested), names included, so the plan can be clean.
+  const bank = [attested('first_name', 'Asha'), attested('last_name', 'Rao'), attested(Q_AVAILABLE, 'Yes'), attested(Q_OFFICE, 'Yes')] as unknown as AnswerBankRow[];
   // Same call as above, now with the rows.
   const plan = planFill(await extractFields(page), bank, profile, 'HackerRank');
   // id -> [value, source].

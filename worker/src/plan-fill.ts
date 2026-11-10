@@ -11,6 +11,9 @@
 // THE WRONG ANSWER CANNOT BE EXPRESSED. The planner has no code path that
 // invents a value. It can only copy an answer that a human already supplied, or
 // report a blocker. There is no third branch to get wrong.
+//
+// "Already supplied" means ATTESTED (T8, 2026-11-10): an answer_bank row fills a field only when
+// attested_by_human is true, on every path. A row a machine wrote counts as no row at all.
 // Type-only imports: erased at compile time, so the planner stays free of runtime deps.
 import type { AnswerBankRow, MasterProfile } from '@applyy/shared-types';
 import type { FormField } from './extract-fields.ts';
@@ -345,10 +348,10 @@ function attestedRow(
   if (row === undefined) return 'human_only';
   // A placeholder row is not an answer.
   if (row.needs_human) return 'awaiting_human_answer';
-  // STRICT true: the column comes from select('*') and is not in the shared TS type yet, so
-  // anything but a real boolean true (missing, null, "true") is "not attested". A row a
+  // STRICT true: the column arrives via select('*') at runtime, so anything but a real boolean
+  // true (missing, null, "true") is "not attested", whatever the shared type promises. A row a
   // machine wrote is stamped false by the trigger (20261009160000) and refused here.
-  if ((row as { readonly attested_by_human?: unknown }).attested_by_human !== true) return 'human_only';
+  if (row.attested_by_human !== true) return 'human_only';
   // Attested by Teja and not a placeholder: usable.
   return row;
 }
@@ -639,7 +642,13 @@ export function planFill(
 
     // Both lookups up front so the branches read as a plain priority order.
     const collision = collisions.get(key);
-    const match = byKey.get(key);
+    // The row as saved, before the attestation rule below decides whether it may be used.
+    const savedRow = byKey.get(key);
+    // T8 default-deny (2026-11-10): a row Teja never attested counts as NO row, so the field falls
+    // to the profile or parks as no_answer. STRICT true: the trigger (20261009160000) stamps false on
+    // every machine write, and a missing or non-boolean flag is not a confirmation. A placeholder
+    // stays visible either way, so its awaiting_human_answer reason is unchanged.
+    const match = savedRow?.needs_human || savedRow?.attested_by_human === true ? savedRow : undefined;
     if (collision !== undefined) {
       // Which of two rows applies is unknowable; refuse and name both keys for the human.
       refuse('ambiguous_answer_key', `${formField.label} (ambiguous answer_bank keys: "${collision[0]}" and "${collision[1]}")`);

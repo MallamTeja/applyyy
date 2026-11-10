@@ -57,7 +57,9 @@ const answers = [
   { question_key: 'first_name', answer_value: 'Asha', needs_human: false, answer_type: 'text' },
   // Same rule as first_name.
   { question_key: 'last_name', answer_value: 'Rao', needs_human: false, answer_type: 'text' },
-] as unknown as AnswerBankRow[];
+  // T8 (2026-11-10): attested scaffolding. These tests pin the form's fills and eligibility blockers, not the
+  // attestation gate; unattested, both names would park as no_answer (the cadence GAP test pins that live state).
+].map((r) => ({ ...r, attested_by_human: true })) as unknown as AnswerBankRow[];
 
 // The live master profile's identity shape (v2), with invented values.
 const profile = {

@@ -46,10 +46,11 @@ export type { ApplicationStatus } from '@applyy/shared-types';
 export { AGENT_NAMES } from '@applyy/shared-types';
 export type { AgentName } from '@applyy/shared-types';
 
-/* Confidence in `jobs.posted_at`. The 3-day freshness filter behaves
- * differently per level and `unknown` rows are excluded from it entirely by the
- * cold-start guard, so the UI must show which is which or the operator cannot
- * tell why a stale-looking job survived filtering. */
+/* Confidence in `jobs.posted_at`. The job-age (staleness/freshness) filter that
+ * once read this per level was retired on 2026-11-10 - Teja: "dont ever skip even
+ * though they are 1 mon 2 mont old" - so no job is dropped for its age any more.
+ * The UI still shows the level so the operator can tell how far to trust a
+ * displayed posting date (an `unknown` date is a guess, not a board fact). */
 export { POSTED_AT_SOURCES } from '@applyy/shared-types';
 export type { PostedAtSource } from '@applyy/shared-types';
 

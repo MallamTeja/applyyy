@@ -48,8 +48,9 @@ function plan(field: FormField, rows: AnswerBankRow[]): [string[][], string[][]]
 test('generic bank path: "india" plans as the form\'s "India" (country list, 314 options)', () => {
   // "In which country do you currently work?": no gate word, so the plain bank lookup answers it.
   const field = select('question_41852508', 'In which country do you currently work?', OPTIONS['question_41852508']!);
-  // The live lowercase answer, unattested (the plain path does not require attestation).
-  expect(plan(field, [row(questionKey(field.label), 'india', false)])).toEqual([[['question_41852508', 'India']], []]);
+  // The live lowercase answer. Before T8 the row was unattested, because the plain path did not require
+  // attestation then. T8 (2026-11-10): the plain path now needs an attested row too, so the row is attested (default).
+  expect(plan(field, [row(questionKey(field.label), 'india')])).toEqual([[['question_41852508', 'India']], []]);
 });
 
 test('exact-label attested path: "male" plans as "Male", and "hispanic or latino" keeps the option\'s trailing space', () => {
@@ -88,11 +89,11 @@ test('still parks: no same-text option ("indian" is not "India"), and a tie betw
   // The country list has "India", never "Indian": a different word is a different statement.
   const country = select('question_41852508', 'In which country do you currently work?', OPTIONS['question_41852508']!);
   // Refused, exactly as before the wiring.
-  expect(plan(country, [row(questionKey(country.label), 'indian', false)])).toEqual([[], [['question_41852508', 'no_matching_option']]]);
+  expect(plan(country, [row(questionKey(country.label), 'indian')])).toEqual([[], [['question_41852508', 'no_matching_option']]]);
   // Two options normalize to the answer: which one Teja meant is unknowable.
   const tie = select('tie', 'Preferred shift', ['Day', 'day']);
   // Ambiguous parks too.
-  expect(plan(tie, [row(questionKey(tie.label), 'DAY', false)])).toEqual([[], [['tie', 'no_matching_option']]]);
+  expect(plan(tie, [row(questionKey(tie.label), 'DAY')])).toEqual([[], [['tie', 'no_matching_option']]]);
 });
 
 test('HARD CONSTRAINT: matching never reaches a declaration, even with a normalized-equal option', () => {

@@ -70,7 +70,8 @@ const answerableForm: FormField[] = [
 
 /** The matching bank row. Real rows carry more columns; the planner reads these four. */
 const answers = [
-  { question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text' },
+  // T8 (2026-11-10): the planner fills only from human-attested rows, so this fixture row is attested.
+  { question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text', attested_by_human: true },
 ] as unknown as AnswerBankRow[];
 
 /** The claimed row. A real tailored profile, because the stub form asks for a resume (no_resume_field gate, 2026-11-10). */

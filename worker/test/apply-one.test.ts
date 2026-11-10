@@ -73,7 +73,8 @@ const answerableForm: FormField[] = [
 
 /** The matching bank. Real rows carry more columns; the planner reads four. */
 const answers = [
-  { question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text' },
+  // T8 (2026-11-10): the planner fills only from human-attested rows, so this fixture row is attested.
+  { question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text', attested_by_human: true },
 ] as unknown as AnswerBankRow[];
 
 /**
@@ -821,7 +822,8 @@ describe('applyToOne — a fill the page rejects', () => {
   // The bank answer the page will refuse to select.
   const countryAnswers = [
     // A plausible-looking value the page rejects, as a near-miss option would be.
-    { question_key: 'country', answer_value: 'Indo', needs_human: false, answer_type: 'text' },
+    // T8 (2026-11-10): the planner fills only from human-attested rows, so this fixture row is attested.
+    { question_key: 'country', answer_value: 'Indo', needs_human: false, answer_type: 'text', attested_by_human: true },
   ] as unknown as AnswerBankRow[];
 
   /** A gateway that also records each transition's `detail`, which fakeGateway drops. */
@@ -1215,7 +1217,8 @@ describe('applyToOne — optional EEO option mismatch', () => {
     // The attested gender answer the page will fail to find among its options.
     { question_key: 'eeo_gender', answer_value: 'Male', needs_human: false, answer_type: 'text', attested_by_human: true },
     // The plain answer for the required field that must still be filled after the skip.
-    { question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text' },
+    // T8 (2026-11-10): the planner fills only from human-attested rows, so this fixture row is attested.
+    { question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text', attested_by_human: true },
   ] as unknown as AnswerBankRow[];
 
   /** A page whose fill throws `error` for the gender field only and records every fill id in order. */
@@ -1316,10 +1319,11 @@ describe('applyToOne — optional EEO option mismatch', () => {
       // The form-shape gate's resume upload (see RESUME_FIELD), so the fill rejection is what parks it.
       RESUME_FIELD,
     ];
-    // A plain bank row is enough: non-EEO answers need no attestation.
+    // A plain bank row is enough here: since T8 (2026-11-10) it must be attested, but no EEO rule applies.
     const countryAnswers = [
       // The value the page will fail to find among its options.
-      { question_key: 'country', answer_value: 'India', needs_human: false, answer_type: 'text' },
+      // T8 (2026-11-10): the planner fills only from human-attested rows, so this fixture row is attested.
+      { question_key: 'country', answer_value: 'India', needs_human: false, answer_type: 'text', attested_by_human: true },
     ] as unknown as AnswerBankRow[];
     // The typed error, so only the label separates this from the skip case.
     const { page, submit } = fakePage({

@@ -72,7 +72,8 @@ function gateway() {
 }
 
 // The answer bank entry that answers the one field.
-const ANSWERS = [{ question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text' }] as never;
+// T8 (2026-11-10): the planner fills only from human-attested rows, so this fixture row is attested.
+const ANSWERS = [{ question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text', attested_by_human: true }] as never;
 // The common input for a run.
 const base = (r: ClaimedApplication, p: ApplicationPage, g: ApplierGateway, live: boolean) => ({
   row: r, page: p, gateway: g, answers: ANSWERS, env: { DRY_RUN: live ? 'false' : 'true' },

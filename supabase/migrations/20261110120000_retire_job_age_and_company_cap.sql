@@ -86,7 +86,7 @@ begin
   -- rows at the column default enabled = true: an 11-row pool would let one call bring
   -- 12-20 back enabled, whereas existing disabled rows win its ON CONFLICT DO NOTHING.
   insert into public.gemini_key_state (user_id, key_index, enabled)
-  -- One row per key index, 1..v_key_count; enabled only within the live range.
+  -- One row per index from 1 to the row count (v_key_count); enabled only within the live range.
   select p_user_id, i::smallint, i <= v_live_key_count
     -- generate_series is schema-qualified because search_path is empty.
     from pg_catalog.generate_series(1, v_key_count) as g(i)

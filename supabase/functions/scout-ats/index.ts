@@ -315,13 +315,15 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
   // rules, the blocklist and the application history are properties of the USER, not of
   // the board being polled, so re-reading them forty times would be forty times the cost
   // for the same answer. The clock is passed in so every board in one run screens
-  // against the same instant — otherwise a run spanning midnight would apply a different
-  // staleness window to its last board than to its first.
+  // against the same instant, so no two boards in one run see a different "now". (This
+  // once kept a staleness window consistent across a run; the job-age rule was retired on
+  // 2026-11-10 — Teja: "dont ever skip even though they are 1 mon 2 mont old".)
   const screenContext = await loadScreenContext(supabaseScreenQueries(db, now), now);
 
-  // A FAILED CONTEXT LOAD MUST NOT SILENTLY BECOME AN EMPTY CONTEXT. Three rules
-  // (already_applied, company_blocklist, per_company_weekly_cap) read nothing but this
-  // context, so screening with an empty one would pass every job while reporting a clean
+  // A FAILED CONTEXT LOAD MUST NOT SILENTLY BECOME AN EMPTY CONTEXT. Two rules
+  // (already_applied, company_blocklist) read nothing but this context (a third,
+  // per_company_weekly_cap, also did until it was retired on 2026-11-10 — Teja: "remove
+  // it"), so screening with an empty one would pass every job while reporting a clean
   // screen — the precise failure this parcel exists to remove. When it fails we do not
   // screen at all: rows are created at 'discovered', exactly as before this change, which
   // is a TRUE statement about them (they have not been screened) and leaves them
@@ -522,7 +524,9 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
         // so `first_seen_at` is write-once. The old single upsert built every row with
         // `firstSeenAt: now`, so on every poll an undated job's `posted_at` and its
         // source_refs `first_seen_at` were reset to the poll time — the staleness rule
-        // never saw it age — and `seen_count` never moved off 1.
+        // (retired 2026-11-10; age no longer drops a job) never saw it age — and
+        // `seen_count` never moved off 1. Write-once is still right: `posted_at` is shown
+        // to the user and must say when the job was first seen, not when it was last polled.
         const { data: storedRows, error: storedError } = await db
           .from("jobs")
           .select("id, fingerprint, first_seen_at, seen_count")

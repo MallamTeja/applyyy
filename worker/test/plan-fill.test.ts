@@ -19,10 +19,15 @@ import type { FormField } from '../src/extract-fields.ts';
 import { planFill } from '../src/plan-fill.ts';
 
 /** Builds an answer-bank row with only the fields the planner actually reads. */
-function answer(question_key: string, answer_value: unknown, needs_human = false): AnswerBankRow {
+function answer(question_key: string, answer_value: unknown, needs_human = false, attested_by_human = true): AnswerBankRow {
   // Cast at the boundary: the planner reads four fields, and spelling out all
   // eleven in every test would obscure which one each case is about.
-  return { question_key, answer_value, needs_human, answer_type: 'text' } as unknown as AnswerBankRow;
+  // attested_by_human: true because of T8 default-deny: a bank row fills a plain
+  // question only when a human attested it. These tests pin OTHER rules (shape,
+  // matching, option picks), so the helper hands them an attested row; the
+  // unattested case is pinned in test/plan-fill-attested-only.test.ts. The denylist
+  // tests pass false: an attested exact-label row answers EEO/eligibility (H1).
+  return { question_key, answer_value, needs_human, answer_type: 'text', attested_by_human } as unknown as AnswerBankRow;
 }
 
 /** Builds an extracted form field. */
@@ -222,7 +227,8 @@ describe('planFill — denylist', () => {
     // The bank is the most trusted source, so this proves the denylist outranks it.
     const q = 'Will you now or in the future require sponsorship for a visa?';
     // A bank row exists with a plausible answer, which must be ignored.
-    const plan = planFill([field('v', q, true)], [answer(q, 'No')]);
+    // Unattested (T8): an attested exact-label row would answer it under H1; this pins the plain bank row.
+    const plan = planFill([field('v', q, true)], [answer(q, 'No', false, false)]);
     // Nothing typed, and the reason names the denylist rather than a missing answer.
     expect(plan.fills).toEqual([]);
     // human_only, not no_answer: the human must see this is a deliberate refusal.
@@ -233,7 +239,8 @@ describe('planFill — denylist', () => {
     // No other fragment (sponsor, work_authori...) appears here, so only 'visa' can catch it.
     const q = 'Do you hold a valid visa for the UK?';
     // The bank row would otherwise be typed verbatim.
-    const plan = planFill([field('v', q, true)], [answer(q, 'Yes')]);
+    // Unattested (T8): an attested exact-label row would answer it under H1; this pins the plain bank row.
+    const plan = planFill([field('v', q, true)], [answer(q, 'Yes', false, false)]);
     // Nothing typed.
     expect(plan.fills).toEqual([]);
     // Refused by the denylist alone.
@@ -244,7 +251,8 @@ describe('planFill — denylist', () => {
     // 'work_permit' is one of the legal entries added in round 2; no older fragment matches it.
     const q = 'Do you need a work permit?';
     // A bank row exists, so only the denylist can stop it.
-    const plan = planFill([field('w', q, true)], [answer(q, 'No')]);
+    // Unattested (T8): an attested exact-label row would answer it under H1; this pins the plain bank row.
+    const plan = planFill([field('w', q, true)], [answer(q, 'No', false, false)]);
     // Nothing typed.
     expect(plan.fills).toEqual([]);
     // Refused as legal.
@@ -261,7 +269,8 @@ describe('planFill — denylist', () => {
     ['What is your caste category?', 'General'],
   ])('%s, with a bank row, gives human_only', (q, value) => {
     // The bank holds an answer, so only the denylist stands between it and the form.
-    const plan = planFill([field('x', q, true)], [answer(q, value)]);
+    // Unattested (T8): an attested exact-label row would answer it under H1; this pins the plain bank row.
+    const plan = planFill([field('x', q, true)], [answer(q, value, false, false)]);
     // Nothing is typed.
     expect(plan.fills).toEqual([]);
     // It is routed to the human as a legal/consent question.
@@ -270,7 +279,8 @@ describe('planFill — denylist', () => {
 
   test('an optional legal question is skipped silently', () => {
     // Optional plus denylisted: nothing typed and nothing blocking.
-    const plan = planFill([field('g', 'Gender', false)], [answer('gender', 'Male')]);
+    // Unattested (T8): an attested exact-label row would answer it under H1; this pins the plain bank row.
+    const plan = planFill([field('g', 'Gender', false)], [answer('gender', 'Male', false, false)]);
     // The bank row must not leak through an optional field.
     expect(plan.fills).toEqual([]);
     // Optional gaps never block the application.

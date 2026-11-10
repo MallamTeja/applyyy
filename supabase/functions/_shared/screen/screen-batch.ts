@@ -138,7 +138,8 @@ export function toScreenableJob(row: JobInsert | JobRow): ScreenableJob {
   return {
     // UNTRUSTED, straight from the board. What the title blocklist matches on.
     title: row.title,
-    // The normalised join key for the blocklist and the weekly cap.
+    // The normalised join key for the company blocklist. (It also keyed the per-company
+    // weekly cap until that rule was retired on 2026-11-10 — Teja: "remove it".)
     companySlug: row.company_slug,
     // Always `[]` today: `toJobInsert` (registry.ts:162) and both tier lanes (tiers.ts:296,
     // :370) hard-code it, and NOTHING splits locations later. The Normalizer only reads

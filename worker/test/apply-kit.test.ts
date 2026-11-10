@@ -65,8 +65,10 @@ const KIT_FILE_NAME = resumeFileName({ ...tailored, identity: latestMaster.ident
 
 // Name fields come only from the bank (the planner never splits full_name).
 const answers = [
-  { question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text' },
-  { question_key: 'last_name', answer_value: 'Mallam', needs_human: false, answer_type: 'text' },
+  // T8 (2026-11-10): the planner fills only from human-attested rows, so this fixture row is attested.
+  { question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text', attested_by_human: true },
+  // T8 (2026-11-10): the planner fills only from human-attested rows, so this fixture row is attested.
+  { question_key: 'last_name', answer_value: 'Mallam', needs_human: false, answer_type: 'text', attested_by_human: true },
 ] as unknown as AnswerBankRow[];
 
 // The row as the database holds it: `applying`, like GitLab ba1e5d1d.

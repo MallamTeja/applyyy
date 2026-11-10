@@ -7,15 +7,15 @@
  * `boards.greenhouse.io/stripe`. No token, no jobs: this list IS the funnel,
  * and everything downstream can only be as good as what enters here.
  *
- * WHY THIS PAGE MATTERS MORE THAN IT LOOKS. The three-day freshness rule
- * (section 13) throws away anything posted more than a few days ago, which is
- * correct - recruiters read in arrival order and often stop around the
- * fiftieth application - but it means each board only yields whatever it posted
- * this week. A small watchlist plus a tight freshness window is how the
- * pipeline runs dry while every agent reports itself perfectly healthy. That is
- * the trade-off to understand before tuning either: FRESHNESS AND VOLUME PULL
- * AGAINST EACH OTHER, and the watchlist is the dial that buys back volume
- * without loosening honesty or freshness.
+ * WHY THIS PAGE MATTERS MORE THAN IT LOOKS. Every job the pipeline can ever
+ * see comes from a board on this list. A small watchlist is how the pipeline
+ * runs dry while every agent reports itself perfectly healthy, and the
+ * watchlist is the dial that buys back volume without loosening honesty.
+ * (A three-day freshness rule, section 13, used to throw away anything posted
+ * more than a few days ago, which made this list the ONLY volume dial. It was
+ * retired on 2026-11-10 - Teja: "dont ever skip even though they are 1 mon 2
+ * mont old" - so job age no longer drops anything; liveness, i.e. a posting
+ * that has disappeared from its board, is a separate check and still applies.)
  *
  * WHY POLLING STATS BELONG ON THIS PAGE. `CompanyWatchlistRow` carries
  * `last_polled_at`, `last_poll_job_count` and `consecutive_failures`. A board

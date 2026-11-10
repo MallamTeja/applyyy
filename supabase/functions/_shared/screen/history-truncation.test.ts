@@ -2,8 +2,9 @@
 //
 // THE BUG THESE PIN. PostgREST caps every response at max_rows (1000) and says nothing
 // about it. A user with more than 1000 committed applications got the first 1000 back as
-// if that were all of them, so already_applied missed the rest and the weekly cap
-// UNDERCOUNTED: the fail-open of repo CLAUDE.md §6 (missing data becoming an answer).
+// if that were all of them, so already_applied missed the rest (and the per-company weekly
+// cap, retired 2026-11-10 by Teja's "remove it", UNDERCOUNTED): the fail-open of repo
+// CLAUDE.md §6 (missing data becoming an answer). already_applied still depends on this.
 // The fix asks the server for `{ count: "exact" }` and refuses any read whose count is
 // absent or disagrees with the rows it actually received.
 import { test } from "node:test";

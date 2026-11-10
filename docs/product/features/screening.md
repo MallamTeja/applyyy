@@ -32,6 +32,15 @@ The nine cascade rule types are a closed enum (`FILTER_RULE_TYPES` in
 `location_allowlist`, `employment_type`, `already_applied`, `company_blocklist`, `staleness`,
 `degree_mismatch`, `per_company_weekly_cap`.
 
+**Two of the nine are retired (since 2026-11-10, commit 8ba2b06):** `staleness` (job age) and
+`per_company_weekly_cap`. Teja, 2026-11-10 11:31 IST: job age, "dont ever skip even though they are
+1 mon 2 mont old"; the cap, "remove it". `cascade.ts` runs both as `retiredRule`, which never drops
+or warns; the screen context no longer counts applications per company; migration
+`20261110120000_retire_job_age_and_company_cap.sql` deleted their `filter_rules` rows, stopped
+seeding them and dropped `system_settings.max_applications_per_company_per_week` and
+`freshness_window_days`. The enum values stay only because Postgres cannot drop one. Liveness
+(`jobs.disappeared_at`, a posting gone from its board) is not age and still applies.
+
 Every job gets a row, passed or dropped. A drop is **recorded, never omitted**, so the dashboard can
 explain why a job in `jobs` never reached the queue.
 
@@ -66,6 +75,7 @@ explain why a job in `jobs` never reached the queue.
 | 2026-11-05 14:44 IST | **Unknown location passes.** "2 Locations", "In-Office", blank: keep the job. | `work-auth-gate.ts` fail-open rule |
 | 2026-11-05 | Fix leaks in the gate, never with a score cutoff. | `docs/screener/2026-11-06-bulk-revive-needs-pregate-sweep.md` |
 | 2026-11-07 | Drop AVP/VP/Intermediate grades, PhD-only titles and non-software titles at the tech gate. | `tech-gate.ts` `titleRuleDrop` (`e780ede`) |
+| 2026-11-10 11:31 IST | Retire the job-age filter ("dont ever skip even though they are 1 mon 2 mont old") and the per-company weekly cap ("remove it"). Liveness (`disappeared_at`) still applies: gone is not old. | `cascade.ts` `retiredRule` (`8ba2b06`), migration `20261110120000` |
 
 Why so many rulings? Each one followed a real leak Teja found in his own queue. Examples: Axiad
 "AI-First Golang Developer" (JD: "6-8 years") reached manual apply on 2026-11-04 because the
@@ -223,9 +233,9 @@ saved into the run row (`_shared/screen/run-summary.ts`), and the Filters page
 | `employment_type` | `config.allowed_types` | type not allowed |
 | `already_applied` | fingerprints in your history | fingerprint seen before |
 | `company_blocklist` | `company_blocklist` table | company blocked |
-| `staleness` | `config.window_days`, `posted_at`, `posted_at_source` | posted too long ago |
+| `staleness` | nothing (retired 2026-11-10) | never: job age never drops a job |
 | `degree_mismatch` | `jobs.requires_advanced_degree` | requires Master's/PhD |
-| `per_company_weekly_cap` | `config.max_per_week` | too many applications to that company this week |
+| `per_company_weekly_cap` | nothing (retired 2026-11-10) | never: there is no per-company cap |
 
 **Experience ceiling, in detail.** Nothing writes `jobs.min_experience_years`, so
 `toScreenableJob` (`screen-batch.ts`) fills it from the JD with `requiredExperienceYears(title,
@@ -338,10 +348,11 @@ above (`f5b3914`).
 Measured 2026-11-08 by the read-only query in §3.6. Re-run it; do not trust these lines later.
 
 1. **Most cascade rules are enabled but have no config.** Live, `title_blocklist`,
-   `location_allowlist`, `employment_type` and `degree_mismatch` have `config = {}`, and `staleness`
-   has no `window_days`. They warn and pass every job. In practice the cascade drops only through
-   `experience_ceiling` (`max_years = 1`), `already_applied`, `company_blocklist` and maybe the
-   weekly cap. The real filtering is done by the stage-0 gates.
+   `location_allowlist`, `employment_type` and `degree_mismatch` have `config = {}`. They warn and
+   pass every job. In practice the cascade drops only through `experience_ceiling`
+   (`max_years = 1`), `already_applied` and `company_blocklist`. The real filtering is done by the
+   stage-0 gates. (`staleness` and `per_company_weekly_cap` were retired on 2026-11-10 and their
+   rows deleted; see §1. They can no longer drop or warn, whatever their config.)
 2. **`degree_mismatch` has no producer.** Nothing writes `jobs.requires_advanced_degree`, so it
    always skips. PhD-only titles are caught by `title_phd` instead.
 3. **The salary gate is written but not wired.** `evaluateSalaryGate` in

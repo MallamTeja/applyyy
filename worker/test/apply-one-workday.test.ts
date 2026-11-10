@@ -63,7 +63,8 @@ const answerableForm: FormField[] = [
 ];
 // The matching bank row; the planner reads these four columns.
 const answers = [
-  { question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text' },
+  // T8 (2026-11-10): the planner fills only from human-attested rows, so this fixture row is attested.
+  { question_key: 'first_name', answer_value: 'Teja', needs_human: false, answer_type: 'text', attested_by_human: true },
 ] as unknown as AnswerBankRow[];
 
 // A claimed row; each test overrides the URL and provider it is about.

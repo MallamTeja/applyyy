@@ -97,8 +97,14 @@ window over 50 boards yields single digits per day, not 35).
 **The counter-argument, which is real and is why this needs a ruling:** on a new
 Greenhouse board, a job open since March whose description was edited yesterday has
 `updated_at = yesterday` and looks fresh. That is precisely the stale-but-recently-
-touched posting §13 does not want quota spent on, and `derived` passes the staleness
-filter today.
+touched posting §13 does not want quota spent on, and `derived` passed the staleness
+filter.
+
+**Moot since 2026-11-10:** the staleness (job-age) rule is retired (Teja: "dont ever skip
+even though they are 1 mon 2 mont old"; commit 8ba2b06, migration
+`20261110120000_retire_job_age_and_company_cap.sql`). The cascade's `retiredRule` never
+drops or warns, so `posted_at_source` no longer decides whether a job survives. It still
+says how far to trust the displayed date.
 
 **Currently shipped behaviour:** the implementation's. `_shared/ats/adapters_test.ts`
 pins all three cases explicitly ("the cold-start guard degrades the first_seen_at
@@ -118,9 +124,12 @@ resolves to `derived` via `first_seen_at`. No column type can express this, and 
 reader who assumes `unknown` signals a bad parse will write the wrong filter. Pinned by
 a test in `adapters_test.ts` for exactly that reason.
 
-`unknown` **fails** the staleness check rather than bypassing it. That policy is a
-setting, not a buried constant:
-`filter_rules.config.treat_unknown_posted_at_as_fresh`, default `false`.
+`unknown` used to **fail** the staleness check rather than bypass it, via the setting
+`filter_rules.config.treat_unknown_posted_at_as_fresh` (default `false`). **Retired
+2026-11-10:** the staleness rule no longer drops anything (Teja: job age must never skip a
+job), and migration `20261110120000_retire_job_age_and_company_cap.sql` deleted the
+`staleness` rows that carried this setting, so nothing reads it. The enum value
+`staleness` stays only because Postgres cannot drop one.
 
 ---
 

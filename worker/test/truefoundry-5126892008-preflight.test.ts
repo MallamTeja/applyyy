@@ -85,6 +85,13 @@ const nameRows = [
   { question_key: 'last_name', answer_value: 'Rao' },
 ].map((r) => ({ ...r, needs_human: false, answer_type: 'text', attested_by_human: false })) as unknown as AnswerBankRow[];
 
+// T8: live first_name/last_name rows are UNATTESTED (measured 2026-11-10), so the planner ignores them and the
+// names park as no_answer until Teja saves each row in the web Answer bank page. These are the same rows AFTER that
+// Save: the state every FIX below describes.
+const attestedNameRows = nameRows.map((r) => ({ ...r, attested_by_human: true })) as unknown as AnswerBankRow[];
+// T8: the plan-time blockers the live names cause; named once so each test asserts the same exact pair.
+const NAME_BLOCKERS = [['first_name', 'no_answer'], ['last_name', 'no_answer']];
+
 test('extracts the 12-field embed form exactly, and it passes the form-shape gate', async () => {
   // The raw extraction the applier reads.
   const fields = await extractFields(page);
@@ -113,7 +120,9 @@ test('HAZARD: profile-only, the plan is clean but the Degree it types is not a G
   // The applier's call shape (apply-one.ts:608), with the posting's company.
   const plan = planFill(fields, nameRows, profile, 'TrueFoundry');
   // The planner sees no blocker: combobox options are unknown at plan time, so nothing refuses.
-  expect(plan.blockers).toEqual([]);
+  // T8: the only blockers are the two unattested live name rows (park until Teja saves them). They are kept, not
+  // attested away, because this test replays the LIVE bank; the hazard itself is unchanged: no Degree/School blocker.
+  expect(plan.blockers.map((b) => [b.id, b.reason])).toEqual(NAME_BLOCKERS);
   // id -> [value, source], for exact comparison.
   const byId = Object.fromEntries(plan.fills.map((f) => [f.id, [f.value, f.source]]));
   // The profile's abbreviation, verbatim: the planner never rewords a statement.
@@ -125,7 +134,8 @@ test('HAZARD: profile-only, the plan is clean but the Degree it types is not a G
 test('FIX: bank rows degree="Bachelor\'s Degree" and school="Other" win over the profile and are real options', async () => {
   // The two rows the orch asks Teja to save (his statements, so never written by an agent).
   const bank = [
-    ...nameRows,
+    // T8: the state AFTER Teja saves the name rows too; unattested names would park and hide whether the fix works.
+    ...attestedNameRows,
     // A B.Tech in progress is a bachelor's degree; Greenhouse's own option text, verbatim.
     { question_key: 'degree', answer_value: "Bachelor's Degree", needs_human: false, answer_type: 'text', attested_by_human: true },
     // His school is not in Greenhouse's list (searched "MLR", "MLRIT", "Marri Laxman": 0 hits); "Other" is.
@@ -154,4 +164,28 @@ test('the resume goes into the Resume input, never the cover-letter one', async 
   const attachment = planResumeAttachment(fields, { hasResumeSnapshot: true });
   // A plan exists and it targets the resume input.
   expect([attachment.canProceed, attachment.target?.id]).toEqual([true, 'resume']);
+});
+
+test('LIVE BANK (T8): unattested degree/school rows are ignored, so Degree and School fall to the profile and park', async () => {
+  // The live bank as measured 2026-11-10: names plus the 11-09 degree/school rows, none attested by Teja yet.
+  const bank = [
+    // Live names, unattested.
+    ...nameRows,
+    // T8: saved 11-09 but never attested, so the planner treats it as absent.
+    { question_key: 'degree', answer_value: "Bachelor's Degree", needs_human: false, answer_type: 'text', attested_by_human: false },
+    // T8: same for the school row.
+    { question_key: 'school', answer_value: 'Other', needs_human: false, answer_type: 'text', attested_by_human: false },
+  ] as unknown as AnswerBankRow[];
+  // The applier's call shape, against the live bank.
+  const plan = planFill(await extractFields(page), bank, profile, 'TrueFoundry');
+  // Plan time: only the names park (no_answer); Degree and School are not blocked here, they are filled from the profile.
+  expect(plan.blockers.map((b) => [b.id, b.reason])).toEqual(NAME_BLOCKERS);
+  // id -> [value, source].
+  const byId = Object.fromEntries(plan.fills.map((f) => [f.id, [f.value, f.source]]));
+  // T8: the unattested bank row lost to the profile, so the profile's abbreviation is typed.
+  expect(byId['degree--0']).toEqual(['B.Tech', 'profile']);
+  // T8: same for the school: the profile's institution, which Greenhouse's school list does not hold.
+  expect(byId['school--0']).toEqual(['Example Institute of Technology', 'profile']);
+  // Fill time: B.Tech is not a Greenhouse option, so the exact-pick filler parks the row on Degree (School likewise).
+  expect(DEGREES).not.toContain('B.Tech');
 });
