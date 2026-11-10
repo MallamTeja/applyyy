@@ -323,3 +323,24 @@ describe('attestSkill audit-trail honesty (2026-11-04)', () => {
     assert.equal(note.detail.source, 'ai_chat_click');
   });
 });
+
+describe('T10 attestSkill into a group the master does not have yet (2026-11-10)', () => {
+  it('T10 skill group: attesting into a new group writes the master skill under that group', async () => {
+    // The owner dictated a group none of MASTER_V3's skills use.
+    assert.ok(!MASTER_V3.skills.some((skill) => skill.category === 'Infrastructure as Code'), 'fixture must lack the group');
+    // One click: Pulumi under the new group.
+    const { done, calls } = run({}, { keyword: 'Pulumi', category: 'Infrastructure as Code' });
+    // Awaited.
+    const out = await done;
+    // Accepted: a new group is a valid non-blank category.
+    assert.equal(out.ok, true, out.ok ? '' : out.message);
+    // The new master version carries the skill under the owner's group, appended last.
+    const inserted = (callsOf(calls, 'master_profiles', 'insert')[0]!.args[0] as { profile: { skills: unknown[] } }).profile;
+    // Every v3 skill kept, then Pulumi in its new group.
+    assert.deepEqual(inserted.skills, [...MASTER_V3.skills, { id: NEW_ID, name: 'Pulumi', category: 'Infrastructure as Code' }]);
+    // The resume prints it under the same group, so the master and the page agree.
+    const written = callsOf(calls, 'applications', 'update')[0]!.args[0] as { tailored_profile: { skills: unknown[] } };
+    // Last printed skill.
+    assert.deepEqual(written.tailored_profile.skills.at(-1), { ref: NEW_ID, name: 'Pulumi', category: 'Infrastructure as Code' });
+  });
+});

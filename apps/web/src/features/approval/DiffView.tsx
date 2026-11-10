@@ -147,6 +147,9 @@ export interface DiffViewProps {
   /* The one-page preflight for an AI batch (2026-11-07), handed through to the chat: the page simulates
      the batch with its own pure edits and the one-page fit; null means every op would save on one page. */
   readonly onPreflight?: ((actions: readonly EditAction[]) => string | null) | undefined;
+  /* T10 (2026-11-10): the page's ATOMIC batch save, handed through to the chat: every action folded, the end
+     state fitted and rule-checked once, then one write (a swap can never pass a check after each op). */
+  readonly onEditBatch?: ((actions: readonly EditAction[], editSource: EditSource) => Promise<EditResult>) | undefined;
   /* D4: why editing is off for this row, shown instead of controls that could not be honest. */
   readonly editDisabledReason?: string | null | undefined;
   /* Whether the row carries a generated cover letter, which an edit does not regenerate. */
@@ -839,6 +842,8 @@ export function DiffView({
   onEdit,
   // The one-page preflight, passed straight to the AI chat.
   onPreflight,
+  // T10: the atomic batch save, wrapped below like onEdit.
+  onEditBatch,
   editDisabledReason,
   hasCoverLetter,
   locked,
@@ -893,6 +898,26 @@ export function DiffView({
           } catch (cause) {
             /* A throw here escaped the page, so whether the write landed is unknown; said as unknown
                (the prefix is no longer added at render), never as "not saved". */
+            return { ok: false, reason: `Save status unknown: ${cause instanceof Error ? cause.message : 'the save threw'}. Reload to see what is stored.` };
+          } finally {
+            // Unlocks whatever happened.
+            setSaving(false);
+          }
+        };
+
+  /* T10: the batch save under the same lock and the same "unknown, never not-saved" catch as runEdit. Absent
+     when the page gives none or there is no single save path either (the chat then applies op by op). */
+  const runEditBatch =
+    onEditBatch === undefined || onEdit === undefined
+      ? undefined
+      : async (actions: readonly EditAction[], editSource: EditSource): Promise<EditResult> => {
+          // Locks every control in this view, exactly as one edit does.
+          setSaving(true);
+          try {
+            // The page folds, checks and saves the whole batch once.
+            return await onEditBatch(actions, editSource);
+          } catch (cause) {
+            // Same wording as runEdit: a throw that escaped the page leaves the write's fate unknown.
             return { ok: false, reason: `Save status unknown: ${cause instanceof Error ? cause.message : 'the save threw'}. Reload to see what is stored.` };
           } finally {
             // Unlocks whatever happened.
@@ -1069,7 +1094,7 @@ export function DiffView({
         // The panel itself: bound to THIS row's onEdit and id, so whatever it applies lands on this row only.
         const panel =
           runEdit !== null && onAssist !== undefined && !editDisabledReason ? (
-            <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onPreflight={onPreflight} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} structure={assistStructure ?? undefined} seed={chatSeed} />
+            <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onEditBatch={runEditBatch} onPreflight={onPreflight} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} structure={assistStructure ?? undefined} seed={chatSeed} />
           ) : /* Docked and read-only: say why, instead of a dock that is silently empty. */ chatDock?.active === true && editDisabledReason ? (
             <p className="diff__edit-note">AI chat is off for this resume: {editDisabledReason}</p>
           ) : null;

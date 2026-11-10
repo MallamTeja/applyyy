@@ -61,8 +61,8 @@ function withSkills(resume: ResolvedResume, count: number): ResolvedResume {
 }
 
 // A master with nothing in it: every content floor is min(rule, 0) = 0, so only the 2-project cap can bind.
-// Cast: checkContentRules reads only these five lists, and the page-fit tests are not about the rules.
-const EMPTY_MASTER = { projects: [], experience: [], certifications: [], achievements: [], education: [] } as unknown as MasterProfile;
+// Cast: checkContentRules reads only these six lists (skills since T13, the AI-group floor), and the page-fit tests are not about the rules.
+const EMPTY_MASTER = { projects: [], experience: [], certifications: [], achievements: [], education: [], skills: [] } as unknown as MasterProfile;
 
 /** The content-rule context for a page-fit test: the edit compared with itself, against the empty master. */
 function noRules(resume: ResolvedResume) {
@@ -89,7 +89,7 @@ function withProjects(refs: readonly string[]): ResolvedResume {
 /** A master holding three projects (one bullet each) and nothing else, so the 2-project cap is what binds. */
 const THREE_PROJECT_MASTER = {
   // Empty, so their floors bind nothing (min(rule, 0) = 0).
-  experience: [], certifications: [], achievements: [], education: [],
+  experience: [], certifications: [], achievements: [], education: [], skills: [],
   // Three projects, one bullet each: min(2, 3) = 2 is both the floor and the cap.
   projects: ['prj_applyy', 'prj_two', 'prj_three'].map((id) => ({ id, bullets: [{ id: `bul_${id}`, text: id }] })),
 } as unknown as MasterProfile;
@@ -224,5 +224,155 @@ describe('trimNotice', () => {
     // The second item was a 'certification' step until 2026-11-09, when Teja made certs untrimmable and TrimStep lost it.
     // Shape.
     assert.equal(notice, `Trimmed to fit one page: "${'x'.repeat(69)}…", "SQL".`);
+  });
+});
+
+describe('T10 overflow preview (before Apply on an AI card that adds content)', () => {
+  // The posting's one keyword in these tests: the grown bullets carry it, so a bullet without it is the least relevant.
+  const JD = ['caching'];
+
+  /** A new skill with its own long group: one more printed line, the cheapest overflow. */
+  const SKILL = { kind: 'skill', name: 'Tool with a long enough name to wrap', category: 'A brand new group' } as const;
+
+  /** Every bullet rewritten to carry the JD keyword, so a bullet added WITHOUT it is the unique weakest. */
+  function allRelevant(resume: ResolvedResume): ResolvedResume {
+    // One bullet, keyword appended; text and master_text alike so nothing reads as edited.
+    const tag = <B extends { text: string; master_text: string }>(b: B): B => ({ ...b, text: `${b.text} caching`, master_text: `${b.master_text} caching` });
+    // Each bullet-bearing section, entries copied with tagged bullets.
+    const each = <E extends { bullets: readonly { ref: string; text: string; master_text: string }[] }>(entries: readonly E[]): E[] => entries.map((e) => ({ ...e, bullets: e.bullets.map(tag) }));
+    // The same resume, every bullet relevant.
+    return { ...resume, experience: each(resume.experience), projects: each(resume.projects), education: each(resume.education), achievements: each(resume.achievements), certifications: each(resume.certifications) };
+  }
+
+  it('T10 overflow: an add that overflows proposes the least job-relevant non-protected bullet to drop', () => {
+    // Near-full: one more skill line overflows.
+    const current = nearFull();
+    // The preview of an attest_skill card.
+    const out = fit.previewAdd(current, SKILL, JD);
+    // An overflow with something to drop, not a fit and not a refusal.
+    assert.equal(out.kind, 'drops', JSON.stringify(out));
+    // Narrowed.
+    if (out.kind !== 'drops') return;
+    // Something is named.
+    assert.ok(out.drop.length > 0);
+    // Every existing bullet: what the drop is ranked against.
+    const bullets = [...current.experience, ...current.projects, ...current.achievements, ...current.certifications].flatMap((e) => e.bullets);
+    // A bullet without the keyword exists, so the first drop must be one of those (least relevant first).
+    assert.ok(bullets.some((b) => !b.text.includes('caching')), 'fixture precondition: a zero-score bullet exists');
+    // The proposed drop is a zero-score bullet: never one the posting asks for while a weaker one remains.
+    assert.ok(!out.drop[0]!.text.includes('caching'), out.drop[0]!.text);
+  });
+
+  it('T10 overflow: certifications and achievements are never proposed for a drop', () => {
+    // Near-full, and the add overflows.
+    const current = nearFull();
+    // The preview.
+    const out = fit.previewAdd(current, SKILL, JD);
+    // Narrowed: this test is about what a drop may name.
+    assert.equal(out.kind, 'drops');
+    // The resume Apply would save for the same add (the real save path).
+    const applied = fit.fitEditToOnePage({ ...current, skills: [...current.skills, { ref: 'skill_real', name: SKILL.name, category: SKILL.category }] }, JD, noRules(current));
+    // Saved.
+    assert.ok(applied.ok);
+    // Narrowed.
+    if (!applied.ok) return;
+    // Every certification entry stays: the drop is bullets, never a cert.
+    assert.deepEqual(applied.resume.certifications.map((c) => c.ref), current.certifications.map((c) => c.ref));
+    // Every achievement entry stays, each with at least one bullet (the achievements floor).
+    assert.deepEqual(applied.resume.achievements.map((a) => a.ref), current.achievements.map((a) => a.ref));
+    // No achievement lost its last line.
+    for (const a of applied.resume.achievements) assert.ok(a.bullets.length >= Math.min(1, current.achievements.find((c) => c.ref === a.ref)!.bullets.length), a.ref);
+    // No drop names an achievement's or a certification's entry ref (the drop is never a whole entry).
+    const protectedRefs = new Set([...current.certifications, ...current.achievements].map((e) => e.ref));
+    // Checked per item.
+    if (out.kind === 'drops') for (const item of out.drop) assert.ok(!protectedRefs.has(item.ref), item.ref);
+  });
+
+  it('T10 overflow: the item being added is never the proposed drop', () => {
+    // Grown on the experience entry only, so no project sits over its 4-bullet cap (that step would go first).
+    const onExperience = (n: number) => {
+      // A fresh copy of the committed fixture.
+      const r = grown(0);
+      // The first experience entry's bullets, the only list grown.
+      const e = r.experience[0]!.bullets as { ref: string; text: string; master_text: string }[];
+      // n long, unique, keyword-bearing bullets.
+      for (let i = 0; i < n; i += 1) {
+        // Same wording as grown(), so the length per bullet matches.
+        const text = `Built and operated service number ${i} handling queues, caching, retries and dashboards for several internal teams.`;
+        // Appended like any tailored bullet.
+        e.push({ ref: `syn_${i}`, text, master_text: text });
+      }
+      // Every bullet then made relevant.
+      return allRelevant(r);
+    };
+    // The fullest such resume that fits (bounded like nearFull).
+    let n = 0;
+    // Grow until one more would overflow.
+    while (n < 80 && template.fitsOnePage(onExperience(n + 1))) n += 1;
+    // Every existing bullet carries the keyword, so the added bullet (without it) is the trimmer's unique weakest.
+    const current = onExperience(n);
+    // Precondition: the tagged resume still fits (tagging can lengthen a line).
+    assert.equal(template.fitsOnePage(current), true, 'precondition: tagged near-full resume fits');
+    // A long owner-dictated bullet under the first experience entry (an attest_bullet card).
+    const added = { kind: 'bullet', section: 'experience', entryRef: current.experience[0]!.ref, text: 'Organised a long series of internal knowledge-sharing sessions across several teams over a semester.' } as const;
+    // The preview.
+    const out = fit.previewAdd(current, added, JD);
+    // Not a "drops" naming the add: the add is what the owner asked for. The trimmer would cut it straight back, so it says THAT.
+    assert.equal(out.kind, 'cuts_the_add', JSON.stringify(out));
+    // In every scenario: a "drops" result never lists the synthetic ref of the add.
+    const skillOut = fit.previewAdd(nearFull(), SKILL, JD);
+    // Checked on the plain overflow case too.
+    if (skillOut.kind === 'drops') assert.ok(skillOut.drop.every((item) => item.ref !== fit.PREVIEW_ADDED_REF));
+  });
+
+  it("T10 overflow: the preview's drop equals what Apply trims", () => {
+    // Near-full.
+    const current = nearFull();
+    // The preview of an attest_skill.
+    const out = fit.previewAdd(current, SKILL, JD);
+    // What Apply runs: the real save path, with the skill under its real (fresh) ref.
+    const applied = fit.fitEditToOnePage({ ...current, skills: [...current.skills, { ref: 'skill_real', name: SKILL.name, category: SKILL.category }] }, JD, noRules(current));
+    // Both: an overflow that saves.
+    assert.ok(out.kind === 'drops' && applied.ok, JSON.stringify(out));
+    // Narrowed.
+    if (out.kind !== 'drops' || !applied.ok) return;
+    // The same bullets, in the same order.
+    assert.deepEqual(out.drop.map((i) => i.ref), applied.trimmed.map((i) => i.ref));
+    // A pureEdit-built add (add_master_bullet's path) compares the same way: the preview of a built resume.
+    const built = { ...current, skills: [...current.skills, { ref: 'skill_master', name: SKILL.name, category: SKILL.category }] };
+    // The generic preview over an already-built resume.
+    const generic = fit.overflowPreview(current, built, JD);
+    // Same drop.
+    assert.ok(generic.kind === 'drops' && generic.drop.map((i) => i.ref).join() === applied.trimmed.map((i) => i.ref).join(), JSON.stringify(generic));
+  });
+
+  it('T10 overflow: an add that fits proposes nothing', () => {
+    // The committed fixture has room.
+    const out = fit.previewAdd(grown(0), SKILL, JD);
+    // Quiet.
+    assert.deepEqual(out, { kind: 'fits' });
+  });
+});
+
+describe('T10 overflow: the Apply all line', () => {
+  it("T10 overflow: Apply all previews the batch's own trim", () => {
+    // Two adds, each fine alone on a near-full page, together over one page.
+    const step = (resume: ResolvedResume, count: number) => ({ ok: true as const, resume: withSkills(resume, count), before: null, after: null });
+    // The same planBatch the save runs.
+    const plan = fit.planBatch(nearFull(), [2, 2], step, ['caching'], EMPTY_MASTER);
+    // Precondition: the batch trims something.
+    assert.ok(plan.ok && plan.trimmed.length > 0, plan.ok ? 'nothing trimmed' : plan.reason);
+    // Narrowed.
+    if (!plan.ok) return;
+    // The line by Apply all.
+    const notice = fit.applyAllNotice(plan);
+    // Says Apply all drops, not blocked.
+    assert.ok(notice.line !== null && notice.line.startsWith('Apply all also drops "') && !notice.blocked, JSON.stringify(notice));
+    // Names exactly the batch's own trim.
+    for (const item of plan.trimmed) assert.ok(notice.line.includes(item.text.slice(0, 20)), item.ref);
+    // A refused batch: the reason, and the button off.
+    assert.deepEqual(fit.applyAllNotice({ ok: false, reason: 'projects: 1, needs 2' }), { line: 'Apply all would not save: projects: 1, needs 2', blocked: true });
+    // A fit with nothing cut, or no preview: quiet.
+    assert.deepEqual(fit.applyAllNotice(null), { line: null, blocked: false });
   });
 });

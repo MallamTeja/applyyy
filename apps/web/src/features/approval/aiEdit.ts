@@ -40,6 +40,8 @@
 import type { PrintedSkill, ResumeDiff } from './diffModel';
 // Type-only import from the view: the action union is declared there, beside the controls.
 import type { EditAction } from './DiffView';
+// Type only (T10): the save result a batch run reads, the same union every page save answers.
+import type { EditResult } from './DiffView';
 /* Types only from the core edits: section names, directions, and the shape of a master item not on
    the resume. Type-only so this file never runs W1's code, only compiles against its names. */
 import type { AddableBullet, AddableEntry, BulletSection, MoveDirection, SectionKind } from './tailoredEdits';
@@ -49,6 +51,11 @@ import { bulletGroundingGaps, tokenizeText } from '../../../../../supabase/funct
 /* The closed list of section names, shared with the tailor's schema and the edge function, so a
    stored op naming a section is checked against the same seven words everywhere. */
 import { TAILOR_SECTION_KINDS } from '../../../../../supabase/functions/_shared/tailor/prompt.ts';
+/* The tailor's own keyword matcher (page-trim.ts ranks bullets with it), so "most job-relevant" here
+   means exactly what it means when the page fit decides which bullet to cut. Never a copy. */
+import { keywordAppearsIn } from '../../../../../supabase/functions/_shared/tailor/jd-keywords.ts';
+// T10: the content rules' entry counts, so a swap pairs only where a rule caps the count (one home for the number).
+import { PAGE_FIT_FLOORS } from '../../../../../supabase/functions/_shared/tailor/page-trim.ts';
 /* The one edge call that refreshes once and retries once on a revoked session (2026-11-07), so the chat
    never shows the raw `invalid_session` code. */
 import { invokeEdge } from '../../data/edgeCall.ts';
@@ -412,8 +419,6 @@ export function buildAssistDraft(
   const matched = new Set([...diff.coverage.honestlyMatched, ...diff.coverage.matchedByFabrication, ...diff.coverage.matchedByEdit]);
   // The keywords still missing: the useful hint, and far cheaper than the whole posting.
   const missing = shortList(diff.coverage.jdKeywords.filter((keyword) => !matched.has(keyword)));
-  // "nN" -> master entry, whole entries first: "add my LeetCode achievement back" is the common ask.
-  const availableEntries = new Map<string, AddableEntry>((structure?.addable.entries ?? []).slice(0, MAX_AVAILABLE).map((entry, index) => [`n${index}`, entry]));
   // Each master bullet with its entry's short id; one whose entry is not on the resume (or past the
   // entry cap) is left out, since addMasterBullet needs the parent there.
   const placeable = (structure?.addable.bullets ?? []).flatMap((bullet) => {
@@ -422,8 +427,37 @@ export function buildAssistDraft(
     // Kept as a pair, so the body never has to look the id up again.
     return entry === undefined ? [] : [{ bullet, entry }];
   });
-  // In the room the entries left under the cap.
-  const shownBullets = placeable.slice(0, MAX_AVAILABLE - availableEntries.size);
+  /* T10 (2026-11-10). "Add more points to <entry>" may only pull that entry's UNUSED master bullets
+     (truthfulness ruling), so every printed entry must have its best ones in the list. Master order plus
+     a hard slice cut a later entry's bullets off entirely and ranked nothing by the job. Now: per entry,
+     most JD keywords first (the stable sort keeps master order on ties), then dealt round-robin, so each
+     entry's best bullet is listed before any entry's second. */
+  const byEntry = new Map<string, (typeof placeable)[number][]>();
+  // Grouped in master order, so round-robin also visits entries in master order.
+  for (const item of placeable) byEntry.set(item.entry, [...(byEntry.get(item.entry) ?? []), item]);
+  // How many posting keywords a bullet contains: page-trim.ts's keywordScore, by the same matcher.
+  const relevance = (text: string) => diff.coverage.jdKeywords.filter((keyword) => keywordAppearsIn(keyword, text)).length;
+  // Each entry's queue, best first; Array.prototype.sort is stable, so ties stay in master order.
+  const queues = [...byEntry.values()].map((items) => [...items].sort((a, b) => relevance(b.bullet.text) - relevance(a.bullet.text)));
+  /* Whole entries keep their priority ("add my LeetCode achievement back" is the common ask), but may
+     no longer starve bullets: room is held for one bullet per printed entry that has any, up to half the
+     cap. A master with 30+ unprinted entries is the only case that changes, and it keeps 15 of them. */
+  const reserved = Math.min(queues.length, MAX_AVAILABLE / 2);
+  // "nN" -> master entry, whole entries first, within the room the reserve leaves.
+  const availableEntries = new Map<string, AddableEntry>((structure?.addable.entries ?? []).slice(0, MAX_AVAILABLE - reserved).map((entry, index) => [`n${index}`, entry]));
+  // The room the entries left under the function's cap (it refuses a longer list).
+  const room = MAX_AVAILABLE - availableEntries.size;
+  // Dealt round by round: round r takes the r-th best bullet of every entry that still has one.
+  const shownBullets: (typeof placeable)[number][] = [];
+  // Until the room is full or every queue is empty (a round that deals nothing ends it).
+  for (let round = 0; shownBullets.length < room; round += 1) {
+    // This round's bullets, one per entry, in master entry order.
+    const dealt = queues.flatMap((queue) => (round < queue.length ? [queue[round]!] : []));
+    // Every queue is spent.
+    if (dealt.length === 0) break;
+    // Only what still fits; the "mN" ids below follow this order, so they stay contiguous.
+    shownBullets.push(...dealt.slice(0, room - shownBullets.length));
+  }
   // "mN" -> master bullet.
   const availableBullets = new Map<string, AddableBullet>(shownBullets.map(({ bullet }, index) => [`m${index}`, bullet]));
   // Where the role is: every location the scout stored, joined, cut to the function's cap.
@@ -831,6 +865,144 @@ export function toEditAction(stored: ApplicableOp): EditAction {
     case 'remove_entry':
       return { kind: 'remove_entry', section: stored.section, ref: stored.ref };
   }
+}
+
+/* T10 (2026-11-10): THE LINKED SWAP PAIR. A remove_entry of entry X and an add_entry (an add_back of a
+   master ENTRY) in the SAME section, in one answer, are one swap: "instead of One-on-One use F1 Race Pace".
+   Either half alone breaks the project count (1 < 2, or 3 > 2), so they are shown together and applied
+   together in one end-state-checked save (pageFitEdit.planBatch). DERIVED from the stored ops on every
+   read, never stored: StoredOp and readStoredOp stay exactly as they were, so a chat saved before this
+   pairs too on reload, and no wire or table changes. Greedy in answer order: each remove takes the first
+   unpaired add of its section, so "swap two for two" pairs one-to-one. Answers index -> partner index,
+   both ways.
+   Review fix (2026-11-10): ONLY in a section whose content rule CAPS the count (SWAP_CAPPED below), because
+   only there does a lone add break a rule. Elsewhere (certifications: a floor, no cap) each card applies
+   on its own, and linking would only make one click do two things nobody asked to join. */
+export function swapPartners(ops: readonly StoredOp[]): ReadonlyMap<number, number> {
+  // Both directions, filled as pairs are found.
+  const partners = new Map<number, number>();
+  // Each remove_entry in order.
+  ops.forEach((remove, i) => {
+    // Only a whole-entry removal starts a swap, and only in a capped section.
+    if (remove.op !== 'remove_entry' || !(remove.section in SWAP_CAPPED)) return;
+    // The first add_entry of the same section not yet taken by an earlier remove.
+    const j = ops.findIndex((add, k) => add.op === 'add_entry' && add.section === remove.section && !partners.has(k));
+    // No add in this section: the remove stands alone.
+    if (j === -1) return;
+    // Linked one way.
+    partners.set(i, j);
+    // And back, so either card finds the other.
+    partners.set(j, i);
+  });
+  // The pairs.
+  return partners;
+}
+
+/* The sections whose entry COUNT a content rule caps, with the cap read from the rule's own floors
+   (page-trim.ts PAGE_FIT_FLOORS, which checkContentRules reads). A table, not derived: the rules are named
+   checks per field ("projects: 3, at most 2"), with no list of capped sections to read. Today only projects
+   has a cap; a new cap is one line here beside the floor it reads. */
+const SWAP_CAPPED: Readonly<Partial<Record<BulletSection, number>>> = {
+  // "never and ever 3 projects, only 2" (Teja, 2026-11-08): the cap the live swap bug hit.
+  projects: PAGE_FIT_FLOORS.maxProjects,
+};
+
+/* T10 review fix (2026-11-10): THE BATCH RUN, pure so it is tested without a page. Resume-only items go to
+   ONE atomic save (all or none); the attest items (they also write a master version) each run on their own
+   path AFTER it, one at a time. True all-or-none across a master insert and a row update is impossible from
+   the browser (no single DB transaction spans them), so a refused attest after a saved batch is NOT undone:
+   it is reported, never silent. A refused batch runs no attest at all. */
+export type BatchRun =
+  // Every item landed.
+  | { readonly kind: 'all_saved' }
+  // Nothing landed: the batch (or the only attest) was refused.
+  | { readonly kind: 'none_saved'; readonly reason: string }
+  // Some landed (`saved`), then `notSaved` was refused for `reason`; `notTried` attests after it never ran.
+  | { readonly kind: 'partial'; readonly saved: number; readonly notSaved: string; readonly reason: string; readonly notTried: number };
+
+/* Run a batch: the injected saves are the page's (the panel passes onEditBatch and its single save). */
+export async function runApplyBatch<T>(
+  // The items, in answer order.
+  items: readonly T[],
+  // Whether an item also writes the master (and so cannot be folded into the batch).
+  isAttest: (item: T) => boolean,
+  // How the report names an item.
+  label: (item: T) => string,
+  // The atomic save of every resume-only item.
+  saveBatch: (items: readonly T[]) => Promise<EditResult>,
+  // One attest's own guarded save.
+  saveOne: (item: T) => Promise<EditResult>,
+): Promise<BatchRun> {
+  // Resume-only items: folded into one save.
+  const pure = items.filter((item) => !isAttest(item));
+  // Master-writing items: after it.
+  const attests = items.filter(isAttest);
+  // How many landed so far.
+  let saved = 0;
+  // Only when there is something to fold.
+  if (pure.length > 0) {
+    // ONE save of the end state.
+    const result = await saveBatch(pure);
+    // Refused: nothing landed, and no attest runs on top of it.
+    if (!result.ok) return { kind: 'none_saved', reason: result.reason };
+    // All of them landed together.
+    saved = pure.length;
+  }
+  // The attests in order; the first refusal stops the run (the row probably changed).
+  for (const [i, item] of attests.entries()) {
+    // Its own save.
+    const result = await saveOne(item);
+    // Landed: count it.
+    if (result.ok) { saved += 1; continue; }
+    // Refused with nothing before it: nothing landed at all.
+    if (saved === 0) return { kind: 'none_saved', reason: result.reason };
+    // Refused after something landed: say both, and how many were never tried.
+    return { kind: 'partial', saved, notSaved: label(item), reason: result.reason, notTried: attests.length - i - 1 };
+  }
+  // Everything landed.
+  return { kind: 'all_saved' };
+}
+
+/* The one line a batch run puts above the composer, or null when everything landed. */
+export function batchRunLine(run: BatchRun): string | null {
+  // Nothing to say.
+  if (run.kind === 'all_saved') return null;
+  // Nothing landed, in the save's own words.
+  if (run.kind === 'none_saved') return `Not applied: ${run.reason}`;
+  // What landed, what did not and why, and what never ran: a partial save is never silent.
+  return `Saved ${run.saved} change${run.saved === 1 ? '' : 's'}; not saved: ${run.notSaved} — ${run.reason}.${run.notTried > 0 ? ` ${run.notTried} more not tried.` : ''}`;
+}
+
+/* A short name for a card in a batch report. Only the attest kinds reach the report today, but every arm
+   answers, so a new caller never prints "undefined". */
+export function opLabel(op: ApplicableOp): string {
+  // A skill: by name.
+  if (op.op === 'add_skill') return `add skill "${op.name}"`;
+  // A new bullet: by its entry.
+  if (op.op === 'new_bullet') return `new bullet under "${op.parentLabel}"`;
+  // Anything else: its kind, readable.
+  return op.op.replace(/_/g, ' ');
+}
+
+/* Which ops one card's Apply takes, as answer indices in answer order. A half whose partner is NOT on the
+   resume yet takes the partner with it: applying it alone would be refused, or worse, would leave the
+   resume a project short until the second click. A half whose partner already landed (applied earlier,
+   or by hand) is an ordinary single op again. `applied` is injected (the panel passes isApplied over its
+   diff), so this stays pure and testable. */
+export function applyTogether(ops: readonly StoredOp[], index: number, applied: (op: StoredOp) => boolean): number[] {
+  // This card's partner, if it has one.
+  const partner = swapPartners(ops).get(index);
+  // Unpaired, or the partner is already on the resume: this card alone.
+  if (partner === undefined || applied(ops[partner]!)) return [index];
+  // Both, in the order the AI answered them (the order the batch folds them in).
+  return [index, partner].sort((a, b) => a - b);
+}
+
+/* Whether this op is one half of a swap: the chat never auto-applies such a half by itself (an add_back
+   would otherwise land alone and be refused on the project cap), and its card says it goes with its partner. */
+export function isPairedHalf(ops: readonly StoredOp[], index: number): boolean {
+  // Any partner at all.
+  return swapPartners(ops).has(index);
 }
 
 /* Whether the resume already shows this op's effect. Derived, never stored: the resume is the one

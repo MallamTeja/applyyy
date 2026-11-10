@@ -85,29 +85,30 @@ describe('ApprovalQueuePage wiring for a cross-bucket save', () => {
   });
 
   it('editRow clears the announcement before the save and sets it from the outcome after', () => {
-    // From editRow's declaration to the next function on the page.
-    const edit = between('async function editRow(', '// Flip one id in a set-valued state');
+    // From editRows' declaration to the next function on the page (T10: editRow is a batch of one, editRows holds the body).
+    const edit = between('async function editRows(', '// Flip one id in a set-valued state');
     // Cleared before the network write, so a repeat is re-announced.
     assert.ok(edit.indexOf("setAnnouncement('')") >= 0 && edit.indexOf("setAnnouncement('')") < edit.indexOf('await saveTailoredEdit('), 'cleared before the save');
     // Set after adoptRow, from the action, the outcome (skill name) and both buckets. adoptRow takes the
     // FITTED resume since 2026-11-07 (the one-page rule): the stored resume, not the raw edit.
-    assert.match(edit, /adoptRow\(applicationId, fitted\.resume, saved\.updatedAt\);[\s\S]*setAnnouncement\(announcementFor\(action\.kind, outcome, from, to\)\);/);
+    assert.match(edit, /adoptRow\(applicationId, fitted\.resume, saved\.updatedAt\);[\s\S]*setAnnouncement\(announcementFor\(first\.kind, outcome, from, to\)\);/);
     // Never on the failure branch: that branch returns before the announcement.
     assert.ok(edit.indexOf('if (!saved.ok) {') < edit.indexOf('setAnnouncement(announcementFor('), 'announced only after the failure branch returned');
   });
 
   it('focus is requested only when the save moved the row between buckets', () => {
     // The same editRow slice.
-    const edit = between('async function editRow(', '// Flip one id in a set-valued state');
+    const edit = between('async function editRows(', '// Flip one id in a set-valued state');
     // Guarded by from !== to, so an in-bucket save leaves DiffView's own focus return alone.
     assert.match(edit, /if \(from !== undefined && to !== undefined && from !== to\) setPendingFocusId\(applicationId\);/);
   });
 
   it('an add that stays in its bucket is left to CoverageBar, so it is never announced twice', () => {
     // The same editRow slice.
-    const edit = between('async function editRow(', '// Flip one id in a set-valued state');
+    const edit = between('async function editRows(', '// Flip one id in a set-valued state');
     // The page announces everything EXCEPT an in-bucket add, which DiffView (not remounted) already said.
-    assert.match(edit, /if \(!\(action\.kind === 'add_skill' && from === to\)\) setAnnouncement\(announcementFor\(/);
+    // T10: `first` is the batch's first action, which for a single edit is the action itself.
+    assert.match(edit, /if \(!\(first\.kind === 'add_skill' && from === to\)\) setAnnouncement\(announcementFor\(/);
   });
 
   it('both buckets give the card the shared id and tabIndex -1', () => {

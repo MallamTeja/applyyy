@@ -48,7 +48,17 @@ import { DiffView } from './DiffView';
 import type { ClaimDecision, EditAction, EditResult } from './DiffView';
 import { buildResumeDiff } from './diffAdapter';
 // The one-page rule, live: every edit is fitted on one page before it is saved (2026-11-07).
-import { fitEditToOnePage, preflightBatch } from './pageFitEdit';
+import { planBatch, preflightBatch } from './pageFitEdit';
+// Type only (T10 review): what the Apply-all preview answers.
+import type { BatchPlan } from './pageFitEdit';
+// T10: the overflow preview an AI-chat card shows before Apply, run on the same fit the save runs.
+import { overflowPreview, previewAdd } from './pageFitEdit';
+// Type only: the preview's answer, handed to the chat through its context.
+import type { OverflowPreview } from './pageFitEdit';
+// T10: the context the chat reads the preview from (DiffView sits between this page and the chat).
+import { OverflowPreviewContext } from './AiEditPanel';
+// T10 review: the Apply-all line's preview, provided beside the card preview.
+import { BatchPreviewContext } from './AiEditPanel';
 // The adapter's own row shape, so the page holds exactly the fields the diff is built from.
 import type { DiffAdapterInput } from './diffAdapter';
 // coveragePercent (2026-11-04): the row's "ATS score" chip, the same honest figure as the badge and the 'ats' sort.
@@ -1837,7 +1847,66 @@ export function ApprovalQueuePage(): ReactElement {
       master);
   }
 
+  /* T10 (2026-11-10): THE OVERFLOW PREVIEW for one content-adding AI card, before its Apply. Built from the
+     same refs and the same edit its save would use, then the same fit, so the drop it names is the trim the
+     save makes. Pure: reads refs, writes nothing. null = no preview (not an add, or the row is not simulable;
+     its save's own guards then speak). */
+  function overflowFor(applicationId: string, action: EditAction): OverflowPreview | null {
+    // The same inputs editRow reads.
+    const source = latestSources.current.get(applicationId);
+    // The latest saved resume, the one Apply builds on.
+    const current = latestResumes.current.get(applicationId);
+    // Not simulable: Apply's own guards will say why.
+    if (source === undefined || current === undefined || source.original === null || source.full === null) return null;
+    // The row's JD keywords, exactly as every save ranks the trim by.
+    const jd = source.application.selected_jd_keywords;
+    // A skill the master lacks: its real ref is minted at the save, so the preview builds it with a stand-in.
+    if (action.kind === 'attest_skill') return previewAdd(current, { kind: 'skill', name: action.keyword, category: action.category }, jd);
+    // A vouched bullet: appended under its parent, as attestBullet places it.
+    if (action.kind === 'attest_bullet') return previewAdd(current, { kind: 'bullet', section: action.section, entryRef: action.parentRef, text: action.text }, jd);
+    // Every other add is a pure edit from the master: the very resume its save would fit.
+    if (action.kind === 'add_skill' || action.kind === 'add_master_bullet' || action.kind === 'add_master_entry') {
+      // The same pure edit editRow runs.
+      const outcome = pureEdit(action, current, source.original, source.master, source.full);
+      // A refused edit adds nothing, so there is nothing to preview (its Apply reports the refusal).
+      return outcome.ok ? overflowPreview(current, outcome.resume, jd) : null;
+    }
+    // Removes, moves and text edits never add a line.
+    return null;
+  }
+
+  /* T10 review fix (2026-11-10): THE APPLY-ALL PREVIEW. The very planBatch editRows runs, over the same latest
+     saved resume, master and JD keywords, so the line by Apply all names the trim the save makes (or its refusal).
+     Pure: reads refs, writes nothing. null = not simulable, or an attest in the list (the panel never sends one). */
+  function batchPreviewFor(applicationId: string, actions: readonly EditAction[]): BatchPlan | null {
+    // The same inputs editRow reads.
+    const source = latestSources.current.get(applicationId);
+    // The latest saved resume, the one the batch folds over.
+    const current = latestResumes.current.get(applicationId);
+    // Not simulable: Apply all's own guards will say why.
+    if (source === undefined || current === undefined || source.original === null || source.full === null) return null;
+    // Narrowed copies for the step closure.
+    const { original, master, full } = source;
+    // Resume-only actions; an attest cannot be folded, so its presence means no preview.
+    const pure = actions.flatMap((action) => (action.kind === 'attest_skill' || action.kind === 'attest_bullet' ? [] : [action]));
+    // Mixed in: the save would refuse with its own words; the preview stays quiet.
+    if (pure.length !== actions.length) return null;
+    // Exactly what editRows plans.
+    return planBatch(current, pure, (resume, action) => pureEdit(action, resume, original, master, full), source.application.selected_jd_keywords, master);
+  }
+
   async function editRow(applicationId: string, action: PageEditAction, editSource: EditSource): Promise<EditResult> {
+    // One edit is a batch of one: the same guards, the same fit, the same single save (T10 made editRows the one path).
+    return editRows(applicationId, [action], editSource);
+  }
+
+  /* T10 (2026-11-10): THE ATOMIC BATCH SAVE. An AI swap (remove_entry + add_master_entry) can never pass a
+     check after each op (Teja's live bug: "projects: 1, needs 2" on the remove, then nothing), so every
+     pure action of the batch is folded first and only the END STATE is fitted and rule-checked
+     (pageFitEdit.planBatch), then saved in ONE guarded write. All or none. The attest_* kinds also write
+     the master, so they are never folded into a batch: one alone takes its own path below, and a batch
+     that mixes them in is refused whole (the chat sends them on their own). */
+  async function editRows(applicationId: string, actions: readonly PageEditAction[], editSource: EditSource): Promise<EditResult> {
     /* A page that is gone never writes: its refs hold a stamp the mounted page no longer trusts. In the
        page, never the panel: a Bucket A->B move remounts the panel while this page stays current. */
     if (!mountedRef.current) return notSaved('the page was reloaded before this edit could be saved; apply it again.');
@@ -1870,24 +1939,34 @@ export function ApprovalQueuePage(): ReactElement {
     // No FULL: nothing could be checked against the master, so refuse before any write (same rule as the banner).
     if (source.full === null) return notSaved(FULL_UNRESOLVED_REASON);
 
+    // A lone action, the only shape the two master-writing kinds may arrive in.
+    const only = actions.length === 1 ? actions[0] : undefined;
     // Vouching for a missing skill also writes the master, so it has its own path (attestRow above).
-    if (action.kind === 'attest_skill') return attestRow(applicationId, action, source, source.original, current, stamp, supabase, editSource);
+    if (only?.kind === 'attest_skill') return attestRow(applicationId, only, source, source.original, current, stamp, supabase, editSource);
     // A brand-new bullet writes the master too, so it has the same kind of path (attestBulletRow above).
-    if (action.kind === 'attest_bullet') return attestBulletRow(applicationId, action, source, source.original, current, stamp, supabase, editSource);
+    if (only?.kind === 'attest_bullet') return attestBulletRow(applicationId, only, source, source.original, current, stamp, supabase, editSource);
+    // T10: the batch's resume-only actions; an attest inside a batch cannot be folded (it writes the master).
+    const pure = actions.flatMap((action) => (action.kind === 'attest_skill' || action.kind === 'attest_bullet' ? [] : [action]));
+    // Refused whole rather than saving the rest: a partial batch is what T10 exists to prevent.
+    if (pure.length !== actions.length) return notSaved('a skill or bullet new to your master profile is applied on its own, never inside a batch.');
+    // The first action names the history note and the announcement; an empty batch is refused by planBatch.
+    const first = pure[0];
+    // Narrowed copies for the step closure (property narrowing does not reach into a callback).
+    const { original, master, full } = source;
 
     /* The pure operation. Each returns a NEW resume, or a refusal before any write; tracesToMaster
        then checks at the save boundary that every node still traces to the pinned master. */
-    const outcome = pureEdit(action, current, source.original, source.master, source.full);
-    // A refused edit never reaches the network.
-    if (!outcome.ok) return notSaved(outcome.reason);
     /* THE ONE-PAGE RULE, LIVE (Teja, 2026-11-07 23:18 IST): the edited resume is fitted on one page
        BEFORE the save, and the fitted one is what is saved, so no save ever stores page two. The
        same pure trimmer the tailor runs; a cut is announced below and recorded in the history note.
        Floors that overflow, or a resume the check cannot measure, refuse the edit (fail closed). */
     // Content rules judged against the stored resume (only a newly broken rule refuses) and the pinned master.
-    const fitted = fitEditToOnePage(outcome.resume, source.application.selected_jd_keywords, { previous: current, master: source.master });
+    // T10: every action folded first, then ONE fit and rule check on the end state; a refused step refuses all.
+    const fitted = planBatch(current, pure, (resume, action) => pureEdit(action, resume, original, master, full), source.application.selected_jd_keywords, master);
     // Refused before any write, in the check's own words.
-    if (!fitted.ok) return notSaved(fitted.reason);
+    if (!fitted.ok || first === undefined) return notSaved(fitted.ok ? 'there was nothing to apply.' : fitted.reason);
+    // The first step's record: the single edit's before/after, exactly as it was before batches.
+    const outcome = fitted.steps[0] ?? { before: null, after: null };
 
     // Emptied before the save, so the same sentence twice in a row still changes the text and is re-announced.
     setAnnouncement('');
@@ -1914,7 +1993,8 @@ export function ApprovalQueuePage(): ReactElement {
         expectedUpdatedAt: stamp,
         // What changed and who decided it, for the append-only log.
         // pageFitTrimmed: the one-page cuts this save made, so the history shows them beside the edit.
-        event: { kind: EVENT_KIND[action.kind], ref: eventRef(action), before: outcome.before, after: outcome.after, source: editSource, pageFitTrimmed: fitted.trimmed },
+        // T10 batch: every step of a multi-action save, so the note names the swap's both halves.
+        event: { kind: EVENT_KIND[first.kind], ref: eventRef(first), before: outcome.before, after: outcome.after, source: editSource, pageFitTrimmed: fitted.trimmed, batch: pure.map((action, i) => ({ kind: EVENT_KIND[action.kind], ref: eventRef(action), before: fitted.steps[i]?.before ?? null, after: fitted.steps[i]?.after ?? null })) },
       });
     } finally {
       // Released whatever happened, so a failure never strands the row as "saving".
@@ -1949,7 +2029,10 @@ export function ApprovalQueuePage(): ReactElement {
     // Page-level, so it is still mounted when the save remounts DiffView in the other bucket.
     // An add that STAYS in its bucket is already announced by CoverageBar's own status region
     // (DiffView did not remount), so the page stays quiet then rather than speak it twice.
-    if (!(action.kind === 'add_skill' && from === to)) setAnnouncement(announcementFor(action.kind, outcome, from, to));
+    // T10: a batch is announced as one save of N changes; a single edit keeps its own sentence.
+    if (pure.length > 1) setAnnouncement(`Saved ${pure.length} changes together.`);
+    // A single edit, as before.
+    else if (!(first.kind === 'add_skill' && from === to)) setAnnouncement(announcementFor(first.kind, outcome, from, to));
     // Only a MOVE needs the page to place focus; an in-bucket save keeps DiffView's own focus return.
     if (from !== undefined && to !== undefined && from !== to) setPendingFocusId(applicationId);
     // The edit IS saved; only the history note is missing, and the operator should know.
@@ -2053,7 +2136,10 @@ export function ApprovalQueuePage(): ReactElement {
   return (
     /* The wide variant: two resume panes need every pixel, and the standard
        page measure would force the operator to scroll to compare them.
-       queue-page scopes the page's one control height (ApprovalQueuePage.css) to this screen only. */
+       queue-page scopes the page's one control height (ApprovalQueuePage.css) to this screen only.
+       T10: the provider hands every AI chat on the page (docked or inline) its overflow preview. */
+    <OverflowPreviewContext.Provider value={overflowFor}>
+    <BatchPreviewContext.Provider value={batchPreviewFor}>
     <div className="page page--wide queue-page">
       <PageHeader path="approvals" />
 
@@ -2406,6 +2492,8 @@ export function ApprovalQueuePage(): ReactElement {
                     onEdit={(action, editSource) => editRow(diff.applicationId, action, editSource)}
                     /* The AI chat's one-page preflight over a whole batch (2026-11-07). */
                     onPreflight={(actions) => preflightRow(diff.applicationId, actions)}
+                    /* T10: the AI chat's atomic batch save (a swap is judged on its end state); see editRows. */
+                    onEditBatch={(actions, editSource) => editRows(diff.applicationId, actions, editSource)}
                     /* D4: only when the tailor's original could not be rebuilt. */
                     editDisabledReason={editOffReason(sources.get(diff.applicationId))}
                     /* So the diff can say the letter predates the edits. */
@@ -2585,6 +2673,8 @@ export function ApprovalQueuePage(): ReactElement {
                         onEdit={(action, editSource) => editRow(diff.applicationId, action, editSource)}
                     /* The AI chat's one-page preflight over a whole batch (2026-11-07). */
                     onPreflight={(actions) => preflightRow(diff.applicationId, actions)}
+                    /* T10: the AI chat's atomic batch save (a swap is judged on its end state); see editRows. */
+                    onEditBatch={(actions, editSource) => editRows(diff.applicationId, actions, editSource)}
                         /* D4, as in Bucket B. */
                         editDisabledReason={editOffReason(sources.get(diff.applicationId))}
                         /* Cover-letter note, as in Bucket B. */
@@ -2648,5 +2738,7 @@ export function ApprovalQueuePage(): ReactElement {
       ) : null}
       </div>
     </div>
+    </BatchPreviewContext.Provider>
+    </OverflowPreviewContext.Provider>
   );
 }

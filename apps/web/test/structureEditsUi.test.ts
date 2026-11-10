@@ -445,9 +445,10 @@ describe('the page routes each structural EditAction (source shape: no DOM to cl
     // Each, by name in the failure.
     for (const [kind, shape] of cases) assert.match(pageSrc, shape, `pureEdit does not route ${kind}`);
     // editRow sends attest_bullet to its own path BEFORE any pure edit is built.
-    const editRow = pageSrc.slice(pageSrc.indexOf('async function editRow('), pageSrc.indexOf('const outcome =', pageSrc.indexOf('async function editRow(')));
+    // T10: the body lives in editRows (editRow is a batch of one); a lone attest arrives as `only`.
+    const editRow = pageSrc.slice(pageSrc.indexOf('async function editRows('), pageSrc.indexOf('const outcome =', pageSrc.indexOf('async function editRows(')));
     // The route, carrying who decided it (editSource, 2026-11-04) into the history note.
-    assert.match(editRow, /if \(action\.kind === 'attest_bullet'\)\s*return attestBulletRow\(applicationId, action, source, source\.original, current, stamp, supabase, editSource\);/);
+    assert.match(editRow, /if \(only\?\.kind === 'attest_bullet'\)\s*return attestBulletRow\(applicationId, only, source, source\.original, current, stamp, supabase, editSource\);/);
     // And a row without FULL is refused before anything is built.
     assert.match(editRow, /if \(source\.full === null\)\s*return notSaved\(FULL_UNRESOLVED_REASON\);/);
   });

@@ -269,7 +269,10 @@ type SaveArgs = {
   /* pageFitTrimmed (2026-11-07): what the one-page fit cut in this same save (pageFitEdit.ts), so a
      trim is in the history beside the edit that caused it, never silent. Optional: attest saves and
      every edit that fitted untouched carry none, and the note then has no such key. */
-  event: { kind: EditEventKind; ref: string; before: string | null; after: string | null; source: EditSource; pageFitTrimmed?: readonly { step: string; ref: string; text: string }[] };
+  /* batch (T10, 2026-11-10): every step of an AI batch saved in this ONE write (a swap is remove_entry +
+     add_entry), so the note names each change, not only the first. kind/ref/before/after above are the
+     first step's. Optional: a single edit carries none, and its note shape is unchanged. */
+  event: { kind: EditEventKind; ref: string; before: string | null; after: string | null; source: EditSource; pageFitTrimmed?: readonly { step: string; ref: string; text: string }[]; batch?: readonly { kind: EditEventKind; ref: string; before: string | null; after: string | null }[] };
   /* Only for an attested skill: the row moves to a NEW master version. All three pins travel in
      the same single-row UPDATE (tailored_profile's, the column, tailor_refs'), because a pin that
      disagrees with tailor_refs makes the page's rebuild refuse and switches editing off. The caller
@@ -297,6 +300,8 @@ async function recordEvent(client: MinimalClient, args: SaveArgs, updatedAt: str
         kind: args.event.kind, ref: args.event.ref, before: args.event.before, after: args.event.after, source: args.event.source,
         // The one-page cuts made in the same save, only when there were any.
         ...(args.event.pageFitTrimmed !== undefined && args.event.pageFitTrimmed.length > 0 ? { page_fit_trimmed: args.event.pageFitTrimmed } : {}),
+        // T10: every step of a batch saved together, only when there was more than one.
+        ...(args.event.batch !== undefined && args.event.batch.length > 1 ? { batch: args.event.batch } : {}),
       },
     });
     // The resume is saved either way; only whether the log caught it differs.

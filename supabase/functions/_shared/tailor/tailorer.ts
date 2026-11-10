@@ -33,13 +33,13 @@ import { buildBulletRewritePrompt, buildTailorPrompt, type TailorPrompt } from "
 // The honesty gate. The ONLY constructor of a `ResolvedResume`, per its own header.
 import { validateTailoredProfile, type TailorViolation } from "./validator.ts";
 // The posting's skill terms, deterministic and vocabulary-gated, for selected_jd_keywords.
-import { extractJdKeywords, keywordAppearsIn } from "./jd-keywords.ts";
+import { AI_VOCABULARY_TERMS, extractJdKeywords, keywordAppearsIn } from "./jd-keywords.ts";
 // Stored postings may be raw HTML; every reader here sees the text (N1, 2026-11-07).
 import { postingText } from "./posting-text.ts";
 // The one-page rule: the same pure trimmer the web runs live after every edit.
 // The content rules: cap/top-up before the gate, the check after the fit, the cited-variant pick (2026-11-08).
 import { checkContentRules, cleanRoleTitle, enforceContentRules, pickCitedVariant, type ContentRuleChange } from "./content-rules.ts";
-import { fitToOnePage, withoutTrimmed, type TrimItem } from "./page-trim.ts";
+import { fitToOnePage, PAGE_FIT_FLOORS, withoutTrimmed, type TrimItem } from "./page-trim.ts";
 // The contract, reached through this stream's single re-export module. Nothing here
 // redefines one of these — a redefined type does not fail, it drifts.
 import type { MasterProfile, ResolvedResume, TailoredProfile } from "../contracts/shared-types.ts";
@@ -181,6 +181,14 @@ export function dedupeRepeatedRefs(tailored: TailoredProfile): { readonly profil
  *      than the floor shows all it has: the master is the only honest source.
  *   4. ORDER (Teja, 2026-11-07, "rank by the JD"): groups in the order of step 2, and inside each group
  *      posting-named skills first, then master order. The model's own order is not kept.
+ *   5. THE AI GROUP (Teja, 2026-11-10 12:14 IST: "every resume needs an AI skill group with min 5 AI skills, the
+ *      most relevant to that job"). The master category PAGE_FIT_FLOORS.aiSkillsCategory ("AI") always has a seat:
+ *      where relevance put it, else the LAST of the SKILLS_MAX_GROUPS seats (the least relevant group gives it up).
+ *      Its floor is PAGE_FIT_FLOORS.minAiSkills (5), not SKILLS_PER_GROUP_FLOOR, capped at the master's size.
+ *      For AI skills only, "posting-named" (steps 3-4) also counts an AI vocabulary term (AI_VOCABULARY_TERMS) the
+ *      posting names INSIDE the skill name: a JD that says "RAG" ranks "RAG Pipelines" first. The terms come from
+ *      extractJdKeywords, the one extractor. Every AI skill the posting names joins the group, past the floor of 5.
+ *      Measured before (2026-11-10, 86 awaiting_approval rows): 67 had no AI group, 11 had 4 AI skills, 8 had >= 5.
  *
  * WHAT IT NEVER DOES: invent a skill (only master refs, resolved by the unchanged validator after this)
  * or hard-code a group name or size (both read from the master passed in at tailor time, the LATEST
@@ -200,6 +208,16 @@ export function shapeSkillGroups(tailored: TailoredProfile, master: MasterProfil
   const byId = new Map(master.skills.map((skill) => [skill.id, skill]));
   // Master categories in first-appearance order: the final tie-break, and the only source of names.
   const categories = [...new Set(master.skills.map((skill) => skill.category))];
+  // The AI group's name (step 5), from the floors' one home.
+  const aiCategory = PAGE_FIT_FLOORS.aiSkillsCategory;
+  // The posting's AI vocabulary terms, from the same extractor the tailor stores as selected_jd_keywords (no second one).
+  const jdAiTerms = extractJdKeywords(jobDescription).filter((term) => AI_VOCABULARY_TERMS.has(term));
+  // "The posting asks for this skill": its full name appears in the posting, or (an AI skill only) a posting AI term
+  // appears in its name. The second half puts "RAG Pipelines" first for a JD that only says "RAG". Restricted to AI terms
+  // and AI skills, so "caching" or "api" in a backend JD never promotes "Prompt Caching" (review finding, 2026-11-10).
+  const named = (skill: { readonly name: string; readonly category: string }): boolean =>
+    // The full name in the posting (every group, as before), or an AI term inside an AI skill's name.
+    keywordAppearsIn(skill.name, jobDescription) || (skill.category === aiCategory && jdAiTerms.some((term) => keywordAppearsIn(term, skill.name)));
   // Per group: how many of its master skills the posting names.
   const relevance = new Map(categories.map((category) => [category, master.skills.filter((s) => s.category === category && keywordAppearsIn(s.name, jobDescription)).length]));
   // The groups the model picked a resolvable skill in. An unresolved ref belongs to no group; it is kept
@@ -213,7 +231,12 @@ export function shapeSkillGroups(tailored: TailoredProfile, master: MasterProfil
   // nobody chose. Live: 6 of 20 rows tailored that morning showed 1-2 groups ("aim for 3-5").
   const topUp = [...modelGroups].filter((category) => !relevant.includes(category)).slice(0, Math.max(0, SKILLS_MIN_GROUPS - relevant.length));
   // No relevant group at all: keep the model's groups rather than show an empty section (unchanged).
-  const shown = new Set((relevant.length > 0 ? [...relevant, ...topUp] : [...modelGroups]).slice(0, SKILLS_MAX_GROUPS));
+  const ranked0 = (relevant.length > 0 ? [...relevant, ...topUp] : [...modelGroups]).slice(0, SKILLS_MAX_GROUPS);
+  // Step 5: the AI group always holds a seat when the master has one. Already seated: it stays where relevance put it.
+  // Not seated: it takes the last seat, so the group count never passes SKILLS_MAX_GROUPS.
+  const seated = categories.includes(aiCategory) && !ranked0.includes(aiCategory) ? [...ranked0.slice(0, SKILLS_MAX_GROUPS - 1), aiCategory] : ranked0;
+  // The groups shown, in page order.
+  const shown = new Set(seated);
   // The model's picks that survive: in a shown group, or unresolved (left for the validator to refuse).
   const kept = tailored.skills.filter(({ ref }) => { const skill = byId.get(ref); return skill === undefined || shown.has(skill.category); });
   // The model's resolvable picks in a dropped group, reported.
@@ -228,10 +251,17 @@ export function shapeSkillGroups(tailored: TailoredProfile, master: MasterProfil
     const count = kept.filter(({ ref }) => byId.get(ref)?.category === category).length;
     // Its master skills not yet on the resume, in master order.
     const candidates = master.skills.filter((s) => s.category === category && !present.has(s.id));
+    // This group's floor: 5 for the AI group (step 5), the shared per-group floor for every other.
+    const floor = category === aiCategory ? PAGE_FIT_FLOORS.minAiSkills : SKILLS_PER_GROUP_FLOOR;
     // The floor, capped at what the master holds for this group, minus what is there.
-    const need = Math.min(SKILLS_PER_GROUP_FLOOR, count + candidates.length) - count;
+    const fill = Math.min(floor, count + candidates.length) - count;
+    // The AI group also takes EVERY AI skill the posting names, past the floor: "the most relevant AI skills to that
+    // job" must not lose to five model picks the posting never mentions (review finding 2b, 2026-11-10).
+    const namedAi = category === aiCategory ? candidates.filter(named).length : 0;
+    // The larger of the two; the sort below puts posting-named first, so the slice takes every named one.
+    const need = Math.max(fill, namedAi);
     // Posting-named first; stable sort keeps master order among equals.
-    const ranked = candidates.sort((a, b) => Number(keywordAppearsIn(b.name, jobDescription)) - Number(keywordAppearsIn(a.name, jobDescription)));
+    const ranked = candidates.sort((a, b) => Number(named(b)) - Number(named(a)));
     // The top `need` (none when the group is already at the floor).
     for (const skill of ranked.slice(0, Math.max(0, need))) added.push(skill.id);
   }
@@ -247,7 +277,7 @@ export function shapeSkillGroups(tailored: TailoredProfile, master: MasterProfil
     // This group's resolvable entries only.
     .filter(({ ref }) => byId.get(ref)?.category === category)
     // Posting-named first; master position breaks ties, so the result never depends on the model's order.
-    .sort((a, b) => Number(keywordAppearsIn(byId.get(b.ref)!.name, jobDescription)) - Number(keywordAppearsIn(byId.get(a.ref)!.name, jobDescription))
+    .sort((a, b) => Number(named(byId.get(b.ref)!)) - Number(named(byId.get(a.ref)!))
       || (masterIndex.get(a.ref) ?? 0) - (masterIndex.get(b.ref) ?? 0)));
   // Unresolved refs last, kept so the validator still refuses them (never laundered by being left out).
   const skills = [...ordered, ...kept.filter(({ ref }) => !byId.has(ref))];

@@ -34,7 +34,8 @@ function componentFunction(declaration: string): string {
 describe('latestSources: async edits read the row as last published', () => {
   it('editRow takes the row source from latestSources, not the render closure', () => {
     // The function body, code only.
-    const body = componentFunction('async function editRow(');
+    // T10: editRows, since editRow only delegates to it (a batch of one).
+    const body = componentFunction('async function editRows(');
     // Positive shape: the source comes from the ref.
     assert.match(body, /const source = latestSources\.current\.get\(applicationId\)/);
     // And the closure read it replaced is gone from this function.

@@ -515,7 +515,7 @@ const SYSTEM_INSTRUCTION = [
      is not stored, so the cause is UNPROVEN; the suspect is the flat schema letting the name land in
      "text" or "id". parseAssistOps refuses that rather than guessing a name, and now SAYS so on a card,
      so the next occurrence names its cause. "Databases" is only an example; the category rule binds. */
-  'Ops, each with exactly these fields: {"op":"edit","id":"b0","text":"..."} replaces bullet b0, or the summary when id is "summary". {"op":"remove","id":"b0"} drops a bullet. {"op":"add_skill","name":"Redis","category":"Databases"} adds a skill; category must be one of SKILL GROUPS (the owner can change it before applying); when none fits well, pick the closest and say in note that none fits well. {"op":"remove_skill","name":"Redis"} removes a skill, named exactly as SKILLS prints it; when that name prints under two groups, add "category" with the group to remove it from. A skill\'s name goes in "name", never in "id" or "text".',
+  'Ops, each with exactly these fields: {"op":"edit","id":"b0","text":"..."} replaces bullet b0, or the summary when id is "summary". {"op":"remove","id":"b0"} drops a bullet. {"op":"add_skill","name":"Redis","category":"Databases"} adds a skill; category must be one of SKILL GROUPS, or a new group the owner names for a skill they name (the owner can change it before applying); when none fits well, pick the closest and say in note that none fits well. {"op":"remove_skill","name":"Redis"} removes a skill, named exactly as SKILLS prints it; when that name prints under two groups, add "category" with the group to remove it from. A skill\'s name goes in "name", never in "id" or "text".',
   /* 2026-11-09 (Teja, TrueFoundry row): "add tailwind css ... even though i dont have them in my master" got "No
      changes made" twice. This line banned inventing tools with no exception, and the model obeyed it over the
      edge-case line far below. The exception now sits in the SAME sentence as the ban. The ban itself stays: a skill
@@ -553,6 +553,10 @@ const SYSTEM_INSTRUCTION = [
   /* Serving THIS job (2026-11-07): the shape Teja ruled for every tailored resume (2026-11-06/07: only
      JD-relevant groups, 3-5 of them, at least 4 skills each, ranked by the JD) and "more bullet points". */
   "Tailoring for JOB, whenever the instruction asks to improve, tailor or match the job (\"make it better for this JD\" counts): prefer master skills the DESCRIPTION or MISSING KEYWORDS name, and their groups; aim for 3-5 skill groups relevant to the job with at least 4 skills each, filled from MASTER SKILLS NOT ON RESUME; remove_skill a printed skill only when the owner asks or it crowds out a job-relevant one; to add bullets, add_back AVAILABLE mN items that support the job before writing anything new; edit a bullet to use a job keyword only where its own text already supports it.",
+  /* T10 (Teja, 2026-11-10): "add this skill group", "add more skills to this group", "add more points to this entry",
+     each filled from the master, the job-relevant first, and an honest ask when the master has nothing left. The
+     last sentence is backed by a control: parseAssistOps refuses a new_bullet with a word the owner never said. */
+  "Filling a group (\"add the <group> group\", \"add more skills to <group>\"): add_skill that group's MASTER SKILLS NOT ON RESUME, those the DESCRIPTION or MISSING KEYWORDS name first, at least 4 when the master has them; when the owner names a group or says \"all\", add every MASTER SKILLS NOT ON RESUME skill of that group first, before any other op, and never pad an explicit request with unrequested adds; when none are left, no op, and note says the group has no more master skills and asks the owner to name the ones to add. More points (\"add more points to <entry>\") with no text given: add_back that entry's AVAILABLE mN items, the most job-relevant first; when AVAILABLE has none for it, no op, and note says no unused master bullets remain and asks the owner to dictate the point. Never new_bullet text the owner did not state.",
   /* The edge cases, each with its one right answer (2026-11-07), so none falls through to a refusal card. */
   "Edge cases: a skill SKILLS already prints is never re-added (say it is already there); a group the resume does not print yet is fine for add_skill (it appears with its first skill); a skill in neither SKILLS nor MASTER SKILLS NOT ON RESUME that the owner names IS added with add_skill (never answer that it is missing from their master), and one they did not name is not added: say it is not in their master and that it is added on the Master profile page; a remove or reorder request uses remove, remove_skill, remove_entry, move or move_section; a vague request still gets concrete ops chosen by the job rules above; a request beyond the master (a new employer, a degree, a metric the text lacks) gets no op and an honest note saying why and where it can be done.",
 ].join("\n");
@@ -883,6 +887,117 @@ function ownerNamed(name: string, request: AssistRequest): boolean {
   return false;
 }
 
+/* The words a bullet may carry that no owner needs to have said (T10, 2026-11-10). They state no fact: no tool,
+   metric, employer or result. Grammar, plus a few generic action verbs and framing verbs. NOT the auditor's
+   ALLOWED_RHETORICAL_WORDS (review 2026-11-10, #7): that list holds claim words ("production", "users", "scale",
+   "shipped", "serving") a reworded MASTER bullet may gain, which is a different question from what the owner
+   dictated; with it, "Shipped production system serving users at scale using Kafka" passed for "add a point about my
+   Kafka work". A word missing here only refuses a true bullet (the owner re-dictates); a word wrongly here could let
+   a claim through, so ask that question before adding one. */
+const DICTATION_SAFE_WORDS: ReadonlySet<string> = new Set([
+  // Articles, prepositions and conjunctions (the grammar half of the auditor's list, copied, never its claim words).
+  "a", "an", "the", "and", "or", "for", "with", "in", "of", "to", "on", "at", "by", "as", "from", "into", "that", "which", "this", "its", "it", "over",
+  // Scope words: they relate the owner's nouns, never add one.
+  "across", "per", "via", "than", "then", "while", "within", "through", "plus",
+  // Pronouns and determiners.
+  "i", "me", "my", "we", "our", "us", "they", "their", "them", "these", "those", "each", "every", "all", "both",
+  // Forms of "be" and "have", and auxiliaries.
+  "is", "are", "was", "were", "be", "been", "being", "has", "have", "had", "do", "did", "can", "could", "will", "would",
+  // Prepositions and conjunctions the auditor's list lacks.
+  "about", "after", "before", "under", "up", "out", "so", "also", "but", "if", "when", "where", "who", "what", "how", "between", "during", "around", "onto", "upon", "among",
+  /* Generic action verbs (review #7): the past-tense opener a bullet needs, saying the owner did the thing they
+     named, never what it achieved. "shipped", "delivered", "handled" stay out: they claim an outcome or a scope. */
+  "built", "developed", "designed", "implemented", "created", "wrote", "added", "improved", "used", "using", "worked",
+  /* Framing verbs a bullet uses to join the owner's own nouns ("a dashboard monitoring 3 services"). Decided
+     2026-11-10 for Teja's "I built a grafana dashboard for 3 services" -> "...monitoring 3 services": they say how
+     the owner's thing relates to the owner's other thing, never what it achieved. */
+  "monitoring", "tracking", "covering", "spanning",
+]);
+
+/* Irregular past forms -> their base (review 2026-11-10, #9): "I lead a team of 4" must dictate "Led a team of 4",
+   and no suffix rule turns "led" into "lead". Common resume verbs only; a missing one refuses a true bullet (safe). */
+const IRREGULAR_PAST: ReadonlyMap<string, string> = new Map([
+  // Leading and running.
+  ["led", "lead"], ["ran", "run"], ["drove", "drive"], ["began", "begin"], ["grew", "grow"], ["won", "win"],
+  // Making and writing.
+  ["built", "build"], ["wrote", "write"], ["made", "make"], ["took", "take"], ["gave", "give"], ["chose", "choose"],
+  // Teaching, finding, keeping.
+  ["taught", "teach"], ["brought", "bring"], ["sent", "send"], ["spent", "spend"], ["met", "meet"], ["kept", "keep"], ["held", "hold"], ["found", "find"],
+]);
+
+/* A word's comparable stem (T10): an irregular past mapped to its base first; then ONE common inflection stripped,
+   -ing, -ed, -es or -s (not -ss: "process"); then a trailing -e; then a doubled final consonant undoubled. Each
+   step keeps at least 3 letters. So "deploys/deploy", "managed/manage/managing", "services/service" meet, and since
+   review #9 "led/lead", "ran/run", "planned/plan", "debugged/debug", "mapped/map" too. The undoubling runs on EVERY
+   word, suffixed or not, so "call" and "called" both reach "cal" and still meet. Known limit: an irregular form not
+   in IRREGULAR_PAST does not meet its base; that refuses a true bullet, the safe error, never passes an untrue one.
+   Deliberately no shared-prefix rule: "reduced" must never meet "redis". */
+function stemOf(word: string): string {
+  // The irregular past's base, or the word itself.
+  const base = IRREGULAR_PAST.get(word) ?? word;
+  // The one suffix stripped, or the word itself.
+  const stripped = base.length > 5 && base.endsWith("ing") ? base.slice(0, -3)
+    // "-ed": "automated" -> "automat".
+    : base.length > 4 && base.endsWith("ed") ? base.slice(0, -2)
+    // "-es": "services" -> "servic", "processes" -> "process".
+    : base.length > 4 && base.endsWith("es") ? base.slice(0, -2)
+    // "-s" but not "-ss": "deploys" -> "deploy"; "process" stays.
+    : base.length > 3 && base.endsWith("s") && !base.endsWith("ss") ? base.slice(0, -1)
+    // No inflection.
+    : base;
+  // A trailing "e" dropped, so "service"/"servic" and "automate"/"automat" meet.
+  const noE = stripped.length > 3 && stripped.endsWith("e") ? stripped.slice(0, -1) : stripped;
+  // A doubled final consonant undoubled ("plann" -> "plan", "debugg" -> "debug"); vowels ("free") are left alone.
+  return noE.length > 3 && noE.at(-1) === noE.at(-2) && /[b-df-hj-np-tv-z]/.test(noE.at(-1) ?? "") ? noE.slice(0, -1) : noE;
+}
+
+/* Every number in a text with the THING it counts (review 2026-11-10, #6): "40%" -> "40 %", "3 services" ->
+   "3 servic", "a team of 4" -> "4 " (nothing after it). "add 3 more points" puts "3" next to "more", so the request's
+   count can no longer dictate a "3 services" metric. "+" is skipped ("500+ users" is "500 users"), "percent" is "%",
+   "x" and units are their own token ("3x", "40 ms"). Commas inside a number are dropped first, as numbersIn does. */
+function countedNumbers(text: string): Set<string> {
+  // Numbers, words and "%" in order; "+" and other punctuation fall outside the match, so they are skipped.
+  const tokens = text.toLowerCase().replace(/(\d),(?=\d)/g, "$1").match(/\d+|[a-z]+|%/g) ?? [];
+  // Each number with its next token, normalised and stemmed, or "" at the end of the text.
+  const pairs = new Set<string>();
+  // Walk the tokens, pairing every number with what follows it.
+  tokens.forEach((token, i) => {
+    // Only numbers start a pair.
+    if (!/^\d+$/.test(token)) return;
+    // What it counts: the next token, a spelt-out "percent" read as "%", or nothing.
+    const next = tokens[i + 1] === "percent" ? "%" : tokens[i + 1] ?? "";
+    // A number next to a number ("2 3") has no thing of its own; "%" and "" are kept as is; a word is stemmed.
+    pairs.add(`${token} ${/^\d+$/.test(next) || next === "" ? "" : next === "%" ? "%" : stemOf(next)}`);
+  });
+  // The pairs.
+  return pairs;
+}
+
+/* The first word or number of a new bullet the OWNER did not dictate, or null when every one is theirs (T10,
+   2026-11-10). A prompt is not a control (CLAUDE.md §6): new_bullet text was never checked against anything, so
+   "add more points" could come back with "Reduced latency by 40% using Kafka". The rule:
+     - every NUMBER must appear in the owner's messages next to the same thing (countedNumbers, review #6);
+     - every other word must be the owner's (same stem, stemOf) or a DICTATION_SAFE_WORDS word (review #7).
+   The owner's messages are the instruction and their own earlier turns, never the AI's (same source as ownerNamed):
+   an AI that offered a bullet has not been told it. Master bullets are NOT a source here: those come back by
+   add_back with their own true words, never re-typed as a new claim. */
+function undictatedWord(text: string, request: AssistRequest): string | null {
+  // The owner's words only.
+  const said = [request.instruction, ...request.history.filter((message) => message.role === "user").map((message) => message.text)].join(" ");
+  // The numbers they said, each with what it counts.
+  const saidCounts = countedNumbers(said);
+  // A number they never said about this thing is the cheapest lie: refused first.
+  const counted = [...countedNumbers(text)].find((pair) => !saidCounts.has(pair));
+  // Named by the number alone, so the card says which ("3"), not the internal pair.
+  if (counted !== undefined) return counted.split(" ")[0]!;
+  // Their words as stems, split the way the auditor tokenises (letters and digits only).
+  const saidStems = new Set(said.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word !== "").map(stemOf));
+  // The bullet's words; pure digit runs were checked as numbers above.
+  const words = text.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word !== "" && !/^\d+$/.test(word));
+  // The first word that is neither theirs nor dictation-safe.
+  return words.find((word) => !DICTATION_SAFE_WORDS.has(word) && !saidStems.has(stemOf(word))) ?? null;
+}
+
 // Lower case, letters, digits, "+" and "#" only: the form two spellings of one skill name share.
 function compactName(text: string): string {
   // Everything else is spacing or punctuation.
@@ -1118,8 +1233,15 @@ export function parseAssistOps(
          is not a control (CLAUDE.md §6): "improve my skills" must never come back with an invented Kubernetes.
          Checked after "already printed", so a printed skill keeps its more useful reason. */
       if (master === undefined && !ownerNamed(finalName, request)) return `"${clip(finalName, 40)}" is not in your master profile and you did not name it. Name it in your message to add it.`;
-      // No groups at all: nothing to file a skill under (the prompt says so too).
-      if (request.categories.length === 0) return `The AI's answer did not say which skill group. Say which one: ${groupList}.`;
+      /* A NEW skill group the owner named (T10, 2026-11-10: "add this skill group"). Only for a skill the master lacks
+         (a master skill keeps its master group: the resume references the master node), only for a group the master
+         does not already have (an existing one is handled by the chain below, in the master's spelling), and only when
+         the OWNER's own words name it (ownerNamed: the instruction and their earlier turns, never the AI's). A group
+         nobody named still falls to the chain, so the AI never invents one. The group must differ from the skill's own
+         name, or "add AWS" would file AWS under a new group called "AWS". */
+      const ownerGroup = master === undefined && category !== "" && category.length <= MAX_GROUP_NAME && !groups.has(skillKey(category)) && skillKey(category) !== skillKey(finalName) && ownerNamed(category, request) ? category : undefined;
+      // No groups at all and no new group the owner named: nothing to file a skill under (the prompt says so too).
+      if (request.categories.length === 0 && ownerGroup === undefined) return `The AI's answer did not say which skill group. Say which one: ${groupList}.`;
       /* THE GROUP IS DECIDED HERE, NEVER ASKED FOR (Teja, 2026-11-07 10:10 IST: "make everything automatic").
          The flat schema cannot make category required for add_skill alone, and live answers omit it
          ("Add skill "Python"" failed though the master files Python under Languages). In order:
@@ -1131,6 +1253,8 @@ export function parseAssistOps(
          Deterministic, so the same answer always lands the same way; the card shows the group and the
          owner can change it before applying. Only a master skill auto-applies (the browser's rule). */
       const group = (master === undefined ? undefined : groups.get(skillKey(master.category)) ?? master.category)
+        // 1b. the new group the owner named for this owner-named skill (undefined unless every check above held).
+        ?? ownerGroup
         ?? groups.get(skillKey(category))
         ?? namedGroup
         ?? groupForKind(finalName, request.categories)
@@ -1242,6 +1366,10 @@ export function parseAssistOps(
       if (next === "") return WHY.noText;
       // Over the page's own ceiling.
       if (next.length > MAX_TEXT) return WHY.tooLong;
+      // A word or number the owner never said (T10, 2026-11-10): a new claim the AI wrote, refused with the word named.
+      const undictated = undictatedWord(next, request);
+      // Refused before the claim, so a refused bullet never blocks a later dictated one.
+      if (undictated !== null) return `That point is not in your master profile or your message ("${clip(undictated, 30)}"). Dictate it to add it.`;
       // The same bullet twice.
       if (claimed.has(key)) return WHY.targeted;
       // Claimed.
@@ -1269,10 +1397,90 @@ export function parseAssistOps(
     // An op kind outside the closed union.
     return WHY.unknownKind;
   };
+  /* T10 F4 (2026-11-10, live Barclays row 9ae9a866): "add databases with all databases" got 11 unrequested Tools adds
+     plus PostgreSQL, and the cap cut the other 6 databases, because the cap keeps the first MAX_OPS in model order.
+     A prompt is not a control (CLAUDE.md §6): when the cap WILL cut, an add_skill filed under a group the owner named
+     goes first. Stable otherwise, and nothing moves when everything fits, so op order is unchanged in the usual case.
+     The group read is the master's for a master skill (where it lands), else the model's. */
+  const ownerAsked = (raw: unknown): boolean => {
+    // Only add_skill ops are promoted; every other kind keeps its place.
+    if (!isRecord(raw) || raw.op !== "add_skill") return false;
+    // The group the skill will be filed under: the master's, else the one the model wrote.
+    const group = masterSkillNamed(textField(raw.name), request.availableSkills)?.category ?? textField(raw.category);
+    // Named by the owner: the one existing group their instruction names, or any group their own words name.
+    return group !== "" && ((namedGroup !== undefined && skillKey(group) === skillKey(namedGroup)) || ownerNamed(group, request));
+  };
+  /* The proposed ops, requested ones first only when the cap would cut. MAX_OPS stays 12 (decided 2026-11-10): 20 ops
+     of ~60 tokens is ~1200 of the 2048 output ceiling, leaving too little for "low" thinking, and a truncated answer
+     fails the whole turn; with the requested ones first, 12 already fits a 7-skill group plus 5 more. */
+  const ordered = parsed.ops.length > MAX_OPS ? [...parsed.ops.filter(ownerAsked), ...parsed.ops.filter((raw) => !ownerAsked(raw))] : parsed.ops;
+  // Each proposed op's outcome, in order, and whether the cap (not a check) is what dropped it.
+  const outcomes: { raw: unknown; result: AssistOp | string; capCut: boolean }[] = [];
+  // Ops kept so far, for the cap.
+  let keptSoFar = 0;
   // Each proposed op in order.
-  for (const raw of parsed.ops) {
+  for (const raw of ordered) {
     // Past the cap, everything else is dropped, valid or not: a bigger rewrite is a re-tailor.
-    const result = ops.length >= MAX_OPS ? `More than ${MAX_OPS} changes in one answer; ask for fewer at once.` : check(raw);
+    const capCut = keptSoFar >= MAX_OPS;
+    // The cap's reason, or the op's own check.
+    const result = capCut ? `More than ${MAX_OPS} changes in one answer; ask for fewer at once.` : check(raw);
+    // Counted toward the cap only when kept.
+    if (typeof result !== "string") keptSoFar += 1;
+    // Recorded for the swap pass below.
+    outcomes.push({ raw, result, capCut });
+  }
+  /* A SWAP PAIR IS KEPT OR CUT TOGETHER (review 2026-11-10, #3). The web pairs a remove_entry with the first add_back
+     of a master ENTRY in the same section (aiEdit.ts swapPartners, greedy in answer order), and applies them as one
+     save: either half alone breaks the project count and is always refused. So when the cap cut one half, the kept
+     half is dropped too, with a reason naming the swap, instead of shipping a card that can never apply. */
+  const sectionOf = (raw: unknown): { kind: "remove" | "add"; section: string } | null => {
+    // Only these two kinds make a swap.
+    if (!isRecord(raw)) return null;
+    // The id both kinds carry.
+    const id = textField(raw.id);
+    // A removal: its entry's section, from the request.
+    if (raw.op === "remove_entry") {
+      // The entry it names, if listed.
+      const entry = request.entries.find((candidate) => candidate.id === id);
+      // Its section, or no pairing.
+      return entry === undefined ? null : { kind: "remove", section: entry.section };
+    }
+    // An add_back: only a whole master ENTRY (nN) pairs; a bullet (mN) never does.
+    if (raw.op === "add_back") {
+      // The AVAILABLE item it names, if any.
+      const item = request.available.find((candidate) => candidate.id === id);
+      // An entry's section, or no pairing.
+      return item !== undefined && item.kind === "entry" ? { kind: "add", section: item.section } : null;
+    }
+    // Any other kind.
+    return null;
+  };
+  // Indices already taken by an earlier pair, so "swap two for two" pairs one-to-one, like the web.
+  const paired = new Set<number>();
+  // Each removal looks for its add.
+  outcomes.forEach((remove, i) => {
+    // This op's swap role.
+    const removeSide = sectionOf(remove.raw);
+    // Only a removal starts a pair.
+    if (removeSide === null || removeSide.kind !== "remove") return;
+    // The first unpaired add of the same section.
+    const j = outcomes.findIndex((add, k) => !paired.has(k) && sectionOf(add.raw)?.kind === "add" && sectionOf(add.raw)?.section === removeSide.section);
+    // No partner: an ordinary removal.
+    if (j === -1) return;
+    // Both taken.
+    paired.add(i);
+    // Both taken.
+    paired.add(j);
+    // The add half.
+    const add = outcomes[j]!;
+    // Exactly one half kept and the other cut by the cap: the kept half goes too.
+    for (const [kept, cut] of [[remove, add], [add, remove]] as const) {
+      // Kept as an op while its partner fell to the cap.
+      if (typeof kept.result !== "string" && cut.capCut) kept.result = `Its swap partner was cut by the ${MAX_OPS}-change cap, and one half of a swap cannot apply alone; ask for fewer changes at once.`;
+    }
+  });
+  // The outcomes as the answer: kept ops, and each drop counted and named.
+  for (const { raw, result } of outcomes) {
     // A string is the reason this op cannot be applied.
     if (typeof result === "string") {
       // Counted, not silently lost.

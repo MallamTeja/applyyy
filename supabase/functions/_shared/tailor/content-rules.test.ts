@@ -426,3 +426,64 @@ test("the validator refuses a header title outside the cleaned shape", () => {
   assert.equal(validateTailoredProfile(bad, master(), VERSION).ok, false);
 });
 
+// --- AI skills floor (Teja, 2026-11-10): every tailored resume carries an AI skills group of >= min(5, master) skills. ---
+
+/** n master skills in category "AI", ids ai-1..ai-n, so a test can hold exactly the count it names. */
+const aiSkills = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `ai-${i + 1}`, name: `AI Skill ${i + 1}`, category: "AI" }));
+
+/** The base master plus n AI skills: everything else unchanged, so the only floor that can move is the new one. */
+const masterWithAi = (n: number) => ({ ...master(), skills: [...master().skills, ...aiSkills(n)] }) as MasterProfile;
+
+/** checkContentRules on a COMPLIANT resolved resume printing the first `printed` AI skills, against a master holding `held`. */
+function aiGate(printed: number, held: number): string[] {
+  // The enforced greedy answer: the fixture the "gate then passes" test proves yields [] against master().
+  const { profile } = enforceContentRules(greedyAnswer(), master(), JD);
+  // Resolved through the real validator, so the resume has the exact shape the gate runs on in production.
+  const verdict = validateTailoredProfile(profile, master(), VERSION);
+  // A refusal would be a fixture bug, not the rule under test.
+  assert.equal(verdict.ok, true, JSON.stringify(verdict));
+  // Narrowing for the type checker; unreachable after the assert above.
+  if (!verdict.ok) return ["<unresolved>"];
+  // The resolved AI entries ({ref, name, category}), taken from the same master the gate is given.
+  const printedAi = aiSkills(held).slice(0, printed).map((s) => ({ ref: s.id, name: s.name, category: s.category }));
+  // The compliant resume with its AI skills appended: only the skills list differs from the passing case.
+  const resume = { ...verdict.resume, skills: [...verdict.resume.skills, ...printedAi] };
+  // Gated against the master holding `held` AI skills, so F = min(5, held).
+  return checkContentRules(resume, masterWithAi(held));
+}
+
+test("AI skills floor (2026-11-10): 4 AI skills against an 18-skill AI master is refused, naming the floor of 5", () => {
+  // Exactly one break: every other rule is met by the compliant fixture, so the array is the whole verdict.
+  assert.deepEqual(aiGate(4, 18), ["skills[AI]: 4, needs 5"]);
+});
+
+test("AI skills floor (2026-11-10): 5 AI skills meets the floor", () => {
+  // At the floor: compliant, nothing broken at all.
+  assert.deepEqual(aiGate(5, 18), []);
+});
+
+test("AI skills floor (2026-11-10): a master with only 3 AI skills is never padded, so those 3 comply", () => {
+  // F = min(5, 3) = 3: the resume holds everything the master can supply.
+  assert.deepEqual(aiGate(3, 3), []);
+});
+
+test("AI skills floor (2026-11-10): a master with no AI category requires none", () => {
+  // F = min(5, 0) = 0: no AI group to print, so no break.
+  assert.deepEqual(aiGate(0, 0), []);
+});
+
+test("AI skills floor (2026-11-10): 0 AI skills against an 18-skill AI master is refused", () => {
+  // A missing group counts as 0, never as "no rule".
+  assert.deepEqual(aiGate(0, 18), ["skills[AI]: 0, needs 5"]);
+});
+
+test("AI skills floor (2026-11-10): the string keeps the web's rule-key contract (pageFitEdit.ts ruleKey)", () => {
+  // The break for a short AI group.
+  const aiBreak = aiGate(4, 18).find((s) => s.startsWith("skills[AI]"));
+  // It exists at all, or the two checks below would pass vacuously on undefined.
+  assert.ok(aiBreak !== undefined, "no skills[AI] break was emitted");
+  // The web keys a rule by the text before the FIRST ":", so the prefix must be exactly the rule identity.
+  assert.equal(aiBreak.split(":")[0], "skills[AI]");
+  // The web reads "at most" as a max rule; this is a floor, so the phrase must be absent.
+  assert.equal(aiBreak.includes("at most"), false);
+});

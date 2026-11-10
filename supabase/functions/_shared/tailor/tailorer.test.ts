@@ -29,6 +29,8 @@ import { TAILOR_RESPONSE_SCHEMA, TAILOR_SECTION_KINDS } from "./prompt.ts";
 // The contract types, reached through this stream's single re-export module. Nothing
 // here redefines one — a redefined type does not fail, it drifts.
 import type { MasterProfile, TailoredProfile } from "../contracts/shared-types.ts";
+// The floors' single home: the AI-group tests read the AI category name and its minimum from here, never restated.
+import { PAGE_FIT_FLOORS } from "./page-trim.ts";
 
 // The pinned version every test resolves against. A literal rather than a variable the
 // tests can nudge, so a "mismatch" test has to state its own wrong number out loud.
@@ -755,4 +757,191 @@ test("summary variant: a non-string summary_variant is a malformed reply", async
   const tailor = createTailorer({ callLlm: () => Promise.resolve(JSON.stringify({ ...HONEST_TAILORING, summary_variant: 7 })), master: MASTER, masterVersion: MASTER_VERSION });
   // Thrown, like every other shape failure.
   await assert.rejects(tailor(POSTING), /malformed summary_variant/);
+});
+
+// ---- AI skills group (Teja, 2026-11-10 12:14 IST) -------------------------------------------------------
+// "every resume needs to contain an AI skill group with min 5 AI skills, the most relevant AI skills to that
+// job, from now on". RED until shapeSkillGroups enforces it: these pin the contract the implementation meets.
+
+// The live master v32 AI category, in its master order (copied from the live row, so the names are real).
+const AI_SKILL_NAMES_V32 = ["LLM Applications", "RAG Pipelines", "Prompt Engineering", "Context Engineering", "AI Agents & Workflows", "Tool Calling & Guardrails", "LLM/SLM API Integration", "Vector Search", "Multi-Agent Systems", "Prompt Injection Protection", "Context Validation", "Prompt Builders", "Context Builders", "Prompt Caching", "Token Cost Optimization", "Quantization", "MCP Integrations", "Harness Engineering"];
+
+// A stable id from a name, so a test can name a ref ("ai-rag-pipelines") without a lookup table.
+const aiId = (name: string): string => `ai-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-$/, "")}`;
+
+// The non-AI groups, v32 category names, four skills each where a Java backend JD can name one per group.
+const NON_AI_SKILLS: MasterProfile["skills"] = [
+  // Languages: Java is what a backend JD names.
+  { id: "lang-java", name: "Java", category: "Languages" }, { id: "lang-python", name: "Python", category: "Languages" }, { id: "lang-ts", name: "TypeScript", category: "Languages" }, { id: "lang-sql", name: "SQL", category: "Languages" },
+  // Frameworks: Spring Boot, the second group a Java JD names.
+  { id: "fw-spring", name: "Spring Boot", category: "Frameworks" }, { id: "fw-react", name: "React", category: "Frameworks" }, { id: "fw-express", name: "Express", category: "Frameworks" }, { id: "fw-fastapi", name: "FastAPI", category: "Frameworks" },
+  // Databases: PostgreSQL ("Postgres" in a JD canonicalises to it).
+  { id: "db-pg", name: "PostgreSQL", category: "Databases" }, { id: "db-mysql", name: "MySQL", category: "Databases" }, { id: "db-redis", name: "Redis", category: "Databases" }, { id: "db-mongo", name: "MongoDB", category: "Databases" },
+  // DevOps & Cloud: Docker.
+  { id: "dev-docker", name: "Docker", category: "DevOps & Cloud" }, { id: "dev-aws", name: "AWS", category: "DevOps & Cloud" }, { id: "dev-k8s", name: "Kubernetes", category: "DevOps & Cloud" }, { id: "dev-gha", name: "GitHub Actions", category: "DevOps & Cloud" },
+  // Testing & Quality: JUnit.
+  { id: "test-junit", name: "JUnit", category: "Testing & Quality" }, { id: "test-jest", name: "Jest", category: "Testing & Quality" }, { id: "test-pw", name: "Playwright", category: "Testing & Quality" }, { id: "test-vitest", name: "Vitest", category: "Testing & Quality" },
+  // Tools: Git.
+  { id: "tool-git", name: "Git", category: "Tools" }, { id: "tool-jira", name: "Jira", category: "Tools" }, { id: "tool-postman", name: "Postman", category: "Tools" }, { id: "tool-vscode", name: "VS Code", category: "Tools" },
+  // Backend Engineering: REST APIs.
+  { id: "be-rest", name: "REST APIs", category: "Backend Engineering" }, { id: "be-micro", name: "Microservices", category: "Backend Engineering" }, { id: "be-design", name: "System Design", category: "Backend Engineering" }, { id: "be-cache", name: "Caching", category: "Backend Engineering" },
+  // Data Science, Machine Learning, CS Fundamentals: present in v32, never named by these JDs.
+  { id: "ds-pandas", name: "Pandas", category: "Data Science" }, { id: "ml-xgb", name: "XGBoost", category: "Machine Learning" }, { id: "cs-dsa", name: "Data Structures", category: "CS Fundamentals" },
+];
+
+// A master shaped like v32: the non-AI groups first and AI LAST, so master order never seats AI by accident.
+function aiMaster(aiNames: readonly string[]): MasterProfile {
+  // The literal "AI" is the contract's category name (PAGE_FIT_FLOORS.aiSkillsCategory); a literal here so the
+  // fixture is still well-formed while that field is undefined, and the red stays an assertion, not a TypeError.
+  return { ...MASTER, skills: [...NON_AI_SKILLS, ...aiNames.map((name) => ({ id: aiId(name), name, category: "AI" }))] };
+}
+
+// The refs of the shaped section whose master category is AI, in page order.
+function aiRefsOf(skills: readonly { readonly ref: string }[], master: MasterProfile): string[] {
+  // Each master skill's category by id; an unresolved ref has none and is not AI.
+  const categoryById = new Map(master.skills.map((s) => [s.id, s.category]));
+  // Page order kept, so R3 can read the first AI skill.
+  return skills.map((s) => s.ref).filter((ref) => categoryById.get(ref) === "AI");
+}
+
+// The distinct groups the shaped section shows, in page order.
+function groupsOf(skills: readonly { readonly ref: string }[], master: MasterProfile): string[] {
+  // Each master skill's category by id.
+  const categoryById = new Map(master.skills.map((s) => [s.id, s.category]));
+  // First appearance wins, exactly as the renderer groups them.
+  return [...new Set(skills.flatMap((s) => categoryById.get(s.ref) ?? []))];
+}
+
+// A pure Java/Spring backend JD: no AI term at all (no "AI", "LLM", "RAG", "machine learning").
+const JAVA_JD = "Java backend developer: Spring Boot services on PostgreSQL.";
+// The same backend role naming seven non-AI groups, so every one of them outranks AI on relevance.
+const SEVEN_GROUP_JD = "Java and Spring Boot services on PostgreSQL in Docker, tested with JUnit, versioned in Git, exposing REST APIs.";
+
+// The contract's two new floors, read where every other floor lives. Red until page-trim.ts exports them.
+test("AI group (2026-11-10): PAGE_FIT_FLOORS names the AI category and its minimum of 5", () => {
+  // The category name the shape matches exactly, read through a loose type so the test runs before the field exists.
+  assert.equal((PAGE_FIT_FLOORS as { aiSkillsCategory?: string }).aiSkillsCategory, "AI");
+  // The minimum AI skills per resume (Teja: "min 5 AI skills").
+  assert.equal((PAGE_FIT_FLOORS as { minAiSkills?: number }).minAiSkills, 5);
+});
+
+// R1 PRESENT: the model picked no AI skill and the JD names none, yet the resume still carries >= 5.
+test("AI group (2026-11-10): R1 a Java backend JD still gets >= 5 AI skills", () => {
+  // The full v32 AI group of 18.
+  const master = aiMaster(AI_SKILL_NAMES_V32);
+  // The model picked Java only: the AI group must come from the rule, not the model.
+  const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "lang-java" }] }, master, JAVA_JD);
+  // The AI refs on the page.
+  const ai = aiRefsOf(shaped.profile.skills, master);
+  // min(5, 18) = 5 at least; a literal 5 so a missing PAGE_FIT_FLOORS field cannot make this pass vacuously.
+  assert.ok(ai.length >= 5, `expected >= 5 AI skills on a Java JD, got ${ai.length}: ${JSON.stringify(ai)}`);
+  // Every AI ref was added by the shape (the model picked none), so each must be reported in `added`.
+  for (const ref of ai) assert.ok(shaped.added.includes(ref), `AI ref ${ref} was added but not reported in added`);
+});
+
+// R2 SEAT: seven non-AI groups outrank AI on relevance; AI still takes one of the SKILLS_MAX_GROUPS seats.
+test("AI group (2026-11-10): R2 the AI group takes a seat even when 5+ other groups are more JD-relevant", () => {
+  // The full v32 AI group.
+  const master = aiMaster(AI_SKILL_NAMES_V32);
+  // One pick per JD-named group, so the model agrees with the posting on every non-AI group.
+  const picks = ["lang-java", "fw-spring", "db-pg", "dev-docker", "test-junit", "tool-git", "be-rest"].map((ref) => ({ ref }));
+  // Shape against the seven-group posting.
+  const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: picks }, master, SEVEN_GROUP_JD);
+  // The groups the page shows.
+  const groups = groupsOf(shaped.profile.skills, master);
+  // AI is one of them.
+  assert.ok(groups.includes("AI"), `AI group missing; groups shown: ${JSON.stringify(groups)}`);
+  // Still at least 5 AI skills in it.
+  assert.ok(aiRefsOf(shaped.profile.skills, master).length >= 5, "AI group holds fewer than 5 skills");
+  // And the cap holds: AI took a seat, it did not add a sixth group (SKILLS_MAX_GROUPS = 5).
+  assert.ok(groups.length <= 5, `more than 5 groups shown: ${JSON.stringify(groups)}`);
+});
+
+// R3 RANKED: a JD-relevant AI skill is pulled in past the floor and leads the group.
+test("AI group (2026-11-10): R3 a RAG posting puts RAG Pipelines in the AI group and first, even 8th in master order", () => {
+  // The first eight in the R3 order: RAG Pipelines moved to 8th, so a master-order fill of 5 never reaches it.
+  const firstEight = ["LLM Applications", "Prompt Engineering", "Context Engineering", "AI Agents & Workflows", "Tool Calling & Guardrails", "LLM/SLM API Integration", "Vector Search", "RAG Pipelines"];
+  // The rest of v32 after them, in v32 order.
+  const reordered = [...firstEight, ...AI_SKILL_NAMES_V32.filter((n) => !firstEight.includes(n))];
+  // Guard the fixture itself: RAG Pipelines really is past position 5, or the test proves nothing.
+  assert.equal(reordered.indexOf("RAG Pipelines"), 7);
+  // The master with that order.
+  const master = aiMaster(reordered);
+  // extractJdKeywords emits "RAG" from this (case-sensitive exact term); the full name "RAG Pipelines" is NOT in
+  // the JD, so only the term-in-name half of the relevance rule can rank it.
+  const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "lang-java" }] }, master, "You will build RAG systems on Postgres.");
+  // The AI refs, page order.
+  const ai = aiRefsOf(shaped.profile.skills, master);
+  // RAG Pipelines leads the AI group (which also proves it is in it).
+  assert.equal(ai[0], aiId("RAG Pipelines"), `first AI skill should be RAG Pipelines; AI group: ${JSON.stringify(ai)}`);
+  // And the group still meets the minimum.
+  assert.ok(ai.length >= 5, `expected >= 5 AI skills, got ${ai.length}`);
+});
+
+// R4 NEVER INVENT: a 3-skill AI group yields exactly those 3, and nothing outside the master.
+test("AI group (2026-11-10): R4 a master with only 3 AI skills yields exactly those 3, never an invented one", () => {
+  // Three real AI skills only.
+  const master = aiMaster(["LLM Applications", "RAG Pipelines", "Prompt Engineering"]);
+  // Java pick, Java JD: three relevant non-AI groups, so the D2 top-up never seats AI today.
+  const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "lang-java" }] }, master, JAVA_JD);
+  // Exactly the three, as a set (order is R3's concern).
+  assert.deepEqual(aiRefsOf(shaped.profile.skills, master).sort(), ["LLM Applications", "RAG Pipelines", "Prompt Engineering"].map(aiId).sort());
+  // Every shaped ref is a master id: the floor min(5, 3) never pads with a made-up skill.
+  const masterIds = new Set(master.skills.map((s) => s.id));
+  // Checked ref by ref so a failure names the invented one.
+  for (const { ref } of shaped.profile.skills) assert.ok(masterIds.has(ref), `ref ${ref} is not in the master`);
+});
+
+// R4 control: a master without an "AI" category is shaped exactly as before; no AI group is forced.
+test("AI group (2026-11-10): R4 control, a master with no AI category gets no AI group and an unchanged shape", () => {
+  // The non-AI groups only.
+  const master: MasterProfile = { ...MASTER, skills: NON_AI_SKILLS };
+  // Java pick, Java JD.
+  const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "lang-java" }] }, master, JAVA_JD);
+  // The three JD-relevant groups, as the pre-AI rule shapes them: no AI seat, nothing else.
+  assert.deepEqual(groupsOf(shaped.profile.skills, master), ["Languages", "Frameworks", "Databases"]);
+  // The full shaped list, each group at the floor of 4, so any change at all to the no-AI path goes red here.
+  assert.deepEqual(shaped.profile.skills.map((s) => s.ref), ["lang-java", "lang-python", "lang-ts", "lang-sql", "fw-spring", "fw-react", "fw-express", "fw-fastapi", "db-pg", "db-mysql", "db-redis", "db-mongo"]);
+});
+
+// R5 KEEPS PICKS: the floor is a minimum. Seven model AI picks all survive, even against seven stronger groups.
+test("AI group (2026-11-10): R5 seven model-picked AI skills all stay, the floor is a minimum", () => {
+  // The full v32 AI group.
+  const master = aiMaster(AI_SKILL_NAMES_V32);
+  // The model's seven AI picks, by v32 position.
+  const aiPicks = AI_SKILL_NAMES_V32.slice(0, 7).map(aiId);
+  // Plus Java, against the seven-group posting where AI is the least relevant group (dropped by the pre-AI rule).
+  const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "lang-java" }, ...aiPicks.map((ref) => ({ ref }))] }, master, SEVEN_GROUP_JD);
+  // The AI refs on the page.
+  const ai = aiRefsOf(shaped.profile.skills, master);
+  // Every pick kept, none trimmed to the floor of 5.
+  for (const ref of aiPicks) assert.ok(ai.includes(ref), `model AI pick ${ref} was not kept; AI group: ${JSON.stringify(ai)}`);
+  // And none of them reported as dropped.
+  assert.deepEqual(shaped.dropped.filter((ref) => aiPicks.includes(ref)), [], "model AI picks were reported dropped");
+});
+
+// Review finding 2 (2026-11-10): a generic posting term inside an AI skill's name is word overlap, not relevance.
+test("AI group (2026-11-10): R6 a backend JD saying caching and APIs does not promote Prompt Caching or LLM/SLM API Integration", () => {
+  // The full v32 AI group: Prompt Caching is 14th and LLM/SLM API Integration 7th, both past the floor of 5.
+  const master = aiMaster(AI_SKILL_NAMES_V32);
+  // Generic words that ARE vocabulary terms elsewhere (caching, APIs, monitoring, agents), and no AI term at all.
+  const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "lang-java" }] }, master, "Java backend: caching, REST APIs, agents and monitoring.");
+  // With no AI term in the posting, the group is simply the first 5 in master order.
+  assert.deepEqual(aiRefsOf(shaped.profile.skills, master), AI_SKILL_NAMES_V32.slice(0, 5).map(aiId));
+});
+
+// Review finding 2b (2026-11-10): five model picks the posting never names must not keep out an AI skill it does name.
+test("AI group (2026-11-10): R7 five unnamed model AI picks still let the JD-named RAG Pipelines in, first", () => {
+  // RAG Pipelines moved to 8th, so neither the model's five picks nor the floor reaches it.
+  const firstEight = ["LLM Applications", "Prompt Engineering", "Context Engineering", "AI Agents & Workflows", "Tool Calling & Guardrails", "LLM/SLM API Integration", "Vector Search", "RAG Pipelines"];
+  // The rest of v32 after them.
+  const master = aiMaster([...firstEight, ...AI_SKILL_NAMES_V32.filter((n) => !firstEight.includes(n))]);
+  // The model picked the first five AI skills: the floor is already met, so only the "named joins" rule can add RAG.
+  const picks = firstEight.slice(0, 5).map((name) => ({ ref: aiId(name) }));
+  // A posting that names RAG.
+  const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "lang-java" }, ...picks] }, master, "You will build RAG systems on Postgres.");
+  // The AI group in page order.
+  const ai = aiRefsOf(shaped.profile.skills, master);
+  // RAG Pipelines is in and leads; the five picks stay (six in all).
+  assert.deepEqual(ai, [aiId("RAG Pipelines"), ...firstEight.slice(0, 5).map(aiId)]);
 });

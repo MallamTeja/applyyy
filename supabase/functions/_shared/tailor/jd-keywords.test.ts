@@ -10,7 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 // Extension-suffixed so this runs under Deno and `node --test` alike.
 // keywordAppearsIn is the NUMERATOR's rule; testing it beside the extractor keeps them one rule.
-import { canonicalSkillTerm, extractJdKeywords, keywordAppearsIn } from "./jd-keywords.ts";
+import { AI_VOCABULARY_TERMS, canonicalSkillTerm, extractJdKeywords, keywordAppearsIn } from "./jd-keywords.ts";
 
 // A short posting in the shape of the live GitLab one, written for this test.
 const POSTING = [
@@ -229,4 +229,13 @@ test("canonicalSkillTerm maps only a name a vocabulary pattern matches whole", (
   assert.equal(canonicalSkillTerm("AWS Lambda"), null);
   // An unknown skill has no term.
   assert.equal(canonicalSkillTerm("Dagster"), null);
+});
+
+// AI_VOCABULARY_TERMS (2026-11-10, T13) is a second list beside the vocabulary; this keeps it from drifting. Each term must
+// be one the extractor really emits, or shapeSkillGroups would wait for a term that can never arrive.
+test("AI_VOCABULARY_TERMS: every AI term is a vocabulary term the extractor emits", () => {
+  // Non-vacuity: all five AI terms are listed.
+  assert.ok(AI_VOCABULARY_TERMS.size >= 5, `expected the 5 AI terms, got ${AI_VOCABULARY_TERMS.size}`);
+  // Each term, written into a posting the way a recruiter would, comes back from the extractor under its own name.
+  for (const term of AI_VOCABULARY_TERMS) assert.ok(extractJdKeywords(`Experience with ${term} required.`).includes(term), `${term} is not emitted`);
 });

@@ -455,8 +455,8 @@ test("parseAssistOps keeps structure ops only for ids the request listed", () =>
     ],
     note: "",
   });
-  // Validated against the structured request.
-  const parsed = parseAssistOps(answer, structuredRequest());
+  // Validated against the structured request, the owner dictating the new bullet (T10: an undictated one is refused).
+  const parsed = parseAssistOps(answer, dictating("add a point: predicted race pace from lap telemetry"));
   // Narrowed.
   assert.ok(parsed.ok);
   // The five valid ops, in order, the section lower-cased to the printed name.
@@ -1202,4 +1202,200 @@ test("the Rules line itself carries the owner-named exception, so \"never invent
   const rules = system.split("\n").find((line) => line.startsWith("Rules:")) ?? "";
   // The exception sits in the same sentence as the ban it qualifies.
   assert.match(rules, /Never invent .*tools.*except a skill or tool the owner names/);
+});
+
+// --- T10 (2026-11-10): new skill groups, filling a group, more points, and new_bullet truthfulness ---
+
+test("T10 skill group: an owner-named new group is kept for an owner-named skill", () => {
+  // The owner names both the skill (not in the master) and a group the master does not have.
+  const parsed = parseAssistRequest(body({ instruction: "add Grafana under a new Observability group" }));
+  // Valid fixture.
+  assert.ok(parsed.ok);
+  // The model files it under the owner's new group.
+  const ops = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Grafana", category: "Observability" }], note: "" }), parsed.request);
+  // Narrowed.
+  assert.ok(ops.ok);
+  // Kept under the new group, as the owner wrote it, not forced into Languages/Tools.
+  assert.deepEqual(ops.ops, [{ op: "add_skill", name: "Grafana", category: "Observability" }]);
+  // A master with no groups at all still takes an owner-named group.
+  const empty = parseAssistRequest(body({ instruction: "add Grafana under a new Observability group", categories: [] }));
+  // Valid fixture.
+  assert.ok(empty.ok);
+  // The same op against an empty group list.
+  const emptyOps = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Grafana", category: "Observability" }], note: "" }), empty.request);
+  // Narrowed.
+  assert.ok(emptyOps.ok);
+  // Kept, filed under the group the owner named.
+  assert.deepEqual(emptyOps.ops, [{ op: "add_skill", name: "Grafana", category: "Observability" }]);
+});
+
+test("T10 skill group: a group nobody named is never invented", () => {
+  // The owner names the skill but no group.
+  const parsed = parseAssistRequest(body({ instruction: "add Grafana" }));
+  // Valid fixture.
+  assert.ok(parsed.ok);
+  // The model invents a group.
+  const ops = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Grafana", category: "Observability" }], note: "" }), parsed.request);
+  // Narrowed.
+  assert.ok(ops.ok);
+  // Filed under an existing group by the old chain ("Tools" is the catch-all), never "Observability".
+  assert.deepEqual(ops.ops, [{ op: "add_skill", name: "Grafana", category: "Tools" }]);
+  // With no groups at all, an unnamed group is still a rejection, not a new group.
+  const empty = parseAssistRequest(body({ instruction: "add Grafana", categories: [] }));
+  // Valid fixture.
+  assert.ok(empty.ok);
+  // Refused with the existing reason.
+  assert.match(rejectedFor({ op: "add_skill", name: "Grafana", category: "Observability" }, empty.request)?.why ?? "", /did not say which skill group/);
+  // A master skill keeps its master group even when the owner names another one.
+  const master = parseAssistRequest(body({ instruction: "add Postman to a new Observability group", availableSkills: LIVE_AVAILABLE }));
+  // Valid fixture.
+  assert.ok(master.ok);
+  // The model obeys the owner's group for a master skill.
+  const masterOps = parseAssistOps(JSON.stringify({ ops: [{ op: "add_skill", name: "Postman", category: "Observability" }], note: "" }), master.request);
+  // Narrowed.
+  assert.ok(masterOps.ok);
+  // The master's own group wins: the resume references the master node.
+  assert.deepEqual(masterOps.ops, [{ op: "add_skill", name: "Postman", category: "Tools" }]);
+});
+
+test("T10 more skills: the prompt tells the model to fill a group from its master skills, job-relevant first", () => {
+  // The fixed system text.
+  const system = buildAssistPrompt(request()).systemInstruction;
+  // The fill-a-group rule, job-relevant first, at least 4.
+  assert.match(system, /add more skills to <group>.*MASTER SKILLS NOT ON RESUME.*DESCRIPTION or MISSING KEYWORDS name first.*at least 4/);
+  // None left: no op, and ask the owner to name them.
+  assert.match(system, /no more master skills and asks the owner to name the ones to add/);
+  // The category rule allows a group the owner states.
+  assert.match(system, /category must be one of SKILL GROUPS, or a new group the owner names/);
+});
+
+test("T10 more points: the prompt steers to AVAILABLE mN of that entry and to asking for dictation when none remain", () => {
+  // The fixed system text.
+  const system = buildAssistPrompt(request()).systemInstruction;
+  // More points with no text: add_back that entry's mN items, job-relevant first.
+  assert.match(system, /add more points to <entry>.*add_back that entry's AVAILABLE mN items, the most job-relevant first/);
+  // None left: ask for dictation.
+  assert.match(system, /no unused master bullets remain and asks the owner to dictate the point/);
+  // Never a new_bullet the owner did not state.
+  assert.match(system, /Never new_bullet text the owner did not state/);
+});
+
+// The structured request with the owner's own words, for the new_bullet truthfulness tests.
+function dictating(instruction: string, history: unknown[] = []): AssistRequest {
+  // Through the real validator.
+  const parsed = parseAssistRequest(structured({ instruction, history }));
+  // The fixture must be valid.
+  if (!parsed.ok) throw new Error(parsed.message);
+  // The request.
+  return parsed.request;
+}
+
+test("T10 truthfulness: a new_bullet with a non-master, non-dictated claim is refused", () => {
+  // The owner only asked for more points; the model invents a metric and a tool.
+  const ops = parseAssistOps(JSON.stringify({ ops: [{ op: "new_bullet", entry: "e0", text: "Reduced latency by 40% using Kafka." }], note: "" }), dictating("add more points to the Aczen job"));
+  // Narrowed.
+  assert.ok(ops.ok);
+  // Nothing kept.
+  assert.equal(ops.ops.length, 0);
+  // Named with the reason and the way out.
+  assert.match(ops.rejected[0]?.why ?? "", /^That point is not in your master profile or your message.*Dictate it to add it\.$/);
+  // Without the number, the invented tool alone is still refused.
+  assert.equal(rejectedFor({ op: "new_bullet", entry: "e0", text: "Reduced latency using Kafka." }, dictating("add more points to the Aczen job"))?.what, 'New bullet under "Aczen Technologies · Full Stack AI Engineer"');
+});
+
+test("T10 truthfulness: a dictated point reformatted as a bullet is kept", () => {
+  // The owner's own words, in their own casing and grammar.
+  const req = dictating("add a point: i built a grafana dashboard for 3 services");
+  // The model's bullet form: past-tense verb, capitalised tool, a framing word ("monitoring").
+  const ops = parseAssistOps(JSON.stringify({ ops: [{ op: "new_bullet", entry: "e0", text: "Built a Grafana dashboard monitoring 3 services." }], note: "" }), req);
+  // Narrowed.
+  assert.ok(ops.ok);
+  // Kept as written.
+  assert.deepEqual(ops.ops, [{ op: "new_bullet", entry: "e0", text: "Built a Grafana dashboard monitoring 3 services." }]);
+  // An inflection of the owner's word counts ("dashboards" for "dashboard"), and an earlier owner turn dictates too.
+  const later = dictating("yes add it", [{ role: "user", text: "i automated deploys of the dashboard" }]);
+  // Kept: "automated", "deploys", "dashboards" all come from the owner.
+  assert.equal(rejectedFor({ op: "new_bullet", entry: "e0", text: "Automated deploys of the dashboards." }, later), null);
+});
+
+test("T10 truthfulness: an AI turn in history cannot dictate a bullet", () => {
+  // The claim appears only in the assistant's message.
+  const req = dictating("yes add it", [{ role: "user", text: "add more points" }, { role: "assistant", text: "Shall I add: Reduced latency by 40% using Kafka?" }]);
+  // Refused: the AI cannot dictate the owner's claims.
+  assert.match(rejectedFor({ op: "new_bullet", entry: "e0", text: "Reduced latency by 40% using Kafka." }, req)?.why ?? "", /not in your master profile or your message/);
+});
+
+test("T10 all of a group: an owner-named group's master skills survive the op cap ahead of unrequested adds", () => {
+  // Live shape (Barclays row 9ae9a866, 2026-11-10): 11 master Tools skills nobody asked for, then the 7 master Databases.
+  const tools = Array.from({ length: 11 }, (_, i) => ({ name: `Tool${i}`, category: "Tools" }));
+  // The live master v32 Databases group, none printed.
+  const databases = ["PostgreSQL", "pgvector", "Redis", "MySQL", "DBMS", "Supabase", "MongoDB"].map((name) => ({ name, category: "Databases" }));
+  // The owner's own words from that turn.
+  const parsed = parseAssistRequest(body({ instruction: "add databases with all databases", categories: ["Languages", "Tools", "Databases"], availableSkills: [...tools, ...databases] }));
+  // Valid fixture.
+  assert.ok(parsed.ok);
+  // The model's order: the unrequested adds first, so a first-12 cut would keep only one database.
+  const answer = JSON.stringify({ ops: [...tools, ...databases].map((skill) => ({ op: "add_skill", name: skill.name, category: skill.category })), note: "" });
+  // Validated.
+  const ops = parseAssistOps(answer, parsed.request);
+  // Narrowed.
+  assert.ok(ops.ok);
+  // Still capped.
+  assert.equal(ops.ops.length, MAX_OPS);
+  // Every requested database survived the cap.
+  assert.deepEqual(ops.ops.filter((op) => op.op === "add_skill" && op.category === "Databases").map((op) => (op.op === "add_skill" ? op.name : "")), databases.map((skill) => skill.name));
+  // The prompt says it too: the named group first, never padded.
+  assert.match(buildAssistPrompt(parsed.request).systemInstruction, /says "all", add every MASTER SKILLS NOT ON RESUME skill of that group first.*never pad an explicit request with unrequested adds/);
+});
+
+// --- T10 review round (2026-11-10): numbers, the dictation word set, irregular verbs, the cap and a swap ---
+
+test("T10 truthfulness: a count in the request does not dictate a metric", () => {
+  // "3" is how many points to add, not a fact about the work; every WORD of the bullet is the owner's.
+  const req = dictating("add 3 more points: i handled services for the billing api");
+  // The model turns the request count into a metric.
+  const why = rejectedFor({ op: "new_bullet", entry: "e0", text: "Handled 3 services for the billing API." }, req)?.why ?? "";
+  // Refused, naming the number.
+  assert.match(why, /not in your master profile or your message \("3"\)/);
+  // The same number next to the same thing IS dictated ("3 services" said, "3 services" written).
+  assert.equal(rejectedFor({ op: "new_bullet", entry: "e0", text: "Handled 3 services for the billing API." }, dictating("i handled 3 services for the billing api")), null);
+  // A unit counts as the thing: "40%" said, "40%" written.
+  assert.equal(rejectedFor({ op: "new_bullet", entry: "e0", text: "Cut costs by 40%." }, dictating("i cut costs by 40%")), null);
+});
+
+test("T10 truthfulness: rhetorical claim words are not dictation", () => {
+  // The owner names only the topic.
+  const req = dictating("add a point about my Kafka work");
+  // Every claim word here is in the auditor's rhetorical list; only "Kafka" is the owner's.
+  const why = rejectedFor({ op: "new_bullet", entry: "e0", text: "Shipped production system serving users at scale using Kafka." }, req)?.why ?? "";
+  // Refused: a reworded bullet may reuse grammar, never a claim the owner did not make.
+  assert.match(why, /not in your master profile or your message/);
+});
+
+test("T10 truthfulness: 'I lead a team of 4' dictates 'Led a team of 4 …'", () => {
+  // Irregular past: "led" is "lead".
+  assert.equal(rejectedFor({ op: "new_bullet", entry: "e0", text: "Led a team of 4." }, dictating("i lead a team of 4")), null);
+  // Doubled consonant: "planned" is "plan", "debugged" is "debug".
+  assert.equal(rejectedFor({ op: "new_bullet", entry: "e0", text: "Planned sprints and debugged releases." }, dictating("i plan sprints and debug releases")), null);
+  // Irregular past: "wrote" is "write", "ran" is "run".
+  assert.equal(rejectedFor({ op: "new_bullet", entry: "e0", text: "Wrote docs and ran demos." }, dictating("i write docs and run demos")), null);
+});
+
+test("T10 op cap: a swap pair is kept or cut together", () => {
+  // A master project entry, the add half of a projects swap.
+  const parsed = parseAssistRequest(structured({ available: [{ id: "n0", section: "projects", label: "One-on-One" }] }));
+  // Valid fixture.
+  assert.ok(parsed.ok);
+  // Eleven valid moves, then the swap: the remove is the 12th op, so the cap would keep it and cut its add.
+  const answer = JSON.stringify({ ops: [...Array.from({ length: MAX_OPS - 1 }, () => ({ op: "move", id: "b1", direction: "up" })), { op: "remove_entry", id: "e1" }, { op: "add_back", id: "n0" }], note: "" });
+  // Validated.
+  const ops = parseAssistOps(answer, parsed.request);
+  // Narrowed.
+  assert.ok(ops.ok);
+  // Neither half kept alone.
+  assert.equal(ops.ops.some((op) => op.op === "remove_entry" || op.op === "add_back"), false);
+  // Both named as dropped, the remove saying its partner was cut.
+  assert.deepEqual(ops.rejected.map((r) => r.what), ['Remove entry "F1 Race Pace Predictor"', 'Add back "One-on-One"']);
+  // The remove's reason names the swap.
+  assert.match(ops.rejected[0]!.why, /swap/);
 });

@@ -176,6 +176,11 @@ const SKILL_VOCABULARY: readonly SkillTerm[] = [
   { term: "Prompt engineering", pattern: word("prompt engineering") },
 ];
 
+// THE AI TERMS (2026-11-10, T13): the vocabulary's AI group above, by term. shapeSkillGroups lets ONLY these count when
+// found INSIDE an AI skill's name ("RAG" -> "RAG Pipelines"): a generic term such as "Caching" inside "Prompt Caching" is
+// word overlap, not relevance (review finding, 2026-11-10). jd-keywords.test.ts proves each one is a vocabulary term.
+export const AI_VOCABULARY_TERMS: ReadonlySet<string> = new Set(["AI", "LLM", "RAG", "Machine learning", "Prompt engineering"]);
+
 // term -> entry, built once at module load so a per-keyword lookup is O(1), not a scan per call.
 const VOCABULARY_BY_TERM: ReadonlyMap<string, SkillTerm> = new Map(SKILL_VOCABULARY.map((entry) => [entry.term, entry]));
 

@@ -895,3 +895,71 @@ describe('replyNote (never a claimed change that has no op behind it)', () => {
     assert.equal(ai.replyNote('Added Kafka.', [landable, rejected]), 'Added Kafka.');
   });
 });
+
+// --- T10: "add more points" ranks unused master bullets by the job (2026-11-10) ------------------
+
+// sdiff with a posting asking for Kafka and Docker, so the master bullets can be ranked against it.
+const kdiff = { ...(sdiff as object), coverage: { jdKeywords: ['Kafka', 'Docker'], honestlyMatched: [], matchedByFabrication: [], matchedByEdit: [] } } as never;
+// One unused master bullet under the job (x) or the project (p), with the label the page would give.
+const unused = (ref: string, parentRef: 'x' | 'p', text: string) =>
+  ({ ref, text, section: parentRef === 'x' ? 'experience' : 'projects', parentRef, parentLabel: parentRef === 'x' ? structure.entries[0].label : structure.entries[1].label }) as const;
+// The bullet items of a draft's AVAILABLE list (entries carry no text).
+const shownBulletsOf = (draft: ReturnType<typeof ai.buildAssistDraft>) => (draft.body.available ?? []).flatMap((item) => ('text' in item ? [item] : []));
+
+describe('T10 buildAssistDraft offers unused master bullets by job relevance', () => {
+  it('T10 more points: each printed entry gets its most job-relevant unused master bullet before any entry gets a second', () => {
+    // 35 unused bullets under the job, master order first, then the project's only unused one LAST in master order.
+    const bullets = [...Array.from({ length: 35 }, (_, i) => unused(`x_m${i}`, 'x', i === 20 ? 'Ran Kafka streams.' : `Job point ${i}.`)), unused('p_m0', 'p', 'Tuned the model.')];
+    // Built with the master's one whole entry too, so the cap is shared as before.
+    const draft = ai.buildAssistDraft(kdiff, [], 'add more points', [], { ...structure, addable: { entries: structure.addable.entries, bullets } } as never);
+    // Still within the function's cap of 30 items in all.
+    assert.ok((draft.body.available?.length ?? 0) <= 30);
+    // The project's bullet survives the cap: master order plus a hard slice used to cut it off.
+    assert.ok(shownBulletsOf(draft).some((item) => item.entry === 'e1' && item.text === 'Tuned the model.'));
+    // Round one: the job's best (the Kafka one, far down in master order) and the project's only one, before any second job point.
+    assert.deepEqual(shownBulletsOf(draft).slice(0, 2).map((item) => item.text), ['Ran Kafka streams.', 'Tuned the model.']);
+    // Ids stay contiguous m0.. and each one maps back to the very master bullet it was shown as.
+    shownBulletsOf(draft).forEach((item, index) => {
+      // Contiguous numbering.
+      assert.equal(item.id, `m${index}`);
+      // Same bullet behind the id, so an add_back lands the bullet the model read.
+      assert.equal(draft.availableBullets.get(item.id)?.text, item.text);
+    });
+  });
+
+  it('T10 more points: unused master bullets are ordered by job relevance within an entry', () => {
+    // Master order: no keyword, one keyword, two keywords, then a second no-keyword point (a tie with the first).
+    const bullets = [unused('x_m0', 'x', 'Mentored two interns.'), unused('x_m1', 'x', 'Ran Docker builds.'), unused('x_m2', 'x', 'Built Kafka pipelines in Docker.'), unused('x_m3', 'x', 'Wrote the runbook.')];
+    // Built with no whole entries, so only bullets are listed.
+    const draft = ai.buildAssistDraft(kdiff, [], 'add more points to Aczen', [], { ...structure, addable: { entries: [], bullets } } as never);
+    // Most keywords first; the two zero-keyword points keep their master order.
+    assert.deepEqual(shownBulletsOf(draft).map((item) => item.text), ['Built Kafka pipelines in Docker.', 'Ran Docker builds.', 'Mentored two interns.', 'Wrote the runbook.']);
+  });
+});
+
+// --- T10: a skill group the owner names, new to the master (2026-11-10) --------------------------
+
+describe('T10 a new owner-named skill group', () => {
+  it('T10 skill group: a new owner-named group survives the reader and becomes an attest_skill held for a click', async () => {
+    // The op the server now sends when the owner dictated the group: a category the master has never had.
+    const op = { op: 'add_skill', name: 'Pulumi', category: 'Infrastructure as Code' };
+    // A client answering with it, in the server's ok shape.
+    const client = fakeEdgeClient(async () => ({ data: { status: 'ok', ops: [op], note: '' }, error: null }));
+    // A minimal body: the reader's job is the answer, not the request.
+    const body = { instruction: 'add Pulumi under a new group Infrastructure as Code', job: { title: '', company: '', missing: [] }, summary: null, bullets: [], skills: '', categories: ['Languages', 'Tools'], history: [] };
+    // Read through the real strict reader.
+    const answer = await ai.requestAssist(client, body);
+    // Not a whole-answer refusal, and the group arrives unchanged.
+    assert.deepEqual(answer.kind === 'ok' ? answer.ops : answer, [op]);
+    // Resolved against a draft whose master lacks Pulumi (jdiff's master skills: TypeScript, Postgres, Kafka, Testing).
+    const [stored] = ai.resolveOps([op as never], ai.buildAssistDraft(jdiff, ['Languages', 'Tools'], body.instruction));
+    // A skill the master lacks, filed under the owner's new group.
+    assert.deepEqual(stored, { op: 'add_skill', name: 'Pulumi', category: 'Infrastructure as Code', inMaster: false });
+    // The page action is an attest carrying that group, so Apply writes it into the master.
+    assert.deepEqual(ai.toEditAction(stored as never), { kind: 'attest_skill', keyword: 'Pulumi', category: 'Infrastructure as Code' });
+    // Held: a skill new to the master never applies by itself, even when the owner named it.
+    assert.equal(ai.shouldAutoApply(stored!, body.instruction), false);
+    // And the card says why it waits.
+    assert.match(ai.holdReason(stored!) ?? '', /group/);
+  });
+});

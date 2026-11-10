@@ -61,8 +61,11 @@ describe('a late AI answer never writes from an unmounted page (2026-11-05)', ()
   });
 
   it('editRow refuses on an unmounted page before any write path', () => {
-    // editRow's own body, comments stripped.
-    const body = componentFunction(page, 'async function editRow(');
+    // T10 (2026-11-10): editRow is a batch of one; the guards and every write live in editRows. Pinned, so a
+    // second path that skips editRows fails here.
+    assert.match(componentFunction(page, 'async function editRow('), /return editRows\(applicationId, \[action\], editSource\);/);
+    // editRows' own body, comments stripped.
+    const body = componentFunction(page, 'async function editRows(');
     // The guard, in its exact positive shape.
     const guard = body.indexOf('if (!mountedRef.current) return notSaved(');
     // Present at all.

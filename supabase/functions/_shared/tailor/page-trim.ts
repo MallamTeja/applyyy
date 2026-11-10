@@ -67,6 +67,14 @@ export const PAGE_FIT_FLOORS = {
   minAchievements: Number.POSITIVE_INFINITY,
   // Education entries kept at least ("both educations; the diploma counts").
   minEducation: 2,
+  // THE AI SKILLS GROUP (Teja, 2026-11-10 12:14 IST: "every resume needs to contain an AI skill group with min 5 AI
+  // skills, the most relevant AI skills to that job, from now on"). The master category that IS that group: an exact
+  // name, never a pattern, so "Machine Learning" or a misfiled "Testing" can never count toward it. Master v32 holds 18.
+  aiSkillsCategory: "AI",
+  // AI skills every resume shows at least, min(5, what the master holds) like every other floor. Shaped in by
+  // shapeSkillGroups (tailorer.ts), gated by checkContentRules. Never page-trimmed: the trimmer removes bullets only, so a
+  // tight page gives up a bullet, never an AI skill (protected like minCertifications).
+  minAiSkills: 5,
 } as const;
 
 /** One unit of trimming. */

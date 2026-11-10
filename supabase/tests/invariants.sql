@@ -364,3 +364,52 @@ begin
     raise exception 'INVARIANT agent_key_seeded: expected 1 key row, found %', v_count;
   end if;
 end $$;
+
+-- ============================================================================
+-- 13. anon_holds_nothing_in_public — anon holds no table, column or sequence
+-- privilege in schema public, and postgres's default ACL in public grants it none
+-- for future tables or sequences. Source: migrations 20261110130000 (revoke on
+-- existing objects) and 20261110150000 (default privileges), T14/T14b 2026-11-10.
+-- ============================================================================
+do $$
+declare
+  -- Public relations anon can still touch (tables, views, sequences), by name.
+  v_bad text;
+  -- Public relations found at all (an empty public schema, or a wrong schema name, must not pass vacuously).
+  v_found integer;
+  -- anon entries left in postgres's default ACL for public tables/sequences.
+  v_defaults text;
+begin
+  -- Count what the check runs over; 0 means the query is pointed at nothing.
+  select count(*) into v_found
+    from pg_class
+   where relnamespace = 'public'::regnamespace and relkind in ('r', 'p', 'v', 'm', 'f', 'S');
+  -- CLAUDE.md §6: a guard that can pass vacuously is not a guard.
+  if v_found = 0 then
+    raise exception 'INVARIANT anon_holds_nothing_in_public: expected public relations, found 0';
+  end if;
+  -- Asked of the privilege functions, not information_schema (which hides grants for roles the caller is not in).
+  select string_agg(c.oid::regclass::text, ', ') into v_bad
+    from pg_class c
+   where c.relnamespace = 'public'::regnamespace
+     and ((c.relkind in ('r', 'p', 'v', 'm', 'f')
+           and (has_table_privilege('anon', c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN')
+                or has_any_column_privilege('anon', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')))
+       or (c.relkind = 'S' and has_sequence_privilege('anon', c.oid, 'USAGE, SELECT, UPDATE')));
+  -- RLS is the first barrier; these grants are the second. Any hit means a migration re-granted anon.
+  if v_bad is not null then
+    raise exception 'INVARIANT anon_holds_nothing_in_public: anon has privileges on: %', v_bad;
+  end if;
+  -- The default ACL that stamps NEW objects: postgres creates every migration's tables, so its entry decides.
+  select string_agg(d.defaclobjtype::text || ':' || a.privilege_type, ', ') into v_defaults
+    from pg_default_acl d
+    cross join lateral aclexplode(d.defaclacl) a
+   where d.defaclrole = 'postgres'::regrole
+     and d.defaclnamespace in (0, 'public'::regnamespace)  -- 0 = a global entry, which a per-schema revoke cannot clear
+     and d.defaclobjtype in ('r', 'S')
+     and a.grantee = 'anon'::regrole;
+  -- A hit here means the next `create table` would hand anon rights again.
+  if v_defaults is not null then
+    raise exception 'INVARIANT anon_holds_nothing_in_public: postgres default ACL still grants anon: %', v_defaults;
+  end if;
+end $$;

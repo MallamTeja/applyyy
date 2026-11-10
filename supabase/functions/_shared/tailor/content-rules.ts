@@ -393,6 +393,16 @@ export function checkContentRules(resume: ResolvedResume, master: MasterProfile)
     // Under it.
     if (resume[section].length < floor) broken.push(`${section}: ${resume[section].length}, needs ${floor}`);
   }
+  // THE AI SKILLS GROUP (Teja, 2026-11-10 12:14 IST): at least min(5, master) skills in the master's AI category. The
+  // prefix "skills[AI]" holds no colon, so the web edit gate's ruleKey (the text before the first ":") names this rule
+  // alone, and no "at most", so it reads as a floor. A floor, so an edit that drops an AI skill below it is refused too.
+  const aiCategory = PAGE_FIT_FLOORS.aiSkillsCategory;
+  // The floor the master can supply: a master with 3 AI skills needs 3, one with no AI group needs none.
+  const aiFloor = Math.min(PAGE_FIT_FLOORS.minAiSkills, master.skills.filter((skill) => skill.category === aiCategory).length);
+  // What the resume prints in that group (resolved skills carry the master's category).
+  const aiPrinted = resume.skills.filter((skill) => skill.category === aiCategory).length;
+  // Under it: named with the count and the floor, like every other floor line.
+  if (aiPrinted < aiFloor) broken.push(`skills[${aiCategory}]: ${aiPrinted}, needs ${aiFloor}`);
   // Empty when compliant.
   return broken;
 }

@@ -77,7 +77,9 @@ export function auditorContentRulesDrop(resume: ResolvedResume | null, master: M
   if (master === null || master === undefined) throw new Error("auditor content rules: no pinned master for this row");
   // Every section the gate counts must be an array on both sides; a missing one would throw a bare TypeError or, worse,
   // read `.length` off a non-array object as undefined and compare false (a silent pass). Name the broken shape instead.
-  for (const section of ["projects", "experience", "certifications", "achievements", "education"] as const) {
+  // "skills" since 2026-11-10 (T13): checkContentRules counts the AI skills group on both sides, so a master with no
+  // skills array would otherwise fail as a bare TypeError, and the named error tells the reader which shape broke.
+  for (const section of ["projects", "experience", "certifications", "achievements", "education", "skills"] as const) {
     // The resume side: a stored profile missing a section is damaged data, never "0 of them, fine".
     if (!Array.isArray(resume[section])) throw new Error(`auditor content rules: resume.${section} is not an array`);
     // The master side: an empty floor here would wave every resume through.

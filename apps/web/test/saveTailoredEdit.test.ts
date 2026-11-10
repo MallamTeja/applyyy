@@ -755,3 +755,27 @@ describe('the history note carries the one-page cuts made in the same save (2026
     assert.equal('page_fit_trimmed' in (inserts(calls)[0]!.args[0] as { detail: object }).detail, false);
   });
 });
+
+describe('T10: an atomic AI batch names every step in its one history note (2026-11-10)', () => {
+  it('a two-step batch records batch beside the first step; a single edit writes no batch key', async () => {
+    // A swap's two halves, as the page builds them.
+    const batch = [
+      // The remove half.
+      { kind: 'resume_remove_entry' as const, ref: 'prj_two', before: 'One-on-One', after: null },
+      // The add half.
+      { kind: 'resume_add_entry' as const, ref: 'prj_three', before: null, after: 'F1 Race Pace Predictor' },
+    ];
+    // Saved with both steps.
+    const { done, calls } = run({}, NEXT, { ...EVENT, batch });
+    // Saved.
+    assert.equal((await done).ok, true);
+    // Both halves are in the one note, so the history never shows only the remove.
+    assert.deepEqual((inserts(calls)[0]!.args[0] as { detail: Record<string, unknown> }).detail.batch, batch);
+    // A batch of one is a plain edit: the note shape stays as before T10.
+    const single = run({}, NEXT, { ...EVENT, batch: batch.slice(0, 1) });
+    // Saved.
+    assert.equal((await single.done).ok, true);
+    // No key at all.
+    assert.equal('batch' in (inserts(single.calls)[0]!.args[0] as { detail: object }).detail, false);
+  });
+});

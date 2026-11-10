@@ -111,6 +111,8 @@ const MASTER = {
   education: [masterNode("edu_a", 0), masterNode("edu_b", 0)],
   // A summary to print, so "every tailored resume prints a summary" (2026-11-08 16:06 IST) binds here too.
   summary: { id: "summary_master", text: "Engineer." },
+  // No skills: the AI skills floor (2026-11-10, T13) is min(5, 0) = 0 here, so it cannot break this fixture's verdicts.
+  skills: [],
 } as unknown as MasterProfile;
 
 // A resume meeting every rule against MASTER.
@@ -129,6 +131,8 @@ const COMPLIANT = {
   summary: "Engineer.",
   // Every section the resume prints, summary first.
   section_order: ["summary", "experience", "projects", "education", "achievements", "certifications"],
+  // A real resolved resume always carries a skills array; the AI floor (2026-11-10) reads it.
+  skills: [],
 } as unknown as ResolvedResume;
 
 describe("auditorContentRulesDrop", () => {
@@ -170,5 +174,7 @@ describe("auditorContentRulesDrop", () => {
     assert.throws(() => auditorContentRulesDrop(COMPLIANT, null), /no pinned master/);
     // A section missing from the stored resume is damaged data, not "zero, fine".
     assert.throws(() => auditorContentRulesDrop({ ...COMPLIANT, certifications: undefined } as unknown as ResolvedResume, MASTER), /resume.certifications is not an array/);
+    // A master missing its skills (2026-11-10, T13): named, never a bare TypeError from the AI skills floor.
+    assert.throws(() => auditorContentRulesDrop(COMPLIANT, { ...MASTER, skills: undefined } as unknown as MasterProfile), /master.skills is not an array/);
   });
 });

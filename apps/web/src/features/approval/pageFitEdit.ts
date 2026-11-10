@@ -141,3 +141,174 @@ export function preflightBatch<A>(current: ResolvedResume, actions: readonly A[]
   // Every op would save on one page.
   return null;
 }
+
+/* T10 (2026-11-10): THE ATOMIC BATCH. Live bug (Teja, 12:20 IST): an AI swap ("instead of One-on-One
+   use F1 Race Pace") is remove_entry + add_master_entry, and checked after EACH op it can never pass:
+   the remove alone is "projects: 1, needs 2", the add alone "projects: 3, at most 2". So a batch is
+   judged on its END STATE: every action folded over the current resume by the same pure step the page
+   saves with, then ONE fitEditToOnePage against the pre-batch resume, then (in the page) ONE save.
+   All or none: a step its edit refuses, or an end state that breaks a rule, returns a reason and no
+   resume, so nothing can be saved half-way. The intermediate states are never judged, on purpose:
+   they are never stored, and only what is stored has to obey the rules. */
+
+/* One folded step's record for the history note: what the pure edit said changed. */
+export interface BatchStep {
+  // The edit's own before text (an entry's label, a skill's name, a bullet's old text), or null.
+  readonly before: string | null;
+  // The edit's own after text, or null.
+  readonly after: string | null;
+}
+
+/* What a whole batch becomes. A closed union, no boolean beside it: a refusal carries no resume to save. */
+export type BatchPlan =
+  // Save `resume` exactly, in one write; `steps` is aligned with the actions, for the history note.
+  | { readonly ok: true; readonly resume: ResolvedResume; readonly trimmed: readonly TrimItem[]; readonly notice: string | null; readonly steps: readonly BatchStep[] }
+  // Nothing may be saved; `reason` is shown where the batch was applied.
+  | { readonly ok: false; readonly reason: string };
+
+/* One pure edit as the page computes it (pureEdit, tailoredEdits' EditOutcome): a new resume with its
+   before/after, or a refusal with the edit's own reason. Structural, so the tests pass the very
+   tailoredEdits functions without a page. */
+export type BatchEditStep<A> = (resume: ResolvedResume, action: A) => ({ readonly ok: true; readonly resume: ResolvedResume } & BatchStep) | { readonly ok: false; readonly reason: string };
+
+/* Fold `actions` over `current`, then fit and rule-check the end state once. `master` is required for
+   the reason fitEditToOnePage's `rules` is: no caller may skip the content rules by omission. */
+export function planBatch<A>(current: ResolvedResume, actions: readonly A[], step: BatchEditStep<A>, jdKeywords: readonly string[], master: MasterProfile): BatchPlan {
+  // An empty batch would save an unchanged resume under a history note naming nothing.
+  if (actions.length === 0) return { ok: false, reason: 'there was nothing to apply.' };
+  // The resume as the batch builds it, never stored until the end state passes.
+  let resume = current;
+  // Each step's record, in order.
+  const steps: BatchStep[] = [];
+  // Every action, in the order the AI answered them.
+  for (const action of actions) {
+    // The same pure edit the page's single save runs.
+    const edited = step(resume, action);
+    // One refused step refuses the whole batch: applying the rest would be the partial save this exists to prevent.
+    if (!edited.ok) return { ok: false, reason: edited.reason };
+    // Recorded for the note.
+    steps.push({ before: edited.before, after: edited.after });
+    // The next step builds on this one.
+    resume = edited.resume;
+  }
+  // ONE fit and ONE rule check, judged against the resume as stored before the batch.
+  const fitted = fitEditToOnePage(resume, jdKeywords, { previous: current, master });
+  // The end state breaks a rule or overflows past the floors: nothing is saved.
+  if (!fitted.ok) return fitted;
+  // The end state, fitted, with every step's record.
+  return { ...fitted, steps };
+}
+
+/* T10 review fix (2026-11-10): THE APPLY-ALL LINE. Each card previews its own add alone, but Apply all fits the
+   END state, so a batch can trim bullets no card warned about. This line reads the very planBatch the save runs
+   and says, before the click, what that end state costs. `blocked` turns Apply all off: the save would refuse. */
+export function applyAllNotice(plan: BatchPlan | null): { readonly line: string | null; readonly blocked: boolean } {
+  // No preview (render-only callers, an unsimulable row, a batch of attests only): quiet, and the save's own guards speak.
+  if (plan === null) return { line: null, blocked: false };
+  // The save would refuse: say why, and keep the button off.
+  if (!plan.ok) return { line: `Apply all would not save: ${plan.reason}`, blocked: true };
+  // One page with nothing cut: quiet.
+  if (plan.trimmed.length === 0) return { line: null, blocked: false };
+  // The batch's own trim, quoted like the save's notice.
+  return { line: `Apply all also drops ${plan.trimmed.map(quote).join(', ')} (least job-relevant).`, blocked: false };
+}
+
+/* T10 (2026-11-10): THE OVERFLOW PREVIEW, shown on an AI-chat card that ADDS content BEFORE its Apply,
+   so an add that would run past one page is never a surprise ("never silently overflow, never silently
+   drop"). It runs the very fitToOnePage that fitEditToOnePage runs at the save, on the same resume the
+   save would build, so the drop it names IS the trim Apply makes (a test pins that). It does not run
+   the content rules: those refuse at Apply in their own words, and this line is about the page only. */
+
+/* What a content-adding card puts on the resume, when the card itself must build it (the attest_* kinds,
+   whose real ref is minted only at the save). Closed: a third kind is a compile error here, not a guess. */
+export type AddedItem =
+  // attest_skill: a skill the master lacks, printed under `category`.
+  | { readonly kind: 'skill'; readonly name: string; readonly category: string }
+  // attest_bullet: the owner's own words, appended under one entry (where attestBullet's master puts it: last).
+  | { readonly kind: 'bullet'; readonly section: 'experience' | 'projects' | 'education' | 'achievements' | 'certifications'; readonly entryRef: string; readonly text: string };
+
+/* The preview's answer. One closed union, no boolean beside it: each arm is one line on the card. */
+export type OverflowPreview =
+  // One page with the add: the card stays quiet.
+  | { readonly kind: 'fits' }
+  // Over one page: Apply also drops these existing bullets, least job-relevant first. Never lists the add itself.
+  | { readonly kind: 'drops'; readonly drop: readonly TrimItem[] }
+  // Over one page, and the add is itself the least job-relevant line: Apply would trim it straight back off.
+  | { readonly kind: 'cuts_the_add' }
+  // Over one page and the floors hold: Apply would be refused (fitEditToOnePage's own reason).
+  | { readonly kind: 'blocked'; readonly reason: string };
+
+/* The ref a previewed attest item carries. Its real ref is a fresh uuid minted at the save; the trimmer
+   ranks by text score and document position, never by ref, so this stand-in trims exactly like it. */
+export const PREVIEW_ADDED_REF = 'preview_added';
+
+/* The resume an attest card's Apply would fit: `current` with the item appended where its save puts it. */
+export function withAdded(current: ResolvedResume, added: AddedItem): ResolvedResume {
+  // A skill goes last, as addSkill appends it.
+  if (added.kind === 'skill') return { ...current, skills: [...current.skills, { ref: PREVIEW_ADDED_REF, name: added.name, category: added.category }] };
+  // The new bullet, text and master_text alike (a vouched line is its own master text).
+  const bullet = { ref: PREVIEW_ADDED_REF, text: added.text, master_text: added.text };
+  // Appended last under the matching entry of the named section; every other section and entry stays the same object.
+  const append = <E extends { readonly ref: string; readonly bullets: readonly (typeof bullet)[] }>(section: string, entries: readonly E[]): readonly E[] =>
+    // Another section: untouched. The named one: only the parent changes.
+    section !== added.section ? entries : entries.map((entry) => (entry.ref === added.entryRef ? { ...entry, bullets: [...entry.bullets, bullet] } : entry));
+  // One call per section, so each keeps its own entry type (a computed key would widen them into one union).
+  return {
+    // Everything else as stored.
+    ...current,
+    // Each bullet section, appended to only when it is the named one.
+    experience: append('experience', current.experience),
+    // Same.
+    projects: append('projects', current.projects),
+    // Same.
+    education: append('education', current.education),
+    // Same.
+    achievements: append('achievements', current.achievements),
+    // Same.
+    certifications: append('certifications', current.certifications),
+  };
+}
+
+/* The preview over an already-built resume (a pureEdit result, or withAdded's). The added refs are the
+   bullets and skills `next` holds that `current` does not, so the add is never offered as "the drop". */
+export function overflowPreview(current: ResolvedResume, next: ResolvedResume, jdKeywords: readonly string[]): OverflowPreview {
+  // Every bullet ref already on the resume: anything else in a trim is part of the add.
+  const before = new Set([...current.experience, ...current.projects, ...current.education, ...current.achievements, ...current.certifications].flatMap((entry) => entry.bullets.map((b) => b.ref)));
+  // The trimmer's answer, or nothing when it threw.
+  let fit: ReturnType<typeof fitToOnePage>;
+  // A throw is a measuring failure: shown as a refusal, exactly as the save would refuse it.
+  try {
+    // The same call fitEditToOnePage makes at the save.
+    fit = fitToOnePage(next, jdKeywords);
+  } catch {
+    // fitEditToOnePage's own words for this case, so the card and the save say the same thing.
+    return { kind: 'blocked', reason: 'the one-page check could not measure this resume, so nothing was saved.' };
+  }
+  // The floors hold: Apply is refused; the reason names them.
+  if (!fit.fits) return { kind: 'blocked', reason: `this would make the resume longer than one page, and nothing more can be cut automatically (${fit.blockedBy.join('; ')}). Remove something first.` };
+  // One page with nothing cut: quiet.
+  if (fit.trimmed.length === 0) return { kind: 'fits' };
+  // The trimmer took the add itself: say that, never name it as "the drop" the owner should accept.
+  if (fit.trimmed.some((item) => !before.has(item.ref))) return { kind: 'cuts_the_add' };
+  // Existing bullets only: these are what Apply also drops.
+  return { kind: 'drops', drop: fit.trimmed };
+}
+
+/* The preview for an attest card: build the add, then preview it. */
+export function previewAdd(current: ResolvedResume, added: AddedItem, jdKeywords: readonly string[]): OverflowPreview {
+  // One path for every caller, so the card and the test read the same answer.
+  return overflowPreview(current, withAdded(current, added), jdKeywords);
+}
+
+/* The one line a card shows for its preview, or null to stay quiet (it fits, or there is no preview).
+   Here, not in the panel, so the wording sits beside the quoting the save's own notice uses. */
+export function overflowNotice(preview: OverflowPreview | null): string | null {
+  // No preview (not an add, or the row cannot be simulated) and a fit both say nothing.
+  if (preview === null || preview.kind === 'fits') return null;
+  // The drop, quoted like the save's own trim notice, named before the click.
+  if (preview.kind === 'drops') return `Would run past one page: Apply also drops ${preview.drop.map(quote).join(', ')} (least job-relevant).`;
+  // The add is the weakest line: Apply keeps it in the master but the page fit cuts it from this resume.
+  if (preview.kind === 'cuts_the_add') return 'Would run past one page: this is the least job-relevant line, so Apply would trim it straight back off this resume. Remove something first.';
+  // Floors hold: Apply would be refused; the reason already ends in "Remove something first."
+  return `Would run past one page: ${preview.reason}`;
+}
